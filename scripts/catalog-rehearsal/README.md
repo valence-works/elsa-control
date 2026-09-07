@@ -50,7 +50,7 @@ the parser and comparison gate bind each result to its phase prefix and reject a
 ## Offline checks
 
 ```sh
-python3 scripts/catalog-rehearsal/tests/test_catalog_rehearsal_harness.py
+python3 scripts/tests/test_catalog_rehearsal_harness.py
 bash -n scripts/catalog-rehearsal/run-phase.sh
 ```
 
@@ -68,5 +68,20 @@ scripts/catalog-rehearsal/run-phase.sh
 python3 scripts/catalog-rehearsal/compare-results.py candidate-result.json previous-result.json
 ```
 
-Keep results, ledgers and any rollback captures in a durable private location (0600), never
-under a temporary directory.
+## Durable evidence
+
+Keep results, ledgers, rollback captures and the rendered specs in a durable private
+operator directory such as `~/.elsa-control-ops/` (directory 0700, files 0600).
+`/private/tmp` and `/tmp` are not acceptable: on 2026-09-07 every artifact of the build
+92 to 96 rehearsals, including the original harness and a production auth rollback
+capture, was lost when `/private/tmp` was cleared (#303). `run-phase.sh` therefore writes
+its temporary files under `REHEARSAL_TMPDIR` (default `~/.elsa-control-ops/tmp`).
+
+## Limits
+
+- The build number is a configured label (`Application__BuildNumber` is injected by the
+  renderer from the same input the probe expects); the baked source identifier reported by
+  `/health` is the real image identity binding.
+- Integrity is audited through catalog views and dynamic `NOT EXISTS`/`NOT (definition)`
+  counts over every enabled foreign key (including composite keys) and check constraint.
+  Disabled constraints are not evaluated.

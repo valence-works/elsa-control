@@ -14,10 +14,9 @@ import json
 import os
 import re
 import sys
+from typing import NoReturn
 
-SCHEMA = "elsa-control.catalog-rehearsal/v1"
-SAFE_ID = re.compile(r"^[A-Za-z0-9._+:-]{1,128}$")
-MIGRATION = re.compile(r"^[0-9]{14}_[A-Za-z0-9_]+$")
+from rehearsal_contract import MIGRATION, SCHEMA, group_name_valid
 CONTRACT_FLAGS = (
     "integrityChecks", "indexChecks", "permissionChecks", "principalChecks", "commonCountsEqual",
     "providerAssignmentSchemaPresent", "recoveryObservationColumnsValid", "recoveryObservationForeignKeysValid",
@@ -26,7 +25,7 @@ CONTRACT_FLAGS = (
 )
 
 
-def stop(code: str) -> "NoReturn":
+def stop(code: str) -> NoReturn:
     print(code)
     raise SystemExit(0 if code == "CATALOG_REHEARSAL_PASSED" else 1)
 
@@ -50,9 +49,7 @@ def load(path: str, phase: str, source: str, build: str) -> dict[str, object]:
         stop("RESULT_NOT_PASSED")
     if value.get("bakedImageId") != source or value.get("buildNumber") != build or value.get("healthChecks") != 2:
         stop("RESULT_IMAGE_BINDING")
-    group_name = value.get("rehearsalGroupName")
-    prefix = f"catalog-rehearsal-{phase}"
-    if not isinstance(group_name, str) or not SAFE_ID.fullmatch(group_name) or not (group_name == prefix or group_name.startswith(prefix + "-")):
+    if not group_name_valid(value.get("rehearsalGroupName"), phase):
         stop("RESULT_GROUP_BINDING")
     if not all(value.get(flag) is True for flag in CONTRACT_FLAGS):
         stop("RESULT_CONTRACT_INCOMPLETE")

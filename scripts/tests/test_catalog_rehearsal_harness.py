@@ -12,8 +12,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-HARNESS = Path(__file__).resolve().parents[1]
-ROOT = HARNESS.parents[1]
+ROOT = Path(__file__).resolve().parents[2]
+HARNESS = ROOT / "scripts" / "catalog-rehearsal"
 REGISTRY = "acr.azurecr.io"
 CANDIDATE_SOURCE = "a" * 40
 PREVIOUS_SOURCE = "b" * 40
@@ -28,6 +28,20 @@ MIGRATIONS = [f"2026090100000{i:d}_M{i}" if i < 10 else f"202609010000{i:d}_M{i}
 
 def python(script: str, *arguments: str, env: dict[str, str] | None = None, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["python3", str(HARNESS / script), *arguments], capture_output=True, text=True, env={**os.environ, **(env or {})}, input=stdin, check=False, timeout=120)
+
+
+def passed_result(phase: str, group: str, source: str, build: str, baseline_ids: list[str], preview_baseline: int) -> dict[str, object]:
+    counts = {name: 1 for name in COUNTS}
+    return {
+        "schema": "elsa-control.catalog-rehearsal/v1", "phase": phase, "result": "passed", "code": "ok", "healthChecks": 2,
+        "migrationIds": MIGRATIONS, "baselineMigrationIds": baseline_ids, "previewColumnCount": 2, "baselinePreviewColumnCount": preview_baseline,
+        "duplicateTargetGroupCount": 0, "duplicateOperationGroupCount": 0, "billingProviderEventNullStateCount": 0, "billingProviderEventsPresent": True,
+        "foreignKeyIntegrityViolationCount": 0, "checkConstraintIntegrityViolationCount": 0, "orphanProviderAssignmentCount": 0, "orphanOperationTransitionCount": 0,
+        "providerAssignmentSchemaPresent": True, "recoveryObservationColumnsValid": True, "recoveryObservationForeignKeysValid": True,
+        "recoveryObservationNaturalKeyIndexValid": True, "recoveryObservationAppendOnlyTriggerValid": True, "recoveryRequestColumnsValid": True,
+        "attemptedStepColumnValid": True, "commonCountsEqual": True, "permissionChecks": True, "principalChecks": True, "integrityChecks": True,
+        "indexChecks": True, "baselineCounts": counts, "postCounts": counts, "bakedImageId": source, "buildNumber": build, "rehearsalGroupName": group,
+    }
 
 
 class HarnessCase(unittest.TestCase):
@@ -122,27 +136,13 @@ class RendererTests(HarnessCase):
 
 
 class ParserAndGateTests(HarnessCase):
-    @staticmethod
-    def passed_result(phase: str, group: str, source: str, build: str, baseline_ids: list[str], preview_baseline: int) -> dict[str, object]:
-        counts = {name: 1 for name in COUNTS}
-        return {
-            "schema": "elsa-control.catalog-rehearsal/v1", "phase": phase, "result": "passed", "code": "ok", "healthChecks": 2,
-            "migrationIds": MIGRATIONS, "baselineMigrationIds": baseline_ids, "previewColumnCount": 2, "baselinePreviewColumnCount": preview_baseline,
-            "duplicateTargetGroupCount": 0, "duplicateOperationGroupCount": 0, "billingProviderEventNullStateCount": 0, "billingProviderEventsPresent": True,
-            "foreignKeyIntegrityViolationCount": 0, "checkConstraintIntegrityViolationCount": 0, "orphanProviderAssignmentCount": 0, "orphanOperationTransitionCount": 0,
-            "providerAssignmentSchemaPresent": True, "recoveryObservationColumnsValid": True, "recoveryObservationForeignKeysValid": True,
-            "recoveryObservationNaturalKeyIndexValid": True, "recoveryObservationAppendOnlyTriggerValid": True, "recoveryRequestColumnsValid": True,
-            "attemptedStepColumnValid": True, "commonCountsEqual": True, "permissionChecks": True, "principalChecks": True, "integrityChecks": True,
-            "indexChecks": True, "baselineCounts": counts, "postCounts": counts, "bakedImageId": source, "buildNumber": build, "rehearsalGroupName": group,
-        }
-
     def write(self, name: str, payload: object, raw: str | None = None) -> Path:
         path = self.temp / name
         path.write_text(raw if raw is not None else json.dumps(payload) + "\n")
         return path
 
     def test_parser_accepts_only_one_safe_line_and_rejects_extra_fields(self) -> None:
-        payload = self.passed_result("candidate", "catalog-rehearsal-candidate-96", CANDIDATE_SOURCE, "96", MIGRATIONS[:45], 0)
+        payload = passed_result("candidate", "catalog-rehearsal-candidate-96", CANDIDATE_SOURCE, "96", MIGRATIONS[:45], 0)
         ok = python("parse-result.py", str(self.write("log", payload, raw="noise line\n" + json.dumps(payload) + "\n")), "candidate")
         self.assertEqual(2, ok.returncode)  # more than one non-empty line is rejected
         ok = python("parse-result.py", str(self.write("log", payload)), "candidate")
@@ -157,7 +157,8 @@ class ParserAndGateTests(HarnessCase):
             "partial counts on pass": lambda p: p.update(postCounts={"Accounts": 1}),
         }.items():
             with self.subTest(case=name):
-                broken = json.loads(json.dumps(payload)); mutate(broken)
+                broken = json.loads(json.dumps(payload))
+                mutate(broken)
                 self.assertEqual(2, python("parse-result.py", str(self.write("log", broken)), "candidate").returncode)
 
     def test_parser_failure_outcome_and_failed_modes(self) -> None:
@@ -168,7 +169,7 @@ class ParserAndGateTests(HarnessCase):
         self.assertEqual(("failed", "container-create-failed", "catalog-rehearsal-candidate-96"), (value["result"], value["code"], value["rehearsalGroupName"]))
         self.assertEqual(0, python("parse-result.py", "--is-failed", str(path)).returncode)
         self.assertEqual(1, python("parse-result.py", "--outcome", str(path), "Succeeded", "0", "0").returncode)
-        passed = self.write("passed.json", self.passed_result("candidate", "catalog-rehearsal-candidate-96", CANDIDATE_SOURCE, "96", MIGRATIONS[:45], 0))
+        passed = self.write("passed.json", passed_result("candidate", "catalog-rehearsal-candidate-96", CANDIDATE_SOURCE, "96", MIGRATIONS[:45], 0))
         self.assertEqual(0, python("parse-result.py", "--outcome", str(passed), "Succeeded", "0", "0").returncode)
         for state, api, probe in (("Failed", "0", "0"), ("Succeeded", "1", "0"), ("Succeeded", "0", "1"), ("Stopped", "0", "0")):
             self.assertEqual(1, python("parse-result.py", "--outcome", str(passed), state, api, probe).returncode)
@@ -177,8 +178,8 @@ class ParserAndGateTests(HarnessCase):
         self.assertEqual(("unknown", "unknown"), (json.loads(unsafe.stdout)["code"], json.loads(unsafe.stdout)["rehearsalGroupName"]))
 
     def test_compare_gate_passes_only_the_full_two_phase_contract(self) -> None:
-        candidate = self.write("candidate.json", self.passed_result("candidate", "catalog-rehearsal-candidate-96", CANDIDATE_SOURCE, "96", MIGRATIONS[:45], 0))
-        previous = self.write("previous.json", self.passed_result("previous", "catalog-rehearsal-previous-96", PREVIOUS_SOURCE, "89", MIGRATIONS, 2))
+        candidate = self.write("candidate.json", passed_result("candidate", "catalog-rehearsal-candidate-96", CANDIDATE_SOURCE, "96", MIGRATIONS[:45], 0))
+        previous = self.write("previous.json", passed_result("previous", "catalog-rehearsal-previous-96", PREVIOUS_SOURCE, "89", MIGRATIONS, 2))
         env = self.common_env()
         ok = python("compare-results.py", str(candidate), str(previous), env=env)
         self.assertEqual((0, "CATALOG_REHEARSAL_PASSED"), (ok.returncode, ok.stdout.strip()))
@@ -195,7 +196,9 @@ class ParserAndGateTests(HarnessCase):
         for name, (target, mutate, expected) in cases.items():
             with self.subTest(case=name):
                 originals = {"candidate.json": candidate.read_text(), "previous.json": previous.read_text()}
-                broken = json.loads(originals[target]); mutate(broken); (self.temp / target).write_text(json.dumps(broken))
+                broken = json.loads(originals[target])
+                mutate(broken)
+                (self.temp / target).write_text(json.dumps(broken))
                 completed = python("compare-results.py", str(candidate), str(previous), env=env)
                 self.assertEqual((1, expected), (completed.returncode, completed.stdout.strip()))
                 (self.temp / target).write_text(originals[target])
@@ -205,8 +208,9 @@ class ParserAndGateTests(HarnessCase):
 class ProbeTests(HarnessCase):
     """Runs probe.py against fake sqlcmd/curl. The fake sqlcmd answers by matching fixed fragments of the query."""
 
-    def make_fakes(self, migrated: bool, health_json: str = '{"status":"ok","buildNumber":"96","imageId":"%s"}' % CANDIDATE_SOURCE, sqlcmd_fail_after: int | None = None) -> None:
-        state = self.temp / "state"; state.mkdir(exist_ok=True)
+    def make_fakes(self, migrated: bool, health_json: str = '{"status":"ok","buildNumber":"96","imageId":"%s"}' % CANDIDATE_SOURCE, sqlcmd_fail_after: int | None = None, answer_overrides: dict[str, str] | None = None) -> None:
+        state = self.temp / "state"
+        state.mkdir(exist_ok=True)
         (state / "migrated").write_text("1" if migrated else "0")
         answers = {
             "FROM dbo.__EFMigrationsHistory": "MIGRATIONS",
@@ -231,6 +235,7 @@ class ProbeTests(HarnessCase):
             "HAS_PERMS_BY_NAME": "2",
             "sys.database_principals": "2",
         }
+        answers.update(answer_overrides or {})
         (state / "answers.json").write_text(json.dumps(answers))
         (state / "sqlcmd-fail-after").write_text(str(sqlcmd_fail_after if sqlcmd_fail_after is not None else -1))
         (self.temp / "sqlcmd").write_text(f"""#!/usr/bin/env python3
@@ -247,6 +252,7 @@ ids = {json.dumps(MIGRATIONS)}
 answers = json.loads((state / "answers.json").read_text())
 for fragment, answer in answers.items():
     if fragment in query:
+        if answer.isdigit(): print(answer); sys.exit(0)
         if answer == "MIGRATIONS": print("\\n".join(ids if migrated else ids[:45])); sys.exit(0)
         if answer == "PREVIEW": print("2" if migrated else "0"); sys.exit(0)
         if answer == "OBS_COLUMNS": print("32" if migrated else "0"); sys.exit(0)
@@ -261,13 +267,14 @@ sys.exit(4)
         (self.temp / "sqlcmd").chmod(0o755)
         (self.temp / "curl").write_text(f"""#!/usr/bin/env bash
 state={str(state)!r}
-if [ -e "$state/api-started" ]; then echo "$state/migrated" >/dev/null; printf '%s\\n200' {health_json!r}; else printf '\\n000'; exit 7; fi
+if [ -e "$state/api-started" ]; then printf '%s\\n200' {health_json!r}; else printf '\\n000'; exit 7; fi
 """)
         (self.temp / "curl").chmod(0o755)
 
     def run_probe(self, phase: str = "candidate", start_api: bool = True, api_exits: bool = False, **overrides: str) -> tuple[subprocess.CompletedProcess[str], Path]:
         barrier = self.temp / "rehearsal"
-        shutil.rmtree(barrier, ignore_errors=True); barrier.mkdir()
+        shutil.rmtree(barrier, ignore_errors=True)
+        barrier.mkdir()
         state = self.temp / "state"
         for stale in ("api-started", "calls"):
             (state / stale).unlink(missing_ok=True)
@@ -332,9 +339,38 @@ done"""])
         self.assertEqual(45, len(value["migrationIds"]))  # post audit still recorded the unchanged clone
 
     def test_wrong_image_identity_or_build_is_not_health(self) -> None:
-        self.make_fakes(migrated=False, health_json='{"status":"ok","buildNumber":"97","imageId":"%s"}' % CANDIDATE_SOURCE)
-        completed, _ = self.run_probe(API_START_TIMEOUT_SECONDS="30")
-        self.assertEqual("api-health-timeout", self.result(completed)["code"])
+        for health in ('{"status":"ok","buildNumber":"97","imageId":"%s"}' % CANDIDATE_SOURCE, '{"status":"ok","buildNumber":"96","imageId":"%s"}' % PREVIOUS_SOURCE):
+            with self.subTest(health=health):
+                self.make_fakes(migrated=False, health_json=health)
+                completed, _ = self.run_probe(API_START_TIMEOUT_SECONDS="30")
+                self.assertEqual("api-health-timeout", self.result(completed)["code"])
+
+    def test_failed_audits_produce_stable_codes_and_never_pass(self) -> None:
+        cases = {
+            "duplicate active operations": ({"HAVING COUNT(*) > 1": "1"}, "baseline-duplicate-active-operations", False),
+            "insufficient permissions": ({"HAS_PERMS_BY_NAME": "1"}, "baseline-authority-invalid", False),
+            "foreign principal": ({"sys.database_principals": "1"}, "baseline-authority-invalid", False),
+            "foreign key violation": ({"sys.foreign_keys fk": "3"}, "post-authority-or-integrity-invalid", True),
+            "orphan transition": ({"o.Id = t.OperationId": "1"}, "post-authority-or-integrity-invalid", True),
+            # The filtered indexes arrive with migration 48 of 53, so they gate only the post-migration audit.
+            "missing filtered index": ({"IX_AzureProviderOperations_WorkspaceId_TargetKey'": "0"}, "post-authority-or-integrity-invalid", True),
+            "null billing state": ({"FROM dbo.BillingProviderEvents WHERE State IS NULL": "2"}, "billing-event-state-null", True),
+        }
+        for name, (overrides, expected, api_started) in cases.items():
+            with self.subTest(case=name):
+                self.make_fakes(migrated=False, answer_overrides=overrides)
+                completed, barrier = self.run_probe()
+                value = self.result(completed)
+                self.assertEqual((1, "failed", expected), (completed.returncode, value["result"], value["code"]))
+                self.assertEqual(api_started, (barrier / "start-api").exists())
+
+    def test_missing_append_only_trigger_fails_the_migration_contract(self) -> None:
+        self.make_fakes(migrated=False, answer_overrides={"TR_AzureProviderRecoveryObservations_AppendOnly": "0"})
+        completed, _ = self.run_probe()
+        value = self.result(completed)
+        self.assertEqual("post-migration-contract-invalid", value["code"])
+        self.assertFalse(value["recoveryObservationAppendOnlyTriggerValid"])
+        self.assertTrue(value["recoveryObservationNaturalKeyIndexValid"])
 
     def test_sql_boundary_failure_is_a_stable_code_without_error_text(self) -> None:
         self.make_fakes(migrated=False, sqlcmd_fail_after=0)
@@ -345,7 +381,7 @@ done"""])
 
 class RunPhaseTests(HarnessCase):
     def fake_az(self, group_state: str = "Succeeded", api_exit: str = "0", probe_exit: str = "0", probe_log: str | None = None, create_fails: bool = False) -> Path:
-        log = probe_log if probe_log is not None else json.dumps(ParserAndGateTests.passed_result("candidate", "catalog-rehearsal-candidate-96", CANDIDATE_SOURCE, "96", MIGRATIONS[:45], 0))
+        log = probe_log if probe_log is not None else json.dumps(passed_result("candidate", "catalog-rehearsal-candidate-96", CANDIDATE_SOURCE, "96", MIGRATIONS[:45], 0))
         (self.temp / "probe.log").write_text(log + "\n")
         az = self.temp / "az"
         az.write_text(f"""#!/usr/bin/env bash
@@ -366,7 +402,7 @@ esac
 
     def run_phase(self, az: Path, **overrides: str) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
         result_path = self.temp / "candidate-result.json"
-        env = {**os.environ, **self.common_env(**overrides), "AZ_BIN": str(az), "RESULT_PATH": str(result_path), "AZURE_CLI_TIMEOUT_SECONDS": "10"}
+        env = {**os.environ, **self.common_env(**overrides), "AZ_BIN": str(az), "RESULT_PATH": str(result_path), "AZURE_CLI_TIMEOUT_SECONDS": "10", "REHEARSAL_TMPDIR": str(self.temp / "private-tmp")}
         completed = subprocess.run(["bash", str(HARNESS / "run-phase.sh")], capture_output=True, text=True, env=env, check=False, timeout=120)
         return completed, json.loads(result_path.read_text())
 
@@ -378,6 +414,8 @@ esac
         self.assertIn("container create", calls)
         self.assertNotIn("container delete", calls)
         self.assertEqual(1, len([l for l in completed.stdout.splitlines() if l.strip()]))
+        self.assertEqual(0o700, (self.temp / "private-tmp").stat().st_mode & 0o777)
+        self.assertEqual([], list((self.temp / "private-tmp").iterdir()))  # temporary spec removed on exit
 
     def test_failed_container_outcome_rejects_a_passing_probe_line(self) -> None:
         for state, api, probe in (("Failed", "0", "0"), ("Succeeded", "1", "0"), ("Succeeded", "0", "1")):

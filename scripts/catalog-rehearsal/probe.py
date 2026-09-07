@@ -172,18 +172,23 @@ def filtered_unique_index_valid(sql: Sql, name: str) -> bool | None:
     return None if count is None else count == 1
 
 
+# Every enabled foreign key, including composite ones: rows whose referencing columns are all non-null
+# but match no referenced row.
 FOREIGN_KEY_VIOLATIONS = """
 DECLARE @violations bigint = 0, @sql nvarchar(max), @count bigint;
 DECLARE fk CURSOR LOCAL FAST_FORWARD FOR
-  SELECT N'SELECT @c = COUNT(*) FROM ' + QUOTENAME(cs.name) + N'.' + QUOTENAME(ct.name) + N' AS c WHERE c.' + QUOTENAME(cc.name) +
-         N' IS NOT NULL AND NOT EXISTS (SELECT 1 FROM ' + QUOTENAME(ps.name) + N'.' + QUOTENAME(pt.name) + N' AS p WHERE p.' + QUOTENAME(pc.name) + N' = c.' + QUOTENAME(cc.name) + N')'
+  SELECT N'SELECT @c = COUNT(*) FROM ' + QUOTENAME(cs.name) + N'.' + QUOTENAME(ct.name) + N' AS c WHERE ' +
+         STRING_AGG(N'c.' + QUOTENAME(cc.name) + N' IS NOT NULL', N' AND ') +
+         N' AND NOT EXISTS (SELECT 1 FROM ' + QUOTENAME(ps.name) + N'.' + QUOTENAME(pt.name) + N' AS p WHERE ' +
+         STRING_AGG(N'p.' + QUOTENAME(pc.name) + N' = c.' + QUOTENAME(cc.name), N' AND ') + N')'
   FROM sys.foreign_keys fk
   JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
   JOIN sys.tables ct ON ct.object_id = fk.parent_object_id JOIN sys.schemas cs ON cs.schema_id = ct.schema_id
   JOIN sys.columns cc ON cc.object_id = fkc.parent_object_id AND cc.column_id = fkc.parent_column_id
   JOIN sys.tables pt ON pt.object_id = fk.referenced_object_id JOIN sys.schemas ps ON ps.schema_id = pt.schema_id
   JOIN sys.columns pc ON pc.object_id = fkc.referenced_object_id AND pc.column_id = fkc.referenced_column_id
-  WHERE (SELECT COUNT(*) FROM sys.foreign_key_columns x WHERE x.constraint_object_id = fk.object_id) = 1;
+  WHERE fk.is_disabled = 0
+  GROUP BY fk.object_id, cs.name, ct.name, ps.name, pt.name;
 OPEN fk; FETCH NEXT FROM fk INTO @sql;
 WHILE @@FETCH_STATUS = 0 BEGIN
   EXEC sp_executesql @sql, N'@c bigint OUTPUT', @c = @count OUTPUT; SET @violations += @count;
@@ -210,25 +215,29 @@ SELECT @violations;
 
 
 def audit(sql: Sql, prefix: str) -> str | None:
-    """Populate result fields for one audit pass; return a stable failure code or None."""
+    """Populate result fields for one audit pass ("baseline" or "post"); return a stable failure code or None."""
+    ids_key, preview_key, counts_key = (
+        ("baselineMigrationIds", "baselinePreviewColumnCount", "baselineCounts") if prefix == "baseline"
+        else ("migrationIds", "previewColumnCount", "postCounts")
+    )
     migrations = sql.column("SELECT MigrationId FROM dbo.__EFMigrationsHistory ORDER BY MigrationId")
     if migrations is None or any(not MIGRATION_RE.fullmatch(item) for item in migrations):
         return f"{prefix}-migration-query-failed"
-    result["baselineMigrationIds" if prefix == "baseline" else "migrationIds"] = migrations
+    result[ids_key] = migrations
     preview = sql.scalar(
         "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND COLUMN_NAME = 'PreviewManifestDigest' "
         "AND TABLE_NAME IN ('ElsaInstances', 'ElsaInstanceIntentRevisions')"
     )
     if preview is None:
         return f"{prefix}-schema-query-failed"
-    result["baselinePreviewColumnCount" if prefix == "baseline" else "previewColumnCount"] = preview
+    result[preview_key] = preview
     counts: dict[str, int] = {}
     for table in COUNT_TABLES:
         count = sql.scalar(f"SELECT COUNT(*) FROM dbo.{table}")
         if count is None:
             return f"{prefix}-count-query-failed"
         counts[table] = count
-    result["baselineCounts" if prefix == "baseline" else "postCounts"] = counts
+    result[counts_key] = counts
     duplicate_targets = sql.scalar(
         "SELECT COUNT(*) FROM (SELECT WorkspaceId, TargetKey FROM dbo.AzureProviderOperations "
         f"WHERE Status IN {ACTIVE_STATUSES} GROUP BY WorkspaceId, TargetKey HAVING COUNT(*) > 1) AS d"
@@ -341,8 +350,6 @@ def health_ok(payload: object, expected_image: str, expected_build: str) -> bool
         and payload.get("status") == "ok"
         and payload.get("imageId") == expected_image
         and payload.get("buildNumber") == expected_build
-        and isinstance(payload.get("buildNumber"), str)
-        and bool(SAFE_ID_RE.fullmatch(payload["buildNumber"]))
     )
 
 
@@ -442,10 +449,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    sys.stderr = open(os.devnull, "w")
-    try:
-        main()
-    except SystemExit:
-        raise
-    except Exception:
-        finish("probe-failed")
+    with open(os.devnull, "w") as devnull:
+        sys.stderr = devnull
+        try:
+            main()
+        except SystemExit:
+            raise
+        except Exception:
+            finish("probe-failed")

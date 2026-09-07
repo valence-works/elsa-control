@@ -2,6 +2,8 @@
 # Operator runner for one rehearsal phase. Creates the exact ACI group from the rendered spec, waits for a
 # terminal state, parses exactly one safe probe result line, and writes it to RESULT_PATH. It never prints raw
 # Azure CLI output or container logs and never deletes the group: cleanup is a separate, verified operator step.
+# Unlike the sibling scripts this one never uses `set -e` or message-bearing `fail`: every exit path must emit a
+# stable code through the parser, and all stderr is discarded so no Azure or tool text can reach the operator log.
 set -u -o pipefail
 umask 077
 exec 2>/dev/null
@@ -62,8 +64,16 @@ for name in AZURE_SUBSCRIPTION_ID RESOURCE_GROUP REHEARSAL_GROUP_NAME; do
   fi
 done
 
+# The rendered spec carries the clone connection string as a secure value; keep every temporary file in a private
+# operator directory (REHEARSAL_TMPDIR, default ~/.elsa-control-ops/tmp), never in the shared system temp dir.
+private_tmp="${REHEARSAL_TMPDIR:-$HOME/.elsa-control-ops/tmp}"
+if ! mkdir -p -m 700 "$private_tmp" || ! chmod 700 "$private_tmp"; then
+  emit_failure temp-dir-failed
+  exit 2
+fi
+export TMPDIR="$private_tmp"
 spec_file="$(mktemp)" || { emit_failure temp-file-failed; exit 2; }
-if ! python3 "$renderer" --output "$spec_file" --probe-script "$probe" >/dev/null 2>&1; then
+if ! python3 "$renderer" --output "$spec_file" --probe-script "$probe" >/dev/null; then
   emit_failure input-invalid
   exit 2
 fi
@@ -79,6 +89,8 @@ if ! [[ "$cli_timeout" =~ ^[0-9]+$ ]] || (( cli_timeout < 1 || cli_timeout > 300
   emit_failure cli-timeout-invalid
   exit 2
 fi
+
+group_args=(--subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$RESOURCE_GROUP" --name "$REHEARSAL_GROUP_NAME")
 
 az_call() {
   local output_path="$1"
@@ -105,7 +117,7 @@ raise SystemExit(completed.returncode)
 PY
 }
 
-if ! az_call /dev/null container create --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$RESOURCE_GROUP" --name "$REHEARSAL_GROUP_NAME" --file "$spec_file" --no-wait --only-show-errors; then
+if ! az_call /dev/null container create "${group_args[@]}" --file "$spec_file" --no-wait --only-show-errors; then
   emit_failure container-create-failed
   exit 3
 fi
@@ -115,7 +127,7 @@ state_file="$(mktemp)" || { emit_failure state-temp-file-failed; exit 5; }
 state=""
 while (( $(date +%s) < deadline )); do
   : > "$state_file"
-  if az_call "$state_file" container show --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$RESOURCE_GROUP" --name "$REHEARSAL_GROUP_NAME" --query instanceView.state --output tsv --only-show-errors; then
+  if az_call "$state_file" container show "${group_args[@]}" --query instanceView.state --output tsv --only-show-errors; then
     state="$(tr -d '\r\n' <"$state_file")"
   else
     state=""
@@ -132,7 +144,7 @@ fi
 
 container_query() {
   : > "$state_file"
-  az_call "$state_file" container show --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$RESOURCE_GROUP" --name "$REHEARSAL_GROUP_NAME" --query "$1" --output tsv --only-show-errors || return 1
+  az_call "$state_file" container show "${group_args[@]}" --query "$1" --output tsv --only-show-errors || return 1
   tr -d '\r\n' <"$state_file"
 }
 
@@ -147,11 +159,11 @@ if ! api_state="$(container_query "containers[?name=='api'].instanceView.current
 fi
 
 log_file="$(mktemp)" || { emit_failure result-temp-file-failed; exit 5; }
-if ! az_call "$log_file" container logs --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$RESOURCE_GROUP" --name "$REHEARSAL_GROUP_NAME" --container-name probe --only-show-errors; then
+if ! az_call "$log_file" container logs "${group_args[@]}" --container-name probe --only-show-errors; then
   emit_failure probe-log-unavailable
   exit 5
 fi
-if ! python3 "$parser" "$log_file" "$phase" >"$result_path" 2>/dev/null; then
+if ! python3 "$parser" "$log_file" "$phase" >"$result_path"; then
   emit_failure result-invalid
   exit 6
 fi

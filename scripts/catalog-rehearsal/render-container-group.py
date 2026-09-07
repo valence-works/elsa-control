@@ -17,6 +17,9 @@ import re
 import stat
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NoReturn
+
+from rehearsal_contract import MIGRATION, PHASES, group_name_valid
 
 DIGEST_IMAGE = re.compile(r"^[a-z0-9.-]+\.azurecr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$")
 SOURCE_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -26,10 +29,9 @@ GUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 RESOURCE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._()-]{0,89}$")
 HOST_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{2,253}$")
 DATE_RE = re.compile(r"^20[0-9]{2}-[0-9]{2}-[0-9]{2}$")
-MIGRATION_RE = re.compile(r"^[0-9]{14}_[A-Za-z0-9_]+$")
 
 
-def fail() -> "NoReturn":
+def fail() -> NoReturn:
     raise SystemExit(2)
 
 
@@ -55,7 +57,7 @@ def main() -> int:
     arguments = parser.parse_args()
 
     phase = required("REHEARSAL_PHASE")
-    if phase not in ("candidate", "previous"):
+    if phase not in PHASES:
         fail()
     subscription = required("AZURE_SUBSCRIPTION_ID", GUID_RE, lower=True)
     resource_group = required("RESOURCE_GROUP", RESOURCE_NAME_RE)
@@ -79,8 +81,7 @@ def main() -> int:
     if not probe_image.startswith(registry + "/"):
         fail()
     group_name = required("REHEARSAL_GROUP_NAME", NAME_RE)
-    phase_prefix = f"catalog-rehearsal-{phase}"
-    if not (group_name == phase_prefix or group_name.startswith(f"{phase_prefix}-")):
+    if not group_name_valid(group_name, phase):
         fail()
     expiry = required("REHEARSAL_EXPIRY_UTC", DATE_RE)
     if datetime.strptime(expiry, "%Y-%m-%d").date() <= datetime.now(timezone.utc).date():
@@ -89,7 +90,7 @@ def main() -> int:
     if not probe_script.startswith("#!/usr/bin/env python3") or len(probe_script) > 64 * 1024:
         fail()
     expected_ids = Path(required("EXPECTED_MIGRATION_IDS_FILE")).read_text(encoding="utf-8").split()
-    if len(expected_ids) != int(target_migrations) or any(not MIGRATION_RE.fullmatch(item) for item in expected_ids) or len(set(expected_ids)) != len(expected_ids):
+    if len(expected_ids) != int(target_migrations) or any(not MIGRATION.fullmatch(item) for item in expected_ids) or len(set(expected_ids)) != len(expected_ids):
         fail()
 
     identity_prefix = f"/subscriptions/{subscription}/resourceGroups/{authority_group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/"

@@ -12,37 +12,13 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
+from typing import NoReturn
 
-SCHEMA = "elsa-control.catalog-rehearsal/v1"
-SAFE_ID = re.compile(r"^[A-Za-z0-9._+:-]{1,128}$")
-MIGRATION = re.compile(r"^[0-9]{14}_[A-Za-z0-9_]+$")
-COUNTS = ("Accounts", "Organizations", "Workspaces", "ElsaInstances", "DeploymentRuns", "AzureProviderOperations")
-COUNT_FIELDS = (
-    "previewColumnCount", "baselinePreviewColumnCount", "duplicateTargetGroupCount", "duplicateOperationGroupCount",
-    "billingProviderEventNullStateCount", "foreignKeyIntegrityViolationCount", "checkConstraintIntegrityViolationCount",
-    "orphanProviderAssignmentCount", "orphanOperationTransitionCount",
-)
-BOOL_FIELDS = (
-    "commonCountsEqual", "permissionChecks", "principalChecks", "integrityChecks", "indexChecks",
-    "recoveryObservationColumnsValid", "recoveryObservationForeignKeysValid", "recoveryObservationNaturalKeyIndexValid",
-    "recoveryObservationAppendOnlyTriggerValid", "recoveryRequestColumnsValid", "attemptedStepColumnValid",
-    "billingProviderEventsPresent", "providerAssignmentSchemaPresent",
-)
-SAFE_FIELDS = frozenset(
-    ("schema", "phase", "result", "code", "healthChecks", "migrationIds", "baselineMigrationIds", "baselineCounts",
-     "postCounts", "bakedImageId", "buildNumber", "rehearsalGroupName", *COUNT_FIELDS, *BOOL_FIELDS)
-)
+from rehearsal_contract import BOOL_FIELDS, COUNT_FIELDS, COUNTS, MIGRATION, PHASES, SAFE_FIELDS, SAFE_ID, SCHEMA, group_name_valid
 
-
-def invalid() -> "NoReturn":
+def invalid() -> NoReturn:
     raise SystemExit(2)
-
-
-def group_name_valid(name: object, phase: str) -> bool:
-    prefix = f"catalog-rehearsal-{phase}"
-    return isinstance(name, str) and bool(SAFE_ID.fullmatch(name)) and (name == prefix or name.startswith(prefix + "-"))
 
 
 def validate(payload: object, expected_phase: str) -> dict[str, object]:
@@ -81,7 +57,7 @@ def validate(payload: object, expected_phase: str) -> dict[str, object]:
 
 
 def failure_payload(phase: str, code: str, group_name: str) -> dict[str, object]:
-    safe_phase = phase if phase in ("candidate", "previous") else "unknown"
+    safe_phase = phase if phase in PHASES else "unknown"
     return {
         "schema": SCHEMA, "phase": safe_phase, "result": "failed", "code": code if SAFE_ID.fullmatch(code) else "unknown",
         "healthChecks": 0, "migrationIds": [], "baselineMigrationIds": [],
@@ -123,7 +99,7 @@ def main(argv: list[str]) -> int:
         return 0 if passed and group_state == "Succeeded" and api_exit == "0" and probe_exit == "0" else 1
     if len(argv) == 2 and argv[0] == "--is-failed":
         return 0 if load(argv[1]).get("result") == "failed" else 1
-    if len(argv) != 2 or argv[1] not in ("candidate", "previous"):
+    if len(argv) != 2 or argv[1] not in PHASES:
         invalid()
     try:
         with open(argv[0], encoding="utf-8") as stream:
