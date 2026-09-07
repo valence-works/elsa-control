@@ -120,7 +120,7 @@ class Sql:
         command = [
             self.sqlcmd, "-S", f"tcp:{self.server},1433", "-d", self.database,
             "--authentication-method", "ActiveDirectoryManagedIdentity", "-U", self.client_id,
-            "-N", "true", "-C", "-h", "-1", "-W", "-s", "\t", "-b", "-l", "30", "-t", str(timeout), "-Q", "SET NOCOUNT ON; " + query,
+            "-N", "true", "-h", "-1", "-W", "-s", "\t", "-b", "-l", "30", "-t", str(timeout), "-Q", "SET NOCOUNT ON; " + query,
         ]
         try:
             completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout + 60, check=False)
