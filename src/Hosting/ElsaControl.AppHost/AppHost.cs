@@ -7,6 +7,9 @@ var applicationBuildNumber = Environment.GetEnvironmentVariable("APPLICATION_BUI
     ?? Environment.GetEnvironmentVariable("GITHUB_RUN_NUMBER");
 
 builder.AddAzureAppServiceEnvironment("elsa-control")
+    // Production observability is Application Insights/Log Analytics behind Entra RBAC (#266, #302); the
+    // Aspire dashboard web app and its OTLP sidecar are not provisioned. The dashboard still runs locally.
+    .WithDashboard(false)
     .ConfigureInfrastructure(infrastructure =>
     {
         var plan = infrastructure.GetProvisionableResources().OfType<AppServicePlan>().Single();

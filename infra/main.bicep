@@ -52,9 +52,9 @@ module elsa_control 'elsa-control/elsa-control.module.bicep' = {
   name: 'elsa-control'
   scope: rg
   params: {
+    elsa_control_acr_outputs_name: elsa_control_acr.outputs.name
     location: location
     userPrincipalId: principalId
-    elsa_control_acr_outputs_name: elsa_control_acr.outputs.name
   }
 }
 module elsa_control_acr 'elsa-control-acr/elsa-control-acr.module.bicep' = {
@@ -66,13 +66,9 @@ module elsa_control_acr 'elsa-control-acr/elsa-control-acr.module.bicep' = {
 }
 output API_IDENTITY_CLIENTID string = api_identity.outputs.clientId
 output API_IDENTITY_ID string = api_identity.outputs.id
-output AZURE_APP_SERVICE_DASHBOARD_URI string = elsa_control.outputs.AZURE_APP_SERVICE_DASHBOARD_URI
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = elsa_control.outputs.AZURE_CONTAINER_REGISTRY_ENDPOINT
 output CONTROL_SQL_SQLSERVERFQDN string = control_sql.outputs.sqlServerFqdn
-output ELSA_CONTROL_AZURE_APP_SERVICE_DASHBOARD_URI string = elsa_control.outputs.AZURE_APP_SERVICE_DASHBOARD_URI
 output ELSA_CONTROL_AZURE_CONTAINER_REGISTRY_ENDPOINT string = elsa_control.outputs.AZURE_CONTAINER_REGISTRY_ENDPOINT
 output ELSA_CONTROL_AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_CLIENT_ID string = elsa_control.outputs.AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_CLIENT_ID
 output ELSA_CONTROL_AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_ID string = elsa_control.outputs.AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_ID
-output ELSA_CONTROL_AZURE_WEBSITE_CONTRIBUTOR_MANAGED_IDENTITY_ID string = elsa_control.outputs.AZURE_WEBSITE_CONTRIBUTOR_MANAGED_IDENTITY_ID
-output ELSA_CONTROL_AZURE_WEBSITE_CONTRIBUTOR_MANAGED_IDENTITY_PRINCIPAL_ID string = elsa_control.outputs.AZURE_WEBSITE_CONTRIBUTOR_MANAGED_IDENTITY_PRINCIPAL_ID
 output ELSA_CONTROL_PLANID string = elsa_control.outputs.planId

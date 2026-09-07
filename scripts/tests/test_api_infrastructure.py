@@ -63,14 +63,6 @@ def parameter_file(module_path: Path, parameter_directory: Path, provisioner_id:
         "api_identity_outputs_id": API_ID,
         "api_identity_outputs_clientid": API_CLIENT_ID,
         "provisioner_identity_outputs_id": provisioner_id,
-        "elsa_control_outputs_azure_app_service_dashboard_uri": "https://dashboard.example",
-        "elsa_control_outputs_azure_website_contributor_managed_identity_id": (
-            f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{RESOURCE_GROUP}/"
-            "providers/Microsoft.ManagedIdentity/userAssignedIdentities/contributor"
-        ),
-        "elsa_control_outputs_azure_website_contributor_managed_identity_principal_id": (
-            "00000000-0000-0000-0000-000000000005"
-        ),
     }
     lines = [f"using '{using_path}'", ""]
     lines.extend(f"param {name} = '{value}'" for name, value in values.items())
@@ -199,9 +191,13 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("empty(provisioner_identity_outputs_id)", module)
         self.assertIn("'${provisioner_identity_outputs_id}': { }", module)
         self.assertIn("patch-api-provisioner-identity.py", regeneration)
+        self.assertIn("api.tmpl.bicepparam", PATCH_API_IDENTITY.read_text())
+        self.assertNotIn("dashboard", module.lower())
+        self.assertNotIn("WEBSITE_ENABLE_ASPIRE_OTEL_SIDECAR", module)
         self.assertIn("azure-production", regeneration)
         self.assertIn("azure-workload-proof", regeneration)
         self.assertIn("azure-customer-subscription", regeneration)
+        self.assertIn("managed-telemetry", regeneration)
         self.assertLess(
             regeneration.index("trap restore_preserved_infra EXIT"),
             regeneration.index('mv "infra/$relative_path"'),
