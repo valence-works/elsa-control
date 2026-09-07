@@ -6,7 +6,7 @@ targetScope = 'resourceGroup'
 // live resource group must be a no-op: names, location, subject and role-assignment names are inputs.
 // NEVER delete this identity: it is the production environment's AZURE_CLIENT_ID.
 
-@description('Existing region of the identity; changing it would recreate the identity and its client id.')
+@description('Existing region of the identity; ARM rejects a different location for an existing identity.')
 param location string
 
 @minLength(3)
@@ -28,7 +28,7 @@ param apiSiteName string
 @description('Container registry the deploy identity pushes candidate images to.')
 param registryName string
 
-@description('Existing role-assignment names to adopt; defaults derive deterministic names for new environments.')
+@description('Existing role-assignment names to adopt; defaults derive deterministic names for new environments. Role ids are repeated literally here because Bicep parameter defaults cannot reference variables.')
 param readerRoleAssignmentName string = guid(resourceGroup().id, identityName, 'acdd72a7-3385-48ef-bd42-f606fba81ae7')
 param websiteContributorRoleAssignmentName string = guid(resourceGroup().id, apiSiteName, identityName, 'de139f84-1756-47ae-9be6-808fbbe84772')
 param acrPushRoleAssignmentName string = guid(resourceGroup().id, registryName, identityName, '8311e382-0749-4cb8-b61a-304f252e45ec')

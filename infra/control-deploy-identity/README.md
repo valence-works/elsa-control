@@ -8,7 +8,9 @@ the Aspire dashboard; the dashboard was retired (#302, #307), so this template i
 truth for the identity, the credential and its three deploy roles (#308).
 
 **Never delete this identity.** Doing so breaks every build, promote and infra deployment and
-requires re-bootstrapping the GitHub environment with a new client id.
+requires re-bootstrapping the GitHub environment with a new client id. Do not re-run
+`scripts/bootstrap-github-azure.sh` against the `production` environment either: it creates an
+Entra app registration with Contributor rights and overwrites `AZURE_CLIENT_ID`.
 
 ## Roles (exact scopes)
 
@@ -31,5 +33,8 @@ az deployment group what-if --subscription 8e23037a-420f-4ad0-9594-9d194de29e84 
   --parameters @infra/control-deploy-identity/main.parameters.production.json
 ```
 
-Every resource must report `NoChange`. New environments omit the role-assignment names and let
+The federated credential must report `NoChange`; the identity and role assignments show only
+what-if reference noise (`principalId` is evaluated at deployment time, and the identity has no
+explicit `properties`). The 2026-09-08 adoption deployment left client id, principal id, roles and
+subject unchanged. New environments omit the role-assignment names and let
 the template derive deterministic ones. `dev/regenerate-infra.sh` preserves this directory.

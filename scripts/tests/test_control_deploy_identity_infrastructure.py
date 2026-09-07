@@ -53,17 +53,20 @@ class ControlDeployIdentityTests(unittest.TestCase):
         self.assertEqual(["api://AzureADTokenExchange"], credential["audiences"])
         self.assertEqual("[parameters('githubSubject')]", credential["subject"])
 
-    def test_roles_are_exact_and_scoped_to_the_site_and_registry(self):
+    def test_roles_are_exact_and_each_is_bound_to_its_scope(self):
         assignments = self.by_type["Microsoft.Authorization/roleAssignments"]
-        definitions = {self.resolve(a["properties"]["roleDefinitionId"]) for a in assignments}
-        for role_id in ROLE_IDS.values():
-            self.assertTrue(any(role_id in definition for definition in definitions), role_id)
-        scopes = sorted(a.get("scope", "<resourceGroup>") for a in assignments)
-        self.assertEqual(1, sum(scope == "<resourceGroup>" for scope in scopes))
-        self.assertTrue(any("Microsoft.Web/sites" in scope for scope in scopes))
-        self.assertTrue(any("Microsoft.ContainerRegistry/registries" in scope for scope in scopes))
-        self.assertTrue(all(a["properties"]["principalType"] == "ServicePrincipal" for a in assignments))
-        self.assertTrue(all("principalId" in a["properties"]["principalId"] for a in assignments))
+        bound = {}
+        for assignment in assignments:
+            role_id = next(role for role in ROLE_IDS.values() if role in self.resolve(assignment["properties"]["roleDefinitionId"]))
+            bound[role_id] = assignment.get("scope", "<resourceGroup>")
+            self.assertEqual("ServicePrincipal", assignment["properties"]["principalType"])
+            self.assertIn("Microsoft.ManagedIdentity/userAssignedIdentities", assignment["properties"]["principalId"])
+            self.assertIn("parameters('identityName')", assignment["properties"]["principalId"])
+        self.assertEqual("<resourceGroup>", bound[ROLE_IDS["reader"]])
+        self.assertIn("Microsoft.Web/sites", bound[ROLE_IDS["websiteContributor"]])
+        self.assertIn("parameters('apiSiteName')", bound[ROLE_IDS["websiteContributor"]])
+        self.assertIn("Microsoft.ContainerRegistry/registries", bound[ROLE_IDS["acrPush"]])
+        self.assertIn("parameters('registryName')", bound[ROLE_IDS["acrPush"]])
 
     def test_no_default_identity_name_location_or_subject(self):
         parameters = self.template["parameters"]
@@ -79,8 +82,10 @@ class ControlDeployIdentityTests(unittest.TestCase):
         self.assertRegex(values["githubSubject"], r"^repo:valence-works(@[0-9]+)?/elsa-control(@[0-9]+)?:environment:production$")
         self.assertEqual("api-m5uymkuaf222o", values["apiSiteName"])
         self.assertEqual("valencecontrolacrm5uymkuaf222o", values["registryName"])
-        for name in ("readerRoleAssignmentName", "websiteContributorRoleAssignmentName", "acrPushRoleAssignmentName"):
-            self.assertRegex(values[name], r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+        # The live assignment names: a different value would create a duplicate assignment instead of adopting.
+        self.assertEqual("73cdddfd-3707-5f90-a858-75455aac2d90", values["readerRoleAssignmentName"])
+        self.assertEqual("a51368d6-377e-5237-8236-97e5231baf0b", values["websiteContributorRoleAssignmentName"])
+        self.assertEqual("130c7d80-0cb5-4e7b-bcbd-3c6ce913a3e7", values["acrPushRoleAssignmentName"])
         self.assertEqual(set(values), set(self.template["parameters"]) - {"tags"})
 
     def test_readme_states_the_identity_must_never_be_deleted(self):

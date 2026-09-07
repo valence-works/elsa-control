@@ -134,7 +134,8 @@ Required GitHub Actions variables:
 - `AZURE_CLIENT_ID`: client ID of the deploy identity
   `valence_control_contributor_mi-m5uymkuaf222o`, declared in
   `infra/control-deploy-identity/` together with its GitHub federated credential and
-  exact deploy roles. Never delete that identity; see its README.
+  exact deploy roles. Never delete that identity and do not re-run the bootstrap script
+  against `production` (it would replace the client id); see its README.
 - `AZURE_TENANT_ID`: Microsoft Entra tenant ID.
 - `AZURE_SUBSCRIPTION_ID`: target Azure subscription ID.
 - `AZURE_ENV_NAME`: existing or desired `azd` environment name, for example
