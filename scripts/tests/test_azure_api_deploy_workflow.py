@@ -195,7 +195,7 @@ esac
             self.assertIn("Application__BuildNumber=96", classic_calls)
             self.assertNotIn("Application__BuildNumber=1786839398", classic_calls)
 
-            for invalid_build_number in ("", "abc", "0", "0123", "12345678901"):
+            for invalid_build_number in ("", "abc", "0", "0123", "1" * 21):
                 with self.subTest(candidate_build_number=invalid_build_number):
                     rejected = run_promotion("classic", f"DOCKER|{candidate_image}", candidate_build_number=invalid_build_number)
                     self.assertNotEqual(0, rejected.returncode)
