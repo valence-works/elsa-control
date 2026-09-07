@@ -391,6 +391,17 @@ export is preserved; when `OTEL_EXPORTER_OTLP_ENDPOINT` is configured, managed
 lifecycle signals reach that explicitly configured destination as well as this
 Azure Monitor sink. Review both destinations during operational acceptance.
 
+The bounded observation window is produced by
+`scripts/managed-lifecycle-slo-sampler.py`. It probes the managed runtime health
+endpoint itself at a fixed interval for the whole window (Control's stored
+operational health can be recorded alongside but never substitutes for a fresh
+probe), optionally counts the named `managed_lifecycle.*` signals that reached the
+sink during the same UTC window through the Entra-authenticated query boundary, and
+prints one JSON line with the window timestamps and healthy/unhealthy/unknown
+counts. Unreachable, timed-out, capped or missing samples are `unknown`, never
+healthy; a failed sink query marks the window incomplete. The output carries no
+URL, host, token, body or error text, so it is safe acceptance evidence as-is.
+
 Treat exporter startup, actual signal ingestion, private operator dashboard access,
 and the fresh five-minute observation window as separate gates. An anonymous
 dashboard denial alone is not positive operator-access proof. Stored instance

@@ -68,6 +68,7 @@ class CiWorkflowTests(unittest.TestCase):
             "python3 scripts/tests/test_api_infrastructure.py",
             "python3 scripts/tests/test_customer_subscription_bootstrap.py",
             "python3 scripts/tests/test_api_provider_image.py",
+            "python3 scripts/tests/test_managed_lifecycle_slo_sampler.py",
             "python3 scripts/tests/test_validate_api_provider_image.py",
             "python3 scripts/tests/test_azure_workload_proof.py",
             "python3 scripts/tests/test_azure_workload_restore_proof.py",
