@@ -9,7 +9,6 @@ build numbers) is an explicit input; nothing is inferred from a registry or a de
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import json
 import os

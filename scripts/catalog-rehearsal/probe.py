@@ -147,11 +147,14 @@ class Sql:
 
 
 def object_exists(sql: Sql, table: str, column: str | None = None) -> bool | None:
+    """True/False when the catalog answered, None when the query boundary failed."""
     if column is None:
-        return sql.scalar(f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = '{table}'")
-    return sql.scalar(
-        f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = '{table}' AND COLUMN_NAME = '{column}'"
-    )
+        count = sql.scalar(f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = '{table}'")
+    else:
+        count = sql.scalar(
+            f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = '{table}' AND COLUMN_NAME = '{column}'"
+        )
+    return None if count is None else count == 1
 
 
 def all_columns_present(sql: Sql, table: str, columns: tuple[str, ...]) -> bool | None:
@@ -255,7 +258,7 @@ def audit(sql: Sql, prefix: str) -> str | None:
     billing_present = object_exists(sql, "BillingProviderEvents")
     if billing_present is None:
         return f"{prefix}-schema-query-failed"
-    result["billingProviderEventsPresent"] = billing_present == 1
+    result["billingProviderEventsPresent"] = billing_present
     if billing_present:
         null_states = sql.scalar("SELECT COUNT(*) FROM dbo.BillingProviderEvents WHERE State IS NULL")
         if null_states is None:
@@ -273,7 +276,7 @@ def integrity(sql: Sql) -> str | None:
         return "integrity-query-failed"
     result["foreignKeyIntegrityViolationCount"] = fk
     result["checkConstraintIntegrityViolationCount"] = ck
-    result["providerAssignmentSchemaPresent"] = assignment_schema == 1 and assignments_table == 1
+    result["providerAssignmentSchemaPresent"] = assignment_schema and assignments_table
     orphan_assignments = 0
     if result["providerAssignmentSchemaPresent"]:
         orphan_assignments = sql.scalar(
@@ -315,8 +318,7 @@ def schema_contract(sql: Sql) -> str | None:
         "AND te.type_desc IN ('UPDATE', 'DELETE')"
     )
     checks["recoveryObservationAppendOnlyTriggerValid"] = None if trigger is None else trigger == 2
-    attempted = object_exists(sql, "AzureProviderOperations", "AttemptedStep")
-    checks["attemptedStepColumnValid"] = None if attempted is None else attempted == 1
+    checks["attemptedStepColumnValid"] = object_exists(sql, "AzureProviderOperations", "AttemptedStep")
     if any(value is None for value in checks.values()):
         return "schema-contract-query-failed"
     result.update(checks)
