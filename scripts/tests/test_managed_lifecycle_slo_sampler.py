@@ -101,7 +101,7 @@ class SamplerTests(unittest.TestCase):
     def test_unhealthy_unreachable_timed_out_and_redirected_samples_are_never_healthy(self) -> None:
         self.fixture.responses["/runtime"] = [(503, '{"status":"degraded"}'), (0, "1.5"), (302, "")]
         completed = self.run_sampler()
-        unreachable = self.run_sampler(runtime_url=f"http://127.0.0.1:{self.fixture.server.server_port + 1}/runtime")
+        unreachable = self.run_sampler(runtime_url="http://127.0.0.1:1/runtime")  # reserved port: refused immediately
         result = self.parse(completed)
         self.assertEqual(1, completed.returncode)
         self.assertEqual({"total": 4, "healthy": 1, "unhealthy": 2, "unknown": 1}, result["runtime"])
@@ -149,6 +149,7 @@ class SamplerTests(unittest.TestCase):
         cases = {
             "missing token": (("--control-health-url", self.fixture.url("/control")), {"ELSA_CONTROL_SAMPLER_TOKEN": ""}),
             "unsafe signal name": (("--sink-workspace-id", WORKSPACE_ID, "--sink-signal", "requests; drop table"), {}),
+            "malformed workspace id": (("--sink-workspace-id", "-" * 36, "--sink-signal", COMPLETED_SIGNAL), {}),
             "signal without workspace": (("--sink-signal", COMPLETED_SIGNAL), {}),
             "non-numeric timeout": (("--timeout-seconds", "soon"), {}),
             "unknown option echoing a host": (("--runtime-healthurl", "https://typo-host.example.test/x"), {}),
@@ -173,7 +174,8 @@ class SamplerTests(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 "printf '%s\\n' \"$*\" >> \"${AZ_CALL_LOG:?}\"\n"
                 "if [ \"${AZ_FAIL:-}\" = 1 ]; then exit 1; fi\n"
-                f"printf '%s' '[{{\"Name\":\"{COMPLETED_SIGNAL}\",\"rows\":7}},{{\"Name\":\"unrelated\",\"rows\":99}}]'\n"
+                # Mirrors the real `az monitor log-analytics query -o json` shape: a flat row list with string values.
+                f"printf '%s' '[{{\"Name\":\"{COMPLETED_SIGNAL}\",\"TableName\":\"PrimaryResult\",\"rows\":\"7\"}},{{\"Name\":\"unrelated\",\"TableName\":\"PrimaryResult\",\"rows\":\"99\"}}]'\n"
             )
             fake_az.chmod(0o755)
             log = Path(temp_dir) / "calls"

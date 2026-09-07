@@ -30,7 +30,7 @@ RUNTIME_CATEGORIES = ("healthy", "unhealthy", "unknown")
 CONTROL_STATUSES = ("healthy", "degraded", "failed", "unknown", "stale", "recovery_required")
 CONTROL_CATEGORIES = (*CONTROL_STATUSES, "unhealthy_response", "other")
 SIGNAL_NAME = re.compile(r"^managed_lifecycle\.[a-z_.]{1,80}$")
-WORKSPACE_ID = re.compile(r"^[0-9a-fA-F-]{36}$")
+WORKSPACE_ID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
 def utc_now() -> str:
@@ -141,6 +141,8 @@ def query_sink(az_bin: str, workspace_id: str, signals: list[str], start: str, e
         rows = json.loads(completed.stdout) if completed.returncode == 0 else None
     except Exception:
         rows = None
+    # The log-analytics CLI extension flattens the result into a list of row objects keyed by column
+    # name (plus TableName); numeric columns arrive as strings.
     if not isinstance(rows, list):
         return {"queried": False, "signals": None}
     counts = {signal: 0 for signal in signals}
