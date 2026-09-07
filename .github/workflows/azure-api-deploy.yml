@@ -608,6 +608,13 @@ jobs:
               echo "::error::The candidate image digest has an unexpected format; refusing promotion."
               exit 1
             fi
+            # A promoted image keeps the build number of the run that built and validated it;
+            # the promotion run number is not a build identity. Refuse before touching the Web App.
+            application_build_number="$VALIDATED_CANDIDATE_BUILD_NUMBER"
+            if [[ ! "$application_build_number" =~ ^[1-9][0-9]{0,9}$ ]]; then
+              echo "::error::The validated candidate build number is unavailable; refusing promotion."
+              exit 1
+            fi
 
             if [ "$current_deployment_mode" = "sitecontainers" ]; then
               az webapp sitecontainers update \
@@ -662,15 +669,8 @@ jobs:
             exit 1
           fi
 
-          # A promoted image keeps the build number of the run that built and validated it;
-          # the promotion run number is not a build identity.
-          application_build_number="$GITHUB_RUN_NUMBER"
-          if [ "$DEPLOY_MODE" = "promote" ]; then
-            application_build_number="$VALIDATED_CANDIDATE_BUILD_NUMBER"
-            if [[ ! "$application_build_number" =~ ^[1-9][0-9]{0,9}$ ]]; then
-              echo "::error::The validated candidate build number is unavailable; refusing promotion."
-              exit 1
-            fi
+          if [ "$DEPLOY_MODE" != "promote" ]; then
+            application_build_number="$GITHUB_RUN_NUMBER"
           fi
           if [ "$DEPLOY_MODE" = "infra" ]; then
             az webapp config appsettings set \

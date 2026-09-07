@@ -195,10 +195,13 @@ esac
             self.assertIn("Application__BuildNumber=96", classic_calls)
             self.assertNotIn("Application__BuildNumber=1786839398", classic_calls)
 
-            missing_build_number = run_promotion("classic", f"DOCKER|{candidate_image}", candidate_build_number="")
-            self.assertNotEqual(0, missing_build_number.returncode)
-            self.assertIn("candidate build number is unavailable", missing_build_number.stdout + missing_build_number.stderr)
-            self.assertNotIn("webapp config appsettings set", call_log.read_text())
+            for invalid_build_number in ("", "abc", "0", "0123", "12345678901"):
+                with self.subTest(candidate_build_number=invalid_build_number):
+                    rejected = run_promotion("classic", f"DOCKER|{candidate_image}", candidate_build_number=invalid_build_number)
+                    self.assertNotEqual(0, rejected.returncode)
+                    self.assertIn("candidate build number is unavailable", rejected.stdout + rejected.stderr)
+                    # Refused before any Web App mutation, not merely before the settings write.
+                    self.assertEqual("", call_log.read_text() if call_log.exists() else "")
 
             sitecontainers = run_promotion("sitecontainers", candidate_image)
             self.assertEqual(0, sitecontainers.returncode, sitecontainers.stderr)
