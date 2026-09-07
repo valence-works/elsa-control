@@ -52,32 +52,19 @@ public sealed class CatalogManagedIdentityCredentialPipelineTests
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var uri = request.RequestUri!;
+            var metadata = request.Headers.Contains("Metadata");
             // Exceptions thrown here are swallowed by MSAL's optional probes, so record unexpected shapes instead.
             if (uri.Host != "169.254.169.254" || request.Method != HttpMethod.Get)
-            {
-                Stages.Add($"unexpected:{request.Method}:{uri.Host}");
-                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
-            }
+                return NotFound($"unexpected:{request.Method}:{uri.Host}");
             if (uri.AbsolutePath == "/metadata/identity/getplatformmetadata")
-            {
-                Assert.Equal("?cred-api-version=2.0&client_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", uri.Query);
-                Assert.False(request.Headers.Contains("Metadata"));
-                Stages.Add("capability");
-                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
-            }
+                return NotFound(!metadata && uri.Query == "?cred-api-version=2.0&client_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+                    ? "capability"
+                    : "unexpected:capability-shape");
             if (uri.AbsolutePath == "/metadata/instance/compute")
-            {
-                Assert.Equal("?api-version=2021-02-01", uri.Query);
-                Assert.True(request.Headers.Contains("Metadata"));
-                Stages.Add("compute");
-                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
-            }
+                return NotFound(metadata && uri.Query == "?api-version=2021-02-01" ? "compute" : "unexpected:compute-shape");
             if (uri.AbsolutePath != "/metadata/identity/oauth2/token")
-            {
-                Stages.Add($"unexpected:{uri.AbsolutePath}");
-                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
-            }
-            if (!request.Headers.Contains("Metadata"))
+                return NotFound($"unexpected:{uri.AbsolutePath}");
+            if (!metadata)
             {
                 Stages.Add("availability");
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest));
@@ -90,6 +77,12 @@ public sealed class CatalogManagedIdentityCredentialPipelineTests
                     {"access_token":"synthetic-test-token","expires_on":"4102444800","resource":"https://database.windows.net/","token_type":"Bearer"}
                     """)
             });
+        }
+
+        private Task<HttpResponseMessage> NotFound(string stage)
+        {
+            Stages.Add(stage);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
         }
     }
 }

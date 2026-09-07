@@ -9,8 +9,8 @@ namespace ElsaControl.Api.Tests;
 public sealed class CatalogManagedIdentityRetryPipelineTests
 {
     [Theory]
-    [InlineData("http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01")]
-    [InlineData("http://169.254.169.254/metadata/instance/compute/location?api-version=2020-06-01&format=text")]
+    [InlineData(ImdsProbes.Compute)]
+    [InlineData(ImdsProbes.Region)]
     public async Task Actual_pipeline_does_not_retry_unsupported_instance_metadata_probe(string uri)
     {
         using var handler = new StatusHandler(404);
@@ -42,7 +42,7 @@ public sealed class CatalogManagedIdentityRetryPipelineTests
         var policy = new ManagedIdentityProbeRetryPolicy(delay);
         var pipeline = new HttpPipeline(new HttpClientTransport(client), [policy], new ResponseClassifier());
         using var message = pipeline.CreateMessage();
-        message.Request.Uri.Reset(new Uri("http://169.254.169.254/metadata/identity/oauth2/token"));
+        message.Request.Uri.Reset(new Uri(ImdsProbes.Token));
         message.Request.Headers.Add("Metadata", "true");
 
         await pipeline.SendAsync(message, CancellationToken.None);
@@ -58,7 +58,7 @@ public sealed class CatalogManagedIdentityRetryPipelineTests
         using var client = new HttpClient(handler);
         var pipeline = new HttpPipeline(new HttpClientTransport(client), [new ManagedIdentityProbeRetryPolicy()], new ResponseClassifier());
         using var message = pipeline.CreateMessage();
-        message.Request.Uri.Reset(new Uri("http://169.254.169.254/metadata/identity/oauth2/token"));
+        message.Request.Uri.Reset(new Uri(ImdsProbes.Token));
         message.Request.Headers.Add("Metadata", "true");
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
@@ -77,7 +77,7 @@ public sealed class CatalogManagedIdentityRetryPipelineTests
         using var client = new HttpClient(handler);
         var pipeline = new HttpPipeline(new HttpClientTransport(client), [new ManagedIdentityProbeRetryPolicy()], new ResponseClassifier());
         using var message = pipeline.CreateMessage();
-        message.Request.Uri.Reset(new Uri("http://169.254.169.254/metadata/identity/oauth2/token"));
+        message.Request.Uri.Reset(new Uri(ImdsProbes.Token));
         message.Request.Headers.Add("Metadata", "true");
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
@@ -92,7 +92,7 @@ public sealed class CatalogManagedIdentityRetryPipelineTests
         using var client = new HttpClient(handler);
         var pipeline = new HttpPipeline(new HttpClientTransport(client), [], new ResponseClassifier());
         using var message = pipeline.CreateMessage();
-        message.Request.Uri.Reset(new Uri("http://169.254.169.254/metadata/identity/oauth2/token"));
+        message.Request.Uri.Reset(new Uri(ImdsProbes.Token));
         await pipeline.SendAsync(message, CancellationToken.None);
         Assert.Equal(TimeSpan.FromSeconds(120), new ManagedIdentityRetryDelay().GetNextDelay(message.Response, 1));
     }

@@ -5,6 +5,15 @@ using Microsoft.Identity.Client;
 
 namespace ElsaControl.Api.Tests;
 
+/// <summary>Exact IMDS request shapes the Catalog managed-identity policy reasons about.</summary>
+internal static class ImdsProbes
+{
+    public const string Token = "http://169.254.169.254/metadata/identity/oauth2/token";
+    public const string Capability = "http://169.254.169.254/metadata/identity/getplatformmetadata?cred-api-version=2.0";
+    public const string Compute = "http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01";
+    public const string Region = "http://169.254.169.254/metadata/instance/compute/location?api-version=2020-06-01&format=text";
+}
+
 /// <summary>Counts retry waits without sleeping so pipeline tests stay fast and deterministic.</summary>
 internal sealed class RecordingDelay : DelayStrategy
 {

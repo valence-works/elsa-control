@@ -8,9 +8,9 @@ namespace ElsaControl.Api.Tests;
 
 public sealed class ManagedIdentityProbeRetryPolicyTests
 {
-    private const string Probe = "http://169.254.169.254/metadata/identity/getplatformmetadata?cred-api-version=2.0";
-    private const string RegionProbe = "http://169.254.169.254/metadata/instance/compute/location?api-version=2020-06-01&format=text";
-    private const string ComputeProbe = "http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01";
+    private const string Probe = ImdsProbes.Capability;
+    private const string RegionProbe = ImdsProbes.Region;
+    private const string ComputeProbe = ImdsProbes.Compute;
 
     [Theory]
     [InlineData(false)]
@@ -42,7 +42,7 @@ public sealed class ManagedIdentityProbeRetryPolicyTests
     }
 
     [Theory]
-    [InlineData("http://169.254.169.254/metadata/identity/oauth2/token", "GET", 404, "true")]
+    [InlineData(ImdsProbes.Token, "GET", 404, "true")]
     [InlineData(Probe, "GET", 429, null)]
     [InlineData(Probe, "GET", 500, null)]
     [InlineData(Probe, "GET", 503, null)]
@@ -89,10 +89,13 @@ public sealed class ManagedIdentityProbeRetryPolicyTests
         Assert.True(await policy.Evaluate(message, true));
     }
 
-    [Fact]
-    public async Task Transport_failure_with_prior_probe_response_is_not_suppressed()
+    [Theory]
+    [InlineData(Probe, null)]
+    [InlineData(RegionProbe, "true")]
+    [InlineData(ComputeProbe, "true")]
+    public async Task Transport_failure_with_prior_probe_response_is_not_suppressed(string uri, string? metadata)
     {
-        using var message = Message(Probe, 404);
+        using var message = Message(uri, 404, metadata: metadata);
         var policy = new ExposedPolicy();
         var error = new IOException();
         Assert.True(await policy.Evaluate(message, false, error));
@@ -110,7 +113,7 @@ public sealed class ManagedIdentityProbeRetryPolicyTests
     [InlineData(401, false)]
     public async Task Token_response_preserves_managed_identity_retry_classification(int status, bool expected)
     {
-        using var message = Message("http://169.254.169.254/metadata/identity/oauth2/token", status, metadata: "true");
+        using var message = Message(ImdsProbes.Token, status, metadata: "true");
         message.ResponseClassifier = new ResponseClassifier();
         var policy = new ExposedPolicy();
         Assert.Equal(expected, await policy.Evaluate(message, false));
@@ -120,7 +123,7 @@ public sealed class ManagedIdentityProbeRetryPolicyTests
     [Fact]
     public async Task Existing_token_availability_probe_still_does_not_retry()
     {
-        using var message = Message("http://169.254.169.254/metadata/identity/oauth2/token", 404);
+        using var message = Message(ImdsProbes.Token, 404);
         var policy = new ExposedPolicy();
         Assert.False(await policy.Evaluate(message, false));
         Assert.False(await policy.Evaluate(message, true));

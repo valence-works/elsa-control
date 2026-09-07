@@ -4,8 +4,8 @@ using Azure.Core.Pipeline;
 
 namespace ElsaControl.Api.Catalog;
 
-// Azure.Core 1.60.0's managed-identity policy semantics are intentionally retained except
-// the optional capability probe. Keep these defaults aligned when upgrading Azure.Core.
+// Azure.Core 1.60.0's managed-identity policy semantics are intentionally retained except for
+// the optional IMDS probes exempted below. Keep these defaults aligned when upgrading Azure.Core.
 // https://github.com/Azure/azure-sdk-for-net/tree/Azure.Core_1.60.0/sdk/core/Azure.Core/src/Identity/Policies
 internal class ManagedIdentityProbeRetryPolicy(DelayStrategy? delayStrategy = null) : RetryPolicy(maxRetries: 5, delayStrategy: delayStrategy ?? new ManagedIdentityRetryDelay())
 {
@@ -14,19 +14,25 @@ internal class ManagedIdentityProbeRetryPolicy(DelayStrategy? delayStrategy = nu
     protected override bool ShouldRetry(HttpMessage message, Exception? exception)
     {
         message.ResponseClassifier = ManagedIdentityClassifier;
-        return !IsAvailabilityProbe(message) && !IsUnsupportedCapabilityProbe(message, exception) &&
-            !IsUnsupportedInstanceMetadataProbe(message, exception) &&
-            base.ShouldRetry(message, exception);
+        return !IsExemptProbe(message, exception) && base.ShouldRetry(message, exception);
     }
 
     protected override ValueTask<bool> ShouldRetryAsync(HttpMessage message, Exception? exception)
     {
         message.ResponseClassifier = ManagedIdentityClassifier;
-        return IsAvailabilityProbe(message) || IsUnsupportedCapabilityProbe(message, exception) ||
-            IsUnsupportedInstanceMetadataProbe(message, exception)
+        return IsExemptProbe(message, exception)
             ? ValueTask.FromResult(false)
             : base.ShouldRetryAsync(message, exception);
     }
+
+    private static bool IsExemptProbe(HttpMessage message, Exception? exception) =>
+        IsAvailabilityProbe(message) || IsUnsupportedCapabilityProbe(message, exception) ||
+        IsUnsupportedInstanceMetadataProbe(message, exception);
+
+    // An optional probe is only exempt when the host answered it with a plain 404 GET response.
+    private static bool IsUnsupportedGet(HttpMessage message, Exception? exception) =>
+        exception is null && message.HasResponse && message.Response.Status == 404 &&
+        message.Request.Method == RequestMethod.Get;
 
     // Preserve the SDK's existing availability-probe exemption.
     private static bool IsAvailabilityProbe(HttpMessage message) =>
@@ -36,8 +42,7 @@ internal class ManagedIdentityProbeRetryPolicy(DelayStrategy? delayStrategy = nu
 
     private static bool IsUnsupportedCapabilityProbe(HttpMessage message, Exception? exception)
     {
-        if (exception is not null || !message.HasResponse || message.Response.Status != 404 ||
-            message.Request.Method != RequestMethod.Get || message.Request.Headers.Contains("Metadata"))
+        if (!IsUnsupportedGet(message, exception) || message.Request.Headers.Contains("Metadata"))
             return false;
 
         var uri = message.Request.Uri.ToUri();
@@ -56,8 +61,7 @@ internal class ManagedIdentityProbeRetryPolicy(DelayStrategy? delayStrategy = nu
 
     private static bool IsUnsupportedInstanceMetadataProbe(HttpMessage message, Exception? exception)
     {
-        if (exception is not null || !message.HasResponse || message.Response.Status != 404 ||
-            message.Request.Method != RequestMethod.Get ||
+        if (!IsUnsupportedGet(message, exception) ||
             !message.Request.Headers.TryGetValue("Metadata", out var metadata) ||
             !string.Equals(metadata, "true", StringComparison.OrdinalIgnoreCase))
             return false;
