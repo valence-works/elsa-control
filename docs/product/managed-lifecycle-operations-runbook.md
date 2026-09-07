@@ -358,7 +358,9 @@ prepares workspace-based Application Insights with local authentication disabled
 and an exact-resource publisher grant for the existing Control API managed
 identity. It does not modify API deployment mode, enable workers, or prove
 ingestion. The Aspire dashboard web app and its OTLP sidecar are not provisioned
-in production (#302); local development keeps the dashboard. The Azure service endpoints are Entra/RBAC
+in production (#302); local development keeps the dashboard. The deploy identity Aspire
+created beside the dashboard (`infra/control-deploy-identity`) is the GitHub Actions login
+and must never be removed as part of dashboard cleanup. The Azure service endpoints are Entra/RBAC
 protected; private-link ingestion is not implied.
 
 The opt-in API exporter requires `ManagedLifecycleTelemetry:AzureMonitor:Enabled`,

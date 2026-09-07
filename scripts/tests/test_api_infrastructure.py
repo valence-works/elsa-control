@@ -20,6 +20,8 @@ API_PARAMETERS = ROOT / "src" / "Hosting" / "ElsaControl.AppHost" / "infra" / "a
 REGENERATE_INFRA = ROOT / "dev" / "regenerate-infra.sh"
 PATCH_API_IDENTITY = ROOT / "dev" / "patch-api-provisioner-identity.py"
 APP_SERVICE_DOC = ROOT / "docs" / "deployment" / "azure-app-service.md"
+# Hand-maintained directories dev/regenerate-infra.sh must carry across a regeneration.
+PRESERVED_INFRA_DIRECTORIES = ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry", "control-deploy-identity")
 
 SUBSCRIPTION = "00000000-0000-0000-0000-000000000000"
 RESOURCE_GROUP = "rg-api-test"
@@ -191,12 +193,10 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("empty(provisioner_identity_outputs_id)", module)
         self.assertIn("'${provisioner_identity_outputs_id}': { }", module)
         self.assertIn("patch-api-provisioner-identity.py", regeneration)
+        for directory in PRESERVED_INFRA_DIRECTORIES:
+            self.assertIn(directory, regeneration)
         self.assertNotIn("dashboard", module.lower())
         self.assertNotIn("WEBSITE_ENABLE_ASPIRE_OTEL_SIDECAR", module)
-        self.assertIn("azure-production", regeneration)
-        self.assertIn("azure-workload-proof", regeneration)
-        self.assertIn("azure-customer-subscription", regeneration)
-        self.assertIn("managed-telemetry", regeneration)
         self.assertLess(
             regeneration.index("trap restore_preserved_infra EXIT"),
             regeneration.index('mv "infra/$relative_path"'),
@@ -271,7 +271,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         (temporary / "infra").mkdir()
         shutil.copy2(REGENERATE_INFRA, temporary / "dev" / "regenerate-infra.sh")
         shutil.copy2(PATCH_API_IDENTITY, temporary / "dev" / "patch-api-provisioner-identity.py")
-        for relative_path in ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry"):
+        for relative_path in PRESERVED_INFRA_DIRECTORIES:
             directory = temporary / "infra" / relative_path
             directory.mkdir(parents=True)
             (directory / "manual.marker").write_text(relative_path)
@@ -314,7 +314,7 @@ class ApiInfrastructureTests(unittest.TestCase):
 
     @staticmethod
     def assert_manual_directories(test_case: unittest.TestCase, project: Path) -> None:
-        for relative_path in ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry"):
+        for relative_path in PRESERVED_INFRA_DIRECTORIES:
             marker = project / "infra" / relative_path / "manual.marker"
             test_case.assertTrue(marker.exists(), f"manual directory was not restored: {relative_path}")
             test_case.assertEqual(marker.read_text(), relative_path)
@@ -336,7 +336,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         result, project = self.run_regeneration_fixture("collision")
 
         self.assertNotEqual(result.returncode, 0)
-        for relative_path in ("azure-workload-proof", "azure-customer-subscription", "managed-telemetry"):
+        for relative_path in PRESERVED_INFRA_DIRECTORIES[1:]:
             marker = project / "infra" / relative_path / "manual.marker"
             self.assertEqual(marker.read_text(), relative_path)
         self.assertEqual(
