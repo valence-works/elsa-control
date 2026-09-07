@@ -10,6 +10,7 @@ public sealed class ManagedIdentityProbeRetryPolicyTests
 {
     private const string Probe = "http://169.254.169.254/metadata/identity/getplatformmetadata?cred-api-version=2.0";
     private const string RegionProbe = "http://169.254.169.254/metadata/instance/compute/location?api-version=2020-06-01&format=text";
+    private const string ComputeProbe = "http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01";
 
     [Theory]
     [InlineData(false)]
@@ -30,11 +31,13 @@ public sealed class ManagedIdentityProbeRetryPolicyTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Unsupported_region_discovery_probe_does_not_retry(bool async)
+    [InlineData(RegionProbe, false)]
+    [InlineData(RegionProbe, true)]
+    [InlineData(ComputeProbe, false)]
+    [InlineData(ComputeProbe, true)]
+    public async Task Unsupported_instance_metadata_probe_does_not_retry(string uri, bool async)
     {
-        using var message = Message(RegionProbe, 404, metadata: "true");
+        using var message = Message(uri, 404, metadata: "true");
         Assert.False(await new ExposedPolicy().Evaluate(message, async));
     }
 
@@ -65,6 +68,19 @@ public sealed class ManagedIdentityProbeRetryPolicyTests
     [InlineData(RegionProbe + "&extra=true", "GET", 404, "true")]
     [InlineData(RegionProbe + "#fragment", "GET", 404, "true")]
     [InlineData("https://example.test/metadata/instance/compute/location?api-version=2020-06-01&format=text", "GET", 404, "true")]
+    [InlineData(ComputeProbe, "GET", 410, "true")]
+    [InlineData(ComputeProbe, "GET", 500, "true")]
+    [InlineData(ComputeProbe, "POST", 404, "true")]
+    [InlineData(ComputeProbe, "GET", 404, null)]
+    [InlineData(ComputeProbe, "GET", 404, "false")]
+    [InlineData("http://169.254.169.254/metadata/instance/compute", "GET", 404, "true")]
+    [InlineData("http://169.254.169.254/metadata/instance/compute?api-version=2020-06-01", "GET", 404, "true")]
+    [InlineData("http://169.254.169.254/metadata/instance/compute/?api-version=2021-02-01", "GET", 404, "true")]
+    [InlineData("http://169.254.169.254/metadata/instance?api-version=2021-02-01", "GET", 404, "true")]
+    [InlineData(ComputeProbe + "&format=json", "GET", 404, "true")]
+    [InlineData(ComputeProbe + "#fragment", "GET", 404, "true")]
+    [InlineData("https://example.test/metadata/instance/compute?api-version=2021-02-01", "GET", 404, "true")]
+    [InlineData("http://169.254.169.254:8080/metadata/instance/compute?api-version=2021-02-01", "GET", 404, "true")]
     public async Task Unrelated_or_transient_response_preserves_classifier_retry(string uri, string method, int status, string? metadata)
     {
         using var message = Message(uri, status, method, metadata);

@@ -15,7 +15,7 @@ internal class ManagedIdentityProbeRetryPolicy(DelayStrategy? delayStrategy = nu
     {
         message.ResponseClassifier = ManagedIdentityClassifier;
         return !IsAvailabilityProbe(message) && !IsUnsupportedCapabilityProbe(message, exception) &&
-            !IsUnsupportedRegionDiscoveryProbe(message, exception) &&
+            !IsUnsupportedInstanceMetadataProbe(message, exception) &&
             base.ShouldRetry(message, exception);
     }
 
@@ -23,7 +23,7 @@ internal class ManagedIdentityProbeRetryPolicy(DelayStrategy? delayStrategy = nu
     {
         message.ResponseClassifier = ManagedIdentityClassifier;
         return IsAvailabilityProbe(message) || IsUnsupportedCapabilityProbe(message, exception) ||
-            IsUnsupportedRegionDiscoveryProbe(message, exception)
+            IsUnsupportedInstanceMetadataProbe(message, exception)
             ? ValueTask.FromResult(false)
             : base.ShouldRetryAsync(message, exception);
     }
@@ -44,10 +44,17 @@ internal class ManagedIdentityProbeRetryPolicy(DelayStrategy? delayStrategy = nu
         return IsExactImdsUri(uri, "/metadata/identity/getplatformmetadata") && IsCapabilityQuery(uri.Query);
     }
 
-    // MSAL's optional regional authority discovery shares the credential pipeline. A 404 means
-    // this host does not expose the compute-location endpoint and must fall through immediately;
-    // applying managed-identity token retries can exceed SqlClient's connection timeout.
-    private static bool IsUnsupportedRegionDiscoveryProbe(HttpMessage message, Exception? exception)
+    // MSAL sends two optional IMDS instance-metadata GETs through the credential pipeline: the compute
+    // probe (MSAL 4.84+, decides mTLS binding strength after IMDSv1 is detected) and regional authority
+    // discovery. Hosts such as ACI answer 404 and MSAL treats that as "feature unavailable", so retrying
+    // with the managed-identity token schedule only delays token acquisition past SqlClient's login timeout.
+    private static readonly (string Path, string Query)[] OptionalInstanceMetadataProbes =
+    [
+        ("/metadata/instance/compute", "?api-version=2021-02-01"),
+        ("/metadata/instance/compute/location", "?api-version=2020-06-01&format=text"),
+    ];
+
+    private static bool IsUnsupportedInstanceMetadataProbe(HttpMessage message, Exception? exception)
     {
         if (exception is not null || !message.HasResponse || message.Response.Status != 404 ||
             message.Request.Method != RequestMethod.Get ||
@@ -56,8 +63,7 @@ internal class ManagedIdentityProbeRetryPolicy(DelayStrategy? delayStrategy = nu
             return false;
 
         var uri = message.Request.Uri.ToUri();
-        return IsExactImdsUri(uri, "/metadata/instance/compute/location") &&
-            uri.Query == "?api-version=2020-06-01&format=text";
+        return OptionalInstanceMetadataProbes.Any(probe => IsExactImdsUri(uri, probe.Path) && uri.Query == probe.Query);
     }
 
     private static bool IsExactImdsUri(Uri uri, string path) =>

@@ -8,8 +8,10 @@ namespace ElsaControl.Api.Tests;
 
 public sealed class CatalogManagedIdentityRetryPipelineTests
 {
-    [Fact]
-    public async Task Actual_pipeline_does_not_retry_unsupported_region_discovery()
+    [Theory]
+    [InlineData("http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01")]
+    [InlineData("http://169.254.169.254/metadata/instance/compute/location?api-version=2020-06-01&format=text")]
+    public async Task Actual_pipeline_does_not_retry_unsupported_instance_metadata_probe(string uri)
     {
         using var handler = new StatusHandler(404);
         using var client = new HttpClient(handler);
@@ -17,8 +19,7 @@ public sealed class CatalogManagedIdentityRetryPipelineTests
         var policy = new ManagedIdentityProbeRetryPolicy(delay);
         var pipeline = new HttpPipeline(new HttpClientTransport(client), [policy], new ResponseClassifier());
         using var message = pipeline.CreateMessage();
-        message.Request.Uri.Reset(new Uri(
-            "http://169.254.169.254/metadata/instance/compute/location?api-version=2020-06-01&format=text"));
+        message.Request.Uri.Reset(new Uri(uri));
         message.Request.Headers.Add("Metadata", "true");
 
         await pipeline.SendAsync(message, CancellationToken.None);
@@ -94,16 +95,6 @@ public sealed class CatalogManagedIdentityRetryPipelineTests
         message.Request.Uri.Reset(new Uri("http://169.254.169.254/metadata/identity/oauth2/token"));
         await pipeline.SendAsync(message, CancellationToken.None);
         Assert.Equal(TimeSpan.FromSeconds(120), new ManagedIdentityRetryDelay().GetNextDelay(message.Response, 1));
-    }
-
-    private sealed class RecordingDelay : DelayStrategy
-    {
-        public int Attempts { get; private set; }
-        protected override TimeSpan GetNextDelayCore(Azure.Response? response, int retryNumber)
-        {
-            Attempts++;
-            return TimeSpan.Zero;
-        }
     }
 
     private sealed class StatusHandler(int status, bool retryAfter = false, Action? responseSent = null) : HttpMessageHandler

@@ -12,12 +12,14 @@ public sealed class CatalogManagedIdentityCredentialPipelineTests
     [Fact]
     public async Task Actual_credential_reaches_token_after_unsupported_capability_without_probe_retries()
     {
+        MsalManagedIdentityDiscovery.Reset();
         using var handler = new ImdsHandler();
         using var client = new HttpClient(handler);
+        var delay = new RecordingDelay();
         var options = new ManagedIdentityCredentialOptions(
             ManagedIdentityId.FromUserAssignedClientId("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"))
         {
-            RetryPolicy = new ManagedIdentityProbeRetryPolicy(),
+            RetryPolicy = new ManagedIdentityProbeRetryPolicy(delay),
             Transport = new HttpClientTransport(client)
         };
         var credential = new ManagedIdentityCredential(options);
@@ -30,9 +32,14 @@ public sealed class CatalogManagedIdentityCredentialPipelineTests
         Assert.Equal("token", handler.Stages[^1]);
         Assert.Equal(1, handler.Stages.Count(x => x == "availability"));
         Assert.Equal(1, handler.Stages.Count(x => x == "token"));
+        // MSAL 4.84.x probes IMDS compute metadata (mTLS binding strength) after detecting IMDSv1. Hosts such as
+        // ACI answer 404; the probe is optional and must not consume managed-identity token retries.
+        Assert.Equal(1, handler.Stages.Count(x => x == "compute"));
+        Assert.DoesNotContain(handler.Stages, x => x.StartsWith("unexpected:", StringComparison.Ordinal));
+        Assert.Equal(0, delay.Attempts);
         // The SDK may re-detect capabilities when it switches from its availability probe to MSAL.
-        // This smoke test permits that re-detection, not a proof of zero retries: the exact
-        // sync/async404 predicate tests separately enforce the no-retry decision.
+        // Re-detection is permitted; retry waits are not (delay.Attempts above), and the exact
+        // sync/async 404 predicate tests separately pin each suppressed probe shape.
         Assert.InRange(handler.Stages.Count(x => x == "capability"), 1, 2);
         Assert.DoesNotContain(handler.Stages.Zip(handler.Stages.Skip(1)), pair =>
             pair.First == "capability" && pair.Second == "capability");
@@ -45,8 +52,12 @@ public sealed class CatalogManagedIdentityCredentialPipelineTests
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var uri = request.RequestUri!;
-            Assert.Equal("169.254.169.254", uri.Host);
-            Assert.Equal(HttpMethod.Get, request.Method);
+            // Exceptions thrown here are swallowed by MSAL's optional probes, so record unexpected shapes instead.
+            if (uri.Host != "169.254.169.254" || request.Method != HttpMethod.Get)
+            {
+                Stages.Add($"unexpected:{request.Method}:{uri.Host}");
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+            }
             if (uri.AbsolutePath == "/metadata/identity/getplatformmetadata")
             {
                 Assert.Equal("?cred-api-version=2.0&client_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", uri.Query);
@@ -54,8 +65,18 @@ public sealed class CatalogManagedIdentityCredentialPipelineTests
                 Stages.Add("capability");
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
             }
-
-            Assert.Equal("/metadata/identity/oauth2/token", uri.AbsolutePath);
+            if (uri.AbsolutePath == "/metadata/instance/compute")
+            {
+                Assert.Equal("?api-version=2021-02-01", uri.Query);
+                Assert.True(request.Headers.Contains("Metadata"));
+                Stages.Add("compute");
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+            }
+            if (uri.AbsolutePath != "/metadata/identity/oauth2/token")
+            {
+                Stages.Add($"unexpected:{uri.AbsolutePath}");
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+            }
             if (!request.Headers.Contains("Metadata"))
             {
                 Stages.Add("availability");
