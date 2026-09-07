@@ -356,8 +356,9 @@ cutover.
 The separate [managed telemetry sink template](../../infra/managed-telemetry/README.md)
 prepares workspace-based Application Insights with local authentication disabled
 and an exact-resource publisher grant for the existing Control API managed
-identity. It does not modify API deployment mode, expose the Aspire dashboard,
-enable workers, or prove ingestion. The Azure service endpoints are Entra/RBAC
+identity. It does not modify API deployment mode, enable workers, or prove
+ingestion. The Aspire dashboard web app and its OTLP sidecar are not provisioned
+in production (#302); local development keeps the dashboard. The Azure service endpoints are Entra/RBAC
 protected; private-link ingestion is not implied.
 
 The opt-in API exporter requires `ManagedLifecycleTelemetry:AzureMonitor:Enabled`,
@@ -402,10 +403,12 @@ counts. Unreachable, timed-out, capped or missing samples are `unknown`, never
 healthy; a failed sink query marks the window incomplete. The output carries no
 URL, host, token, body or error text, so it is safe acceptance evidence as-is.
 
-Treat exporter startup, actual signal ingestion, private operator dashboard access,
-and the fresh five-minute observation window as separate gates. An anonymous
-dashboard denial alone is not positive operator-access proof. Stored instance
-health alone is not a fresh endpoint sample. A missing or capped telemetry window
+Treat exporter startup, actual signal ingestion, authenticated operator access to
+the workspace, and the fresh five-minute observation window as separate gates. The
+operator observation surface is Application Insights/Log Analytics behind Entra RBAC,
+with the API's App Service console/HTTP/platform/app logs delivered to the same
+workspace by the `api-logs-to-managed-workspace` diagnostic setting; an anonymous
+denial alone is not positive operator-access proof. Stored instance health alone is not a fresh endpoint sample. A missing or capped telemetry window
 remains unknown/incomplete, never healthy. Keep the metric and authorized trace
 contracts above unchanged throughout rollout.
 

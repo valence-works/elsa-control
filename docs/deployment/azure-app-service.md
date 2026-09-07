@@ -141,7 +141,6 @@ Required GitHub Actions variables:
 - `AZURE_RESOURCE_GROUP`: resource group containing the deployed App Service,
   for example `rg-elsa-control`.
 - `AZURE_WEBAPP_NAME`: API App Service name, for example `api-k35qdj734hds2`.
-- `AZURE_APP_SERVICE_DASHBOARD_URI`: Aspire dashboard URL emitted by `azd up`.
 - `AZURE_CONTAINER_REGISTRY_ENDPOINT`: ACR login server for app image pushes,
   for example `elsacontrolacrk35qdj734hds2.azurecr.io`.
 - `API_IDENTITY_CLIENTID` and `API_IDENTITY_ID`: managed identity values emitted
@@ -149,16 +148,11 @@ Required GitHub Actions variables:
 - Optional `AZURE_PROVISIONER_IDENTITY_ID`: the exact full resource ID of the
   dedicated provider provisioner identity when the staged attachment is enabled.
 - `CONTROL_SQL_SQLSERVERFQDN`: Azure SQL server FQDN emitted by `azd up`.
-- `ELSA_CONTROL_AZURE_APP_SERVICE_DASHBOARD_URI`: Aspire dashboard URL
-  emitted by `azd up`.
 - `ELSA_CONTROL_AZURE_CONTAINER_REGISTRY_ENDPOINT`: ACR login server
   emitted by `azd up`.
 - `ELSA_CONTROL_AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_CLIENT_ID` and
   `ELSA_CONTROL_AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_ID`: managed
   identity values emitted by `azd up` for ACR image pushes.
-- `ELSA_CONTROL_AZURE_WEBSITE_CONTRIBUTOR_MANAGED_IDENTITY_ID` and
-  `ELSA_CONTROL_AZURE_WEBSITE_CONTRIBUTOR_MANAGED_IDENTITY_PRINCIPAL_ID`:
-  managed identity values emitted by `azd up` for Web App updates.
 - `ELSA_CONTROL_PLANID`: App Service plan resource ID emitted by
   `azd up`.
 

@@ -66,3 +66,27 @@ if content.count(new_catalog) != 1 or old_catalog in content:
     raise SystemExit("Generated Catalog authentication setting is ambiguous.")
 
 path.write_text(content)
+
+
+
+def patch_parameter_template(parameters_path: Path) -> None:
+    """Re-add the optional provisioner parameter to the regenerated azd parameter template (idempotent)."""
+    if not parameters_path.exists():
+        return  # module-only fixtures carry no template
+    parameters = parameters_path.read_text()
+    if "provisioner_identity_outputs_id" in parameters:
+        return
+    anchor = "param api_identity_outputs_id = '{{ .Env.API_IDENTITY_ID }}'\n"
+    if parameters.count(anchor) != 1:
+        raise SystemExit("Cannot find the generated API identity parameter anchor in the parameter template.")
+    block = (
+        '{{ if index .Env "AZURE_PROVISIONER_IDENTITY_ID" }}\n'
+        "param provisioner_identity_outputs_id = '{{ .Env.AZURE_PROVISIONER_IDENTITY_ID }}'\n"
+        "{{ else }}\n"
+        "param provisioner_identity_outputs_id = ''\n"
+        "{{ end }}\n"
+    )
+    parameters_path.write_text(parameters.replace(anchor, anchor + block, 1))
+
+
+patch_parameter_template(Path("src/Hosting/ElsaControl.AppHost/infra/api/api.tmpl.bicepparam"))

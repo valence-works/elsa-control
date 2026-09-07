@@ -42,90 +42,6 @@ resource elsa_control_asplan 'Microsoft.Web/serverfarms@2025-03-01' = {
   }
 }
 
-resource elsa_control_contributor_mi 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' = {
-  name: take('elsa_control_contributor_mi-${uniqueString(resourceGroup().id)}', 128)
-  location: location
-}
-
-resource elsa_control_ra 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(resourceGroup().id, elsa_control_contributor_mi.id, subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'acdd72a7-3385-48ef-bd42-f606fba81ae7'))
-  properties: {
-    principalId: elsa_control_contributor_mi.properties.principalId
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'acdd72a7-3385-48ef-bd42-f606fba81ae7')
-    principalType: 'ServicePrincipal'
-  }
-}
-
-resource dashboard 'Microsoft.Web/sites@2025-03-01' = {
-  name: take('${toLower('elsa-control')}-${toLower('aspiredashboard')}-${uniqueString(resourceGroup().id)}', 60)
-  location: location
-  properties: {
-    serverFarmId: elsa_control_asplan.id
-    siteConfig: {
-      numberOfWorkers: 1
-      linuxFxVersion: 'ASPIREDASHBOARD|1.0'
-      acrUseManagedIdentityCreds: true
-      acrUserManagedIdentityID: elsa_control_mi.properties.clientId
-      appSettings: [
-        {
-          name: 'DASHBOARD__FRONTEND__AUTHMODE'
-          value: 'Unsecured'
-        }
-        {
-          name: 'DASHBOARD__OTLP__AUTHMODE'
-          value: 'Unsecured'
-        }
-        {
-          name: 'DASHBOARD__OTLP__SUPPRESSUNSECUREDTELEMETRYMESSAGE'
-          value: 'true'
-        }
-        {
-          name: 'DASHBOARD__RESOURCESERVICECLIENT__AUTHMODE'
-          value: 'Unsecured'
-        }
-        {
-          name: 'DASHBOARD__UI__DISABLEIMPORT'
-          value: 'true'
-        }
-        {
-          name: 'WEBSITES_PORT'
-          value: '5000'
-        }
-        {
-          name: 'HTTP20_ONLY_PORT'
-          value: '4317'
-        }
-        {
-          name: 'WEBSITE_START_SCM_WITH_PRELOAD'
-          value: 'true'
-        }
-        {
-          name: 'AZURE_CLIENT_ID'
-          value: elsa_control_contributor_mi.properties.clientId
-        }
-        {
-          name: 'ALLOWED_MANAGED_IDENTITIES'
-          value: elsa_control_mi.properties.clientId
-        }
-        {
-          name: 'ASPIRE_ENVIRONMENT_NAME'
-          value: 'elsa-control'
-        }
-      ]
-      alwaysOn: true
-      http20Enabled: true
-      http20ProxyFlag: 1
-    }
-  }
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${elsa_control_contributor_mi.id}': { }
-    }
-  }
-  kind: 'app,linux,aspiredashboard'
-}
-
 output name string = elsa_control_asplan.name
 
 output planId string = elsa_control_asplan.id
@@ -139,9 +55,3 @@ output AZURE_CONTAINER_REGISTRY_ENDPOINT string = elsa_control_acr.properties.lo
 output AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_ID string = elsa_control_mi.id
 
 output AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_CLIENT_ID string = elsa_control_mi.properties.clientId
-
-output AZURE_WEBSITE_CONTRIBUTOR_MANAGED_IDENTITY_ID string = elsa_control_contributor_mi.id
-
-output AZURE_WEBSITE_CONTRIBUTOR_MANAGED_IDENTITY_PRINCIPAL_ID string = elsa_control_contributor_mi.properties.principalId
-
-output AZURE_APP_SERVICE_DASHBOARD_URI string = 'https://${take('${toLower('elsa-control')}-${toLower('aspiredashboard')}-${uniqueString(resourceGroup().id)}', 60)}.azurewebsites.net'

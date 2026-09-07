@@ -17,9 +17,9 @@ subscription, not in the customer workload subscription or Pay-As-You-Go.
   Publisher”, but it authorizes telemetry publication for all signal types.
 - The Azure service ingestion/query endpoints use public TLS endpoints protected
   by Entra authentication and RBAC. This is **not** a private-link/AMPLS deployment.
-  The existing Aspire dashboard remains a separate resource with public network
-  access disabled. Neither resource deployment nor an anonymous HTTP denial proves
-  that the private operator dashboard route works.
+  The Aspire dashboard web app is no longer provisioned in production (#302); the
+  operator observation surface is this workspace and Application Insights behind
+  Entra RBAC, so there is no public dashboard route to defend or prove.
 - The workspace uses consumption pricing without reserved capacity, 30-day
   retention, and a default 1 GB/day ingestion safety brake. The quota is not a
   guaranteed spend cap and reaching it makes an observation window incomplete;
@@ -45,9 +45,10 @@ Microsoft documents [Entra-authenticated ingestion and the required scoped role]
    image promotion and migration-compatibility gates. The live API's classic Docker
    mode must not be converted to site containers to enable observability.
 5. Prove positive managed-identity ingestion and negative unauthorized ingestion,
-   then positive authorized-operator and negative anonymous/unauthorized dashboard
-   access while public dashboard access stays disabled. Verify actual received
-   signal names/labels and authorized trace correlation, not merely exporter setup.
+   then positive authorized-operator access to the workspace/Application Insights
+   queries and negative access for an account outside the operator role. Verify
+   actual received signal names/labels and authorized trace correlation, not merely
+   exporter setup.
 6. Run the separate bounded sampler against fresh managed runtime/provider
    observations for at least five minutes. Retained database health is not a fresh
    probe. Retain safe UTC window timestamps and healthy/total/unknown counts; no raw

@@ -63,14 +63,6 @@ def parameter_file(module_path: Path, parameter_directory: Path, provisioner_id:
         "api_identity_outputs_id": API_ID,
         "api_identity_outputs_clientid": API_CLIENT_ID,
         "provisioner_identity_outputs_id": provisioner_id,
-        "elsa_control_outputs_azure_app_service_dashboard_uri": "https://dashboard.example",
-        "elsa_control_outputs_azure_website_contributor_managed_identity_id": (
-            f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{RESOURCE_GROUP}/"
-            "providers/Microsoft.ManagedIdentity/userAssignedIdentities/contributor"
-        ),
-        "elsa_control_outputs_azure_website_contributor_managed_identity_principal_id": (
-            "00000000-0000-0000-0000-000000000005"
-        ),
     }
     lines = [f"using '{using_path}'", ""]
     lines.extend(f"param {name} = '{value}'" for name, value in values.items())
@@ -199,9 +191,12 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("empty(provisioner_identity_outputs_id)", module)
         self.assertIn("'${provisioner_identity_outputs_id}': { }", module)
         self.assertIn("patch-api-provisioner-identity.py", regeneration)
+        self.assertNotIn("dashboard", module.lower())
+        self.assertNotIn("WEBSITE_ENABLE_ASPIRE_OTEL_SIDECAR", module)
         self.assertIn("azure-production", regeneration)
         self.assertIn("azure-workload-proof", regeneration)
         self.assertIn("azure-customer-subscription", regeneration)
+        self.assertIn("managed-telemetry", regeneration)
         self.assertLess(
             regeneration.index("trap restore_preserved_infra EXIT"),
             regeneration.index('mv "infra/$relative_path"'),
@@ -237,6 +232,25 @@ class ApiInfrastructureTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, "identity patch helper should be idempotent")
             self.assertEqual(fixture.read_text(), module)
 
+    def test_regeneration_patch_restores_the_provisioner_parameter_block_idempotently(self) -> None:
+        template = API_PARAMETERS.read_text()
+        provisioner_block = re.compile(r'\{\{ if index \.Env "AZURE_PROVISIONER_IDENTITY_ID" \}\}.*?\{\{ end \}\}\n', re.DOTALL)
+        regenerated = provisioner_block.sub("", template, count=1)
+        self.assertNotIn("provisioner_identity_outputs_id", regenerated)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            module_fixture = root / "infra" / "api" / "api-website.module.bicep"
+            module_fixture.parent.mkdir(parents=True)
+            module_fixture.write_text(self.generated_api_module())
+            template_fixture = root / "src" / "Hosting" / "ElsaControl.AppHost" / "infra" / "api" / "api.tmpl.bicepparam"
+            template_fixture.parent.mkdir(parents=True)
+            template_fixture.write_text(regenerated)
+            for _ in range(2):
+                result = subprocess.run([sys.executable, str(PATCH_API_IDENTITY)], cwd=temporary, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 0, "patch helper should be idempotent")
+            self.assertEqual(template_fixture.read_text(), template)
+            self.assertEqual(1, template_fixture.read_text().count("param provisioner_identity_outputs_id = ''"))
+
     def test_regeneration_rejects_unknown_catalog_authentication_without_partial_write(self) -> None:
         generated = self.generated_api_module().replace("Active Directory Default", "Unexpected Authentication")
         with tempfile.TemporaryDirectory() as temporary:
@@ -257,7 +271,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         (temporary / "infra").mkdir()
         shutil.copy2(REGENERATE_INFRA, temporary / "dev" / "regenerate-infra.sh")
         shutil.copy2(PATCH_API_IDENTITY, temporary / "dev" / "patch-api-provisioner-identity.py")
-        for relative_path in ("azure-production", "azure-workload-proof", "azure-customer-subscription"):
+        for relative_path in ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry"):
             directory = temporary / "infra" / relative_path
             directory.mkdir(parents=True)
             (directory / "manual.marker").write_text(relative_path)
@@ -300,7 +314,7 @@ class ApiInfrastructureTests(unittest.TestCase):
 
     @staticmethod
     def assert_manual_directories(test_case: unittest.TestCase, project: Path) -> None:
-        for relative_path in ("azure-production", "azure-workload-proof", "azure-customer-subscription"):
+        for relative_path in ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry"):
             marker = project / "infra" / relative_path / "manual.marker"
             test_case.assertTrue(marker.exists(), f"manual directory was not restored: {relative_path}")
             test_case.assertEqual(marker.read_text(), relative_path)
@@ -322,7 +336,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         result, project = self.run_regeneration_fixture("collision")
 
         self.assertNotEqual(result.returncode, 0)
-        for relative_path in ("azure-workload-proof", "azure-customer-subscription"):
+        for relative_path in ("azure-workload-proof", "azure-customer-subscription", "managed-telemetry"):
             marker = project / "infra" / relative_path / "manual.marker"
             self.assertEqual(marker.read_text(), relative_path)
         self.assertEqual(

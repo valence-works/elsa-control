@@ -45,7 +45,7 @@ resource workspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
       dailyQuotaGb: dailyQuotaGb
     }
     // Azure service endpoints remain Entra/RBAC protected. This is not an AMPLS
-    // private-link deployment and does not change the disabled public dashboard.
+    // private-link deployment; there is no public dashboard (the Aspire dashboard is not provisioned).
     publicNetworkAccessForIngestion: 'Enabled'
     publicNetworkAccessForQuery: 'Enabled'
   }

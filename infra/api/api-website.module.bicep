@@ -35,12 +35,6 @@ param api_identity_outputs_clientid string
 @description('Optional full resource ID of the dedicated Azure provider provisioner identity. The identity must be in the same Microsoft Entra tenant as this app; it may be hosted in another subscription. Empty preserves the existing API and ACR identity set.')
 param provisioner_identity_outputs_id string = ''
 
-param elsa_control_outputs_azure_app_service_dashboard_uri string
-
-param elsa_control_outputs_azure_website_contributor_managed_identity_id string
-
-param elsa_control_outputs_azure_website_contributor_managed_identity_principal_id string
-
 resource mainContainer 'Microsoft.Web/sites/sitecontainers@2025-03-01' = {
   name: 'main'
   properties: {
@@ -201,30 +195,6 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
           name: 'ASPIRE_ENVIRONMENT_NAME'
           value: 'elsa-control'
         }
-        {
-          name: 'OTEL_SERVICE_NAME'
-          value: 'api'
-        }
-        {
-          name: 'OTEL_EXPORTER_OTLP_PROTOCOL'
-          value: 'grpc'
-        }
-        {
-          name: 'OTEL_EXPORTER_OTLP_ENDPOINT'
-          value: 'http://localhost:6001'
-        }
-        {
-          name: 'WEBSITE_ENABLE_ASPIRE_OTEL_SIDECAR'
-          value: 'true'
-        }
-        {
-          name: 'OTEL_COLLECTOR_URL'
-          value: elsa_control_outputs_azure_app_service_dashboard_uri
-        }
-        {
-          name: 'OTEL_CLIENT_ID'
-          value: elsa_control_outputs_azure_container_registry_managed_identity_client_id
-        }
       ]
     }
   }
@@ -246,24 +216,4 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
             '${provisioner_identity_outputs_id}': { }
           })
   }
-}
-
-resource api_website_ra 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(webapp.id, elsa_control_outputs_azure_website_contributor_managed_identity_id, subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'de139f84-1756-47ae-9be6-808fbbe84772'))
-  properties: {
-    principalId: elsa_control_outputs_azure_website_contributor_managed_identity_principal_id
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'de139f84-1756-47ae-9be6-808fbbe84772')
-    principalType: 'ServicePrincipal'
-  }
-  scope: webapp
-}
-
-resource slotConfigNames 'Microsoft.Web/sites/config@2025-03-01' = {
-  name: 'slotConfigNames'
-  properties: {
-    appSettingNames: [
-      'OTEL_SERVICE_NAME'
-    ]
-  }
-  parent: webapp
 }
