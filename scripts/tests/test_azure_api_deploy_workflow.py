@@ -156,6 +156,7 @@ esac
             def run_promotion(
                 current_deployment_mode: str,
                 runtime_readback: str,
+                candidate_build_number: str = "96",
             ) -> subprocess.CompletedProcess[str]:
                 call_log.unlink(missing_ok=True)
                 environment = os.environ.copy()
@@ -169,6 +170,7 @@ esac
                         "DEPLOY_MODE": "promote",
                         "GITHUB_RUN_NUMBER": "1786839398",
                         "VALIDATED_CANDIDATE_IMAGE": candidate_image,
+                        "VALIDATED_CANDIDATE_BUILD_NUMBER": candidate_build_number,
                         "CURRENT_DEPLOYMENT_MODE": current_deployment_mode,
                         "RUNTIME_READBACK": runtime_readback,
                     }
@@ -189,6 +191,17 @@ esac
             self.assertIn("webapp config show", classic_calls)
             self.assertIn("webapp config appsettings set", classic_calls)
             self.assertIn("webapp restart", classic_calls)
+            # The promoted app keeps the candidate's build number, not the promotion run number.
+            self.assertIn("Application__BuildNumber=96", classic_calls)
+            self.assertNotIn("Application__BuildNumber=1786839398", classic_calls)
+
+            for invalid_build_number in ("", "abc", "0", "0123", "1" * 21):
+                with self.subTest(candidate_build_number=invalid_build_number):
+                    rejected = run_promotion("classic", f"DOCKER|{candidate_image}", candidate_build_number=invalid_build_number)
+                    self.assertNotEqual(0, rejected.returncode)
+                    self.assertIn("candidate build number is unavailable", rejected.stdout + rejected.stderr)
+                    # Refused before any Web App mutation, not merely before the settings write.
+                    self.assertEqual("", call_log.read_text() if call_log.exists() else "")
 
             sitecontainers = run_promotion("sitecontainers", candidate_image)
             self.assertEqual(0, sitecontainers.returncode, sitecontainers.stderr)
@@ -216,7 +229,11 @@ esac
     def test_health_identity_separates_candidate_source_from_promotion_run(self) -> None:
         self.assertIn('VALIDATED_CANDIDATE_SOURCE_SHA: ${{ steps.candidate-authority.outputs.candidate_source_sha }}', self.source)
         self.assertIn('expected_image_id="$VALIDATED_CANDIDATE_SOURCE_SHA"', self.source)
-        self.assertIn('--arg expected_build_number "$GITHUB_RUN_NUMBER"', self.source)
+        self.assertIn('VALIDATED_CANDIDATE_BUILD_NUMBER: ${{ steps.candidate-authority.outputs.candidate_build_number }}', self.source)
+        self.assertIn('expected_build_number="$VALIDATED_CANDIDATE_BUILD_NUMBER"', self.source)
+        self.assertIn('--arg expected_build_number "$expected_build_number"', self.source)
+        self.assertNotIn('--arg expected_build_number "$GITHUB_RUN_NUMBER"', self.source)
+        self.assertNotIn('Application__BuildNumber="$GITHUB_RUN_NUMBER"', self.source)
         self.assertIn('--arg expected_image_id "$expected_image_id"', self.source)
         self.assertIn('The Web App has a runtime image identity override; refusing promotion', self.source)
 
