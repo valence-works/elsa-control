@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": { "value": "belgiumcentral" },
+    "identityName": { "value": "valence_control_contributor_mi-m5uymkuaf222o" },
+    "federatedCredentialName": { "value": "github-elsa-control-production" },
+    "githubSubject": { "value": "repo:valence-works@260870356/elsa-control@1243475536:environment:production" },
+    "apiSiteName": { "value": "api-m5uymkuaf222o" },
+    "registryName": { "value": "valencecontrolacrm5uymkuaf222o" },
+    "readerRoleAssignmentName": { "value": "73cdddfd-3707-5f90-a858-75455aac2d90" },
+    "websiteContributorRoleAssignmentName": { "value": "a51368d6-377e-5237-8236-97e5231baf0b" },
+    "acrPushRoleAssignmentName": { "value": "130c7d80-0cb5-4e7b-bcbd-3c6ce913a3e7" }
+  }
+}

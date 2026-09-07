@@ -38,6 +38,7 @@ jobs:
           python3 scripts/tests/test_api_infrastructure.py
           python3 scripts/tests/test_customer_subscription_bootstrap.py
           python3 scripts/tests/test_managed_telemetry_infrastructure.py
+          python3 scripts/tests/test_control_deploy_identity_infrastructure.py
           python3 scripts/tests/test_api_provider_image.py
           python3 scripts/tests/test_managed_lifecycle_slo_sampler.py
           python3 scripts/tests/test_catalog_rehearsal_harness.py

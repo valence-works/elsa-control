@@ -197,6 +197,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("azure-workload-proof", regeneration)
         self.assertIn("azure-customer-subscription", regeneration)
         self.assertIn("managed-telemetry", regeneration)
+        self.assertIn("control-deploy-identity", regeneration)
         self.assertLess(
             regeneration.index("trap restore_preserved_infra EXIT"),
             regeneration.index('mv "infra/$relative_path"'),
@@ -271,7 +272,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         (temporary / "infra").mkdir()
         shutil.copy2(REGENERATE_INFRA, temporary / "dev" / "regenerate-infra.sh")
         shutil.copy2(PATCH_API_IDENTITY, temporary / "dev" / "patch-api-provisioner-identity.py")
-        for relative_path in ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry"):
+        for relative_path in ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry", "control-deploy-identity"):
             directory = temporary / "infra" / relative_path
             directory.mkdir(parents=True)
             (directory / "manual.marker").write_text(relative_path)
@@ -314,7 +315,7 @@ class ApiInfrastructureTests(unittest.TestCase):
 
     @staticmethod
     def assert_manual_directories(test_case: unittest.TestCase, project: Path) -> None:
-        for relative_path in ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry"):
+        for relative_path in ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry", "control-deploy-identity"):
             marker = project / "infra" / relative_path / "manual.marker"
             test_case.assertTrue(marker.exists(), f"manual directory was not restored: {relative_path}")
             test_case.assertEqual(marker.read_text(), relative_path)
@@ -336,7 +337,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         result, project = self.run_regeneration_fixture("collision")
 
         self.assertNotEqual(result.returncode, 0)
-        for relative_path in ("azure-workload-proof", "azure-customer-subscription", "managed-telemetry"):
+        for relative_path in ("azure-workload-proof", "azure-customer-subscription", "managed-telemetry", "control-deploy-identity"):
             marker = project / "infra" / relative_path / "manual.marker"
             self.assertEqual(marker.read_text(), relative_path)
         self.assertEqual(
