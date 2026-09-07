@@ -1,0 +1,72 @@
+# Catalog migration rehearsal harness
+
+Operator tooling for a no-ingress Azure Container Instances rehearsal of a Control API
+candidate against a restored clone of the production Catalog database. It contains no
+connection string, token, secret, or raw Azure output; every environment identity is an
+explicit input. This is the versioned home of the harness that #266 and #279 used from a
+temporary directory (#303).
+
+The rehearsal runs the **candidate** API image first against the clone at its baseline
+migration count, then the retained **previous** image second against the migrated clone.
+Each phase is one fresh two-container ACI group in the proof-host resource group with an
+`emptyDir` barrier volume and no `ipAddress`:
+
+1. The probe sidecar audits the clone with the attached managed identity before the API
+   starts: exact migration identities, preview-consent columns, common table counts,
+   duplicate active `WorkspaceId+TargetKey` and `WorkspaceId+TargetKey+OperationIdentity`
+   groups across the five active statuses (including `EntitlementHeld`), the two filtered
+   unique indexes, and the identity's principal and migration permissions.
+2. The API container waits for `/rehearsal/start-api`, runs the exact image entrypoint in
+   `Production` with every mutation worker and exporter disabled, discards its own output,
+   and records its exit code in `/rehearsal/api-exited` so a crash never leaves the probe in
+   its full health timeout.
+3. The probe requires two stable loopback `/health` responses bound to the expected baked
+   source identifier and build number.
+4. It audits again (foreign-key and check-constraint integrity through the catalog views,
+   orphan provider assignments and operation transitions, non-null billing event states, the
+   provider-assignment schema, the recovery-observation columns/foreign keys/natural-key
+   index/append-only trigger and recovery-request columns), writes `/rehearsal/stop-api`,
+   and emits exactly one value-free JSON result line.
+
+`run-phase.sh` never deletes the group; cleanup is a separate operator step that must
+verify the exact group is absent. A passing result also requires the group state
+`Succeeded` and both containers terminal at exit code zero.
+
+## Inputs
+
+Copy `rehearsal.env.example` and replace every `REQUIRED` value. The renderer constructs
+the canonical clone connection string itself (Entra managed identity, encryption enabled);
+no connection material is accepted. Images must be immutable `@sha256:` references; the
+probe image must live in the same registry. Produce the target migration list from the
+exact candidate source checkout:
+
+```sh
+python3 scripts/catalog-rehearsal/list-migration-ids.py <candidate-checkout> expected-migrations.txt
+```
+
+Group names must start with `catalog-rehearsal-candidate` or `catalog-rehearsal-previous`;
+the parser and comparison gate bind each result to its phase prefix and reject a reused group.
+
+## Offline checks
+
+```sh
+python3 scripts/catalog-rehearsal/tests/test_catalog_rehearsal_harness.py
+bash -n scripts/catalog-rehearsal/run-phase.sh
+```
+
+The tests use fake `az`, `sqlcmd` and `curl` boundaries only.
+
+## Operator flow
+
+```sh
+set -a; . ./rehearsal.env; set +a
+export REHEARSAL_PHASE=candidate REHEARSAL_GROUP_NAME=catalog-rehearsal-candidate-<build>
+scripts/catalog-rehearsal/run-phase.sh
+# delete the exact group and verify absence, then:
+export REHEARSAL_PHASE=previous REHEARSAL_GROUP_NAME=catalog-rehearsal-previous-<build>
+scripts/catalog-rehearsal/run-phase.sh
+python3 scripts/catalog-rehearsal/compare-results.py candidate-result.json previous-result.json
+```
+
+Keep results, ledgers and any rollback captures in a durable private location (0600), never
+under a temporary directory.
