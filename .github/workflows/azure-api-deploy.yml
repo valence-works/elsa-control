@@ -547,6 +547,7 @@ jobs:
         if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.DEPLOY_MODE != 'build' }}
         env:
           VALIDATED_CANDIDATE_IMAGE: ${{ steps.candidate-authority.outputs.candidate_image }}
+          VALIDATED_CANDIDATE_BUILD_NUMBER: ${{ steps.candidate-authority.outputs.candidate_build_number }}
           SQL_ADMINISTRATOR_LOGIN: ${{ env.DEPLOY_MODE == 'infra' && vars.SQL_ADMINISTRATOR_LOGIN || '' }}
           ADMIN_API_KEY: ${{ env.DEPLOY_MODE == 'infra' && secrets.ADMIN_API_KEY || '' }}
           BUILDER_CLIENT_API_KEY: ${{ env.DEPLOY_MODE == 'infra' && secrets.BUILDER_CLIENT_API_KEY || '' }}
@@ -661,17 +662,27 @@ jobs:
             exit 1
           fi
 
+          # A promoted image keeps the build number of the run that built and validated it;
+          # the promotion run number is not a build identity.
+          application_build_number="$GITHUB_RUN_NUMBER"
+          if [ "$DEPLOY_MODE" = "promote" ]; then
+            application_build_number="$VALIDATED_CANDIDATE_BUILD_NUMBER"
+            if [[ ! "$application_build_number" =~ ^[1-9][0-9]{0,9}$ ]]; then
+              echo "::error::The validated candidate build number is unavailable; refusing promotion."
+              exit 1
+            fi
+          fi
           if [ "$DEPLOY_MODE" = "infra" ]; then
             az webapp config appsettings set \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_WEBAPP_NAME" \
-              --settings Application__BuildNumber="$GITHUB_RUN_NUMBER" \
+              --settings Application__BuildNumber="$application_build_number" \
               --output none
           else
             az webapp config appsettings set \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_WEBAPP_NAME" \
-              --settings AZURE_TOKEN_CREDENTIALS=prod Application__BuildNumber="$GITHUB_RUN_NUMBER" \
+              --settings AZURE_TOKEN_CREDENTIALS=prod Application__BuildNumber="$application_build_number" \
               --output none
           fi
 
@@ -685,6 +696,7 @@ jobs:
         if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.DEPLOY_MODE != 'build' }}
         env:
           VALIDATED_CANDIDATE_SOURCE_SHA: ${{ steps.candidate-authority.outputs.candidate_source_sha }}
+          VALIDATED_CANDIDATE_BUILD_NUMBER: ${{ steps.candidate-authority.outputs.candidate_build_number }}
         shell: bash
         run: |
           set -euo pipefail
@@ -706,10 +718,16 @@ jobs:
           trap 'rm -f "$health_response_file"' EXIT
           stable_health_probes=0
           expected_image_id="$GITHUB_SHA"
+          expected_build_number="$GITHUB_RUN_NUMBER"
           if [ "$DEPLOY_MODE" = "promote" ]; then
             expected_image_id="$VALIDATED_CANDIDATE_SOURCE_SHA"
+            expected_build_number="$VALIDATED_CANDIDATE_BUILD_NUMBER"
             if [[ ! "$expected_image_id" =~ ^[0-9a-f]{40}$ ]]; then
               echo "::error::The validated candidate source identity is unavailable; refusing promotion health acceptance."
+              exit 1
+            fi
+            if [[ ! "$expected_build_number" =~ ^[1-9][0-9]{0,9}$ ]]; then
+              echo "::error::The validated candidate build number is unavailable; refusing promotion health acceptance."
               exit 1
             fi
             image_id_override_count="$(az webapp config appsettings list \
@@ -727,7 +745,7 @@ jobs:
           for attempt in $(seq 1 30); do
             if http_status="$(curl --silent --show-error --output "$health_response_file" --write-out '%{http_code}' --max-time 10 "$health_url")"; then
               if [ "$http_status" = "200" ] && jq -e \
-                --arg expected_build_number "$GITHUB_RUN_NUMBER" \
+                --arg expected_build_number "$expected_build_number" \
                 --arg expected_image_id "$expected_image_id" \
                 '.status == "ok" and .buildNumber == $expected_build_number and .imageId == $expected_image_id' \
                 "$health_response_file" >/dev/null 2>&1; then
