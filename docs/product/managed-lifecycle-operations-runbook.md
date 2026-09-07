@@ -405,9 +405,10 @@ URL, host, token, body or error text, so it is safe acceptance evidence as-is.
 
 Treat exporter startup, actual signal ingestion, authenticated operator access to
 the workspace, and the fresh five-minute observation window as separate gates. The
-operator observation surface is Application Insights/Log Analytics (plus App Service
-diagnostic logs) behind Entra RBAC; an anonymous denial alone is not positive
-operator-access proof. Stored instance health alone is not a fresh endpoint sample. A missing or capped telemetry window
+operator observation surface is Application Insights/Log Analytics behind Entra RBAC,
+with the API's App Service console/HTTP/platform/app logs delivered to the same
+workspace by the `api-logs-to-managed-workspace` diagnostic setting; an anonymous
+denial alone is not positive operator-access proof. Stored instance health alone is not a fresh endpoint sample. A missing or capped telemetry window
 remains unknown/incomplete, never healthy. Keep the metric and authorized trace
 contracts above unchanged throughout rollout.
 

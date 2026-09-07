@@ -67,22 +67,26 @@ if content.count(new_catalog) != 1 or old_catalog in content:
 
 path.write_text(content)
 
-# The azd parameter template is regenerated too; re-add the optional provisioner parameter so the
-# host can attach the identity without editing generated files by hand.
-parameters_path = Path("src/Hosting/ElsaControl.AppHost/infra/api/api.tmpl.bicepparam")
-if not parameters_path.exists():
-    raise SystemExit(0)  # module-only fixtures (tests) have no parameter template to maintain
-parameters = parameters_path.read_text()
-provisioner_block = (
-    '{{ if index .Env "AZURE_PROVISIONER_IDENTITY_ID" }}\n'
-    "param provisioner_identity_outputs_id = '{{ .Env.AZURE_PROVISIONER_IDENTITY_ID }}'\n"
-    "{{ else }}\n"
-    "param provisioner_identity_outputs_id = ''\n"
-    "{{ end }}\n"
-)
-if provisioner_block not in parameters:
-    parameter_anchor = "param api_identity_outputs_id = '{{ .Env.API_IDENTITY_ID }}'\n"
-    if parameters.count(parameter_anchor) != 1:
+
+
+def patch_parameter_template(parameters_path: Path) -> None:
+    """Re-add the optional provisioner parameter to the regenerated azd parameter template (idempotent)."""
+    if not parameters_path.exists():
+        return  # module-only fixtures carry no template
+    parameters = parameters_path.read_text()
+    if "provisioner_identity_outputs_id" in parameters:
+        return
+    anchor = "param api_identity_outputs_id = '{{ .Env.API_IDENTITY_ID }}'\n"
+    if parameters.count(anchor) != 1:
         raise SystemExit("Cannot find the generated API identity parameter anchor in the parameter template.")
-    parameters = parameters.replace(parameter_anchor, parameter_anchor + provisioner_block, 1)
-    parameters_path.write_text(parameters)
+    block = (
+        '{{ if index .Env "AZURE_PROVISIONER_IDENTITY_ID" }}\n'
+        "param provisioner_identity_outputs_id = '{{ .Env.AZURE_PROVISIONER_IDENTITY_ID }}'\n"
+        "{{ else }}\n"
+        "param provisioner_identity_outputs_id = ''\n"
+        "{{ end }}\n"
+    )
+    parameters_path.write_text(parameters.replace(anchor, anchor + block, 1))
+
+
+patch_parameter_template(Path("src/Hosting/ElsaControl.AppHost/infra/api/api.tmpl.bicepparam"))

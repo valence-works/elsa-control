@@ -153,9 +153,6 @@ Required GitHub Actions variables:
 - `ELSA_CONTROL_AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_CLIENT_ID` and
   `ELSA_CONTROL_AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_ID`: managed
   identity values emitted by `azd up` for ACR image pushes.
-- `ELSA_CONTROL_AZURE_WEBSITE_CONTRIBUTOR_MANAGED_IDENTITY_ID` and
-  `ELSA_CONTROL_AZURE_WEBSITE_CONTRIBUTOR_MANAGED_IDENTITY_PRINCIPAL_ID`:
-  managed identity values emitted by `azd up` for Web App updates.
 - `ELSA_CONTROL_PLANID`: App Service plan resource ID emitted by
   `azd up`.
 
