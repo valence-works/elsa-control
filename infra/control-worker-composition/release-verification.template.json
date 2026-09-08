@@ -1,0 +1,15 @@
+{
+  "$comment": "Production App Service settings that turn on governed release-manifest signature verification (docs/production-release-verification.md). Applied before the dogfood release is admitted (#311); the worker composition does not depend on it at startup.",
+  "ReleaseCatalog__Verification__Enabled": "true",
+  "ReleaseCatalog__Verification__RegistryHost": "${RegistryName}.azurecr.io",
+  "ReleaseCatalog__Verification__Repository": "release-manifests/release-manifest",
+  "ReleaseCatalog__Verification__TenantId": "${TenantId}",
+  "ReleaseCatalog__Verification__ManagedIdentityClientId": "${ReleaseVerificationClientId}",
+  "ReleaseCatalog__Verification__BlobRedirectHosts__0": "${ReleaseVerificationBlobRedirectHost}",
+  "ReleaseCatalog__Verification__CosignPath": "/opt/elsa-control/verification/cosign",
+  "ReleaseCatalog__Verification__CosignSha256": "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71",
+  "ReleaseCatalog__Verification__TrustedRootPath": "/opt/elsa-control/verification/trusted-root.json",
+  "ReleaseCatalog__Verification__TrustedRootSha256": "6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66",
+  "ReleaseCatalog__Admission__ExpectedSignatureSubject": "${ReleaseProducerSignatureSubject}",
+  "ReleaseCatalog__Admission__ExpectedOidcIssuer": "${ReleaseProducerOidcIssuer}"
+}

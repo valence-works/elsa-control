@@ -430,6 +430,24 @@ These checks prove deterministic contracts and safe response paths. They are not
 production SLO measurements and do not establish Azure Monitor, PagerDuty, or
 another vendor's alerting/delivery behavior.
 
+## Enabling the production workers (#264, #315)
+
+Production workers are enabled only from the checked-in composition in
+[`infra/control-worker-composition`](../../infra/control-worker-composition/README.md).
+`scripts/render-worker-settings.py workers` renders the App Service payload from the
+template and the non-secret production parameters, prints setting names and a payload
+digest only, and refuses to render while any referenced decision is pending (today the
+static SQL bootstrap egress address, #310, and the dogfood release inputs, #311). The
+rendered file is applied with `az webapp config appsettings set --settings @file` and a
+restart; `worker-rollback.json` is the reviewed rollback and turns the three worker
+switches off together. Hand-typed worker settings, `--set` overrides against production,
+and partial enablement are out of contract: the startup validator rejects a half-enabled
+composition and the renderer rejects raw secret values, disposable proof mode and any
+attempt to override the image-owned tool paths. The offline contract tests
+(`scripts/tests/test_control_worker_composition.py` and
+`ProductionWorkerCompositionContractTests`) prove that the rendered settings compose
+through the production seams against the shipped `infra/azure-production` authority.
+
 ## Opt-in production-composition Azure lifecycle proof (#265)
 
 The live proof is an explicitly gated `WebApplicationFactory<Program>` run. It

@@ -1,0 +1,5 @@
+[
+  { "name": "Deployment__ElsaInstanceLifecycle__Enabled", "value": "false", "slotSetting": false },
+  { "name": "Deployment__AzureProvider__WorkerEnabled", "value": "false", "slotSetting": false },
+  { "name": "Deployment__AzureProvider__InstanceLifecycle__Enabled", "value": "false", "slotSetting": false }
+]
