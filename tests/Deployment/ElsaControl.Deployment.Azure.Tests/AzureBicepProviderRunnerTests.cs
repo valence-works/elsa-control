@@ -10,6 +10,22 @@ namespace ElsaControl.Deployment.Azure.Tests;
 public sealed class AzureBicepProviderRunnerTests : IDisposable
 {
     private const string OwnedGroupTags = "{\"managed-by\":\"elsa-control\",\"owner\":\"elsa-control\",\"workload-name\":\"proof\",\"sqlBootstrapObjectId\":\"11111111-1111-1111-1111-111111111111\"}";
+
+    private const string HealthyCandidateRevision = "{\"active\":true,\"health\":\"Healthy\",\"fqdn\":\"proof-app--candidate.hash.azurecontainerapps.io\"}";
+
+    private static bool IsCandidateReadinessProbe(string[] args) =>
+        args.Contains("--fail") && args.Contains("https://proof-app--candidate.hash.azurecontainerapps.io/health");
+
+    private AzureProviderResourceReferences PromotionResources() => _fixture.FoundationResources with
+    {
+        RegistryResourceId = _fixture.RegistryId,
+        AcrPullDeploymentId = _fixture.RegistryDeploymentId,
+        AcrPullRoleAssignmentId = _fixture.RegistryRoleAssignmentId,
+        WorkloadResourceId = _fixture.AppId,
+        WorkloadDeploymentId = _fixture.WorkloadDeploymentId,
+        WorkloadRevisionName = "proof-app--candidate",
+        StableTrafficRevisionName = "proof-app--stable"
+    };
     private const string ExactSqlBootstrapFirewall = "[{\"name\":\"elsa-bootstrap\",\"startIpAddress\":\"203.0.113.10\",\"endIpAddress\":\"203.0.113.10\"}]";
     private readonly RunnerFixture _fixture = new();
 
@@ -873,18 +889,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         var process = new FakeCommandProcess();
         process.Success(args => args.Contains("containerapp") && args.Contains("show") && args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
         process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "{\"active\":true,\"health\":\"Degraded\"}");
-        var resources = _fixture.FoundationResources with
-        {
-            RegistryResourceId = _fixture.RegistryId,
-            AcrPullDeploymentId = _fixture.RegistryDeploymentId,
-            AcrPullRoleAssignmentId = _fixture.RegistryRoleAssignmentId,
-            WorkloadResourceId = _fixture.AppId,
-            WorkloadDeploymentId = _fixture.WorkloadDeploymentId,
-            WorkloadRevisionName = "proof-app--candidate",
-            StableTrafficRevisionName = "proof-app--stable"
-        };
-
-        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Promotion, resources));
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Promotion, PromotionResources()));
 
         Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
         Assert.Equal("azure.promotion.health-gate", result.Code);
@@ -1696,6 +1701,8 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     [InlineData("<html>Healthy</html>", "azure.promotion.candidate-readiness-invalid")]
     [InlineData("", "azure.promotion.candidate-readiness-invalid")]
     [InlineData("healthy", "azure.promotion.candidate-readiness-invalid")]
+    [InlineData(" Healthy ", "azure.promotion.candidate-readiness-invalid")]
+    [InlineData("Healthy\n", "azure.promotion.candidate-readiness-invalid")]
     public async Task Promotion_refuses_a_candidate_whose_readiness_report_is_not_healthy(string report, string code)
     {
         var process = new FakeCommandProcess();
@@ -1783,21 +1790,6 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         Assert.Equal("proof-app--stable", result.Resources.StableTrafficRevisionName);
     }
 
-    private const string HealthyCandidateRevision = "{\"active\":true,\"health\":\"Healthy\",\"fqdn\":\"proof-app--candidate.hash.azurecontainerapps.io\"}";
-
-    private static bool IsCandidateReadinessProbe(string[] args) =>
-        args.Contains("--fail") && args.Contains("https://proof-app--candidate.hash.azurecontainerapps.io/health");
-
-    private AzureProviderResourceReferences PromotionResources() => _fixture.FoundationResources with
-    {
-        RegistryResourceId = _fixture.RegistryId,
-        AcrPullDeploymentId = _fixture.RegistryDeploymentId,
-        AcrPullRoleAssignmentId = _fixture.RegistryRoleAssignmentId,
-        WorkloadResourceId = _fixture.AppId,
-        WorkloadDeploymentId = _fixture.WorkloadDeploymentId,
-        WorkloadRevisionName = "proof-app--candidate",
-        StableTrafficRevisionName = "proof-app--stable"
-    };
 
     [Fact]
     public async Task Stable_traffic_restore_requires_positive_zero_candidate_absence_proof()

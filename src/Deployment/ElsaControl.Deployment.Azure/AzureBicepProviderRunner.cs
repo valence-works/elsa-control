@@ -1087,9 +1087,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             return Failed(command, AzureProviderOperationPhase.TrafficPromoted, "azure.promotion.candidate-endpoint-invalid", "The candidate revision endpoint is missing or outside the workload origin.");
         var readiness = await ExecuteHealthProbeAsync(command, $"https://{candidateHost}/health", cancellationToken);
         if (!readiness.Succeeded)
-            return readiness.Status is AzureCommandProcessStatus.Cancelled or AzureCommandProcessStatus.TerminationUncertain
-                ? ProcessFailure(command, AzureProviderOperationPhase.TrafficPromoted, readiness, command.Resources, mutation: false)
-                : Failed(command, AzureProviderOperationPhase.TrafficPromoted, "azure.promotion.candidate-unready", "The candidate revision did not answer its readiness route.");
+            return ProcessFailure(command, AzureProviderOperationPhase.TrafficPromoted, readiness, command.Resources, mutation: false,
+                failedCode: "azure.promotion.candidate-unready", failedMessage: "The candidate revision did not answer its readiness route.");
         var candidateReadiness = ClassifyRuntimeHealth(readiness.Value?.Value);
         if (candidateReadiness != RuntimeHealthReport.Healthy)
             return candidateReadiness == RuntimeHealthReport.NotHealthy
@@ -1385,8 +1384,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
 
     /// <summary>
     /// Probes a runtime health route and returns its bounded body. The runtime health contract is a
-    /// short plain-text report (<c>Healthy</c>, <c>Degraded</c> or <c>Unhealthy</c>); anything longer than
-    /// <see cref="MaximumHealthReportCharacters"/> is rejected as invalid output before it is inspected.
+    /// short plain-text report (<c>Healthy</c>, <c>Degraded</c> or <c>Unhealthy</c>) matched byte-exact;
+    /// anything longer than <see cref="MaximumHealthReportCharacters"/> is rejected before it is inspected.
     /// </summary>
     private async Task<AzureCommandProcessResult<SafeValue<string>>> ExecuteHealthProbeAsync(AzureProviderRunnerCommand command, string endpoint, CancellationToken cancellationToken)
     {
@@ -1402,8 +1401,9 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
 
     private enum RuntimeHealthReport { Healthy, NotHealthy, Invalid }
 
+    // The report is kept byte-exact: padding or line endings are outside the contract and fail closed.
     private static SafeValue<string> ParseHealthReportAsync(ReadOnlyMemory<char> output) =>
-        output.Length <= MaximumHealthReportCharacters ? new(output.ToString().Trim()) : throw new FormatException();
+        output.Length <= MaximumHealthReportCharacters ? new(output.ToString()) : throw new FormatException();
 
     private static RuntimeHealthReport ClassifyRuntimeHealth(string? report) => report switch
     {
@@ -2083,7 +2083,13 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             ? "The persisted registry resource references are incomplete."
             : null);
 
-    private static AzureProviderRunnerResult ProcessFailure<T>(AzureProviderRunnerCommand command, AzureProviderOperationPhase phase, AzureCommandProcessResult<T> result, AzureProviderResourceReferences resources, bool mutation)
+    /// <summary>
+    /// Maps a process result to the runner outcome. Cancellation and unproven termination are always
+    /// Uncertain; a plain failure is Uncertain after a mutation and Failed before one, where callers may
+    /// supply a more specific policy code for the Failed case.
+    /// </summary>
+    private static AzureProviderRunnerResult ProcessFailure<T>(AzureProviderRunnerCommand command, AzureProviderOperationPhase phase, AzureCommandProcessResult<T> result, AzureProviderResourceReferences resources, bool mutation,
+        string failedCode = "azure.step.failed", string failedMessage = "The Azure lifecycle observation failed.")
         where T : AzureCommandSafeOutput =>
         result.Status is AzureCommandProcessStatus.TerminationUncertain || result.FailureKind is AzureCommandProcessFailureKind.TerminationUncertain
             ? Uncertain(command, phase, "azure.step.termination-uncertain", "The Azure lifecycle process could not be proven terminated, so the external result requires recovery.", resources, result.FailureKind)
@@ -2091,7 +2097,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 ? Uncertain(command, phase, "azure.step.cancelled", "The Azure lifecycle step was interrupted before its result was confirmed.", resources, result.FailureKind)
             : mutation
                 ? Uncertain(command, phase, "azure.step.uncertain", "The Azure lifecycle step failed before its external result was confirmed.", resources, result.FailureKind)
-                : Failed(command, phase, "azure.step.failed", "The Azure lifecycle observation failed.", resources, result.FailureKind);
+                : Failed(command, phase, failedCode, failedMessage, resources, result.FailureKind);
 
     private static AzureProviderRunnerResult Completed(AzureProviderRunnerCommand command, AzureProviderOperationPhase phase, AzureProviderResourceReferences resources, bool noOp = false, AzureProviderHealth health = AzureProviderHealth.Unknown, string? endpoint = null, bool stableTrafficRestored = false) =>
         new(noOp ? AzureProviderRunnerOutcome.NoOp : AzureProviderRunnerOutcome.Completed, phase, resources, health, endpoint, [], noOp ? "azure.step.no-op" : "azure.step.completed", noOp ? "The Azure lifecycle step was already converged." : "The Azure lifecycle step completed.", StableTrafficRestored: stableTrafficRestored);
