@@ -9,14 +9,16 @@ renderer that refuses to produce a payload until every referenced decision is ma
 | --- | --- |
 | `worker-settings.template.json` | Every App Service setting the workers need; `${Name}` placeholders resolve from the parameter file. |
 | `release-verification.template.json` | Governed release-manifest signature verification for the dogfood release admission (#311). |
-| `worker-settings.production.parameters.json` | Production identifiers. A value shaped `{ "pending": "#N" }` is an undecided input and blocks rendering. |
+| `worker-settings.parameters.production.json` | Production identifiers. A value shaped `{ "pending": "#N" }` is an undecided input and blocks rendering. |
 | `worker-rollback.json` | Turns the three worker switches off. Apply it as-is; it has no parameters. |
 
 Contract gates: `python3 scripts/tests/test_control_worker_composition.py` (renderer and file shape) and
 `ProductionWorkerCompositionContractTests` in `tests/Hosting/ElsaControl.Api.Tests` (the rendered
 settings compose through the same `AzureProviderRunnerComposition`, `AzureInstanceLifecycleComposition`,
 `ElsaInstancePlanResolutionComposition` and `ManagedAzureProviderConfigurationValidator` seams that
-`Program.cs` uses, against the `infra/azure-production` template authority the API image ships).
+`Program.cs` uses, against the `infra/azure-production` template authority the API image ships; the
+release-verification template is composed through `ReleaseManifestVerifierComposition` the same way,
+with the image-owned cosign and trust-root files stood in by digest-matched fixtures).
 `dev/regenerate-infra.sh` preserves this directory.
 
 ## What the template binds
@@ -40,8 +42,10 @@ settings compose through the same `AzureProviderRunnerComposition`, `AzureInstan
 `python3 scripts/render-worker-settings.py status` lists resolved and pending parameters without values.
 At the time of writing `SqlBootstrapIp` waits on #310 (one static egress address for the API) and the
 release feed, verification identity, blob redirect host and producer identity wait on #311.
-A pending parameter is filled by editing the parameter file in a reviewed PR, never with `--set` in
-production; `--set` exists for rehearsals against disposable targets.
+A pending parameter is filled only by editing the parameter file in a reviewed PR. The renderer has
+no command-line override and reads no other parameter file, so a value that was never reviewed
+cannot be rendered. Rehearsals against disposable targets use the #265 proof harness configuration,
+not this renderer.
 
 ## Enabling workers in production (#313)
 

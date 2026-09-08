@@ -1,5 +1,5 @@
 {
-  "$comment": "Production App Service settings that enable the managed-instance lifecycle and Azure provider workers in the Control API. Every ${NAME} is resolved from worker-settings.production.parameters.json by scripts/render-worker-settings.py; literals are governed constants. Tool paths and TemplateRoot come from the API image (Dockerfile ENV) and are deliberately absent.",
+  "$comment": "Production App Service settings that enable the managed-instance lifecycle and Azure provider workers in the Control API. Every ${NAME} is resolved from worker-settings.parameters.production.json by scripts/render-worker-settings.py; literals are governed constants. Tool paths and TemplateRoot come from the API image (Dockerfile ENV) and are deliberately absent.",
   "Deployment__ElsaInstanceLifecycle__Enabled": "true",
   "Deployment__ElsaInstanceLifecycle__PollInterval": "00:00:05",
   "Deployment__AzureProvider__WorkerEnabled": "true",

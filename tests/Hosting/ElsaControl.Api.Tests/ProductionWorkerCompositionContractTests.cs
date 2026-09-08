@@ -1,4 +1,7 @@
+using System.Security.Cryptography;
 using System.Text.Json;
+using ElsaControl.Api.ReleaseCatalog;
+using ElsaControl.RuntimeBuilder.Abstractions.ReleaseManifests;
 using System.Text.RegularExpressions;
 using ElsaControl.Api.Workspace;
 using ElsaControl.Deployment.Azure;
@@ -16,8 +19,9 @@ namespace ElsaControl.Api.Tests;
 /// (infra/azure-production), with no Azure access. Tool paths come from the image and pending
 /// operator decisions are substituted with documented test values.
 /// </summary>
-public sealed class ProductionWorkerCompositionContractTests
+public sealed class ProductionWorkerCompositionContractTests : IDisposable
 {
+    private readonly string _directory = Path.Combine(Path.GetTempPath(), $"elsa-worker-composition-{Guid.NewGuid():N}");
     private static readonly Regex Placeholder = new(@"\$\{([A-Za-z][A-Za-z0-9_]*)\}", RegexOptions.CultureInvariant);
     private static readonly string RepositoryRoot = FindRepositoryRoot();
     private static readonly string CompositionRoot = Path.Combine(RepositoryRoot, "infra", "control-worker-composition");
@@ -25,10 +29,14 @@ public sealed class ProductionWorkerCompositionContractTests
     private static readonly IReadOnlyDictionary<string, string> PendingTestValues = new Dictionary<string, string>
     {
         ["SqlBootstrapIp"] = "203.0.113.10",
-        ["ReleaseFeedServiceIndex"] = AzureProviderRunnerOptions.DefaultReleaseFeedServiceIndex
+        ["ReleaseFeedServiceIndex"] = AzureProviderRunnerOptions.DefaultReleaseFeedServiceIndex,
+        ["ReleaseVerificationClientId"] = "c5055d7d-d66d-468d-8984-077214496243",
+        ["ReleaseVerificationBlobRedirectHost"] = "elsareleases.blob.core.windows.net",
+        ["ReleaseProducerSignatureSubject"] = "https://github.com/example/producer/.github/workflows/release.yml@refs/heads/main",
+        ["ReleaseProducerOidcIssuer"] = "https://token.actions.githubusercontent.com"
     };
 
-    private readonly Dictionary<string, string?> _settings = RenderWorkerSettings();
+    private readonly Dictionary<string, string?> _settings = Render("worker-settings.template.json");
 
     [Fact]
     public void Only_the_documented_decisions_are_pending()
@@ -139,6 +147,35 @@ public sealed class ProductionWorkerCompositionContractTests
     }
 
     [Fact]
+    public void Release_verification_composition_composes_the_configured_verifier()
+    {
+        var settings = Render("release-verification.template.json");
+        Assert.Equal("valenceruntimeimages.azurecr.io", settings["ReleaseCatalog:Verification:RegistryHost"]);
+        Assert.Equal("release-manifests/release-manifest", settings["ReleaseCatalog:Verification:Repository"]);
+        Assert.Equal("f35bcd45-7991-4e24-84f1-e964394501ad", settings["ReleaseCatalog:Verification:TenantId"]);
+        Assert.Equal("/opt/elsa-control/verification/cosign", settings["ReleaseCatalog:Verification:CosignPath"]);
+        Assert.Equal("/opt/elsa-control/verification/trusted-root.json", settings["ReleaseCatalog:Verification:TrustedRootPath"]);
+
+        // The image owns cosign and the trust root; digest-matched fixtures stand in for them.
+        Directory.CreateDirectory(_directory);
+        var cosign = Path.Combine(_directory, "cosign");
+        var root = Path.Combine(_directory, "trusted-root.json");
+        File.WriteAllText(cosign, "fixture; never executed by composition");
+        File.WriteAllText(root, "{}");
+        settings["ReleaseCatalog:Verification:CosignPath"] = cosign;
+        settings["ReleaseCatalog:Verification:CosignSha256"] = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(cosign)));
+        settings["ReleaseCatalog:Verification:TrustedRootPath"] = root;
+        settings["ReleaseCatalog:Verification:TrustedRootSha256"] = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(root)));
+
+        var services = new ServiceCollection();
+        ReleaseManifestVerifierComposition.AddVerifier(services, Configuration(settings));
+        using var provider = services.BuildServiceProvider();
+        Assert.IsType<ConfiguredAcrReleaseManifestSignatureVerifier>(provider.GetRequiredService<IReleaseManifestSignatureVerifier>());
+        Assert.IsType<AcrReleaseRegistryReader>(provider.GetRequiredService<IReleaseRegistryReader>());
+        Assert.IsType<SigstoreReleaseManifestBundleVerifier>(provider.GetRequiredService<IReleaseManifestBundleVerifier>());
+    }
+
+    [Fact]
     public void Composition_never_carries_image_owned_tool_paths_or_raw_values()
     {
         var template = ReadTemplate();
@@ -148,11 +185,11 @@ public sealed class ProductionWorkerCompositionContractTests
                 or "Deployment__AzureProvider__Runner__CurlPath" or "Deployment__AzureProvider__Runner__TemplateRoot");
     }
 
-    private static Dictionary<string, string?> RenderWorkerSettings()
+    private static Dictionary<string, string?> Render(string templateName)
     {
         var parameters = ReadParameters();
         var settings = new Dictionary<string, string?>();
-        foreach (var (key, raw) in ReadTemplate())
+        foreach (var (key, raw) in ReadTemplate(templateName))
         {
             var value = Placeholder.Replace(raw, match =>
             {
@@ -166,18 +203,21 @@ public sealed class ProductionWorkerCompositionContractTests
             settings[key.Replace("__", ":", StringComparison.Ordinal)] = value;
         }
 
-        // The image owns the runner tools and template root; the test stands in for the image.
-        var tool = Environment.ProcessPath ?? throw new InvalidOperationException("Process path unavailable.");
-        settings["Deployment:AzureProvider:Runner:AzureCliPath"] = tool;
-        settings["Deployment:AzureProvider:Runner:SqlCmdPath"] = tool;
-        settings["Deployment:AzureProvider:Runner:CurlPath"] = tool;
-        settings["Deployment:AzureProvider:Runner:TemplateRoot"] = TemplateRoot;
+        if (templateName.StartsWith("worker-", StringComparison.Ordinal))
+        {
+            // The image owns the runner tools and template root; the test stands in for the image.
+            var tool = Environment.ProcessPath ?? throw new InvalidOperationException("Process path unavailable.");
+            settings["Deployment:AzureProvider:Runner:AzureCliPath"] = tool;
+            settings["Deployment:AzureProvider:Runner:SqlCmdPath"] = tool;
+            settings["Deployment:AzureProvider:Runner:CurlPath"] = tool;
+            settings["Deployment:AzureProvider:Runner:TemplateRoot"] = TemplateRoot;
+        }
         return settings;
     }
 
-    private static Dictionary<string, string> ReadTemplate()
+    private static Dictionary<string, string> ReadTemplate(string templateName = "worker-settings.template.json")
     {
-        using var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(CompositionRoot, "worker-settings.template.json")));
+        using var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(CompositionRoot, templateName)));
         return document.RootElement.EnumerateObject()
             .Where(property => !property.Name.StartsWith('$'))
             .ToDictionary(property => property.Name, property => property.Value.GetString()!, StringComparer.Ordinal);
@@ -186,7 +226,7 @@ public sealed class ProductionWorkerCompositionContractTests
     /// <summary>Resolved parameters map to their value; pending decisions map to null.</summary>
     private static Dictionary<string, string?> ReadParameters()
     {
-        using var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(CompositionRoot, "worker-settings.production.parameters.json")));
+        using var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(CompositionRoot, "worker-settings.parameters.production.json")));
         return document.RootElement.GetProperty("parameters").EnumerateObject()
             .ToDictionary(
                 property => property.Name,
@@ -205,6 +245,12 @@ public sealed class ProductionWorkerCompositionContractTests
                 return directory.FullName;
         }
         throw new InvalidOperationException("The repository root with infra/control-worker-composition was not found.");
+    }
+
+    public void Dispose()
+    {
+        if (Directory.Exists(_directory))
+            Directory.Delete(_directory, recursive: true);
     }
 
     private sealed class SucceedingPreflight : IAzureProviderAuthorityPreflight

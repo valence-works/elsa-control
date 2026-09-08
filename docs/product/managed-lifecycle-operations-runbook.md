@@ -440,7 +440,7 @@ digest only, and refuses to render while any referenced decision is pending (tod
 static SQL bootstrap egress address, #310, and the dogfood release inputs, #311). The
 rendered file is applied with `az webapp config appsettings set --settings @file` and a
 restart; `worker-rollback.json` is the reviewed rollback and turns the three worker
-switches off together. Hand-typed worker settings, `--set` overrides against production,
+switches off together. Hand-typed worker settings, renderer overrides (none exist),
 and partial enablement are out of contract: the startup validator rejects a half-enabled
 composition and the renderer rejects raw secret values, disposable proof mode and any
 attempt to override the image-owned tool paths. The offline contract tests

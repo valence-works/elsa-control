@@ -163,13 +163,15 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(0, renderer.main(["status"]))
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(2, renderer.main(["workers", "--output", str(Path(directory) / "w.json")]))
-            self.assertEqual(0, renderer.main(["workers", "--output", str(Path(directory) / "w.json"),
-                                              "--set", "SqlBootstrapIp=203.0.113.10",
-                                              "--set", "ReleaseFeedServiceIndex=https://api.nuget.org/v3/index.json"]))
-            self.assertEqual(2, renderer.main(["workers", "--output", str(Path(directory) / "w.json"),
-                                              "--set", "ProvisionerClientId=00000000-0000-0000-0000-000000000000",
-                                              "--set", "SqlBootstrapIp=203.0.113.10"]))
+            self.assertEqual(2, renderer.main(["release-verification", "--output", str(Path(directory) / "v.json")]))
+            self.assertFalse((Path(directory) / "w.json").exists())
             self.assertEqual(0, renderer.main(["rollback", "--output", str(Path(directory) / "r.json")]))
+
+    def test_cli_has_no_value_override_so_only_the_checked_in_parameters_reach_production(self):
+        for argv in (["workers", "--output", "x.json", "--set", "SqlBootstrapIp=203.0.113.10"],
+                     ["workers", "--output", "x.json", "--parameters", "other.json"]):
+            with self.assertRaises(SystemExit):
+                renderer.main(argv)
 
 
 if __name__ == "__main__":

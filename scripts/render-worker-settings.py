@@ -3,8 +3,10 @@
 
 The template in infra/control-worker-composition names every setting the production API
 needs to run the managed-instance lifecycle and Azure provider workers. Parameters hold
-non-secret identifiers only. The rendered payload is the sole input to
-`az webapp config appsettings set --settings @<file>`; this script never prints values.
+non-secret identifiers only and are the single source of values: there is no command-line
+override, so a value reaches production only through a reviewed change to that file. The
+rendered payload is the sole input to `az webapp config appsettings set --settings @<file>`;
+this script never prints values.
 
 Exit codes: 0 rendered, 2 the composition is not renderable (pending decision, unresolved
 placeholder, unknown parameter, forbidden key, unsafe value, or half-enabled workers).
@@ -22,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPOSITION = ROOT / "infra" / "control-worker-composition"
 WORKER_TEMPLATE = COMPOSITION / "worker-settings.template.json"
 VERIFICATION_TEMPLATE = COMPOSITION / "release-verification.template.json"
-PRODUCTION_PARAMETERS = COMPOSITION / "worker-settings.production.parameters.json"
+PRODUCTION_PARAMETERS = COMPOSITION / "worker-settings.parameters.production.json"
 ROLLBACK = COMPOSITION / "worker-rollback.json"
 
 PLACEHOLDER = re.compile(r"\$\{([A-Za-z][A-Za-z0-9_]*)\}")
@@ -161,11 +163,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("workers", "release-verification"):
-        command = sub.add_parser(name, help=f"render the {name} settings payload")
-        command.add_argument("--parameters", type=Path, default=PRODUCTION_PARAMETERS)
+        command = sub.add_parser(name, help=f"render the {name} settings payload from the checked-in parameters")
         command.add_argument("--output", type=Path, required=True)
-        command.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
-                             help="resolve a pending parameter for this render only (the value is not printed)")
     rollback = sub.add_parser("rollback", help="write the workers-off payload")
     rollback.add_argument("--output", type=Path, required=True)
     sub.add_parser("status", help="list resolved and pending parameters without values")
@@ -175,21 +174,15 @@ def main(argv: list[str] | None = None) -> int:
             digest = write_payload(load_rollback(), args.output)
             print(f"rendered {len(WORKER_ENABLE_KEYS)} settings to {args.output} sha256={digest}")
             return 0
-        resolved, pending = load_parameters(PRODUCTION_PARAMETERS if args.command == "status" else args.parameters)
+        resolved, pending = load_parameters(PRODUCTION_PARAMETERS)
         if args.command == "status":
             for name in sorted(resolved):
                 print(f"resolved {name}")
             for name, issue in sorted(pending.items()):
                 print(f"pending  {name} -> {issue}")
             return 0
-        overrides: dict[str, str] = {}
-        for item in args.set:
-            name, separator, value = item.partition("=")
-            if not separator or name not in pending or not SAFE_VALUE.match(value):
-                raise CompositionError("--set accepts NAME=VALUE only for a pending parameter with a safe value")
-            overrides[name] = value
         template = load_template(WORKER_TEMPLATE if args.command == "workers" else VERIFICATION_TEMPLATE)
-        rendered = render(template, resolved, pending, overrides)
+        rendered = render(template, resolved, pending)
         digest = write_payload(to_app_settings(rendered), args.output)
         for key in rendered:
             print(f"setting {key}")
