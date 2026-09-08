@@ -9,7 +9,12 @@ to App Service, and a NAT gateway with a Standard static public IP. The API site
 with regional VNet integration and routes all outbound traffic through it.
 
 Nothing inbound changes. No customer compute is created and the customer workload subscription is not
-touched. The Basic (B1) plan supports regional VNet integration; no plan change is needed.
+touched. Regional VNet integration is available on Basic and above, and NAT gateway integration has no
+tier requirement beyond VNet integration (Microsoft docs, checked 2026-09-08), so the B1 plan stays.
+Two documented caveats apply while outbound internet routing is on: traffic to Azure Storage accounts
+must use a service or private endpoint (the API has no direct Storage dependency; the platform content
+share and image pull keep their default public configuration route, which is left unchanged), and
+route-all only affects application traffic, not the platform's own configuration traffic.
 
 | File | Purpose |
 | --- | --- |
@@ -58,12 +63,20 @@ composition before workers run again.
      --resource-group rg-valence-control-prod --name api-m5uymkuaf222o \
      --vnet-route-all-enabled true --query vnetRouteAllEnabled
    ```
-   Then verify health and that an outbound probe from the site reports the NAT address (for example
-   the Kudu console `curl -s https://api.ipify.org`, or the App Service `outboundIpAddresses` no longer
-   being the effective path). The runner preflight against a disposable SQL server is the final check
-   (#310 acceptance).
+   Then verify health, and verify the egress from inside the site with `az webapp ssh` (the image ships
+   `curl` and `sqlcmd`): `curl -s https://api.ipify.org` must print `egressIpAddress`, and a disposable
+   Azure SQL server whose only firewall rule is that address must accept
+   `sqlcmd -S <server>.database.windows.net -d master -N true -G -Q "SELECT 1"` with the provisioner
+   identity, while the same query fails after the rule is removed. That is the runner's bootstrap
+   path (`sql-bootstrap.sql` runs through the same firewall rule), so it is the #310 acceptance check.
+   Delete the disposable server afterwards.
 4. Rollback: `az webapp vnet-integration remove` on the site, `--vnet-route-all-enabled false`, and the
    worker rollback file from `infra/control-worker-composition` if workers were enabled.
+
+Once attached, `AZURE_API_EGRESS_SUBNET_ID` must be present in the azd environment before any
+`azd provision`: the generated module sets `virtualNetworkSubnetId` to null when the variable is empty,
+which detaches the site and returns it to the platform pool. Workers would then fail closed at the SQL
+bootstrap firewall rule rather than silently continue, but the detachment itself is not announced.
 
 Sources: [App Service regional VNet integration](https://learn.microsoft.com/en-us/azure/app-service/overview-vnet-integration),
 [NAT gateway with App Service](https://learn.microsoft.com/en-us/azure/app-service/networking/nat-gateway-integration),

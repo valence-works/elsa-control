@@ -164,6 +164,8 @@ Required GitHub Actions variables:
   subnet with regional VNet integration and routes all outbound traffic through its NAT gateway, so
   the API has one static egress address for the provider runner's SQL bootstrap firewall rule.
   Empty keeps the platform outbound address pool. Attaching or detaching restarts the app once.
+  Once the production site is attached, keep this variable set in the azd environment: an
+  `azd provision` without it renders `virtualNetworkSubnetId` as null and detaches the site.
 
 Required GitHub Actions secrets:
 
