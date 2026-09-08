@@ -141,9 +141,15 @@ class RenderTests(unittest.TestCase):
     def test_parameter_loader_refuses_credential_shaped_values(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "p.json"
-            path.write_text(json.dumps({"parameters": {"X": "Server=tcp:a;Password=b"}}))
-            with self.assertRaises(renderer.CompositionError):
-                renderer.load_parameters(path)
+            for value in ("Server=tcp:a;Password=b", "P@ssw0rd123", "sk-abc123XYZ", "QUJDREVGR0hJSktMTU5PUA==",
+                          "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71"):
+                path.write_text(json.dumps({"parameters": {"X": value}}))
+                with self.assertRaises(renderer.CompositionError, msg=value):
+                    renderer.load_parameters(path)
+            for value in ("ada5e428-c5d8-4daf-b7f9-9f2c79d23815", "mi-elsa-cloud-provisioner-prod-weu", "203.0.113.10",
+                          "https://api.nuget.org/v3/index.json", "valenceruntimeimages.azurecr.io"):
+                path.write_text(json.dumps({"parameters": {"X": value}}))
+                self.assertEqual({"X": value}, renderer.load_parameters(path)[0], value)
 
     def test_payload_shape_matches_az_webapp_appsettings_and_is_private(self):
         rendered = renderer.render(self.workers, self.resolved, self.pending, self.overrides)

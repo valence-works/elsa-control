@@ -8,7 +8,7 @@ renderer that refuses to produce a payload until every referenced decision is ma
 | File | Purpose |
 | --- | --- |
 | `worker-settings.template.json` | Every App Service setting the workers need; `${Name}` placeholders resolve from the parameter file. |
-| `release-verification.template.json` | Governed release-manifest signature verification for the dogfood release admission (#311). |
+| `release-verification.template.json` | Governed release-manifest signature verification for the dogfood release admission (#311). Pins the linux/amd64 cosign digest; the production App Service host is amd64. |
 | `worker-settings.parameters.production.json` | Production identifiers. A value shaped `{ "pending": "#N" }` is an undecided input and blocks rendering. |
 | `worker-rollback.json` | Turns the three worker switches off. Apply it as-is; it has no parameters. |
 

@@ -223,15 +223,19 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
             .ToDictionary(property => property.Name, property => property.Value.GetString()!, StringComparer.Ordinal);
     }
 
-    /// <summary>Resolved parameters map to their value; pending decisions map to null.</summary>
+    /// <summary>Resolved parameters map to their value; pending decisions map to null; anything else is malformed.</summary>
     private static Dictionary<string, string?> ReadParameters()
     {
         using var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(CompositionRoot, "worker-settings.parameters.production.json")));
         return document.RootElement.GetProperty("parameters").EnumerateObject()
-            .ToDictionary(
-                property => property.Name,
-                property => property.Value.ValueKind == JsonValueKind.String ? property.Value.GetString() : null,
-                StringComparer.Ordinal);
+            .ToDictionary(property => property.Name, property => property.Value switch
+            {
+                { ValueKind: JsonValueKind.String } value => value.GetString(),
+                { ValueKind: JsonValueKind.Object } value when value.TryGetProperty("pending", out var issue)
+                    && issue.ValueKind == JsonValueKind.String
+                    && Regex.IsMatch(issue.GetString()!, "^#[1-9][0-9]{0,5}$") => null,
+                _ => throw new InvalidOperationException($"Parameter {property.Name} is neither an identifier nor a pending issue reference.")
+            }, StringComparer.Ordinal);
     }
 
     private static IConfiguration Configuration(IDictionary<string, string?> values) =>

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -52,6 +53,14 @@ SETTING_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,127}$")
 # Values are identifiers, locators or short tokens; anything resembling a credential is refused.
 SAFE_VALUE = re.compile(r"^[A-Za-z0-9._:/@#\-]{1,512}$")
 GUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+# Parameters are identifiers, never secrets: one of these lowercase shapes, or the value is refused.
+PARAMETER_SHAPES = (
+    GUID,
+    re.compile(r"^/subscriptions/[0-9a-f-]{36}(/resourcegroups/[a-z0-9._()-]+)?(/providers/[a-z0-9./_-]+)+$", re.IGNORECASE),
+    re.compile(r"^https://[a-z0-9.-]+(/[a-z0-9._/-]*)?$"),
+    re.compile(r"^(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])){3}$"),
+    re.compile(r"^[a-z][a-z0-9-]{0,62}(\.[a-z0-9-]{1,63})*$"),
+)
 
 
 class CompositionError(Exception):
@@ -97,8 +106,8 @@ def load_parameters(path: Path) -> tuple[dict[str, str], dict[str, str]]:
                 raise CompositionError(f"{path.name}: parameter {name} must be a string or a pending issue reference")
             pending[name] = issue
         elif isinstance(value, str):
-            if not SAFE_VALUE.match(value):
-                raise CompositionError(f"{path.name}: parameter {name} has an unsafe value shape")
+            if not SAFE_VALUE.match(value) or not any(shape.match(value) for shape in PARAMETER_SHAPES):
+                raise CompositionError(f"{path.name}: parameter {name} is not an identifier shape")
             resolved[name] = value
         else:
             raise CompositionError(f"{path.name}: parameter {name} must be a string")
@@ -144,7 +153,10 @@ def to_app_settings(rendered: dict[str, str]) -> list[dict[str, object]]:
 
 def write_payload(payload: list[dict[str, object]], output: Path) -> str:
     text = json.dumps(payload, indent=2) + "\n"
-    output.write_text(text, encoding="utf-8")
+    # Create private before writing so no wider mode is ever observable.
+    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(text)
     output.chmod(0o600)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 

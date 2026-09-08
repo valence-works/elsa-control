@@ -1,5 +1,5 @@
 {
-  "$comment": "Production App Service settings that turn on governed release-manifest signature verification (docs/production-release-verification.md). Applied before the dogfood release is admitted (#311); the worker composition does not depend on it at startup.",
+  "$comment": "Production App Service settings that turn on governed release-manifest signature verification (docs/production-release-verification.md). Applied before the dogfood release is admitted (#311); the worker composition does not depend on it at startup. CosignSha256 is the linux/amd64 cosign 3.1.3 digest because the production App Service (Linux) host runs the amd64 image; an arm64 host would need the arm64 digest from docs/production-release-verification.md.",
   "ReleaseCatalog__Verification__Enabled": "true",
   "ReleaseCatalog__Verification__RegistryHost": "${RegistryName}.azurecr.io",
   "ReleaseCatalog__Verification__Repository": "release-manifests/release-manifest",
