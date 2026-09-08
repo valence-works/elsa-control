@@ -1,0 +1,25 @@
+{
+  "$comment": "Non-secret production identifiers only. A parameter whose value is an object with a `pending` issue reference is not yet decided; the renderer refuses to produce production output while any parameter used by the template is pending. Never put connection strings, keys or passwords here.",
+  "parameters": {
+    "ProvisionerClientId": "ada5e428-c5d8-4daf-b7f9-9f2c79d23815",
+    "ProvisionerPrincipalId": "f9e35dbd-06a3-42ab-a0ce-04fc01a6cde6",
+    "ProvisionerIdentityName": "mi-elsa-cloud-provisioner-prod-weu",
+    "SqlBootstrapIp": { "pending": "#310", "reason": "The API needs one static egress address before the runner can open the temporary SQL bootstrap firewall rule." },
+    "RuntimeAdminUsername": "elsa-runtime-admin",
+    "ReleaseFeedServiceIndex": { "pending": "#311", "reason": "Must be the verified producer feed that carries the exact SQL package versions declared by the admitted dogfood release." },
+    "RegistryDeploymentMetadataRoleDefinitionId": "/subscriptions/8e23037a-420f-4ad0-9594-9d194de29e84/providers/Microsoft.Authorization/roleDefinitions/a821f94b-8f8e-522d-845c-81da8bf0e7c2",
+    "RegistryDeploymentMetadataRoleAssignmentId": "/subscriptions/8e23037a-420f-4ad0-9594-9d194de29e84/resourceGroups/rg-valence-runtime/providers/Microsoft.Authorization/roleAssignments/395da5c4-283d-5ae7-af7a-2609d3d51926",
+    "RegistryRoleAdministrationAssignmentId": "/subscriptions/8e23037a-420f-4ad0-9594-9d194de29e84/resourceGroups/rg-valence-runtime/providers/Microsoft.ContainerRegistry/registries/valenceruntimeimages/providers/Microsoft.Authorization/roleAssignments/2a85661e-fe81-58f6-b7dc-11793c71f92e",
+    "WorkloadSubscriptionId": "a54cd7b1-3d13-48ce-9dce-5ae013142c85",
+    "WorkloadResourceGroupName": "rg-elsa-cloud-workloads-platform-prod-weu",
+    "RegistrySubscriptionId": "8e23037a-420f-4ad0-9594-9d194de29e84",
+    "RegistryResourceGroupName": "rg-valence-runtime",
+    "RegistryName": "valenceruntimeimages",
+    "TenantId": "f35bcd45-7991-4e24-84f1-e964394501ad",
+    "ControlPlaneOrigin": "https://api-m5uymkuaf222o.azurewebsites.net",
+    "ReleaseVerificationClientId": { "pending": "#311", "reason": "Choose the attached identity that holds registry read at valenceruntimeimages; grant AcrPull there first." },
+    "ReleaseVerificationBlobRedirectHost": { "pending": "#311", "reason": "Exact blob host observed during the live verification proof." },
+    "ReleaseProducerSignatureSubject": { "pending": "#311", "reason": "Exact producer workflow identity of the admitted release." },
+    "ReleaseProducerOidcIssuer": { "pending": "#311", "reason": "Issuer of the producer workflow identity." }
+  }
+}

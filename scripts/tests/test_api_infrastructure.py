@@ -21,7 +21,7 @@ REGENERATE_INFRA = ROOT / "dev" / "regenerate-infra.sh"
 PATCH_API_IDENTITY = ROOT / "dev" / "patch-api-provisioner-identity.py"
 APP_SERVICE_DOC = ROOT / "docs" / "deployment" / "azure-app-service.md"
 # Hand-maintained directories dev/regenerate-infra.sh must carry across a regeneration.
-PRESERVED_INFRA_DIRECTORIES = ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry", "control-deploy-identity")
+PRESERVED_INFRA_DIRECTORIES = ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry", "control-deploy-identity", "control-worker-composition")
 
 SUBSCRIPTION = "00000000-0000-0000-0000-000000000000"
 RESOURCE_GROUP = "rg-api-test"

@@ -20,6 +20,7 @@ preserved_infra_paths=(
     azure-customer-subscription
     managed-telemetry
     control-deploy-identity
+    control-worker-composition
 )
 preservation_dir="$(mktemp -d)"
 restore_preserved_infra() {
