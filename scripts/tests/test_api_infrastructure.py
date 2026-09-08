@@ -21,7 +21,7 @@ REGENERATE_INFRA = ROOT / "dev" / "regenerate-infra.sh"
 PATCH_API_IDENTITY = ROOT / "dev" / "patch-api-provisioner-identity.py"
 APP_SERVICE_DOC = ROOT / "docs" / "deployment" / "azure-app-service.md"
 # Hand-maintained directories dev/regenerate-infra.sh must carry across a regeneration.
-PRESERVED_INFRA_DIRECTORIES = ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry", "control-deploy-identity", "control-worker-composition")
+PRESERVED_INFRA_DIRECTORIES = ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry", "control-deploy-identity", "control-worker-composition", "control-egress")
 
 SUBSCRIPTION = "00000000-0000-0000-0000-000000000000"
 RESOURCE_GROUP = "rg-api-test"
@@ -41,7 +41,13 @@ ACR_CLIENT_ID = "00000000-0000-0000-0000-000000000001"
 API_CLIENT_ID = "00000000-0000-0000-0000-000000000004"
 
 
-def parameter_file(module_path: Path, parameter_directory: Path, provisioner_id: str) -> str:
+EGRESS_SUBNET_ID = (
+    f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{RESOURCE_GROUP}/"
+    "providers/Microsoft.Network/virtualNetworks/vnet/subnets/snet-api-egress"
+)
+
+
+def parameter_file(module_path: Path, parameter_directory: Path, provisioner_id: str, egress_subnet_id: str = "") -> str:
     """Return a synthetic, non-secret parameter file for Bicep snapshot evaluation."""
 
     using_path = os.path.relpath(module_path, start=parameter_directory).replace(os.sep, "/")
@@ -65,6 +71,7 @@ def parameter_file(module_path: Path, parameter_directory: Path, provisioner_id:
         "api_identity_outputs_id": API_ID,
         "api_identity_outputs_clientid": API_CLIENT_ID,
         "provisioner_identity_outputs_id": provisioner_id,
+        "api_egress_subnet_id": egress_subnet_id,
     }
     lines = [f"using '{using_path}'", ""]
     lines.extend(f"param {name} = '{value}'" for name, value in values.items())
@@ -95,6 +102,20 @@ class ApiInfrastructureTests(unittest.TestCase):
             re.DOTALL,
         )
         generated = optional_parameter.sub("", module, count=1)
+        egress_parameter = re.compile(
+            r"\n@description\('Optional resource ID of the delegated App Service integration subnet.*?"
+            r"\nparam api_egress_subnet_id string = ''\n",
+            re.DOTALL,
+        )
+        generated = egress_parameter.sub("", generated, count=1)
+        generated = re.sub(
+            r"\n    // Regional VNet integration for one static egress \(#310\).*?\n    virtualNetworkSubnetId: [^\n]*\n",
+            "\n",
+            generated,
+            count=1,
+            flags=re.DOTALL,
+        )
+        generated = generated.replace("      vnetRouteAllEnabled: !empty(api_egress_subnet_id)\n", "", 1)
         return re.sub(
             r"(?ms)^  identity: \{\n.*?^  \}\n",
             "\n".join(
@@ -113,14 +134,14 @@ class ApiInfrastructureTests(unittest.TestCase):
             count=1,
         )
 
-    def snapshot(self, directory: Path, provisioner_id: str) -> dict:
+    def snapshot(self, directory: Path, provisioner_id: str, egress_subnet_id: str = "") -> dict:
         """Evaluate the actual module with Bicep's offline deployment snapshot."""
 
         if shutil.which("az") is None:
             self.fail("Azure CLI is required for offline Bicep snapshot evaluation.")
 
         parameter_path = directory / ("api-with-provisioner.bicepparam" if provisioner_id else "api-default.bicepparam")
-        parameter_path.write_text(parameter_file(API_MODULE, directory, provisioner_id))
+        parameter_path.write_text(parameter_file(API_MODULE, directory, provisioner_id, egress_subnet_id))
         result = subprocess.run(
             [
                 "az",
@@ -166,6 +187,16 @@ class ApiInfrastructureTests(unittest.TestCase):
         )
         self.assertEqual(client_setting["value"], API_CLIENT_ID)
 
+    def test_bicep_module_keeps_platform_egress_unless_a_subnet_is_supplied(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            default = self.webapp(self.snapshot(Path(temporary), ""))["properties"]
+            attached = self.webapp(self.snapshot(Path(temporary), PROVISIONER_ID, EGRESS_SUBNET_ID))["properties"]
+
+        self.assertIsNone(default.get("virtualNetworkSubnetId"))
+        self.assertFalse(default["siteConfig"]["vnetRouteAllEnabled"])
+        self.assertEqual(attached["virtualNetworkSubnetId"], EGRESS_SUBNET_ID)
+        self.assertTrue(attached["siteConfig"]["vnetRouteAllEnabled"])
+
     def test_bicep_module_evaluates_only_supplied_provisioner_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             webapp = self.webapp(self.snapshot(Path(temporary), PROVISIONER_ID))
@@ -182,6 +213,15 @@ class ApiInfrastructureTests(unittest.TestCase):
         regeneration = REGENERATE_INFRA.read_text()
 
         self.assertIn("param provisioner_identity_outputs_id string = ''", module)
+        self.assertIn("param api_egress_subnet_id string = ''", module)
+        self.assertIn("virtualNetworkSubnetId: empty(api_egress_subnet_id) ? null : api_egress_subnet_id", module)
+        self.assertIn("      vnetRouteAllEnabled: !empty(api_egress_subnet_id)", module)
+        self.assertRegex(
+            parameters,
+            r"\{\{ if index \.Env \"AZURE_API_EGRESS_SUBNET_ID\" \}\}\s+"
+            r"param api_egress_subnet_id = '\{\{ \.Env\.AZURE_API_EGRESS_SUBNET_ID \}\}'\s+"
+            r"\{\{ else \}\}\s+param api_egress_subnet_id = ''\s+\{\{ end \}\}",
+        )
         self.assertRegex(
             parameters,
             r"\{\{ if index \.Env \"AZURE_PROVISIONER_IDENTITY_ID\" \}\}\s+"
@@ -206,6 +246,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         documentation = APP_SERVICE_DOC.read_text()
 
         self.assertIn("AZURE_PROVISIONER_IDENTITY_ID", documentation)
+        self.assertIn("AZURE_API_EGRESS_SUBNET_ID", documentation)
         self.assertIn("same Microsoft Entra tenant", documentation)
         self.assertIn("restarts the app", documentation)
         self.assertIn("AZURE_CLIENT_ID` remains", documentation)
@@ -235,8 +276,10 @@ class ApiInfrastructureTests(unittest.TestCase):
     def test_regeneration_patch_restores_the_provisioner_parameter_block_idempotently(self) -> None:
         template = API_PARAMETERS.read_text()
         provisioner_block = re.compile(r'\{\{ if index \.Env "AZURE_PROVISIONER_IDENTITY_ID" \}\}.*?\{\{ end \}\}\n', re.DOTALL)
-        regenerated = provisioner_block.sub("", template, count=1)
+        egress_block = re.compile(r'\{\{ if index \.Env "AZURE_API_EGRESS_SUBNET_ID" \}\}.*?\{\{ end \}\}\n', re.DOTALL)
+        regenerated = egress_block.sub("", provisioner_block.sub("", template, count=1), count=1)
         self.assertNotIn("provisioner_identity_outputs_id", regenerated)
+        self.assertNotIn("api_egress_subnet_id", regenerated)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             module_fixture = root / "infra" / "api" / "api-website.module.bicep"

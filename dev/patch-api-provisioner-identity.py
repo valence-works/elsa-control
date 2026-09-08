@@ -16,6 +16,40 @@ if parameter not in content:
         raise SystemExit("Cannot find the generated API identity parameter anchor.")
     content = content.replace(anchor, f"{anchor}\n{description}\n{parameter}\n", 1)
 
+# Optional static egress (#310): the site joins the delegated NAT subnet only when the host supplies it.
+egress_parameter = "param api_egress_subnet_id string = ''"
+egress_description = (
+    "@description('Optional resource ID of the delegated App Service integration subnet from "
+    "infra/control-egress that carries all API egress through one static NAT address. Empty keeps "
+    "the platform outbound address pool.')"
+)
+if egress_parameter not in content:
+    egress_anchor = f"{parameter}\n"
+    if content.count(egress_anchor) != 1:
+        raise SystemExit("Cannot find the provisioner parameter anchor for the egress parameter.")
+    content = content.replace(egress_anchor, f"{egress_anchor}\n{egress_description}\n{egress_parameter}\n", 1)
+egress_properties = "\n".join(
+    [
+        "    keyVaultReferenceIdentity: api_identity_outputs_id",
+        "    // Regional VNet integration for one static egress (#310); empty keeps the platform pool.",
+        "    virtualNetworkSubnetId: empty(api_egress_subnet_id) ? null : api_egress_subnet_id",
+        "    siteConfig: {",
+        "      numberOfWorkers: 1",
+        "      vnetRouteAllEnabled: !empty(api_egress_subnet_id)",
+    ]
+)
+if egress_properties not in content:
+    properties_anchor = "\n".join(
+        [
+            "    keyVaultReferenceIdentity: api_identity_outputs_id",
+            "    siteConfig: {",
+            "      numberOfWorkers: 1",
+        ]
+    ) + "\n"
+    if content.count(properties_anchor) != 1:
+        raise SystemExit("Cannot find the generated site properties anchor for the egress settings.")
+    content = content.replace(properties_anchor, egress_properties + "\n", 1)
+
 old_identity = "\n".join(
     [
         "  identity: {",
@@ -74,19 +108,30 @@ def patch_parameter_template(parameters_path: Path) -> None:
     if not parameters_path.exists():
         return  # module-only fixtures carry no template
     parameters = parameters_path.read_text()
-    if "provisioner_identity_outputs_id" in parameters:
-        return
     anchor = "param api_identity_outputs_id = '{{ .Env.API_IDENTITY_ID }}'\n"
-    if parameters.count(anchor) != 1:
-        raise SystemExit("Cannot find the generated API identity parameter anchor in the parameter template.")
-    block = (
+    provisioner_block = (
         '{{ if index .Env "AZURE_PROVISIONER_IDENTITY_ID" }}\n'
         "param provisioner_identity_outputs_id = '{{ .Env.AZURE_PROVISIONER_IDENTITY_ID }}'\n"
         "{{ else }}\n"
         "param provisioner_identity_outputs_id = ''\n"
         "{{ end }}\n"
     )
-    parameters_path.write_text(parameters.replace(anchor, anchor + block, 1))
+    if "provisioner_identity_outputs_id" not in parameters:
+        if parameters.count(anchor) != 1:
+            raise SystemExit("Cannot find the generated API identity parameter anchor in the parameter template.")
+        parameters = parameters.replace(anchor, anchor + provisioner_block, 1)
+    egress_block = (
+        '{{ if index .Env "AZURE_API_EGRESS_SUBNET_ID" }}\n'
+        "param api_egress_subnet_id = '{{ .Env.AZURE_API_EGRESS_SUBNET_ID }}'\n"
+        "{{ else }}\n"
+        "param api_egress_subnet_id = ''\n"
+        "{{ end }}\n"
+    )
+    if "api_egress_subnet_id" not in parameters:
+        if parameters.count(provisioner_block) != 1:
+            raise SystemExit("Cannot find the provisioner parameter block to anchor the egress parameter.")
+        parameters = parameters.replace(provisioner_block, provisioner_block + egress_block, 1)
+    parameters_path.write_text(parameters)
 
 
 patch_parameter_template(Path("src/Hosting/ElsaControl.AppHost/infra/api/api.tmpl.bicepparam"))

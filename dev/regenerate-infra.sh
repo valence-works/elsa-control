@@ -21,6 +21,7 @@ preserved_infra_paths=(
     managed-telemetry
     control-deploy-identity
     control-worker-composition
+    control-egress
 )
 preservation_dir="$(mktemp -d)"
 restore_preserved_infra() {
