@@ -1,8 +1,8 @@
 """Re-apply the hand-maintained patches to the Aspire-generated API module and azd parameter template.
 
 Every patch is an idempotent, anchored, single-occurrence replacement: if the patched text is
-already present nothing changes; if the anchor is missing or ambiguous the script exits before
-writing, so a regeneration never leaves a half-patched file behind.
+already present nothing changes; if any anchor is missing or ambiguous the script exits before
+writing either file, so a regeneration never leaves a half-patched or mismatched pair behind.
 """
 from pathlib import Path
 
@@ -20,8 +20,7 @@ def lines(*parts: str) -> str:
     return "\n".join(parts) + "\n"
 
 
-def patch_module(path: Path) -> None:
-    content = path.read_text()
+def patch_module(content: str) -> str:
 
     # Optional provisioner identity: attached only when the host supplies it.
     provisioner_parameter = "param provisioner_identity_outputs_id string = ''"
@@ -98,15 +97,11 @@ def patch_module(path: Path) -> None:
     content = replace_once(content, new_catalog, old_catalog, new_catalog, "generated Catalog authentication setting")
     if content.count(new_catalog) != 1 or old_catalog in content:
         raise SystemExit("Generated Catalog authentication setting is ambiguous.")
+    return content
 
-    path.write_text(content)
 
-
-def patch_parameter_template(parameters_path: Path) -> None:
+def patch_parameter_template(parameters: str) -> str:
     """Re-add the optional host parameters to the regenerated azd parameter template (idempotent)."""
-    if not parameters_path.exists():
-        return  # module-only fixtures carry no template
-    parameters = parameters_path.read_text()
     anchor = "param api_identity_outputs_id = '{{ .Env.API_IDENTITY_ID }}'\n"
     provisioner_block = (
         '{{ if index .Env "AZURE_PROVISIONER_IDENTITY_ID" }}\n'
@@ -128,8 +123,18 @@ def patch_parameter_template(parameters_path: Path) -> None:
     parameters = replace_once(
         parameters, "api_egress_subnet_id", provisioner_block, provisioner_block + egress_block,
         "provisioner parameter block to anchor the egress parameter")
-    parameters_path.write_text(parameters)
+    return parameters
 
 
-patch_module(Path("infra/api/api-website.module.bicep"))
-patch_parameter_template(Path("src/Hosting/ElsaControl.AppHost/infra/api/api.tmpl.bicepparam"))
+def main() -> None:
+    module_path = Path("infra/api/api-website.module.bicep")
+    template_path = Path("src/Hosting/ElsaControl.AppHost/infra/api/api.tmpl.bicepparam")
+    # Render every file first; write only once all anchors validated, so a failure changes nothing.
+    module = patch_module(module_path.read_text())
+    template = patch_parameter_template(template_path.read_text()) if template_path.exists() else None
+    module_path.write_text(module)
+    if template is not None:
+        template_path.write_text(template)
+
+
+main()

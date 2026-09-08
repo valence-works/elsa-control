@@ -316,6 +316,21 @@ class ApiInfrastructureTests(unittest.TestCase):
             self.assertIn("egress", result.stderr)
             self.assertEqual(fixture.read_text(), generated)
 
+    def test_regeneration_writes_nothing_when_the_parameter_template_is_malformed(self) -> None:
+        generated = self.generated_api_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            module_fixture = root / "infra" / "api" / "api-website.module.bicep"
+            module_fixture.parent.mkdir(parents=True)
+            module_fixture.write_text(generated)
+            template_fixture = root / "src" / "Hosting" / "ElsaControl.AppHost" / "infra" / "api" / "api.tmpl.bicepparam"
+            template_fixture.parent.mkdir(parents=True)
+            template_fixture.write_text("using './api-website.module.bicep'\n")
+            result = subprocess.run([sys.executable, str(PATCH_API_IDENTITY)], cwd=temporary, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(module_fixture.read_text(), generated, "module must not be written when the template fails")
+            self.assertEqual(template_fixture.read_text(), "using './api-website.module.bicep'\n")
+
     def run_regeneration_fixture(self, mode: str) -> tuple[subprocess.CompletedProcess[str], Path]:
         """Run regeneration in a disposable project with a fake azd/az pair."""
 
