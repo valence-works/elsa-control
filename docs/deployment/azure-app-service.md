@@ -159,6 +159,13 @@ Required GitHub Actions variables:
   identity values emitted by `azd up` for ACR image pushes.
 - `ELSA_CONTROL_PLANID`: App Service plan resource ID emitted by
   `azd up`.
+- Optional `AZURE_API_EGRESS_SUBNET_ID`: the exact resource ID of the delegated App Service
+  integration subnet created by `infra/control-egress` (#310). When set, the API site joins that
+  subnet with regional VNet integration and routes all outbound traffic through its NAT gateway, so
+  the API has one static egress address for the provider runner's SQL bootstrap firewall rule.
+  Empty keeps the platform outbound address pool. Attaching or detaching restarts the app once.
+  Once the production site is attached, keep this variable set in the azd environment: an
+  `azd provision` without it renders `virtualNetworkSubnetId` as null and detaches the site.
 
 Required GitHub Actions secrets:
 

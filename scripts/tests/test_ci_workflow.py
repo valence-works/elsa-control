@@ -71,6 +71,7 @@ class CiWorkflowTests(unittest.TestCase):
             "python3 scripts/tests/test_managed_lifecycle_slo_sampler.py",
             "python3 scripts/tests/test_control_deploy_identity_infrastructure.py",
             "python3 scripts/tests/test_control_worker_composition.py",
+            "python3 scripts/tests/test_control_egress_infrastructure.py",
             "python3 scripts/tests/test_catalog_rehearsal_harness.py",
             "bash -n scripts/catalog-rehearsal/run-phase.sh",
             "python3 scripts/tests/test_validate_api_provider_image.py",

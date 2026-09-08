@@ -35,6 +35,9 @@ param api_identity_outputs_clientid string
 @description('Optional full resource ID of the dedicated Azure provider provisioner identity. The identity must be in the same Microsoft Entra tenant as this app; it may be hosted in another subscription. Empty preserves the existing API and ACR identity set.')
 param provisioner_identity_outputs_id string = ''
 
+@description('Optional resource ID of the delegated App Service integration subnet from infra/control-egress that carries all API egress through one static NAT address. Empty keeps the platform outbound address pool.')
+param api_egress_subnet_id string = ''
+
 resource mainContainer 'Microsoft.Web/sites/sitecontainers@2025-03-01' = {
   name: 'main'
   properties: {
@@ -53,8 +56,11 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
   properties: {
     serverFarmId: elsa_control_outputs_planid
     keyVaultReferenceIdentity: api_identity_outputs_id
+    // Regional VNet integration for one static egress (#310); empty keeps the platform pool.
+    virtualNetworkSubnetId: empty(api_egress_subnet_id) ? null : api_egress_subnet_id
     siteConfig: {
       numberOfWorkers: 1
+      vnetRouteAllEnabled: !empty(api_egress_subnet_id)
       linuxFxVersion: 'SITECONTAINERS'
       acrUseManagedIdentityCreds: true
       acrUserManagedIdentityID: elsa_control_outputs_azure_container_registry_managed_identity_client_id
