@@ -304,6 +304,18 @@ class ApiInfrastructureTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(fixture.read_text(), generated)
 
+    def test_regeneration_rejects_an_ambiguous_egress_anchor_without_partial_write(self) -> None:
+        generated = self.generated_api_module().replace("      numberOfWorkers: 1\n", "      numberOfWorkers: 2\n", 1)
+        self.assertNotIn("api_egress_subnet_id", generated)
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = Path(temporary) / "infra" / "api" / "api-website.module.bicep"
+            fixture.parent.mkdir(parents=True)
+            fixture.write_text(generated)
+            result = subprocess.run([sys.executable, str(PATCH_API_IDENTITY)], cwd=temporary, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("egress", result.stderr)
+            self.assertEqual(fixture.read_text(), generated)
+
     def run_regeneration_fixture(self, mode: str) -> tuple[subprocess.CompletedProcess[str], Path]:
         """Run regeneration in a disposable project with a fake azd/az pair."""
 
