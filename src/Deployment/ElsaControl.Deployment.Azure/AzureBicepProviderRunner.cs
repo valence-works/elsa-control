@@ -1071,13 +1071,29 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         var candidateState = await ExecuteAzAsync(command,
             ["containerapp", "revision", "show", "--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command),
                 "--name", AppName(command), "--revision", command.Resources.WorkloadRevisionName,
-                "--query", "properties.{active:active,health:healthState}", "--output", "json", "--only-show-errors"],
+                "--query", "properties.{active:active,health:healthState,fqdn:fqdn}", "--output", "json", "--only-show-errors"],
             ParseRevisionStateAsync,
             cancellationToken);
         if (!candidateState.Succeeded || candidateState.Value is null)
             return ProcessFailure(command, AzureProviderOperationPhase.TrafficPromoted, candidateState, command.Resources, mutation: false);
         if (!candidateState.Value.Value.Active || !string.Equals(candidateState.Value.Value.Health, "Healthy", StringComparison.OrdinalIgnoreCase))
             return Failed(command, AzureProviderOperationPhase.TrafficPromoted, "azure.promotion.health-gate", "The candidate revision is not active and healthy.");
+
+        // The platform health state only proves the readiness probe passed at some point. Before any
+        // traffic moves, the exact candidate revision must answer the runtime health contract on its
+        // own revision-scoped endpoint, which is the only route that cannot be served by the stable revision.
+        var candidateHost = CandidateRevisionHost(candidateState.Value.Value.Fqdn, endpoint, AppName(command), command.Resources.WorkloadRevisionName);
+        if (candidateHost is null)
+            return Failed(command, AzureProviderOperationPhase.TrafficPromoted, "azure.promotion.candidate-endpoint-invalid", "The candidate revision endpoint is missing or outside the workload origin.");
+        var readiness = await ExecuteHealthProbeAsync(command, $"https://{candidateHost}/health", cancellationToken);
+        if (!readiness.Succeeded)
+            return ProcessFailure(command, AzureProviderOperationPhase.TrafficPromoted, readiness, command.Resources, mutation: false,
+                failedCode: "azure.promotion.candidate-unready", failedMessage: "The candidate revision did not answer its readiness route.");
+        var candidateReadiness = ClassifyRuntimeHealth(readiness.Value?.Value);
+        if (candidateReadiness != RuntimeHealthReport.Healthy)
+            return candidateReadiness == RuntimeHealthReport.NotHealthy
+                ? Failed(command, AzureProviderOperationPhase.TrafficPromoted, "azure.promotion.candidate-not-ready", "The candidate revision reports it is not healthy.")
+                : Failed(command, AzureProviderOperationPhase.TrafficPromoted, "azure.promotion.candidate-readiness-invalid", "The candidate revision readiness response is outside the health contract.");
 
         EnsureMutationAuthority(command);
         var promoted = await ExecuteAzAsync<AzureCommandNoOutput>(command,
@@ -1094,8 +1110,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 ? Uncertain(command, AzureProviderOperationPhase.TrafficPromoted, "azure.promotion.traffic-uncertain", "Candidate traffic promotion could not be confirmed.")
                 : Uncertain(command, AzureProviderOperationPhase.TrafficPromoted, "azure.promotion.traffic-invalid", "Candidate traffic did not reach the required single-revision state.");
 
-        var health = await ExecuteCurlAsync(command, $"{endpoint.TrimEnd('/')}/health", cancellationToken);
-        if (!health.Succeeded)
+        var health = await ExecuteHealthProbeAsync(command, $"{endpoint.TrimEnd('/')}/health", cancellationToken);
+        if (!health.Succeeded || ClassifyRuntimeHealth(health.Value?.Value) != RuntimeHealthReport.Healthy)
             return Uncertain(command, AzureProviderOperationPhase.TrafficPromoted, "azure.promotion.health-uncertain", "Candidate external health could not be confirmed.", command.Resources);
 
         return Completed(
@@ -1366,14 +1382,54 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         return await _process.ExecuteAsync(request, projector, cancellationToken);
     }
 
-    private async Task<AzureCommandProcessResult<AzureCommandNoOutput>> ExecuteCurlAsync(AzureProviderRunnerCommand command, string endpoint, CancellationToken cancellationToken)
+    /// <summary>
+    /// Probes a runtime health route and returns its bounded body. The runtime health contract is a
+    /// short plain-text report (<c>Healthy</c>, <c>Degraded</c> or <c>Unhealthy</c>) matched byte-exact;
+    /// anything longer than <see cref="MaximumHealthReportCharacters"/> is rejected before it is inspected.
+    /// </summary>
+    private async Task<AzureCommandProcessResult<SafeValue<string>>> ExecuteHealthProbeAsync(AzureProviderRunnerCommand command, string endpoint, CancellationToken cancellationToken)
     {
         _options.ValidateExecutionAuthority(command.Context, _scope);
         var request = new AzureCommandProcessRequest(
             _options.CurlPath,
             new[] { "--fail", "--silent", "--show-error", "--retry", "30", "--retry-all-errors", "--retry-delay", "5", "--max-time", "10", endpoint }
                 .Select(AzureCommandArgument.Safe).ToArray());
-        return await _process.ExecuteAsync<AzureCommandNoOutput>(request, static _ => AzureCommandNoOutput.Instance, cancellationToken);
+        return await _process.ExecuteAsync(request, ParseHealthReportAsync, cancellationToken);
+    }
+
+    private const int MaximumHealthReportCharacters = 64;
+
+    private enum RuntimeHealthReport { Healthy, NotHealthy, Invalid }
+
+    // The report is kept byte-exact: padding or line endings are outside the contract and fail closed.
+    private static SafeValue<string> ParseHealthReportAsync(ReadOnlyMemory<char> output) =>
+        output.Length <= MaximumHealthReportCharacters ? new(output.ToString()) : throw new FormatException();
+
+    private static RuntimeHealthReport ClassifyRuntimeHealth(string? report) => report switch
+    {
+        "Healthy" => RuntimeHealthReport.Healthy,
+        "Degraded" or "Unhealthy" => RuntimeHealthReport.NotHealthy,
+        _ => RuntimeHealthReport.Invalid
+    };
+
+    /// <summary>
+    /// The candidate revision's own host is exactly <c>{revision}.{environment domain}</c>, where the
+    /// environment domain is the workload origin host without its <c>{app}.</c> prefix. Any other value
+    /// (missing, foreign domain, another revision, scheme or path) is rejected so the readiness probe
+    /// can never be answered by the stable revision or an unrelated host.
+    /// </summary>
+    private static string? CandidateRevisionHost(string? revisionFqdn, string endpoint, string appName, string revisionName)
+    {
+        var host = revisionFqdn?.Trim();
+        if (string.IsNullOrEmpty(host) || host.Length > 253 || host.Any(c => !(char.IsAsciiLetterLower(c) || char.IsAsciiDigit(c) || c is '-' or '.')))
+            return null;
+        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var origin) || origin.HostNameType != UriHostNameType.Dns)
+            return null;
+        var prefix = $"{appName}.";
+        if (!origin.Host.StartsWith(prefix, StringComparison.Ordinal) || !revisionName.StartsWith($"{appName}--", StringComparison.Ordinal))
+            return null;
+        var expected = $"{revisionName}.{origin.Host[prefix.Length..]}";
+        return string.Equals(host, expected, StringComparison.Ordinal) ? host : null;
     }
 
     private async Task<bool?> WaitForRoleAssignmentAsync(AzureProviderRunnerCommand command, string registryId, string principalId, string expectedAssignmentId, CancellationToken cancellationToken)
@@ -2027,7 +2083,13 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             ? "The persisted registry resource references are incomplete."
             : null);
 
-    private static AzureProviderRunnerResult ProcessFailure<T>(AzureProviderRunnerCommand command, AzureProviderOperationPhase phase, AzureCommandProcessResult<T> result, AzureProviderResourceReferences resources, bool mutation)
+    /// <summary>
+    /// Maps a process result to the runner outcome. Cancellation and unproven termination are always
+    /// Uncertain; a plain failure is Uncertain after a mutation and Failed before one, where callers may
+    /// supply a more specific policy code for the Failed case.
+    /// </summary>
+    private static AzureProviderRunnerResult ProcessFailure<T>(AzureProviderRunnerCommand command, AzureProviderOperationPhase phase, AzureCommandProcessResult<T> result, AzureProviderResourceReferences resources, bool mutation,
+        string failedCode = "azure.step.failed", string failedMessage = "The Azure lifecycle observation failed.")
         where T : AzureCommandSafeOutput =>
         result.Status is AzureCommandProcessStatus.TerminationUncertain || result.FailureKind is AzureCommandProcessFailureKind.TerminationUncertain
             ? Uncertain(command, phase, "azure.step.termination-uncertain", "The Azure lifecycle process could not be proven terminated, so the external result requires recovery.", resources, result.FailureKind)
@@ -2035,7 +2097,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 ? Uncertain(command, phase, "azure.step.cancelled", "The Azure lifecycle step was interrupted before its result was confirmed.", resources, result.FailureKind)
             : mutation
                 ? Uncertain(command, phase, "azure.step.uncertain", "The Azure lifecycle step failed before its external result was confirmed.", resources, result.FailureKind)
-                : Failed(command, phase, "azure.step.failed", "The Azure lifecycle observation failed.", resources, result.FailureKind);
+                : Failed(command, phase, failedCode, failedMessage, resources, result.FailureKind);
 
     private static AzureProviderRunnerResult Completed(AzureProviderRunnerCommand command, AzureProviderOperationPhase phase, AzureProviderResourceReferences resources, bool noOp = false, AzureProviderHealth health = AzureProviderHealth.Unknown, string? endpoint = null, bool stableTrafficRestored = false) =>
         new(noOp ? AzureProviderRunnerOutcome.NoOp : AzureProviderRunnerOutcome.Completed, phase, resources, health, endpoint, [], noOp ? "azure.step.no-op" : "azure.step.completed", noOp ? "The Azure lifecycle step was already converged." : "The Azure lifecycle step completed.", StableTrafficRestored: stableTrafficRestored);
@@ -2437,7 +2499,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private sealed class DeletedVaultProperties { public string? Location { get; set; } public string? VaultId { get; set; } }
     private sealed class AdminRecord { public string? Login { get; set; } public string? Sid { get; set; } }
     private sealed class TrafficEntry { public string? RevisionName { get; set; } public int Weight { get; set; } }
-    private sealed class RevisionState { public bool Active { get; set; } public string? Health { get; set; } }
+    private sealed class RevisionState { public bool Active { get; set; } public string? Health { get; set; } public string? Fqdn { get; set; } }
     private sealed class AzureSecretSeedMetadata
     {
         public string? ManagedBy { get; set; }

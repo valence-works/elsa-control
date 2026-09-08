@@ -10,6 +10,22 @@ namespace ElsaControl.Deployment.Azure.Tests;
 public sealed class AzureBicepProviderRunnerTests : IDisposable
 {
     private const string OwnedGroupTags = "{\"managed-by\":\"elsa-control\",\"owner\":\"elsa-control\",\"workload-name\":\"proof\",\"sqlBootstrapObjectId\":\"11111111-1111-1111-1111-111111111111\"}";
+
+    private const string HealthyCandidateRevision = "{\"active\":true,\"health\":\"Healthy\",\"fqdn\":\"proof-app--candidate.hash.azurecontainerapps.io\"}";
+
+    private static bool IsCandidateReadinessProbe(string[] args) =>
+        args.Contains("--fail") && args.Contains("https://proof-app--candidate.hash.azurecontainerapps.io/health");
+
+    private AzureProviderResourceReferences PromotionResources() => _fixture.FoundationResources with
+    {
+        RegistryResourceId = _fixture.RegistryId,
+        AcrPullDeploymentId = _fixture.RegistryDeploymentId,
+        AcrPullRoleAssignmentId = _fixture.RegistryRoleAssignmentId,
+        WorkloadResourceId = _fixture.AppId,
+        WorkloadDeploymentId = _fixture.WorkloadDeploymentId,
+        WorkloadRevisionName = "proof-app--candidate",
+        StableTrafficRevisionName = "proof-app--stable"
+    };
     private const string ExactSqlBootstrapFirewall = "[{\"name\":\"elsa-bootstrap\",\"startIpAddress\":\"203.0.113.10\",\"endIpAddress\":\"203.0.113.10\"}]";
     private readonly RunnerFixture _fixture = new();
 
@@ -873,18 +889,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         var process = new FakeCommandProcess();
         process.Success(args => args.Contains("containerapp") && args.Contains("show") && args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
         process.Success(args => args.Contains("containerapp") && args.Contains("revision") && args.Contains("show"), "{\"active\":true,\"health\":\"Degraded\"}");
-        var resources = _fixture.FoundationResources with
-        {
-            RegistryResourceId = _fixture.RegistryId,
-            AcrPullDeploymentId = _fixture.RegistryDeploymentId,
-            AcrPullRoleAssignmentId = _fixture.RegistryRoleAssignmentId,
-            WorkloadResourceId = _fixture.AppId,
-            WorkloadDeploymentId = _fixture.WorkloadDeploymentId,
-            WorkloadRevisionName = "proof-app--candidate",
-            StableTrafficRevisionName = "proof-app--stable"
-        };
-
-        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Promotion, resources));
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Promotion, PromotionResources()));
 
         Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
         Assert.Equal("azure.promotion.health-gate", result.Code);
@@ -1674,27 +1679,117 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     {
         var process = new FakeCommandProcess();
         process.Success(args => args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
-        process.Success(args => args.Contains("revision") && args.Contains("show"), "{\"active\":true,\"health\":\"Healthy\"}");
+        process.Success(args => args.Contains("revision") && args.Contains("show"), HealthyCandidateRevision);
+        process.Success(IsCandidateReadinessProbe, "Healthy");
         process.Success(args => args.Contains("traffic") && args.Contains("set"));
         process.Success(args => args.Contains("show") && args.Any(x => x.Contains("traffic", StringComparison.Ordinal)), "[{\"revisionName\":\"proof-app--candidate\",\"weight\":100},{\"revisionName\":\"proof-app--stable\",\"weight\":0}]");
-        process.Success(args => args.Contains("--fail") && args.Any(x => x.Contains("/health", StringComparison.Ordinal)));
-        var resources = _fixture.FoundationResources with
-        {
-            RegistryResourceId = _fixture.RegistryId,
-            AcrPullDeploymentId = _fixture.RegistryDeploymentId,
-            AcrPullRoleAssignmentId = _fixture.RegistryRoleAssignmentId,
-            WorkloadResourceId = _fixture.AppId,
-            WorkloadDeploymentId = _fixture.WorkloadDeploymentId,
-            WorkloadRevisionName = "proof-app--candidate",
-            StableTrafficRevisionName = "proof-app--stable"
-        };
+        process.Success(args => args.Contains("--fail") && args.Contains("https://proof-app.hash.azurecontainerapps.io/health"), "Healthy");
 
-        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Promotion, resources));
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Promotion, PromotionResources()));
 
         Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
         Assert.Equal("proof-app--candidate", result.Resources.StableTrafficRevisionName);
         Assert.Equal("https://proof-app.hash.azurecontainerapps.io", result.Endpoint);
+        var probe = process.Calls.FindIndex(IsCandidateReadinessProbe);
+        var trafficSet = process.Calls.FindIndex(call => call.Contains("traffic") && call.Contains("set"));
+        Assert.True(probe >= 0 && probe < trafficSet, "the candidate readiness probe must precede the traffic shift");
     }
+
+    [Theory]
+    [InlineData("Degraded", "azure.promotion.candidate-not-ready")]
+    [InlineData("Unhealthy", "azure.promotion.candidate-not-ready")]
+    [InlineData("<html>Healthy</html>", "azure.promotion.candidate-readiness-invalid")]
+    [InlineData("", "azure.promotion.candidate-readiness-invalid")]
+    [InlineData("healthy", "azure.promotion.candidate-readiness-invalid")]
+    [InlineData(" Healthy ", "azure.promotion.candidate-readiness-invalid")]
+    [InlineData("Healthy\n", "azure.promotion.candidate-readiness-invalid")]
+    public async Task Promotion_refuses_a_candidate_whose_readiness_report_is_not_healthy(string report, string code)
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
+        process.Success(args => args.Contains("revision") && args.Contains("show"), HealthyCandidateRevision);
+        process.Success(IsCandidateReadinessProbe, report);
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Promotion, PromotionResources()));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
+        Assert.Equal(code, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == code);
+        Assert.Equal("proof-app--stable", result.Resources.StableTrafficRevisionName);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("traffic") && call.Contains("set"));
+    }
+
+    [Fact]
+    public async Task Promotion_rejects_an_oversized_readiness_response_as_invalid_output()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
+        process.Success(args => args.Contains("revision") && args.Contains("show"), HealthyCandidateRevision);
+        process.Success(IsCandidateReadinessProbe, new string('H', 65));
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Promotion, PromotionResources()));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
+        Assert.Equal("azure.promotion.candidate-unready", result.Code);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("traffic") && call.Contains("set"));
+    }
+
+    [Fact]
+    public async Task Promotion_fails_closed_when_the_candidate_readiness_route_does_not_answer()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
+        process.Success(args => args.Contains("revision") && args.Contains("show"), HealthyCandidateRevision);
+        process.Failure(IsCandidateReadinessProbe);
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Promotion, PromotionResources()));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
+        Assert.Equal("azure.promotion.candidate-unready", result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "azure.promotion.candidate-unready");
+        Assert.DoesNotContain(process.Calls, call => call.Contains("traffic") && call.Contains("set"));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("proof-app.hash.azurecontainerapps.io")]
+    [InlineData("proof-app--stable.hash.azurecontainerapps.io")]
+    [InlineData("proof-app--candidate.evil.example")]
+    [InlineData("https://proof-app--candidate.hash.azurecontainerapps.io")]
+    [InlineData("proof-app--candidate.hash.azurecontainerapps.io/health")]
+    public async Task Promotion_refuses_a_candidate_endpoint_outside_the_workload_origin(string fqdn)
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
+        process.Success(args => args.Contains("revision") && args.Contains("show"), "{\"active\":true,\"health\":\"Healthy\",\"fqdn\":\"" + fqdn + "\"}");
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Promotion, PromotionResources()));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
+        Assert.Equal("azure.promotion.candidate-endpoint-invalid", result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "azure.promotion.candidate-endpoint-invalid");
+        Assert.DoesNotContain(process.Calls, call => call.Contains("--fail"));
+        Assert.DoesNotContain(process.Calls, call => call.Contains("traffic") && call.Contains("set"));
+    }
+
+    [Fact]
+    public async Task Promotion_is_uncertain_when_the_promoted_origin_stops_reporting_healthy()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
+        process.Success(args => args.Contains("revision") && args.Contains("show"), HealthyCandidateRevision);
+        process.Success(IsCandidateReadinessProbe, "Healthy");
+        process.Success(args => args.Contains("traffic") && args.Contains("set"));
+        process.Success(args => args.Contains("show") && args.Any(x => x.Contains("traffic", StringComparison.Ordinal)), "[{\"revisionName\":\"proof-app--candidate\",\"weight\":100},{\"revisionName\":\"proof-app--stable\",\"weight\":0}]");
+        process.Success(args => args.Contains("--fail") && args.Contains("https://proof-app.hash.azurecontainerapps.io/health"), "Degraded");
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Promotion, PromotionResources()));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal("azure.promotion.health-uncertain", result.Code);
+        Assert.Equal("proof-app--stable", result.Resources.StableTrafficRevisionName);
+    }
+
 
     [Fact]
     public async Task Stable_traffic_restore_requires_positive_zero_candidate_absence_proof()

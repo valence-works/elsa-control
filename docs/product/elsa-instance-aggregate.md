@@ -336,7 +336,15 @@ For the initial managed Azure path, `CurrentDeploymentReference.EndpointUri` is 
 canonical direct Container Apps managed-TLS **origin**, not a health URL or provider
 resource locator. It therefore uses HTTPS, has a non-empty host, and has no path,
 userinfo, query or fragment. The provider appends `/health` only while verifying the
-runtime; that probe path is not persisted or exposed as the customer endpoint. A
+runtime; that probe path is not persisted or exposed as the customer endpoint. Before
+a candidate revision receives traffic, the provider probes the candidate's own
+revision-scoped host (`{revision}.{environment domain}`, which the stable revision
+cannot answer) and requires the exact plain-text `Healthy` report; a missing or foreign
+host, a non-answering route, a `Degraded`/`Unhealthy` report or any other body fails
+the promotion closed with the stable revision untouched
+(`azure.promotion.candidate-endpoint-invalid`, `azure.promotion.candidate-unready`,
+`azure.promotion.candidate-not-ready`, `azure.promotion.candidate-readiness-invalid`). The
+report is matched byte-exact; padding or line endings fail closed. A
 missing or malformed origin projects provider uncertainty and cannot create an
 identity binding or an openable instance. Front Door, WAF, custom DNS, private
 ingress and multi-region routing remain later endpoint realizations of the same

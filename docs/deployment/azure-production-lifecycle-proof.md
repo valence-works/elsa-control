@@ -100,6 +100,17 @@ preflight. A developer's interactive `az login` is not a valid substitute. Produ
 workspace headers must remain disabled; the fixture actor ID is persisted through the actual
 account/workspace stores and passed to the lifecycle service.
 
+## Promotion readiness expectation
+
+Since #267's health-before-promotion correction, every traffic promotion the workers perform
+probes the candidate revision on its own revision-scoped host (`{revision}.{environment domain}`)
+and requires the plain-text `Healthy` report before `traffic set`. A live upgrade proof therefore
+records the candidate probe preceding the traffic shift and, for the injected unhealthy candidate,
+one of `azure.promotion.candidate-not-ready`, `azure.promotion.candidate-readiness-invalid`,
+`azure.promotion.candidate-unready` or `azure.promotion.candidate-endpoint-invalid` with the
+stable revision still serving. The two-release live proof
+remains open on #267 until it runs against the dogfood instance.
+
 ## What the test proves
 
 The test seeds an isolated actor, organization entitlement, and catalog entry using the real
