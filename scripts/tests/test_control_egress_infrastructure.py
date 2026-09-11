@@ -35,8 +35,11 @@ class ControlEgressTests(unittest.TestCase):
     def test_only_network_egress_resources_are_created(self):
         self.assertEqual(ALLOWED_TYPES, set(self.by_type))
         self.assertEqual(3, len(self.template["resources"]))
-        self.assertEqual("westeurope", self.production["location"]["value"])
-        self.assertEqual(["westeurope"], self.template["parameters"]["location"]["allowedValues"])
+        # The VNet must share the API site's region (regional VNet integration); production Control runs
+        # in Belgium Central, while West Europe is only the customer workload profile.
+        self.assertEqual("belgiumcentral", self.production["location"]["value"])
+        self.assertEqual("[resourceGroup().location]", self.template["parameters"]["location"]["defaultValue"])
+        self.assertNotIn("allowedValues", self.template["parameters"]["location"])
 
     def test_public_ip_is_a_standard_static_ipv4_address(self):
         ip = self.by_type["Microsoft.Network/publicIPAddresses"][0]
