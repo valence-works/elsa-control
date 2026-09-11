@@ -44,7 +44,8 @@ The release inputs are decided on #311: the Elsa preview feed on feedz.io, the A
 already holds AcrPull on the governed registry), the observed blob redirect host, and the keyless
 signing identity of the `elsa-production-image` build workflow on `main` with the GitHub Actions
 issuer. Tighten the signer to version tags before any release is marked Supported.
-`SqlBootstrapIp` waits on the #310 egress deployment.
+`SqlBootstrapIp` is the static NAT address of the #310 egress deployment in Belgium Central; the
+API site routes all outbound traffic through it. No parameter is pending.
 A pending parameter is filled only by editing the parameter file in a reviewed PR. The renderer has
 no command-line override and reads no other parameter file, so a value that was never reviewed
 cannot be rendered. Rehearsals against disposable targets use the #265 proof harness configuration,

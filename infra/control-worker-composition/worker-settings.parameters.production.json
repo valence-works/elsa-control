@@ -4,10 +4,7 @@
     "ProvisionerClientId": "ada5e428-c5d8-4daf-b7f9-9f2c79d23815",
     "ProvisionerPrincipalId": "f9e35dbd-06a3-42ab-a0ce-04fc01a6cde6",
     "ProvisionerIdentityName": "mi-elsa-cloud-provisioner-prod-weu",
-    "SqlBootstrapIp": {
-      "pending": "#310",
-      "reason": "The API needs one static egress address before the runner can open the temporary SQL bootstrap firewall rule."
-    },
+    "SqlBootstrapIp": "9.160.165.252",
     "RuntimeAdminUsername": "elsa-runtime-admin",
     "ReleaseFeedServiceIndex": "https://f.feedz.io/elsa-workflows/elsa-3/nuget/index.json",
     "RegistryDeploymentMetadataRoleDefinitionId": "/subscriptions/8e23037a-420f-4ad0-9594-9d194de29e84/providers/Microsoft.Authorization/roleDefinitions/a821f94b-8f8e-522d-845c-81da8bf0e7c2",

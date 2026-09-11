@@ -61,7 +61,11 @@ class CompositionFilesTests(unittest.TestCase):
                 self.assertNotRegex(value, r"[=;]")
 
     def test_only_the_named_decisions_are_pending(self):
-        self.assertEqual({"SqlBootstrapIp": "#310"}, self.pending)
+        self.assertEqual({}, self.pending)
+
+    def test_sql_bootstrap_address_is_the_control_egress_nat_address(self):
+        # Output of infra/control-egress (#310): the single static address all API egress uses.
+        self.assertEqual("9.160.165.252", self.resolved["SqlBootstrapIp"])
 
     def test_release_verification_binds_the_decided_producer_and_the_api_identity(self):
         self.assertEqual(
@@ -97,19 +101,24 @@ class RenderTests(unittest.TestCase):
     def setUp(self):
         self.workers = renderer.load_template(renderer.WORKER_TEMPLATE)
         self.resolved, self.pending = renderer.load_parameters(renderer.PRODUCTION_PARAMETERS)
-        self.overrides = {"SqlBootstrapIp": "203.0.113.10"}
+        self.overrides = {}
 
-    def test_production_render_is_blocked_while_a_decision_is_pending(self):
+    def test_render_is_blocked_while_a_decision_is_pending(self):
+        resolved = {name: value for name, value in self.resolved.items() if name != "SqlBootstrapIp"}
         with self.assertRaises(renderer.CompositionError) as raised:
-            renderer.render(self.workers, self.resolved, self.pending)
+            renderer.render(self.workers, resolved, {"SqlBootstrapIp": "#310"})
         self.assertIn("#310", str(raised.exception))
         self.assertNotIn("ada5e428", str(raised.exception))
+
+    def test_production_render_succeeds_with_every_decision_made(self):
+        rendered = renderer.render(self.workers, self.resolved, self.pending)
+        self.assertEqual("9.160.165.252", rendered["Deployment__AzureProvider__Runner__SqlBootstrapIp"])
 
     def test_render_with_resolved_decisions_produces_only_template_keys(self):
         rendered = renderer.render(self.workers, self.resolved, self.pending, self.overrides)
         self.assertEqual(set(self.workers), set(rendered))
         self.assertFalse(any("${" in value for value in rendered.values()))
-        self.assertEqual("203.0.113.10", rendered["Deployment__AzureProvider__Runner__SqlBootstrapIp"])
+        self.assertEqual("9.160.165.252", rendered["Deployment__AzureProvider__Runner__SqlBootstrapIp"])
 
     def test_render_refuses_half_enabled_workers(self):
         template = dict(self.workers)
@@ -180,8 +189,7 @@ class RenderTests(unittest.TestCase):
     def test_cli_status_and_pending_exit_code(self):
         self.assertEqual(0, renderer.main(["status"]))
         with tempfile.TemporaryDirectory() as directory:
-            self.assertEqual(2, renderer.main(["workers", "--output", str(Path(directory) / "w.json")]))
-            self.assertFalse((Path(directory) / "w.json").exists())
+            self.assertEqual(0, renderer.main(["workers", "--output", str(Path(directory) / "w.json")]))
             self.assertEqual(0, renderer.main(["release-verification", "--output", str(Path(directory) / "v.json")]))
             self.assertEqual(0, renderer.main(["rollback", "--output", str(Path(directory) / "r.json")]))
 
