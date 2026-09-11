@@ -19,7 +19,7 @@ route-all only affects application traffic, not the platform's own configuration
 | File | Purpose |
 | --- | --- |
 | `main.bicep` | VNet, delegated subnet, NAT gateway, static public IP; outputs the subnet id and the egress address. |
-| `main.parameters.production.json` | Production names (`vnet-valence-control-prod-weu`, `snet-api-egress`, `natgw-valence-control-prod-weu`, `pip-natgw-valence-control-prod-weu`) and address space (`10.60.0.0/24`, subnet `/26`). |
+| `main.parameters.production.json` | Production region `belgiumcentral` (the API site's region; regional VNet integration requires the same region), names (`vnet-valence-control-prod-weu`, `snet-api-egress`, `natgw-valence-control-prod-weu`, `pip-natgw-valence-control-prod-weu`) and address space (`10.60.0.0/24`, subnet `/26`). |
 
 The site attachment is not in this template. `dev/patch-api-provisioner-identity.py` adds the optional
 `api_egress_subnet_id` parameter to the Aspire-generated API module (`virtualNetworkSubnetId` and

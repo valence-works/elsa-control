@@ -7,9 +7,8 @@
 // public IP. Nothing here is customer compute; the customer workload subscription is untouched.
 targetScope = 'resourceGroup'
 
-@description('Region of the Control resource group; the governed provider profile is West Europe only.')
-@allowed(['westeurope'])
-param location string = 'westeurope'
+@description('Region of the Control API site. Regional VNet integration requires the VNet in the same region as the app, so this follows the Control resource group rather than the customer workload profile.')
+param location string = resourceGroup().location
 
 @minLength(2)
 @maxLength(64)
