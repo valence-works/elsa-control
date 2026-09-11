@@ -3,20 +3,30 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import type { ReactNode } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppShell } from "@/app/AppShell";
 import { AdminLoginPage, ConsoleNotFoundPage } from "@/app/routes";
 import { AuthProvider } from "@/lib/auth/AuthProvider";
 
 describe("AppShell", () => {
+  let restoreDialogStub: (() => void) | undefined;
+
+  beforeEach(() => {
+    restoreDialogStub = installDialogStub();
+  });
+
   afterEach(() => {
     cleanup();
+    restoreDialogStub?.();
+    restoreDialogStub = undefined;
     vi.unstubAllGlobals();
     if (typeof window.localStorage?.clear === "function") {
       window.localStorage.clear();
     }
     document.documentElement.classList.remove("dark");
+    document.documentElement.removeAttribute("data-console-theme");
     document.documentElement.removeAttribute("data-theme-accent");
+    document.documentElement.removeAttribute("style");
   });
 
   it("renders the unified Elsa Control navigation with package catalog active links", async () => {
@@ -58,31 +68,60 @@ describe("AppShell", () => {
     buildLabels.forEach((label) => expect(label).toHaveTextContent("Build 2026.05.16.7"));
   });
 
-  it("toggles between light and dark mode", async () => {
+  it("changes the selected theme and color mode without disturbing the console content", async () => {
     renderAppShell();
 
+    const overviewLinksBefore = screen.getAllByRole("link", { name: "Overview" });
+    expect(document.documentElement).toHaveAttribute("data-console-theme", "classic");
     expect(document.documentElement).not.toHaveClass("dark");
 
-    await userEvent.click(screen.getAllByRole("button", { name: "Switch to dark mode" })[0]);
+    await userEvent.click(screen.getAllByRole("button", { name: "Appearance" })[0]);
 
+    expect(screen.getByRole("dialog", { name: "Appearance" })).toHaveAttribute("open");
+    expect(screen.getByRole("radio", { name: "Classic" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Light" })).toBeChecked();
+
+    await userEvent.click(screen.getByRole("radio", { name: "Operations Canvas" }));
+    expect(document.documentElement).toHaveAttribute("data-console-theme", "operations-canvas");
+    expect(screen.getAllByRole("link", { name: "Overview" })).toHaveLength(overviewLinksBefore.length);
+    expect(screen.getAllByText("Elsa Control").length).toBeGreaterThan(0);
+
+    await userEvent.click(screen.getByRole("radio", { name: "Dark" }));
+
+    expect(document.documentElement).toHaveAttribute("data-console-theme", "operations-canvas");
     expect(document.documentElement).toHaveClass("dark");
     expect(window.localStorage.getItem("elsa-control-console-theme")).toBe("dark");
-    expect(screen.getAllByRole("button", { name: "Switch to light mode" }).length).toBeGreaterThan(0);
+    expect(window.localStorage.getItem("elsa-control-console-theme-accent")).toBe("teal");
   });
 
-  it("stores the selected accent theme", async () => {
+  it("stores the Classic accent and keeps the selection after closing and reopening Appearance", async () => {
     renderAppShell();
 
-    const accentPickers = screen.getAllByRole("combobox", { name: "Theme accent" });
-    expect(accentPickers).toHaveLength(2);
-    expect(accentPickers[0]).toHaveValue("teal");
+    await userEvent.click(screen.getAllByRole("button", { name: "Appearance" })[0]);
+
+    const dialog = screen.getByRole("dialog", { name: "Appearance" });
+    const accentPicker = screen.getByRole("combobox", { name: "Theme accent" });
+    expect(accentPicker).toHaveValue("teal");
     await waitFor(() => expect(document.documentElement).toHaveAttribute("data-theme-accent", "teal"));
 
-    await userEvent.selectOptions(accentPickers[0], "violet");
+    await userEvent.selectOptions(accentPicker, "violet");
 
-    expect(accentPickers[0]).toHaveValue("violet");
+    expect(accentPicker).toHaveValue("violet");
     expect(document.documentElement).toHaveAttribute("data-theme-accent", "violet");
     expect(window.localStorage.getItem("elsa-control-console-theme-accent")).toBe("violet");
+
+    const persisted = JSON.parse(window.localStorage.getItem("elsa-control-console-appearance") ?? "null") as Record<string, unknown>;
+    expect(persisted).toMatchObject({ version: 1, themeId: "classic", mode: "light", accent: "violet" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Close appearance" }));
+    expect(dialog).not.toHaveAttribute("open");
+
+    await userEvent.click(screen.getAllByRole("button", { name: "Appearance" })[0]);
+
+    expect(screen.getByRole("dialog", { name: "Appearance" })).toHaveAttribute("open");
+    expect(screen.getByRole("radio", { name: "Classic" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Light" })).toBeChecked();
+    expect(screen.getByRole("combobox", { name: "Theme accent" })).toHaveValue("violet");
   });
 
   it("opens Weaver as a global assistant drawer", async () => {
@@ -342,6 +381,39 @@ function installLocalStorageStub() {
       clear: () => storage.clear()
     }
   });
+}
+
+function installDialogStub() {
+  const dialogPrototype = HTMLDialogElement.prototype as unknown as Record<string, unknown>;
+  const previousShowModal = dialogPrototype.showModal;
+  const previousClose = dialogPrototype.close;
+
+  Object.defineProperty(dialogPrototype, "showModal", {
+    configurable: true,
+    value: vi.fn(function (this: HTMLDialogElement) {
+      this.setAttribute("open", "");
+    })
+  });
+  Object.defineProperty(dialogPrototype, "close", {
+    configurable: true,
+    value: vi.fn(function (this: HTMLDialogElement) {
+      this.removeAttribute("open");
+      this.dispatchEvent(new Event("close"));
+    })
+  });
+
+  return () => {
+    if (previousShowModal === undefined) {
+      delete dialogPrototype.showModal;
+    } else {
+      Object.defineProperty(dialogPrototype, "showModal", { configurable: true, value: previousShowModal });
+    }
+    if (previousClose === undefined) {
+      delete dialogPrototype.close;
+    } else {
+      Object.defineProperty(dialogPrototype, "close", { configurable: true, value: previousClose });
+    }
+  };
 }
 
 function TestQueryProvider({ children }: { children: ReactNode }) {

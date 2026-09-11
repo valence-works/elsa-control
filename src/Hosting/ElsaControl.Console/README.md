@@ -50,6 +50,35 @@ mutations before backend contracts exist. The catalog module must not include
 Settings, package identity approval controls, hard-delete source controls,
 realtime streaming logs, or manifest editing.
 
+## Console themes
+
+Open **Appearance** in the shell to choose Classic, Operations Canvas, Command
+Deck, or Topology Atlas. Each supports Light, Dark, and System mode. Classic also
+retains the existing accent choices. Changes apply immediately without replacing
+page content or navigation. Preferences belong to the current browser, persist
+across reloads, and synchronize across tabs; they are not account settings.
+When browser storage is unavailable, choices last for the current page session.
+There is no in-app feedback collection or telemetry.
+
+`src/lib/theme/themes.ts` is the theme registry. Each theme has a stable ID,
+display name, version, complete light/dark semantic palettes, font stacks, and a
+corner radius. To add a theme, extend `ThemeId` and add a complete registry entry;
+the selector and previews discover it automatically. Increment a theme's version
+when its visual design changes so feedback can identify the revision (the card's
+tooltip shows the version). Use already loaded fonts or update `index.html`.
+
+Components use semantic Tailwind utilities such as `bg-surface`, `text-foreground`,
+`text-primary`, `font-display`, and `rounded-ui`. Avoid theme-specific component
+branches and hardcoded colors. `ThemeProvider` maps registry values to CSS
+variables; `initializeTheme()` applies saved preferences before React renders.
+`styles.css` contains the Classic light fallback and shared appearance UI styles.
+
+The versioned `elsa-control-console-appearance` record is authoritative. The old
+theme/accent keys are migrated and retained for older bundles. Invalid settings
+fall back safely. New palettes should be checked in both modes for text contrast,
+focus visibility, controls, validation states, and narrow screens. Run the console
+quality gates above after changing the framework.
+
 ## Deployment
 
 The production API container builds this app and serves it from `/admin`. Vite is

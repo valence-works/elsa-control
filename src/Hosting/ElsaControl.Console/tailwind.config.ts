@@ -19,11 +19,11 @@ export default {
         success: "hsl(var(--success))"
       },
       borderRadius: {
-        ui: "8px"
+        ui: "var(--radius-ui, 8px)"
       },
       fontFamily: {
-        display: ["Space Grotesk", "Inter", "ui-sans-serif", "system-ui", "sans-serif"],
-        mono: ["JetBrains Mono", "ui-monospace", "SFMono-Regular", "Menlo", "monospace"]
+        display: ["var(--font-display)"],
+        mono: ["var(--font-mono)"]
       }
     }
   },

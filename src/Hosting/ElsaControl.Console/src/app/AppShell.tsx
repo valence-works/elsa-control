@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
@@ -14,12 +14,10 @@ import {
   Home,
   KeyRound,
   Layers3,
-  Moon,
   PackageSearch,
   Palette,
   Rocket,
   ShieldCheck,
-  Sun,
   Terminal,
   WalletCards,
 } from "lucide-react";
@@ -32,6 +30,8 @@ import { useAuth } from "@/lib/auth/AuthProvider";
 import { queryKeys } from "@/lib/query/queryClient";
 import { cn } from "@/lib/utils";
 import { Select } from "@/components/ui";
+import { ThemeProvider } from "@/lib/theme/ThemeProvider";
+import { AppearanceDialog } from "@/components/appearance/AppearanceDialog";
 
 type NavItem = {
   to: string;
@@ -90,42 +90,19 @@ const navSections: Array<{ label: string; items: NavItem[] }> = [
   }
 ];
 
-type Theme = "light" | "dark";
-type ThemeAccent = "teal" | "blue" | "violet" | "amber" | "rose";
-
-const themeAccentStorageKey = "elsa-control-console-theme-accent";
-
-const themeAccents: Array<{ value: ThemeAccent; label: string }> = [
-  { value: "teal", label: "Teal" },
-  { value: "blue", label: "Blue" },
-  { value: "violet", label: "Violet" },
-  { value: "amber", label: "Amber" },
-  { value: "rose", label: "Rose" }
-];
-
 export function AppShell() {
-  const [theme, setTheme] = useTheme();
-  const [themeAccent, setThemeAccent] = useThemeAccent();
-
   return (
-    <WorkspaceContextProvider>
-      <AppShellLayout theme={theme} themeAccent={themeAccent} onThemeChange={setTheme} onThemeAccentChange={setThemeAccent} />
-    </WorkspaceContextProvider>
+    <ThemeProvider>
+      <WorkspaceContextProvider>
+        <AppShellLayout />
+      </WorkspaceContextProvider>
+    </ThemeProvider>
   );
 }
 
-function AppShellLayout({
-  theme,
-  themeAccent,
-  onThemeChange,
-  onThemeAccentChange
-}: {
-  theme: Theme;
-  themeAccent: ThemeAccent;
-  onThemeChange: (theme: Theme) => void;
-  onThemeAccentChange: (themeAccent: ThemeAccent) => void;
-}) {
+function AppShellLayout() {
   const [weaverOpen, setWeaverOpen] = useState(false);
+  const [appearanceOpen, setAppearanceOpen] = useState(false);
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -137,8 +114,7 @@ function AppShellLayout({
               <p className="text-xs text-muted-foreground">Control Console</p>
             </div>
             <div className="flex shrink-0 items-center gap-1">
-              <ThemeAccentPicker themeAccent={themeAccent} onThemeAccentChange={onThemeAccentChange} />
-              <ThemeToggle theme={theme} onThemeChange={onThemeChange} />
+              <AppearanceTrigger onClick={() => setAppearanceOpen(true)} />
             </div>
           </div>
           <OrganizationWorkspaceSwitcher className="mb-5" />
@@ -155,8 +131,7 @@ function AppShellLayout({
             </div>
             <div className="flex shrink-0 items-center gap-2">
               <WeaverTrigger onClick={() => setWeaverOpen(true)} compact />
-              <ThemeAccentPicker themeAccent={themeAccent} onThemeAccentChange={onThemeAccentChange} compact />
-              <ThemeToggle theme={theme} onThemeChange={onThemeChange} />
+              <AppearanceTrigger onClick={() => setAppearanceOpen(true)} compact />
             </div>
           </div>
           <OrganizationWorkspaceSwitcher compact className="mb-2" />
@@ -170,7 +145,6 @@ function AppShellLayout({
             </div>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <WeaverTrigger onClick={() => setWeaverOpen(true)} />
-              <ThemeToggle theme={theme} onThemeChange={onThemeChange} />
             </div>
           </div>
         </header>
@@ -179,140 +153,19 @@ function AppShellLayout({
         </main>
       </div>
       <WeaverAssistantPanel open={weaverOpen} onClose={() => setWeaverOpen(false)} />
+      <AppearanceDialog open={appearanceOpen} onClose={() => setAppearanceOpen(false)} />
     </div>
   );
 }
 
-function useTheme(): [Theme, (theme: Theme) => void] {
-  const [theme, setThemeState] = useState<Theme>(() => {
-    return getStoredTheme();
-  });
-
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
-    storeTheme(theme);
-  }, [theme]);
-
-  return [theme, setThemeState];
-}
-
-function useThemeAccent(): [ThemeAccent, (themeAccent: ThemeAccent) => void] {
-  const [themeAccent, setThemeAccentState] = useState<ThemeAccent>(() => {
-    return getStoredThemeAccent();
-  });
-
-  useEffect(() => {
-    document.documentElement.dataset.themeAccent = themeAccent;
-    storeThemeAccent(themeAccent);
-  }, [themeAccent]);
-
-  return [themeAccent, setThemeAccentState];
-}
-
-function getStoredTheme(): Theme {
-  if (typeof window === "undefined" || typeof window.localStorage?.getItem !== "function") {
-    return "light";
-  }
-
-  try {
-    return window.localStorage.getItem("elsa-control-console-theme") === "dark" ? "dark" : "light";
-  } catch {
-    return "light";
-  }
-}
-
-function storeTheme(theme: Theme) {
-  if (typeof window === "undefined" || typeof window.localStorage?.setItem !== "function") {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem("elsa-control-console-theme", theme);
-  } catch {
-    // Theme persistence is optional; the UI should continue to work without browser storage.
-  }
-}
-
-function getStoredThemeAccent(): ThemeAccent {
-  if (typeof window === "undefined" || typeof window.localStorage?.getItem !== "function") {
-    return "teal";
-  }
-
-  try {
-    return parseThemeAccent(window.localStorage.getItem(themeAccentStorageKey));
-  } catch {
-    return "teal";
-  }
-}
-
-function storeThemeAccent(themeAccent: ThemeAccent) {
-  if (typeof window === "undefined" || typeof window.localStorage?.setItem !== "function") {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(themeAccentStorageKey, themeAccent);
-  } catch {
-    // Theme persistence is optional; the UI should continue to work without browser storage.
-  }
-}
-
-function parseThemeAccent(value: string | null): ThemeAccent {
-  return themeAccents.some((themeAccent) => themeAccent.value === value) ? (value as ThemeAccent) : "teal";
-}
-
-function ThemeToggle({ theme, onThemeChange }: { theme: Theme; onThemeChange: (theme: Theme) => void }) {
-  const nextTheme = theme === "dark" ? "light" : "dark";
-  const Icon = theme === "dark" ? Sun : Moon;
-
+function AppearanceTrigger({ compact = false, onClick }: { compact?: boolean; onClick: () => void }) {
   return (
-    <button
-      type="button"
-      aria-label={`Switch to ${nextTheme} mode`}
-      aria-pressed={theme === "dark"}
-      className="inline-flex h-8 w-8 items-center justify-center rounded-ui border border-border bg-background text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-      onClick={() => onThemeChange(nextTheme)}
+    <button type="button" aria-label="Appearance" aria-haspopup="dialog" onClick={onClick}
+      className="inline-flex h-8 shrink-0 items-center justify-center gap-2 rounded-ui border border-border bg-background px-2 text-xs text-foreground hover:bg-muted"
     >
-      <Icon aria-hidden className="h-4 w-4" />
+      <Palette aria-hidden className="h-4 w-4 text-primary" />
+      {compact ? null : 'Appearance'}
     </button>
-  );
-}
-
-function ThemeAccentPicker({
-  themeAccent,
-  compact = false,
-  onThemeAccentChange
-}: {
-  themeAccent: ThemeAccent;
-  compact?: boolean;
-  onThemeAccentChange: (themeAccent: ThemeAccent) => void;
-}) {
-  return (
-    <label
-      className={cn(
-        "relative inline-flex h-8 items-center gap-1 rounded-ui border border-border bg-background px-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-primary",
-        compact ? "max-w-[7rem]" : "max-w-[8rem]"
-      )}
-      title="Theme accent"
-    >
-      <Palette aria-hidden className="h-4 w-4 shrink-0 text-primary" />
-      <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">
-        {themeAccents.find((item) => item.value === themeAccent)?.label ?? "Teal"}
-      </span>
-      <select
-        aria-label="Theme accent"
-        className="theme-accent-picker-select absolute inset-0 h-full w-full cursor-pointer appearance-none rounded-ui bg-transparent opacity-0"
-        value={themeAccent}
-        onChange={(event) => onThemeAccentChange(parseThemeAccent(event.target.value))}
-      >
-        {themeAccents.map((item) => (
-          <option key={item.value} value={item.value}>
-            {item.label}
-          </option>
-        ))}
-      </select>
-      <ChevronDown aria-hidden className="h-3 w-3 shrink-0 text-muted-foreground" />
-    </label>
   );
 }
 
