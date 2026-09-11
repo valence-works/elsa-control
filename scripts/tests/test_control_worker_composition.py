@@ -56,8 +56,8 @@ class CompositionFilesTests(unittest.TestCase):
     def test_production_parameters_are_non_secret_identifiers(self):
         for name, value in self.resolved.items():
             with self.subTest(name=name):
-                self.assertTrue(any(shape.match(value) for shape in renderer.PARAMETER_SHAPES),
-                                f"{name} does not look like an identifier")
+                shapes = (renderer.NAMED_PARAMETER_SHAPES[name],) if name in renderer.NAMED_PARAMETER_SHAPES else renderer.PARAMETER_SHAPES
+                self.assertTrue(any(shape.match(value) for shape in shapes), f"{name} does not look like an identifier")
                 self.assertNotRegex(value, r"[=;]")
 
     def test_only_the_named_decisions_are_pending(self):
@@ -69,8 +69,8 @@ class CompositionFilesTests(unittest.TestCase):
             self.resolved["ReleaseProducerSignatureSubject"])
         self.assertEqual("https://token.actions.githubusercontent.com", self.resolved["ReleaseProducerOidcIssuer"])
         self.assertEqual("c5055d7d-d66d-468d-8984-077214496243", self.resolved["ReleaseVerificationClientId"])
-        self.assertTrue(self.resolved["ReleaseVerificationBlobRedirectHost"].endswith(".blob.core.windows.net"))
-        self.assertNotIn("*", self.resolved["ReleaseVerificationBlobRedirectHost"])
+        self.assertEqual("becmanaged36.blob.core.windows.net", self.resolved["ReleaseVerificationBlobRedirectHost"])
+        self.assertEqual("https://f.feedz.io/elsa-workflows/elsa-3/nuget/index.json", self.resolved["ReleaseFeedServiceIndex"])
         rendered = renderer.render(self.verification, self.resolved, self.pending)
         self.assertEqual("valenceruntimeimages.azurecr.io", rendered["ReleaseCatalog__Verification__RegistryHost"])
 
@@ -137,6 +137,18 @@ class RenderTests(unittest.TestCase):
                 path.write_text(json.dumps({key: "x"}))
                 with self.assertRaises(renderer.CompositionError, msg=key):
                     renderer.load_template(path)
+
+    def test_signer_identity_accepts_only_an_exact_github_actions_workflow_ref(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "p.json"
+            for value in ("https://example.com/signer", "https://github.com/valence-works/elsa-production-image",
+                          "https://github.com/valence-works/*/.github/workflows/build.yml@refs/heads/main"):
+                path.write_text(json.dumps({"parameters": {"ReleaseProducerSignatureSubject": value}}))
+                with self.assertRaises(renderer.CompositionError, msg=value):
+                    renderer.load_parameters(path)
+            path.write_text(json.dumps({"parameters": {"ReleaseProducerOidcIssuer": "https://issuer.example"}}))
+            with self.assertRaises(renderer.CompositionError):
+                renderer.load_parameters(path)
 
     def test_parameter_loader_refuses_credential_shaped_values(self):
         with tempfile.TemporaryDirectory() as directory:
