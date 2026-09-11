@@ -19,7 +19,7 @@ route-all only affects application traffic, not the platform's own configuration
 | File | Purpose |
 | --- | --- |
 | `main.bicep` | VNet, delegated subnet, NAT gateway, static public IP; outputs the subnet id and the egress address. |
-| `main.parameters.production.json` | Production region `belgiumcentral` (the API site's region; regional VNet integration requires the same region), names (`vnet-valence-control-prod-weu`, `snet-api-egress`, `natgw-valence-control-prod-weu`, `pip-natgw-valence-control-prod-weu`) and address space (`10.60.0.0/24`, subnet `/26`). |
+| `main.parameters.production.json` | Production region `belgiumcentral` (the API site's region; regional VNet integration requires the same region), names (`vnet-valence-control-prod-bec`, `snet-api-egress`, `natgw-valence-control-prod-bec`, `pip-natgw-valence-control-prod-bec`) and address space (`10.60.0.0/24`, subnet `/26`). |
 
 The site attachment is not in this template. `dev/patch-api-provisioner-identity.py` adds the optional
 `api_egress_subnet_id` parameter to the Aspire-generated API module (`virtualNetworkSubnetId` and
@@ -58,7 +58,7 @@ composition before workers run again.
    ```sh
    az webapp vnet-integration add --subscription 8e23037a-420f-4ad0-9594-9d194de29e84 \
      --resource-group rg-valence-control-prod --name api-m5uymkuaf222o \
-     --vnet vnet-valence-control-prod-weu --subnet snet-api-egress
+     --vnet vnet-valence-control-prod-bec --subnet snet-api-egress
    az webapp config set --subscription 8e23037a-420f-4ad0-9594-9d194de29e84 \
      --resource-group rg-valence-control-prod --name api-m5uymkuaf222o \
      --vnet-route-all-enabled true --query vnetRouteAllEnabled

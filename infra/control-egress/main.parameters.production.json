@@ -6,16 +6,16 @@
       "value": "belgiumcentral"
     },
     "virtualNetworkName": {
-      "value": "vnet-valence-control-prod-weu"
+      "value": "vnet-valence-control-prod-bec"
     },
     "subnetName": {
       "value": "snet-api-egress"
     },
     "natGatewayName": {
-      "value": "natgw-valence-control-prod-weu"
+      "value": "natgw-valence-control-prod-bec"
     },
     "publicIpName": {
-      "value": "pip-natgw-valence-control-prod-weu"
+      "value": "pip-natgw-valence-control-prod-bec"
     },
     "virtualNetworkAddressPrefix": {
       "value": "10.60.0.0/24"
