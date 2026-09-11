@@ -40,8 +40,11 @@ with the image-owned cosign and trust-root files stood in by digest-matched fixt
 ## Pending decisions
 
 `python3 scripts/render-worker-settings.py status` lists resolved and pending parameters without values.
-At the time of writing `SqlBootstrapIp` waits on #310 (one static egress address for the API) and the
-release feed, verification identity, blob redirect host and producer identity wait on #311.
+The release inputs are decided on #311: the Elsa preview feed on feedz.io, the API identity (which
+already holds AcrPull on the governed registry), the observed blob redirect host, and the keyless
+signing identity of the `elsa-production-image` build workflow on `main` with the GitHub Actions
+issuer. Tighten the signer to version tags before any release is marked Supported.
+`SqlBootstrapIp` waits on the #310 egress deployment.
 A pending parameter is filled only by editing the parameter file in a reviewed PR. The renderer has
 no command-line override and reads no other parameter file, so a value that was never reviewed
 cannot be rendered. Rehearsals against disposable targets use the #265 proof harness configuration,

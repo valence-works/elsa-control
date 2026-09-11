@@ -58,6 +58,8 @@ PARAMETER_SHAPES = (
     GUID,
     re.compile(r"^/subscriptions/[0-9a-f-]{36}(/resourcegroups/[a-z0-9._()-]+)?(/providers/[a-z0-9./_-]+)+$", re.IGNORECASE),
     re.compile(r"^https://[a-z0-9.-]+(/[a-z0-9._/-]*)?$"),
+    # Keyless-signing workflow identity: an exact GitHub Actions workflow ref, never a wildcard.
+    re.compile(r"^https://github\.com/[a-z0-9-]+/[a-z0-9._-]+/\.github/workflows/[a-z0-9._-]+\.ya?ml@refs/(heads|tags)/[A-Za-z0-9._/-]+$"),
     re.compile(r"^(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])){3}$"),
     re.compile(r"^[a-z][a-z0-9-]{0,62}(\.[a-z0-9-]{1,63})*$"),
 )

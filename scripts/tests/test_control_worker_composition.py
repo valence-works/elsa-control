@@ -14,9 +14,6 @@ renderer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(renderer)
 
 GUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-ARM_ID = re.compile(r"^/subscriptions/[0-9a-f-]{36}(/resourceGroups/[A-Za-z0-9._()-]+)?(/providers/[A-Za-z0-9./_-]+)+$")
-ORIGIN = re.compile(r"^https://[a-z0-9.-]+$")
-TOKEN = re.compile(r"^[A-Za-z0-9._@#-]{1,128}$")
 
 
 class CompositionFilesTests(unittest.TestCase):
@@ -59,20 +56,23 @@ class CompositionFilesTests(unittest.TestCase):
     def test_production_parameters_are_non_secret_identifiers(self):
         for name, value in self.resolved.items():
             with self.subTest(name=name):
-                self.assertTrue(
-                    GUID.match(value) or ARM_ID.match(value) or ORIGIN.match(value) or TOKEN.match(value),
-                    f"{name} does not look like an identifier")
+                self.assertTrue(any(shape.match(value) for shape in renderer.PARAMETER_SHAPES),
+                                f"{name} does not look like an identifier")
                 self.assertNotRegex(value, r"[=;]")
 
     def test_only_the_named_decisions_are_pending(self):
-        self.assertEqual({
-            "SqlBootstrapIp": "#310",
-            "ReleaseFeedServiceIndex": "#311",
-            "ReleaseVerificationClientId": "#311",
-            "ReleaseVerificationBlobRedirectHost": "#311",
-            "ReleaseProducerSignatureSubject": "#311",
-            "ReleaseProducerOidcIssuer": "#311",
-        }, self.pending)
+        self.assertEqual({"SqlBootstrapIp": "#310"}, self.pending)
+
+    def test_release_verification_binds_the_decided_producer_and_the_api_identity(self):
+        self.assertEqual(
+            "https://github.com/valence-works/elsa-production-image/.github/workflows/build-and-push.yml@refs/heads/main",
+            self.resolved["ReleaseProducerSignatureSubject"])
+        self.assertEqual("https://token.actions.githubusercontent.com", self.resolved["ReleaseProducerOidcIssuer"])
+        self.assertEqual("c5055d7d-d66d-468d-8984-077214496243", self.resolved["ReleaseVerificationClientId"])
+        self.assertTrue(self.resolved["ReleaseVerificationBlobRedirectHost"].endswith(".blob.core.windows.net"))
+        self.assertNotIn("*", self.resolved["ReleaseVerificationBlobRedirectHost"])
+        rendered = renderer.render(self.verification, self.resolved, self.pending)
+        self.assertEqual("valenceruntimeimages.azurecr.io", rendered["ReleaseCatalog__Verification__RegistryHost"])
 
     def test_production_scope_binds_the_customer_workload_subscription_and_the_governed_registry(self):
         self.assertEqual("a54cd7b1-3d13-48ce-9dce-5ae013142c85", self.resolved["WorkloadSubscriptionId"])
@@ -97,7 +97,7 @@ class RenderTests(unittest.TestCase):
     def setUp(self):
         self.workers = renderer.load_template(renderer.WORKER_TEMPLATE)
         self.resolved, self.pending = renderer.load_parameters(renderer.PRODUCTION_PARAMETERS)
-        self.overrides = {"SqlBootstrapIp": "203.0.113.10", "ReleaseFeedServiceIndex": "https://api.nuget.org/v3/index.json"}
+        self.overrides = {"SqlBootstrapIp": "203.0.113.10"}
 
     def test_production_render_is_blocked_while_a_decision_is_pending(self):
         with self.assertRaises(renderer.CompositionError) as raised:
@@ -169,8 +169,8 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(0, renderer.main(["status"]))
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(2, renderer.main(["workers", "--output", str(Path(directory) / "w.json")]))
-            self.assertEqual(2, renderer.main(["release-verification", "--output", str(Path(directory) / "v.json")]))
             self.assertFalse((Path(directory) / "w.json").exists())
+            self.assertEqual(0, renderer.main(["release-verification", "--output", str(Path(directory) / "v.json")]))
             self.assertEqual(0, renderer.main(["rollback", "--output", str(Path(directory) / "r.json")]))
 
     def test_cli_has_no_value_override_so_only_the_checked_in_parameters_reach_production(self):
