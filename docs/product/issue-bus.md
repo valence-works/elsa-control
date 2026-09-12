@@ -13,20 +13,22 @@ Issue Bus **extends** the program operating model. It does not replace Definitio
 
 ## Pickup
 
-Canonical query, oldest first:
+Canonical repository query, oldest first:
 
 ```text
 repo:valence-works/elsa-control is:issue is:open label:ready-for-agent -label:blocked -label:needs:decision sort:created-asc
 ```
 
-Optional worker-lane filters when the session is bound to one implementer:
+This query is authoritative for repository-local labels and issue openness. Project Status and Agent State remain required preflight checks.
 
-- Codex: add `label:worker:codex`
-- Claude: add `label:worker:claude`
+Optional worker-lane preference filters when the session is bound to one implementer:
+
+- Codex: first try `label:worker:codex`; if nothing is ready, retry without a lane label and continue to exclude `worker:claude`
+- Claude: first try `label:worker:claude`; if nothing is ready, retry without a lane label and continue to exclude `worker:codex`
 
 If the session is lane-bound, prefer a matching lane issue. Do not take an issue labeled for the other worker. An issue with `ready-for-agent` and no `worker:*` label is available to either worker.
 
-Skip an issue that is already assigned, already has a `claim:` comment, or is a Feature, Epic, or Program. The pickup query is authoritative for eligibility; `type:task` is the usual leaf, and a `type:bug` or `type:spike` that matches the query is also valid.
+Skip an issue that does not have project Status `Ready` and Agent State `Agent Ready`, is already assigned, or is a Feature, Epic, or Program. Treat a `claim:` comment as active only until a later `blocked:` comment or until an operator restores `ready-for-agent`, Status `Ready`, and Agent State `Agent Ready` for requeue. `type:task` is the usual leaf, and a `type:bug` or `type:spike` that satisfies the same readiness checks is also valid.
 
 ## Claim
 
@@ -35,10 +37,11 @@ Before writing code:
 1. Confirm the issue still matches the pickup query and is unassigned.
 2. Self-assign the issue to the agent identity used for this session.
 3. Comment exactly `claim: <codex|claude> starting`.
-4. Remove `ready-for-agent` and move project Status to `In Progress` so other agents skip it. Prefer this over leaving `ready-for-agent` on a claimed issue.
-5. Take only this one Task for the session.
+4. Remove `ready-for-agent`, move project Status to `In Progress`, and set Agent State to `Assigned` so other agents skip it. Prefer this over leaving `ready-for-agent` on a claimed issue.
+5. Re-read the issue after all claim mutations. If more than one session claimed it, the earliest successful `claim:` comment that also completed assignment and state updates wins. A losing session must unassign itself if needed, leave a collision note if cleanup is incomplete, and stop.
+6. Take only this one Task for the session.
 
-If assignment or the claim comment fails, do not start work.
+If any claim mutation fails (assignment, claim comment, label removal, Status update, or Agent State update), do not start work. Clean up any partial claim state that you can revert immediately; if cleanup is incomplete, comment with the failure and stop.
 
 ## While in flight
 
@@ -49,7 +52,7 @@ If assignment or the claim comment fails, do not start work.
 If blocked mid-flight:
 
 1. Comment `blocked: <reason>`.
-2. Add the `blocked` label.
+2. Add the `blocked` label and move project Status to `Blocked`.
 3. Unassign.
 4. Stop. Do not keep the branch as an implicit claim.
 
@@ -57,7 +60,7 @@ If blocked mid-flight:
 
 - One PR per claimed Task.
 - The PR body uses `Fixes #<task>` for the claimed leaf issue only. Reference parent Features and Epics (`Part of #…`, `Refs #…`) but never `Fixes` or `Closes` a parent Feature or Epic.
-- After the PR exists, comment `pr: <url>` on the claimed issue.
+- After the PR exists, move project Status to `In Review`, set Agent State to `Review Required`, and comment `pr: <url>` on the claimed issue.
 - Attach or describe the validation evidence required by the Task and by Definition of Done.
 
 ## Hard skips
@@ -78,7 +81,7 @@ Never pick up or continue:
 |------|--------|-------|
 | CEO / Launch Ops | Priority, outcome, and worker lane | Priority, `ready-for-agent`, and `worker:codex` or `worker:claude` when a lane is required |
 | Sipke (operator) | Operator steps only | Secrets, live-account actions, and environment facts agents cannot obtain |
-| Agents | Protocol comments only | Claim → PR → `pr:` evidence. Agents do not set `ready-for-agent` or priority |
+| Agents | Protocol comments and claim-state mutations | Self-assignment, `ready-for-agent` removal, Status/Agent State transitions for claim/block/review, and `pr:` evidence. Agents do not set `ready-for-agent` or priority |
 
 Agents do not invent a new Agent Ready ticket as a substitute for claiming an existing one.
 
@@ -112,6 +115,7 @@ Commands, tests, or flows that prove the acceptance criteria.
 - PRD:
 - ADR:
 - Parent Feature/Epic:
+- Repository boundaries:
 - Related issues:
 
 ## Operator steps
