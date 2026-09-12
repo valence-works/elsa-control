@@ -5314,6 +5314,8 @@ function summarizeApplicationHealth(application: DeploymentCockpit["applications
   ) {
     return "Needs review";
   }
+  const connectedEnvironmentIds = new Set(applicationEngines.map(engine => engine.environmentId));
+  if (application.environments.some(environment => !connectedEnvironmentIds.has(environment.id))) return "Needs setup";
   return applicationEngines.every(engine => engine.health === "Healthy") ? "Healthy" : "Not checked";
 }
 

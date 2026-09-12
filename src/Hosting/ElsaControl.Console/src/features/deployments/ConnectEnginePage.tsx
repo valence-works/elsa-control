@@ -407,8 +407,8 @@ function ConnectEngineForm({
               <Field label="Engine name" error={!values.engineName.trim() && error ? "Enter an engine name." : undefined}>
                 <Input aria-label="Engine name" required value={values.engineName} onChange={(event) => setValue("engineName", event.target.value)} placeholder="elsa-dev" disabled={isSubmitting} />
               </Field>
-              <Field label="Engine URL" hint="Use the base HTTP or HTTPS URL for the engine." error={endpointError ?? undefined}>
-                <Input aria-label="Engine URL" required type="url" value={values.baseUrl} onChange={(event) => setValue("baseUrl", event.target.value)} placeholder="https://elsa.example.com" autoComplete="url" spellCheck={false} disabled={isSubmitting} />
+              <Field label="Engine URL" hint="Use the base HTTP or HTTPS URL for the engine." hintId="connect-engine-url-hint" error={endpointError ?? undefined} errorId="connect-engine-url-error">
+                <Input aria-label="Engine URL" aria-invalid={endpointError ? "true" : undefined} aria-describedby={endpointError ? "connect-engine-url-error" : "connect-engine-url-hint"} required type="url" value={values.baseUrl} onChange={(event) => setValue("baseUrl", event.target.value)} placeholder="https://elsa.example.com" autoComplete="url" spellCheck={false} disabled={isSubmitting} />
               </Field>
             </div>
 
@@ -522,8 +522,8 @@ function ConnectEngineForm({
   );
 }
 
-function Field({ label, hint, error, children }: { label: string; hint?: string; error?: string; children: ReactNode }) {
-  return <div className="connect-engine-field"><span className="connect-engine-field-label">{label}</span><div className="connect-engine-field-control">{children}</div>{error ? <p className="connect-engine-error-text">{error}</p> : hint ? <p className="connect-engine-hint">{hint}</p> : null}</div>;
+function Field({ label, hint, hintId, error, errorId, children }: { label: string; hint?: string; hintId?: string; error?: string; errorId?: string; children: ReactNode }) {
+  return <div className="connect-engine-field"><span className="connect-engine-field-label">{label}</span><div className="connect-engine-field-control">{children}</div>{error ? <p id={errorId} className="connect-engine-error-text">{error}</p> : hint ? <p id={hintId} className="connect-engine-hint">{hint}</p> : null}</div>;
 }
 
 function Benefit({ icon, title, detail }: { icon: ReactNode; title: string; detail: string }) {
@@ -661,7 +661,7 @@ function endpointValidationMessage(baseUrl: string) {
 
 function legacyTierFromName(name?: string): EnvironmentSummary["tier"] {
   if (name === "Dev" || name === "Test" || name === "Stage" || name === "Production") return name;
-  return "Dev";
+  return "Production";
 }
 
 function enginePath(placement: PlacementTarget, engineId: string) {

@@ -212,16 +212,44 @@ describe("ConnectEnginePage", () => {
     }));
   });
 
-  it("rejects endpoint credentials and query strings before saving", async () => {
+  it("uses the production legacy tier when no active custom tier is available", async () => {
+    vi.mocked(getDeploymentCockpit).mockResolvedValue({ ...cockpitFixture, applications: [], engines: [] });
+    renderPage();
+
+    await screen.findByRole("heading", { name: "Connect an engine" });
+    await userEvent.type(screen.getByLabelText("Engine name"), "new-engine");
+    await userEvent.type(screen.getByLabelText("Engine URL"), "https://new.example.com");
+    await userEvent.click(screen.getByRole("button", { name: "Connect engine →" }));
+
+    await waitFor(() => expect(createDeploymentEnvironment).toHaveBeenCalledTimes(1));
+    expect(createDeploymentEnvironment).toHaveBeenCalledWith("workspace-1", "app-new", {
+      name: "Development",
+      tier: "Production"
+    });
+  });
+
+  it.each([
+    ["endpoint credentials", "https://user:secret@example.com"],
+    ["query-string URLs", "https://engine.example.com?api_key=hidden"]
+  ])("rejects %s before saving", async (_caseName, invalidUrl) => {
     renderPage();
 
     await screen.findByRole("heading", { name: "Connect an engine" });
     await userEvent.type(screen.getByLabelText("Engine name"), "unsafe-engine");
-    await userEvent.type(screen.getByLabelText("Engine URL"), "https://user:secret@example.com?api_key=hidden");
+    const endpoint = screen.getByLabelText("Engine URL");
+    await userEvent.type(endpoint, invalidUrl);
 
-    expect(screen.getByText("Use a base URL without credentials, a query, or a fragment.")).toBeInTheDocument();
+    const error = "Use a base URL without credentials, a query, or a fragment.";
+    expect(screen.getByText(error)).toBeInTheDocument();
+    expect(endpoint).toHaveAttribute("aria-invalid", "true");
+    expect(endpoint).toHaveAccessibleDescription(error);
     expect(screen.getByRole("button", { name: "Connect engine →" })).toBeDisabled();
     expect(registerDeploymentEngine).not.toHaveBeenCalled();
+
+    await userEvent.clear(endpoint);
+    await userEvent.type(endpoint, "https://engine.example.com");
+    expect(endpoint).not.toHaveAttribute("aria-invalid");
+    expect(endpoint).toHaveAccessibleDescription("Use the base HTTP or HTTPS URL for the engine.");
   });
 
   it("keeps a created application across an environment failure so retry does not duplicate it", async () => {

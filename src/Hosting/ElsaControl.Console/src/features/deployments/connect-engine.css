@@ -54,7 +54,7 @@
 .connect-engine-page input:focus-visible,
 .connect-engine-page select:focus-visible,
 .connect-engine-page summary:focus-visible {
-  outline: 2px solid hsl(var(--primary));
+  outline: 2px solid hsl(var(--primary-text));
   outline-offset: 2px;
 }
 

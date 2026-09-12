@@ -206,7 +206,7 @@
 
 .aperture-overview__search input:focus-visible,
 .aperture-overview__filter select:focus-visible {
-  outline: 2px solid var(--ap-accent);
+  outline: 2px solid var(--ap-accent-text);
   outline-offset: 3px;
 }
 

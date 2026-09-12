@@ -80,6 +80,24 @@ describe("DeploymentsPage", () => {
     expect(screen.queryByText("Deployment posture")).not.toBeInTheDocument();
   });
 
+  it.each([
+    { missingEngine: true, expectedHealth: "Needs setup" },
+    { missingEngine: false, expectedHealth: "Healthy" }
+  ])("reports $expectedHealth when an application has missingEngine=$missingEngine", async ({ missingEngine, expectedHealth }) => {
+    const application = deploymentCockpitFixture.applications[0];
+    const environments = application.environments.slice(0, 2);
+    const connectedIds = environments.slice(0, missingEngine ? 1 : 2).map(environment => environment.id);
+    renderDeployments({
+      ...deploymentCockpitFixture,
+      applications: [{ ...application, environments }],
+      engines: deploymentCockpitFixture.engines.filter(engine => connectedIds.includes(engine.environmentId))
+    }, "/admin/deployments/applications");
+
+    const card = await screen.findByRole("link", { name: application.name });
+    expect(within(card).getByText(expectedHealth)).toBeInTheDocument();
+    if (missingEngine) expect(within(card).queryByText("Healthy")).not.toBeInTheDocument();
+  });
+
   it("shows an empty application list state when no deployment setup exists", async () => {
     renderDeployments({
       applications: [],
