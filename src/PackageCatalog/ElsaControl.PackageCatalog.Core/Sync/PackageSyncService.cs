@@ -28,6 +28,8 @@ public sealed class PackageSyncService(
 {
     private const string SyncScope = "sync";
     private const string NotReverifiedMessage = "Already indexed; the stored manifest was not re-verified in this run.";
+    private const string NoManifestMessage = "Package does not contain elsa-package.json.";
+    private const string NoManifestNotRereadMessage = "Previously found without elsa-package.json; not re-read in this run.";
 
     // A verification counts once it has run to the end over all enabled sources. Runs that completed with item errors count
     // too: their failures stay visible on the run and its sources, and one persistently failing version must not turn every
@@ -52,9 +54,10 @@ public sealed class PackageSyncService(
     }
 
     /// <summary>
-    /// Runs a scheduled sync of all enabled sources. Stored versions are only downloaded and re-verified when this run is a
-    /// verification run: when no completed all-source verification run started within <paramref name="verificationInterval"/>.
-    /// Otherwise only versions that are not stored yet are downloaded, read, validated and indexed.
+    /// Runs a scheduled sync of all enabled sources. It is a verification run, which downloads and reads every discovered
+    /// version, when no completed all-source verification run started within <paramref name="verificationInterval"/>.
+    /// Otherwise it is a regular run: stored versions, and versions that the last verification run read without finding
+    /// elsa-package.json, are recorded without being downloaded; every other version is downloaded, read, validated and indexed.
     /// </summary>
     public async Task<SyncRun> SyncScheduledAsync(TimeSpan verificationInterval, CancellationToken cancellationToken = default)
     {
@@ -62,16 +65,23 @@ public sealed class PackageSyncService(
         var executed = await concurrencyGuard.TryRunAsync(SyncScope, async () =>
         {
             var startedAt = _timeProvider.GetUtcNow();
-            var lastVerificationStartedAt = await syncRuns.GetLatestRunStartedAtAsync(SyncRunMode.Verification, AllSourceTriggers, CompletedStatuses, cancellationToken);
+            var lastVerification = await syncRuns.GetLatestRunAsync(SyncRunMode.Verification, AllSourceTriggers, CompletedStatuses, cancellationToken);
             // A verification dated in the future (clock skew) is not trusted to postpone the next one.
-            var verificationIsCurrent = startedAt - lastVerificationStartedAt is { } age && age >= TimeSpan.Zero && age < verificationInterval;
+            var currentVerification = startedAt - lastVerification?.StartedAt is { } age && age >= TimeSpan.Zero && age < verificationInterval
+                ? lastVerification
+                : null;
+            // Read from the same run that postpones the verification, so a version stays unread only while the read that found it
+            // without a manifest is current. Versions that run failed to read, or never saw, are still read.
+            var foundWithoutManifest = currentVerification is null
+                ? null
+                : await syncRuns.GetVersionsFoundWithoutManifestAsync(currentVerification.Id, cancellationToken);
             run = new SyncRun
             {
                 Trigger = SyncRunTrigger.Scheduled,
-                Mode = verificationIsCurrent ? SyncRunMode.NewVersionsOnly : SyncRunMode.Verification,
+                Mode = currentVerification is null ? SyncRunMode.Verification : SyncRunMode.NewVersionsOnly,
                 StartedAt = startedAt
             };
-            await ExecuteRunAsync(run, () => sources.ListAsync(cancellationToken), cancellationToken, addRun: true);
+            await ExecuteRunAsync(run, () => sources.ListAsync(cancellationToken), cancellationToken, addRun: true, foundWithoutManifest);
         });
 
         return executed
@@ -169,7 +179,12 @@ public sealed class PackageSyncService(
         await syncRuns.SaveChangesAsync(CancellationToken.None);
     }
 
-    private async Task ExecuteRunAsync(SyncRun run, Func<Task<IReadOnlyList<PackageSource>>> getSources, CancellationToken cancellationToken, bool addRun)
+    private async Task ExecuteRunAsync(
+        SyncRun run,
+        Func<Task<IReadOnlyList<PackageSource>>> getSources,
+        CancellationToken cancellationToken,
+        bool addRun,
+        IReadOnlySet<SourcePackageVersion>? foundWithoutManifest = null)
     {
         using var runCancellation = cancellationRegistry.Track(run.Id, cancellationToken);
         diagnostics.SyncRunStarted(run.Id);
@@ -183,7 +198,7 @@ public sealed class PackageSyncService(
             foreach (var source in (await getSources()).Where(x => x.Enabled))
             {
                 runCancellation.Token.ThrowIfCancellationRequested();
-                await SyncSourceAsync(run, source, counters, runCancellation.Token);
+                await SyncSourceAsync(run, source, counters, foundWithoutManifest, runCancellation.Token);
                 await sources.SaveChangesAsync(runCancellation.Token);
             }
 
@@ -217,7 +232,7 @@ public sealed class PackageSyncService(
         await syncRuns.SaveChangesAsync(cancellationToken);
     }
 
-    private async Task SyncSourceAsync(SyncRun run, PackageSource source, Dictionary<string, int> counters, CancellationToken cancellationToken)
+    private async Task SyncSourceAsync(SyncRun run, PackageSource source, Dictionary<string, int> counters, IReadOnlySet<SourcePackageVersion>? foundWithoutManifest, CancellationToken cancellationToken)
     {
         using var activity = syncActivity.BeginSourceSync(source.Id);
         IReadOnlyList<DiscoveredPackageVersion> discovered;
@@ -243,7 +258,7 @@ public sealed class PackageSyncService(
         SyncRunItem? firstFailure = null;
         foreach (var item in discovered)
         {
-            var runItem = await SyncPackageVersionAsync(run, source, item, counters, cancellationToken);
+            var runItem = await SyncPackageVersionAsync(run, source, item, counters, foundWithoutManifest, cancellationToken);
             if (runItem.Status != SyncRunItemStatus.Failed)
                 continue;
 
@@ -259,7 +274,13 @@ public sealed class PackageSyncService(
             source.LastSuccessfulSyncAt = source.LastSyncedAt;
     }
 
-    private async Task<SyncRunItem> SyncPackageVersionAsync(SyncRun run, PackageSource source, DiscoveredPackageVersion discovered, Dictionary<string, int> counters, CancellationToken cancellationToken)
+    private async Task<SyncRunItem> SyncPackageVersionAsync(
+        SyncRun run,
+        PackageSource source,
+        DiscoveredPackageVersion discovered,
+        Dictionary<string, int> counters,
+        IReadOnlySet<SourcePackageVersion>? foundWithoutManifest,
+        CancellationToken cancellationToken)
     {
         var runItem = await AddItemAsync(run, source.Id, discovered.PackageId, discovered.Version, SyncRunItemStatus.Discovered, cancellationToken);
         try
@@ -275,21 +296,29 @@ public sealed class PackageSyncService(
                 };
 
             var existingVersion = await catalog.GetPackageVersionAsync(package.Id, discovered.Version, cancellationToken);
-            if (existingVersion is not null && run.Mode == SyncRunMode.NewVersionsOnly)
+            if (run.Mode == SyncRunMode.NewVersionsOnly)
             {
-                UpdateLatestVersion(package, discovered.Version);
-                MarkUnchanged(runItem, existingVersion, counters);
-                runItem.Message = NotReverifiedMessage;
-                return runItem;
+                if (existingVersion is not null)
+                {
+                    UpdateLatestVersion(package, discovered.Version);
+                    MarkUnchanged(runItem, existingVersion, counters);
+                    runItem.Message = NotReverifiedMessage;
+                    return runItem;
+                }
+
+                // Checked after the stored version, so a version indexed since the last verification is never reported as lacking a manifest.
+                if (foundWithoutManifest?.Contains(new SourcePackageVersion(source.Id, discovered.PackageId, discovered.Version)) == true)
+                {
+                    MarkWithoutManifest(runItem, NoManifestNotRereadMessage, counters);
+                    return runItem;
+                }
             }
 
             await using var packageStream = await downloader.DownloadPackageAsync(source, discovered.PackageId, discovered.Version, cancellationToken);
             var read = await manifestReader.ReadAsync(packageStream, cancellationToken);
             if (!read.Exists || read.ManifestJson is null || read.ManifestHash is null)
             {
-                runItem.Status = SyncRunItemStatus.Invalid;
-                runItem.Message = "Package does not contain elsa-package.json.";
-                Increment(counters, "invalid");
+                MarkWithoutManifest(runItem, NoManifestMessage, counters);
                 return runItem;
             }
 
@@ -412,6 +441,14 @@ public sealed class PackageSyncService(
         Increment(counters, "unchanged");
     }
 
+    // Recorded as Invalid without a stored version: the shape ISyncRunStore.GetVersionsFoundWithoutManifestAsync reads back.
+    private static void MarkWithoutManifest(SyncRunItem runItem, string message, Dictionary<string, int> counters)
+    {
+        runItem.Status = SyncRunItemStatus.Invalid;
+        runItem.Message = message;
+        Increment(counters, "invalid");
+    }
+
     private static ValidationStatus ToValidationStatus(ManifestValidationResult validation) =>
         validation.Status == ManifestValidationStatus.UnsupportedSchema
             ? ValidationStatus.UnsupportedSchema
@@ -516,7 +553,11 @@ public interface ISyncRunStore
 {
     Task<IReadOnlyList<SyncRun>> ListAsync(CancellationToken cancellationToken = default);
     Task<SyncRun?> GetAsync(Guid id, CancellationToken cancellationToken = default);
-    Task<DateTimeOffset?> GetLatestRunStartedAtAsync(SyncRunMode mode, IReadOnlyCollection<SyncRunTrigger> triggers, IReadOnlyCollection<SyncRunStatus> statuses, CancellationToken cancellationToken = default);
+    Task<SyncRun?> GetLatestRunAsync(SyncRunMode mode, IReadOnlyCollection<SyncRunTrigger> triggers, IReadOnlyCollection<SyncRunStatus> statuses, CancellationToken cancellationToken = default);
+
+    /// <summary>The versions the run read without finding elsa-package.json: its Invalid items that stored no package version.</summary>
+    Task<IReadOnlySet<SourcePackageVersion>> GetVersionsFoundWithoutManifestAsync(Guid runId, CancellationToken cancellationToken = default);
+
     Task<IReadOnlyDictionary<Guid, SyncRunListMetadata>> GetListMetadataAsync(IReadOnlyCollection<Guid> runIds, CancellationToken cancellationToken = default);
     Task<SyncRunDeletionCandidate?> GetDeletionCandidateAsync(Guid id, CancellationToken cancellationToken = default);
     Task<SyncRunCleanupPreview> PreviewDeleteBeforeAsync(DateTimeOffset completedBefore, IReadOnlyCollection<SyncRunStatus> terminalStatuses, CancellationToken cancellationToken = default);
@@ -526,6 +567,11 @@ public interface ISyncRunStore
     Task AddItemAsync(SyncRunItem item, CancellationToken cancellationToken = default);
     Task SaveChangesAsync(CancellationToken cancellationToken = default);
 }
+
+public sealed record SourcePackageVersion(
+    Guid SourceId,
+    string PackageId,
+    string Version);
 
 public sealed record SyncRunDeletionCandidate(
     Guid Id,

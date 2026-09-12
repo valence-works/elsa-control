@@ -19,18 +19,32 @@ public sealed class SyncRunStore(CatalogDbContext dbContext) : ISyncRunStore
             .Include(x => x.Items)
             .SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
 
-    public async Task<DateTimeOffset?> GetLatestRunStartedAtAsync(SyncRunMode mode, IReadOnlyCollection<SyncRunTrigger> triggers, IReadOnlyCollection<SyncRunStatus> statuses, CancellationToken cancellationToken = default)
+    public Task<SyncRun?> GetLatestRunAsync(SyncRunMode mode, IReadOnlyCollection<SyncRunTrigger> triggers, IReadOnlyCollection<SyncRunStatus> statuses, CancellationToken cancellationToken = default)
     {
         var triggerValues = triggers.ToArray();
         var statusValues = statuses.ToArray();
-        var latest = await dbContext.SyncRuns
+        return dbContext.SyncRuns
             .AsNoTracking()
             .Where(x => x.Mode == mode && triggerValues.Contains(x.Trigger) && statusValues.Contains(x.Status))
             .OrderByDescending(x => x.StartedAt)
-            .Select(x => new { x.StartedAt })
             .FirstOrDefaultAsync(cancellationToken);
+    }
 
-        return latest?.StartedAt;
+    public async Task<IReadOnlySet<SourcePackageVersion>> GetVersionsFoundWithoutManifestAsync(Guid runId, CancellationToken cancellationToken = default)
+    {
+        // One seek on the SyncRunId index for the whole run; an Invalid item stores a package version unless the archive had no manifest.
+        var versions = await dbContext.SyncRunItems
+            .AsNoTracking()
+            .Where(x => x.SyncRunId == runId &&
+                        x.Status == SyncRunItemStatus.Invalid &&
+                        x.PackageVersionId == null &&
+                        x.SourceId != null &&
+                        x.PackageId != null &&
+                        x.Version != null)
+            .Select(x => new SourcePackageVersion(x.SourceId!.Value, x.PackageId!, x.Version!))
+            .ToListAsync(cancellationToken);
+
+        return versions.ToHashSet();
     }
 
     public async Task<IReadOnlyDictionary<Guid, SyncRunListMetadata>> GetListMetadataAsync(IReadOnlyCollection<Guid> runIds, CancellationToken cancellationToken = default)

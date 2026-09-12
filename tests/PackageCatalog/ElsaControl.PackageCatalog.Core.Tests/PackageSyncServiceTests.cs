@@ -360,8 +360,13 @@ public sealed partial class PackageSyncServiceTests
         public List<SyncRunItem> Items { get; } = [];
         public Task<IReadOnlyList<SyncRun>> ListAsync(CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<SyncRun>>(Runs);
         public Task<SyncRun?> GetAsync(Guid id, CancellationToken cancellationToken = default) => Task.FromResult(Runs.SingleOrDefault(x => x.Id == id));
-        public Task<DateTimeOffset?> GetLatestRunStartedAtAsync(SyncRunMode mode, IReadOnlyCollection<SyncRunTrigger> triggers, IReadOnlyCollection<SyncRunStatus> statuses, CancellationToken cancellationToken = default) =>
-            Task.FromResult(Runs.Where(x => x.Mode == mode && triggers.Contains(x.Trigger) && statuses.Contains(x.Status)).Max(x => (DateTimeOffset?)x.StartedAt));
+        public Task<SyncRun?> GetLatestRunAsync(SyncRunMode mode, IReadOnlyCollection<SyncRunTrigger> triggers, IReadOnlyCollection<SyncRunStatus> statuses, CancellationToken cancellationToken = default) =>
+            Task.FromResult(Runs.Where(x => x.Mode == mode && triggers.Contains(x.Trigger) && statuses.Contains(x.Status)).MaxBy(x => x.StartedAt));
+        public Task<IReadOnlySet<SourcePackageVersion>> GetVersionsFoundWithoutManifestAsync(Guid runId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlySet<SourcePackageVersion>>(Items
+                .Where(x => x.SyncRunId == runId && x.Status == SyncRunItemStatus.Invalid && x.PackageVersionId is null)
+                .Select(x => new SourcePackageVersion(x.SourceId!.Value, x.PackageId!, x.Version!))
+                .ToHashSet());
         public Task<IReadOnlyDictionary<Guid, SyncRunListMetadata>> GetListMetadataAsync(IReadOnlyCollection<Guid> runIds, CancellationToken cancellationToken = default)
         {
             var itemMetadata = Items
@@ -465,6 +470,9 @@ public sealed partial class PackageSyncServiceTests
         {
             using var reader = new StreamReader(packageStream);
             var json = await reader.ReadToEndAsync(cancellationToken);
+            if (json.Length == 0)
+                return PackageManifestReadResult.Missing();
+
             var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(json))).ToLowerInvariant();
             return PackageManifestReadResult.Found("elsa-package.json", json, hash, []);
         }

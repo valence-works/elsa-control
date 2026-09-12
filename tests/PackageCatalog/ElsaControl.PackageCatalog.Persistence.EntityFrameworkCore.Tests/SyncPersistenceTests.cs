@@ -412,7 +412,7 @@ public sealed class SyncPersistenceTests
     }
 
     [Fact]
-    public async Task Latest_run_start_only_considers_runs_of_the_requested_mode_triggers_and_statuses()
+    public async Task Latest_run_only_considers_runs_of_the_requested_mode_triggers_and_statuses()
     {
         await using var db = await CreateOpenDbContextAsync();
         var start = new DateTimeOffset(2026, 9, 1, 0, 0, 0, TimeSpan.Zero);
@@ -424,15 +424,54 @@ public sealed class SyncPersistenceTests
             latestVerification,
             Run(SyncRunTrigger.Scheduled, SyncRunMode.NewVersionsOnly, SyncRunStatus.Completed, 2),
             Run(SyncRunTrigger.ManualSource, SyncRunMode.Verification, SyncRunStatus.Completed, 3),
-            Run(SyncRunTrigger.ManualAll, SyncRunMode.Verification, SyncRunStatus.Failed, 4));
+            Run(SyncRunTrigger.ManualAll, SyncRunMode.Verification, SyncRunStatus.Failed, 4),
+            Run(SyncRunTrigger.ManualAll, SyncRunMode.Verification, SyncRunStatus.Running, 5));
         await db.SaveChangesAsync();
         var store = new SyncRunStore(db);
 
-        var latest = await store.GetLatestRunStartedAtAsync(SyncRunMode.Verification, [SyncRunTrigger.Scheduled, SyncRunTrigger.ManualAll], [SyncRunStatus.Completed, SyncRunStatus.CompletedWithErrors]);
-        var none = await store.GetLatestRunStartedAtAsync(SyncRunMode.NewVersionsOnly, [SyncRunTrigger.ManualAll], [SyncRunStatus.Completed]);
+        var latest = await store.GetLatestRunAsync(SyncRunMode.Verification, [SyncRunTrigger.Scheduled, SyncRunTrigger.ManualAll], [SyncRunStatus.Completed, SyncRunStatus.CompletedWithErrors]);
+        var none = await store.GetLatestRunAsync(SyncRunMode.NewVersionsOnly, [SyncRunTrigger.ManualAll], [SyncRunStatus.Completed]);
 
-        Assert.Equal(latestVerification.StartedAt, latest);
+        Assert.Equal(latestVerification.Id, latest?.Id);
+        Assert.Equal(latestVerification.StartedAt, latest?.StartedAt);
         Assert.Null(none);
+    }
+
+    [Fact]
+    public async Task Versions_found_without_manifest_are_the_invalid_items_of_the_run_that_stored_no_version()
+    {
+        await using var db = await CreateOpenDbContextAsync();
+        var source = PublicCatalogSeedData.CreatePackageSource();
+        var storedInvalidVersion = PublicCatalogSeedData.AddVersion(PublicCatalogSeedData.CreatePackage(source, "Elsa.Stored"), validationStatus: ValidationStatus.Invalid);
+        db.PackageSources.Add(source);
+        var otherSourceId = Guid.NewGuid();
+        var verification = new SyncRun { Trigger = SyncRunTrigger.ManualAll, Status = SyncRunStatus.Completed };
+        var regular = new SyncRun { Trigger = SyncRunTrigger.Scheduled, Mode = SyncRunMode.NewVersionsOnly, Status = SyncRunStatus.Completed };
+        void Item(SyncRun run, Guid sourceId, string version, SyncRunItemStatus status, PackageVersion? stored = null) =>
+            run.Items.Add(new SyncRunItem
+            {
+                SyncRun = run,
+                SyncRunId = run.Id,
+                SourceId = sourceId,
+                PackageId = stored?.Package?.PackageId ?? "Elsa.Legacy",
+                Version = version,
+                Status = status,
+                PackageVersion = stored,
+                PackageVersionId = stored?.Id
+            });
+        Item(verification, source.Id, "1.0.0", SyncRunItemStatus.Invalid);
+        Item(verification, otherSourceId, "1.0.0", SyncRunItemStatus.Invalid);
+        Item(verification, source.Id, storedInvalidVersion.Version, SyncRunItemStatus.Invalid, storedInvalidVersion);
+        Item(verification, source.Id, "2.0.0", SyncRunItemStatus.Failed);
+        Item(regular, source.Id, "3.0.0", SyncRunItemStatus.Invalid);
+        db.SyncRuns.AddRange(verification, regular);
+        await db.SaveChangesAsync();
+
+        var versions = await new SyncRunStore(db).GetVersionsFoundWithoutManifestAsync(verification.Id);
+
+        Assert.Equal(
+            new HashSet<SourcePackageVersion> { new(source.Id, "Elsa.Legacy", "1.0.0"), new(otherSourceId, "Elsa.Legacy", "1.0.0") },
+            versions);
     }
 
     private static async Task<CatalogDbContext> CreateOpenDbContextAsync()
