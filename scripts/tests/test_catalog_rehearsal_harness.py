@@ -209,7 +209,7 @@ class ParserAndGateTests(HarnessCase):
 class ProbeTests(HarnessCase):
     """Runs probe.py against fake sqlcmd/curl. The fake sqlcmd answers by matching fixed fragments of the query."""
 
-    def make_fakes(self, migrated: bool, health_json: str = '{"status":"ok","buildNumber":"96","imageId":"%s"}' % CANDIDATE_SOURCE, sqlcmd_fail_after: int | None = None, answer_overrides: dict[str, str] | None = None, resume_failures: int = 0, other_failures: int = 0) -> None:
+    def make_fakes(self, migrated: bool, health_json: str = '{"status":"ok","buildNumber":"96","imageId":"%s"}' % CANDIDATE_SOURCE, sqlcmd_fail_after: int | None = None, answer_overrides: dict[str, str] | None = None, resume_failures: int = 0, other_failures: int = 0, unavailable_wording_failures: int = 0) -> None:
         state = self.temp / "state"
         state.mkdir(exist_ok=True)
         (state / "migrated").write_text("1" if migrated else "0")
@@ -241,6 +241,7 @@ class ProbeTests(HarnessCase):
         (state / "sqlcmd-fail-after").write_text(str(sqlcmd_fail_after if sqlcmd_fail_after is not None else -1))
         (state / "resume-failures").write_text(str(resume_failures))
         (state / "other-failures").write_text(str(other_failures))
+        (state / "unavailable-wording-failures").write_text(str(unavailable_wording_failures))
         (self.temp / "sqlcmd").write_text(f"""#!/usr/bin/env python3
 import json, sys, pathlib
 state = pathlib.Path({str(state)!r})
@@ -249,6 +250,8 @@ fail_after = int((state / "sqlcmd-fail-after").read_text())
 if fail_after >= 0 and n > fail_after: sys.exit(1)
 if n <= int((state / "resume-failures").read_text()):
     print("mssql: login error: Database is not currently available. Please retry the connection later. (Error 40613)", file=sys.stderr); sys.exit(1)
+if n <= int((state / "unavailable-wording-failures").read_text()):
+    print("mssql: Server is not currently available. (Error 40532)", file=sys.stderr); sys.exit(1)
 if n <= int((state / "other-failures").read_text()):
     print("mssql: login error: Login failed for user. (Error 18456)", file=sys.stderr); sys.exit(1)
 args = sys.argv[1:]
@@ -349,6 +352,14 @@ fi"""])
         completed, barrier = self.run_probe()
         value = self.result(completed)
         self.assertEqual((1, "baseline-migration-query-failed"), (completed.returncode, value["code"]))
+        self.assertFalse((barrier / "start-api").exists())
+
+    def test_only_error_40613_is_retried_not_similar_wording(self) -> None:
+        self.make_fakes(migrated=False, unavailable_wording_failures=1)
+        completed, barrier = self.run_probe()
+        value = self.result(completed)
+        self.assertEqual((1, "baseline-migration-query-failed"), (completed.returncode, value["code"]))
+        self.assertEqual("1", (self.temp / "state" / "calls").read_text())
         self.assertFalse((barrier / "start-api").exists())
 
     def test_a_clone_that_never_resumes_fails_after_bounded_attempts(self) -> None:

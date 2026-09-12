@@ -155,7 +155,7 @@ class Sql:
 
     @staticmethod
     def resuming(output: str) -> bool:
-        return "40613" in output or "is not currently available" in output
+        return re.search(r"\b(?:Error|Msg) 40613\b", output) is not None
 
     def scalar(self, query: str) -> int | None:
         rows = self.rows(query)
