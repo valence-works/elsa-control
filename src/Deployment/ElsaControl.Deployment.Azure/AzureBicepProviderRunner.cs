@@ -74,6 +74,9 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             return Failed(command, CurrentPhase(command.Step), "azure.runner.scope-invalid", exception.Message);
         }
 
+        if (BuildsTowardWorkload(command.Step) && CapacityFailure(command, CurrentPhase(command.Step)) is { } capacityFailure)
+            return capacityFailure;
+
         try
         {
             return command.Step switch
@@ -1882,6 +1885,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             $"adminPasswordSecretName={AdminPasswordSecretName}", $"adminUsername={_options.RuntimeAdminUsername}",
             $"elsaVersion={command.Plan.ElsaVersion}", ..ReleaseIdentityArguments(command),
             $"sqlWorkflowPackageVersion={command.Plan.SqlWorkflowPackageVersion}", $"sqlQuartzPackageVersion={command.Plan.SqlQuartzPackageVersion}",
+            ..CapacityArguments(command),
             $"templateFingerprint={command.Context.TemplateFingerprint}", "deployWorkload=false", "--query", "properties.outputs", "--output", "json", "--only-show-errors"];
 
     private IReadOnlyList<string> AcrDeploymentArguments(AzureProviderRunnerCommand command, string identityId, string principalId, string deploymentName) =>
@@ -1901,6 +1905,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             $"adminPasswordSecretName={AdminPasswordSecretName}", $"adminUsername={_options.RuntimeAdminUsername}",
             $"elsaVersion={command.Plan.ElsaVersion}", ..ReleaseIdentityArguments(command),
             $"sqlWorkflowPackageVersion={command.Plan.SqlWorkflowPackageVersion}", $"sqlQuartzPackageVersion={command.Plan.SqlQuartzPackageVersion}",
+            ..CapacityArguments(command),
             $"templateFingerprint={command.Context.TemplateFingerprint}", "deployWorkload=true", $"workloadRevisionSuffix={revision}",
             $"stableTrafficRevisionName={stable ?? string.Empty}", "--query", "properties.outputs", "--output", "json", "--only-show-errors"];
 
@@ -2110,6 +2115,18 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         new(AzureProviderRunnerOutcome.Uncertain, phase, resources ?? command.Resources, AzureProviderHealth.Unknown, null,
             AzureProviderSafeDiagnostics.Failure(command.Step, AzureProviderRunnerOutcome.Uncertain, code, processFailureKind), code, message);
 
+    /// <summary>
+    /// Steps that create or change resources on the way to a workload deployment. They all need
+    /// the plan capacity, so an operation without one (for example a legacy row restored after
+    /// the capacity migration) fails before its first Azure call instead of part-way through.
+    /// Cleanup, temporary-firewall cleanup, health, promotion and stable-traffic restore stay
+    /// available so an existing instance remains deletable and its traffic recoverable.
+    /// </summary>
+    private static bool BuildsTowardWorkload(AzureProviderRunnerStep step) => step is
+        AzureProviderRunnerStep.Foundation or AzureProviderRunnerStep.AcrPull or AzureProviderRunnerStep.SeedSecrets or
+        AzureProviderRunnerStep.SqlBootstrap or AzureProviderRunnerStep.SqlFirewallCreate or
+        AzureProviderRunnerStep.SqlBootstrapScript or AzureProviderRunnerStep.Workload;
+
     private static AzureProviderOperationPhase CurrentPhase(AzureProviderRunnerStep step) => step switch
     {
         AzureProviderRunnerStep.Foundation or AzureProviderRunnerStep.AcrPull or AzureProviderRunnerStep.SeedSecrets => AzureProviderOperationPhase.FoundationSubmitted,
@@ -2303,6 +2320,34 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private string[] ReleaseIdentityArguments(AzureProviderRunnerCommand command) => _options.DisposableProofMode
         ? []
         : [$"releaseLine={command.Plan.ReleaseLine}", $"releaseFeedServiceIndex={_options.NormalizeReleaseFeedServiceIndex()}"];
+
+    /// <summary>
+    /// The production template sizes the workload from the plan alone and has no capacity
+    /// defaults. A plan without an exact Container Apps mapping fails before any Azure call.
+    /// The disposable-proof template keeps its own cost-boxed sizing and takes no capacity.
+    /// </summary>
+    private AzureProviderRunnerResult? CapacityFailure(AzureProviderRunnerCommand command, AzureProviderOperationPhase phase) =>
+        _options.DisposableProofMode || AzureContainerAppsCapacity.Map(command.Plan.Capacity) is not null
+            ? null
+            : command.Plan.Capacity is null
+                ? Failed(command, phase, "azure.capacity.required", "The plan carries no workload capacity for the production template.")
+                : Failed(command, phase, "azure.capacity.unsupported", "The plan capacity has no exact Azure Container Apps consumption mapping.");
+
+    private string[] CapacityArguments(AzureProviderRunnerCommand command)
+    {
+        if (_options.DisposableProofMode)
+            return [];
+        var capacity = command.Plan.Capacity;
+        var size = AzureContainerAppsCapacity.Map(capacity)
+            ?? throw new InvalidOperationException("The plan capacity has no exact Azure Container Apps consumption mapping.");
+        return
+        [
+            $"workloadMinReplicas={capacity!.MinReplicas.ToString(CultureInfo.InvariantCulture)}",
+            $"workloadMaxReplicas={capacity.MaxReplicas.ToString(CultureInfo.InvariantCulture)}",
+            $"workloadCpu={size.Cpu}",
+            $"workloadMemory={size.Memory}"
+        ];
+    }
 
     private string[] SqlAuthenticationArguments() => _options.DisposableProofMode
         ? ["--authentication-method", "ActiveDirectoryDefault"]

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import unittest
@@ -53,6 +54,35 @@ class AzureProductionTemplateTests(unittest.TestCase):
         self.assertIn("name: 'ELSA_RELEASE_VERSION'", app)
         self.assertIn("value: releaseFeedServiceIndex", app)
         self.assertNotRegex(app, r"param\s+(elsaVersion|releaseLine|releaseVersion)\s+string\s*=")
+
+    def test_workload_capacity_is_required_plan_data_without_template_literals(self) -> None:
+        main = MAIN.read_text()
+        app = APP.read_text()
+        capacity = {
+            "workloadMinReplicas": ("int", "minReplicas"),
+            "workloadMaxReplicas": ("int", "maxReplicas"),
+            "workloadCpu": ("string", "cpu"),
+            "workloadMemory": ("string", "memory"),
+        }
+        for parameter, (kind, module_parameter) in capacity.items():
+            self.assertRegex(main, rf"(?m)^param\s+{parameter}\s+{kind}\s*$")
+            self.assertRegex(main, rf"(?m)^\s+{module_parameter}: {parameter}$")
+            self.assertRegex(app, rf"(?m)^param\s+{module_parameter}\s+{kind}\s*$")
+        self.assertRegex(main, r"@minValue\(0\)\s*@maxValue\(300\)\s*param workloadMinReplicas int")
+        self.assertRegex(main, r"@minValue\(1\)\s*@maxValue\(300\)\s*param workloadMaxReplicas int")
+        self.assertIn("capacity=${workloadMinReplicas}/${workloadMaxReplicas}/${workloadCpu}/${workloadMemory}", main)
+        self.assertRegex(app, r"(?m)^\s+minReplicas: minReplicas$")
+        self.assertRegex(app, r"(?m)^\s+maxReplicas: maxReplicas$")
+        self.assertNotRegex(app, r"(?:min|max)Replicas:\s*\d")
+        self.assertIn("resources: consumptionResources['${cpu}/${memory}']", app)
+        self.assertNotRegex(app, r"resources:\s*\{\s*cpu:")
+
+    def test_example_parameters_supply_the_required_capacity(self) -> None:
+        parameters = json.loads((PRODUCTION / "main.parameters.example.json").read_text())["parameters"]
+        self.assertEqual(
+            {"workloadMinReplicas": 1, "workloadMaxReplicas": 1, "workloadCpu": "0.5", "workloadMemory": "1Gi"},
+            {name: parameters[name]["value"] for name in ("workloadMinReplicas", "workloadMaxReplicas", "workloadCpu", "workloadMemory")},
+        )
 
     def test_runtime_admin_identity_is_required_and_secret_safe(self) -> None:
         main = MAIN.read_text()

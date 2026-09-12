@@ -1367,6 +1367,7 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
                     }
                 ]
             },
+            Capacity = basePlan.Capacity with { Components = GovernedTestCapacity.StandardSmall(component.Id) },
             Isolation = AzureWorkloadPlanTranslator.SupportedIsolation,
             Configuration = new(
             [

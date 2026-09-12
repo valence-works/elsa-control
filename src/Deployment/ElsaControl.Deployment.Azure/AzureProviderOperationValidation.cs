@@ -374,6 +374,7 @@ public static class AzureProviderOperationValidation
         if (request.SqlQuartzPackageVersion is not null && !IsSafePackageVersion(request.SqlQuartzPackageVersion))
             errors.Add("sqlQuartzPackageVersion.invalid");
         if ((request.ReleaseManifestReference is null) != (request.ReleaseManifestSignatureReference is null)) errors.Add("releaseManifestReferences.incomplete");
+        if (request.Capacity is not null && AzureContainerAppsCapacity.Map(request.Capacity) is null) errors.Add("capacity.invalid");
         ValidateSecretReferences(request.SecretReferences, errors);
 
         BoundedSafe(request.TargetKey, 128, "target", errors);
@@ -427,8 +428,18 @@ public static class AzureProviderOperationValidation
                 normalized.ProviderScopeFingerprint,
                 secretReferences = normalized.SecretReferences
             });
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(WithCapacity(canonical, normalized.Capacity)))).ToLowerInvariant();
     }
+
+    /// <summary>
+    /// Capacity joined the persisted projection after operations were already retained. Those
+    /// rows carry none and must keep hashing to exactly the value they were stored with, so the
+    /// capacity suffix is only present when the request has one.
+    /// </summary>
+    private static string WithCapacity(string canonical, AzureWorkloadCapacity? capacity) =>
+        capacity is null
+            ? canonical
+            : $"{canonical}|capacity:{capacity.MinReplicas}/{capacity.MaxReplicas}/{capacity.CpuMillicores}/{capacity.MemoryMiB}";
 
     public static string ComputeOperationIdentity(AzureProviderOperationRequest request)
     {

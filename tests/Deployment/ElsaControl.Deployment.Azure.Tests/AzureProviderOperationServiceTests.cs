@@ -57,6 +57,32 @@ public sealed class AzureProviderOperationServiceTests
     }
 
     [Fact]
+    public async Task Submit_persists_the_admitted_capacity_with_the_safe_projection()
+    {
+        var store = new CapturingStore();
+        var service = new AzureProviderOperationService(store, new FixedTimeProvider(Now));
+
+        await service.SubmitAsync(WorkspaceId, new AzureProviderOperationSubmission("request-1", new('b', 64), CreatePlan()));
+
+        Assert.Equal(new AzureWorkloadCapacity(1, 1, 500, 1024), store.Request!.Capacity);
+    }
+
+    [Fact]
+    public async Task Submit_rejects_capacity_without_a_Container_Apps_mapping_before_persistence()
+    {
+        var store = new CapturingStore();
+        var service = new AzureProviderOperationService(store, new FixedTimeProvider(Now));
+
+        await Assert.ThrowsAsync<ArgumentException>(() => service.SubmitAsync(
+            WorkspaceId,
+            new AzureProviderOperationSubmission("request-1", new('b', 64), CreatePlan() with
+            {
+                Capacity = new AzureWorkloadCapacity(1, 1, 500, 2048)
+            })));
+        Assert.Null(store.Request);
+    }
+
+    [Fact]
     public async Task Restore_fails_closed_when_legacy_operation_lacks_release_package_metadata()
     {
         var store = new CapturingStore();
@@ -299,7 +325,8 @@ public sealed class AzureProviderOperationServiceTests
         },
         new('a', 64),
         "3.8.0-preview.5413",
-        "3.8.0-preview.5413");
+        "3.8.0-preview.5413",
+        new AzureWorkloadCapacity(1, 1, 500, 1024));
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {

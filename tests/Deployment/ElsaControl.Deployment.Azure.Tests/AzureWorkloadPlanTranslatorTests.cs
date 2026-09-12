@@ -240,6 +240,60 @@ public sealed class AzureWorkloadPlanTranslatorTests
         Assert.NotEqual(first.Plan?.Fingerprint, second.Plan?.Fingerprint);
     }
 
+    [Theory]
+    [InlineData("standard-small")]
+    [InlineData("standard")]
+    public void Carries_the_governed_capacity_of_the_workload_component(string profile)
+    {
+        var governed = ElsaInstancePlanResolutionOptions.Default.EffectiveCapacityProfiles[profile];
+
+        var result = Translate(WithCapacity(governed.MinReplicas, governed.MaxReplicas, governed.CpuMillicores, governed.MemoryMiB, governed.EphemeralStorageMiB));
+
+        Assert.True(result.IsAccepted);
+        Assert.Equal(new AzureWorkloadCapacity(governed.MinReplicas, governed.MaxReplicas, governed.CpuMillicores, governed.MemoryMiB), result.Plan!.Capacity);
+    }
+
+    [Fact]
+    public void Capacity_is_bound_into_the_provider_plan_fingerprint()
+    {
+        var small = Translate(WithCapacity(1, 1, 500, 1024));
+        var scaled = Translate(WithCapacity(1, 3, 500, 1024));
+        var larger = Translate(WithCapacity(1, 1, 1000, 2048));
+
+        Assert.NotEqual(small.Plan!.Fingerprint, scaled.Plan!.Fingerprint);
+        Assert.NotEqual(small.Plan.Fingerprint, larger.Plan!.Fingerprint);
+    }
+
+    [Theory]
+    [InlineData(1, 1, 500, 2048, null)]
+    [InlineData(1, 1, 300, 600, null)]
+    [InlineData(1, 1, 4000, 8192, null)]
+    [InlineData(0, 0, 500, 1024, null)]
+    [InlineData(1, 301, 500, 1024, null)]
+    [InlineData(1, 1, 500, 1024, 2049)]
+    public void Rejects_capacity_without_an_exact_Container_Apps_consumption_mapping(
+        int minReplicas, int maxReplicas, int cpuMillicores, int memoryMiB, int? ephemeralStorageMiB)
+    {
+        var result = Translate(WithCapacity(minReplicas, maxReplicas, cpuMillicores, memoryMiB, ephemeralStorageMiB));
+
+        Assert.False(result.IsAccepted);
+        Assert.Null(result.Plan);
+        var finding = Assert.Single(result.Findings);
+        Assert.Equal("azure.capacity.unsupported", finding.Code);
+        Assert.Equal("capacity:runtime", finding.Scope);
+    }
+
+    [Fact]
+    public void Rejects_a_plan_without_capacity_for_the_workload_component()
+    {
+        var plan = CreatePlan();
+
+        var result = Translate(plan with { Capacity = plan.Capacity with { Components = [] } });
+
+        Assert.Null(result.Plan);
+        Assert.Contains(result.Findings, x => x.Code == "azure.capacity.required" && x.Scope == "capacity:runtime");
+    }
+
     [Fact]
     public void Manifest_payload_digest_is_admission_evidence_not_a_second_Azure_intent_identity()
     {
@@ -650,6 +704,22 @@ public sealed class AzureWorkloadPlanTranslatorTests
                 new(ReleaseManifestEvidenceKinds.Signature, "oci://release-manifest.example/signature", ImageDigest, "Verified release manifest signature"),
                 new("catalog", "catalog://snapshot", null, "Resolved catalog snapshot")
             ]);
+    }
+
+    private static AzureWorkloadPlanTranslation Translate(ResolvedElsaApplicationPlan plan) =>
+        AzureWorkloadPlanTranslator.Translate(plan, new("workload-a", "westeurope"));
+
+    private static ResolvedElsaApplicationPlan WithCapacity(
+        int minReplicas, int maxReplicas, int cpuMillicores, int memoryMiB, int? ephemeralStorageMiB = null)
+    {
+        var plan = CreatePlan();
+        return plan with
+        {
+            Capacity = plan.Capacity with
+            {
+                Components = [new("runtime", minReplicas, maxReplicas, cpuMillicores, memoryMiB, ephemeralStorageMiB)]
+            }
+        };
     }
 
     private static System.Text.Json.JsonElement Json(string json)

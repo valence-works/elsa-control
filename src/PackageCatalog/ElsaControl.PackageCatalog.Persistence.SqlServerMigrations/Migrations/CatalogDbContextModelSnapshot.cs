@@ -1218,6 +1218,18 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("nvarchar(64)");
 
+                    b.Property<int?>("CapacityCpuMillicores")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("CapacityMaxReplicas")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("CapacityMemoryMiB")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("CapacityMinReplicas")
+                        .HasColumnType("int");
+
                     b.Property<long>("CheckpointSequence")
                         .HasColumnType("bigint");
 

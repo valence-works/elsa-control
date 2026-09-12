@@ -395,6 +395,7 @@ public sealed partial class ElsaInstanceProviderReconciliationHostedServiceTests
         var plan = source.Plan!;
         const string imageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         var component = plan.Topology.Components.Single();
+        var capacity = ElsaInstancePlanResolutionOptions.Default.EffectiveCapacityProfiles["standard-small"];
         plan = plan with
         {
             Release = plan.Release with
@@ -418,6 +419,10 @@ public sealed partial class ElsaInstanceProviderReconciliationHostedServiceTests
                         Digest = imageDigest
                     }
                 }]
+            },
+            Capacity = plan.Capacity with
+            {
+                Components = [new(component.Id, capacity.MinReplicas, capacity.MaxReplicas, capacity.CpuMillicores, capacity.MemoryMiB, capacity.EphemeralStorageMiB)]
             },
             Isolation = AzureWorkloadPlanTranslator.SupportedIsolation,
             Network = plan.Network with { Egress = "unrestricted" },

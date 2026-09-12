@@ -27,7 +27,15 @@ public sealed record AzureWorkloadPlan(
     IReadOnlyDictionary<string, string> SecretReferences,
     string Fingerprint,
     string? SqlWorkflowPackageVersion = null,
-    string? SqlQuartzPackageVersion = null);
+    string? SqlQuartzPackageVersion = null,
+    AzureWorkloadCapacity? Capacity = null);
+
+/// <summary>
+/// Governed sizing of the single workload container, in the resolved plan's own units.
+/// <see cref="AzureContainerAppsCapacity"/> owns the exact Container Apps representation;
+/// a capacity without one is never approximated.
+/// </summary>
+public sealed record AzureWorkloadCapacity(int MinReplicas, int MaxReplicas, int CpuMillicores, int MemoryMiB);
 
 public sealed record AzureWorkloadPlanTranslation(
     AzureWorkloadPlan? Plan,

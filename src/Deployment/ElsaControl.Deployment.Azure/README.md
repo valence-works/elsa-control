@@ -15,6 +15,9 @@ The first admitted provider capability is deliberately narrow:
 - Elsa release line 3.8
 - Paid images from the governed `valenceruntimeimages.azurecr.io` authority
 - Public HTTPS/TLS endpoints with unrestricted egress and no private connectivity
+- Workload capacity with an exact Azure Container Apps consumption size
+  (`AzureContainerAppsCapacity`); the runner never rounds or falls back to
+  template defaults
 
 Release line and exact version remain strings in the provider-neutral schema.
 The capability check rejects an unsupported later line with a provider finding;
@@ -29,7 +32,10 @@ contains secret values, credentials, manifest payloads or signer identities.
 The fingerprint is SHA-256 over a versioned, canonical projection of the typed
 workload intent and normalized Azure target facts. Equivalent plans therefore
 produce the same fingerprint, and changes to resource-affecting governed inputs
-produce a different one. The unhashed canonical input is not exposed.
+produce a different one. The unhashed canonical input is not exposed. Workload
+capacity is part of that projection and of the persisted operation, so a
+restarted worker deploys exactly the admitted sizing; an operation retained
+before capacity existed restores without it and cannot deploy a workload.
 
 ## Durable provider execution
 
