@@ -974,6 +974,14 @@ public sealed class EfCoreElsaInstanceLifecycleStore(
                                            operation.State == ElsaInstanceOperationState.EntitlementHeld ||
                                            operation.State == ElsaInstanceOperationState.Running ||
                                            operation.State == ElsaInstanceOperationState.RecoveryRequired)))) &&
+                                    // If this claim's commit above succeeds but the acknowledgement to
+                                    // the caller is lost, the execution strategy re-runs this whole unit
+                                    // with the same worker and lease duration. This filter then excludes
+                                    // the row this worker just leased (WorkerId set, lease unexpired), so
+                                    // the re-run finds no work instead of claiming it a second time; the
+                                    // operation stays claimed until its lease naturally expires, which
+                                    // bounds the delay to one lease duration and is safe because no other
+                                    // worker can claim it in the meantime either.
                                     (x.Operation.WorkerId == null ||
                                      x.Operation.LeaseExpiresAt == null ||
                                      x.Operation.LeaseExpiresAt <= nowUtc))
@@ -1178,6 +1186,11 @@ public sealed class EfCoreElsaInstanceLifecycleStore(
                                     (run.Status == WorkspaceDeploymentRunStatus.Queued ||
                                      run.Status == WorkspaceDeploymentRunStatus.Running ||
                                      run.Status == WorkspaceDeploymentRunStatus.RecoveryRequired)) &&
+                                // See the mirror image of this filter in TryClaimNextAsync: if this
+                                // claim's commit below succeeds but the acknowledgement is lost, a
+                                // re-run of this whole unit is excluded here by the worker's own
+                                // unexpired lease, so it returns no work instead of double-claiming;
+                                // the operation becomes claimable again only after that lease expires.
                                 (x.Operation.WorkerId == null || x.Operation.LeaseExpiresAt == null || x.Operation.LeaseExpiresAt <= nowUtc))
                     .OrderBy(x => x.CreatedAt).ThenBy(x => x.Id)
                     .FirstOrDefaultAsync(cancellationToken);

@@ -1,6 +1,10 @@
+using System.Data;
+using System.Data.Common;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 
@@ -59,6 +63,40 @@ public sealed class OrganizationBillingLifecycleTests
         Assert.Equal(OrganizationSubscriptionState.Trial, await fixture.StateAsync(secondOrganizationId));
         Assert.Single(await fixture.Db.OrganizationBillingLifecycleNotices.Where(x => x.OrganizationId == fixture.OrganizationId).ToListAsync());
         Assert.Empty(await fixture.Db.OrganizationBillingLifecycleNotices.Where(x => x.OrganizationId == secondOrganizationId).ToListAsync());
+    }
+
+    [Fact]
+    public async Task Exhausted_strategy_retries_are_not_multiplied_by_the_lifecycle_conflict_loop()
+    {
+        // Mirrors OrganizationInternalEntitlementPersistenceTests's equivalent case: once the
+        // execution strategy classifies a failure as transient and still exhausts its retries, the
+        // lifecycle conflict loop must let that exhaustion propagate instead of starting over.
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var organizationId = Guid.NewGuid();
+        DateTimeOffset trialEndsAt;
+
+        await using (var seed = new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbContext>().UseRetryingSqlite(connection).Options))
+        {
+            await seed.Database.EnsureCreatedAsync();
+            seed.Organizations.Add(new Organization { Id = organizationId, Name = "Acme" });
+            await seed.SaveChangesAsync();
+            var started = await new OrganizationBillingStore(seed).StartTrialAsync(organizationId, "stripe", Start);
+            trialEndsAt = Assert.IsType<OrganizationSubscription>(started.Subscription).TrialEndsAt;
+        }
+
+        var writes = new LockedWrites(failures: int.MaxValue);
+        await using var db = new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(connection, isTransient: exception => exception is SqliteException { SqliteErrorCode: 5 })
+            .AddInterceptors(writes)
+            .Options);
+
+        var exception = await Assert.ThrowsAsync<RetryLimitExceededException>(() => new OrganizationBillingStore(db).AdvanceDueAsync(trialEndsAt));
+
+        Assert.IsType<SqliteException>(exception.InnerException?.InnerException);
+        Assert.Equal(TestRetryingExecutionStrategy.MaxRetries + 1, writes.Transactions.Count);
+        db.ChangeTracker.Clear();
+        Assert.Equal(OrganizationSubscriptionState.Trial, (await db.OrganizationSubscriptions.SingleAsync(x => x.OrganizationId == organizationId)).State);
     }
 
     [Fact]
@@ -390,6 +428,56 @@ public sealed class OrganizationBillingLifecycleTests
         }
     }
 
+    /// <summary>
+    /// Fails every write command with SQLite's "database is locked", a conflict the lifecycle
+    /// retry discipline re-runs, and records the isolation level of every transaction begun.
+    /// </summary>
+    private sealed class LockedWrites(int failures) : DbCommandInterceptor, IDbTransactionInterceptor
+    {
+        private int _failed;
+
+        public List<IsolationLevel> Transactions { get; } = [];
+
+        public ValueTask<InterceptionResult<DbTransaction>> TransactionStartingAsync(
+            DbConnection connection,
+            TransactionStartingEventData eventData,
+            InterceptionResult<DbTransaction> result,
+            CancellationToken cancellationToken = default)
+        {
+            Transactions.Add(eventData.IsolationLevel);
+            return ValueTask.FromResult(result);
+        }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            FailWrite(command);
+            return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+        }
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            FailWrite(command);
+            return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
+        }
+
+        private void FailWrite(DbCommand command)
+        {
+            var sql = command.CommandText.TrimStart();
+            if (_failed < failures && (sql.StartsWith("INSERT", StringComparison.OrdinalIgnoreCase) || sql.StartsWith("UPDATE", StringComparison.OrdinalIgnoreCase)))
+            {
+                _failed++;
+                throw new SqliteException("database is locked", 5);
+            }
+        }
+    }
 
     private sealed class TestTimeProvider(DateTimeOffset utcNow) : TimeProvider
     {

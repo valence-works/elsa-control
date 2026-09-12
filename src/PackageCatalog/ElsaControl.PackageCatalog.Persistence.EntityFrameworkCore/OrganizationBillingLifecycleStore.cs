@@ -1,6 +1,7 @@
 using System.Data;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 
@@ -458,10 +459,18 @@ public sealed partial class OrganizationBillingStore
         return value.ToUniversalTime();
     }
 
-    private static bool IsRetryableLifecycleConflict(Exception exception) =>
-        exception is DbUpdateException update && EfCoreDatabaseExceptionPolicy.IsUniqueViolation(update) ||
-        exception is Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: 5 or 6 } ||
-        exception is Microsoft.Data.SqlClient.SqlException { Number: 1205 or 3960 };
+    private static bool IsRetryableLifecycleConflict(Exception exception)
+    {
+        // The execution strategy already re-ran the whole transaction for transient failures,
+        // deadlocks and snapshot conflicts included. Once it gives up, retrying here would only
+        // multiply its attempts, so the exhausted failure propagates.
+        if (exception is RetryLimitExceededException)
+            return false;
+
+        return exception is DbUpdateException update && EfCoreDatabaseExceptionPolicy.IsUniqueViolation(update) ||
+            exception is Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: 5 or 6 } ||
+            exception is Microsoft.Data.SqlClient.SqlException { Number: 1205 or 3960 };
+    }
 
     private static string? SafeFailureCode(string? value)
     {
