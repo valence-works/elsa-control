@@ -61,6 +61,13 @@ PARAMETER_SHAPES = (
     re.compile(r"^(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])){3}$"),
     re.compile(r"^[a-z][a-z0-9-]{0,62}(\.[a-z0-9-]{1,63})*$"),
 )
+# Parameters whose shape is narrower than the generic identifier shapes: only this shape is accepted.
+NAMED_PARAMETER_SHAPES = {
+    # Keyless-signing identity: one exact GitHub Actions workflow ref, never a wildcard or another URL.
+    "ReleaseProducerSignatureSubject": re.compile(
+        r"^https://github\.com/[a-z0-9-]+/[a-z0-9._-]+/\.github/workflows/[a-z0-9._-]+\.ya?ml@refs/(heads|tags)/[A-Za-z0-9._/-]+$"),
+    "ReleaseProducerOidcIssuer": re.compile(r"^https://token\.actions\.githubusercontent\.com$"),
+}
 
 
 class CompositionError(Exception):
@@ -106,7 +113,8 @@ def load_parameters(path: Path) -> tuple[dict[str, str], dict[str, str]]:
                 raise CompositionError(f"{path.name}: parameter {name} must be a string or a pending issue reference")
             pending[name] = issue
         elif isinstance(value, str):
-            if not SAFE_VALUE.match(value) or not any(shape.match(value) for shape in PARAMETER_SHAPES):
+            shapes = (NAMED_PARAMETER_SHAPES[name],) if name in NAMED_PARAMETER_SHAPES else PARAMETER_SHAPES
+            if not SAFE_VALUE.match(value) or not any(shape.match(value) for shape in shapes):
                 raise CompositionError(f"{path.name}: parameter {name} is not an identifier shape")
             resolved[name] = value
         else:

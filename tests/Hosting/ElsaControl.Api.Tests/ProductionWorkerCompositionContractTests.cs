@@ -26,15 +26,7 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
     private static readonly string RepositoryRoot = FindRepositoryRoot();
     private static readonly string CompositionRoot = Path.Combine(RepositoryRoot, "infra", "control-worker-composition");
     private static readonly string TemplateRoot = Path.Combine(RepositoryRoot, "infra", "azure-production");
-    private static readonly IReadOnlyDictionary<string, string> PendingTestValues = new Dictionary<string, string>
-    {
-        ["SqlBootstrapIp"] = "203.0.113.10",
-        ["ReleaseFeedServiceIndex"] = AzureProviderRunnerOptions.DefaultReleaseFeedServiceIndex,
-        ["ReleaseVerificationClientId"] = "c5055d7d-d66d-468d-8984-077214496243",
-        ["ReleaseVerificationBlobRedirectHost"] = "elsareleases.blob.core.windows.net",
-        ["ReleaseProducerSignatureSubject"] = "https://github.com/example/producer/.github/workflows/release.yml@refs/heads/main",
-        ["ReleaseProducerOidcIssuer"] = "https://token.actions.githubusercontent.com"
-    };
+    private static readonly IReadOnlyDictionary<string, string> PendingTestValues = new Dictionary<string, string>();
 
     private readonly Dictionary<string, string?> _settings = Render("worker-settings.template.json");
 
@@ -42,9 +34,7 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
     public void Only_the_documented_decisions_are_pending()
     {
         var pending = ReadParameters().Where(pair => pair.Value is null).Select(pair => pair.Key).Order().ToArray();
-        Assert.Equal(
-            ["ReleaseFeedServiceIndex", "ReleaseProducerOidcIssuer", "ReleaseProducerSignatureSubject", "ReleaseVerificationBlobRedirectHost", "ReleaseVerificationClientId", "SqlBootstrapIp"],
-            pending);
+        Assert.Empty(pending);
         Assert.True(PendingTestValues.Keys.All(pending.Contains));
     }
 
