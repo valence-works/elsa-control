@@ -95,6 +95,19 @@ result: dict[str, object] = {
 }
 
 
+def wait_for_api_exit() -> None:
+    """Keep the probe alive until a started API records its own exit code.
+
+    Azure Container Instances terminates the remaining containers of a group when one exits, so a probe
+    that exits first makes the API wrapper report 143 whatever the API would have returned. The wrapper
+    stops the API within 15 seconds of stop-api (then kills it), so the bound leaves margin."""
+    if not BARRIER_PATH.joinpath("start-api").exists():
+        return
+    deadline = time.monotonic() + int(os.environ.get("REHEARSAL_API_STOP_WAIT_SECONDS", "45"))
+    while not BARRIER_PATH.joinpath("api-exited").exists() and time.monotonic() < deadline:
+        time.sleep(0.5)
+
+
 def finish(code: str, passed: bool = False) -> None:
     result["result"] = "passed" if passed else "failed"
     result["code"] = code
@@ -102,6 +115,7 @@ def finish(code: str, passed: bool = False) -> None:
         BARRIER_PATH.joinpath("stop-api").touch(mode=0o600, exist_ok=True)
     except OSError:
         pass
+    wait_for_api_exit()
     sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
     sys.stdout.flush()
     raise SystemExit(0 if passed else 1)
@@ -115,6 +129,11 @@ class Sql:
         self.server = env("CATALOG_SERVER")
         self.database = env("CATALOG_DATABASE")
         self.client_id = env("CATALOG_MI_CLIENT_ID")
+        self.resume_delay = int(os.environ.get("REHEARSAL_SQL_RESUME_DELAY_SECONDS", "45"))
+
+    # A serverless database that auto-paused answers the first login with error 40613 while it
+    # resumes; the retained rehearsal clone pauses after an hour idle. Retry only that signal.
+    RESUME_ATTEMPTS = 4
 
     def rows(self, query: str, timeout: int = 120) -> list[list[str]] | None:
         command = [
@@ -122,13 +141,21 @@ class Sql:
             "--authentication-method", "ActiveDirectoryManagedIdentity", "-U", self.client_id,
             "-N", "true", "-h", "-1", "-W", "-s", "\t", "-b", "-l", "30", "-t", str(timeout), "-Q", "SET NOCOUNT ON; " + query,
         ]
-        try:
-            completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout + 60, check=False)
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        if completed.returncode != 0:
-            return None
-        return [line.split("\t") for line in completed.stdout.splitlines() if line.strip()]
+        for attempt in range(self.RESUME_ATTEMPTS):
+            try:
+                completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout + 60, check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                return None
+            if completed.returncode == 0:
+                return [line.split("\t") for line in completed.stdout.splitlines() if line.strip()]
+            if not self.resuming(completed.stdout + completed.stderr) or attempt + 1 == self.RESUME_ATTEMPTS:
+                return None
+            time.sleep(self.resume_delay)
+        return None
+
+    @staticmethod
+    def resuming(output: str) -> bool:
+        return re.search(r"\b(?:Error|Msg) 40613\b", output) is not None
 
     def scalar(self, query: str) -> int | None:
         rows = self.rows(query)

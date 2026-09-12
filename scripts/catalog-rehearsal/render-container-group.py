@@ -62,6 +62,9 @@ def main() -> int:
     resource_group = required("RESOURCE_GROUP", RESOURCE_NAME_RE)
     authority_group = required("AUTHORITY_RESOURCE_GROUP", RESOURCE_NAME_RE)
     server = required("CATALOG_SERVER", HOST_RE)
+    # The probe connects to this exact host; a short server name resolves nowhere inside ACI.
+    if not server.endswith(".database.windows.net"):
+        fail()
     database = required("CATALOG_DATABASE", RESOURCE_NAME_RE)
     api_identity_name = required("API_IDENTITY_NAME", RESOURCE_NAME_RE)
     api_identity_client = required("CATALOG_MI_CLIENT_ID", GUID_RE, lower=True)
