@@ -1,4 +1,4 @@
-import { Archive, DatabaseZap, FileClock, Gauge, Home, KeyRound, Layers3, PackageSearch, Rocket, ShieldCheck, Terminal } from "lucide-react";
+import { Activity, Cloud, WalletCards, Archive, DatabaseZap, FileClock, Gauge, Home, KeyRound, Layers3, PackageSearch, Rocket, ShieldCheck, Terminal } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 type ConsoleDestination = { to: string; label: string; icon: LucideIcon; end?: boolean };
@@ -6,7 +6,9 @@ export const consoleNavigation: Array<{ label: string; items: ConsoleDestination
   { label: "Workspace", items: [
     { to: "/admin/overview", label: "Overview", icon: Home },
     { to: "/admin/deployments/applications", label: "Applications", icon: Rocket },
-    { to: "/admin/deployments", label: "Deployments", icon: Gauge, end: true }
+    { to: "/admin/deployments", label: "Deployments", icon: Gauge, end: true },
+    { to: "/admin/runtimes", label: "Managed runtimes", icon: Cloud },
+    { to: "/admin/operations", label: "Runtime operations", icon: Activity }
   ] },
   { label: "Library", items: [
     { to: "/admin/artifacts", label: "Artifacts", icon: Archive },
@@ -18,6 +20,7 @@ export const consoleNavigation: Array<{ label: string; items: ConsoleDestination
     { to: "/admin/sync-runs", label: "Sync runs", icon: FileClock },
     { to: "/admin/deployments/credentials", label: "Engine credentials", icon: KeyRound },
     { to: "/admin/deployments/tiers", label: "Tiers", icon: ShieldCheck },
-    { to: "/admin/console", label: "Logs", icon: Terminal }
+    { to: "/admin/console", label: "Logs", icon: Terminal },
+    { to: "/admin/billing", label: "Billing", icon: WalletCards }
   ] }
 ];

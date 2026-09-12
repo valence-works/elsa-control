@@ -22,6 +22,7 @@ describe("OverviewPage", () => {
     expect(screen.getByText("Engine inventory")).toBeInTheDocument();
     expect(screen.getByText("03 / 03 ENGINES")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Claims Dev" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Inspect Claims Dev" })).toHaveAccessibleDescription(/Claims.*Dev.*Healthy/);
     expect(screen.getAllByText("Healthy", { exact: true })).not.toHaveLength(0);
     expect(screen.getByRole("link", { name: "View engine" })).toHaveAttribute(
       "href",

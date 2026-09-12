@@ -70,6 +70,7 @@ describe("DeploymentsPage", () => {
     expect(screen.getByText("Claims Operations")).toBeInTheDocument();
     expect(screen.getByLabelText("Sort applications")).toHaveValue("name");
     expect(screen.getByRole("link", { name: "Claims Operations" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Claims Operations" })).toHaveAccessibleDescription(/environment.*engine/);
     expect(screen.getByRole("link", { name: "Policy" })).toBeInTheDocument();
 
     await userEvent.type(screen.getByPlaceholderText("Search applications"), "Policy");

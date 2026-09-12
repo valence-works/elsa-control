@@ -2891,11 +2891,11 @@ function ApplicationCards({ applications, data }: { applications: DeploymentCock
     {applications.map((application) => {
       const engines = enginesForApplication(data, application);
       const driftCount = application.environments.filter(environment => environment.driftStatus === "DriftDetected").length;
-      return <Link key={application.id} to={applicationPath(application.id)} aria-label={application.name} className="console-application-card">
-        <div className="console-application-card-top"><Boxes aria-hidden size={24} strokeWidth={1.5} /><StatusBadge value={summarizeApplicationHealth(application, data.engines)} tone={applicationHealthTone(application, data.engines)} /></div>
+      return <Link key={application.id} to={applicationPath(application.id)} aria-label={application.name} aria-describedby={`application-health-${application.id} application-summary-${application.id} application-action-${application.id}`} className="console-application-card">
+        <div id={`application-health-${application.id}`} className="console-application-card-top"><Boxes aria-hidden size={24} strokeWidth={1.5} /><StatusBadge value={summarizeApplicationHealth(application, data.engines)} tone={applicationHealthTone(application, data.engines)} /></div>
         <h2>{application.name}</h2>
-        <p>{application.environments.length} environment{application.environments.length === 1 ? "" : "s"} · {engines.length} engine{engines.length === 1 ? "" : "s"}</p>
-        <div className="console-application-card-footer"><span>{driftCount ? `${driftCount} with drift` : "Open application"}</span><ArrowUpRight aria-hidden size={16} /></div>
+        <p id={`application-summary-${application.id}`}>{application.environments.length} environment{application.environments.length === 1 ? "" : "s"} · {engines.length} engine{engines.length === 1 ? "" : "s"}</p>
+        <div id={`application-action-${application.id}`} className="console-application-card-footer"><span>{driftCount ? `${driftCount} with drift` : "Open application"}</span><ArrowUpRight aria-hidden size={16} /></div>
       </Link>;
     })}
   </div>;

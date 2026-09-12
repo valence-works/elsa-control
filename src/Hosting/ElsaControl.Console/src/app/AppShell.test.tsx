@@ -49,7 +49,9 @@ describe("AppShell", () => {
     expect(screen.getAllByRole("link", { name: "Artifacts" }).length).toBeGreaterThan(0);
     expect(screen.getByRole("link", { name: "Runtime builder" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Logs" })).toBeInTheDocument();
-    expect(screen.queryByText("Managed Runtimes")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Managed runtimes" })).toHaveAttribute("href", "/admin/runtimes");
+    expect(screen.getByRole("link", { name: "Runtime operations" })).toHaveAttribute("href", "/admin/operations");
+    expect(screen.getByRole("link", { name: "Billing" })).toHaveAttribute("href", "/admin/billing");
     expect(navigationText).toContain("WorkspaceOverviewApplicationsDeployments");
     expect(navigationText).toContain("LibraryArtifactsPackagesRuntime builder");
     expect(screen.queryByRole("link", { name: "Settings" })).not.toBeInTheDocument();

@@ -361,7 +361,7 @@ describe("ManagedElsaInstancesPage", () => {
 
     renderPage();
 
-    expect(await screen.findByRole("status")).toHaveTextContent("No managed Elsa releases are currently available.");
+    expect(await screen.findByText("No managed Elsa releases are currently available.")).toHaveAttribute("role", "status");
   });
 
   it("keeps distinct governed release lines and channels selectable", async () => {

@@ -187,15 +187,16 @@ function EngineRow({ context, index, selected, onSelect }: { context: EngineCont
       type="button"
       className={`aperture-overview__row${selected ? " is-selected" : ""}`}
       aria-label={`Inspect ${name}`}
+      aria-describedby={`engine-placement-${engine.id} engine-health-${engine.id}`}
       aria-pressed={selected}
       onClick={() => onSelect(engine.id)}
     >
       <span className="aperture-overview__index">{String(index + 1).padStart(2, "0")}</span>
       <span className="aperture-overview__identity">
         <span className="aperture-overview__name">{name}</span>
-        <span className="aperture-overview__sub">{application?.name ?? "Unmapped application"} / {environment?.name ?? "Unmapped environment"}</span>
+        <span id={`engine-placement-${engine.id}`} className="aperture-overview__sub">{application?.name ?? "Unmapped application"} / {environment?.name ?? "Unmapped environment"}</span>
       </span>
-      <HealthStatus health={engineHealth(engine)} />
+      <span id={`engine-health-${engine.id}`}><HealthStatus health={engineHealth(engine)} /></span>
       <ChevronRight aria-hidden />
     </button>
   );
