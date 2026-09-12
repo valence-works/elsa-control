@@ -22,8 +22,8 @@
 .console-breadcrumb { display: flex; align-items: center; gap: 10px; padding: 24px 32px 0; color: hsl(var(--muted-foreground)); font: 11px/1.5 var(--font-mono); }
 .console-breadcrumb span { overflow-wrap: anywhere; min-width: 0; }
 .console-breadcrumb span:last-child { color: hsl(var(--foreground)); }
-.console-content { padding: 32px 32px 48px; }
-.console-content:focus { outline: none; }
+.console-content { padding: 32px 32px 48px; scroll-margin-top: 96px; }
+.console-content:focus-visible { outline: 2px solid hsl(var(--primary-text)); outline-offset: -2px; }
 .console-content h1 { font-family: var(--font-display); letter-spacing: -.045em; font-weight: 500; }
 .console-application-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
 .console-application-card { min-width: 0; padding: 25px; border: 1px solid hsl(var(--border)); border-top: 2px solid hsl(var(--foreground)); border-radius: 0 0 var(--radius-ui) var(--radius-ui); background: hsl(var(--surface)); }

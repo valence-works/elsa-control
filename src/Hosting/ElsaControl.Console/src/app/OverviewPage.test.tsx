@@ -83,11 +83,24 @@ describe("OverviewPage", () => {
     expect(screen.queryByText("Engine inventory")).not.toBeInTheDocument();
     expect(screen.queryByText("Healthy", { exact: true })).not.toBeInTheDocument();
   });
+
+  it("keeps the overview Connect engine action read-only without setup permission", async () => {
+    renderOverview({ permissions: ["deployments.read"] });
+
+    expect(await screen.findByRole("heading", { name: "Acme Insurance" })).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: /Connect engine/ });
+    expect(link).toHaveAttribute("aria-disabled", "true");
+    expect(link).toHaveAttribute("tabindex", "-1");
+    link.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(screen.getByRole("heading", { name: "Claims Dev" })).toBeInTheDocument();
+  });
 });
 
 type RenderOptions = {
   cockpit?: DeploymentCockpit;
   cockpitResponse?: Response;
+  permissions?: string[];
 };
 
 function renderOverview(options: RenderOptions = {}) {
@@ -98,6 +111,9 @@ function renderOverview(options: RenderOptions = {}) {
       return Response.json({ loginEnabled: true, authenticated: true, displayName: "Test User", email: "test@example.com", loginPath: "/api/auth/login", logoutPath: "/api/auth/logout" });
     }
     if (url.endsWith("/api/me/organizations")) return Response.json(workspaceContextFixture());
+    if (url.endsWith(`/api/workspaces/${workspaceId}/deployments/permissions`)) {
+      return Response.json({ permissions: options.permissions ?? ["deployments.read", "deployments.setup.manage"] });
+    }
     if (url.endsWith(`/api/workspaces/${workspaceId}/deployments/cockpit`)) return options.cockpitResponse ?? Response.json(options.cockpit ?? deploymentCockpitFixture());
     return Response.json({ title: "Not found" }, { status: 404 });
   }));

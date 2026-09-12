@@ -237,7 +237,7 @@ export const designPreviewFixtures = {
     ]
   } satisfies WorkspaceDeploymentCredentialReferencesResponse,
   secretStores: {
-    items: previewSecretStores
+    items: structuredClone(previewSecretStores)
   } satisfies WorkspaceDeploymentSecretStoresResponse,
   cockpit: createCockpit()
 };
@@ -249,6 +249,24 @@ const previewSequences = {
   secretStore: 0,
   credential: 0
 };
+
+const initialDesignPreviewState = {
+  cockpit: structuredClone(designPreviewFixtures.cockpit),
+  credentials: structuredClone(designPreviewFixtures.credentials),
+  secretStores: structuredClone(designPreviewFixtures.secretStores),
+  credentialEngineIds: structuredClone(previewCredentialEngineIds),
+  sequences: structuredClone(previewSequences)
+};
+
+export function resetDesignPreviewFixtures() {
+  designPreviewFixtures.cockpit = structuredClone(initialDesignPreviewState.cockpit);
+  designPreviewFixtures.credentials = structuredClone(initialDesignPreviewState.credentials);
+  designPreviewFixtures.secretStores = structuredClone(initialDesignPreviewState.secretStores);
+
+  for (const key of Object.keys(previewCredentialEngineIds)) delete previewCredentialEngineIds[key];
+  Object.assign(previewCredentialEngineIds, structuredClone(initialDesignPreviewState.credentialEngineIds));
+  Object.assign(previewSequences, initialDesignPreviewState.sequences);
+}
 
 export function installDesignPreviewFixtures() {
   if (!import.meta.env.DEV) {

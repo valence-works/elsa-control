@@ -149,6 +149,31 @@ describe("DeploymentsPage", () => {
     expect(screen.getByText("No deployment setup")).toBeInTheDocument();
   });
 
+  it("keeps an empty environment engine action read-only without setup permission", async () => {
+    const cockpit: DeploymentCockpit = {
+      ...deploymentCockpitFixture,
+      applications: deploymentCockpitFixture.applications.map((application) => application.id === "claims-ops"
+        ? {
+            ...application,
+            environments: application.environments.map((environment) => environment.id === "claims-dev" ? { ...environment, engineIds: [] } : environment)
+          }
+        : application),
+      engines: deploymentCockpitFixture.engines.filter((engine) => engine.id !== "dev-engine")
+    };
+    renderDeployments(cockpit, "/admin/deployments/applications/claims-ops/environments/claims-dev", { permissions: ["deployments.read"] });
+
+    expect(await screen.findByRole("heading", { name: "Dev" })).toBeInTheDocument();
+    const links = screen.getAllByRole("link", { name: "Connect engine" });
+    expect(links).toHaveLength(2);
+    links.forEach((link) => {
+      expect(link).toHaveAttribute("aria-disabled", "true");
+      expect(link).toHaveAttribute("tabindex", "-1");
+    });
+    links[1].focus();
+    await userEvent.keyboard("{Enter}");
+    expect(screen.getByRole("heading", { name: "Dev" })).toBeInTheDocument();
+  });
+
   it("creates application setup with environments and engines from the guided setup route", async () => {
     const fetchMock = renderDeployments({
       applications: [],

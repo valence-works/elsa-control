@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectEnginePage } from "@/features/deployments/ConnectEnginePage";
-import type { DeploymentCockpit, WorkflowEngineRegistration, WorkspaceDeploymentCredentialReference } from "@/features/deployments/deploymentModels";
+import type { DeploymentCockpit, WorkflowEngineRegistration, WorkspaceDeploymentCredentialReference, WorkspaceDeploymentTier } from "@/features/deployments/deploymentModels";
 import { ApiError } from "@/lib/api/httpClient";
 import { queryKeys } from "@/lib/query/queryClient";
 import {
@@ -265,6 +265,47 @@ describe("ConnectEnginePage", () => {
     }));
   });
 
+  it("suffixes an auto-generated credential name when the store already uses it", async () => {
+    vi.mocked(getDeploymentCredentialReferences).mockResolvedValue({ items: [{ ...credentialFixture, name: "Orders API key" }] });
+    renderPage();
+
+    await screen.findByRole("heading", { name: "Connect an engine" });
+    await userEvent.type(screen.getByLabelText("Engine name"), "Orders");
+    await userEvent.type(screen.getByLabelText("Engine URL"), "https://orders.example.com");
+    await userEvent.click(screen.getByRole("button", { name: "New API key" }));
+    await userEvent.type(screen.getByLabelText("Engine API key"), "secret-value");
+    await userEvent.click(screen.getByRole("button", { name: "Connect engine →" }));
+
+    await waitFor(() => expect(createDeploymentCredentialReference).toHaveBeenCalledWith("workspace-1", "store-local", expect.objectContaining({
+      name: "Orders API key (2)",
+      reference: "local://engine-credentials/orders-api-key-2",
+      secretValue: "secret-value"
+    })));
+  });
+
+  it("leaves an explicit credential-name conflict for server validation", async () => {
+    vi.mocked(createDeploymentCredentialReference).mockRejectedValueOnce(new ApiError("Validation", "An active credential reference with this name already exists in the secret store.", 400));
+    renderPage();
+
+    await screen.findByRole("heading", { name: "Connect an engine" });
+    await userEvent.type(screen.getByLabelText("Engine name"), "Orders");
+    await userEvent.type(screen.getByLabelText("Engine URL"), "https://orders.example.com");
+    await userEvent.click(screen.getByRole("button", { name: "New API key" }));
+    await userEvent.click(screen.getByText("Credential name", { exact: true }));
+    await userEvent.type(screen.getByLabelText("Credential name"), "Orders API key");
+    await userEvent.type(screen.getByLabelText("Engine API key"), "secret-value");
+    await userEvent.click(screen.getByRole("button", { name: "Connect engine →" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("An active credential reference with this name already exists in the secret store.");
+    expect(alert).toHaveTextContent("Your entries are still here. Correct them and try again.");
+    expect(createDeploymentCredentialReference).toHaveBeenCalledWith("workspace-1", "store-local", expect.objectContaining({
+      name: "Orders API key",
+      reference: "local://engine-credentials/orders-api-key",
+      secretValue: "secret-value"
+    }));
+  });
+
   it("redacts the trimmed API key when a credential request echoes it", async () => {
     vi.mocked(createDeploymentCredentialReference).mockRejectedValueOnce(new ApiError("Validation", "The API key secret-value was rejected.", 400));
     renderPage();
@@ -313,6 +354,47 @@ describe("ConnectEnginePage", () => {
       name: "Development",
       tier: "Production"
     });
+  });
+
+  it("prefers the workspace default tier over the legacy Dev name", async () => {
+    const tierDefaults = {
+      workspaceId: "workspace-1",
+      description: null,
+      status: "Active" as const,
+      capabilities: [],
+      environmentCount: 0,
+      createdAt: "2026-09-12T08:00:00Z",
+      updatedAt: "2026-09-12T08:00:00Z",
+      createdByAccountId: null,
+      updatedByAccountId: null,
+      archivedAt: null,
+      archivedByAccountId: null
+    };
+    const tiers: WorkspaceDeploymentTier[] = [
+      {
+        ...tierDefaults,
+        id: "tier-dev",
+        name: "Dev",
+        sortOrder: 10,
+        isDefault: false
+      },
+      {
+        ...tierDefaults,
+        id: "tier-release",
+        name: "Release",
+        sortOrder: 20,
+        isDefault: true
+      }
+    ];
+    vi.mocked(getDeploymentCockpit).mockResolvedValue({ ...cockpitFixture, applications: [], engines: [] });
+    renderPageWithQueryClient("/admin/engines/connect", (queryClient) => {
+      queryClient.setQueryDefaults(queryKeys.deploymentTiers("workspace-1"), { staleTime: Infinity });
+      queryClient.setQueryData(queryKeys.deploymentTiers("workspace-1"), { tiers });
+    });
+
+    await screen.findByRole("heading", { name: "Connect an engine" });
+    await userEvent.click(screen.getByRole("button", { name: "Change" }));
+    expect(screen.getByLabelText("Environment tier")).toHaveValue("tier-release");
   });
 
   it.each([
@@ -441,8 +523,9 @@ function renderPage(initialEntry = "/admin/engines/connect") {
   return renderPageWithQueryClient(initialEntry).view;
 }
 
-function renderPageWithQueryClient(initialEntry = "/admin/engines/connect") {
+function renderPageWithQueryClient(initialEntry = "/admin/engines/connect", seed?: (queryClient: QueryClient) => void) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  seed?.(queryClient);
   const view = render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={[initialEntry]}>

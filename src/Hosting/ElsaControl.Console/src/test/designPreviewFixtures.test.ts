@@ -1,17 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { designPreviewFixtures, installDesignPreviewFixtures } from "./designPreviewFixtures";
+import { designPreviewFixtures, installDesignPreviewFixtures, resetDesignPreviewFixtures } from "./designPreviewFixtures";
 
 const originalFetch = window.fetch;
-const originalCockpit = structuredClone(designPreviewFixtures.cockpit);
 const workspacePath = "/api/workspaces/workspace-preview";
 const billingPath = "/api/organizations/organization-preview/billing/";
 const previewUrl = (path: string) => new URL(path, window.location.origin).href;
 
 describe("design preview fixtures", () => {
-  beforeEach(() => installDesignPreviewFixtures());
+  beforeEach(() => {
+    resetDesignPreviewFixtures();
+    installDesignPreviewFixtures();
+  });
   afterEach(() => {
     window.fetch = originalFetch;
-    designPreviewFixtures.cockpit = structuredClone(originalCockpit);
+    resetDesignPreviewFixtures();
   });
 
   it.each([
@@ -83,6 +85,47 @@ describe("design preview fixtures", () => {
         environmentId: "env-automations-stage"
       }]
     });
+  });
+
+  it("resets saved credential registration state between preview sessions", async () => {
+    const environment = designPreviewFixtures.cockpit.applications[0].environments[0];
+    const storeResponse = await window.fetch(previewUrl(`${workspacePath}/deployments/secret-stores`), {
+      method: "POST",
+      body: JSON.stringify({ name: "Preview local store", type: "LocalEncryptedDatabase", provider: "Preview protected store" })
+    });
+    const store = await storeResponse.json();
+    const credentialResponse = await window.fetch(previewUrl(`${workspacePath}/deployments/secret-stores/${store.id}/credential-references`), {
+      method: "POST",
+      body: JSON.stringify({ name: "Preview saved credential", reference: "local://preview/saved", description: "Fixture credential" })
+    });
+    const credential = await credentialResponse.json();
+    const engineResponse = await window.fetch(previewUrl(`${workspacePath}/deployments/environments/${environment.id}/engines`), {
+      method: "POST",
+      body: JSON.stringify({ name: "Saved credential engine", baseUrl: "https://saved.example.test", credentialReferenceId: credential.id })
+    });
+    const engine = await engineResponse.json();
+
+    expect(credential.id).toBe("credential-preview-01");
+    expect(credential.usageCount).toBe(0);
+    expect(engine.id).toBe("engine-preview-01");
+    expect((await (await window.fetch(previewUrl(`${workspacePath}/deployments/credential-references/${credential.id}/usage`))).json()).items).toMatchObject([{ engineId: engine.id }]);
+
+    resetDesignPreviewFixtures();
+
+    const cleanStores = await (await window.fetch(previewUrl(`${workspacePath}/deployments/secret-stores`))).json();
+    const cleanCredentials = await (await window.fetch(previewUrl(`${workspacePath}/deployments/credential-references`))).json();
+    const cleanCockpit = await (await window.fetch(previewUrl(`${workspacePath}/deployments/cockpit`))).json();
+    expect(cleanStores.items).toHaveLength(2);
+    expect(cleanCredentials.items).toHaveLength(2);
+    expect(cleanCredentials.items.some((item: { id: string }) => item.id === credential.id)).toBe(false);
+    expect(cleanCockpit.engines).toHaveLength(3);
+    expect((await window.fetch(previewUrl(`${workspacePath}/deployments/credential-references/${credential.id}/usage`))).status).toBe(404);
+
+    const nextStore = await (await window.fetch(previewUrl(`${workspacePath}/deployments/secret-stores`), {
+      method: "POST",
+      body: JSON.stringify({ name: "Sequence reset store", type: "LocalEncryptedDatabase" })
+    })).json();
+    expect(nextStore.id).toBe("secretStore-preview-01");
   });
 
   it("starts a new preview environment as unavailable with no desired revision", async () => {

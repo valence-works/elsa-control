@@ -328,6 +328,7 @@ function ConnectEngineForm({
         credentialReferenceId = await ensureCredentialReference({
           workspaceId,
           values,
+          activeCredentials,
           activeSecretStores: localSecretStores,
           existingSecretStoreId: createdSecretStoreId,
           onSecretStoreCreated: setCreatedSecretStoreId,
@@ -561,7 +562,7 @@ function initialValues(cockpit: DeploymentCockpit, credentials: WorkspaceDeploym
   const placements = flattenPlacements(cockpit);
   const activeCredentials = credentials.filter((reference) => reference.status === "Active");
   const activeTiers = tiers.filter((tier) => tier.status === "Active");
-  const firstTier = activeTiers.find((tier) => tier.name.toLowerCase() === "dev") ?? activeTiers[0];
+  const firstTier = activeTiers.find((tier) => tier.isDefault) ?? activeTiers.find((tier) => tier.name.toLowerCase() === "dev") ?? activeTiers[0];
   return {
     ...defaultValues,
     placementMode: placements.length > 0 ? "existing" : "new",
@@ -634,10 +635,10 @@ async function ensurePlacement({ workspaceId, cockpit, values, activeTiers, exis
   };
 }
 
-async function ensureCredentialReference({ workspaceId, values, activeSecretStores, existingSecretStoreId, onSecretStoreCreated, existingCredentialReferenceId, onCredentialCreated, onMutationConfirmed }: { workspaceId: string; values: ConnectEngineValues; activeSecretStores: WorkspaceDeploymentSecretStore[]; existingSecretStoreId: string | null; onSecretStoreCreated: (secretStoreId: string | null) => void; existingCredentialReferenceId: string | null; onCredentialCreated: (credentialReferenceId: string | null) => void; onMutationConfirmed: () => Promise<void> }) {
+async function ensureCredentialReference({ workspaceId, values, activeCredentials, activeSecretStores, existingSecretStoreId, onSecretStoreCreated, existingCredentialReferenceId, onCredentialCreated, onMutationConfirmed }: { workspaceId: string; values: ConnectEngineValues; activeCredentials: WorkspaceDeploymentCredentialReference[]; activeSecretStores: WorkspaceDeploymentSecretStore[]; existingSecretStoreId: string | null; onSecretStoreCreated: (secretStoreId: string | null) => void; existingCredentialReferenceId: string | null; onCredentialCreated: (credentialReferenceId: string | null) => void; onMutationConfirmed: () => Promise<void> }) {
   if (existingCredentialReferenceId) return existingCredentialReferenceId;
   let store = activeSecretStores.find((item) => item.id === values.credentialStoreId);
-  const name = values.credentialName.trim() || `${values.engineName.trim()} API key`;
+  const explicitName = values.credentialName.trim();
   const secretValue = values.credentialSecret.trim();
   if (!secretValue) throw new ConnectEngineValidationError("Enter the API key.");
   if (!store && existingSecretStoreId) {
@@ -654,6 +655,7 @@ async function ensureCredentialReference({ workspaceId, values, activeSecretStor
     onSecretStoreCreated(createdStore.id);
     await onMutationConfirmed();
   }
+  const name = explicitName || generatedCredentialName(`${values.engineName.trim()} API key`, store.id, activeCredentials);
   const reference = `local://engine-credentials/${slugify(name)}`;
   const created = await createDeploymentCredentialReference(workspaceId, store.id, {
     name,
@@ -664,6 +666,19 @@ async function ensureCredentialReference({ workspaceId, values, activeSecretStor
   onCredentialCreated(created.id);
   await onMutationConfirmed();
   return created.id;
+}
+
+function generatedCredentialName(baseName: string, secretStoreId: string, activeCredentials: WorkspaceDeploymentCredentialReference[]) {
+  const names = new Set(
+    activeCredentials
+      .filter((reference) => reference.status === "Active" && reference.secretStoreId === secretStoreId)
+      .map((reference) => reference.name.trim().toLowerCase())
+  );
+  if (!names.has(baseName.toLowerCase())) return baseName;
+
+  let suffix = 2;
+  while (names.has(`${baseName} (${suffix})`.toLowerCase())) suffix += 1;
+  return `${baseName} (${suffix})`;
 }
 
 function slugify(value: string) {

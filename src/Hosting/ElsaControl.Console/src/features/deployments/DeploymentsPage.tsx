@@ -22,7 +22,7 @@ import {
   XCircle
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { MouseEvent, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Badge, Button, buttonClassName, EmptyState, Input, SecondaryButton, Select, Table } from "@/components/ui";
 import { RequestStateView } from "@/components/states/RequestStateViews";
@@ -110,6 +110,7 @@ import {
 import { useWorkspaceContext } from "@/app/WorkspaceContextProvider";
 import { formatDateTime } from "@/lib/formatters";
 import { queryKeys } from "@/lib/query/queryClient";
+import { permissionLinkProps } from "@/lib/auth/permissionLinkProps";
 import { statusToneClass, type StatusTone } from "@/lib/status/statusBadges";
 import { cn } from "@/lib/utils";
 
@@ -2068,7 +2069,15 @@ function DeploymentEnvironmentReady({
               <EmptyState
                 title="No engine registered"
                 description="Register an engine before verifying runtime health or running controls."
-                action={<Link to={`${environmentPath(application.id, environment.id)}/engines/new`} className={buttonClassName()}>Connect engine</Link>}
+                action={
+                  <Link
+                    to={`${environmentPath(application.id, environment.id)}/engines/new`}
+                    className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)}
+                    {...permissionLinkProps(canManageSetup)}
+                  >
+                    Connect engine
+                  </Link>
+                }
               />
             ) : (
               <div className="space-y-3">
@@ -5402,14 +5411,4 @@ function statusTextClass(tone: StatusTone) {
   if (tone === "warning") return "text-warning";
   if (tone === "destructive") return "text-destructive";
   return "";
-}
-
-function permissionLinkProps(enabled: boolean) {
-  return {
-    "aria-disabled": !enabled,
-    tabIndex: enabled ? undefined : -1,
-    onClick: (event: MouseEvent<HTMLAnchorElement>) => {
-      if (!enabled) event.preventDefault();
-    }
-  };
 }

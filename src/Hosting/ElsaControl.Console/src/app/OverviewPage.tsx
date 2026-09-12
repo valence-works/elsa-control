@@ -6,7 +6,7 @@ import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useWorkspaceContext } from "@/app/WorkspaceContextProvider";
 import { RequestStateView } from "@/components/states/RequestStateViews";
-import { getDeploymentCockpit } from "@/features/deployments/deploymentApi";
+import { getDeploymentCockpit, getDeploymentPermissions } from "@/features/deployments/deploymentApi";
 import type {
   DeploymentCockpit,
   DeploymentHealth,
@@ -15,6 +15,7 @@ import type {
   WorkflowEngineRegistration
 } from "@/features/deployments/deploymentModels";
 import { ApiError } from "@/lib/api/httpClient";
+import { permissionLinkProps } from "@/lib/auth/permissionLinkProps";
 import { queryKeys } from "@/lib/query/queryClient";
 
 type EngineHealth = DeploymentHealth | "Unknown";
@@ -36,7 +37,13 @@ export function OverviewPage() {
     queryFn: () => getDeploymentCockpit(selectedWorkspaceId as string),
     enabled: Boolean(selectedWorkspaceId)
   });
+  const permissions = useQuery({
+    queryKey: queryKeys.deploymentPermissions(selectedWorkspaceId ?? ""),
+    queryFn: () => getDeploymentPermissions(selectedWorkspaceId as string),
+    enabled: Boolean(selectedWorkspaceId)
+  });
   const data = cockpit.data;
+  const canManageSetup = permissions.data?.permissions.includes("deployments.setup.manage") ?? false;
   const contexts = useMemo(() => data ? buildEngineContexts(data) : [], [data]);
   const filteredContexts = useMemo(
     () => filterEngines(contexts, engineSearch, engineFilter),
@@ -80,7 +87,11 @@ export function OverviewPage() {
             <h1>{workspaceName}</h1>
             <p>{data.engines.length} engine{data.engines.length === 1 ? "" : "s"} · {data.applications.length} application{data.applications.length === 1 ? "" : "s"}</p>
           </div>
-          <Link to="/admin/engines/connect" className="aperture-overview__primary">
+          <Link
+            to="/admin/engines/connect"
+            className={`aperture-overview__primary${canManageSetup ? "" : " pointer-events-none opacity-50"}`}
+            {...permissionLinkProps(canManageSetup)}
+          >
             Connect engine <ArrowUpRight aria-hidden />
           </Link>
         </header>
