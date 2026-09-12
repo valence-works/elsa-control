@@ -50,7 +50,19 @@ public sealed class OrganizationBillingApiService(
         if (!_stripeOptions.IsCheckoutConfigured)
             return OrganizationBillingApiResult.Unavailable();
 
-        var trial = await billing.StartTrialAsync(organizationId, provider.Provider, cancellationToken);
+        BillingEventConsumptionResult trial;
+        try
+        {
+            trial = await billing.StartTrialAsync(organizationId, provider.Provider, cancellationToken);
+        }
+        catch (BillingProviderEventConflictException)
+        {
+            // The organization's subscription belongs to another provider (for
+            // example, an operator-granted internal entitlement); it is terminal
+            // to a checkout that only ever creates or resumes a Stripe trial.
+            return OrganizationBillingApiResult.Terminal();
+        }
+
         var subscription = trial.Subscription ?? await billing.GetSubscriptionAsync(organizationId, cancellationToken);
         if (subscription is null)
             return OrganizationBillingApiResult.Unavailable();

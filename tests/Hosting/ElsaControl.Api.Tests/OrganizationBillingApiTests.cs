@@ -88,6 +88,34 @@ public sealed class OrganizationBillingApiTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Checkout_for_an_internally_granted_organization_returns_terminal_conflict_before_calling_provider()
+    {
+        await _app.SeedAsync(_ => Task.CompletedTask);
+        var owner = _app.CreateControlIdentityClient(subject: "billing-internal-owner");
+        var organizationId = (await owner.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces"))!.Organizations.Single().Id;
+        await using (var scope = _app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            var store = new OrganizationBillingStore(db);
+            var granted = await store.GrantInternalEntitlementAsync(
+                new(organizationId, new("Internal dogfood grant", 2, DateTimeOffset.UtcNow.AddDays(30)), "operator"),
+                DateTimeOffset.UtcNow);
+            Assert.Equal(OrganizationInternalEntitlementOutcome.Granted, granted.Outcome);
+        }
+
+        var response = await owner.PostControlJsonAsync($"/api/organizations/{organizationId}/billing/checkout", new { });
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("billing.subscription-terminal", (await response.Content.ReadFromJsonAsync<Dictionary<string, string>>())!["code"]);
+        Assert.Null(_provider.LastCheckout);
+        await using var verifyScope = _app.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var subscription = await verifyDb.OrganizationSubscriptions.SingleAsync(x => x.OrganizationId == organizationId);
+        Assert.Equal(BillingProviderNames.Internal, subscription.Provider);
+        Assert.Equal(0, await verifyDb.OrganizationBillingCleanups.CountAsync());
+    }
+
+    [Fact]
     public async Task Checkout_fails_closed_before_trial_when_the_injected_provider_is_not_stripe()
     {
         await _app.SeedAsync(_ => Task.CompletedTask);

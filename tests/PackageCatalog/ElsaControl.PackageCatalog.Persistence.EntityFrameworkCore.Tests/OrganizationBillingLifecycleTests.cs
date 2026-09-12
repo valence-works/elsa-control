@@ -175,6 +175,37 @@ public sealed class OrganizationBillingLifecycleTests
     }
 
     [Fact]
+    public async Task Internal_grant_deletion_cleanup_is_confirmed_without_any_provider_call()
+    {
+        await using var fixture = await LifecycleFixture.CreateAsync();
+        var granted = await fixture.Store.GrantInternalEntitlementAsync(
+            new(fixture.OrganizationId, new("Internal dogfood grant", 2, Start.AddDays(30)), "operator"),
+            Start);
+        Assert.Equal(OrganizationInternalEntitlementOutcome.Granted, granted.Outcome);
+
+        await fixture.Store.RequestDeletionAsync(fixture.OrganizationId, Start.AddDays(1));
+        Assert.Equal(OrganizationSubscriptionState.Suspended, await fixture.StateAsync(fixture.OrganizationId));
+
+        // A registered Stripe provider is present, but the queued cleanup is for
+        // the "internal" provider, so it must never be dispatched to it.
+        var provider = new SequencedCleanupProvider(OrganizationBillingCleanupOutcome.ConfirmedAbsent);
+        var worker = new OrganizationBillingLifecycleWorker(fixture.Store, new TestTimeProvider(Start.AddDays(1)), provider);
+
+        var result = await worker.ProcessAvailableAsync("worker");
+
+        Assert.Equal(1, result.CleanupAttempts);
+        Assert.Empty(provider.Requests);
+        Assert.Equal(OrganizationSubscriptionState.Deleted, await fixture.StateAsync(fixture.OrganizationId));
+        var cleanup = await fixture.Db.OrganizationBillingCleanups.SingleAsync();
+        Assert.Equal(OrganizationBillingCleanupState.Confirmed, cleanup.State);
+        Assert.Null(cleanup.LastFailureCode);
+
+        // A second pass must not requeue or reclaim the confirmed cleanup.
+        var second = await worker.ProcessAvailableAsync("worker");
+        Assert.Equal(0, second.CleanupAttempts);
+    }
+
+    [Fact]
     public async Task Provider_timeout_is_recorded_as_retryable_when_the_host_token_is_not_cancelled()
     {
         await using var fixture = await LifecycleFixture.CreateAsync();

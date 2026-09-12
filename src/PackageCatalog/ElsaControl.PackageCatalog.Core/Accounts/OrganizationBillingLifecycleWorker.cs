@@ -37,7 +37,14 @@ public sealed class OrganizationBillingLifecycleWorker(
             cleanupAttempts++;
             var outcome = OrganizationBillingCleanupOutcome.Unknown;
             string? failureCode = "cleanup.unknown";
-            if (string.Equals(item.Provider, _cleanupProvider.Provider, StringComparison.Ordinal))
+            if (string.Equals(item.Provider, BillingProviderNames.Internal, StringComparison.Ordinal))
+            {
+                // An internally granted entitlement never had an external subscription to
+                // cancel, so its cleanup is confirmed without calling any billing provider.
+                outcome = OrganizationBillingCleanupOutcome.ConfirmedAbsent;
+                failureCode = null;
+            }
+            else if (string.Equals(item.Provider, _cleanupProvider.Provider, StringComparison.Ordinal))
             {
                 try
                 {
