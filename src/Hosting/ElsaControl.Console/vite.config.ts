@@ -42,6 +42,20 @@ export default defineConfig(({ mode }) => {
       handleHotUpdate(context) {
         if (normalizePath(context.file).includes("/lib/theme/")) themeBootstrap = undefined;
       }
+    }, {
+      name: "console-design-preview",
+      configureServer(server) {
+        server.middlewares.use((request, response, next) => {
+          // The sample session has no real identity to sign out. Keep its native
+          // logout form inside the preview, then restart it with fresh sample data.
+          if (request.method === "POST" && request.url?.split("?")[0] === "/admin/design-preview.html") {
+            response.writeHead(303, { Location: "/admin/design-preview.html" });
+            response.end();
+            return;
+          }
+          next();
+        });
+      }
     }],
     resolve: {
       alias: {
