@@ -66,7 +66,7 @@ public sealed class RuntimeConfigurationPersistenceTests
     private static CatalogDbContext CreateDbContext(bool useMigrations)
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite("Data Source=:memory:", sqlite =>
+            .UseRetryingSqlite("Data Source=:memory:", sqlite =>
             {
                 if (useMigrations)
                     sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly);

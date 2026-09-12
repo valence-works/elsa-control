@@ -459,7 +459,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         setup.ChangeTracker.Clear();
 
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         await using var firstDb = new CatalogDbContext(options);
         await using var secondDb = new CatalogDbContext(options);
@@ -509,7 +509,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         setup.ChangeTracker.Clear();
 
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         await using var firstDb = new CatalogDbContext(options);
         await using var secondDb = new CatalogDbContext(options);
@@ -550,7 +550,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 workspace.OrganizationId, workspace.Id, "Managed Elsa", "atomic-delete", CreateIntent(), "create-atomic-delete"));
         await CompleteOperationAsync(setup, created.Operation.Id);
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         await using var staleDb = new CatalogDbContext(options);
         var store = CreateStore(staleDb);
@@ -823,7 +823,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         setup.ChangeTracker.Clear();
 
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         await using var firstDb = new CatalogDbContext(options);
         await using var secondDb = new CatalogDbContext(options);
@@ -1086,7 +1086,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 workspace.OrganizationId, workspace.Id, "Worker Elsa", "concurrent-worker-elsa", WorkerIntent(), "concurrent-worker-create"));
         var target = await AddManagedEnvironmentAsync(setup, workspace, accepted.Instance.Id);
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         await using var firstDb = new CatalogDbContext(options);
         await using var secondDb = new CatalogDbContext(options);
@@ -2706,7 +2706,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     private static CatalogDbContext CreateMigratedContext(SqliteConnection connection)
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         return new CatalogDbContext(options);
     }

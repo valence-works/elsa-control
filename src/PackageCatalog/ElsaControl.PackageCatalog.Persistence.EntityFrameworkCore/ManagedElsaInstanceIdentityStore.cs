@@ -170,86 +170,84 @@ public sealed class EfCoreManagedElsaInstanceIdentityStore(CatalogDbContext dbCo
             return Conflict();
 
         dbContext.ChangeTracker.Clear();
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(
-            IsolationLevel.Serializable, cancellationToken);
-        var entity = await dbContext.ElsaInstances
-            .Include(x => x.IdentityBinding)
-            .SingleOrDefaultAsync(
-                x => x.OrganizationId == organizationId && x.WorkspaceId == workspaceId && x.Id == instanceId,
-                cancellationToken);
-
-        if (entity is null || IsUnavailable(entity))
-            return NotFound();
-
-        var existing = entity.IdentityBinding;
-        ElsaInstanceIdentityBinding binding;
-        ManagedElsaInstanceIdentityBindingWriteOutcome outcome;
         try
         {
-            var candidate = ElsaInstanceIdentityBinding.Create(instanceId, verifiedEndpointOrigin, changedAt);
-            if (!ElsaManagedEndpointOrigin.TryCreate(entity.CurrentDeploymentEndpointUri, out var currentEndpoint) ||
-                !string.Equals(currentEndpoint.Value, candidate.VerifiedEndpointOrigin,
-                    StringComparison.Ordinal))
-                return Conflict();
-
-            if (expectedBindingVersion is null)
+            return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
             {
-                if (existing is not null)
-                    return Conflict();
+                var entity = await dbContext.ElsaInstances
+                    .Include(x => x.IdentityBinding)
+                    .SingleOrDefaultAsync(
+                        x => x.OrganizationId == organizationId && x.WorkspaceId == workspaceId && x.Id == instanceId,
+                        cancellationToken);
 
-                binding = candidate;
-                entity.IdentityBinding = new ElsaInstanceIdentityBindingEntity
-                {
-                    InstanceId = instanceId,
-                    Audience = binding.Audience,
-                    CanonicalCallbackUri = binding.CanonicalCallbackUri,
-                    VerifiedEndpointOrigin = binding.VerifiedEndpointOrigin,
-                    BindingVersion = binding.BindingVersion,
-                    ChangedAt = binding.ChangedAt
-                };
-                outcome = ManagedElsaInstanceIdentityBindingWriteOutcome.Created;
-            }
-            else
-            {
-                if (existing is null)
+                if (entity is null || IsUnavailable(entity))
                     return NotFound();
-                if (existing.BindingVersion != expectedBindingVersion)
+
+                var existing = entity.IdentityBinding;
+                ElsaInstanceIdentityBinding binding;
+                ManagedElsaInstanceIdentityBindingWriteOutcome outcome;
+                try
+                {
+                    var candidate = ElsaInstanceIdentityBinding.Create(instanceId, verifiedEndpointOrigin, changedAt);
+                    if (!ElsaManagedEndpointOrigin.TryCreate(entity.CurrentDeploymentEndpointUri, out var currentEndpoint) ||
+                        !string.Equals(currentEndpoint.Value, candidate.VerifiedEndpointOrigin,
+                            StringComparison.Ordinal))
+                        return Conflict();
+
+                    if (expectedBindingVersion is null)
+                    {
+                        if (existing is not null)
+                            return Conflict();
+
+                        binding = candidate;
+                        entity.IdentityBinding = new ElsaInstanceIdentityBindingEntity
+                        {
+                            InstanceId = instanceId,
+                            Audience = binding.Audience,
+                            CanonicalCallbackUri = binding.CanonicalCallbackUri,
+                            VerifiedEndpointOrigin = binding.VerifiedEndpointOrigin,
+                            BindingVersion = binding.BindingVersion,
+                            ChangedAt = binding.ChangedAt
+                        };
+                        outcome = ManagedElsaInstanceIdentityBindingWriteOutcome.Created;
+                    }
+                    else
+                    {
+                        if (existing is null)
+                            return NotFound();
+                        if (existing.BindingVersion != expectedBindingVersion)
+                            return Conflict();
+
+                        var current = ElsaInstanceIdentityBinding.Hydrate(
+                            instanceId,
+                            existing.VerifiedEndpointOrigin,
+                            existing.BindingVersion,
+                            existing.ChangedAt);
+                        binding = current.Rotate(candidate.VerifiedEndpointOrigin, changedAt);
+                        existing.Audience = binding.Audience;
+                        existing.CanonicalCallbackUri = binding.CanonicalCallbackUri;
+                        existing.VerifiedEndpointOrigin = binding.VerifiedEndpointOrigin;
+                        existing.BindingVersion = binding.BindingVersion;
+                        existing.ChangedAt = binding.ChangedAt;
+                        outcome = ManagedElsaInstanceIdentityBindingWriteOutcome.Rotated;
+                    }
+                }
+                catch (ArgumentException)
+                {
                     return Conflict();
+                }
 
-                var current = ElsaInstanceIdentityBinding.Hydrate(
-                    instanceId,
-                    existing.VerifiedEndpointOrigin,
-                    existing.BindingVersion,
-                    existing.ChangedAt);
-                binding = current.Rotate(candidate.VerifiedEndpointOrigin, changedAt);
-                existing.Audience = binding.Audience;
-                existing.CanonicalCallbackUri = binding.CanonicalCallbackUri;
-                existing.VerifiedEndpointOrigin = binding.VerifiedEndpointOrigin;
-                existing.BindingVersion = binding.BindingVersion;
-                existing.ChangedAt = binding.ChangedAt;
-                outcome = ManagedElsaInstanceIdentityBindingWriteOutcome.Rotated;
-            }
-        }
-        catch (ArgumentException)
-        {
-            return Conflict();
-        }
-
-        try
-        {
-            await dbContext.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            return new(outcome, Map(entity, binding));
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return new ManagedElsaInstanceIdentityBindingWriteResult(outcome, Map(entity, binding));
+            }, cancellationToken);
         }
         catch (DbUpdateConcurrencyException)
         {
-            await transaction.RollbackAsync(cancellationToken);
             dbContext.ChangeTracker.Clear();
             return Conflict();
         }
         catch (DbUpdateException exception) when (EfCoreDatabaseExceptionPolicy.IsUniqueViolation(exception))
         {
-            await transaction.RollbackAsync(cancellationToken);
             dbContext.ChangeTracker.Clear();
             return Conflict();
         }

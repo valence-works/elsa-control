@@ -26,92 +26,86 @@ public sealed class EfCoreElsaInstanceMigrationStore(CatalogDbContext dbContext)
     {
         var migration = envelope.Migration;
         dbContext.ChangeTracker.Clear();
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
         var scope = $"instance/{migration.InstanceId:D}/MajorMigration";
-        var replayOperation = await dbContext.ElsaInstanceOperations.AsNoTracking().SingleOrDefaultAsync(x =>
-            x.WorkspaceId == migration.WorkspaceId && x.IdempotencyScope == scope &&
-            x.IdempotencyKey == envelope.IdempotencyKey, cancellationToken);
-        if (replayOperation is not null)
-        {
-            var replay = await dbContext.ElsaInstanceMigrations.AsNoTracking()
-                .SingleOrDefaultAsync(x => x.OperationId == replayOperation.Id, cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            if (replay is null || replayOperation.RequestHash != migration.StartRequestHash)
-                return Result(ElsaInstanceMigrationWriteOutcome.Conflict, replay is null ? null : Map(replay),
-                    "migration.idempotency.conflict");
-            return Result(ElsaInstanceMigrationWriteOutcome.Replayed, Map(replay), "migration.replayed");
-        }
-
-        var instance = await dbContext.ElsaInstances.SingleOrDefaultAsync(x =>
-            x.Id == migration.InstanceId && x.WorkspaceId == migration.WorkspaceId &&
-            x.OrganizationId == migration.OrganizationId, cancellationToken);
-        if (instance is null)
-        {
-            await transaction.CommitAsync(cancellationToken);
-            return Result(ElsaInstanceMigrationWriteOutcome.NotFound, null, "migration.instance.not-found");
-        }
-        if (instance.Version != envelope.ExpectedInstanceVersion)
-        {
-            await transaction.CommitAsync(cancellationToken);
-            return Result(ElsaInstanceMigrationWriteOutcome.Conflict, null, "migration.instance.version-conflict");
-        }
-
-        var unsafeLifecycle = instance.DesiredLifecycle == ElsaDesiredLifecycle.Deleting ||
-            instance.ObservedLifecycle is ElsaObservedLifecycle.Deleting or ElsaObservedLifecycle.Deleted;
-        var activeOperation = await dbContext.ElsaInstanceOperations.AsNoTracking().AnyAsync(x =>
-            x.InstanceId == migration.InstanceId &&
-            (x.State == ElsaInstanceOperationState.Accepted || x.State == ElsaInstanceOperationState.Queued ||
-             x.State == ElsaInstanceOperationState.Running || x.State == ElsaInstanceOperationState.RecoveryRequired ||
-             x.State == ElsaInstanceOperationState.WaitingForPriorOperation), cancellationToken);
-        var uncertainRun = await dbContext.DeploymentRuns.AsNoTracking().AnyAsync(x =>
-            x.WorkspaceId == migration.WorkspaceId && x.ElsaInstanceId == migration.InstanceId &&
-            (x.Status == WorkspaceDeploymentRunStatus.Queued || x.Status == WorkspaceDeploymentRunStatus.Running ||
-             x.Status == WorkspaceDeploymentRunStatus.RecoveryRequired), cancellationToken);
-        if (unsafeLifecycle || activeOperation || uncertainRun)
-        {
-            await transaction.CommitAsync(cancellationToken);
-            return Result(ElsaInstanceMigrationWriteOutcome.Conflict, null, "migration.instance.busy");
-        }
-        if (!MatchesCurrentSource(instance, migration.Source))
-        {
-            await transaction.CommitAsync(cancellationToken);
-            return Result(ElsaInstanceMigrationWriteOutcome.Conflict, null, "migration.source.stale");
-        }
-        if (!await IsPersistedTargetAsync(migration, cancellationToken))
-        {
-            await transaction.CommitAsync(cancellationToken);
-            return Result(ElsaInstanceMigrationWriteOutcome.Conflict, null, "migration.target.unverified");
-        }
-
-        dbContext.ElsaInstanceOperations.Add(new ElsaInstanceOperationEntity
-        {
-            Id = migration.OperationId,
-            InstanceId = migration.InstanceId,
-            OrganizationId = migration.OrganizationId,
-            WorkspaceId = migration.WorkspaceId,
-            Action = ElsaInstanceOperationAction.MajorMigration,
-            IdempotencyScope = scope,
-            IdempotencyKey = envelope.IdempotencyKey,
-            RequestHash = migration.StartRequestHash,
-            ExpectedVersion = envelope.ExpectedInstanceVersion,
-            State = ElsaInstanceOperationState.Running,
-            AttemptNumber = 1,
-            AcceptedAt = migration.CreatedAt,
-            StartedAt = migration.CreatedAt,
-            CreatedAt = migration.CreatedAt,
-            UpdatedAt = migration.UpdatedAt
-        });
-        dbContext.ElsaInstanceMigrations.Add(Map(migration));
-        await AddAuditAsync(migration, audit, cancellationToken);
         try
         {
-            await dbContext.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            return Result(ElsaInstanceMigrationWriteOutcome.Applied, migration, "migration.started");
+            return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+            {
+                var replayOperation = await dbContext.ElsaInstanceOperations.AsNoTracking().SingleOrDefaultAsync(x =>
+                    x.WorkspaceId == migration.WorkspaceId && x.IdempotencyScope == scope &&
+                    x.IdempotencyKey == envelope.IdempotencyKey, cancellationToken);
+                if (replayOperation is not null)
+                {
+                    var replay = await dbContext.ElsaInstanceMigrations.AsNoTracking()
+                        .SingleOrDefaultAsync(x => x.OperationId == replayOperation.Id, cancellationToken);
+                    if (replay is null || replayOperation.RequestHash != migration.StartRequestHash)
+                        return Result(ElsaInstanceMigrationWriteOutcome.Conflict, replay is null ? null : Map(replay),
+                            "migration.idempotency.conflict");
+                    return Result(ElsaInstanceMigrationWriteOutcome.Replayed, Map(replay), "migration.replayed");
+                }
+
+                var instance = await dbContext.ElsaInstances.SingleOrDefaultAsync(x =>
+                    x.Id == migration.InstanceId && x.WorkspaceId == migration.WorkspaceId &&
+                    x.OrganizationId == migration.OrganizationId, cancellationToken);
+                if (instance is null)
+                {
+                    return Result(ElsaInstanceMigrationWriteOutcome.NotFound, null, "migration.instance.not-found");
+                }
+                if (instance.Version != envelope.ExpectedInstanceVersion)
+                {
+                    return Result(ElsaInstanceMigrationWriteOutcome.Conflict, null, "migration.instance.version-conflict");
+                }
+
+                var unsafeLifecycle = instance.DesiredLifecycle == ElsaDesiredLifecycle.Deleting ||
+                    instance.ObservedLifecycle is ElsaObservedLifecycle.Deleting or ElsaObservedLifecycle.Deleted;
+                var activeOperation = await dbContext.ElsaInstanceOperations.AsNoTracking().AnyAsync(x =>
+                    x.InstanceId == migration.InstanceId &&
+                    (x.State == ElsaInstanceOperationState.Accepted || x.State == ElsaInstanceOperationState.Queued ||
+                     x.State == ElsaInstanceOperationState.Running || x.State == ElsaInstanceOperationState.RecoveryRequired ||
+                     x.State == ElsaInstanceOperationState.WaitingForPriorOperation), cancellationToken);
+                var uncertainRun = await dbContext.DeploymentRuns.AsNoTracking().AnyAsync(x =>
+                    x.WorkspaceId == migration.WorkspaceId && x.ElsaInstanceId == migration.InstanceId &&
+                    (x.Status == WorkspaceDeploymentRunStatus.Queued || x.Status == WorkspaceDeploymentRunStatus.Running ||
+                     x.Status == WorkspaceDeploymentRunStatus.RecoveryRequired), cancellationToken);
+                if (unsafeLifecycle || activeOperation || uncertainRun)
+                {
+                    return Result(ElsaInstanceMigrationWriteOutcome.Conflict, null, "migration.instance.busy");
+                }
+                if (!MatchesCurrentSource(instance, migration.Source))
+                {
+                    return Result(ElsaInstanceMigrationWriteOutcome.Conflict, null, "migration.source.stale");
+                }
+                if (!await IsPersistedTargetAsync(migration, cancellationToken))
+                {
+                    return Result(ElsaInstanceMigrationWriteOutcome.Conflict, null, "migration.target.unverified");
+                }
+
+                dbContext.ElsaInstanceOperations.Add(new ElsaInstanceOperationEntity
+                {
+                    Id = migration.OperationId,
+                    InstanceId = migration.InstanceId,
+                    OrganizationId = migration.OrganizationId,
+                    WorkspaceId = migration.WorkspaceId,
+                    Action = ElsaInstanceOperationAction.MajorMigration,
+                    IdempotencyScope = scope,
+                    IdempotencyKey = envelope.IdempotencyKey,
+                    RequestHash = migration.StartRequestHash,
+                    ExpectedVersion = envelope.ExpectedInstanceVersion,
+                    State = ElsaInstanceOperationState.Running,
+                    AttemptNumber = 1,
+                    AcceptedAt = migration.CreatedAt,
+                    StartedAt = migration.CreatedAt,
+                    CreatedAt = migration.CreatedAt,
+                    UpdatedAt = migration.UpdatedAt
+                });
+                dbContext.ElsaInstanceMigrations.Add(Map(migration));
+                await AddAuditAsync(migration, audit, cancellationToken);
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return Result(ElsaInstanceMigrationWriteOutcome.Applied, migration, "migration.started");
+            }, cancellationToken);
         }
         catch (DbUpdateException)
         {
-            await transaction.RollbackAsync(cancellationToken);
             dbContext.ChangeTracker.Clear();
             return Result(ElsaInstanceMigrationWriteOutcome.Conflict, null, "migration.concurrent.conflict");
         }
@@ -122,51 +116,49 @@ public sealed class EfCoreElsaInstanceMigrationStore(CatalogDbContext dbContext)
         CancellationToken cancellationToken = default)
     {
         dbContext.ChangeTracker.Clear();
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-        var entity = await dbContext.ElsaInstanceMigrations.SingleOrDefaultAsync(x =>
-            x.WorkspaceId == migration.WorkspaceId && x.MigrationId == migration.Id, cancellationToken);
-        var operation = await dbContext.ElsaInstanceOperations.SingleOrDefaultAsync(x =>
-            x.Id == migration.OperationId && x.InstanceId == migration.InstanceId, cancellationToken);
-        if (entity is null || operation is null)
-        {
-            await transaction.CommitAsync(cancellationToken);
-            return Result(ElsaInstanceMigrationWriteOutcome.NotFound, null, "migration.not-found");
-        }
-        if (entity.UpdatedAt != expectedUpdatedAt.ToUniversalTime() || entity.LastRequestHash == migration.LastRequestHash)
-        {
-            await transaction.CommitAsync(cancellationToken);
-            var current = Map(entity);
-            return entity.LastRequestHash == migration.LastRequestHash
-                ? Result(ElsaInstanceMigrationWriteOutcome.Replayed, current, "migration.replayed")
-                : Result(ElsaInstanceMigrationWriteOutcome.Conflict, current, "migration.version.conflict");
-        }
-
-        entity.Phase = migration.Phase.ToString();
-        entity.SourceAccessMode = migration.SourceAccess.ToString();
-        entity.CutoverAt = migration.CutoverAt;
-        entity.SourceRetainUntil = migration.SourceRetainUntil;
-        entity.EarlyReleaseApprovedByAccountId = migration.EarlyReleaseApprovedByAccountId;
-        entity.EarlyReleaseApprovedAt = migration.EarlyReleaseApprovedAt;
-        entity.SourceReleasedAt = migration.SourceReleasedAt;
-        entity.LastRequestHash = migration.LastRequestHash;
-        entity.UpdatedAt = migration.UpdatedAt;
-        if (migration.IsTerminal)
-        {
-            operation.State = migration.Phase == ElsaInstanceMigrationPhase.Failed
-                ? ElsaInstanceOperationState.Failed : ElsaInstanceOperationState.Succeeded;
-            operation.CompletedAt = migration.UpdatedAt;
-            operation.UpdatedAt = migration.UpdatedAt;
-        }
-        await AddAuditAsync(migration, audit, cancellationToken);
         try
         {
-            await dbContext.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            return Result(ElsaInstanceMigrationWriteOutcome.Applied, migration, "migration.updated");
+            return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+            {
+                var entity = await dbContext.ElsaInstanceMigrations.SingleOrDefaultAsync(x =>
+                    x.WorkspaceId == migration.WorkspaceId && x.MigrationId == migration.Id, cancellationToken);
+                var operation = await dbContext.ElsaInstanceOperations.SingleOrDefaultAsync(x =>
+                    x.Id == migration.OperationId && x.InstanceId == migration.InstanceId, cancellationToken);
+                if (entity is null || operation is null)
+                {
+                    return Result(ElsaInstanceMigrationWriteOutcome.NotFound, null, "migration.not-found");
+                }
+                if (entity.UpdatedAt != expectedUpdatedAt.ToUniversalTime() || entity.LastRequestHash == migration.LastRequestHash)
+                {
+                    var current = Map(entity);
+                    return entity.LastRequestHash == migration.LastRequestHash
+                        ? Result(ElsaInstanceMigrationWriteOutcome.Replayed, current, "migration.replayed")
+                        : Result(ElsaInstanceMigrationWriteOutcome.Conflict, current, "migration.version.conflict");
+                }
+
+                entity.Phase = migration.Phase.ToString();
+                entity.SourceAccessMode = migration.SourceAccess.ToString();
+                entity.CutoverAt = migration.CutoverAt;
+                entity.SourceRetainUntil = migration.SourceRetainUntil;
+                entity.EarlyReleaseApprovedByAccountId = migration.EarlyReleaseApprovedByAccountId;
+                entity.EarlyReleaseApprovedAt = migration.EarlyReleaseApprovedAt;
+                entity.SourceReleasedAt = migration.SourceReleasedAt;
+                entity.LastRequestHash = migration.LastRequestHash;
+                entity.UpdatedAt = migration.UpdatedAt;
+                if (migration.IsTerminal)
+                {
+                    operation.State = migration.Phase == ElsaInstanceMigrationPhase.Failed
+                        ? ElsaInstanceOperationState.Failed : ElsaInstanceOperationState.Succeeded;
+                    operation.CompletedAt = migration.UpdatedAt;
+                    operation.UpdatedAt = migration.UpdatedAt;
+                }
+                await AddAuditAsync(migration, audit, cancellationToken);
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return Result(ElsaInstanceMigrationWriteOutcome.Applied, migration, "migration.updated");
+            }, cancellationToken);
         }
         catch (DbUpdateConcurrencyException)
         {
-            await transaction.RollbackAsync(cancellationToken);
             dbContext.ChangeTracker.Clear();
             return Result(ElsaInstanceMigrationWriteOutcome.Conflict, null, "migration.version.conflict");
         }
@@ -179,42 +171,41 @@ public sealed class EfCoreElsaInstanceMigrationStore(CatalogDbContext dbContext)
             throw new ArgumentOutOfRangeException(nameof(leaseDuration));
         now = now.ToUniversalTime();
         dbContext.ChangeTracker.Clear();
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-        var entity = await dbContext.ElsaInstanceMigrations
-            .Where(x =>
-                (x.Phase == nameof(ElsaInstanceMigrationPhase.RetiringSource) ||
-                 x.Phase == nameof(ElsaInstanceMigrationPhase.RetainingSource) && x.SourceRetainUntil <= now) &&
-                (x.SourceReleaseClaimedUntil == null || x.SourceReleaseClaimedUntil <= now))
-            .OrderBy(x => x.SourceRetainUntil).ThenBy(x => x.CreatedAt)
-            .FirstOrDefaultAsync(cancellationToken);
-        if (entity is null)
-        {
-            await transaction.CommitAsync(cancellationToken);
-            return null;
-        }
-
-        var changedAt = now > entity.UpdatedAt ? now : entity.UpdatedAt.AddTicks(1);
-        entity.Phase = nameof(ElsaInstanceMigrationPhase.RetiringSource);
-        entity.SourceAccessMode = nameof(ElsaInstanceMigrationSourceAccess.Stopped);
-        entity.SourceReleaseClaimToken = Guid.NewGuid();
-        entity.SourceReleaseClaimedUntil = now.Add(leaseDuration);
-        entity.SourceReleaseAttemptCount++;
-        entity.SourceReleaseDiagnosticCode = null;
-        entity.UpdatedAt = changedAt;
         try
         {
-            await dbContext.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
+            return await dbContext.ExecuteInTransactionAsync<ElsaInstanceMigrationSourceReleaseClaim?>(IsolationLevel.Serializable, async () =>
+            {
+                var entity = await dbContext.ElsaInstanceMigrations
+                    .Where(x =>
+                        (x.Phase == nameof(ElsaInstanceMigrationPhase.RetiringSource) ||
+                         x.Phase == nameof(ElsaInstanceMigrationPhase.RetainingSource) && x.SourceRetainUntil <= now) &&
+                        (x.SourceReleaseClaimedUntil == null || x.SourceReleaseClaimedUntil <= now))
+                    .OrderBy(x => x.SourceRetainUntil).ThenBy(x => x.CreatedAt)
+                    .FirstOrDefaultAsync(cancellationToken);
+                if (entity is null)
+                {
+                    return null;
+                }
+
+                var changedAt = now > entity.UpdatedAt ? now : entity.UpdatedAt.AddTicks(1);
+                entity.Phase = nameof(ElsaInstanceMigrationPhase.RetiringSource);
+                entity.SourceAccessMode = nameof(ElsaInstanceMigrationSourceAccess.Stopped);
+                entity.SourceReleaseClaimToken = Guid.NewGuid();
+                entity.SourceReleaseClaimedUntil = now.Add(leaseDuration);
+                entity.SourceReleaseAttemptCount++;
+                entity.SourceReleaseDiagnosticCode = null;
+                entity.UpdatedAt = changedAt;
+                await dbContext.SaveChangesAsync(cancellationToken);
+                var migration = Map(entity);
+                return new ElsaInstanceMigrationSourceReleaseClaim(migration, entity.SourceReleaseClaimToken.Value,
+                    entity.SourceReleaseAttemptCount, entity.SourceReleaseClaimedUntil.Value);
+            }, cancellationToken);
         }
         catch (DbUpdateException)
         {
-            await transaction.RollbackAsync(cancellationToken);
             dbContext.ChangeTracker.Clear();
             return null;
         }
-        var migration = Map(entity);
-        return new(migration, entity.SourceReleaseClaimToken.Value, entity.SourceReleaseAttemptCount,
-            entity.SourceReleaseClaimedUntil.Value);
     }
 
     public async Task<ElsaInstanceMigrationWriteResult> CompleteAsync(
@@ -225,50 +216,50 @@ public sealed class EfCoreElsaInstanceMigrationStore(CatalogDbContext dbContext)
         result.Validate();
         now = now.ToUniversalTime();
         dbContext.ChangeTracker.Clear();
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-        var entity = await dbContext.ElsaInstanceMigrations.SingleOrDefaultAsync(x =>
-            x.MigrationId == claim.Migration.Id && x.WorkspaceId == claim.Migration.WorkspaceId, cancellationToken);
-        if (entity is null)
-            return Result(ElsaInstanceMigrationWriteOutcome.NotFound, null, "migration.not-found");
-        var operation = await dbContext.ElsaInstanceOperations.SingleOrDefaultAsync(x =>
-            x.Id == claim.Migration.OperationId && x.InstanceId == claim.Migration.InstanceId, cancellationToken);
-        if (entity.SourceReleaseClaimToken != claim.ClaimToken || entity.SourceReleaseClaimedUntil <= now ||
-            entity.UpdatedAt != claim.Migration.UpdatedAt || entity.Phase != nameof(ElsaInstanceMigrationPhase.RetiringSource) ||
-            entity.OperationId != claim.Migration.OperationId || operation?.State != ElsaInstanceOperationState.Running)
-            return Result(ElsaInstanceMigrationWriteOutcome.Conflict, Map(entity), "migration.source-release.claim-conflict");
-
-        entity.SourceReleaseClaimToken = null;
-        entity.SourceReleaseClaimedUntil = null;
-        entity.SourceReleaseDiagnosticCode = result.DiagnosticCode;
-        entity.SourceReleaseProviderCorrelationId = result.ProviderCorrelationId;
-        entity.SourceReleaseEvidenceReference = result.EvidenceReference;
-        entity.SourceReleaseEvidenceDigest = result.EvidenceDigest;
-        if (result.Outcome != ElsaInstanceSourceReleaseOutcome.Confirmed)
+        return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
         {
-            entity.UpdatedAt = now > entity.UpdatedAt ? now : entity.UpdatedAt.AddTicks(1);
-            var attempted = Map(entity);
-            await AddAuditAsync(attempted, new(attempted.Id, attempted.OperationId,
-                "MigrationSourceReleaseAttempted", attempted.Phase.ToString(), attempted.Phase.ToString(),
-                Guid.Empty, attempted.LastRequestHash, attempted.UpdatedAt), cancellationToken);
-            await dbContext.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            return Result(ElsaInstanceMigrationWriteOutcome.Conflict, Map(entity), result.DiagnosticCode);
-        }
+            var entity = await dbContext.ElsaInstanceMigrations.SingleOrDefaultAsync(x =>
+                x.MigrationId == claim.Migration.Id && x.WorkspaceId == claim.Migration.WorkspaceId, cancellationToken);
+            if (entity is null)
+                return Result(ElsaInstanceMigrationWriteOutcome.NotFound, null, "migration.not-found");
+            var operation = await dbContext.ElsaInstanceOperations.SingleOrDefaultAsync(x =>
+                x.Id == claim.Migration.OperationId && x.InstanceId == claim.Migration.InstanceId, cancellationToken);
+            if (entity.SourceReleaseClaimToken != claim.ClaimToken || entity.SourceReleaseClaimedUntil <= now ||
+                entity.UpdatedAt != claim.Migration.UpdatedAt || entity.Phase != nameof(ElsaInstanceMigrationPhase.RetiringSource) ||
+                entity.OperationId != claim.Migration.OperationId || operation?.State != ElsaInstanceOperationState.Running)
+                return Result(ElsaInstanceMigrationWriteOutcome.Conflict, Map(entity), "migration.source-release.claim-conflict");
 
-        var released = Map(entity).ConfirmSourceReleased(now > entity.UpdatedAt ? now : entity.UpdatedAt.AddTicks(1));
-        entity.Phase = released.Phase.ToString();
-        entity.SourceReleasedAt = released.SourceReleasedAt;
-        entity.UpdatedAt = released.UpdatedAt;
-        operation = await dbContext.ElsaInstanceOperations.SingleAsync(x => x.Id == entity.OperationId, cancellationToken);
-        operation.State = ElsaInstanceOperationState.Succeeded;
-        operation.CompletedAt = released.UpdatedAt;
-        operation.UpdatedAt = released.UpdatedAt;
-        await AddAuditAsync(released, new(released.Id, released.OperationId, "MigrationSourceReleased",
-            ElsaInstanceMigrationPhase.RetiringSource.ToString(), released.Phase.ToString(), Guid.Empty,
-            released.LastRequestHash, released.UpdatedAt), cancellationToken);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return Result(ElsaInstanceMigrationWriteOutcome.Applied, released, "migration.source-released");
+            entity.SourceReleaseClaimToken = null;
+            entity.SourceReleaseClaimedUntil = null;
+            entity.SourceReleaseDiagnosticCode = result.DiagnosticCode;
+            entity.SourceReleaseProviderCorrelationId = result.ProviderCorrelationId;
+            entity.SourceReleaseEvidenceReference = result.EvidenceReference;
+            entity.SourceReleaseEvidenceDigest = result.EvidenceDigest;
+            if (result.Outcome != ElsaInstanceSourceReleaseOutcome.Confirmed)
+            {
+                entity.UpdatedAt = now > entity.UpdatedAt ? now : entity.UpdatedAt.AddTicks(1);
+                var attempted = Map(entity);
+                await AddAuditAsync(attempted, new(attempted.Id, attempted.OperationId,
+                    "MigrationSourceReleaseAttempted", attempted.Phase.ToString(), attempted.Phase.ToString(),
+                    Guid.Empty, attempted.LastRequestHash, attempted.UpdatedAt), cancellationToken);
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return Result(ElsaInstanceMigrationWriteOutcome.Conflict, Map(entity), result.DiagnosticCode);
+            }
+
+            var released = Map(entity).ConfirmSourceReleased(now > entity.UpdatedAt ? now : entity.UpdatedAt.AddTicks(1));
+            entity.Phase = released.Phase.ToString();
+            entity.SourceReleasedAt = released.SourceReleasedAt;
+            entity.UpdatedAt = released.UpdatedAt;
+            operation = await dbContext.ElsaInstanceOperations.SingleAsync(x => x.Id == entity.OperationId, cancellationToken);
+            operation.State = ElsaInstanceOperationState.Succeeded;
+            operation.CompletedAt = released.UpdatedAt;
+            operation.UpdatedAt = released.UpdatedAt;
+            await AddAuditAsync(released, new(released.Id, released.OperationId, "MigrationSourceReleased",
+                ElsaInstanceMigrationPhase.RetiringSource.ToString(), released.Phase.ToString(), Guid.Empty,
+                released.LastRequestHash, released.UpdatedAt), cancellationToken);
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return Result(ElsaInstanceMigrationWriteOutcome.Applied, released, "migration.source-released");
+        }, cancellationToken);
     }
 
     public async Task<bool> RenewAsync(

@@ -34,7 +34,7 @@ public sealed class CatalogElsaInstanceLifecycleResolutionInputSourceTests : IAs
     {
         await _connection.OpenAsync();
         _dbOptions = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(_connection)
+            .UseRetryingSqlite(_connection)
             .Options;
         _db = new CatalogDbContext(_dbOptions);
         await _db.Database.EnsureCreatedAsync();

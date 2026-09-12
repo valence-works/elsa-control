@@ -410,6 +410,6 @@ public sealed class ManagedElsaHandoffPersistenceTests
 
     private static CatalogDbContext CreateContext(SqliteConnection connection) =>
         new(new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options);
 }

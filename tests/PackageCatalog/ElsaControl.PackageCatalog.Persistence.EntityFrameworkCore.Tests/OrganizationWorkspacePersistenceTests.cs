@@ -39,7 +39,7 @@ public sealed class OrganizationWorkspacePersistenceTests
     private static CatalogDbContext CreateDbContext(SqliteConnection connection)
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         return new CatalogDbContext(options);
     }

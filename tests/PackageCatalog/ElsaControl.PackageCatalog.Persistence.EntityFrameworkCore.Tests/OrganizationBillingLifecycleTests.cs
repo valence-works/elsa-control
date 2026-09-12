@@ -352,7 +352,7 @@ public sealed class OrganizationBillingLifecycleTests
         {
             var connection = new SqliteConnection("Data Source=:memory:");
             await connection.OpenAsync();
-            var db = new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbContext>().UseSqlite(connection).Options);
+            var db = new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbContext>().UseRetryingSqlite(connection).Options);
             await db.Database.EnsureCreatedAsync();
             var fixture = new LifecycleFixture(connection, db);
             db.Organizations.Add(new Organization { Id = fixture.OrganizationId, Name = "Acme" });

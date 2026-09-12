@@ -69,130 +69,120 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
         try { leaseExpires = now.ToUniversalTime().Add(leaseDuration); }
         catch (ArgumentOutOfRangeException) { throw new ArgumentException("Lease duration overflowed.", nameof(leaseDuration)); }
 
-        AzureProviderOperation? result = null;
-        await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        db.ChangeTracker.Clear();
+        try
+        {
+            return await db.ExecuteInTransactionAsync<AzureProviderOperation?>(IsolationLevel.Serializable, async () =>
+            {
+                var recovery = await db.ElsaInstanceRecoveryRequests.SingleOrDefaultAsync(
+                    x => x.Id == request.RecoveryRequestId && x.WorkspaceId == request.WorkspaceId &&
+                         x.InstanceId == request.InstanceId && x.OperationId == request.LifecycleOperationId,
+                    cancellationToken);
+                if (recovery is null ||
+                    !AzureProviderDeleteRecoveryAuthority.TryParse(recovery.AzureDeleteRecoveryAuthority, out var authority) ||
+                    authority is null || authority.LifecycleAttemptNumber != request.LifecycleAttemptNumber ||
+                    recovery.AttemptNumber != request.LifecycleAttemptNumber)
+                    return null;
+
+                var lifecycleOperation = await db.ElsaInstanceOperations.SingleOrDefaultAsync(
+                    x => x.Id == request.LifecycleOperationId && x.WorkspaceId == request.WorkspaceId &&
+                         x.InstanceId == request.InstanceId,
+                    cancellationToken);
+                var instance = await db.ElsaInstances.AsNoTracking().SingleOrDefaultAsync(
+                    x => x.Id == request.InstanceId && x.WorkspaceId == request.WorkspaceId,
+                    cancellationToken);
+                var providerOperation = await db.AzureProviderOperations.SingleOrDefaultAsync(
+                    x => x.Id == authority.ProviderOperationId && x.WorkspaceId == request.WorkspaceId,
+                    cancellationToken);
+                var assignment = await db.AzureProviderResourceAssignments.AsNoTracking().SingleOrDefaultAsync(
+                    x => x.Id == authority.ProviderAssignmentId && x.WorkspaceId == request.WorkspaceId,
+                    cancellationToken);
+                var verifiedCleanupFinalization = providerOperation is not null && assignment is not null &&
+                    IsVerifiedCleanupEligible(providerOperation, assignment);
+
+                var lifecycleLeaseHash = Hash(request.LeaseToken);
+                var nowUtc = now.ToUniversalTime();
+                var lifecycleIsCurrent = lifecycleOperation is not null && instance is not null &&
+                    lifecycleOperation.OrganizationId == recovery.OrganizationId &&
+                    lifecycleOperation.Action == ElsaInstanceOperationAction.Delete &&
+                    lifecycleOperation.State == ElsaInstanceOperationState.Running &&
+                    lifecycleOperation.AttemptNumber == request.LifecycleAttemptNumber &&
+                    lifecycleOperation.RecoveryIdempotencyScope == recovery.IdempotencyScope &&
+                    lifecycleOperation.RecoveryIdempotencyKey == recovery.IdempotencyKey &&
+                    lifecycleOperation.RecoveryRequestHash == recovery.RequestHash &&
+                    instance.OrganizationId == recovery.OrganizationId && instance.Version == request.InstanceVersion &&
+                    request.InstanceVersion == authority.InstanceVersion &&
+                    instance.DesiredLifecycle == ElsaDesiredLifecycle.Deleting &&
+                    HasCapturedPlacement(instance, authority.ProviderAssignmentId) &&
+                    lifecycleOperation.WorkerId == request.WorkerId &&
+                    lifecycleOperation.LeaseTokenHash == lifecycleLeaseHash &&
+                    lifecycleOperation.LeaseVersion == request.LeaseVersion &&
+                    lifecycleOperation.LeaseExpiresAt is { } lifecycleLeaseExpires && lifecycleLeaseExpires > nowUtc;
+                var providerIdentityIsCurrent = providerOperation is not null &&
+                    providerOperation.OrganizationId == recovery.OrganizationId &&
+                    providerOperation.InstanceId == request.InstanceId &&
+                    providerOperation.ProviderAssignmentId == authority.ProviderAssignmentId &&
+                    providerOperation.LifecycleAction == ElsaInstanceOperationAction.Delete &&
+                    providerOperation.Action == AzureProviderOperationAction.Delete &&
+                    (providerOperation.LeaseExpiresAt is null || providerOperation.LeaseExpiresAt <= nowUtc) &&
+                    providerOperation.AttemptNumber == authority.ProviderAttemptNumber &&
+                    providerOperation.Version == authority.ProviderVersion &&
+                    providerOperation.CheckpointSequence == authority.ProviderCheckpointSequence &&
+                    providerOperation.OperationIdentity == authority.ProviderOperationIdentity &&
+                    providerOperation.RequestHash == authority.ProviderRequestHash &&
+                    providerOperation.TargetKey == authority.TargetKey &&
+                    providerOperation.ProviderScopeFingerprint == authority.ProviderScopeFingerprint &&
+                    providerOperation.PlanFingerprint == authority.ProviderPlanFingerprint &&
+                    providerOperation.TemplateFingerprint == authority.ProviderTemplateFingerprint &&
+                    AzureProviderOperationValidation.IsLifecycleDeleteIdempotencyKey(
+                        providerOperation.IdempotencyKey, request.LifecycleOperationId);
+                var providerIsCurrent = providerIdentityIsCurrent &&
+                    providerOperation!.Status == AzureProviderOperationStatus.RecoveryRequired &&
+                    (providerOperation.Phase == AzureProviderOperationPhase.CleanupSubmitted &&
+                     providerOperation.AttemptedStep == AzureProviderRunnerStep.Cleanup &&
+                     assignment is not null && assignment.State != AzureProviderAssignmentState.Deleted ||
+                     verifiedCleanupFinalization);
+                var assignmentIsCurrent = assignment is not null &&
+                    assignment.OrganizationId == recovery.OrganizationId && assignment.InstanceId == request.InstanceId &&
+                    assignment.LastOperationId == authority.ProviderOperationId &&
+                    string.Equals(assignment.WorkloadName, authority.TargetKey, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(NormalizeProviderScope(assignment.ProviderScopeFingerprint), authority.ProviderScopeFingerprint, StringComparison.Ordinal) &&
+                    (assignment.State != AzureProviderAssignmentState.Deleted || verifiedCleanupFinalization);
+                var competingOperation = providerOperation is not null && await db.AzureProviderOperations.AnyAsync(
+                    x => x.Id != authority.ProviderOperationId && x.WorkspaceId == request.WorkspaceId &&
+                         x.TargetKey == authority.TargetKey &&
+                         (x.Status == AzureProviderOperationStatus.Accepted ||
+                          x.Status == AzureProviderOperationStatus.Queued ||
+                          x.Status == AzureProviderOperationStatus.EntitlementHeld ||
+                          x.Status == AzureProviderOperationStatus.Running ||
+                          x.Status == AzureProviderOperationStatus.RecoveryRequired),
+                    cancellationToken);
+                if (providerOperation is null || !lifecycleIsCurrent || !providerIsCurrent || !assignmentIsCurrent || competingOperation)
+                    return null;
+
+                providerOperation.Status = AzureProviderOperationStatus.Running;
+                providerOperation.WorkerId = request.WorkerId;
+                providerOperation.LeaseTokenHash = Hash(request.LeaseToken);
+                providerOperation.CompletionLeaseTokenHash = null;
+                providerOperation.CompletionFingerprint = null;
+                providerOperation.LeaseExpiresAt = leaseExpires;
+                providerOperation.HeartbeatAt = nowUtc;
+                providerOperation.AttemptNumber = checked(providerOperation.AttemptNumber + 1);
+                providerOperation.UpdatedAt = nowUtc;
+                providerOperation.Version = checked(providerOperation.Version + 1);
+                AddTransition(providerOperation,
+                    "operation.delete-recovery.claimed",
+                    "Explicit Azure delete recovery claimed.",
+                    nowUtc);
+                await db.SaveChangesAsync(cancellationToken);
+                return ToModel(providerOperation);
+            }, cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
         {
             db.ChangeTracker.Clear();
-            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-            var recovery = await db.ElsaInstanceRecoveryRequests.SingleOrDefaultAsync(
-                x => x.Id == request.RecoveryRequestId && x.WorkspaceId == request.WorkspaceId &&
-                     x.InstanceId == request.InstanceId && x.OperationId == request.LifecycleOperationId,
-                cancellationToken);
-            if (recovery is null ||
-                !AzureProviderDeleteRecoveryAuthority.TryParse(recovery.AzureDeleteRecoveryAuthority, out var authority) ||
-                authority is null || authority.LifecycleAttemptNumber != request.LifecycleAttemptNumber ||
-                recovery.AttemptNumber != request.LifecycleAttemptNumber)
-            {
-                await transaction.RollbackAsync(cancellationToken);
-                return;
-            }
-
-            var lifecycleOperation = await db.ElsaInstanceOperations.SingleOrDefaultAsync(
-                x => x.Id == request.LifecycleOperationId && x.WorkspaceId == request.WorkspaceId &&
-                     x.InstanceId == request.InstanceId,
-                cancellationToken);
-            var instance = await db.ElsaInstances.AsNoTracking().SingleOrDefaultAsync(
-                x => x.Id == request.InstanceId && x.WorkspaceId == request.WorkspaceId,
-                cancellationToken);
-            var providerOperation = await db.AzureProviderOperations.SingleOrDefaultAsync(
-                x => x.Id == authority.ProviderOperationId && x.WorkspaceId == request.WorkspaceId,
-                cancellationToken);
-            var assignment = await db.AzureProviderResourceAssignments.AsNoTracking().SingleOrDefaultAsync(
-                x => x.Id == authority.ProviderAssignmentId && x.WorkspaceId == request.WorkspaceId,
-                cancellationToken);
-            var verifiedCleanupFinalization = providerOperation is not null && assignment is not null &&
-                IsVerifiedCleanupEligible(providerOperation, assignment);
-
-            var lifecycleLeaseHash = Hash(request.LeaseToken);
-            var nowUtc = now.ToUniversalTime();
-            var lifecycleIsCurrent = lifecycleOperation is not null && instance is not null &&
-                lifecycleOperation.OrganizationId == recovery.OrganizationId &&
-                lifecycleOperation.Action == ElsaInstanceOperationAction.Delete &&
-                lifecycleOperation.State == ElsaInstanceOperationState.Running &&
-                lifecycleOperation.AttemptNumber == request.LifecycleAttemptNumber &&
-                lifecycleOperation.RecoveryIdempotencyScope == recovery.IdempotencyScope &&
-                lifecycleOperation.RecoveryIdempotencyKey == recovery.IdempotencyKey &&
-                lifecycleOperation.RecoveryRequestHash == recovery.RequestHash &&
-                instance.OrganizationId == recovery.OrganizationId && instance.Version == request.InstanceVersion &&
-                request.InstanceVersion == authority.InstanceVersion &&
-                instance.DesiredLifecycle == ElsaDesiredLifecycle.Deleting &&
-                HasCapturedPlacement(instance, authority.ProviderAssignmentId) &&
-                lifecycleOperation.WorkerId == request.WorkerId &&
-                lifecycleOperation.LeaseTokenHash == lifecycleLeaseHash &&
-                lifecycleOperation.LeaseVersion == request.LeaseVersion &&
-                lifecycleOperation.LeaseExpiresAt is { } lifecycleLeaseExpires && lifecycleLeaseExpires > nowUtc;
-            var providerIdentityIsCurrent = providerOperation is not null &&
-                providerOperation.OrganizationId == recovery.OrganizationId &&
-                providerOperation.InstanceId == request.InstanceId &&
-                providerOperation.ProviderAssignmentId == authority.ProviderAssignmentId &&
-                providerOperation.LifecycleAction == ElsaInstanceOperationAction.Delete &&
-                providerOperation.Action == AzureProviderOperationAction.Delete &&
-                (providerOperation.LeaseExpiresAt is null || providerOperation.LeaseExpiresAt <= nowUtc) &&
-                providerOperation.AttemptNumber == authority.ProviderAttemptNumber &&
-                providerOperation.Version == authority.ProviderVersion &&
-                providerOperation.CheckpointSequence == authority.ProviderCheckpointSequence &&
-                providerOperation.OperationIdentity == authority.ProviderOperationIdentity &&
-                providerOperation.RequestHash == authority.ProviderRequestHash &&
-                providerOperation.TargetKey == authority.TargetKey &&
-                providerOperation.ProviderScopeFingerprint == authority.ProviderScopeFingerprint &&
-                providerOperation.PlanFingerprint == authority.ProviderPlanFingerprint &&
-                providerOperation.TemplateFingerprint == authority.ProviderTemplateFingerprint &&
-                AzureProviderOperationValidation.IsLifecycleDeleteIdempotencyKey(
-                    providerOperation.IdempotencyKey, request.LifecycleOperationId);
-            var providerIsCurrent = providerIdentityIsCurrent &&
-                providerOperation!.Status == AzureProviderOperationStatus.RecoveryRequired &&
-                (providerOperation.Phase == AzureProviderOperationPhase.CleanupSubmitted &&
-                 providerOperation.AttemptedStep == AzureProviderRunnerStep.Cleanup &&
-                 assignment is not null && assignment.State != AzureProviderAssignmentState.Deleted ||
-                 verifiedCleanupFinalization);
-            var assignmentIsCurrent = assignment is not null &&
-                assignment.OrganizationId == recovery.OrganizationId && assignment.InstanceId == request.InstanceId &&
-                assignment.LastOperationId == authority.ProviderOperationId &&
-                string.Equals(assignment.WorkloadName, authority.TargetKey, StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(NormalizeProviderScope(assignment.ProviderScopeFingerprint), authority.ProviderScopeFingerprint, StringComparison.Ordinal) &&
-                (assignment.State != AzureProviderAssignmentState.Deleted || verifiedCleanupFinalization);
-            var competingOperation = providerOperation is not null && await db.AzureProviderOperations.AnyAsync(
-                x => x.Id != authority.ProviderOperationId && x.WorkspaceId == request.WorkspaceId &&
-                     x.TargetKey == authority.TargetKey &&
-                     (x.Status == AzureProviderOperationStatus.Accepted ||
-                      x.Status == AzureProviderOperationStatus.Queued ||
-                      x.Status == AzureProviderOperationStatus.EntitlementHeld ||
-                      x.Status == AzureProviderOperationStatus.Running ||
-                      x.Status == AzureProviderOperationStatus.RecoveryRequired),
-                cancellationToken);
-            if (providerOperation is null || !lifecycleIsCurrent || !providerIsCurrent || !assignmentIsCurrent || competingOperation)
-            {
-                await transaction.RollbackAsync(cancellationToken);
-                return;
-            }
-
-            providerOperation.Status = AzureProviderOperationStatus.Running;
-            providerOperation.WorkerId = request.WorkerId;
-            providerOperation.LeaseTokenHash = Hash(request.LeaseToken);
-            providerOperation.CompletionLeaseTokenHash = null;
-            providerOperation.CompletionFingerprint = null;
-            providerOperation.LeaseExpiresAt = leaseExpires;
-            providerOperation.HeartbeatAt = nowUtc;
-            providerOperation.AttemptNumber = checked(providerOperation.AttemptNumber + 1);
-            providerOperation.UpdatedAt = nowUtc;
-            providerOperation.Version = checked(providerOperation.Version + 1);
-            AddTransition(providerOperation,
-                "operation.delete-recovery.claimed",
-                "Explicit Azure delete recovery claimed.",
-                nowUtc);
-            try
-            {
-                await db.SaveChangesAsync(cancellationToken);
-                await transaction.CommitAsync(cancellationToken);
-                result = ToModel(providerOperation);
-            }
-            catch (DbUpdateConcurrencyException)
-            {
-                await transaction.RollbackAsync(cancellationToken);
-                db.ChangeTracker.Clear();
-            }
-        });
-        return result;
+            return null;
+        }
     }
 
     private static bool HasCapturedPlacement(ElsaInstanceEntity instance, Guid assignmentId) =>
@@ -401,155 +391,153 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
         // Safe-exit supersession and successor reservation are one serializable
         // decision. Two Stop/Delete requests must not both observe the same
         // held predecessor and race to insert successors.
-        await using var transaction = await db.Database.BeginTransactionAsync(
-            IsolationLevel.Serializable, cancellationToken);
-        var existing = await FindByKeyAsync(normalized, cancellationToken);
-        var identityEntity = await db.AzureProviderOperations.AsNoTracking()
-            .Where(x => x.WorkspaceId == normalized.WorkspaceId && x.TargetKey == normalized.TargetKey &&
-                        x.OperationIdentity == identity &&
-                        (x.Status == AzureProviderOperationStatus.Accepted || x.Status == AzureProviderOperationStatus.Queued || x.Status == AzureProviderOperationStatus.EntitlementHeld ||
-                         x.Status == AzureProviderOperationStatus.Running || x.Status == AzureProviderOperationStatus.RecoveryRequired))
-            .SingleOrDefaultAsync(cancellationToken);
-        existing ??= identityEntity is null ? null : ToModel(identityEntity);
-        if (existing is not null)
-            return new(EnsureSameRequest(existing, hash), Replayed: true);
-
         Guid? supersededHeldOperationId = null;
-        if (normalized.LifecycleAction is ElsaInstanceOperationAction.Stop or ElsaInstanceOperationAction.Delete)
-        {
-            var heldSafeExit = await FindBoundEntitlementHeldAsync(normalized, cancellationToken);
-            if (heldSafeExit is not null)
-            {
-                supersededHeldOperationId = heldSafeExit.Id;
-                heldSafeExit.Status = AzureProviderOperationStatus.Cancelled;
-                heldSafeExit.CompletedAt = now;
-                heldSafeExit.UpdatedAt = now;
-                heldSafeExit.Version++;
-                heldSafeExit.WorkerId = null;
-                heldSafeExit.LeaseTokenHash = null;
-                heldSafeExit.CompletionLeaseTokenHash = null;
-                heldSafeExit.CompletionFingerprint = null;
-                heldSafeExit.LeaseExpiresAt = null;
-                heldSafeExit.HeartbeatAt = null;
-                AddTransition(
-                    heldSafeExit,
-                    ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded,
-                    "The Azure provider operation was superseded by a safe lifecycle exit.",
-                    now);
-            }
-        }
-
-        var activeTargetEntity = await FindActiveTargetAsync(normalized, supersededHeldOperationId, cancellationToken);
-        if (activeTargetEntity is not null)
-            throw new AzureProviderOperationConflictException(ToModel(activeTargetEntity));
-        var previousResources = await GetLatestReconcileAsync(
-            normalized.WorkspaceId,
-            normalized.TargetKey,
-            normalized.ProviderScopeFingerprint,
-            cancellationToken);
-
-        var entity = new AzureProviderOperationEntity
-        {
-            Id = Guid.NewGuid(),
-            WorkspaceId = normalized.WorkspaceId,
-            OrganizationId = normalized.OrganizationId,
-            InstanceId = normalized.InstanceId,
-            ProviderAssignmentId = normalized.ProviderAssignmentId,
-            LifecycleAction = normalized.LifecycleAction,
-            TargetKey = normalized.TargetKey,
-            Action = normalized.Action,
-            IdempotencyKey = normalized.IdempotencyKey,
-            RequestHash = hash,
-            OperationIdentity = identity,
-            PlanFingerprint = normalized.PlanFingerprint,
-            TemplateFingerprint = normalized.TemplateFingerprint,
-            ProviderScopeFingerprint = normalized.ProviderScopeFingerprint,
-            SqlWorkflowPackageVersion = normalized.SqlWorkflowPackageVersion,
-            SqlQuartzPackageVersion = normalized.SqlQuartzPackageVersion,
-            ElsaVersion = normalized.ElsaVersion,
-            ReleaseLine = normalized.ReleaseLine,
-            Topology = normalized.Topology,
-            Isolation = normalized.Isolation,
-            Location = normalized.Location,
-            ImageRepository = normalized.ImageRepository,
-            ImageDigest = normalized.ImageDigest,
-            ReleaseManifestDigest = normalized.ReleaseManifestDigest,
-            ReleaseManifestSignatureDigest = normalized.ReleaseManifestSignatureDigest,
-            ReleaseManifestReference = normalized.ReleaseManifestReference,
-            ReleaseManifestSignatureReference = normalized.ReleaseManifestSignatureReference,
-            SecretReferencesJson = JsonSerializer.Serialize(normalized.SecretReferences),
-            Status = AzureProviderOperationStatus.Accepted,
-            Phase = AzureProviderOperationPhase.Planned,
-            CheckpointSequence = 0,
-            AttemptNumber = 0,
-            Version = 1,
-            Health = AzureProviderHealth.Unknown,
-            CreatedAt = now,
-            UpdatedAt = now,
-            ResourceGroupName = previousResources?.Resources.ResourceGroupName,
-            FoundationDeploymentId = previousResources?.Resources.FoundationDeploymentId,
-            WorkloadDeploymentId = previousResources?.Resources.WorkloadDeploymentId,
-            WorkloadResourceId = previousResources?.Resources.WorkloadResourceId,
-            WorkloadRevisionName = previousResources?.Resources.WorkloadRevisionName,
-            StableTrafficRevisionName = previousResources?.Resources.StableTrafficRevisionName,
-            WorkloadIdentityResourceId = previousResources?.Resources.WorkloadIdentityResourceId,
-            WorkloadIdentityClientId = previousResources?.Resources.WorkloadIdentityClientId,
-            WorkloadIdentityPrincipalId = previousResources?.Resources.WorkloadIdentityPrincipalId,
-            KeyVaultResourceId = previousResources?.Resources.KeyVaultResourceId,
-            KeyVaultUri = previousResources?.Resources.KeyVaultUri,
-            SqlServerResourceId = previousResources?.Resources.SqlServerResourceId,
-            SqlServerFqdn = previousResources?.Resources.SqlServerFqdn,
-            ContainerAppsEnvironmentResourceId = previousResources?.Resources.ContainerAppsEnvironmentResourceId,
-            RegistryResourceId = previousResources?.Resources.RegistryResourceId,
-            AcrPullDeploymentId = previousResources?.Resources.AcrPullDeploymentId,
-            AcrPullRoleAssignmentId = previousResources?.Resources.AcrPullRoleAssignmentId
-        };
-        entity.Transitions.Add(new AzureProviderOperationTransitionEntity
-        {
-            Id = Guid.NewGuid(),
-            OperationId = entity.Id,
-            Sequence = 1,
-            Status = entity.Status,
-            Phase = entity.Phase,
-            Code = "operation.accepted",
-            Message = "Azure provider operation accepted.",
-            OccurredAt = now
-        });
-        db.AzureProviderOperations.Add(entity);
         try
         {
-            await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            return new(ToModel(entity), Replayed: false);
+            return await db.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+            {
+                var existing = await FindByKeyAsync(normalized, cancellationToken);
+                var identityEntity = await db.AzureProviderOperations.AsNoTracking()
+                    .Where(x => x.WorkspaceId == normalized.WorkspaceId && x.TargetKey == normalized.TargetKey &&
+                                x.OperationIdentity == identity &&
+                                (x.Status == AzureProviderOperationStatus.Accepted || x.Status == AzureProviderOperationStatus.Queued || x.Status == AzureProviderOperationStatus.EntitlementHeld ||
+                                 x.Status == AzureProviderOperationStatus.Running || x.Status == AzureProviderOperationStatus.RecoveryRequired))
+                    .SingleOrDefaultAsync(cancellationToken);
+                existing ??= identityEntity is null ? null : ToModel(identityEntity);
+                if (existing is not null)
+                    return new(EnsureSameRequest(existing, hash), Replayed: true);
+
+                // Reset per attempt; the recovery read below uses the value from the failed one.
+                supersededHeldOperationId = null;
+                if (normalized.LifecycleAction is ElsaInstanceOperationAction.Stop or ElsaInstanceOperationAction.Delete)
+                {
+                    var heldSafeExit = await FindBoundEntitlementHeldAsync(normalized, cancellationToken);
+                    if (heldSafeExit is not null)
+                    {
+                        supersededHeldOperationId = heldSafeExit.Id;
+                        heldSafeExit.Status = AzureProviderOperationStatus.Cancelled;
+                        heldSafeExit.CompletedAt = now;
+                        heldSafeExit.UpdatedAt = now;
+                        heldSafeExit.Version++;
+                        heldSafeExit.WorkerId = null;
+                        heldSafeExit.LeaseTokenHash = null;
+                        heldSafeExit.CompletionLeaseTokenHash = null;
+                        heldSafeExit.CompletionFingerprint = null;
+                        heldSafeExit.LeaseExpiresAt = null;
+                        heldSafeExit.HeartbeatAt = null;
+                        AddTransition(
+                            heldSafeExit,
+                            ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded,
+                            "The Azure provider operation was superseded by a safe lifecycle exit.",
+                            now);
+                    }
+                }
+
+                var activeTargetEntity = await FindActiveTargetAsync(normalized, supersededHeldOperationId, cancellationToken);
+                if (activeTargetEntity is not null)
+                    throw new AzureProviderOperationConflictException(ToModel(activeTargetEntity));
+                var previousResources = await GetLatestReconcileAsync(
+                    normalized.WorkspaceId,
+                    normalized.TargetKey,
+                    normalized.ProviderScopeFingerprint,
+                    cancellationToken);
+
+                var entity = new AzureProviderOperationEntity
+                {
+                    Id = Guid.NewGuid(),
+                    WorkspaceId = normalized.WorkspaceId,
+                    OrganizationId = normalized.OrganizationId,
+                    InstanceId = normalized.InstanceId,
+                    ProviderAssignmentId = normalized.ProviderAssignmentId,
+                    LifecycleAction = normalized.LifecycleAction,
+                    TargetKey = normalized.TargetKey,
+                    Action = normalized.Action,
+                    IdempotencyKey = normalized.IdempotencyKey,
+                    RequestHash = hash,
+                    OperationIdentity = identity,
+                    PlanFingerprint = normalized.PlanFingerprint,
+                    TemplateFingerprint = normalized.TemplateFingerprint,
+                    ProviderScopeFingerprint = normalized.ProviderScopeFingerprint,
+                    SqlWorkflowPackageVersion = normalized.SqlWorkflowPackageVersion,
+                    SqlQuartzPackageVersion = normalized.SqlQuartzPackageVersion,
+                    ElsaVersion = normalized.ElsaVersion,
+                    ReleaseLine = normalized.ReleaseLine,
+                    Topology = normalized.Topology,
+                    Isolation = normalized.Isolation,
+                    Location = normalized.Location,
+                    ImageRepository = normalized.ImageRepository,
+                    ImageDigest = normalized.ImageDigest,
+                    ReleaseManifestDigest = normalized.ReleaseManifestDigest,
+                    ReleaseManifestSignatureDigest = normalized.ReleaseManifestSignatureDigest,
+                    ReleaseManifestReference = normalized.ReleaseManifestReference,
+                    ReleaseManifestSignatureReference = normalized.ReleaseManifestSignatureReference,
+                    SecretReferencesJson = JsonSerializer.Serialize(normalized.SecretReferences),
+                    Status = AzureProviderOperationStatus.Accepted,
+                    Phase = AzureProviderOperationPhase.Planned,
+                    CheckpointSequence = 0,
+                    AttemptNumber = 0,
+                    Version = 1,
+                    Health = AzureProviderHealth.Unknown,
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                    ResourceGroupName = previousResources?.Resources.ResourceGroupName,
+                    FoundationDeploymentId = previousResources?.Resources.FoundationDeploymentId,
+                    WorkloadDeploymentId = previousResources?.Resources.WorkloadDeploymentId,
+                    WorkloadResourceId = previousResources?.Resources.WorkloadResourceId,
+                    WorkloadRevisionName = previousResources?.Resources.WorkloadRevisionName,
+                    StableTrafficRevisionName = previousResources?.Resources.StableTrafficRevisionName,
+                    WorkloadIdentityResourceId = previousResources?.Resources.WorkloadIdentityResourceId,
+                    WorkloadIdentityClientId = previousResources?.Resources.WorkloadIdentityClientId,
+                    WorkloadIdentityPrincipalId = previousResources?.Resources.WorkloadIdentityPrincipalId,
+                    KeyVaultResourceId = previousResources?.Resources.KeyVaultResourceId,
+                    KeyVaultUri = previousResources?.Resources.KeyVaultUri,
+                    SqlServerResourceId = previousResources?.Resources.SqlServerResourceId,
+                    SqlServerFqdn = previousResources?.Resources.SqlServerFqdn,
+                    ContainerAppsEnvironmentResourceId = previousResources?.Resources.ContainerAppsEnvironmentResourceId,
+                    RegistryResourceId = previousResources?.Resources.RegistryResourceId,
+                    AcrPullDeploymentId = previousResources?.Resources.AcrPullDeploymentId,
+                    AcrPullRoleAssignmentId = previousResources?.Resources.AcrPullRoleAssignmentId
+                };
+                entity.Transitions.Add(new AzureProviderOperationTransitionEntity
+                {
+                    Id = Guid.NewGuid(),
+                    OperationId = entity.Id,
+                    Sequence = 1,
+                    Status = entity.Status,
+                    Phase = entity.Phase,
+                    Code = "operation.accepted",
+                    Message = "Azure provider operation accepted.",
+                    OccurredAt = now
+                });
+                db.AzureProviderOperations.Add(entity);
+                await db.SaveChangesAsync(cancellationToken);
+                return new AzureProviderOperationCreateResult(ToModel(entity), Replayed: false);
+            }, cancellationToken);
         }
         catch (DbUpdateException)
         {
-            await transaction.RollbackAsync(cancellationToken);
             db.ChangeTracker.Clear();
             // The failed transaction may have staged the safe-exit transition,
             // so reread the winner in a fresh serializable transaction.
-            await using var recoveryTransaction = await db.Database.BeginTransactionAsync(
-                IsolationLevel.Serializable, cancellationToken);
-            existing = await FindByKeyAsync(normalized, cancellationToken);
-            identityEntity = await db.AzureProviderOperations.AsNoTracking()
-                .Where(x => x.WorkspaceId == normalized.WorkspaceId && x.TargetKey == normalized.TargetKey && x.OperationIdentity == identity &&
-                            (x.Status == AzureProviderOperationStatus.Accepted || x.Status == AzureProviderOperationStatus.Queued || x.Status == AzureProviderOperationStatus.EntitlementHeld ||
-                             x.Status == AzureProviderOperationStatus.Running || x.Status == AzureProviderOperationStatus.RecoveryRequired))
-                .SingleOrDefaultAsync(cancellationToken);
-            existing ??= identityEntity is null ? null : ToModel(identityEntity);
-            if (existing is not null)
+            var winner = await db.ExecuteInTransactionAsync<AzureProviderOperationCreateResult?>(IsolationLevel.Serializable, async () =>
             {
-                await recoveryTransaction.CommitAsync(cancellationToken);
-                return new(EnsureSameRequest(existing, hash), Replayed: true);
-            }
-            activeTargetEntity = await FindActiveTargetAsync(normalized, supersededHeldOperationId, cancellationToken);
-            if (activeTargetEntity is not null)
-            {
-                await recoveryTransaction.RollbackAsync(cancellationToken);
-                throw new AzureProviderOperationConflictException(ToModel(activeTargetEntity));
-            }
-            await recoveryTransaction.RollbackAsync(cancellationToken);
-            throw;
+                var existing = await FindByKeyAsync(normalized, cancellationToken);
+                var identityEntity = await db.AzureProviderOperations.AsNoTracking()
+                    .Where(x => x.WorkspaceId == normalized.WorkspaceId && x.TargetKey == normalized.TargetKey && x.OperationIdentity == identity &&
+                                (x.Status == AzureProviderOperationStatus.Accepted || x.Status == AzureProviderOperationStatus.Queued || x.Status == AzureProviderOperationStatus.EntitlementHeld ||
+                                 x.Status == AzureProviderOperationStatus.Running || x.Status == AzureProviderOperationStatus.RecoveryRequired))
+                    .SingleOrDefaultAsync(cancellationToken);
+                existing ??= identityEntity is null ? null : ToModel(identityEntity);
+                if (existing is not null)
+                    return new AzureProviderOperationCreateResult(EnsureSameRequest(existing, hash), Replayed: true);
+                var activeTargetEntity = await FindActiveTargetAsync(normalized, supersededHeldOperationId, cancellationToken);
+                if (activeTargetEntity is not null)
+                    throw new AzureProviderOperationConflictException(ToModel(activeTargetEntity));
+                return null;
+            }, cancellationToken);
+            if (winner is null)
+                throw;
+            return winner;
         }
     }
 
@@ -563,54 +551,52 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
     {
         ArgumentNullException.ThrowIfNull(request);
         ValidateAssignmentRequest(request);
-        await using var transaction = await db.Database.BeginTransactionAsync(
-            IsolationLevel.Serializable, cancellationToken);
-        var existing = await db.AzureProviderResourceAssignments
-            .SingleOrDefaultAsync(x => x.WorkspaceId == request.WorkspaceId &&
-                                       x.InstanceId == request.InstanceId &&
-                                       x.ProviderScopeFingerprint == request.ProviderScopeFingerprint,
-                cancellationToken);
-        if (existing is not null)
-        {
-            EnsureSameAssignment(existing, request);
-            await transaction.CommitAsync(cancellationToken);
-            return ToModel(existing);
-        }
-
-        var assignmentId = Guid.NewGuid();
-        var resourceGroupName = AzureProviderResourceAssignmentNaming.ResourceGroupName(
-            request.ResourceGroupNamePrefix, request.InstanceId, request.NamingVersion);
-        var entity = new AzureProviderResourceAssignmentEntity
-        {
-            Id = assignmentId,
-            WorkspaceId = request.WorkspaceId,
-            OrganizationId = request.OrganizationId,
-            InstanceId = request.InstanceId,
-            ProviderScopeFingerprint = request.ProviderScopeFingerprint.ToLowerInvariant(),
-            NamingVersion = request.NamingVersion,
-            SubscriptionId = request.SubscriptionId.ToLowerInvariant(),
-            ResourceGroupName = resourceGroupName,
-            WorkloadName = request.WorkloadName,
-            OwnershipKey = AzureProviderResourceAssignmentNaming.OwnershipKey(
-                assignmentId, request.InstanceId, request.ProviderScopeFingerprint),
-            Location = request.Location.ToLowerInvariant(),
-            State = AzureProviderAssignmentState.Reserved,
-            Version = 1,
-            CreatedAt = now,
-            UpdatedAt = now
-        };
-        db.AzureProviderResourceAssignments.Add(entity);
         try
         {
-            await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            return ToModel(entity);
+            return await db.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+            {
+                var existing = await db.AzureProviderResourceAssignments
+                    .SingleOrDefaultAsync(x => x.WorkspaceId == request.WorkspaceId &&
+                                               x.InstanceId == request.InstanceId &&
+                                               x.ProviderScopeFingerprint == request.ProviderScopeFingerprint,
+                        cancellationToken);
+                if (existing is not null)
+                {
+                    EnsureSameAssignment(existing, request);
+                    return ToModel(existing);
+                }
+
+                var assignmentId = Guid.NewGuid();
+                var resourceGroupName = AzureProviderResourceAssignmentNaming.ResourceGroupName(
+                    request.ResourceGroupNamePrefix, request.InstanceId, request.NamingVersion);
+                var entity = new AzureProviderResourceAssignmentEntity
+                {
+                    Id = assignmentId,
+                    WorkspaceId = request.WorkspaceId,
+                    OrganizationId = request.OrganizationId,
+                    InstanceId = request.InstanceId,
+                    ProviderScopeFingerprint = request.ProviderScopeFingerprint.ToLowerInvariant(),
+                    NamingVersion = request.NamingVersion,
+                    SubscriptionId = request.SubscriptionId.ToLowerInvariant(),
+                    ResourceGroupName = resourceGroupName,
+                    WorkloadName = request.WorkloadName,
+                    OwnershipKey = AzureProviderResourceAssignmentNaming.OwnershipKey(
+                        assignmentId, request.InstanceId, request.ProviderScopeFingerprint),
+                    Location = request.Location.ToLowerInvariant(),
+                    State = AzureProviderAssignmentState.Reserved,
+                    Version = 1,
+                    CreatedAt = now,
+                    UpdatedAt = now
+                };
+                db.AzureProviderResourceAssignments.Add(entity);
+                await db.SaveChangesAsync(cancellationToken);
+                return ToModel(entity);
+            }, cancellationToken);
         }
         catch (DbUpdateException)
         {
-            await transaction.RollbackAsync(cancellationToken);
             db.ChangeTracker.Clear();
-            existing = await db.AzureProviderResourceAssignments.AsNoTracking()
+            var existing = await db.AzureProviderResourceAssignments.AsNoTracking()
                 .SingleOrDefaultAsync(x => x.WorkspaceId == request.WorkspaceId &&
                                            x.InstanceId == request.InstanceId &&
                                            x.ProviderScopeFingerprint == request.ProviderScopeFingerprint,
@@ -719,42 +705,40 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
         long? expectedVersion = null,
         CancellationToken cancellationToken = default)
     {
-        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
-        var changed = await db.AzureProviderOperations
-            .Where(x => x.WorkspaceId == workspaceId && x.Id == operationId &&
-                         (x.Status == AzureProviderOperationStatus.Accepted ||
-                          x.Status == AzureProviderOperationStatus.Queued || x.Status == AzureProviderOperationStatus.EntitlementHeld ||
-                         x.Status == AzureProviderOperationStatus.RecoveryRequired) &&
-                        (!expectedVersion.HasValue || x.Version == expectedVersion.Value))
-            .ExecuteUpdateAsync(setters => setters
-                .SetProperty(x => x.Status, x => x.Status == AzureProviderOperationStatus.RecoveryRequired
-                    ? AzureProviderOperationStatus.RecoveryRequired
-                    : AzureProviderOperationStatus.Failed)
-                .SetProperty(x => x.CompletedAt, x => x.Status == AzureProviderOperationStatus.RecoveryRequired ? null : now)
-                .SetProperty(x => x.UpdatedAt, now)
-                .SetProperty(x => x.Version, x => x.Version + 1)
-                .SetProperty(x => x.LeaseTokenHash, (string?)null)
-                .SetProperty(x => x.LeaseExpiresAt, (DateTimeOffset?)null)
-                .SetProperty(x => x.WorkerId, (string?)null)
-                .SetProperty(x => x.CompletionLeaseTokenHash, (string?)null)
-                .SetProperty(x => x.CompletionFingerprint, (string?)null), cancellationToken);
-        if (changed == 0)
+        return await db.ExecuteInTransactionAsync<AzureProviderOperation?>(IsolationLevel.Unspecified, async () =>
         {
-            await transaction.RollbackAsync(cancellationToken);
-            return null;
-        }
+            var changed = await db.AzureProviderOperations
+                .Where(x => x.WorkspaceId == workspaceId && x.Id == operationId &&
+                             (x.Status == AzureProviderOperationStatus.Accepted ||
+                              x.Status == AzureProviderOperationStatus.Queued || x.Status == AzureProviderOperationStatus.EntitlementHeld ||
+                             x.Status == AzureProviderOperationStatus.RecoveryRequired) &&
+                            (!expectedVersion.HasValue || x.Version == expectedVersion.Value))
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(x => x.Status, x => x.Status == AzureProviderOperationStatus.RecoveryRequired
+                        ? AzureProviderOperationStatus.RecoveryRequired
+                        : AzureProviderOperationStatus.Failed)
+                    .SetProperty(x => x.CompletedAt, x => x.Status == AzureProviderOperationStatus.RecoveryRequired ? null : now)
+                    .SetProperty(x => x.UpdatedAt, now)
+                    .SetProperty(x => x.Version, x => x.Version + 1)
+                    .SetProperty(x => x.LeaseTokenHash, (string?)null)
+                    .SetProperty(x => x.LeaseExpiresAt, (DateTimeOffset?)null)
+                    .SetProperty(x => x.WorkerId, (string?)null)
+                    .SetProperty(x => x.CompletionLeaseTokenHash, (string?)null)
+                    .SetProperty(x => x.CompletionFingerprint, (string?)null), cancellationToken);
+            if (changed == 0)
+                return null;
 
-        db.ChangeTracker.Clear();
-        var entity = await db.AzureProviderOperations
-            .SingleAsync(x => x.WorkspaceId == workspaceId && x.Id == operationId, cancellationToken);
-        AddTransition(
-            entity,
-            "azure.plan.unrestorable",
-            "The persisted provider plan cannot be restored.",
-            now);
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return ToModel(entity);
+            db.ChangeTracker.Clear();
+            var entity = await db.AzureProviderOperations
+                .SingleAsync(x => x.WorkspaceId == workspaceId && x.Id == operationId, cancellationToken);
+            AddTransition(
+                entity,
+                "azure.plan.unrestorable",
+                "The persisted provider plan cannot be restored.",
+                now);
+            await db.SaveChangesAsync(cancellationToken);
+            return ToModel(entity);
+        }, cancellationToken);
     }
 
     public Task<AzureProviderOperation?> ClaimAsync(Guid workspaceId, Guid operationId, string workerId, string leaseToken, TimeSpan leaseDuration, DateTimeOffset now, long? expectedVersion = null, CancellationToken cancellationToken = default) =>
@@ -778,50 +762,44 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
         ArgumentNullException.ThrowIfNull(commercialGate);
 
         db.ChangeTracker.Clear();
-        await using var transaction = await db.Database.BeginTransactionAsync(
-            IsolationLevel.Serializable, cancellationToken);
-        var entity = await db.AzureProviderOperations.SingleOrDefaultAsync(
-            x => x.WorkspaceId == workspaceId && x.Id == operationId,
-            cancellationToken);
-        if (entity is null || entity.Status != AzureProviderOperationStatus.Running ||
-            !LeaseMatches(entity, leaseToken, now) ||
-            expectedVersion.HasValue && entity.Version != expectedVersion.Value)
+        return await db.ExecuteInTransactionAsync<AzureProviderOperationAuthorizationResult?>(IsolationLevel.Serializable, async () =>
         {
-            await transaction.RollbackAsync(cancellationToken);
-            return null;
-        }
+            var entity = await db.AzureProviderOperations.SingleOrDefaultAsync(
+                x => x.WorkspaceId == workspaceId && x.Id == operationId,
+                cancellationToken);
+            if (entity is null || entity.Status != AzureProviderOperationStatus.Running ||
+                !LeaseMatches(entity, leaseToken, now) ||
+                expectedVersion.HasValue && entity.Version != expectedVersion.Value)
+                return null;
 
-        var decision = entity.OrganizationId is not { } organizationId || organizationId == Guid.Empty ||
-                       entity.InstanceId is not { } instanceId || instanceId == Guid.Empty ||
-                       entity.LifecycleAction is not { } lifecycleAction
-            ? new ElsaInstanceCommercialGateDecision(
-                false,
-                ElsaInstanceCommercialOperation.BindingRequired,
-                "The managed-instance provider operation is missing its durable identity binding.")
-            : await commercialGate.EvaluateAsync(
-                organizationId,
-                lifecycleAction,
-                cancellationToken: cancellationToken);
+            var decision = entity.OrganizationId is not { } organizationId || organizationId == Guid.Empty ||
+                           entity.InstanceId is not { } instanceId || instanceId == Guid.Empty ||
+                           entity.LifecycleAction is not { } lifecycleAction
+                ? new ElsaInstanceCommercialGateDecision(
+                    false,
+                    ElsaInstanceCommercialOperation.BindingRequired,
+                    "The managed-instance provider operation is missing its durable identity binding.")
+                : await commercialGate.EvaluateAsync(
+                    organizationId,
+                    lifecycleAction,
+                    cancellationToken: cancellationToken);
 
-        if (decision.Allowed)
-        {
-            await transaction.CommitAsync(cancellationToken);
-            return new(ToModel(entity), decision);
-        }
+            if (decision.Allowed)
+                return new AzureProviderOperationAuthorizationResult(ToModel(entity), decision);
 
-        entity.Status = AzureProviderOperationStatus.EntitlementHeld;
-        entity.CompletedAt = null;
-        entity.UpdatedAt = now;
-        entity.Version++;
-        entity.CompletionLeaseTokenHash = entity.LeaseTokenHash;
-        entity.CompletionFingerprint = Hash($"{AzureProviderOperationStatus.EntitlementHeld}|{decision.Code}");
-        entity.LeaseTokenHash = null;
-        entity.LeaseExpiresAt = null;
-        entity.WorkerId = null;
-        AddTransition(entity, decision.Code, decision.Summary, now);
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return new(ToModel(entity), decision);
+            entity.Status = AzureProviderOperationStatus.EntitlementHeld;
+            entity.CompletedAt = null;
+            entity.UpdatedAt = now;
+            entity.Version++;
+            entity.CompletionLeaseTokenHash = entity.LeaseTokenHash;
+            entity.CompletionFingerprint = Hash($"{AzureProviderOperationStatus.EntitlementHeld}|{decision.Code}");
+            entity.LeaseTokenHash = null;
+            entity.LeaseExpiresAt = null;
+            entity.WorkerId = null;
+            AddTransition(entity, decision.Code, decision.Summary, now);
+            await db.SaveChangesAsync(cancellationToken);
+            return new AzureProviderOperationAuthorizationResult(ToModel(entity), decision);
+        }, cancellationToken);
     }
 
     private async Task<AzureProviderOperation?> ClaimCoreAsync(Guid workspaceId, Guid operationId, string workerId, string leaseToken, TimeSpan leaseDuration, DateTimeOffset now, long? expectedVersion, bool allowRecovery, CancellationToken cancellationToken)
@@ -832,11 +810,9 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
         var hash = Hash(leaseToken);
         DateTimeOffset leaseExpires;
         try { leaseExpires = now.Add(leaseDuration); } catch (ArgumentOutOfRangeException) { throw new ArgumentException("Lease duration overflowed.", nameof(leaseDuration)); }
-        AzureProviderOperation? result = null;
-        await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        db.ChangeTracker.Clear();
+        return await db.ExecuteInTransactionAsync<AzureProviderOperation?>(IsolationLevel.Unspecified, async () =>
         {
-            db.ChangeTracker.Clear();
-            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
             var changed = await db.AzureProviderOperations.Where(x => x.WorkspaceId == workspaceId && x.Id == operationId &&
                      (allowRecovery
                          ? x.Status == AzureProviderOperationStatus.RecoveryRequired
@@ -863,17 +839,14 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                     x.WorkspaceId == workspaceId && x.Id == operationId &&
                     x.Status == AzureProviderOperationStatus.Running && x.WorkerId == workerId &&
                     x.LeaseTokenHash == hash && x.LeaseExpiresAt > now, cancellationToken);
-                result = replay is null ? null : ToModel(replay);
-                return;
+                return replay is null ? null : ToModel(replay);
             }
             db.ChangeTracker.Clear();
             var entity = await db.AzureProviderOperations.SingleAsync(x => x.Id == operationId, cancellationToken);
             AddTransition(entity, allowRecovery ? "operation.recovery.claimed" : "operation.claimed", allowRecovery ? "Recovery reconciliation claimed." : "Azure provider operation claimed.", now);
             await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            result = ToModel(entity);
-        });
-        return result;
+            return ToModel(entity);
+        }, cancellationToken);
     }
 
     public async Task<AzureProviderOperation?> HeartbeatAsync(Guid workspaceId, Guid operationId, string leaseToken, TimeSpan leaseDuration, DateTimeOffset now, long? expectedVersion = null, CancellationToken cancellationToken = default)
@@ -1019,10 +992,9 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
 
     public async Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
     {
-        return await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        db.ChangeTracker.Clear();
+        return await db.ExecuteInTransactionAsync(IsolationLevel.Unspecified, async () =>
         {
-            db.ChangeTracker.Clear();
-            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
             var candidates = await db.AzureProviderOperations.AsNoTracking()
                 .Where(x => x.Status == AzureProviderOperationStatus.Running && x.LeaseExpiresAt != null && x.LeaseExpiresAt <= now)
                 .ToListAsync(cancellationToken);
@@ -1043,9 +1015,8 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                 AddTransition(candidate, "operation.recovery.required", "The operation lease expired before completion.", now);
             }
             await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
             return recovered;
-        });
+        }, cancellationToken);
     }
 
     public async Task<IReadOnlyList<AzureProviderOperationTransition>> ListTransitionsAsync(Guid workspaceId, Guid operationId, CancellationToken cancellationToken = default)

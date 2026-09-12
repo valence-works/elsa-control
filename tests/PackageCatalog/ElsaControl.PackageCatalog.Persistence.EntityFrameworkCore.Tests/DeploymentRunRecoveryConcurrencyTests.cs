@@ -182,7 +182,7 @@ public sealed class DeploymentRunRecoveryConcurrencyTests
     {
         var path = Path.Combine(Path.GetTempPath(), $"elsa-control-run-recovery-{Guid.NewGuid():N}.db");
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite($"Data Source={path};Default Timeout=30")
+            .UseRetryingSqlite($"Data Source={path};Default Timeout=30")
             .Options;
         var workspaceId = Guid.NewGuid();
         var accountId = Guid.NewGuid();

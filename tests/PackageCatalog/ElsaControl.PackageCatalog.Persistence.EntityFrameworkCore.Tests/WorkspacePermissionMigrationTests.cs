@@ -16,7 +16,7 @@ public sealed class WorkspacePermissionMigrationTests
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         await using var db = new CatalogDbContext(options);
         await db.Database.MigrateAsync();
@@ -48,7 +48,7 @@ public sealed class WorkspacePermissionMigrationTests
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         await using var db = new CatalogDbContext(options);
         await db.Database.MigrateAsync(PreviousMigration);

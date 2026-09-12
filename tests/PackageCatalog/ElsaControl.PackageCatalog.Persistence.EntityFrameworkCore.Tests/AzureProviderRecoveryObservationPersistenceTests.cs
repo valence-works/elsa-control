@@ -1393,7 +1393,7 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
 
     private static CatalogDbContext CreateMigratedContext(SqliteConnection connection) =>
         new(new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options);
 
     private static CatalogDbContext CreateMigratedContext(
@@ -1401,7 +1401,7 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
         DbCommandInterceptor? interceptor = null)
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite($"Data Source={databasePath};Pooling=False;Default Timeout=30", sqlite =>
+            .UseRetryingSqlite($"Data Source={databasePath};Pooling=False;Default Timeout=30", sqlite =>
                 sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly));
         if (interceptor is not null)
             options.AddInterceptors(interceptor);

@@ -834,10 +834,10 @@ public sealed class OrganizationBillingPersistenceTests
         new(organizationId, "stripe", id, "subscription." + state.ToString().ToLowerInvariant(), state, occurredAt, "sha256:" + new string('a', 64), customerReference, subscriptionReference);
 
     private static CatalogDbContext CreateDb(SqliteConnection connection) =>
-        new(new DbContextOptionsBuilder<CatalogDbContext>().UseSqlite(connection).Options);
+        new(new DbContextOptionsBuilder<CatalogDbContext>().UseRetryingSqlite(connection).Options);
 
     private static CatalogDbContext CreateMigratedDb(SqliteConnection connection) =>
         new(new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options);
 }

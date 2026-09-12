@@ -55,11 +55,9 @@ public sealed class AccountWorkspaceStore(CatalogDbContext dbContext) : IAccount
 
     public async Task UpdateExternalIdentitySeenAsync(Guid externalIdentityId, string? displayName, string? email, CancellationToken cancellationToken = default)
     {
-        var executionStrategy = dbContext.Database.CreateExecutionStrategy();
-        await executionStrategy.ExecuteAsync(async () =>
+        await dbContext.ExecuteInTransactionAsync(IsolationLevel.Unspecified, async () =>
         {
             var now = DateTimeOffset.UtcNow;
-            await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
             await dbContext.ExternalIdentities
                 .Where(x => x.Id == externalIdentityId)
                 .ExecuteUpdateAsync(updates => updates
@@ -74,8 +72,7 @@ public sealed class AccountWorkspaceStore(CatalogDbContext dbContext) : IAccount
                     .SetProperty(x => x.DisplayName, displayName)
                     .SetProperty(x => x.Email, email)
                     .SetProperty(x => x.UpdatedAt, now), cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-        });
+        }, cancellationToken);
     }
 
     public async Task<WorkspaceEntitlementSnapshot?> GetLatestEntitlementAsync(Guid workspaceId, CancellationToken cancellationToken = default)
@@ -176,72 +173,70 @@ public sealed class AccountWorkspaceStore(CatalogDbContext dbContext) : IAccount
             .ToList();
     }
 
-    public async Task<OrganizationWorkspaceMutationResult> CreateOrganizationWorkspaceAsync(Guid organizationId, Guid creatorAccountId, CreateOrganizationWorkspaceRequest request, CancellationToken cancellationToken = default)
-    {
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-        var now = DateTimeOffset.UtcNow;
-        var workspaceName = request.Name.Trim();
-
-        var entitlement = await dbContext.OrganizationEntitlementSnapshots
-            .AsNoTracking()
-            .Where(x => x.OrganizationId == organizationId)
-            .OrderByDescending(x => x.SyncedAt)
-            .ThenByDescending(x => x.CreatedAt)
-            .FirstOrDefaultAsync(cancellationToken);
-        if (entitlement is null)
-            return OrganizationWorkspaceMutationResult.Denied(OrganizationWorkspaceFailure.EntitlementRequired);
-
-        var activeWorkspaceCount = await dbContext.Workspaces
-            .AsNoTracking()
-            .CountAsync(x => x.OrganizationId == organizationId && x.SoftDeletedAt == null, cancellationToken);
-        if (activeWorkspaceCount >= entitlement.MaxWorkspaces)
-            return OrganizationWorkspaceMutationResult.Denied(OrganizationWorkspaceFailure.WorkspaceLimitReached);
-
-        var duplicateName = await dbContext.Workspaces
-            .AsNoTracking()
-            .AnyAsync(x =>
-                x.OrganizationId == organizationId &&
-                x.SoftDeletedAt == null &&
-                x.Name == workspaceName, cancellationToken);
-        if (duplicateName)
-            return OrganizationWorkspaceMutationResult.Denied(OrganizationWorkspaceFailure.DuplicateWorkspaceName);
-
-        var workspace = new Workspace
+    public Task<OrganizationWorkspaceMutationResult> CreateOrganizationWorkspaceAsync(Guid organizationId, Guid creatorAccountId, CreateOrganizationWorkspaceRequest request, CancellationToken cancellationToken = default) =>
+        dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
         {
-            OrganizationId = organizationId,
-            Name = workspaceName,
-            Kind = WorkspaceKind.Shared,
-            CreatedAt = now,
-            UpdatedAt = now
-        };
+            var now = DateTimeOffset.UtcNow;
+            var workspaceName = request.Name.Trim();
 
-        workspace.Memberships.Add(new WorkspaceMembership
-        {
-            AccountId = creatorAccountId,
-            Workspace = workspace,
-            Role = WorkspaceRole.Owner,
-            CreatedAt = now,
-            UpdatedAt = now
-        });
+            var entitlement = await dbContext.OrganizationEntitlementSnapshots
+                .AsNoTracking()
+                .Where(x => x.OrganizationId == organizationId)
+                .OrderByDescending(x => x.SyncedAt)
+                .ThenByDescending(x => x.CreatedAt)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (entitlement is null)
+                return OrganizationWorkspaceMutationResult.Denied(OrganizationWorkspaceFailure.EntitlementRequired);
 
-        foreach (var member in request.InitialMembers.Where(x => x.AccountId != creatorAccountId).GroupBy(x => x.AccountId).Select(x => x.Last()))
-        {
+            var activeWorkspaceCount = await dbContext.Workspaces
+                .AsNoTracking()
+                .CountAsync(x => x.OrganizationId == organizationId && x.SoftDeletedAt == null, cancellationToken);
+            if (activeWorkspaceCount >= entitlement.MaxWorkspaces)
+                return OrganizationWorkspaceMutationResult.Denied(OrganizationWorkspaceFailure.WorkspaceLimitReached);
+
+            var duplicateName = await dbContext.Workspaces
+                .AsNoTracking()
+                .AnyAsync(x =>
+                    x.OrganizationId == organizationId &&
+                    x.SoftDeletedAt == null &&
+                    x.Name == workspaceName, cancellationToken);
+            if (duplicateName)
+                return OrganizationWorkspaceMutationResult.Denied(OrganizationWorkspaceFailure.DuplicateWorkspaceName);
+
+            var workspace = new Workspace
+            {
+                OrganizationId = organizationId,
+                Name = workspaceName,
+                Kind = WorkspaceKind.Shared,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+
             workspace.Memberships.Add(new WorkspaceMembership
             {
-                AccountId = member.AccountId,
+                AccountId = creatorAccountId,
                 Workspace = workspace,
-                Role = member.Role,
+                Role = WorkspaceRole.Owner,
                 CreatedAt = now,
                 UpdatedAt = now
             });
-        }
 
-        dbContext.Workspaces.Add(workspace);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+            foreach (var member in request.InitialMembers.Where(x => x.AccountId != creatorAccountId).GroupBy(x => x.AccountId).Select(x => x.Last()))
+            {
+                workspace.Memberships.Add(new WorkspaceMembership
+                {
+                    AccountId = member.AccountId,
+                    Workspace = workspace,
+                    Role = member.Role,
+                    CreatedAt = now,
+                    UpdatedAt = now
+                });
+            }
 
-        return OrganizationWorkspaceMutationResult.Success((await WorkspaceSummaryAsync(organizationId, workspace.Id, creatorAccountId, cancellationToken))!);
-    }
+            dbContext.Workspaces.Add(workspace);
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return OrganizationWorkspaceMutationResult.Success((await WorkspaceSummaryAsync(organizationId, workspace.Id, creatorAccountId, cancellationToken))!);
+        }, cancellationToken);
 
     public async Task<WorkspaceSummary?> UpdateOrganizationWorkspaceAsync(Guid organizationId, Guid workspaceId, Guid accountId, UpdateOrganizationWorkspaceRequest request, CancellationToken cancellationToken = default)
     {
@@ -336,31 +331,30 @@ public sealed class AccountWorkspaceStore(CatalogDbContext dbContext) : IAccount
         return existing;
     }
 
-    public async Task<WorkspaceSourceAddResult> TryAddWorkspaceSourceAsync(PackageSource source, int maxSources, CancellationToken cancellationToken = default)
-    {
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-        var currentSourceCount = await dbContext.PackageSources.CountAsync(x =>
-            x.OwnerWorkspaceId == source.OwnerWorkspaceId &&
-            x.Visibility == PackageSourceVisibility.Workspace &&
-            x.SoftDeletedAt == null,
-            cancellationToken);
-        if (currentSourceCount >= maxSources)
-            return new WorkspaceSourceAddResult(WorkspaceSourceAddStatus.LimitReached);
+    public Task<WorkspaceSourceAddResult> TryAddWorkspaceSourceAsync(PackageSource source, int maxSources, CancellationToken cancellationToken = default) =>
+        dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+        {
+            var currentSourceCount = await dbContext.PackageSources.CountAsync(x =>
+                x.OwnerWorkspaceId == source.OwnerWorkspaceId &&
+                x.Visibility == PackageSourceVisibility.Workspace &&
+                x.SoftDeletedAt == null,
+                cancellationToken);
+            if (currentSourceCount >= maxSources)
+                return new WorkspaceSourceAddResult(WorkspaceSourceAddStatus.LimitReached);
 
-        var urlExists = await dbContext.PackageSources.AnyAsync(x =>
-            x.OwnerWorkspaceId == source.OwnerWorkspaceId &&
-            x.Visibility == PackageSourceVisibility.Workspace &&
-            x.SoftDeletedAt == null &&
-            x.Url == source.Url,
-            cancellationToken);
-        if (urlExists)
-            return new WorkspaceSourceAddResult(WorkspaceSourceAddStatus.DuplicateUrl);
+            var urlExists = await dbContext.PackageSources.AnyAsync(x =>
+                x.OwnerWorkspaceId == source.OwnerWorkspaceId &&
+                x.Visibility == PackageSourceVisibility.Workspace &&
+                x.SoftDeletedAt == null &&
+                x.Url == source.Url,
+                cancellationToken);
+            if (urlExists)
+                return new WorkspaceSourceAddResult(WorkspaceSourceAddStatus.DuplicateUrl);
 
-        await dbContext.PackageSources.AddAsync(source, cancellationToken);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return new WorkspaceSourceAddResult(WorkspaceSourceAddStatus.Created);
-    }
+            await dbContext.PackageSources.AddAsync(source, cancellationToken);
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return new WorkspaceSourceAddResult(WorkspaceSourceAddStatus.Created);
+        }, cancellationToken);
 
     public async Task<IReadOnlyList<PackageSource>> ListVisibleSourcesAsync(Guid workspaceId, CancellationToken cancellationToken = default) =>
         await dbContext.PackageSources

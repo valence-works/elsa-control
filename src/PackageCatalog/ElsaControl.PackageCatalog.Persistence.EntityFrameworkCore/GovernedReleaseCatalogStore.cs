@@ -29,45 +29,25 @@ public sealed class GovernedReleaseCatalogStore(DbContextOptions<CatalogDbContex
         var identity = CatalogIdentity(entries[0]);
         var digest = Normalize(entries[0].ManifestDigest);
         var fingerprint = ProjectionFingerprint(entries);
-        await using var strategyDb = new CatalogDbContext(dbOptions);
-        var strategy = strategyDb.Database.CreateExecutionStrategy();
-        return await strategy.ExecuteAsync(async () =>
-        {
-            await using var attemptDb = new CatalogDbContext(dbOptions);
-            return await StoreOnceAsync(attemptDb, entries, identity, digest, fingerprint, cancellationToken);
-        });
-    }
-
-    private async Task<GovernedReleaseCatalogWriteResult> StoreOnceAsync(
-        CatalogDbContext db,
-        IReadOnlyList<GovernedReleaseCatalogEntry> entries,
-        string identity,
-        string digest,
-        string fingerprint,
-        CancellationToken cancellationToken)
-    {
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-
-        var existing = await FindExistingCandidatesAsync(db, identity, digest, entries[0].RegistryClass, cancellationToken);
-        if (existing.Count != 0)
-        {
-            await transaction.RollbackAsync(cancellationToken);
-            return Existing(existing, fingerprint);
-        }
-
-        var entity = ToEntity(entries, identity, fingerprint);
-        db.GovernedReleaseCatalog.Add(entity);
+        await using var db = new CatalogDbContext(dbOptions);
         try
         {
-            await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            return new(GovernedReleaseCatalogWriteStatus.Stored, ToEntries(entity));
+            return await db.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+            {
+                var existing = await FindExistingCandidatesAsync(db, identity, digest, entries[0].RegistryClass, cancellationToken);
+                if (existing.Count != 0)
+                    return Existing(existing, fingerprint);
+
+                var entity = ToEntity(entries, identity, fingerprint);
+                db.GovernedReleaseCatalog.Add(entity);
+                await db.SaveChangesAsync(cancellationToken);
+                return new GovernedReleaseCatalogWriteResult(GovernedReleaseCatalogWriteStatus.Stored, ToEntries(entity));
+            }, cancellationToken);
         }
         catch (DbUpdateException)
         {
-            await transaction.RollbackAsync(cancellationToken);
-            db.ChangeTracker.Clear();
-            existing = await FindExistingCandidatesAsync(db, identity, digest, entries[0].RegistryClass, cancellationToken);
+            // The losing writer's transaction has rolled back; reread the winner's catalog row.
+            var existing = await FindExistingCandidatesAsync(db, identity, digest, entries[0].RegistryClass, cancellationToken);
             if (existing.Count == 0)
                 throw;
             return Existing(existing, fingerprint);

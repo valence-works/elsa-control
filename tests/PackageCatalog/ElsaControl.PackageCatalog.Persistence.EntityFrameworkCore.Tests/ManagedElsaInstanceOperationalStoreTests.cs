@@ -355,7 +355,7 @@ public sealed class ManagedElsaInstanceOperationalStoreTests
 
     private static CatalogDbContext CreateContext(SqliteConnection connection) =>
         new(new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection)
+            .UseRetryingSqlite(connection)
             .Options);
 
     private static async Task<Workspace> CreateWorkspaceAsync(CatalogDbContext db, string name)

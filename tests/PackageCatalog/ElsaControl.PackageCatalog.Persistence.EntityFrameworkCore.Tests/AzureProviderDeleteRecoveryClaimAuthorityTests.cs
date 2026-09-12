@@ -335,7 +335,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     private static CatalogDbContext CreateMigratedContext(string databasePath)
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite($"Data Source={databasePath};Pooling=False;Default Timeout=30", sqlite =>
+            .UseRetryingSqlite($"Data Source={databasePath};Pooling=False;Default Timeout=30", sqlite =>
                 sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         return new CatalogDbContext(options);

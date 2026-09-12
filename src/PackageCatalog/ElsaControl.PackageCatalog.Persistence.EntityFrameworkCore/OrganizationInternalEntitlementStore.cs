@@ -2,7 +2,6 @@ using System.Data;
 using System.Globalization;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 
@@ -67,14 +66,9 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
     {
         try
         {
-            return await dbContext.Database.CreateExecutionStrategy().ExecuteAsync(
-                async _ =>
-                {
-                    // Every attempt decides from committed rows only.
-                    dbContext.ChangeTracker.Clear();
-                    return await transaction();
-                },
-                cancellationToken);
+            // Every attempt decides from committed rows only: the helper clears the change
+            // tracker and opens a new serializable transaction for each strategy attempt.
+            return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, transaction, cancellationToken);
         }
         catch (Exception exception) when (attempt < 2 && IsRetryableConflict(exception))
         {
@@ -90,7 +84,6 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
         var (exists, subscription, entitlement) = await LoadInternalEntitlementAsync(grant.OrganizationId, cancellationToken);
         OrganizationInternalEntitlementOutcome? refusal =
             !exists ? OrganizationInternalEntitlementOutcome.OrganizationNotFound :
@@ -98,7 +91,7 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
             subscription is { State: not OrganizationSubscriptionState.Active } ? OrganizationInternalEntitlementOutcome.SubscriptionClosed :
             null;
         if (refusal is { } refused)
-            return await RefuseAsync(transaction, refused, grant.OrganizationId, subscription, entitlement, now, cancellationToken);
+            return Refuse(refused, grant.OrganizationId, subscription, entitlement, now);
 
         var outcome = subscription is null
             ? OrganizationInternalEntitlementOutcome.Granted
@@ -125,7 +118,6 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
                 $"Internal managed-hosting entitlement {verb} (max instances {grant.Terms.MaxInstances}, expires {entitlement.ManagedHostingExpiresAt.Value.UtcDateTime:O}). Reason: {grant.Terms.Reason.Trim()}"),
             now);
         await dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
         return new(outcome, InternalStatus(grant.OrganizationId, subscription, entitlement, now));
     }
 
@@ -135,7 +127,6 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
         var (exists, subscription, entitlement) = await LoadInternalEntitlementAsync(organizationId, cancellationToken);
         OrganizationInternalEntitlementOutcome? refusal =
             !exists ? OrganizationInternalEntitlementOutcome.OrganizationNotFound :
@@ -144,7 +135,7 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
             entitlement is not { ManagedHostingEnabled: true } ? OrganizationInternalEntitlementOutcome.Unchanged :
             null;
         if (refusal is { } refused)
-            return await RefuseAsync(transaction, refused, organizationId, subscription, entitlement, now, cancellationToken);
+            return Refuse(refused, organizationId, subscription, entitlement, now);
 
         // Expire as well as disable, so a later capability change elsewhere cannot
         // silently revive the revoked grant through the old expiry.
@@ -154,7 +145,6 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
         entitlement.UpdatedAt = now;
         AddInternalEntitlementAudit(subscription!, operatorSubject, "Internal managed-hosting entitlement revoked.", now);
         await dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
         return new(OrganizationInternalEntitlementOutcome.Revoked, InternalStatus(organizationId, subscription, entitlement, now));
     }
 
@@ -170,20 +160,15 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
         return (exists, subscription, entitlement);
     }
 
-    private static async Task<OrganizationInternalEntitlementResult> RefuseAsync(
-        IDbContextTransaction transaction,
+    private static OrganizationInternalEntitlementResult Refuse(
         OrganizationInternalEntitlementOutcome outcome,
         Guid organizationId,
         OrganizationSubscription? subscription,
         OrganizationEntitlementSnapshot? entitlement,
-        DateTimeOffset now,
-        CancellationToken cancellationToken)
-    {
-        await transaction.CommitAsync(cancellationToken);
-        return outcome == OrganizationInternalEntitlementOutcome.OrganizationNotFound
+        DateTimeOffset now) =>
+        outcome == OrganizationInternalEntitlementOutcome.OrganizationNotFound
             ? new(outcome)
             : new(outcome, InternalStatus(organizationId, subscription, entitlement, now));
-    }
 
     // Any subscription of another provider, or a lifecycle projected without a
     // subscription row, is commercial state this path does not own.

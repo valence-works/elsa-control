@@ -99,93 +99,92 @@ public sealed partial class OrganizationBillingStore
     {
         try
         {
-            await using var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-            var subscription = await dbContext.OrganizationSubscriptions
-                .SingleOrDefaultAsync(x => x.OrganizationId == organizationId && x.Id == subscriptionId, cancellationToken);
-            if (subscription is null || subscription.State == OrganizationSubscriptionState.Deleted)
+            return await dbContext.ExecuteInTransactionAsync<OrganizationBillingLifecycleAdvance?>(IsolationLevel.Serializable, async () =>
             {
-                await transaction.CommitAsync(cancellationToken);
-                return null;
-            }
-
-            var previous = subscription.State;
-            var transitionAt = now;
-            var changed = false;
-            switch (subscription.State)
-            {
-                case OrganizationSubscriptionState.Trial when subscription.TrialEndsAt <= now:
-                    transitionAt = subscription.TrialEndsAt.ToUniversalTime();
-                    OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.PastDue, transitionAt, advanceLifecycleVersion: true);
-                    changed = true;
-                    break;
-                case OrganizationSubscriptionState.PastDue:
+                var subscription = await dbContext.OrganizationSubscriptions
+                    .SingleOrDefaultAsync(x => x.OrganizationId == organizationId && x.Id == subscriptionId, cancellationToken);
+                if (subscription is null || subscription.State == OrganizationSubscriptionState.Deleted)
                 {
-                    var graceEndsAt = subscription.GraceEndsAt ?? subscription.PastDueAt?.ToUniversalTime().Add(OrganizationSubscriptionLifecycle.PaymentGracePeriod);
-                    if (graceEndsAt is null || graceEndsAt > now)
+                    return null;
+                }
+
+                var previous = subscription.State;
+                var transitionAt = now;
+                var changed = false;
+                switch (subscription.State)
+                {
+                    case OrganizationSubscriptionState.Trial when subscription.TrialEndsAt <= now:
+                        transitionAt = subscription.TrialEndsAt.ToUniversalTime();
+                        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.PastDue, transitionAt, advanceLifecycleVersion: true);
+                        changed = true;
                         break;
-                    transitionAt = graceEndsAt.Value;
-                    subscription.GraceEndsAt ??= transitionAt;
-                    OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Constrained, transitionAt, advanceLifecycleVersion: true);
-                    changed = true;
-                    break;
-                }
-                case OrganizationSubscriptionState.Constrained:
-                {
-                    var suspensionAt = subscription.ConstrainedAt?.ToUniversalTime().Add(OrganizationSubscriptionLifecycle.ConstraintPeriod);
-                    if (suspensionAt is null || suspensionAt > now)
+                    case OrganizationSubscriptionState.PastDue:
+                    {
+                        var graceEndsAt = subscription.GraceEndsAt ?? subscription.PastDueAt?.ToUniversalTime().Add(OrganizationSubscriptionLifecycle.PaymentGracePeriod);
+                        if (graceEndsAt is null || graceEndsAt > now)
+                            break;
+                        transitionAt = graceEndsAt.Value;
+                        subscription.GraceEndsAt ??= transitionAt;
+                        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Constrained, transitionAt, advanceLifecycleVersion: true);
+                        changed = true;
                         break;
-                    transitionAt = suspensionAt.Value;
-                    OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Suspended, transitionAt, advanceLifecycleVersion: true);
-                    changed = true;
-                    break;
-                }
-                case OrganizationSubscriptionState.Suspended:
-                {
-                    var retentionEndsAt = subscription.RetentionEndsAt ?? subscription.SuspendedAt?.ToUniversalTime().Add(OrganizationSubscriptionLifecycle.FinalRetentionPeriod);
-                    if (retentionEndsAt is null || retentionEndsAt > now)
+                    }
+                    case OrganizationSubscriptionState.Constrained:
+                    {
+                        var suspensionAt = subscription.ConstrainedAt?.ToUniversalTime().Add(OrganizationSubscriptionLifecycle.ConstraintPeriod);
+                        if (suspensionAt is null || suspensionAt > now)
+                            break;
+                        transitionAt = suspensionAt.Value;
+                        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Suspended, transitionAt, advanceLifecycleVersion: true);
+                        changed = true;
                         break;
-                    transitionAt = retentionEndsAt.Value;
-                    subscription.RetentionEndsAt ??= transitionAt;
-                    OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Retained, transitionAt, advanceLifecycleVersion: true);
-                    changed = true;
-                    break;
+                    }
+                    case OrganizationSubscriptionState.Suspended:
+                    {
+                        var retentionEndsAt = subscription.RetentionEndsAt ?? subscription.SuspendedAt?.ToUniversalTime().Add(OrganizationSubscriptionLifecycle.FinalRetentionPeriod);
+                        if (retentionEndsAt is null || retentionEndsAt > now)
+                            break;
+                        transitionAt = retentionEndsAt.Value;
+                        subscription.RetentionEndsAt ??= transitionAt;
+                        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Retained, transitionAt, advanceLifecycleVersion: true);
+                        changed = true;
+                        break;
+                    }
                 }
-            }
 
-            var noticeCreated = false;
-            var cleanupQueued = false;
-            if (changed)
-            {
-                subscription.UpdatedAt = now;
-                await ProjectEntitlementAsync(subscription, now, cancellationToken);
-                if (NoticeFor(subscription.State) is { } noticeKind)
+                var noticeCreated = false;
+                var cleanupQueued = false;
+                if (changed)
                 {
-                    noticeCreated |= await AddNoticeAsync(subscription, noticeKind, now, cancellationToken);
+                    subscription.UpdatedAt = now;
+                    await ProjectEntitlementAsync(subscription, now, cancellationToken);
+                    if (NoticeFor(subscription.State) is { } noticeKind)
+                    {
+                        noticeCreated |= await AddNoticeAsync(subscription, noticeKind, now, cancellationToken);
+                    }
+                    if (subscription.State == OrganizationSubscriptionState.Suspended)
+                        noticeCreated |= await AddNoticeAsync(subscription, OrganizationBillingLifecycleNoticeKind.ExportAvailable, now, cancellationToken);
+                    AddLifecycleAudit(
+                        subscription,
+                        OrganizationAuditAction.SubscriptionChanged,
+                        $"Organization subscription lifecycle advanced from {previous} to {subscription.State}.",
+                        now);
                 }
-                if (subscription.State == OrganizationSubscriptionState.Suspended)
-                    noticeCreated |= await AddNoticeAsync(subscription, OrganizationBillingLifecycleNoticeKind.ExportAvailable, now, cancellationToken);
-                AddLifecycleAudit(
-                    subscription,
-                    OrganizationAuditAction.SubscriptionChanged,
-                    $"Organization subscription lifecycle advanced from {previous} to {subscription.State}.",
-                    now);
-            }
 
-            if (subscription.State == OrganizationSubscriptionState.Retained)
-            {
-                noticeCreated |= await AddNoticeAsync(subscription, OrganizationBillingLifecycleNoticeKind.DeletionScheduled, now, cancellationToken);
-                cleanupQueued = await EnsureCleanupAsync(subscription, now, early: false, cancellationToken);
-            }
+                if (subscription.State == OrganizationSubscriptionState.Retained)
+                {
+                    noticeCreated |= await AddNoticeAsync(subscription, OrganizationBillingLifecycleNoticeKind.DeletionScheduled, now, cancellationToken);
+                    cleanupQueued = await EnsureCleanupAsync(subscription, now, early: false, cancellationToken);
+                }
 
-            if (!changed && !noticeCreated && !cleanupQueued)
-            {
-                await transaction.CommitAsync(cancellationToken);
-                return null;
-            }
+                if (!changed && !noticeCreated && !cleanupQueued)
+                {
+                    return null;
+                }
 
-            await dbContext.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            return new(organizationId, subscription.Id, previous, subscription.State, transitionAt, noticeCreated, cleanupQueued);
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return new OrganizationBillingLifecycleAdvance(organizationId, subscription.Id, previous, subscription.State, transitionAt, noticeCreated, cleanupQueued);
+            }, cancellationToken);
         }
         catch (Exception exception) when (attempt < 2 && IsRetryableLifecycleConflict(exception))
         {
@@ -203,46 +202,45 @@ public sealed partial class OrganizationBillingStore
     {
         try
         {
-            await using var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-            var subscription = await dbContext.OrganizationSubscriptions
-                .SingleOrDefaultAsync(x => x.OrganizationId == organizationId, cancellationToken);
-            if (subscription is null)
+            return await dbContext.ExecuteInTransactionAsync<OrganizationBillingLifecycleAdvance?>(IsolationLevel.Serializable, async () =>
             {
-                await transaction.CommitAsync(cancellationToken);
-                return null;
-            }
+                var subscription = await dbContext.OrganizationSubscriptions
+                    .SingleOrDefaultAsync(x => x.OrganizationId == organizationId, cancellationToken);
+                if (subscription is null)
+                {
+                    return null;
+                }
 
-            var previous = subscription.State;
-            var changed = false;
-            if (subscription.State == OrganizationSubscriptionState.Deleted)
-            {
-                await transaction.CommitAsync(cancellationToken);
-                return new(organizationId, subscription.Id, previous, subscription.State, subscription.DeletedAt ?? requestedAt, false, false);
-            }
+                var previous = subscription.State;
+                var changed = false;
+                if (subscription.State == OrganizationSubscriptionState.Deleted)
+                {
+                    return new(organizationId, subscription.Id, previous, subscription.State, subscription.DeletedAt ?? requestedAt, false, false);
+                }
 
-            subscription.EarlyDeletionRequestedAt ??= requestedAt;
-            if (subscription.State is not OrganizationSubscriptionState.Suspended and
-                not OrganizationSubscriptionState.Retained)
-            {
-                OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Suspended, requestedAt, advanceLifecycleVersion: true);
-                changed = true;
-            }
+                subscription.EarlyDeletionRequestedAt ??= requestedAt;
+                if (subscription.State is not OrganizationSubscriptionState.Suspended and
+                    not OrganizationSubscriptionState.Retained)
+                {
+                    OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Suspended, requestedAt, advanceLifecycleVersion: true);
+                    changed = true;
+                }
 
-            subscription.UpdatedAt = requestedAt;
-            if (changed)
-                await ProjectEntitlementAsync(subscription, requestedAt, cancellationToken);
-            var noticeCreated = NoticeFor(subscription.State) is { } noticeKind && await AddNoticeAsync(subscription, noticeKind, requestedAt, cancellationToken);
-            if (subscription.State == OrganizationSubscriptionState.Suspended)
-                noticeCreated |= await AddNoticeAsync(subscription, OrganizationBillingLifecycleNoticeKind.ExportAvailable, requestedAt, cancellationToken);
-            noticeCreated |= await AddNoticeAsync(subscription, OrganizationBillingLifecycleNoticeKind.DeletionScheduled, requestedAt, cancellationToken);
-            if (changed)
-                AddLifecycleAudit(subscription, OrganizationAuditAction.SubscriptionChanged, $"Customer requested early deletion; subscription advanced from {previous} to Suspended.", requestedAt);
-            var cleanupQueued = await EnsureCleanupAsync(subscription, requestedAt, early: true, cancellationToken);
-            if (cleanupQueued || changed)
-                AddLifecycleAudit(subscription, OrganizationAuditAction.BillingCleanupRequested, "Provider-neutral billing cleanup was queued.", requestedAt);
-            await dbContext.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            return new(organizationId, subscription.Id, previous, subscription.State, requestedAt, noticeCreated, cleanupQueued);
+                subscription.UpdatedAt = requestedAt;
+                if (changed)
+                    await ProjectEntitlementAsync(subscription, requestedAt, cancellationToken);
+                var noticeCreated = NoticeFor(subscription.State) is { } noticeKind && await AddNoticeAsync(subscription, noticeKind, requestedAt, cancellationToken);
+                if (subscription.State == OrganizationSubscriptionState.Suspended)
+                    noticeCreated |= await AddNoticeAsync(subscription, OrganizationBillingLifecycleNoticeKind.ExportAvailable, requestedAt, cancellationToken);
+                noticeCreated |= await AddNoticeAsync(subscription, OrganizationBillingLifecycleNoticeKind.DeletionScheduled, requestedAt, cancellationToken);
+                if (changed)
+                    AddLifecycleAudit(subscription, OrganizationAuditAction.SubscriptionChanged, $"Customer requested early deletion; subscription advanced from {previous} to Suspended.", requestedAt);
+                var cleanupQueued = await EnsureCleanupAsync(subscription, requestedAt, early: true, cancellationToken);
+                if (cleanupQueued || changed)
+                    AddLifecycleAudit(subscription, OrganizationAuditAction.BillingCleanupRequested, "Provider-neutral billing cleanup was queued.", requestedAt);
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return new OrganizationBillingLifecycleAdvance(organizationId, subscription.Id, previous, subscription.State, requestedAt, noticeCreated, cleanupQueued);
+            }, cancellationToken);
         }
         catch (Exception exception) when (attempt < 2 && IsRetryableLifecycleConflict(exception))
         {
@@ -261,38 +259,38 @@ public sealed partial class OrganizationBillingStore
         workerId = workerId.Trim();
         now = RequireUtc(now, nameof(now));
 
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-        var cleanup = await dbContext.OrganizationBillingCleanups
-            .Where(x => (x.State == OrganizationBillingCleanupState.Queued && x.NotBeforeAt <= now) ||
-                        (x.State == OrganizationBillingCleanupState.InProgress && x.LeaseExpiresAt <= now))
-            .OrderBy(x => x.NotBeforeAt)
-            .ThenBy(x => x.OrganizationId)
-            .FirstOrDefaultAsync(cancellationToken);
-        if (cleanup is null)
+        return await dbContext.ExecuteInTransactionAsync<OrganizationBillingCleanupWorkItem?>(IsolationLevel.Serializable, async () =>
         {
-            await transaction.CommitAsync(cancellationToken);
-            return null;
-        }
+            var cleanup = await dbContext.OrganizationBillingCleanups
+                .Where(x => (x.State == OrganizationBillingCleanupState.Queued && x.NotBeforeAt <= now) ||
+                            (x.State == OrganizationBillingCleanupState.InProgress && x.LeaseExpiresAt <= now))
+                .OrderBy(x => x.NotBeforeAt)
+                .ThenBy(x => x.OrganizationId)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (cleanup is null)
+            {
+                return null;
+            }
 
-        var leaseToken = Guid.NewGuid().ToString("N");
-        cleanup.State = OrganizationBillingCleanupState.InProgress;
-        cleanup.LeaseOwner = workerId;
-        cleanup.LeaseToken = leaseToken;
-        cleanup.LeaseExpiresAt = now.Add(CleanupLeaseDuration);
-        cleanup.LastAttemptAt = now;
-        cleanup.AttemptCount++;
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return new(
-            cleanup.Id,
-            cleanup.OrganizationId,
-            cleanup.SubscriptionId,
-            cleanup.CleanupKey,
-            cleanup.Provider,
-            cleanup.ProviderCustomerReference,
-            cleanup.ProviderSubscriptionReference,
-            cleanup.AttemptCount,
-            leaseToken);
+            var leaseToken = Guid.NewGuid().ToString("N");
+            cleanup.State = OrganizationBillingCleanupState.InProgress;
+            cleanup.LeaseOwner = workerId;
+            cleanup.LeaseToken = leaseToken;
+            cleanup.LeaseExpiresAt = now.Add(CleanupLeaseDuration);
+            cleanup.LastAttemptAt = now;
+            cleanup.AttemptCount++;
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return new OrganizationBillingCleanupWorkItem(
+                cleanup.Id,
+                cleanup.OrganizationId,
+                cleanup.SubscriptionId,
+                cleanup.CleanupKey,
+                cleanup.Provider,
+                cleanup.ProviderCustomerReference,
+                cleanup.ProviderSubscriptionReference,
+                cleanup.AttemptCount,
+                leaseToken);
+        }, cancellationToken);
     }
 
     public async Task<OrganizationBillingCleanupResult> CompleteCleanupAsync(
@@ -301,62 +299,62 @@ public sealed partial class OrganizationBillingStore
     {
         ArgumentNullException.ThrowIfNull(completion);
         var completedAt = RequireUtc(completion.CompletedAt, nameof(completion.CompletedAt));
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-        var cleanup = await dbContext.OrganizationBillingCleanups
-            .SingleOrDefaultAsync(x => x.Id == completion.CleanupId &&
-                                       x.OrganizationId == completion.OrganizationId &&
-                                       x.SubscriptionId == completion.SubscriptionId, cancellationToken);
-        if (cleanup is null)
-            throw new ArgumentException("Billing cleanup does not exist.", nameof(completion));
-
-        if (cleanup.State != OrganizationBillingCleanupState.InProgress ||
-            !string.Equals(cleanup.LeaseToken, completion.LeaseToken, StringComparison.Ordinal))
+        return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
         {
-            await transaction.CommitAsync(cancellationToken);
-            return new(cleanup.State, false, cleanup.LastFailureCode);
-        }
+            var cleanup = await dbContext.OrganizationBillingCleanups
+                .SingleOrDefaultAsync(x => x.Id == completion.CleanupId &&
+                                           x.OrganizationId == completion.OrganizationId &&
+                                           x.SubscriptionId == completion.SubscriptionId, cancellationToken);
+            if (cleanup is null)
+                throw new ArgumentException("Billing cleanup does not exist.", nameof(completion));
 
-        cleanup.LeaseOwner = null;
-        cleanup.LeaseToken = null;
-        cleanup.LeaseExpiresAt = null;
-        var deleted = false;
-        switch (completion.Outcome)
-        {
-            case OrganizationBillingCleanupOutcome.ConfirmedAbsent:
+            if (cleanup.State != OrganizationBillingCleanupState.InProgress ||
+                !string.Equals(cleanup.LeaseToken, completion.LeaseToken, StringComparison.Ordinal))
             {
-                cleanup.State = OrganizationBillingCleanupState.Confirmed;
-                cleanup.CompletedAt = completedAt;
-                cleanup.LastFailureCode = null;
-                cleanup.ProviderCustomerReference = null;
-                cleanup.ProviderSubscriptionReference = null;
-                var subscription = await dbContext.OrganizationSubscriptions
-                    .SingleOrDefaultAsync(x => x.OrganizationId == completion.OrganizationId && x.Id == completion.SubscriptionId, cancellationToken);
-                if (subscription is not null && subscription.State != OrganizationSubscriptionState.Deleted)
-                {
-                    OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Deleted, completedAt, advanceLifecycleVersion: true);
-                    subscription.ProviderCustomerReference = null;
-                    subscription.ProviderSubscriptionReference = null;
-                    subscription.LastProviderEventId = null;
-                    subscription.UpdatedAt = completedAt;
-                    await ProjectEntitlementAsync(subscription, completedAt, cancellationToken);
-                    AddLifecycleAudit(subscription, OrganizationAuditAction.BillingCleanupCompleted, "Provider-neutral billing cleanup was confirmed and the subscription was tombstoned.", completedAt);
-                    deleted = true;
-                }
-
-                break;
+                return new(cleanup.State, false, cleanup.LastFailureCode);
             }
-            case OrganizationBillingCleanupOutcome.RetryableFailure:
-            case OrganizationBillingCleanupOutcome.Unknown:
-                cleanup.State = OrganizationBillingCleanupState.Queued;
-                cleanup.NotBeforeAt = completedAt.Add(CleanupRetryDelay);
-                cleanup.CompletedAt = null;
-                cleanup.LastFailureCode = SafeFailureCode(completion.FailureCode);
-                break;
-        }
 
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return new(cleanup.State, deleted, cleanup.LastFailureCode);
+            cleanup.LeaseOwner = null;
+            cleanup.LeaseToken = null;
+            cleanup.LeaseExpiresAt = null;
+            var deleted = false;
+            switch (completion.Outcome)
+            {
+                case OrganizationBillingCleanupOutcome.ConfirmedAbsent:
+                {
+                    cleanup.State = OrganizationBillingCleanupState.Confirmed;
+                    cleanup.CompletedAt = completedAt;
+                    cleanup.LastFailureCode = null;
+                    cleanup.ProviderCustomerReference = null;
+                    cleanup.ProviderSubscriptionReference = null;
+                    var subscription = await dbContext.OrganizationSubscriptions
+                        .SingleOrDefaultAsync(x => x.OrganizationId == completion.OrganizationId && x.Id == completion.SubscriptionId, cancellationToken);
+                    if (subscription is not null && subscription.State != OrganizationSubscriptionState.Deleted)
+                    {
+                        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Deleted, completedAt, advanceLifecycleVersion: true);
+                        subscription.ProviderCustomerReference = null;
+                        subscription.ProviderSubscriptionReference = null;
+                        subscription.LastProviderEventId = null;
+                        subscription.UpdatedAt = completedAt;
+                        await ProjectEntitlementAsync(subscription, completedAt, cancellationToken);
+                        AddLifecycleAudit(subscription, OrganizationAuditAction.BillingCleanupCompleted, "Provider-neutral billing cleanup was confirmed and the subscription was tombstoned.", completedAt);
+                        deleted = true;
+                    }
+
+                    break;
+                }
+                case OrganizationBillingCleanupOutcome.RetryableFailure:
+                case OrganizationBillingCleanupOutcome.Unknown:
+                    cleanup.State = OrganizationBillingCleanupState.Queued;
+                    cleanup.NotBeforeAt = completedAt.Add(CleanupRetryDelay);
+                    cleanup.CompletedAt = null;
+                    cleanup.LastFailureCode = SafeFailureCode(completion.FailureCode);
+                    break;
+            }
+
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return new OrganizationBillingCleanupResult(cleanup.State, deleted, cleanup.LastFailureCode);
+        }, cancellationToken);
     }
 
     private static bool IsDue(
