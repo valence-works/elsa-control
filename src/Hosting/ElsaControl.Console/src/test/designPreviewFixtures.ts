@@ -17,6 +17,7 @@ import type {
   RegisterDeploymentEngineRequest,
   WorkflowEngineRegistration,
   WorkspaceDeploymentCredentialReference,
+  WorkspaceDeploymentCredentialReferenceUsageResponse,
   WorkspaceDeploymentCredentialReferencesResponse,
   WorkspaceDeploymentPermissionsResponse,
   WorkspaceDeploymentSecretStore,
@@ -32,6 +33,10 @@ const previewSecretStores = [
   createSecretStore("store-credential-prod", "Production Key Vault", "AzureKeyVault", "azure-key-vault"),
   createSecretStore("store-credential-staging", "Local protected store", "LocalEncryptedDatabase", "local-protected")
 ];
+const previewCredentialEngineIds: Record<string, readonly string[]> = {
+  "credential-prod": ["engine-northstar-dev"],
+  "credential-staging": ["engine-automations-stage"]
+};
 
 export const designPreviewFixtures = {
   authSession: {
@@ -300,6 +305,12 @@ async function previewResponse(method: string, path: string, request: Request) {
   if (method === "GET" && path.endsWith("/deployments/permissions")) return jsonResponse(designPreviewFixtures.permissions);
   if (method === "GET" && path.endsWith("/deployments/tiers")) return jsonResponse(designPreviewFixtures.tiers);
   if (method === "GET" && path.endsWith("/deployments/credential-references")) return jsonResponse(designPreviewFixtures.credentials);
+  const credentialUsagePath = method === "GET" ? path.match(new RegExp(`^/api/workspaces/${workspaceId}/deployments/credential-references/([^/]+)/usage$`)) : null;
+  if (credentialUsagePath) {
+    const credentialReferenceId = decodeURIComponent(credentialUsagePath[1]);
+    const usage = createCredentialReferenceUsage(credentialReferenceId);
+    return usage ? jsonResponse(usage) : jsonResponse({ title: "Preview credential reference not found" }, 404);
+  }
   if (method === "GET" && path.endsWith("/deployments/tier-capabilities")) return jsonResponse({ capabilities: [] });
   if (method === "GET" && path.endsWith("/deployments/secret-stores")) return jsonResponse(designPreviewFixtures.secretStores);
 
@@ -339,6 +350,12 @@ async function previewResponse(method: string, path: string, request: Request) {
       hostingProvider: body?.hostingProvider ?? template.hostingProvider
     };
     designPreviewFixtures.cockpit.engines.push(engine);
+    const credential = designPreviewFixtures.credentials.items.find((item) => item.id === body?.credentialReferenceId);
+    if (credential) {
+      const engineIds = [...(previewCredentialEngineIds[credential.id] ?? []), engine.id];
+      previewCredentialEngineIds[credential.id] = engineIds;
+      credential.usageCount = engineIds.length;
+    }
     if (!environment.engineIds.includes(engine.id)) environment.engineIds.push(engine.id);
     return jsonResponse(engine);
   }
@@ -433,6 +450,28 @@ async function previewResponse(method: string, path: string, request: Request) {
 
 function findEnvironment(environmentId: string) {
   return designPreviewFixtures.cockpit.applications.flatMap((application) => application.environments).find((environment) => environment.id === environmentId);
+}
+
+function createCredentialReferenceUsage(credentialReferenceId: string): WorkspaceDeploymentCredentialReferenceUsageResponse | null {
+  if (!designPreviewFixtures.credentials.items.some((item) => item.id === credentialReferenceId)) return null;
+  const engineIds = previewCredentialEngineIds[credentialReferenceId] ?? [];
+
+  const items = engineIds.flatMap((engineId) => {
+    const engine = designPreviewFixtures.cockpit.engines.find((item) => item.id === engineId);
+    const application = designPreviewFixtures.cockpit.applications.find((item) => item.environments.some((environment) => environment.engineIds.includes(engineId)));
+    const environment = application?.environments.find((item) => item.id === engine?.environmentId);
+    if (!engine || !application || !environment) return [];
+    return [{
+      engineId: engine.id,
+      engineName: engine.name,
+      applicationId: application.id,
+      applicationName: application.name,
+      environmentId: environment.id,
+      environmentName: environment.name
+    }];
+  });
+
+  return { items };
 }
 
 function nextPreviewId(kind: keyof typeof previewSequences) {

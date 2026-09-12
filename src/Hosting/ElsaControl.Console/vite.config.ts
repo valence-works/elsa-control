@@ -1,6 +1,6 @@
 import path from "node:path";
 import react from "@vitejs/plugin-react";
-import { build, defineConfig, loadEnv } from "vite";
+import { build, defineConfig, loadEnv, normalizePath } from "vite";
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, __dirname, "");
@@ -40,7 +40,7 @@ export default defineConfig(({ mode }) => {
         }
       },
       handleHotUpdate(context) {
-        if (context.file.includes("/lib/theme/")) themeBootstrap = undefined;
+        if (normalizePath(context.file).includes("/lib/theme/")) themeBootstrap = undefined;
       }
     }],
     resolve: {

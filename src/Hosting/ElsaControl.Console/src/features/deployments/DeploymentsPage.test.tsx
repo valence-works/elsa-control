@@ -129,6 +129,26 @@ describe("DeploymentsPage", () => {
     expect(linkByHref("/admin/engines/connect")).toBeInTheDocument();
   });
 
+  it("keeps the empty-workspace Connect engine action read-only without setup permission", async () => {
+    renderDeployments({
+      applications: [],
+      engines: [],
+      comparisons: [],
+      observabilityBindings: [],
+      history: [],
+      driftReport: [],
+      assistantPlans: []
+    }, "/admin/deployments/applications", { permissions: ["deployments.read"] });
+
+    expect(await screen.findByText("No deployment setup")).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: "Connect engine" });
+    expect(link).toHaveAttribute("aria-disabled", "true");
+    expect(link).toHaveAttribute("tabindex", "-1");
+    link.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(screen.getByText("No deployment setup")).toBeInTheDocument();
+  });
+
   it("creates application setup with environments and engines from the guided setup route", async () => {
     const fetchMock = renderDeployments({
       applications: [],

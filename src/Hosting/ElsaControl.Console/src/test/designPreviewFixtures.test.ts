@@ -60,6 +60,31 @@ describe("design preview fixtures", () => {
     }
   });
 
+  it("returns typed usage details for preview credential references", async () => {
+    const response = await window.fetch(previewUrl(`${workspacePath}/deployments/credential-references/credential-prod/usage`));
+    expect(response.ok).toBe(true);
+    expect(await response.json()).toEqual({
+      items: [{
+        engineId: "engine-northstar-dev",
+        engineName: "checkout-dev-eu1",
+        applicationId: "app-checkout",
+        applicationName: "Checkout platform",
+        environmentId: "env-northstar-dev",
+        environmentName: "Development"
+      }]
+    });
+
+    const stagingResponse = await window.fetch(previewUrl(`${workspacePath}/deployments/credential-references/credential-staging/usage`));
+    expect(stagingResponse.ok).toBe(true);
+    expect(await stagingResponse.json()).toMatchObject({
+      items: [{
+        engineId: "engine-automations-stage",
+        applicationId: "app-automations",
+        environmentId: "env-automations-stage"
+      }]
+    });
+  });
+
   it("starts a new preview environment as unavailable with no desired revision", async () => {
     const applicationResponse = await window.fetch(previewUrl(`${workspacePath}/deployments/applications`), {
       method: "POST",

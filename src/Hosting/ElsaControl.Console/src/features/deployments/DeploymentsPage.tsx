@@ -404,7 +404,11 @@ function DeploymentApplicationsReady({ context }: { context: DeploymentContext }
           title="No deployment setup"
           description="Connect an engine to create your first application and environment."
           action={
-            <Link to="/admin/engines/connect" className={buttonClassName()}>
+            <Link
+              to="/admin/engines/connect"
+              className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)}
+              {...permissionLinkProps(canManageSetup)}
+            >
               <Plus className="h-4 w-4" />
               Connect engine
             </Link>
