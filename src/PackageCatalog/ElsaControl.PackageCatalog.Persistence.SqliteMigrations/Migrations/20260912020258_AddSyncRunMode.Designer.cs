@@ -11,7 +11,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 {
     [DbContext(typeof(CatalogDbContext))]
-    [Migration("20260912003257_AddSyncRunMode")]
+    [Migration("20260912020258_AddSyncRunMode")]
     partial class AddSyncRunMode
     {
         /// <inheritdoc />
@@ -384,6 +384,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .HasColumnType("INTEGER");
 
                     b.Property<bool>("ManagedHostingEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("ManagedHostingExpiresAt")
                         .HasColumnType("INTEGER");
 
                     b.Property<int>("MaxInstances")

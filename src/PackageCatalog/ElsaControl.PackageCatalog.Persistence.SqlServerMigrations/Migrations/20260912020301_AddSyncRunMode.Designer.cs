@@ -12,7 +12,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
 {
     [DbContext(typeof(CatalogDbContext))]
-    [Migration("20260912003550_AddSyncRunMode")]
+    [Migration("20260912020301_AddSyncRunMode")]
     partial class AddSyncRunMode
     {
         /// <inheritdoc />
@@ -397,6 +397,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
 
                     b.Property<bool>("ManagedHostingEnabled")
                         .HasColumnType("bit");
+
+                    b.Property<long?>("ManagedHostingExpiresAt")
+                        .HasColumnType("bigint");
 
                     b.Property<int>("MaxInstances")
                         .HasColumnType("int");

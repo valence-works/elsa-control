@@ -10,7 +10,7 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 public sealed class SyncRunModeMigrationTests
 {
     private const string PreviousMigration = "20260906084500_AddAzureDeleteRecoveryAuthority";
-    private const string SqlServerMigration = "20260912003550_AddSyncRunMode";
+    private const string SqlServerMigration = "20260912020301_AddSyncRunMode";
 
     [Fact]
     public async Task Sqlite_classifies_runs_written_without_a_mode_as_verification_runs()
