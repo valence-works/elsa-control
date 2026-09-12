@@ -180,14 +180,24 @@ public readonly record struct ElsaManagedEndpointOrigin
 /// <summary>
 /// Provider-neutral deployment observation. Values are control-owned safe references;
 /// provider resource IDs, credentials and command details are deliberately excluded.
+/// <see cref="ManagedHandoff"/> records that the provider configured this deployment's runtime for the
+/// managed Elsa handoff, bound to <see cref="EndpointOrigin"/>. Without it the runtime serves no handoff
+/// endpoints, so Control must not offer to open the instance.
 /// </summary>
 public sealed record ElsaCurrentDeploymentReference
 {
-    public ElsaCurrentDeploymentReference(string deploymentId, string? revisionId = null, string? endpointUri = null)
+    public ElsaCurrentDeploymentReference(
+        string deploymentId,
+        string? revisionId = null,
+        string? endpointUri = null,
+        bool managedHandoff = false)
     {
         DeploymentId = ElsaInstanceReferenceValue.RequireToken(deploymentId, nameof(deploymentId));
         RevisionId = ElsaInstanceReferenceValue.OptionalToken(revisionId, nameof(revisionId));
         EndpointOrigin = endpointUri is null ? null : new ElsaManagedEndpointOrigin(endpointUri);
+        if (managedHandoff && EndpointOrigin is null)
+            throw new ArgumentException("A managed handoff is bound to a verified endpoint origin.", nameof(managedHandoff));
+        ManagedHandoff = managedHandoff;
     }
 
     public string DeploymentId { get; }
@@ -198,6 +208,8 @@ public sealed record ElsaCurrentDeploymentReference
     public ElsaManagedEndpointOrigin? EndpointOrigin { get; }
 
     public string? EndpointUri => EndpointOrigin?.Value;
+
+    public bool ManagedHandoff { get; }
 
     public string DeploymentReference => DeploymentId;
 

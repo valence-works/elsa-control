@@ -375,6 +375,7 @@ public static class AzureProviderOperationValidation
             errors.Add("sqlQuartzPackageVersion.invalid");
         if ((request.ReleaseManifestReference is null) != (request.ReleaseManifestSignatureReference is null)) errors.Add("releaseManifestReferences.incomplete");
         if (request.Capacity is not null && AzureContainerAppsCapacity.Map(request.Capacity) is null) errors.Add("capacity.invalid");
+        if (request.ManagedHandoff && request.Capacity is not { MaxReplicas: 1 }) errors.Add("managedHandoff.replicasUnsupported");
         ValidateSecretReferences(request.SecretReferences, errors);
 
         BoundedSafe(request.TargetKey, 128, "target", errors);
@@ -428,8 +429,17 @@ public static class AzureProviderOperationValidation
                 normalized.ProviderScopeFingerprint,
                 secretReferences = normalized.SecretReferences
             });
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(WithCapacity(canonical, normalized.Capacity)))).ToLowerInvariant();
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            WithManagedHandoff(WithCapacity(canonical, normalized.Capacity), normalized.ManagedHandoff)))).ToLowerInvariant();
     }
+
+    /// <summary>
+    /// The managed handoff joined the persisted projection after operations were retained. None of
+    /// those configured it, so the suffix is only present when the request does and they keep hashing
+    /// to exactly the value they were stored with.
+    /// </summary>
+    private static string WithManagedHandoff(string canonical, bool managedHandoff) =>
+        managedHandoff ? $"{canonical}|managed-handoff:v1" : canonical;
 
     /// <summary>
     /// Capacity joined the persisted projection after operations were already retained. Those

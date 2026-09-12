@@ -61,7 +61,7 @@ public sealed class AzureProviderOperationCapacityMigrationTests
     /// Writes the row shape an operation had before capacity existed, with the request hash and
     /// identity that shape was stored with.
     /// </summary>
-    private static async Task<Guid> InsertRetainedOperationAsync(CatalogDbContext db, Guid workspaceId)
+    internal static async Task<Guid> InsertRetainedOperationAsync(CatalogDbContext db, Guid workspaceId)
     {
         var request = AzureProviderOperationValidation.Normalize(AzureProviderOperationCapacityPersistenceTests.RestorableRequest(workspaceId));
         var id = Guid.NewGuid();

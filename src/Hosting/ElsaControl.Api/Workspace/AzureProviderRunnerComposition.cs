@@ -1,4 +1,6 @@
+using ElsaControl.Api.Authentication;
 using ElsaControl.Deployment.Azure;
+using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -60,6 +62,8 @@ internal static class AzureProviderRunnerComposition
         var options = runnerSection.Get<AzureProviderRunnerOptions>() ?? new();
         if (string.IsNullOrWhiteSpace(options.AzureCliClientId))
             options = options with { AzureCliClientId = configuration["AZURE_CLIENT_ID"] };
+        // Handoff inputs are Control's own authority, never runner-section settings.
+        options = options with { ManagedHandoff = ManagedHandoffOptions(configuration) };
         if (!options.Enabled)
             throw new InvalidOperationException("Azure provider worker is enabled but its concrete runner is not enabled.");
         options.Validate();
@@ -97,5 +101,26 @@ internal static class AzureProviderRunnerComposition
         services.AddScoped<IAzureProviderRecoveryObserver>(provider =>
             provider.GetRequiredService<AzureBicepProviderRunner>());
         return new(options, scope);
+    }
+
+    /// <summary>
+    /// Derives the runtime handoff inputs from Control's own configuration: the plan authority origin, which
+    /// serves both the redeem endpoint and the console the runtime returns the browser to, and Control's
+    /// runtime-session ceiling. Without a valid origin nothing is composed and the runner refuses a release
+    /// that declares the handoff rather than deploying a runtime that cannot reach Control.
+    /// </summary>
+    internal static AzureManagedHandoffOptions? ManagedHandoffOptions(IConfiguration configuration)
+    {
+        var authority = configuration.GetSection(ElsaInstancePlanAuthorityOptions.ConfigurationSection)
+            .Get<ElsaInstancePlanAuthorityOptions>() ?? new();
+        if (!authority.TryGetOrigin(out var origin))
+            return null;
+        var handoff = configuration.GetSection(ManagedElsaHandoffDefaults.ConfigurationSection)
+            .Get<ManagedElsaHandoffOptions>() ?? new();
+        return new AzureManagedHandoffOptions(
+            origin,
+            origin + ManagedElsaHandoffDefaults.ConsoleContinuationPath,
+            handoff.RuntimeSessionMaximumLifetime,
+            ManagedElsaHandoffDefaults.RuntimeOperatorPermissions);
     }
 }

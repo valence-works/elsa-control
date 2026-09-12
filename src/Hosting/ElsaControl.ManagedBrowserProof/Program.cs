@@ -273,8 +273,10 @@ static async Task SetAvailabilityAsync(
     var endpoint = runtimeOrigin.Value;
     var observedLifecycle = available ? ElsaObservedLifecycle.Ready : ElsaObservedLifecycle.Unknown;
     var health = available ? ElsaInstanceHealth.Healthy : ElsaInstanceHealth.Unknown;
+    // The proof runtime is started with its managed handoff configured, so the fixture records what the
+    // provider would: the current deployment carries the handoff bound to this origin.
     var affected = await database.Database.ExecuteSqlInterpolatedAsync(
-        $"UPDATE ElsaInstances SET CurrentDeploymentId = {"deployment-managed-browser-proof"}, CurrentDeploymentEndpointUri = {endpoint}, DesiredLifecycle = {ElsaDesiredLifecycle.Running.ToString()}, ObservedLifecycle = {observedLifecycle.ToString()}, Health = {health.ToString()} WHERE Id = {instanceId}");
+        $"UPDATE ElsaInstances SET CurrentDeploymentId = {"deployment-managed-browser-proof"}, CurrentDeploymentEndpointUri = {endpoint}, CurrentDeploymentManagedHandoff = {true}, DesiredLifecycle = {ElsaDesiredLifecycle.Running.ToString()}, ObservedLifecycle = {observedLifecycle.ToString()}, Health = {health.ToString()} WHERE Id = {instanceId}");
     if (affected != 1)
         throw new InvalidOperationException("The proof instance was not found.");
 }

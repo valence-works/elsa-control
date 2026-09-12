@@ -1324,6 +1324,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("nvarchar(64)");
 
+                    b.Property<bool>("ManagedHandoff")
+                        .HasColumnType("bit");
+
                     b.Property<string>("OperationIdentity")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -2741,6 +2744,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<string>("CurrentDeploymentId")
                         .HasMaxLength(128)
                         .HasColumnType("nvarchar(128)");
+
+                    b.Property<bool>("CurrentDeploymentManagedHandoff")
+                        .HasColumnType("bit");
 
                     b.Property<string>("CurrentDeploymentRevisionId")
                         .HasMaxLength(128)

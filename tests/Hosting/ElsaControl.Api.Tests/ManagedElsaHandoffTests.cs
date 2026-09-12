@@ -224,7 +224,7 @@ public sealed class ManagedElsaHandoffTests
             const string deploymentId = "deployment-managed";
             const string endpointUri = "https://managed.example.test";
             await db.Database.ExecuteSqlInterpolatedAsync(
-                $"UPDATE ElsaInstances SET CurrentDeploymentId = {deploymentId}, CurrentDeploymentEndpointUri = {endpointUri}, DesiredLifecycle = {ElsaDesiredLifecycle.Running.ToString()}, ObservedLifecycle = {ElsaObservedLifecycle.Ready.ToString()}, Health = {ElsaInstanceHealth.Healthy.ToString()} WHERE Id = {instanceId}");
+                $"UPDATE ElsaInstances SET CurrentDeploymentId = {deploymentId}, CurrentDeploymentEndpointUri = {endpointUri}, CurrentDeploymentManagedHandoff = {true}, DesiredLifecycle = {ElsaDesiredLifecycle.Running.ToString()}, ObservedLifecycle = {ElsaObservedLifecycle.Ready.ToString()}, Health = {ElsaInstanceHealth.Healthy.ToString()} WHERE Id = {instanceId}");
             db.ChangeTracker.Clear();
         }
 
@@ -317,6 +317,39 @@ public sealed class ManagedElsaHandoffTests
             new ManagedElsaHandoffRedeemRequest(issued.Token, setup.Audience, setup.RedirectUri, CodeVerifier));
 
         Assert.Equal(HttpStatusCode.Forbidden, redeem.StatusCode);
+    }
+
+    [Fact]
+    public async Task Issue_and_redemption_fail_closed_when_the_current_deployment_carries_no_managed_handoff()
+    {
+        var setup = await SeedManagedInstanceAsync(
+            ElsaDesiredLifecycle.Running,
+            ElsaObservedLifecycle.Ready,
+            ElsaInstanceHealth.Healthy,
+            bind: true);
+        await using var app = setup.App;
+        var request = new ManagedElsaHandoffIssueRequest(
+            setup.OrganizationId,
+            setup.InstanceId,
+            setup.Audience,
+            setup.RedirectUri,
+            ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier));
+
+        var issue = await setup.Client.PostControlJsonAsync("/api/managed-elsa/handoff/issue", request);
+        Assert.Equal(HttpStatusCode.OK, issue.StatusCode);
+        var issued = (await issue.Content.ReadControlJsonAsync<ManagedElsaHandoffIssueResponse>())!;
+
+        // A redeploy without the handoff leaves the runtime without its endpoints: an already issued code
+        // must not become a session, and no further code may be issued for it.
+        await SetInstanceStateAsync(app, setup.InstanceId, ElsaDesiredLifecycle.Running, ElsaObservedLifecycle.Ready,
+            ElsaInstanceHealth.Healthy, managedHandoff: false);
+
+        var redeem = await app.CreateClient().PostControlJsonAsync(
+            "/api/managed-elsa/handoff/redeem",
+            new ManagedElsaHandoffRedeemRequest(issued.Token, setup.Audience, setup.RedirectUri, CodeVerifier));
+        Assert.Equal(HttpStatusCode.Forbidden, redeem.StatusCode);
+        var reissue = await setup.Client.PostControlJsonAsync("/api/managed-elsa/handoff/issue", request);
+        Assert.Equal(HttpStatusCode.Forbidden, reissue.StatusCode);
     }
 
     private sealed class EmptyLifecycleResolutionInputSource : IElsaInstanceLifecycleResolutionInputSource
@@ -843,11 +876,12 @@ public sealed class ManagedElsaHandoffTests
         Guid instanceId,
         ElsaDesiredLifecycle desiredLifecycle,
         ElsaObservedLifecycle observedLifecycle,
-        ElsaInstanceHealth health)
+        ElsaInstanceHealth health,
+        bool managedHandoff = true)
     {
         await using var scope = app.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
-        await SetInstanceStateAsync(db, instanceId, desiredLifecycle, observedLifecycle, health);
+        await SetInstanceStateAsync(db, instanceId, desiredLifecycle, observedLifecycle, health, managedHandoff);
     }
 
     private static Task SetInstanceStateAsync(
@@ -855,9 +889,10 @@ public sealed class ManagedElsaHandoffTests
         Guid instanceId,
         ElsaDesiredLifecycle desiredLifecycle,
         ElsaObservedLifecycle observedLifecycle,
-        ElsaInstanceHealth health) =>
+        ElsaInstanceHealth health,
+        bool managedHandoff = true) =>
         db.Database.ExecuteSqlInterpolatedAsync(
-            $"UPDATE ElsaInstances SET DesiredLifecycle = {desiredLifecycle.ToString()}, ObservedLifecycle = {observedLifecycle.ToString()}, Health = {health.ToString()}, CurrentDeploymentEndpointUri = {"https://managed.example.test"} WHERE Id = {instanceId}");
+            $"UPDATE ElsaInstances SET DesiredLifecycle = {desiredLifecycle.ToString()}, ObservedLifecycle = {observedLifecycle.ToString()}, Health = {health.ToString()}, CurrentDeploymentEndpointUri = {"https://managed.example.test"}, CurrentDeploymentManagedHandoff = {managedHandoff} WHERE Id = {instanceId}");
 
     private sealed record ManagedInstanceSetup(
         ControlApiTestApplication App,

@@ -531,6 +531,63 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Canonical_list_and_detail_offer_open_only_once_the_provider_configured_the_managed_handoff()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var client = app.CreateTrustedWorkspaceClient("managed-instance-handoff-gate");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var instanceId = (await CreateCanonicalInstanceAsync(client, workspaceId, "handoff-gate-runtime")).Instance.InstanceId;
+        await SetDeploymentAsync(managedHandoff: false);
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            var organizationId = await db.Workspaces.Where(x => x.Id == workspaceId).Select(x => x.OrganizationId).SingleAsync();
+            var bound = await scope.ServiceProvider.GetRequiredService<IManagedElsaInstanceIdentityStore>().BindAsync(
+                organizationId, workspaceId, instanceId, "https://managed.example.test", expectedBindingVersion: null, DateTimeOffset.UtcNow);
+            Assert.True(bound.Succeeded);
+        }
+
+        // A healthy, bound instance whose runtime was deployed without the handoff would answer Open with 404.
+        foreach (var unconfigured in await ReadBothProjectionsAsync())
+        {
+            Assert.False(unconfigured.CanOpen);
+            Assert.Null(unconfigured.Audience);
+            Assert.Null(unconfigured.RedirectUri);
+            Assert.Null(unconfigured.IdentityBinding);
+            Assert.Equal("handoff-unavailable", unconfigured.IdentityBindingState);
+            Assert.Equal(ManagedElsaInstanceEndpoints.HandoffUnavailableReason, unconfigured.UnavailableReason);
+        }
+
+        await SetDeploymentAsync(managedHandoff: true);
+
+        foreach (var configured in await ReadBothProjectionsAsync())
+        {
+            Assert.True(configured.CanOpen);
+            Assert.Equal(ElsaInstanceIdentityBinding.AudienceFor(instanceId), configured.Audience);
+            Assert.Equal("https://managed.example.test/managed-elsa/handoff/callback", configured.RedirectUri);
+            Assert.Equal("available", configured.IdentityBindingState);
+            Assert.Null(configured.UnavailableReason);
+        }
+
+        async Task SetDeploymentAsync(bool managedHandoff)
+        {
+            await using var scope = app.Services.CreateAsyncScope();
+            await SetOpenableDeploymentEndpointAsync(scope.ServiceProvider.GetRequiredService<CatalogDbContext>(),
+                instanceId, "https://managed.example.test", managedHandoff);
+        }
+
+        async Task<ManagedElsaInstanceResponse[]> ReadBothProjectionsAsync()
+        {
+            var detail = await client.GetControlJsonAsync<ManagedElsaInstanceResponse>(
+                $"/api/workspaces/{workspaceId}/instances/{instanceId}");
+            var list = await client.GetControlJsonAsync<ManagedElsaInstanceListResponse>(
+                $"/api/workspaces/{workspaceId}/instances");
+            return [detail!, Assert.Single(list!.Items)];
+        }
+    }
+
+    [Fact]
     public async Task Canonical_list_handles_large_page_numbers_without_overflowing_has_more()
     {
         var app = await PrepareApplicationAsync([]);
@@ -906,6 +963,29 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal("This instance is not currently available.", response.UnavailableReason);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Canonical_projection_offers_open_only_for_a_deployment_that_carries_the_managed_handoff(bool managedHandoff)
+    {
+        var instanceId = Guid.NewGuid();
+        const string origin = "https://managed.example.test";
+        var instance = ElsaInstance.Hydrate(instanceId, Guid.NewGuid(), Guid.NewGuid(), "Claims runtime", "claims-runtime",
+            Intent(), ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy, 2,
+            currentDeploymentReference: new ElsaCurrentDeploymentReference("deployment-managed", "attempt-1", origin, managedHandoff));
+        var identity = new ManagedElsaInstanceIdentity(instance.OrganizationId, instance.WorkspaceId, instanceId,
+            ElsaInstanceIdentityBinding.AudienceFor(instanceId),
+            new Uri(ElsaInstanceIdentityBinding.CanonicalizeCallbackUri(origin)), 1, DateTimeOffset.UtcNow);
+
+        var response = ManagedElsaInstanceEndpoints.ToResponse(instance, canOpen: true, instance.WorkspaceId, identity);
+
+        Assert.Equal(managedHandoff, response.CanOpen);
+        Assert.Equal(managedHandoff, response.RedirectUri is not null);
+        Assert.Equal(managedHandoff, response.IdentityBinding is not null);
+        Assert.Equal(managedHandoff ? "available" : "handoff-unavailable", response.IdentityBindingState);
+        Assert.Equal(managedHandoff ? null : ManagedElsaInstanceEndpoints.HandoffUnavailableReason, response.UnavailableReason);
+    }
+
     [Fact]
     public void Customer_audit_projection_redacts_operator_subject()
     {
@@ -1181,9 +1261,10 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     private static Task SetOpenableDeploymentEndpointAsync(
         CatalogDbContext db,
         Guid instanceId,
-        string endpointUri) =>
+        string endpointUri,
+        bool managedHandoff = true) =>
         db.Database.ExecuteSqlInterpolatedAsync(
-            $"UPDATE ElsaInstances SET CurrentDeploymentId = {"deployment-managed"}, CurrentDeploymentEndpointUri = {endpointUri}, DesiredLifecycle = {ElsaDesiredLifecycle.Running.ToString()}, ObservedLifecycle = {ElsaObservedLifecycle.Ready.ToString()}, Health = {ElsaInstanceHealth.Healthy.ToString()} WHERE Id = {instanceId}");
+            $"UPDATE ElsaInstances SET CurrentDeploymentId = {"deployment-managed"}, CurrentDeploymentEndpointUri = {endpointUri}, CurrentDeploymentManagedHandoff = {managedHandoff}, DesiredLifecycle = {ElsaDesiredLifecycle.Running.ToString()}, ObservedLifecycle = {ElsaObservedLifecycle.Ready.ToString()}, Health = {ElsaInstanceHealth.Healthy.ToString()} WHERE Id = {instanceId}");
 
     private static async Task MarkOperationSucceededAsync(ControlApiTestApplication app, Guid operationId)
     {

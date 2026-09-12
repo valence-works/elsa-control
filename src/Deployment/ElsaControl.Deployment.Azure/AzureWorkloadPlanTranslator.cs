@@ -71,6 +71,7 @@ public static class AzureWorkloadPlanTranslator
         var capacity = RequiredCapacity(normalized.Capacity, component, findings);
         if (findings.Count > 0)
             return Rejected(findings);
+        var managedHandoff = ConfiguresManagedHandoff(component, capacity!);
         var evidence = normalized.Evidence.Single(x =>
             string.Equals(x.Kind, ReleaseManifestEvidenceKinds.Manifest, StringComparison.OrdinalIgnoreCase));
         var signatureEvidence = normalized.Evidence.Single(x =>
@@ -92,9 +93,9 @@ public static class AzureWorkloadPlanTranslator
         };
         var fingerprintInputs = new
         {
-            // v2 binds the workload capacity. A capacity change therefore yields a new plan
-            // fingerprint and, through it, a new Container Apps revision suffix.
-            schema = "azure-workload-plan/v2",
+            // v2 binds the workload capacity and v3 whether the runtime handoff is configured. Either
+            // change therefore yields a new plan fingerprint and, through it, a new revision suffix.
+            schema = "azure-workload-plan/v3",
             canonicalTarget.workloadName,
             canonicalTarget.location,
             elsaVersion = normalized.Release.Version,
@@ -120,6 +121,7 @@ public static class AzureWorkloadPlanTranslator
                 cpuMillicores = capacity.CpuMillicores,
                 memoryMiB = capacity.MemoryMiB
             },
+            managedHandoff,
             secretReferences = secretReferences
                 .OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
                 .Select(x => new { key = x.Key.ToLowerInvariant(), reference = x.Value })
@@ -146,9 +148,21 @@ public static class AzureWorkloadPlanTranslator
                 fingerprint,
                 sqlWorkflowPackageVersion,
                 sqlQuartzPackageVersion,
-                capacity),
+                capacity,
+                managedHandoff),
             []);
     }
+
+    /// <summary>
+    /// The handoff is configured only for a release whose selected image declares the exact
+    /// <c>managed-elsa-handoff-v1</c> contract, and only on a single replica: the runtime keeps its
+    /// handoff state keys and sessions in process, so a second replica would reject callbacks and
+    /// sessions it did not issue. Any other plan leaves the handoff disabled, which keeps Open unavailable
+    /// rather than advertising a sign-in that fails.
+    /// </summary>
+    private static bool ConfiguresManagedHandoff(ResolvedElsaComponent component, AzureWorkloadCapacity capacity) =>
+        capacity.MaxReplicas == 1 &&
+        component.Capabilities.Contains(ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV1, StringComparer.Ordinal);
 
     /// <summary>
     /// Selects the governed capacity of the single workload component. Consumption ephemeral

@@ -157,6 +157,65 @@ public sealed class AzureProviderRunnerOptionsTests : IDisposable
     }
 
     [Fact]
+    public void Provider_scope_fingerprint_binds_the_managed_handoff_only_when_configured()
+    {
+        var withoutHandoff = ValidOptions();
+        var withHandoff = withoutHandoff with { ManagedHandoff = ValidHandoff() };
+        withHandoff.Validate();
+
+        var unbound = withoutHandoff.ComputeProviderScopeFingerprint(ValidScope());
+        var bound = withHandoff.ComputeProviderScopeFingerprint(ValidScope());
+
+        Assert.NotEqual(unbound, bound);
+        Assert.Equal(bound, (withoutHandoff with { ManagedHandoff = ValidHandoff() }).ComputeProviderScopeFingerprint(ValidScope()));
+        Assert.All(
+            new[]
+            {
+                ValidHandoff() with { ControlBaseUrl = "https://other.example.test", ControlContinuationUrl = "https://other.example.test/admin/runtimes" },
+                ValidHandoff() with { ControlContinuationUrl = "https://control.example.test/admin/other" },
+                ValidHandoff() with { RuntimeMaximumLifetime = TimeSpan.FromHours(1) },
+                ValidHandoff() with { RuntimePermissions = ["read:*"] }
+            },
+            changed => Assert.NotEqual(bound, (withoutHandoff with { ManagedHandoff = changed }).ComputeProviderScopeFingerprint(ValidScope())));
+    }
+
+    [Theory]
+    [InlineData("http://control.example.test", "http://control.example.test/admin/runtimes", 8, "*")]
+    [InlineData("https://control.example.test/", "https://control.example.test/admin/runtimes", 8, "*")]
+    [InlineData("https://control.example.test/api", "https://control.example.test/admin/runtimes", 8, "*")]
+    [InlineData("https://user@control.example.test", "https://control.example.test/admin/runtimes", 8, "*")]
+    [InlineData("https://control.example.test", "https://elsewhere.example.test/admin/runtimes", 8, "*")]
+    [InlineData("https://control.example.test", "https://control.example.test/admin/runtimes?next=1", 8, "*")]
+    [InlineData("https://control.example.test", "https://control.example.test/", 8, "*")]
+    [InlineData("https://control.example.test", "https://control.example.test/admin/runtimes", 9, "*")]
+    [InlineData("https://control.example.test", "https://control.example.test/admin/runtimes", 0, "*")]
+    [InlineData("https://control.example.test", "https://control.example.test/admin/runtimes", 8, "")]
+    [InlineData("https://control.example.test", "https://control.example.test/admin/runtimes", 8, "read workflows")]
+    [InlineData("https://control.example.test", "https://control.example.test/admin/runtimes", 8, "read,write")]
+    public void Rejects_unsafe_managed_handoff_inputs(string controlBaseUrl, string continuationUrl, int lifetimeHours, string permission)
+    {
+        var handoff = new AzureManagedHandoffOptions(controlBaseUrl, continuationUrl, TimeSpan.FromHours(lifetimeHours), [permission]);
+
+        Assert.ThrowsAny<ArgumentException>(() => (ValidOptions() with { ManagedHandoff = handoff }).Validate());
+    }
+
+    [Fact]
+    public void Rejects_a_fractional_session_ceiling_duplicate_grants_and_a_disposable_handoff()
+    {
+        Assert.ThrowsAny<ArgumentException>(() =>
+            (ValidOptions() with { ManagedHandoff = ValidHandoff() with { RuntimeMaximumLifetime = TimeSpan.FromMilliseconds(1500) } }).Validate());
+        Assert.ThrowsAny<ArgumentException>(() =>
+            (ValidOptions() with { ManagedHandoff = ValidHandoff() with { RuntimePermissions = ["*", "*"] } }).Validate());
+        Assert.ThrowsAny<ArgumentException>(() => (ValidOptions() with
+        {
+            ManagedHandoff = ValidHandoff(),
+            DisposableProofMode = true,
+            DisposableExpiryUtc = new DateOnly(2026, 9, 30),
+            AzureCliClientId = null
+        }).Validate());
+    }
+
+    [Fact]
     public void Provider_scope_fingerprint_binds_the_managed_identity_client_id()
     {
         var options = ValidOptions();
@@ -290,6 +349,9 @@ public sealed class AzureProviderRunnerOptionsTests : IDisposable
         SqlBootstrapIp = "203.0.113.10",
         RuntimeAdminUsername = "runtime-admin"
     };
+
+    private static AzureManagedHandoffOptions ValidHandoff() => new(
+        "https://control.example.test", "https://control.example.test/admin/runtimes", TimeSpan.FromHours(8), ["*"]);
 
     private static AzureProviderTargetScope ValidScope() => new(
         "11111111-1111-1111-1111-111111111111",

@@ -774,9 +774,22 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             instance.CurrentDeploymentId = OptionalSafeReference(instance.CurrentDeploymentId, nameof(instance.CurrentDeploymentId), 128);
             instance.CurrentDeploymentRevisionId = OptionalSafeReference(instance.CurrentDeploymentRevisionId, nameof(instance.CurrentDeploymentRevisionId), 128);
             var endpointProperty = entry.Property(x => x.CurrentDeploymentEndpointUri);
+            var allowLegacyEndpoint = entry.State == EntityState.Modified && !endpointProperty.IsModified;
+            var persistedEndpoint = instance.CurrentDeploymentEndpointUri;
             instance.CurrentDeploymentEndpointUri = OptionalManagedEndpointOrigin(
                 instance.CurrentDeploymentEndpointUri,
-                allowLegacyInvalid: entry.State == EntityState.Modified && !endpointProperty.IsModified);
+                allowLegacyInvalid: allowLegacyEndpoint);
+            if (instance.CurrentDeploymentManagedHandoff &&
+                (instance.CurrentDeploymentId is null || instance.CurrentDeploymentEndpointUri is null))
+            {
+                // A legacy-invalid endpoint dropped above takes the handoff bound to it along; any other
+                // handoff without a current deployment endpoint is an invalid write.
+                if (allowLegacyEndpoint && persistedEndpoint is not null && instance.CurrentDeploymentEndpointUri is null &&
+                    !entry.Property(x => x.CurrentDeploymentManagedHandoff).IsModified)
+                    instance.CurrentDeploymentManagedHandoff = false;
+                else
+                    throw new InvalidOperationException("A managed handoff must belong to a current deployment with an endpoint.");
+            }
             instance.PlacementAssignmentId = OptionalSafeReference(instance.PlacementAssignmentId, nameof(instance.PlacementAssignmentId), 128);
             instance.ElsaTenantId = OptionalSafeReference(instance.ElsaTenantId, nameof(instance.ElsaTenantId), 128);
             var tenantAudience = OptionalAudience(instance.ElsaTenantAudience, nameof(instance.ElsaTenantAudience));

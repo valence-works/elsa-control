@@ -68,6 +68,33 @@ public sealed class AzureProviderOperationServiceTests
     }
 
     [Fact]
+    public async Task Submit_persists_the_managed_handoff_with_the_safe_projection()
+    {
+        var store = new CapturingStore();
+        var service = new AzureProviderOperationService(store, new FixedTimeProvider(Now));
+
+        await service.SubmitAsync(WorkspaceId, new AzureProviderOperationSubmission("request-1", new('b', 64), CreatePlan() with { ManagedHandoff = true }));
+
+        Assert.True(store.Request!.ManagedHandoff);
+    }
+
+    [Fact]
+    public async Task Submit_rejects_a_managed_handoff_on_more_than_one_replica_before_persistence()
+    {
+        var store = new CapturingStore();
+        var service = new AzureProviderOperationService(store, new FixedTimeProvider(Now));
+
+        await Assert.ThrowsAsync<ArgumentException>(() => service.SubmitAsync(
+            WorkspaceId,
+            new AzureProviderOperationSubmission("request-1", new('b', 64), CreatePlan() with
+            {
+                ManagedHandoff = true,
+                Capacity = new AzureWorkloadCapacity(1, 3, 1000, 2048)
+            })));
+        Assert.Null(store.Request);
+    }
+
+    [Fact]
     public async Task Submit_rejects_capacity_without_a_Container_Apps_mapping_before_persistence()
     {
         var store = new CapturingStore();

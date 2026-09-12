@@ -37,6 +37,27 @@ capacity is part of that projection and of the persisted operation, so a
 restarted worker deploys exactly the admitted sizing; an operation retained
 before capacity existed restores without it and cannot deploy a workload.
 
+## Managed Elsa handoff
+
+The console's Open action lands on the runtime's own `/managed-elsa/handoff/start`, which the
+runtime maps only when its handoff is configured. The translator sets `ManagedHandoff` when the
+selected image declares the exact `managed-elsa-handoff-v1` capability and the workload runs as a
+single replica (the runtime keeps handoff state and sessions in process). The flag is part of the plan
+fingerprint (`azure-workload-plan/v3`) and of the persisted operation and its request hash, so a restarted
+worker configures exactly what was admitted. Operations retained before it existed restore with it off.
+
+The production runner then passes `managedHandoffEnabled` explicitly. When enabled it adds the instance
+ID, the audience from `ElsaInstanceIdentityBinding.AudienceFor`, and Control's own inputs
+(`AzureManagedHandoffOptions`). The host derives those inputs from `ControlPlane:Origin` (redeem origin
+and the `/admin/runtimes` console continuation) and `ManagedElsa:Handoff:RuntimeSessionMaximumLifetime`,
+and binds them into the provider scope fingerprint. The template derives the callback from the workload
+origin. After deployment the runner rejects a callback that is not
+`ElsaInstanceIdentityBinding.CanonicalizeCallbackUri(containerAppEndpoint)` (`azure.handoff.callback-mismatch`).
+Before any Azure call, a declaring plan fails closed without Control's inputs
+(`azure.handoff.configuration-required`) or on more than one replica (`azure.handoff.replicas-unsupported`).
+A succeeded operation reports the fact on its provider-neutral deployment reference, and Control offers
+Open (and issues or redeems handoff codes) only for an instance whose current deployment carries it.
+
 ## Durable provider execution
 
 `AzureProviderExecutor` is the durable orchestration seam for the accepted

@@ -238,7 +238,8 @@ public sealed class AzureProviderOperationService(
             instanceId,
             lifecycleAction,
             providerAssignmentId,
-            plan.Capacity);
+            plan.Capacity,
+            plan.ManagedHandoff);
 
     internal static AzureProviderOperationRequest CreateOperationRequest(AzureProviderOperation operation) =>
         new(
@@ -267,12 +268,14 @@ public sealed class AzureProviderOperationService(
             operation.InstanceId,
             operation.LifecycleAction,
             operation.ProviderAssignmentId,
-            operation.Capacity);
+            operation.Capacity,
+            operation.ManagedHandoff);
 
     /// <summary>
     /// Rebuilds the admitted plan from the persisted operation columns. An operation retained
     /// before capacity joined the projection restores with no capacity: it stays restorable for
-    /// observation and cleanup, while the runner refuses to deploy a workload from it.
+    /// observation and cleanup, while the runner refuses to deploy a workload from it. One retained
+    /// before the managed handoff joined restores with the handoff off, which is what it deployed.
     /// </summary>
     internal static AzureWorkloadPlan? TryRestorePlan(AzureProviderOperation operation)
     {
@@ -309,7 +312,8 @@ public sealed class AzureProviderOperationService(
                 operationRequest.PlanFingerprint,
                 operationRequest.SqlWorkflowPackageVersion,
                 operationRequest.SqlQuartzPackageVersion,
-                operationRequest.Capacity);
+                operationRequest.Capacity,
+                operationRequest.ManagedHandoff);
 
             AzureProviderExecutor.ValidateExecutionRequest(
                 new AzureProviderExecutionRequest(operationRequest, plan));
@@ -359,6 +363,8 @@ public sealed class AzureProviderOperationService(
             throw new ArgumentException("Provider release package metadata is required and must use exact NuGet versions.", parameterName);
         if (plan.Capacity is not null && AzureContainerAppsCapacity.Map(plan.Capacity) is null)
             throw new ArgumentException("The provider capacity has no exact Azure Container Apps mapping.", parameterName);
+        if (plan.ManagedHandoff && plan.Capacity is not { MaxReplicas: 1 })
+            throw new ArgumentException("The managed handoff requires a single-replica workload.", parameterName);
     }
 
     private static bool IsFingerprint(string? value) => value is not null && value.Length == 64 && value.All(Uri.IsHexDigit);

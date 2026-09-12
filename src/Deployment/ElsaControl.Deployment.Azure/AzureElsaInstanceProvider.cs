@@ -701,8 +701,13 @@ public sealed class AzureElsaInstanceProvider(
         ElsaInstanceCleanupObservationKind kind = ElsaInstanceCleanupObservationKind.Unknown) =>
         new(kind, request.OperationId, request.AttemptNumber, code);
 
+    /// <summary>
+    /// A succeeded operation whose plan configured the handoff has deployed and promoted a revision carrying it:
+    /// the production runner refuses to deploy such a plan without Control's handoff inputs and rejects a
+    /// callback that is not the one of this endpoint. That is the fact Control gates Open on.
+    /// </summary>
     private static ElsaCurrentDeploymentReference? CurrentDeployment(AzureProviderOperation operation) =>
-        new(operation.OperationIdentity, $"attempt-{operation.AttemptNumber}", operation.Endpoint);
+        new(operation.OperationIdentity, $"attempt-{operation.AttemptNumber}", operation.Endpoint, operation.ManagedHandoff);
 
     internal static string WorkloadName(Guid instanceId) => $"e{instanceId:N}"[..16];
 

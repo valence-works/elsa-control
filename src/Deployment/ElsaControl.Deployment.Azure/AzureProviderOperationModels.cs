@@ -105,7 +105,8 @@ public sealed record AzureProviderOperationRequest(
     Guid? InstanceId = null,
     ElsaInstanceOperationAction? LifecycleAction = null,
     Guid? ProviderAssignmentId = null,
-    AzureWorkloadCapacity? Capacity = null);
+    AzureWorkloadCapacity? Capacity = null,
+    bool ManagedHandoff = false);
 
 public sealed record AzureProviderResourceReferences(
     string? ResourceGroupName = null,
@@ -174,7 +175,8 @@ public sealed record AzureProviderOperation(
     ElsaInstanceOperationAction? LifecycleAction = null,
     Guid? ProviderAssignmentId = null,
     AzureProviderRunnerStep? AttemptedStep = null,
-    AzureWorkloadCapacity? Capacity = null)
+    AzureWorkloadCapacity? Capacity = null,
+    bool ManagedHandoff = false)
 {
     [JsonIgnore]
     public IReadOnlyDictionary<string, string> SafeSecretReferences => SecretReferences ?? EmptySecretReferences;
