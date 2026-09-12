@@ -533,6 +533,10 @@ builder.Services.AddSingleton<ManualSyncQueue>();
 builder.Services.AddSingleton<PublicCatalogVisibilityPolicy>();
 builder.Services.AddSingleton<PackageVersionPolicy>();
 builder.Services.AddSingleton<ISyncDiagnostics, NoopSyncDiagnostics>();
+// Skipped in Testing for the same reason the catalog migration below is: the schema is created per test, after the
+// host has already started, so it does not exist yet when hosted services' StartAsync runs.
+if (!builder.Environment.IsEnvironment("Testing"))
+    builder.Services.AddHostedService<SyncRunReconciliationHostedService>();
 builder.Services.AddHostedService<ManualSyncHostedService>();
 builder.Services.AddHostedService<ScheduledSyncHostedService>();
 

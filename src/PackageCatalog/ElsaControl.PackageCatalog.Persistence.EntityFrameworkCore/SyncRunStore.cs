@@ -47,6 +47,16 @@ public sealed class SyncRunStore(CatalogDbContext dbContext) : ISyncRunStore
         return versions.ToHashSet();
     }
 
+    public Task<int> ReconcileInterruptedRunsAsync(DateTimeOffset processStartedAt, DateTimeOffset completedAt, string message, CancellationToken cancellationToken = default) =>
+        dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, () =>
+            dbContext.SyncRuns
+                .Where(x => x.Status == SyncRunStatus.Running && x.StartedAt < processStartedAt)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(x => x.Status, SyncRunStatus.Failed)
+                    .SetProperty(x => x.CompletedAt, completedAt)
+                    .SetProperty(x => x.Error, message), cancellationToken),
+            cancellationToken);
+
     public async Task<IReadOnlyDictionary<Guid, SyncRunListMetadata>> GetListMetadataAsync(IReadOnlyCollection<Guid> runIds, CancellationToken cancellationToken = default)
     {
         if (runIds.Count == 0)
