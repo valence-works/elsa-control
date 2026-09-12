@@ -23,25 +23,26 @@ This query is authoritative for repository-local labels and issue openness. Proj
 
 Optional worker-lane preference filters when the session is bound to one implementer:
 
-- Codex: first try `label:worker:codex`; if nothing is ready, retry without a lane label and continue to exclude `worker:claude`
-- Claude: first try `label:worker:claude`; if nothing is ready, retry without a lane label and continue to exclude `worker:codex`
+- Codex: first try `label:worker:codex`; if nothing is ready, retry with `-label:worker:claude`
+- Claude: first try `label:worker:claude`; if nothing is ready, retry with `-label:worker:codex`
 
 If the session is lane-bound, prefer a matching lane issue. Do not take an issue labeled for the other worker. An issue with `ready-for-agent` and no `worker:*` label is available to either worker.
 
-Skip an issue that does not have project Status `Ready` and Agent State `Agent Ready`, is already assigned, or is a Feature, Epic, or Program. Treat a `claim:` comment as active only until a later `blocked:` comment or until an operator restores `ready-for-agent`, Status `Ready`, and Agent State `Agent Ready` for requeue. `type:task` is the usual leaf, and a `type:bug` or `type:spike` that satisfies the same readiness checks is also valid.
+Skip an issue that does not have project Status `Ready` and Agent State `Agent Ready`, is already assigned, or is a Feature, Epic, or Program. Treat a `claim:` comment as active only until a later `blocked:` comment or until an operator removes `blocked` and restores `ready-for-agent`, Status `Ready`, and Agent State `Agent Ready` for requeue. `type:task` is the usual leaf, and a `type:bug` or `type:spike` that satisfies the same readiness checks is also valid.
 
 ## Claim
 
 Before writing code:
 
-1. Confirm the issue still matches the pickup query and is unassigned.
+1. Confirm the issue still matches the pickup query, is unassigned, and has no active `claim:` comment.
 2. Self-assign the issue to the agent identity used for this session.
 3. Comment exactly `claim: <codex|claude> starting`.
-4. Remove `ready-for-agent`, move project Status to `In Progress`, and set Agent State to `Assigned` so other agents skip it. Prefer this over leaving `ready-for-agent` on a claimed issue.
-5. Re-read the issue after all claim mutations. If more than one session claimed it, the earliest successful `claim:` comment that also completed assignment and state updates wins. A losing session must unassign itself if needed, leave a collision note if cleanup is incomplete, and stop.
-6. Take only this one Task for the session.
+4. Re-read the issue before any further mutation. The earliest active `claim:` comment wins; a losing session must unassign itself if needed, leave a collision note if cleanup is incomplete, and stop before changing issue state or writing code.
+5. Remove `ready-for-agent`, move project Status to `In Progress`, and set Agent State to `Assigned` so other agents skip it. Prefer this over leaving `ready-for-agent` on a claimed issue.
+6. Re-read the issue after all claim mutations. If your claim state is no longer intact, unassign yourself if needed, leave a collision note if cleanup is incomplete, and stop.
+7. Take only this one Task for the session.
 
-If any claim mutation fails (assignment, claim comment, label removal, Status update, or Agent State update), do not start work. Clean up any partial claim state that you can revert immediately; if cleanup is incomplete, comment with the failure and stop.
+If any claim mutation fails (assignment, claim comment, label removal, Status update, or Agent State update), do not start work. Revert the claim completely if you can. Otherwise comment `blocked: claim failed - <reason>`, add `blocked`, move project Status to `Blocked`, set Agent State to `Not Ready`, unassign if possible, and stop. Only an operator may requeue that issue by removing `blocked` and restoring `ready-for-agent`, Status `Ready`, and Agent State `Agent Ready`.
 
 ## While in flight
 
@@ -52,7 +53,7 @@ If any claim mutation fails (assignment, claim comment, label removal, Status up
 If blocked mid-flight:
 
 1. Comment `blocked: <reason>`.
-2. Add the `blocked` label and move project Status to `Blocked`.
+2. Add the `blocked` label, move project Status to `Blocked`, and set Agent State to `Not Ready`.
 3. Unassign.
 4. Stop. Do not keep the branch as an implicit claim.
 
@@ -79,7 +80,7 @@ Never pick up or continue:
 
 | Role | Writes | Marks |
 |------|--------|-------|
-| CEO / Launch Ops | Priority, outcome, and worker lane | Priority, `ready-for-agent`, and `worker:codex` or `worker:claude` when a lane is required |
+| CEO / Launch Ops | Priority, outcome, and worker lane | Priority, `ready-for-agent`, initial project Status `Ready`, initial Agent State `Agent Ready`, and `worker:codex` or `worker:claude` when a lane is required |
 | Sipke (operator) | Operator steps only | Secrets, live-account actions, and environment facts agents cannot obtain |
 | Agents | Protocol comments and claim-state mutations | Self-assignment, `ready-for-agent` removal, Status/Agent State transitions for claim/block/review, and `pr:` evidence. Agents do not set `ready-for-agent` or priority |
 
@@ -139,6 +140,8 @@ These labels already exist. Do not recreate them.
 | `needs:live-proof` | Requires a live Azure or external-account proof run |
 | `size:S` / `size:M` / `size:L` | Effort band |
 | `type:task` | Implementation-ready work unit |
+| `type:bug` | Implementation-ready bug fix work unit |
+| `type:spike` | Implementation-ready investigation work unit |
 | `worker:codex` | Preferred implementer: Codex |
 | `worker:claude` | Preferred implementer: Claude |
 
