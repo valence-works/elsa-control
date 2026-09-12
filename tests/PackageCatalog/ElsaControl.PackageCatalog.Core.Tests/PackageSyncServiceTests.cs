@@ -342,7 +342,19 @@ public sealed partial class PackageSyncServiceTests
             Task.FromResult(Packages.SingleOrDefault(x => x.SourceId == sourceId && x.PackageId == packageId));
 
         public Task<PackageVersion?> GetPackageVersionAsync(Guid packageId, string version, CancellationToken cancellationToken = default) =>
-            Task.FromResult(Packages.SelectMany(x => x.Versions).SingleOrDefault(x => x.PackageId == packageId && x.Version == version));
+            Task.FromResult(FindVersion(packageId, version));
+
+        public Task<IReadOnlyList<string>> GetValidVersionsAsync(Guid packageId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<string>>(Packages.SelectMany(x => x.Versions)
+                .Where(x => x.PackageId == packageId && x.ValidationStatus == ValidationStatus.Valid)
+                .Select(x => x.Version)
+                .ToList());
+
+        public Task<string?> GetManifestJsonAsync(Guid packageId, string version, CancellationToken cancellationToken = default) =>
+            Task.FromResult(FindVersion(packageId, version)?.ManifestJson);
+
+        private PackageVersion? FindVersion(Guid packageId, string version) =>
+            Packages.SelectMany(x => x.Versions).SingleOrDefault(x => x.PackageId == packageId && x.Version == version);
 
         public Task AddPackageAsync(Package package, CancellationToken cancellationToken = default)
         {

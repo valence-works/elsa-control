@@ -1196,7 +1196,7 @@ public sealed class ElsaInstancePersistenceTests
         return new CatalogDbContext(options);
     }
 
-    private static ElsaInstanceEntity NewInstance(Guid organizationId, Guid workspaceId)
+    internal static ElsaInstanceEntity NewInstance(Guid organizationId, Guid workspaceId)
     {
         var now = DateTimeOffset.UtcNow;
         return new ElsaInstanceEntity
