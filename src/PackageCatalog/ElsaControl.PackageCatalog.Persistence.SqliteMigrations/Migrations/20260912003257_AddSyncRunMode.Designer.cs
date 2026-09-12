@@ -3,6 +3,7 @@ using System;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 {
     [DbContext(typeof(CatalogDbContext))]
-    partial class CatalogDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260912003257_AddSyncRunMode")]
+    partial class AddSyncRunMode
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.10");
@@ -381,9 +384,6 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .HasColumnType("INTEGER");
 
                     b.Property<bool>("ManagedHostingEnabled")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long?>("ManagedHostingExpiresAt")
                         .HasColumnType("INTEGER");
 
                     b.Property<int>("MaxInstances")
@@ -3451,10 +3451,6 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceRecoveryRequestEntity", b =>
                 {
-                    b.Property<string>("AzureDeleteRecoveryAuthority")
-                        .HasMaxLength(4096)
-                        .HasColumnType("TEXT");
-
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
@@ -3464,6 +3460,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                     b.Property<int>("AttemptNumber")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("AzureDeleteRecoveryAuthority")
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
 
                     b.Property<long>("CreatedAt")
                         .HasColumnType("INTEGER");

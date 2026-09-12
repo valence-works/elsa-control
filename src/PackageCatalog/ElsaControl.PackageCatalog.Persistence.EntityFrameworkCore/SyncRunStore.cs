@@ -19,6 +19,20 @@ public sealed class SyncRunStore(CatalogDbContext dbContext) : ISyncRunStore
             .Include(x => x.Items)
             .SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
 
+    public async Task<DateTimeOffset?> GetLatestRunStartedAtAsync(SyncRunMode mode, IReadOnlyCollection<SyncRunTrigger> triggers, IReadOnlyCollection<SyncRunStatus> statuses, CancellationToken cancellationToken = default)
+    {
+        var triggerValues = triggers.ToArray();
+        var statusValues = statuses.ToArray();
+        var latest = await dbContext.SyncRuns
+            .AsNoTracking()
+            .Where(x => x.Mode == mode && triggerValues.Contains(x.Trigger) && statusValues.Contains(x.Status))
+            .OrderByDescending(x => x.StartedAt)
+            .Select(x => new { x.StartedAt })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        return latest?.StartedAt;
+    }
+
     public async Task<IReadOnlyDictionary<Guid, SyncRunListMetadata>> GetListMetadataAsync(IReadOnlyCollection<Guid> runIds, CancellationToken cancellationToken = default)
     {
         if (runIds.Count == 0)

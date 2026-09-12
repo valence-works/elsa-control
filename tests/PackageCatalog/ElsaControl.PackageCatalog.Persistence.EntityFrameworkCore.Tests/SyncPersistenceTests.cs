@@ -411,6 +411,30 @@ public sealed class SyncPersistenceTests
         Assert.Equal(1, (await db.SyncRuns.CountAsync()));
     }
 
+    [Fact]
+    public async Task Latest_run_start_only_considers_runs_of_the_requested_mode_triggers_and_statuses()
+    {
+        await using var db = await CreateOpenDbContextAsync();
+        var start = new DateTimeOffset(2026, 9, 1, 0, 0, 0, TimeSpan.Zero);
+        SyncRun Run(SyncRunTrigger trigger, SyncRunMode mode, SyncRunStatus status, int hour) =>
+            new() { Trigger = trigger, Mode = mode, Status = status, StartedAt = start.AddHours(hour) };
+        var latestVerification = Run(SyncRunTrigger.Scheduled, SyncRunMode.Verification, SyncRunStatus.CompletedWithErrors, 1);
+        db.SyncRuns.AddRange(
+            Run(SyncRunTrigger.ManualAll, SyncRunMode.Verification, SyncRunStatus.Completed, 0),
+            latestVerification,
+            Run(SyncRunTrigger.Scheduled, SyncRunMode.NewVersionsOnly, SyncRunStatus.Completed, 2),
+            Run(SyncRunTrigger.ManualSource, SyncRunMode.Verification, SyncRunStatus.Completed, 3),
+            Run(SyncRunTrigger.ManualAll, SyncRunMode.Verification, SyncRunStatus.Failed, 4));
+        await db.SaveChangesAsync();
+        var store = new SyncRunStore(db);
+
+        var latest = await store.GetLatestRunStartedAtAsync(SyncRunMode.Verification, [SyncRunTrigger.Scheduled, SyncRunTrigger.ManualAll], [SyncRunStatus.Completed, SyncRunStatus.CompletedWithErrors]);
+        var none = await store.GetLatestRunStartedAtAsync(SyncRunMode.NewVersionsOnly, [SyncRunTrigger.ManualAll], [SyncRunStatus.Completed]);
+
+        Assert.Equal(latestVerification.StartedAt, latest);
+        Assert.Null(none);
+    }
+
     private static async Task<CatalogDbContext> CreateOpenDbContextAsync()
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()

@@ -1085,6 +1085,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<string>("Error")
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<int>("Mode")
+                        .HasColumnType("int");
+
                     b.Property<long>("StartedAt")
                         .HasColumnType("bigint");
 

@@ -23,9 +23,19 @@ public sealed class PackageSyncService(
     SyncConcurrencyGuard concurrencyGuard,
     SourceSyncActivityTracker syncActivity,
     SyncRunCancellationRegistry cancellationRegistry,
-    IPublicCatalogCacheInvalidator? publicCatalogCache = null)
+    IPublicCatalogCacheInvalidator? publicCatalogCache = null,
+    TimeProvider? timeProvider = null)
 {
     private const string SyncScope = "sync";
+    private const string NotReverifiedMessage = "Already indexed; the stored manifest was not re-verified in this run.";
+
+    // A verification counts once it has run to the end over all enabled sources. Runs that completed with item errors count
+    // too: their failures stay visible on the run and its sources, and one persistently failing version must not turn every
+    // scheduled run back into a full verification.
+    private static readonly SyncRunTrigger[] AllSourceTriggers = [SyncRunTrigger.Scheduled, SyncRunTrigger.ManualAll];
+    private static readonly SyncRunStatus[] CompletedStatuses = [SyncRunStatus.Completed, SyncRunStatus.CompletedWithErrors];
+
+    private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
 
     public async Task<SyncRun> SyncAllAsync(CancellationToken cancellationToken = default)
     {
@@ -39,6 +49,34 @@ public sealed class PackageSyncService(
         return executed
             ? run!
             : RejectedRun(SyncRunTrigger.ManualAll, "A sync run is already active for all sources.");
+    }
+
+    /// <summary>
+    /// Runs a scheduled sync of all enabled sources. Stored versions are only downloaded and re-verified when this run is a
+    /// verification run: when no completed all-source verification run started within <paramref name="verificationInterval"/>.
+    /// Otherwise only versions that are not stored yet are downloaded, read, validated and indexed.
+    /// </summary>
+    public async Task<SyncRun> SyncScheduledAsync(TimeSpan verificationInterval, CancellationToken cancellationToken = default)
+    {
+        SyncRun? run = null;
+        var executed = await concurrencyGuard.TryRunAsync(SyncScope, async () =>
+        {
+            var startedAt = _timeProvider.GetUtcNow();
+            var lastVerificationStartedAt = await syncRuns.GetLatestRunStartedAtAsync(SyncRunMode.Verification, AllSourceTriggers, CompletedStatuses, cancellationToken);
+            // A verification dated in the future (clock skew) is not trusted to postpone the next one.
+            var verificationIsCurrent = startedAt - lastVerificationStartedAt is { } age && age >= TimeSpan.Zero && age < verificationInterval;
+            run = new SyncRun
+            {
+                Trigger = SyncRunTrigger.Scheduled,
+                Mode = verificationIsCurrent ? SyncRunMode.NewVersionsOnly : SyncRunMode.Verification,
+                StartedAt = startedAt
+            };
+            await ExecuteRunAsync(run, () => sources.ListAsync(cancellationToken), cancellationToken, addRun: true);
+        });
+
+        return executed
+            ? run!
+            : RejectedRun(SyncRunTrigger.Scheduled, "A sync run is already active for all sources.");
     }
 
     public async Task<SyncRun> SyncSourceAsync(Guid sourceId, CancellationToken cancellationToken = default)
@@ -237,6 +275,14 @@ public sealed class PackageSyncService(
                 };
 
             var existingVersion = await catalog.GetPackageVersionAsync(package.Id, discovered.Version, cancellationToken);
+            if (existingVersion is not null && run.Mode == SyncRunMode.NewVersionsOnly)
+            {
+                UpdateLatestVersion(package, discovered.Version);
+                MarkUnchanged(runItem, existingVersion, counters);
+                runItem.Message = NotReverifiedMessage;
+                return runItem;
+            }
+
             await using var packageStream = await downloader.DownloadPackageAsync(source, discovered.PackageId, discovered.Version, cancellationToken);
             var read = await manifestReader.ReadAsync(packageStream, cancellationToken);
             if (!read.Exists || read.ManifestJson is null || read.ManifestHash is null)
@@ -264,10 +310,7 @@ public sealed class PackageSyncService(
                 }
                 else
                 {
-                    runItem.Status = SyncRunItemStatus.Unchanged;
-                    runItem.PackageVersion = existingVersion;
-                    runItem.PackageVersionId = existingVersion.Id;
-                    Increment(counters, "unchanged");
+                    MarkUnchanged(runItem, existingVersion, counters);
                 }
 
                 return runItem;
@@ -359,6 +402,14 @@ public sealed class PackageSyncService(
         run.Items.Add(item);
         await syncRuns.AddItemAsync(item, cancellationToken);
         return item;
+    }
+
+    private static void MarkUnchanged(SyncRunItem runItem, PackageVersion existingVersion, Dictionary<string, int> counters)
+    {
+        runItem.Status = SyncRunItemStatus.Unchanged;
+        runItem.PackageVersion = existingVersion;
+        runItem.PackageVersionId = existingVersion.Id;
+        Increment(counters, "unchanged");
     }
 
     private static ValidationStatus ToValidationStatus(ManifestValidationResult validation) =>
@@ -465,6 +516,7 @@ public interface ISyncRunStore
 {
     Task<IReadOnlyList<SyncRun>> ListAsync(CancellationToken cancellationToken = default);
     Task<SyncRun?> GetAsync(Guid id, CancellationToken cancellationToken = default);
+    Task<DateTimeOffset?> GetLatestRunStartedAtAsync(SyncRunMode mode, IReadOnlyCollection<SyncRunTrigger> triggers, IReadOnlyCollection<SyncRunStatus> statuses, CancellationToken cancellationToken = default);
     Task<IReadOnlyDictionary<Guid, SyncRunListMetadata>> GetListMetadataAsync(IReadOnlyCollection<Guid> runIds, CancellationToken cancellationToken = default);
     Task<SyncRunDeletionCandidate?> GetDeletionCandidateAsync(Guid id, CancellationToken cancellationToken = default);
     Task<SyncRunCleanupPreview> PreviewDeleteBeforeAsync(DateTimeOffset completedBefore, IReadOnlyCollection<SyncRunStatus> terminalStatuses, CancellationToken cancellationToken = default);
