@@ -36,7 +36,7 @@ resource elsa_control_asplan 'Microsoft.Web/serverfarms@2025-03-01' = {
   }
   kind: 'Linux'
   sku: {
-    name: 'B1'
+    name: 'B2'
     tier: 'Basic'
     capacity: 1
   }

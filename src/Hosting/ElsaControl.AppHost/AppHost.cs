@@ -13,9 +13,11 @@ builder.AddAzureAppServiceEnvironment("elsa-control")
     .ConfigureInfrastructure(infrastructure =>
     {
         var plan = infrastructure.GetProvisionableResources().OfType<AppServicePlan>().Single();
+        // B2 (2 cores, 3.5 GB): the managed-instance provider runs the Azure CLI and Bicep inside the API
+        // container; on B1 the API alone sits near 80% memory, leaving too little for a provisioning run (#314).
         plan.Sku = new AppServiceSkuDescription
         {
-            Name = "B1",
+            Name = "B2",
             Tier = "Basic",
             Capacity = 1
         };
@@ -66,7 +68,7 @@ if (builder.ExecutionContext.IsPublishMode)
     // would fail issuer validation.
     var entraAuthority = ReferenceExpression.Create($"https://login.microsoftonline.com/{entraTenantId}/v2.0");
 
-    // Aspire defaults App Service sites to 30 workers, which a Basic (B1) plan rejects outright.
+    // Aspire defaults App Service sites to 30 workers, which a Basic plan rejects outright.
     api.PublishAsAzureAppServiceWebsite((_, site) => site.SiteConfig.NumberOfWorkers = 1);
 
     // Aspire's App Service integration injects AZURE_TOKEN_CREDENTIALS=ManagedIdentityCredential
