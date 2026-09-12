@@ -24,6 +24,7 @@ public interface IElsaInstanceCommercialGate
 public static class ElsaInstanceCommercialOperation
 {
     public const string EntitlementRequired = "instance.entitlement-required";
+    public const string EntitlementExpired = "instance.entitlement-expired";
     public const string SubscriptionStateRequired = "instance.subscription-state-required";
     public const string LifecycleConstrained = "instance.lifecycle-constrained";
     public const string InstanceLimitReached = "instance.instance-limit-reached";

@@ -2,6 +2,11 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http.Headers;
 using System.Security.Claims;
 using System.Text;
+using ElsaControl.Api.Authentication;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 
 namespace ElsaControl.Api.Tests;
@@ -21,6 +26,25 @@ internal static class TestWorkspaceIdentity
             "Bearer",
             CreateToken(subject, issuer, audience, expires, claims));
         return client;
+    }
+
+    /// <summary>Adds a protected customer session cookie, as issued after OIDC sign-in.</summary>
+    public static void AddControlSessionCookie(this ControlApiTestApplication app, HttpClient client, params Claim[] additionalClaims)
+    {
+        var options = app.Services.GetRequiredService<IOptionsMonitor<CookieAuthenticationOptions>>()
+            .Get(CustomerAuthenticationDefaults.CookieScheme);
+        var claims = new List<Claim>
+        {
+            new("sub", "admin-user"),
+            new("iss", ControlApiTestApplication.TestControlIdentityIssuer),
+            new("name", "Admin User")
+        };
+        claims.AddRange(additionalClaims);
+
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, CustomerAuthenticationDefaults.CookieScheme));
+        var ticket = new AuthenticationTicket(principal, CustomerAuthenticationDefaults.CookieScheme);
+        var cookie = options.TicketDataFormat.Protect(ticket);
+        client.DefaultRequestHeaders.Add("Cookie", $"{CustomerAuthenticationDefaults.CookieName}={cookie}");
     }
 
     public static string CreateToken(

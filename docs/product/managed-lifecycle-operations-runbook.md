@@ -448,6 +448,71 @@ attempt to override the image-owned tool paths. The offline contract tests
 `ProductionWorkerCompositionContractTests`) prove that the rendered settings compose
 through the production seams against the shipped `infra/azure-production` authority.
 
+## Internal dogfood entitlement (#312)
+
+Use this only for the internal Valence Works dogfood organization. It is a narrow,
+operator-granted exception that lets the managed-instance commercial gate admit that
+organization while production has no Stripe configuration and the billing lifecycle
+worker is off. It never replaces Stripe for customers, never overrides a billing
+provider's subscription, and is never applied by a direct database write.
+
+```text
+GET    /api/admin/organizations/{organizationId}/internal-entitlement
+PUT    /api/admin/organizations/{organizationId}/internal-entitlement
+DELETE /api/admin/organizations/{organizationId}/internal-entitlement
+```
+
+The routes use the admin API policy: the admin API key (`X-Api-Key`) or a control
+session with the `control_admin` role. Production also sets
+`Authentication:Admin:AllowAuthenticatedCustomerSession`, under which any
+authenticated Entra session passes the admin policy; that is only safe while the Entra
+application's user assignment is restricted to operators, so prefer the admin API key.
+Browser-session mutations additionally need a same-origin `Origin` header.
+
+`PUT` grants, or re-grants with a new cap and expiry, and returns the current state:
+
+```json
+{ "reason": "Dogfood workload for #314", "maxInstances": 1, "expiresAt": "2026-10-12T00:00:00Z" }
+```
+
+- `reason` is required, trimmed, 3 to 200 characters, and must not contain control or
+  formatting characters. It is stored in the audit record only; responses never echo it.
+- `maxInstances` is 1 to 3 and caps active managed instances for the organization.
+- `expiresAt` must explicitly denote UTC (`Z` or `+00:00`), be in the future, and be at
+  most 90 days ahead. Renew before it lapses with another `PUT`.
+
+Validation failures return a `400` validation problem (`code`
+`internal-entitlement.invalid`) with fixed messages per field. An unknown organization
+returns `404` (`organization.not-found`). If a billing provider already owns the
+organization's subscription, the grant and the revoke return `409`
+(`internal-entitlement.commercial-subscription`) and nothing is written. If the
+organization requested billing deletion, re-granting returns `409`
+(`internal-entitlement.subscription-closed`).
+
+The grant is stored as a subscription of the reserved `internal` provider plus the
+organization entitlement's managed-hosting flag, instance cap and
+`ManagedHostingExpiresAt`; every other capability field is left as it was. Billing
+checkout and webhooks refuse the `internal` provider, and a Stripe checkout for an
+organization that holds an internal grant fails with a conflict: moving such an
+organization to Stripe is a separate human decision.
+
+Expiry needs no background job. The commercial gate compares the expiry with its clock
+on every decision, so from the expiry instant Create, Update and every other non-exit
+action are denied with `instance.entitlement-expired` and queued provider work is held.
+`DELETE` revokes: managed hosting is disabled and the expiry is set to the revocation
+instant, after which the gate denies with `instance.entitlement-required`. A repeated
+`DELETE` returns `204` without a new audit record; `DELETE` without a grant returns
+`404` (`internal-entitlement.not-granted`). Stop and Delete of existing instances stay
+allowed after expiry and after revocation. `GET` reports `None`, `Active`, `Expired`,
+`Revoked`, `Closed` or `CommercialSubscription` with the cap, expiry and last update,
+and no reason, operator identity or provider reference.
+
+Every grant, re-grant and revoke writes an `OrganizationAuditRecord` (`EntitlementChanged`,
+target type `internal-entitlement`) whose summary carries the cap, the expiry and, for
+grants, the bounded reason. The operator is recorded as a SHA-256 fingerprint of the
+authenticated subject (`api-key` for the admin key); check a candidate with
+`printf '%s' '<subject>' | shasum -a 256`.
+
 ## Opt-in production-composition Azure lifecycle proof (#265)
 
 The live proof is an explicitly gated `WebApplicationFactory<Program>` run. It

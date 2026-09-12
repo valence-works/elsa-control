@@ -68,4 +68,11 @@ public sealed record BillingWebhookNormalizationResult(
 public static class BillingProviderNames
 {
     public const string Stripe = "stripe";
+
+    /// <summary>
+    /// Reserved for operator-granted internal entitlements. It is not a payment
+    /// provider: provider checkout and webhook ingestion refuse this value so a
+    /// provider pipeline can never create or advance an internal grant.
+    /// </summary>
+    public const string Internal = "internal";
 }
