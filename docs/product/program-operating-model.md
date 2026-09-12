@@ -22,6 +22,8 @@ Work is done only when applicable implementation, tests, integration/E2E evidenc
 
 ## Worker Assignment
 
+Issue Bus v1 ([`issue-bus.md`](issue-bus.md)) is the pickup, claim, and evidence protocol agents use to take Agent Ready tasks without an operator middleman. This section remains the program-level assignment policy; Issue Bus implements it on GitHub.
+
 1. Select an unblocked Agent Ready task from the project.
 2. Mark it assigned/in progress before implementation.
 3. Provide one objective, issue, PRD/ADRs, repo boundaries, non-goals, acceptance criteria and validation.
