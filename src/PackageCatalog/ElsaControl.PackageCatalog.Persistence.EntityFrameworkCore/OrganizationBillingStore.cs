@@ -287,6 +287,7 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         ArgumentException.ThrowIfNullOrWhiteSpace(provider);
         provider = provider.Trim();
         RequireSafeCode(provider, nameof(provider));
+        RequireBillingProvider(provider, nameof(provider));
         var started = startedAt.ToUniversalTime();
         if (started == default)
             throw new ArgumentException("Trial start timestamp is required.", nameof(startedAt));
@@ -421,6 +422,7 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         if (providerEvent.OrganizationId == Guid.Empty)
             throw new ArgumentException("Organization ID is required.", nameof(providerEvent));
         RequireSafeCode(providerEvent.Provider, nameof(providerEvent.Provider));
+        RequireBillingProvider(providerEvent.Provider, nameof(providerEvent.Provider));
         RequireSafeToken(providerEvent.ProviderEventId, nameof(providerEvent.ProviderEventId));
         RequireSafeCode(providerEvent.EventType, nameof(providerEvent.EventType));
         RequireSha256(providerEvent.EventHash, nameof(providerEvent.EventHash));
@@ -496,6 +498,13 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
     {
         if (string.IsNullOrWhiteSpace(value) || value.Length > 128 || value.Any(ch => !(char.IsAsciiLetterOrDigit(ch) || ch is '.' or '-' or '_' or ':')))
             throw new ArgumentException($"{name} must be a stable safe code.", name);
+    }
+
+    // The internal provider is written only by the operator grant path.
+    private static void RequireBillingProvider(string provider, string name)
+    {
+        if (string.Equals(provider, BillingProviderNames.Internal, StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException($"{name} is reserved for operator-granted internal entitlements.", name);
     }
 
     private static void RequireSafeToken(string? value, string name)

@@ -117,6 +117,13 @@ public sealed class OrganizationEntitlementSnapshot
     public int? MaxSyncsPerDay { get; set; }
     public bool PrivateFeedsEnabled { get; set; }
     public bool ManagedHostingEnabled { get; set; }
+    /// <summary>
+    /// UTC instant from which managed hosting no longer admits create or update
+    /// work. Null means the capability does not expire. The commercial gate
+    /// compares it with its clock on every decision, so expiry never depends on
+    /// a background job having run.
+    /// </summary>
+    public DateTimeOffset? ManagedHostingExpiresAt { get; set; }
     public bool DeploymentTargetsEnabled { get; set; }
     /// <summary>
     /// The provider-neutral commercial lifecycle state used when the snapshot

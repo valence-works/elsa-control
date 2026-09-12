@@ -12,6 +12,7 @@ using ElsaControl.Deployment.Azure;
 using ElsaControl.PackageCatalog.Abstractions.Catalog;
 using ElsaControl.PackageCatalog.Abstractions.Compatibility;
 using ElsaControl.Api.Admin.Application;
+using ElsaControl.Api.Admin.Organizations;
 using ElsaControl.Api.Admin.Workspaces;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Catalog;
@@ -258,6 +259,9 @@ builder.Services.AddScoped<IOrganizationBillingStore>(services =>
     services.GetRequiredService<OrganizationBillingStore>());
 builder.Services.AddScoped<IOrganizationBillingLifecycleStore>(services =>
     services.GetRequiredService<OrganizationBillingStore>());
+builder.Services.AddScoped<IOrganizationInternalEntitlementStore>(services =>
+    services.GetRequiredService<OrganizationBillingStore>());
+builder.Services.AddScoped<OrganizationInternalEntitlementService>();
 builder.Services.AddScoped<OrganizationBillingLifecycleWorker>(services =>
     new OrganizationBillingLifecycleWorker(
         services.GetRequiredService<IOrganizationBillingLifecycleStore>(),
@@ -634,6 +638,7 @@ app.MapAdminPackageEndpoints();
 app.MapAdminApprovalEndpoints();
 app.MapAdminValidationEndpoints();
 app.MapAdminWorkspaceEntitlementEndpoints();
+app.MapAdminOrganizationInternalEntitlementEndpoints();
 app.MapAdminReleaseCatalogEndpoints();
 app.MapConsoleLogStreaming();
 if (adminConsoleAssetsExist)

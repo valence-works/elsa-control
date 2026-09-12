@@ -210,6 +210,7 @@ internal sealed class OrganizationEntitlementSnapshotConfiguration : IEntityType
         builder.Property(x => x.CreatedAt).HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
         builder.Property(x => x.UpdatedAt).HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
         builder.Property(x => x.SubscriptionState).HasConversion<string>().HasMaxLength(32);
+        builder.Property(x => x.ManagedHostingExpiresAt).HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null, value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
         builder.Property(x => x.MaxInstances).IsRequired();
         builder.HasIndex(x => x.OrganizationId).IsUnique();
         builder.HasOne(x => x.Subscription)

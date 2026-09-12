@@ -175,7 +175,7 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
         var app = _app;
         await app.SeedAsync(_ => Task.CompletedTask);
         var client = app.CreateClient(new() { AllowAutoRedirect = false });
-        AddControlSessionCookie(app, client, new Claim("role", AdminAuthorization.ControlAdminRole));
+        app.AddControlSessionCookie(client, new Claim("role", AdminAuthorization.ControlAdminRole));
 
         var response = await client.GetAsync("/api/admin/sources");
 
@@ -188,7 +188,7 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
         var app = _app;
         await app.SeedAsync(_ => Task.CompletedTask);
         var client = app.CreateClient(new() { AllowAutoRedirect = false });
-        AddControlSessionCookie(app, client);
+        app.AddControlSessionCookie(client);
 
         var response = await client.GetAsync("/api/admin/sources");
 
@@ -204,7 +204,7 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
         });
         await app.SeedAsync(_ => Task.CompletedTask);
         var client = app.CreateClient(new() { AllowAutoRedirect = false });
-        AddControlSessionCookie(app, client);
+        app.AddControlSessionCookie(client);
 
         var response = await client.GetAsync("/api/admin/sources");
 
@@ -238,7 +238,7 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
     {
         var app = _app;
         var client = app.CreateClient(new() { AllowAutoRedirect = false });
-        AddControlSessionCookie(app, client, new Claim("role", AdminAuthorization.ControlAdminRole));
+        app.AddControlSessionCookie(client, new Claim("role", AdminAuthorization.ControlAdminRole));
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/sync/packages/Elsa.Workflows");
         request.Headers.Add(HeaderNames.Origin, "https://evil.example");
 
@@ -252,7 +252,7 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
     {
         var app = _app;
         var client = app.CreateClient(new() { AllowAutoRedirect = false });
-        AddControlSessionCookie(app, client, new Claim("role", AdminAuthorization.ControlAdminRole));
+        app.AddControlSessionCookie(client, new Claim("role", AdminAuthorization.ControlAdminRole));
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/sync/packages/Elsa.Workflows");
         request.Headers.Add(HeaderNames.Origin, "http://localhost");
 
@@ -266,7 +266,7 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
     {
         var app = _app;
         var client = app.CreateClient(new() { AllowAutoRedirect = false });
-        AddControlSessionCookie(app, client, new Claim("role", AdminAuthorization.ControlAdminRole));
+        app.AddControlSessionCookie(client, new Claim("role", AdminAuthorization.ControlAdminRole));
 
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/sync/packages/Elsa.Workflows");
         request.Headers.Referrer = new Uri("http://localhost/admin/overview");
@@ -281,7 +281,7 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
     {
         var app = _app;
         var client = app.CreateClient(new() { AllowAutoRedirect = false });
-        AddControlSessionCookie(app, client, new Claim("role", AdminAuthorization.ControlAdminRole));
+        app.AddControlSessionCookie(client, new Claim("role", AdminAuthorization.ControlAdminRole));
 
         var response = await client.PostAsync("/api/admin/sync/packages/Elsa.Workflows", null);
 
@@ -307,7 +307,7 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
     {
         var app = _app;
         var client = app.CreateClient(new() { AllowAutoRedirect = false });
-        AddControlSessionCookie(app, client, new Claim("role", AdminAuthorization.ControlAdminRole));
+        app.AddControlSessionCookie(client, new Claim("role", AdminAuthorization.ControlAdminRole));
 
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/sync/packages/Elsa.Workflows");
         request.Headers.Host = "catalog.example";
@@ -323,7 +323,7 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
     {
         var app = _app;
         var client = app.CreateClient(new() { AllowAutoRedirect = false });
-        AddControlSessionCookie(app, client, new Claim("role", AdminAuthorization.ControlAdminRole));
+        app.AddControlSessionCookie(client, new Claim("role", AdminAuthorization.ControlAdminRole));
 
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/sync/packages/Elsa.Workflows");
         request.Headers.Host = "catalog.example";
@@ -340,7 +340,7 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
     {
         var app = _app;
         var client = app.CreateClient(new() { AllowAutoRedirect = false });
-        AddControlSessionCookie(app, client, new Claim("role", AdminAuthorization.ControlAdminRole));
+        app.AddControlSessionCookie(client, new Claim("role", AdminAuthorization.ControlAdminRole));
 
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/sync/packages/Elsa.Workflows");
         request.Headers.Host = "internal.example";
@@ -374,24 +374,6 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
         var response = await app.CreateClient().GetAsync("/health");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-    }
-
-    private static void AddControlSessionCookie(ControlApiTestApplication app, HttpClient client, params Claim[] additionalClaims)
-    {
-        var options = app.Services.GetRequiredService<IOptionsMonitor<CookieAuthenticationOptions>>()
-            .Get(CustomerAuthenticationDefaults.CookieScheme);
-        var claims = new List<Claim>
-        {
-            new("sub", "admin-user"),
-            new("iss", ControlApiTestApplication.TestControlIdentityIssuer),
-            new("name", "Admin User")
-        };
-        claims.AddRange(additionalClaims);
-
-        var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, CustomerAuthenticationDefaults.CookieScheme));
-        var ticket = new AuthenticationTicket(principal, CustomerAuthenticationDefaults.CookieScheme);
-        var cookie = options.TicketDataFormat.Protect(ticket);
-        client.DefaultRequestHeaders.Add("Cookie", $"{CustomerAuthenticationDefaults.CookieName}={cookie}");
     }
 
     private sealed class TestWebHostEnvironment(string environmentName) : IWebHostEnvironment

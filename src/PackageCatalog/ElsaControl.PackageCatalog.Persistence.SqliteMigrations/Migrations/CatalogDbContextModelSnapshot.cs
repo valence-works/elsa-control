@@ -383,6 +383,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<bool>("ManagedHostingEnabled")
                         .HasColumnType("INTEGER");
 
+                    b.Property<long?>("ManagedHostingExpiresAt")
+                        .HasColumnType("INTEGER");
+
                     b.Property<int>("MaxInstances")
                         .HasColumnType("INTEGER");
 
