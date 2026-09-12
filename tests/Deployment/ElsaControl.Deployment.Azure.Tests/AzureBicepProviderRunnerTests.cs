@@ -4,6 +4,7 @@ using System.Text.Json;
 
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
+using ElsaControl.RuntimeBuilder.Abstractions.Plans;
 
 namespace ElsaControl.Deployment.Azure.Tests;
 
@@ -27,7 +28,180 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         StableTrafficRevisionName = "proof-app--stable"
     };
     private const string ExactSqlBootstrapFirewall = "[{\"name\":\"elsa-bootstrap\",\"startIpAddress\":\"203.0.113.10\",\"endIpAddress\":\"203.0.113.10\"}]";
+    private static readonly AzureWorkloadCapacity StandardSmall = GovernedCapacity("standard-small");
+    private const string WorkloadHandoffCallback = "https://proof-app.hash.azurecontainerapps.io/managed-elsa/handoff/callback";
+    private static readonly AzureManagedHandoffOptions ControlHandoff = new(
+        "https://control.example.test", "https://control.example.test/admin/runtimes", TimeSpan.FromHours(8), ["*"]);
     private readonly RunnerFixture _fixture = new();
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.Foundation, "standard-small", "1", "1", "0.5", "1Gi")]
+    [InlineData(AzureProviderRunnerStep.Workload, "standard-small", "1", "1", "0.5", "1Gi")]
+    [InlineData(AzureProviderRunnerStep.Foundation, "standard", "1", "3", "1", "2Gi")]
+    [InlineData(AzureProviderRunnerStep.Workload, "standard", "1", "3", "1", "2Gi")]
+    public async Task Production_deployment_passes_the_exact_governed_capacity_to_Bicep(
+        AzureProviderRunnerStep step, string profile, string minReplicas, string maxReplicas, string cpu, string memory)
+    {
+        var deployment = await ProductionDeploymentAsync(step, _fixture.Plan with { Capacity = GovernedCapacity(profile) });
+
+        Assert.Equal(
+            [$"workloadMinReplicas={minReplicas}", $"workloadMaxReplicas={maxReplicas}", $"workloadCpu={cpu}", $"workloadMemory={memory}"],
+            deployment.Where(IsCapacityArgument));
+    }
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.Foundation, 1, 1, 500, 2048)]
+    [InlineData(AzureProviderRunnerStep.Workload, 1, 1, 500, 2048)]
+    [InlineData(AzureProviderRunnerStep.Workload, 1, 1, 300, 600)]
+    [InlineData(AzureProviderRunnerStep.Workload, 1, 1, 4000, 8192)]
+    [InlineData(AzureProviderRunnerStep.Workload, 0, 0, 500, 1024)]
+    [InlineData(AzureProviderRunnerStep.Workload, 2, 1, 500, 1024)]
+    [InlineData(AzureProviderRunnerStep.Foundation, 1, 301, 500, 1024)]
+    public async Task Production_deployment_without_an_exact_Container_Apps_mapping_fails_before_any_Azure_call(
+        AzureProviderRunnerStep step, int minReplicas, int maxReplicas, int cpuMillicores, int memoryMiB)
+    {
+        var (result, process) = await RunWithCapacityAsync(step, new(minReplicas, maxReplicas, cpuMillicores, memoryMiB));
+
+        AssertFailedClosed(result, process, "azure.capacity.unsupported");
+    }
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.Foundation)]
+    [InlineData(AzureProviderRunnerStep.AcrPull)]
+    [InlineData(AzureProviderRunnerStep.SeedSecrets)]
+    [InlineData(AzureProviderRunnerStep.SqlBootstrap)]
+    [InlineData(AzureProviderRunnerStep.SqlFirewallCreate)]
+    [InlineData(AzureProviderRunnerStep.SqlBootstrapScript)]
+    [InlineData(AzureProviderRunnerStep.Workload)]
+    public async Task Production_deployment_of_a_plan_retained_without_capacity_fails_before_any_Azure_call(AzureProviderRunnerStep step)
+    {
+        var (result, process) = await RunWithCapacityAsync(step, capacity: null);
+
+        AssertFailedClosed(result, process, "azure.capacity.required");
+    }
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.SqlFirewallCleanup)]
+    [InlineData(AzureProviderRunnerStep.Health)]
+    [InlineData(AzureProviderRunnerStep.Promotion)]
+    [InlineData(AzureProviderRunnerStep.RestoreStableTraffic)]
+    [InlineData(AzureProviderRunnerStep.Cleanup)]
+    public async Task Steps_that_keep_an_existing_instance_recoverable_do_not_require_capacity(AzureProviderRunnerStep step)
+    {
+        var (result, _) = await RunWithCapacityAsync(step, capacity: null);
+
+        Assert.False(result.Code.StartsWith("azure.capacity.", StringComparison.Ordinal), result.Code);
+    }
+
+    [Fact]
+    public async Task Disposable_deployment_keeps_the_cost_boxed_template_sizing_and_takes_no_capacity()
+    {
+        var deployment = await DisposableFoundationDeploymentAsync(_fixture.Plan with { Capacity = null });
+
+        Assert.DoesNotContain(deployment, IsCapacityArgument);
+    }
+
+    [Fact]
+    public async Task Disposable_deployment_takes_no_handoff_even_for_a_release_that_declares_it()
+    {
+        var deployment = await DisposableFoundationDeploymentAsync(_fixture.Plan with { Capacity = null, ManagedHandoff = true });
+
+        Assert.DoesNotContain(deployment, IsHandoffArgument);
+    }
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.Foundation)]
+    [InlineData(AzureProviderRunnerStep.Workload)]
+    public async Task Production_deployment_states_a_disabled_handoff_for_a_release_that_does_not_declare_it(AzureProviderRunnerStep step)
+    {
+        var options = _fixture.Options with { ManagedHandoff = ControlHandoff };
+
+        var deployment = await ProductionDeploymentAsync(step, _fixture.Plan, options);
+
+        Assert.Equal(["managedHandoffEnabled=false"], deployment.Where(IsHandoffArgument));
+    }
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.Foundation)]
+    [InlineData(AzureProviderRunnerStep.Workload)]
+    public async Task Production_deployment_configures_the_runtime_handoff_from_Control_and_the_instance_identity(AzureProviderRunnerStep step)
+    {
+        var options = _fixture.Options with { ManagedHandoff = ControlHandoff };
+        var context = ContextFor(options);
+
+        var deployment = await ProductionDeploymentAsync(step, _fixture.Plan with { ManagedHandoff = true }, options, context);
+
+        var instanceId = context.InstanceId.ToString("D");
+        Assert.Equal(
+        [
+            "managedHandoffEnabled=true",
+            $"managedHandoffInstanceId={instanceId}",
+            $"managedHandoffAudience=urn:elsa:instance:{instanceId}",
+            "managedHandoffControlBaseUrl=https://control.example.test",
+            "managedHandoffControlContinuationUrl=https://control.example.test/admin/runtimes",
+            "managedHandoffRuntimeMaximumLifetime=08:00:00",
+            "managedHandoffRuntimePermissions=[\"*\"]"
+        ], deployment.Where(IsHandoffArgument));
+        Assert.DoesNotContain(deployment, argument => argument.StartsWith("managedHandoffCallbackUri=", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.Foundation)]
+    [InlineData(AzureProviderRunnerStep.Workload)]
+    public async Task Production_deployment_of_a_handoff_release_without_Control_handoff_inputs_fails_before_any_Azure_call(AzureProviderRunnerStep step)
+    {
+        var process = new FakeCommandProcess();
+        var result = await _fixture.Runner(process).RunAsync(
+            _fixture.Command(step, RegistryReadyResources()) with { Plan = _fixture.Plan with { ManagedHandoff = true } });
+
+        AssertFailedClosed(result, process, "azure.handoff.configuration-required");
+    }
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.Foundation)]
+    [InlineData(AzureProviderRunnerStep.Workload)]
+    public async Task Production_deployment_of_a_handoff_on_more_than_one_replica_fails_before_any_Azure_call(AzureProviderRunnerStep step) =>
+        await AssertHandoffReplicasUnsupportedAsync(step, GovernedCapacity("standard"));
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.Foundation)]
+    [InlineData(AzureProviderRunnerStep.Workload)]
+    public async Task Production_deployment_of_a_handoff_that_can_scale_to_zero_fails_before_any_Azure_call(AzureProviderRunnerStep step) =>
+        await AssertHandoffReplicasUnsupportedAsync(step, new AzureWorkloadCapacity(0, 1, 500, 1024));
+
+    private async Task AssertHandoffReplicasUnsupportedAsync(AzureProviderRunnerStep step, AzureWorkloadCapacity capacity)
+    {
+        var options = _fixture.Options with { ManagedHandoff = ControlHandoff };
+        var process = new FakeCommandProcess();
+        var command = _fixture.Command(step, RegistryReadyResources()) with
+        {
+            Plan = _fixture.Plan with { ManagedHandoff = true, Capacity = capacity },
+            Context = ContextFor(options)
+        };
+
+        var result = await new AzureBicepProviderRunner(options, _fixture.Scope, process).RunAsync(command);
+
+        AssertFailedClosed(result, process, "azure.handoff.replicas-unsupported");
+    }
+
+    [Theory]
+    [InlineData(true, "")]
+    [InlineData(true, "https://other-app.hash.azurecontainerapps.io/managed-elsa/handoff/callback")]
+    [InlineData(true, "https://proof-app.hash.azurecontainerapps.io/managed-elsa/handoff/callback/")]
+    [InlineData(false, WorkloadHandoffCallback)]
+    public async Task Workload_whose_handoff_callback_is_not_its_endpoint_callback_fails(bool managedHandoff, string callback)
+    {
+        var options = _fixture.Options with { ManagedHandoff = ControlHandoff };
+
+        var (result, process) = await RunProductionDeploymentAsync(
+            AzureProviderRunnerStep.Workload, _fixture.Plan with { ManagedHandoff = managedHandoff }, options, ContextFor(options), callback);
+
+        Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
+        Assert.Equal("azure.handoff.callback-mismatch", result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "azure.handoff.callback-mismatch");
+        Assert.Contains(process.Calls, call => call.Contains("deployment") && call.Contains("create"));
+        Assert.DoesNotContain(process.Calls, call => call.Contains("ad-admin"));
+    }
 
     [Fact]
     public async Task Disposable_foundation_preserves_the_proof_template_and_ownership_contract()
@@ -2072,11 +2246,125 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         return _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Foundation));
     }
 
-    private string WorkloadOutputs() => """
+    private static AzureWorkloadCapacity GovernedCapacity(string profile)
+    {
+        var governed = ElsaInstancePlanResolutionOptions.Default.EffectiveCapacityProfiles[profile];
+        return new(governed.MinReplicas, governed.MaxReplicas, governed.CpuMillicores, governed.MemoryMiB);
+    }
+
+    private static bool IsHandoffArgument(string argument) =>
+        argument.StartsWith("managedHandoff", StringComparison.Ordinal);
+
+    private AzureProviderExecutionContext ContextFor(AzureProviderRunnerOptions options) =>
+        _fixture.Context with { ProviderScopeFingerprint = options.ComputeProviderScopeFingerprint(_fixture.Scope) };
+
+    /// <summary>Runs a converging disposable foundation step and returns its deployment arguments.</summary>
+    private async Task<string[]> DisposableFoundationDeploymentAsync(AzureWorkloadPlan plan)
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args is ["group", "exists", ..], "false");
+        process.Success(args => args is ["group", "create", ..]);
+        process.Success(args => args.Contains("deployment") && args.Contains("create"), FoundationOutputs());
+        var options = _fixture.Options with
+        {
+            DisposableProofMode = true,
+            DisposableExpiryUtc = new DateOnly(2026, 9, 30),
+            AzureCliClientId = null
+        };
+        var command = _fixture.Command(AzureProviderRunnerStep.Foundation) with { Plan = plan, Context = ContextFor(options) };
+
+        var result = await new AzureBicepProviderRunner(options, _fixture.Scope, process).RunAsync(command);
+
+        Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
+        return process.Calls.Single(call => call.Contains("deployment"));
+    }
+
+    private static bool IsCapacityArgument(string argument) =>
+        argument.StartsWith("workloadMinReplicas=", StringComparison.Ordinal) ||
+        argument.StartsWith("workloadMaxReplicas=", StringComparison.Ordinal) ||
+        argument.StartsWith("workloadCpu=", StringComparison.Ordinal) ||
+        argument.StartsWith("workloadMemory=", StringComparison.Ordinal);
+
+    private AzureProviderResourceReferences RegistryReadyResources() => _fixture.FoundationResources with
+    {
+        RegistryResourceId = _fixture.RegistryId,
+        AcrPullDeploymentId = _fixture.RegistryDeploymentId,
+        AcrPullRoleAssignmentId = _fixture.RegistryRoleAssignmentId
+    };
+
+    /// <summary>Runs a converging production foundation or workload step and returns its deployment arguments.</summary>
+    private async Task<string[]> ProductionDeploymentAsync(
+        AzureProviderRunnerStep step,
+        AzureWorkloadPlan plan,
+        AzureProviderRunnerOptions? options = null,
+        AzureProviderExecutionContext? context = null)
+    {
+        var (result, process) = await RunProductionDeploymentAsync(
+            step, plan, options, context, plan.ManagedHandoff ? WorkloadHandoffCallback : "");
+
+        Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
+        return process.Calls.Single(call => call.Contains("deployment") && call.Contains("create"));
+    }
+
+    private async Task<(AzureProviderRunnerResult Result, FakeCommandProcess Process)> RunProductionDeploymentAsync(
+        AzureProviderRunnerStep step,
+        AzureWorkloadPlan plan,
+        AzureProviderRunnerOptions? options,
+        AzureProviderExecutionContext? context,
+        string handoffCallback)
+    {
+        var process = new FakeCommandProcess();
+        if (step == AzureProviderRunnerStep.Foundation)
+        {
+            process.Success(args => args is ["group", "exists", ..], "false");
+            process.Success(args => args is ["group", "create", ..]);
+            process.Success(args => args.Contains("deployment") && args.Contains("create"), FoundationOutputs());
+        }
+        else
+        {
+            process.Success(args => args.Contains("resource") && args.Contains("list"), "0");
+            process.Success(args => args.Contains("resource") && args.Contains("list"), "0");
+            process.Success(args => args.Contains("deployment") && args.Contains("create"), WorkloadOutputs(handoffCallback));
+            process.Success(args => args.Contains("sql") && args.Contains("server") && args.Contains("list"), "1");
+            process.Success(args => args.Contains("ad-admin") && args.Contains("list"), "[{\"login\":\"proof-bootstrap\",\"sid\":\"11111111-1111-1111-1111-111111111111\"}]");
+            process.Success(args => args.Contains("ad-only-auth") && args.Contains("enable"));
+        }
+
+        options ??= _fixture.Options;
+        var command = _fixture.Command(step, step == AzureProviderRunnerStep.Foundation ? null : RegistryReadyResources()) with
+        {
+            Plan = plan,
+            Context = context ?? ContextFor(options)
+        };
+        var result = await new AzureBicepProviderRunner(options, _fixture.Scope, process).RunAsync(command);
+        return (result, process);
+    }
+
+    private async Task<(AzureProviderRunnerResult Result, FakeCommandProcess Process)> RunWithCapacityAsync(
+        AzureProviderRunnerStep step,
+        AzureWorkloadCapacity? capacity)
+    {
+        // No scripted responses: any Azure command would fail the test double.
+        var process = new FakeCommandProcess();
+        var result = await _fixture.Runner(process).RunAsync(
+            _fixture.Command(step, RegistryReadyResources()) with { Plan = _fixture.Plan with { Capacity = capacity } });
+        return (result, process);
+    }
+
+    private static void AssertFailedClosed(AzureProviderRunnerResult result, FakeCommandProcess process, string code)
+    {
+        Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
+        Assert.Equal(code, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == code);
+        Assert.Empty(process.Calls);
+    }
+
+    private string WorkloadOutputs(string handoffCallback = "") => $$"""
         {
           "deploymentName": { "value": "workload" },
           "containerAppId": { "value": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/proof-rg/providers/Microsoft.App/containerApps/proof-app" },
-          "containerAppEndpoint": { "value": "https://proof-app.hash.azurecontainerapps.io" }
+          "containerAppEndpoint": { "value": "https://proof-app.hash.azurecontainerapps.io" },
+          "managedHandoffCallbackUri": { "value": "{{handoffCallback}}" }
         }
         """;
 
@@ -2131,7 +2419,8 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
             context.InstanceId,
             ElsaInstanceOperationAction.Reconcile,
             Guid.Parse(context.ProviderAssignmentId),
-            attemptedStep);
+            attemptedStep,
+            _fixture.Plan.Capacity);
         var assignmentId = Guid.Parse(context.ProviderAssignmentId);
         var assignment = new AzureProviderResourceAssignment(
             assignmentId,
@@ -2201,7 +2490,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
             "oci://release/manifest@sha256:" + new string('c', 64), "sha256:" + new string('c', 64),
             "oci://release/signature@sha256:" + new string('d', 64), "sha256:" + new string('d', 64),
             new Dictionary<string, string>(), new string('a', 64),
-            "3.8.0-preview.5413", "3.8.0-preview.342");
+            "3.8.0-preview.5413", "3.8.0-preview.342", StandardSmall);
         public AzureProviderResourceReferences FoundationResources { get; } = new(
             ResourceGroupName: "proof-rg",
             FoundationDeploymentId: "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/proof-rg/providers/Microsoft.Resources/deployments/foundation",

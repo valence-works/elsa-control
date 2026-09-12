@@ -9,7 +9,10 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 /// <summary>
 /// Resolves the current managed Elsa identity binding from the instance aggregate.
 /// A missing, deleted, unavailable or malformed binding is represented as null so
-/// callers cannot accidentally construct a fallback audience or callback.
+/// callers cannot accidentally construct a fallback audience or callback. An instance is
+/// only openable when the provider also configured its current deployment's runtime handoff:
+/// without it the runtime serves no handoff endpoints, so listing, issuing and redeeming all
+/// treat it as unavailable.
 /// </summary>
 public sealed class EfCoreManagedElsaInstanceIdentityStore(CatalogDbContext dbContext) : IManagedElsaInstanceIdentityStore
 {
@@ -114,7 +117,8 @@ public sealed class EfCoreManagedElsaInstanceIdentityStore(CatalogDbContext dbCo
                      x.DeletedAt == null &&
                      x.DesiredLifecycle == ElsaDesiredLifecycle.Running &&
                      x.ObservedLifecycle == ElsaObservedLifecycle.Ready &&
-                     x.Health == ElsaInstanceHealth.Healthy,
+                     x.Health == ElsaInstanceHealth.Healthy &&
+                     x.CurrentDeploymentManagedHandoff,
                 cancellationToken);
         return entity is null ? null : TryMap(entity);
     }
@@ -136,7 +140,8 @@ public sealed class EfCoreManagedElsaInstanceIdentityStore(CatalogDbContext dbCo
                         x.DeletedAt == null &&
                         x.DesiredLifecycle == ElsaDesiredLifecycle.Running &&
                         x.ObservedLifecycle == ElsaObservedLifecycle.Ready &&
-                        x.Health == ElsaInstanceHealth.Healthy)
+                        x.Health == ElsaInstanceHealth.Healthy &&
+                        x.CurrentDeploymentManagedHandoff)
             .ToListAsync(cancellationToken);
 
         var result = new Dictionary<Guid, ManagedElsaInstanceIdentity>();

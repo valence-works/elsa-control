@@ -67,9 +67,11 @@ public static class AzureWorkloadPlanTranslator
         var releasePackages = normalized.Release.ComponentDeclarations?.Packages;
         var sqlWorkflowPackageVersion = RequiredPackageVersion(releasePackages, SqlWorkflowPackageId, findings);
         var sqlQuartzPackageVersion = RequiredPackageVersion(releasePackages, SqlQuartzPackageId, findings);
+        var component = normalized.Topology.Components.Single();
+        var capacity = RequiredCapacity(normalized.Capacity, component, findings);
         if (findings.Count > 0)
             return Rejected(findings);
-        var component = normalized.Topology.Components.Single();
+        var managedHandoff = ConfiguresManagedHandoff(component, capacity!);
         var evidence = normalized.Evidence.Single(x =>
             string.Equals(x.Kind, ReleaseManifestEvidenceKinds.Manifest, StringComparison.OrdinalIgnoreCase));
         var signatureEvidence = normalized.Evidence.Single(x =>
@@ -91,7 +93,9 @@ public static class AzureWorkloadPlanTranslator
         };
         var fingerprintInputs = new
         {
-            schema = "azure-workload-plan/v1",
+            // v2 binds the workload capacity and v3 whether the runtime handoff is configured. Either
+            // change therefore yields a new plan fingerprint and, through it, a new revision suffix.
+            schema = "azure-workload-plan/v3",
             canonicalTarget.workloadName,
             canonicalTarget.location,
             elsaVersion = normalized.Release.Version,
@@ -110,6 +114,14 @@ public static class AzureWorkloadPlanTranslator
             releaseManifestSignatureDigest = signatureEvidence.Digest!.ToLowerInvariant(),
             sqlWorkflowPackageVersion,
             sqlQuartzPackageVersion,
+            capacity = new
+            {
+                minReplicas = capacity!.MinReplicas,
+                maxReplicas = capacity.MaxReplicas,
+                cpuMillicores = capacity.CpuMillicores,
+                memoryMiB = capacity.MemoryMiB
+            },
+            managedHandoff,
             secretReferences = secretReferences
                 .OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
                 .Select(x => new { key = x.Key.ToLowerInvariant(), reference = x.Value })
@@ -135,8 +147,52 @@ public static class AzureWorkloadPlanTranslator
                 secretReferences,
                 fingerprint,
                 sqlWorkflowPackageVersion,
-                sqlQuartzPackageVersion),
+                sqlQuartzPackageVersion,
+                capacity,
+                managedHandoff),
             []);
+    }
+
+    /// <summary>
+    /// The handoff is configured only for a release whose selected image declares the exact
+    /// <c>managed-elsa-handoff-v1</c> contract, and only on a single replica: the runtime keeps its
+    /// handoff state keys and sessions in process, so a second replica would reject callbacks and
+    /// sessions it did not issue, and scaling to zero would discard them between start and callback.
+    /// Any other plan leaves the handoff disabled, which keeps Open unavailable rather than advertising
+    /// a sign-in that fails.
+    /// </summary>
+    private static bool ConfiguresManagedHandoff(ResolvedElsaComponent component, AzureWorkloadCapacity capacity) =>
+        capacity is { MinReplicas: 1, MaxReplicas: 1 } &&
+        component.Capabilities.Contains(ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV1, StringComparer.Ordinal);
+
+    /// <summary>
+    /// Selects the governed capacity of the single workload component. Consumption ephemeral
+    /// storage is derived from CPU, so a plan asking for more than that CPU provides is
+    /// rejected rather than silently given less.
+    /// </summary>
+    private static AzureWorkloadCapacity? RequiredCapacity(
+        ResolvedCapacityOutcome resolvedCapacity,
+        ResolvedElsaComponent component,
+        ICollection<ResolvedPlanValidationFinding> findings)
+    {
+        var matches = resolvedCapacity.Components
+            .Where(x => string.Equals(x.ComponentId, component.Id, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (matches.Length != 1)
+        {
+            findings.Add(new("azure.capacity.required", "The admitted plan must carry exactly one capacity outcome for the Azure workload component.", $"capacity:{component.Id}"));
+            return null;
+        }
+
+        var resolved = matches[0];
+        var capacity = new AzureWorkloadCapacity(resolved.MinReplicas, resolved.MaxReplicas, resolved.CpuMillicores, resolved.MemoryMiB);
+        var size = AzureContainerAppsCapacity.Map(capacity);
+        if (size is null || resolved.EphemeralStorageMiB > size.EphemeralStorageMiB)
+        {
+            findings.Add(new("azure.capacity.unsupported", "The resolved capacity has no exact Azure Container Apps consumption mapping.", $"capacity:{component.Id}"));
+            return null;
+        }
+        return capacity;
     }
 
     private static string? RequiredPackageVersion(

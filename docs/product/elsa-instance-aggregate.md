@@ -378,6 +378,12 @@ Handoff is unavailable until a verified endpoint origin is projected. The API ma
 return `identityBinding: null` with a safe `identity-unavailable` state; it never
 guesses a callback or falls back to a shared audience.
 
+Handoff is also unavailable until the provider reports that the current deployment
+configured the runtime's managed handoff (`managed-elsa-handoff-v1`) for that origin,
+because the runtime serves no handoff endpoint otherwise. The current deployment
+reference carries that fact; without it the API returns a safe `handoff-unavailable`
+state, and issuance and redemption treat the instance as not openable.
+
 ### Major migration source retention
 
 A major migration is a durable side-by-side transition, not an in-place version

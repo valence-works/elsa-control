@@ -389,6 +389,7 @@ public sealed class ElsaInstancePersistenceTests
         var instance = NewInstance(workspace.OrganizationId, workspace.Id);
         instance.CurrentDeploymentId = "deployment-current";
         instance.CurrentDeploymentEndpointUri = "https://control.example";
+        instance.CurrentDeploymentManagedHandoff = true;
         db.ElsaInstances.Add(instance);
         db.ElsaInstanceIdentityBindings.Add(NewBinding(
             instance.Id,
@@ -419,9 +420,13 @@ public sealed class ElsaInstancePersistenceTests
         Assert.Null(legacyInstance.CurrentDeploymentReference?.EndpointUri);
         Assert.Null(legacyInstance.IdentityBinding);
 
+        Assert.False(legacyInstance.CurrentDeploymentReference?.ManagedHandoff);
+
         legacyEntity.Name = "Managed instance after legacy endpoint read";
         await db.SaveChangesAsync();
         Assert.Null(legacyEntity.CurrentDeploymentEndpointUri);
+        // The handoff was bound to the dropped legacy origin, so it goes with it.
+        Assert.False(legacyEntity.CurrentDeploymentManagedHandoff);
 
         await db.Database.ExecuteSqlInterpolatedAsync(
             $"UPDATE ElsaInstances SET CurrentDeploymentEndpointUri = {"https://different.example"} WHERE Id = {instance.Id}");
@@ -1196,7 +1201,7 @@ public sealed class ElsaInstancePersistenceTests
         return new CatalogDbContext(options);
     }
 
-    private static ElsaInstanceEntity NewInstance(Guid organizationId, Guid workspaceId)
+    internal static ElsaInstanceEntity NewInstance(Guid organizationId, Guid workspaceId)
     {
         var now = DateTimeOffset.UtcNow;
         return new ElsaInstanceEntity

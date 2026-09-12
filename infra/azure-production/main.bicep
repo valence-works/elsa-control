@@ -96,6 +96,74 @@ param owner string = 'elsa-control'
 @description('Create the externally reachable Container App. Set false for the foundation phase while the runbook seeds Key Vault secrets.')
 param deployWorkload bool = true
 
+// Workload capacity comes from the resolved plan and has no defaults: a caller that omits it
+// fails the deployment instead of silently scaling to zero. Values are the exact Container Apps
+// consumption representation; workloadMemory must be the consumption pair of workloadCpu.
+@description('Minimum workload replicas from the resolved plan capacity. Zero permits scale-to-zero only when the plan asks for it.')
+@minValue(0)
+@maxValue(300)
+param workloadMinReplicas int
+
+@description('Maximum workload replicas from the resolved plan capacity.')
+@minValue(1)
+@maxValue(300)
+param workloadMaxReplicas int
+
+@description('Container Apps consumption vCPU for the workload container, mapped exactly from the plan millicores.')
+@allowed([
+  '0.25'
+  '0.5'
+  '0.75'
+  '1'
+  '1.25'
+  '1.5'
+  '1.75'
+  '2'
+])
+param workloadCpu string
+
+@description('Container Apps consumption memory for the workload container, mapped exactly from the plan MiB.')
+@allowed([
+  '0.5Gi'
+  '1Gi'
+  '1.5Gi'
+  '2Gi'
+  '2.5Gi'
+  '3Gi'
+  '3.5Gi'
+  '4Gi'
+])
+param workloadMemory string
+
+// The runtime's managed Elsa handoff (release capability managed-elsa-handoff-v1). The provider runner enables
+// it only for a release that declares the capability and supplies the instance identity and Control's own
+// handoff configuration. The callback is never a caller input: it is derived below from the workload origin.
+@description('Enable the runtime managed Elsa handoff. The runner sets it only when the admitted release declares managed-elsa-handoff-v1.')
+param managedHandoffEnabled bool
+
+@description('Lowercase canonical Elsa instance ID the handoff binds to. Required when the handoff is enabled.')
+@maxLength(36)
+param managedHandoffInstanceId string = ''
+
+@description('Exact handoff audience of the instance (urn:elsa:instance:<id>). Required when the handoff is enabled.')
+@maxLength(64)
+param managedHandoffAudience string = ''
+
+@description('Elsa Control origin that redeems handoff codes: absolute HTTPS without a path. Required when the handoff is enabled.')
+@maxLength(2048)
+param managedHandoffControlBaseUrl string = ''
+
+@description('Elsa Control console route the runtime returns the browser to. Required when the handoff is enabled.')
+@maxLength(2048)
+param managedHandoffControlContinuationUrl string = ''
+
+@description('Upper bound of a runtime session (hh:mm:ss), no longer than Control\'s runtime session maximum. Required when the handoff is enabled.')
+@maxLength(16)
+param managedHandoffRuntimeMaximumLifetime string = ''
+
+@description('Runtime permissions granted to a handed-off Control operator. Required when the handoff is enabled.')
+param managedHandoffRuntimePermissions array = []
+
 @description('SHA-256 of the compiled main template. The runbook supplies this so IaC changes produce a new plan and revision identity.')
 @minLength(64)
 @maxLength(64)
@@ -113,7 +181,8 @@ param stableTrafficRevisionName string = ''
 param additionalTags object = {}
 
 var effectiveReleaseVersion = empty(releaseVersion) ? elsaVersion : releaseVersion
-var planInput = 'template=${toLower(templateFingerprint)}|name=${workloadName}|location=${location}|image=${imageRepository}@sha256:${toLower(imageDigest)}|elsa=${elsaVersion}|release-line=${releaseLine}|release-version=${effectiveReleaseVersion}|release-feed=${releaseFeedName}/${releaseFeedServiceIndex}|sql-workflow=${sqlWorkflowPackageVersion}|sql-quartz=${sqlQuartzPackageVersion}|topology=combined|acr=${registrySubscriptionId}/${registryResourceGroupName}/${registryName}|sql-bootstrap=${sqlBootstrapObjectId}/${sqlBootstrapLogin}|admin=${adminUsername}|secrets=${sqlConnectionSecretName}/${signingKeySecretName}/${adminPasswordSecretName}'
+var managedHandoffInput = managedHandoffEnabled ? 'v1/${managedHandoffInstanceId}/${managedHandoffAudience}/${managedHandoffControlBaseUrl}/${managedHandoffControlContinuationUrl}/${managedHandoffRuntimeMaximumLifetime}/${join(managedHandoffRuntimePermissions, ',')}' : 'disabled'
+var planInput = 'template=${toLower(templateFingerprint)}|name=${workloadName}|location=${location}|image=${imageRepository}@sha256:${toLower(imageDigest)}|elsa=${elsaVersion}|release-line=${releaseLine}|release-version=${effectiveReleaseVersion}|release-feed=${releaseFeedName}/${releaseFeedServiceIndex}|sql-workflow=${sqlWorkflowPackageVersion}|sql-quartz=${sqlQuartzPackageVersion}|topology=combined|capacity=${workloadMinReplicas}/${workloadMaxReplicas}/${workloadCpu}/${workloadMemory}|handoff=${managedHandoffInput}|acr=${registrySubscriptionId}/${registryResourceGroupName}/${registryName}|sql-bootstrap=${sqlBootstrapObjectId}/${sqlBootstrapLogin}|admin=${adminUsername}|secrets=${sqlConnectionSecretName}/${signingKeySecretName}/${adminPasswordSecretName}'
 // Bicep 0.43 has no SHA-256 function. uniqueString is deterministic for the
 // canonical input, including the externally computed compiled-template hash.
 var planFingerprint = uniqueString(planInput)
@@ -182,10 +251,16 @@ module containerEnvironment 'modules/container-apps-environment.bicep' = {
   }
 }
 
+// Container Apps serves an external app at <app name>.<environment default domain>, the same origin the provider
+// verifies as the workload endpoint and Control binds the instance's handoff callback to. The environment exists
+// from the foundation phase, so the origin is known before the app is created.
+var workloadAppName = '${workloadName}-app'
+var managedHandoffCallbackUri = managedHandoffEnabled ? toLower('https://${workloadAppName}.${containerEnvironment.outputs.defaultDomain}/managed-elsa/handoff/callback') : ''
+
 module workload 'modules/container-app.bicep' = if (deployWorkload) {
   name: 'container-app'
   params: {
-    name: '${workloadName}-app'
+    name: workloadAppName
     location: location
     managedEnvironmentId: containerEnvironment.outputs.id
     registryName: registryName
@@ -210,6 +285,18 @@ module workload 'modules/container-app.bicep' = if (deployWorkload) {
     sqlQuartzPackageVersion: sqlQuartzPackageVersion
     revisionSuffix: revisionSuffix
     stableTrafficRevisionName: stableTrafficRevisionName
+    minReplicas: workloadMinReplicas
+    maxReplicas: workloadMaxReplicas
+    cpu: workloadCpu
+    memory: workloadMemory
+    managedHandoffEnabled: managedHandoffEnabled
+    managedHandoffInstanceId: managedHandoffInstanceId
+    managedHandoffAudience: managedHandoffAudience
+    managedHandoffControlBaseUrl: managedHandoffControlBaseUrl
+    managedHandoffControlContinuationUrl: managedHandoffControlContinuationUrl
+    managedHandoffCallbackUri: managedHandoffCallbackUri
+    managedHandoffRuntimeMaximumLifetime: managedHandoffRuntimeMaximumLifetime
+    managedHandoffRuntimePermissions: managedHandoffRuntimePermissions
     tags: tags
   }
 }
@@ -232,4 +319,5 @@ output sqlShortTermRetentionDays int = database.outputs.shortTermRetentionDays
 output containerAppsEnvironmentId string = containerEnvironment.outputs.id
 output containerAppId string = deployWorkload ? workload!.outputs.id : ''
 output containerAppEndpoint string = deployWorkload ? workload!.outputs.endpoint : ''
+output managedHandoffCallbackUri string = deployWorkload ? managedHandoffCallbackUri : ''
 output immutableImage string = '${imageRepository}@sha256:${toLower(imageDigest)}'

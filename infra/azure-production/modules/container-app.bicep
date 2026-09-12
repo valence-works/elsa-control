@@ -104,6 +104,42 @@ param revisionSuffix string
 @maxLength(64)
 param stableTrafficRevisionName string = ''
 
+@description('Minimum replicas from the resolved plan capacity.')
+param minReplicas int
+
+@description('Maximum replicas from the resolved plan capacity.')
+param maxReplicas int
+
+@description('Consumption vCPU for the workload container.')
+param cpu string
+
+@description('Consumption memory for the workload container.')
+param memory string
+
+@description('Enable the runtime managed Elsa handoff (managed-elsa-handoff-v1).')
+param managedHandoffEnabled bool
+
+@description('Lowercase canonical Elsa instance ID the handoff is bound to.')
+param managedHandoffInstanceId string = ''
+
+@description('Exact handoff audience of the instance.')
+param managedHandoffAudience string = ''
+
+@description('Elsa Control origin that redeems handoff codes.')
+param managedHandoffControlBaseUrl string = ''
+
+@description('Elsa Control console route the runtime returns the browser to.')
+param managedHandoffControlContinuationUrl string = ''
+
+@description('Exact public handoff callback on this app\'s own origin.')
+param managedHandoffCallbackUri string = ''
+
+@description('Upper bound of a runtime session (hh:mm:ss).')
+param managedHandoffRuntimeMaximumLifetime string = ''
+
+@description('Runtime permissions granted to a handed-off Control operator.')
+param managedHandoffRuntimePermissions array = []
+
 @description('Tags applied to the app.')
 param tags object = {}
 
@@ -112,6 +148,42 @@ resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' existing =
   scope: resourceGroup(registrySubscriptionId, registryResourceGroupName)
 }
 var immutableImage = '${imageRepository}@sha256:${toLower(imageDigest)}'
+// Consumption accepts only these CPU/memory pairs. Indexing by the requested pair fails the
+// deployment for any other combination rather than letting a default or rounding decide.
+var consumptionResources = {
+  '0.25/0.5Gi': {
+    cpu: json('0.25')
+    memory: '0.5Gi'
+  }
+  '0.5/1Gi': {
+    cpu: json('0.5')
+    memory: '1Gi'
+  }
+  '0.75/1.5Gi': {
+    cpu: json('0.75')
+    memory: '1.5Gi'
+  }
+  '1/2Gi': {
+    cpu: json('1')
+    memory: '2Gi'
+  }
+  '1.25/2.5Gi': {
+    cpu: json('1.25')
+    memory: '2.5Gi'
+  }
+  '1.5/3Gi': {
+    cpu: json('1.5')
+    memory: '3Gi'
+  }
+  '1.75/3.5Gi': {
+    cpu: json('1.75')
+    memory: '3.5Gi'
+  }
+  '2/4Gi': {
+    cpu: json('2')
+    memory: '4Gi'
+  }
+}
 var nuplaneFeedEnvironment = [
   {
     name: 'Nuplane__Setup__Feeds__0__Name'
@@ -196,6 +268,73 @@ var featureEnvironment = [
     secretRef: adminCredentialRef
   }
 ]
+// The runtime maps its handoff endpoints only from a complete, valid set, and its startup validation
+// rejects a partial one. It also keeps handoff state and sessions in process, so the handoff holds only on one
+// always-running replica. Enabling it with a missing input, more replicas or scale-to-zero fails the deployment here (no
+// 'invalid' entry below) instead of producing a revision that cannot start or rejects its own callbacks. A
+// disabled handoff is stated explicitly so an image default can never switch it on.
+var managedHandoffInputsComplete = !empty(managedHandoffInstanceId) && !empty(managedHandoffAudience) && !empty(managedHandoffControlBaseUrl) && !empty(managedHandoffControlContinuationUrl) && !empty(managedHandoffCallbackUri) && !empty(managedHandoffRuntimeMaximumLifetime) && !empty(managedHandoffRuntimePermissions)
+var managedHandoffMode = !managedHandoffEnabled ? 'disabled' : managedHandoffInputsComplete && minReplicas == 1 && maxReplicas == 1 ? 'enabled' : 'invalid'
+var managedHandoffPermissionEnvironment = [for (permission, index) in managedHandoffRuntimePermissions: {
+  name: 'ManagedElsa__Handoff__RuntimePermissions__${index}'
+  value: permission
+}]
+var managedHandoffEnvironment = {
+  disabled: [
+    {
+      name: 'ManagedElsa__Handoff__Enabled'
+      value: 'false'
+    }
+  ]
+  enabled: concat([
+    {
+      name: 'ManagedElsa__Handoff__Enabled'
+      value: 'true'
+    }
+    {
+      name: 'ManagedElsa__Handoff__ControlBaseUrl'
+      value: managedHandoffControlBaseUrl
+    }
+    {
+      name: 'ManagedElsa__Handoff__ControlContinuationUrl'
+      value: managedHandoffControlContinuationUrl
+    }
+    {
+      name: 'ManagedElsa__Handoff__InstanceId'
+      value: managedHandoffInstanceId
+    }
+    {
+      name: 'ManagedElsa__Handoff__Audience'
+      value: managedHandoffAudience
+    }
+    {
+      name: 'ManagedElsa__Handoff__CallbackUri'
+      value: managedHandoffCallbackUri
+    }
+    {
+      name: 'ManagedElsa__Handoff__UpstreamAuthenticationScheme'
+      value: 'Jwt-or-ApiKey'
+    }
+    {
+      name: 'ManagedElsa__Handoff__SuccessPath'
+      value: '/'
+    }
+    {
+      name: 'ManagedElsa__Handoff__StateLifetime'
+      value: '00:05:00'
+    }
+    {
+      name: 'ManagedElsa__Handoff__RuntimeMaximumLifetime'
+      value: managedHandoffRuntimeMaximumLifetime
+    }
+    {
+      // Container Apps ingress terminates TLS; the handoff cookies and host authentication must observe
+      // the external HTTPS scheme. Ingress is the only route into this dedicated environment.
+      name: 'ASPNETCORE_FORWARDEDHEADERS_ENABLED'
+      value: 'true'
+    }
+  ], managedHandoffPermissionEnvironment)
+}[managedHandoffMode]
 
 resource app 'Microsoft.App/containerApps@2023-05-01' = {
   name: name
@@ -259,10 +398,7 @@ resource app 'Microsoft.App/containerApps@2023-05-01' = {
         {
           name: topology
           image: immutableImage
-          resources: {
-            cpu: json('0.5')
-            memory: '1Gi'
-          }
+          resources: consumptionResources['${cpu}/${memory}']
           env: concat([
             {
               name: 'ASPNETCORE_ENVIRONMENT'
@@ -288,7 +424,7 @@ resource app 'Microsoft.App/containerApps@2023-05-01' = {
               name: 'ELSA_TOPOLOGY'
               value: topology
             }
-          ], concat(nuplaneFeedEnvironment, featureEnvironment))
+          ], concat(nuplaneFeedEnvironment, featureEnvironment, managedHandoffEnvironment))
           probes: [
             {
               type: 'Startup'
@@ -330,8 +466,8 @@ resource app 'Microsoft.App/containerApps@2023-05-01' = {
         }
       ]
       scale: {
-        minReplicas: 0
-        maxReplicas: 1
+        minReplicas: minReplicas
+        maxReplicas: maxReplicas
       }
     }
   }

@@ -2074,8 +2074,10 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             Now.AddMinutes(12))));
     }
 
-    [Fact]
-    public async Task Azure_provider_reconciliation_persists_safe_origin_and_identity_in_EF_projection()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Azure_provider_reconciliation_persists_safe_origin_and_identity_in_EF_projection(bool declaresManagedHandoff)
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -2100,7 +2102,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             new FixedTimeProvider(Now));
         var item = await lifecycleStore.TryClaimNextAsync("resolver-worker", Now)
             ?? throw new InvalidOperationException("Expected a claimed lifecycle operation.");
-        var resolved = AzureProviderResolution(workspace.Id, accepted.Instance.Id);
+        var resolved = AzureProviderResolution(workspace.Id, accepted.Instance.Id, declaresManagedHandoff);
         var translated = AzureWorkloadPlanTranslator.Translate(
             resolved.Plan,
             new("azure-provider", "westeurope"));
@@ -2149,6 +2151,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.False(submission.Replayed);
 
         var providerOperation = Assert.Single(await operationStore.ListRunnableAsync(Now, 16));
+        Assert.Equal(declaresManagedHandoff, providerOperation.ManagedHandoff);
         await lifecycleStore.CommitProviderSubmissionAsync(new(
             workspace.Id,
             accepted.Instance.Id,
@@ -2239,6 +2242,12 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             customerProjection.IdentityBinding?.Audience);
         Assert.Equal("https://runtime.example.test/managed-elsa/handoff/callback",
             customerProjection.IdentityBinding?.CanonicalCallbackUri);
+        // The runtime serves the handoff only when the release declared it and the provider configured it;
+        // that fact, not the binding alone, decides whether Control offers to open the instance.
+        Assert.Equal(declaresManagedHandoff, persisted.CurrentDeploymentManagedHandoff);
+        Assert.Equal(declaresManagedHandoff, customerProjection.CurrentDeploymentReference?.ManagedHandoff);
+        Assert.Equal(declaresManagedHandoff, await new EfCoreManagedElsaInstanceIdentityStore(db)
+            .FindOpenableAsync(accepted.Instance.OrganizationId, accepted.Instance.Id) is not null);
         var customerJson = JsonSerializer.Serialize(customerProjection);
         Assert.DoesNotContain(foundationDeploymentId, customerJson, StringComparison.Ordinal);
         Assert.DoesNotContain(workloadDeploymentId, customerJson, StringComparison.Ordinal);
@@ -2577,7 +2586,10 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             "server-studio",
             []);
 
-    private static ElsaInstancePlanResolutionResult AzureProviderResolution(Guid workspaceId, Guid instanceId)
+    private static ElsaInstancePlanResolutionResult AzureProviderResolution(
+        Guid workspaceId,
+        Guid instanceId,
+        bool declaresManagedHandoff = false)
     {
         var baseline = SuccessfulResolution(workspaceId, instanceId);
         var baselinePlan = baseline.Plan!;
@@ -2610,7 +2622,10 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                             Repository = AzureWorkloadPlanTranslator.SupportedRepository,
                             Reference = $"{AzureWorkloadPlanTranslator.SupportedRepository}@{imageDigest}",
                             Digest = imageDigest
-                        }
+                        },
+                        Capabilities = declaresManagedHandoff
+                            ? [.. component.Capabilities, ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV1]
+                            : component.Capabilities
                     }
                 ]
             },
@@ -2628,6 +2643,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                     })
                     .ToArray()
             },
+            Capacity = baselinePlan.Capacity with { Components = GovernedTestCapacity.StandardSmall(component.Id) },
             Isolation = AzureWorkloadPlanTranslator.SupportedIsolation,
             Configuration = new(
             [

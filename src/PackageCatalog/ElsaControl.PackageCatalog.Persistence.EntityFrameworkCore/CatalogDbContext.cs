@@ -223,28 +223,48 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
     }
 
+    /// <summary>
+    /// Runs the persistence guards over the changes detected once, at the start of the pass. With automatic detection on,
+    /// every <c>ChangeTracker.Entries()</c> call rescans all tracked entities, so a long-lived context (a sync run saves
+    /// once per discovered version) would pay a full scan per guard lookup on every save. The guards therefore see the
+    /// Added, Modified and Deleted state as it stood when the save began; none depends on another guard's mutation being
+    /// detected first (a new guard that does needs an explicit <c>DetectChanges</c> before it). The caller's setting is
+    /// restored before the base save, whose own detection picks up the values the guards normalize or assign.
+    /// </summary>
     private void PrepareForSave()
     {
-        EnsureWorkspacePermissionAuditIsAppendOnly();
-        EnsureAzureOperationTransitionsAreAppendOnly();
-        EnsureAzureProviderRecoveryObservationsAreAppendOnly();
-        EnsureElsaInstanceAuditIsAppendOnly();
-        EnsureElsaInstanceDurableRowsAreNotDeleted();
-        EnsureElsaInstanceIntentRevisionsAreAppendOnly();
-        EnsureElsaInstanceLifecycleOutboxIsAppendOnly();
-        EnsureElsaInstanceResolvedPlansAreAppendOnly();
-        EnsureElsaInstanceRecoveryRequestsAreAppendOnly();
-        EnsureManagedElsaHandoffRowsAreAppendOnly();
-        EnsureBillingProviderEventsAreAppendOnly();
-        EnsureBillingLifecycleNoticesAreAppendOnly();
-        EnsureBillingCleanupsAreNotDeleted();
-        EnsureBillingSubscriptionsAreConsistent();
-        EnsureGovernedReleaseCatalogIsImmutable();
-        ValidateManagedElsaHandoffRows();
-        ValidateAzureProviderRecoveryObservations();
-        ValidateElsaInstancePersistence();
-        EnsureOrganizationsForNewWorkspaces();
-        ValidateBillingPersistence();
+        var autoDetectChanges = ChangeTracker.AutoDetectChangesEnabled;
+        if (autoDetectChanges)
+            ChangeTracker.DetectChanges();
+
+        ChangeTracker.AutoDetectChangesEnabled = false;
+        try
+        {
+            EnsureWorkspacePermissionAuditIsAppendOnly();
+            EnsureAzureOperationTransitionsAreAppendOnly();
+            EnsureAzureProviderRecoveryObservationsAreAppendOnly();
+            EnsureElsaInstanceAuditIsAppendOnly();
+            EnsureElsaInstanceDurableRowsAreNotDeleted();
+            EnsureElsaInstanceIntentRevisionsAreAppendOnly();
+            EnsureElsaInstanceLifecycleOutboxIsAppendOnly();
+            EnsureElsaInstanceResolvedPlansAreAppendOnly();
+            EnsureElsaInstanceRecoveryRequestsAreAppendOnly();
+            EnsureManagedElsaHandoffRowsAreAppendOnly();
+            EnsureBillingProviderEventsAreAppendOnly();
+            EnsureBillingLifecycleNoticesAreAppendOnly();
+            EnsureBillingCleanupsAreNotDeleted();
+            EnsureBillingSubscriptionsAreConsistent();
+            EnsureGovernedReleaseCatalogIsImmutable();
+            ValidateManagedElsaHandoffRows();
+            ValidateAzureProviderRecoveryObservations();
+            ValidateElsaInstancePersistence();
+            EnsureOrganizationsForNewWorkspaces();
+            ValidateBillingPersistence();
+        }
+        finally
+        {
+            ChangeTracker.AutoDetectChangesEnabled = autoDetectChanges;
+        }
     }
 
     private void ValidateBillingPersistence()
@@ -754,9 +774,22 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             instance.CurrentDeploymentId = OptionalSafeReference(instance.CurrentDeploymentId, nameof(instance.CurrentDeploymentId), 128);
             instance.CurrentDeploymentRevisionId = OptionalSafeReference(instance.CurrentDeploymentRevisionId, nameof(instance.CurrentDeploymentRevisionId), 128);
             var endpointProperty = entry.Property(x => x.CurrentDeploymentEndpointUri);
+            var allowLegacyEndpoint = entry.State == EntityState.Modified && !endpointProperty.IsModified;
+            var persistedEndpoint = instance.CurrentDeploymentEndpointUri;
             instance.CurrentDeploymentEndpointUri = OptionalManagedEndpointOrigin(
                 instance.CurrentDeploymentEndpointUri,
-                allowLegacyInvalid: entry.State == EntityState.Modified && !endpointProperty.IsModified);
+                allowLegacyInvalid: allowLegacyEndpoint);
+            if (instance.CurrentDeploymentManagedHandoff &&
+                (instance.CurrentDeploymentId is null || instance.CurrentDeploymentEndpointUri is null))
+            {
+                // A legacy-invalid endpoint dropped above takes the handoff bound to it along; any other
+                // handoff without a current deployment endpoint is an invalid write.
+                if (allowLegacyEndpoint && persistedEndpoint is not null && instance.CurrentDeploymentEndpointUri is null &&
+                    !entry.Property(x => x.CurrentDeploymentManagedHandoff).IsModified)
+                    instance.CurrentDeploymentManagedHandoff = false;
+                else
+                    throw new InvalidOperationException("A managed handoff must belong to a current deployment with an endpoint.");
+            }
             instance.PlacementAssignmentId = OptionalSafeReference(instance.PlacementAssignmentId, nameof(instance.PlacementAssignmentId), 128);
             instance.ElsaTenantId = OptionalSafeReference(instance.ElsaTenantId, nameof(instance.ElsaTenantId), 128);
             var tenantAudience = OptionalAudience(instance.ElsaTenantAudience, nameof(instance.ElsaTenantAudience));

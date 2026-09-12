@@ -48,8 +48,10 @@ public sealed class AzureElsaInstanceProviderTests
         });
     }
 
-    [Fact]
-    public async Task Healthy_observation_projects_only_safe_provider_neutral_deployment_identity()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Healthy_observation_projects_only_safe_provider_neutral_deployment_identity(bool managedHandoff)
     {
         var workspaceId = Guid.Parse("11111111-1111-1111-1111-111111111111");
         var instanceId = Guid.Parse("22222222-2222-2222-2222-222222222222");
@@ -60,7 +62,8 @@ public sealed class AzureElsaInstanceProviderTests
             Status = AzureProviderOperationStatus.Succeeded,
             AttemptNumber = 2,
             Health = AzureProviderHealth.Healthy,
-            Endpoint = "https://runtime.example.test/"
+            Endpoint = "https://runtime.example.test/",
+            ManagedHandoff = managedHandoff
         };
         var provider = new AzureElsaInstanceProvider(
             new CapturingOperationService(operation),
@@ -84,6 +87,7 @@ public sealed class AzureElsaInstanceProviderTests
         Assert.Equal(operation.OperationIdentity, observation.CurrentDeploymentReference?.DeploymentId);
         Assert.Equal("attempt-2", observation.CurrentDeploymentReference?.RevisionId);
         Assert.Equal("https://runtime.example.test", observation.CurrentDeploymentReference?.EndpointUri);
+        Assert.Equal(managedHandoff, observation.CurrentDeploymentReference?.ManagedHandoff);
     }
 
     [Theory]
@@ -388,6 +392,42 @@ public sealed class AzureElsaInstanceProviderTests
         Assert.Equal(ElsaInstanceProviderSubmissionFailureKind.Rejected, exception.Kind);
         Assert.Empty(service.Submissions);
         Assert.DoesNotContain("Customer.SecretPackage", exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(1, 1, 500, 1024, true)]
+    [InlineData(1, 3, 1000, 2048, true)]
+    [InlineData(1, 1, 500, 2048, false)]
+    public async Task Submission_carries_the_resolved_capacity_or_is_rejected_without_a_Container_Apps_mapping(
+        int minReplicas, int maxReplicas, int cpuMillicores, int memoryMiB, bool mappable)
+    {
+        var workspaceId = Guid.NewGuid();
+        var operationId = Guid.NewGuid();
+        var translated = Translate("5.0", "5.0.0");
+        var service = new CapturingOperationService(CreateOperation(workspaceId, translated, operationId));
+        var provider = new AzureElsaInstanceProvider(service, new CapturingOperationStore(), new InMemoryAssignmentStore(), options: EnabledOptions());
+        var request = CreateSubmission(workspaceId, Guid.NewGuid(), operationId, translated);
+        request = request with
+        {
+            Plan = request.Plan with
+            {
+                Capacity = request.Plan.Capacity with
+                {
+                    Components = [new("runtime", minReplicas, maxReplicas, cpuMillicores, memoryMiB)]
+                }
+            }
+        };
+
+        if (mappable)
+        {
+            await provider.SubmitAsync(request);
+            Assert.Equal(new AzureWorkloadCapacity(minReplicas, maxReplicas, cpuMillicores, memoryMiB), Assert.Single(service.Submissions).Plan.Capacity);
+            return;
+        }
+
+        var exception = await Assert.ThrowsAsync<ElsaInstanceProviderSubmissionException>(() => provider.SubmitAsync(request));
+        Assert.Equal(ElsaInstanceProviderSubmissionFailureKind.Rejected, exception.Kind);
+        Assert.Empty(service.Submissions);
     }
 
     [Fact]

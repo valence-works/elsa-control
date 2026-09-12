@@ -135,6 +135,36 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
     }
 
     [Fact]
+    public async Task A_redeploy_without_the_managed_handoff_does_not_inherit_the_previous_handoff()
+    {
+        var (store, accepted) = await RecoveryTargetAsync();
+        _ = await Service(store, new RecordingPort(Converged(
+                "observation-configured",
+                new("deployment-1", "attempt-1", "https://managed.example.test", managedHandoff: true))))
+            .ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+        var configured = store.Instances.Single();
+        Assert.True(configured.CurrentDeploymentReference!.ManagedHandoff);
+
+        var restarted = await new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now.AddMinutes(1)))
+            .RestartAsync(new(WorkspaceId, configured.Id, configured.Version, "redeploy-without-handoff"));
+        store.MarkRecoveryRequired(restarted.Operation.Id);
+        _ = await Service(store, new RecordingPort(Converged(
+                "observation-unconfigured",
+                new("deployment-2", "attempt-1", "https://managed.example.test"))))
+            .ReconcileAsync(WorkspaceId, restarted.Operation.Id);
+
+        Assert.False(store.Instances.Single().CurrentDeploymentReference!.ManagedHandoff);
+
+        static ElsaInstanceProviderObservation Converged(string correlationId, ElsaCurrentDeploymentReference deployment) => new(
+            ElsaInstanceProviderObservationKind.Confirmed,
+            ElsaObservedLifecycle.Ready,
+            ElsaInstanceProviderHealthGate.Passed,
+            correlationId,
+            retryEvidence: null,
+            currentDeploymentReference: deployment);
+    }
+
+    [Fact]
     public async Task Read_only_deleted_observation_cannot_tombstone_a_deleting_instance()
     {
         var (store, accepted) = await RecoveryTargetAsync(ElsaDesiredLifecycle.Deleting);

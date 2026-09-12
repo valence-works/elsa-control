@@ -374,6 +374,8 @@ public static class AzureProviderOperationValidation
         if (request.SqlQuartzPackageVersion is not null && !IsSafePackageVersion(request.SqlQuartzPackageVersion))
             errors.Add("sqlQuartzPackageVersion.invalid");
         if ((request.ReleaseManifestReference is null) != (request.ReleaseManifestSignatureReference is null)) errors.Add("releaseManifestReferences.incomplete");
+        if (request.Capacity is not null && AzureContainerAppsCapacity.Map(request.Capacity) is null) errors.Add("capacity.invalid");
+        if (request.ManagedHandoff && request.Capacity is not { MinReplicas: 1, MaxReplicas: 1 }) errors.Add("managedHandoff.replicasUnsupported");
         ValidateSecretReferences(request.SecretReferences, errors);
 
         BoundedSafe(request.TargetKey, 128, "target", errors);
@@ -427,8 +429,27 @@ public static class AzureProviderOperationValidation
                 normalized.ProviderScopeFingerprint,
                 secretReferences = normalized.SecretReferences
             });
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            WithManagedHandoff(WithCapacity(canonical, normalized.Capacity), normalized.ManagedHandoff)))).ToLowerInvariant();
     }
+
+    /// <summary>
+    /// The managed handoff joined the persisted projection after operations were retained. None of
+    /// those configured it, so the suffix is only present when the request does and they keep hashing
+    /// to exactly the value they were stored with.
+    /// </summary>
+    private static string WithManagedHandoff(string canonical, bool managedHandoff) =>
+        managedHandoff ? $"{canonical}|managed-handoff:v1" : canonical;
+
+    /// <summary>
+    /// Capacity joined the persisted projection after operations were already retained. Those
+    /// rows carry none and must keep hashing to exactly the value they were stored with, so the
+    /// capacity suffix is only present when the request has one.
+    /// </summary>
+    private static string WithCapacity(string canonical, AzureWorkloadCapacity? capacity) =>
+        capacity is null
+            ? canonical
+            : $"{canonical}|capacity:{capacity.MinReplicas}/{capacity.MaxReplicas}/{capacity.CpuMillicores}/{capacity.MemoryMiB}";
 
     public static string ComputeOperationIdentity(AzureProviderOperationRequest request)
     {

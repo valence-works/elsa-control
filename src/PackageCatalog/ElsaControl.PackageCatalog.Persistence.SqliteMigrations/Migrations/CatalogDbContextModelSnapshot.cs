@@ -1202,6 +1202,18 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("TEXT");
 
+                    b.Property<int?>("CapacityCpuMillicores")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("CapacityMaxReplicas")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("CapacityMemoryMiB")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("CapacityMinReplicas")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long>("CheckpointSequence")
                         .HasColumnType("INTEGER");
 
@@ -1295,6 +1307,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("TEXT");
+
+                    b.Property<bool>("ManagedHandoff")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("OperationIdentity")
                         .IsRequired()
@@ -2711,6 +2726,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<string>("CurrentDeploymentId")
                         .HasMaxLength(128)
                         .HasColumnType("TEXT");
+
+                    b.Property<bool>("CurrentDeploymentManagedHandoff")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("CurrentDeploymentRevisionId")
                         .HasMaxLength(128)

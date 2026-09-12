@@ -5,6 +5,7 @@ using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.RuntimeBuilder.Abstractions.ReleaseCatalog;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Api.Workspace;
 
@@ -14,6 +15,8 @@ namespace ElsaControl.Api.Workspace;
 /// </summary>
 public static class ManagedElsaInstanceEndpoints
 {
+    internal const string HandoffUnavailableReason = "Managed sign-in is not configured for this instance's current deployment.";
+
     private static readonly ManagedElsaInstanceLaunchProfile InitialLaunchProfile = new(
         "West Europe Dedicated", "Managed hosting in West Europe.",
         "managed", "westeurope", "dedicated", "standard-small", "public", "managed");
@@ -525,14 +528,14 @@ public static class ManagedElsaInstanceEndpoints
     {
         endpoints.MapGet("/api/workspaces/{workspaceId:guid}/managed-elsa/instances", async (
             Guid workspaceId, HttpContext context, WorkspacePermissionService permissions,
-            IManagedElsaInstanceCatalog instances, CancellationToken cancellationToken) =>
+            IManagedElsaInstanceCatalog instances, IOptions<ManagedElsaHandoffOptions> handoff, CancellationToken cancellationToken) =>
         {
             context.Response.Headers.CacheControl = "private, no-store";
             context.Response.Headers.Pragma = "no-cache";
             var canOpen = (await permissions.GetEffectivePermissionsAsync(workspaceId, context.GetWorkspaceAccess().AccountId, cancellationToken))
                 .Has(ManagedElsaInstancePermissions.Open);
             var summaries = await instances.ListAsync(workspaceId, cancellationToken);
-            return Results.Ok(summaries.Select(summary => ToLegacyResponse(summary, canOpen)).ToList());
+            return Results.Ok(summaries.Select(summary => ToLegacyResponse(summary, canOpen, handoff.Value.Enabled)).ToList());
         }).WithTags("Managed Elsa Instances").RequireWorkspaceAccess();
     }
 
@@ -591,12 +594,15 @@ public static class ManagedElsaInstanceEndpoints
                               candidate.WorkspaceId == workspaceId && candidate.InstanceId == instance.Id
             ? candidate
             : null;
-        var openable = canOpen && healthy && currentIdentity is not null;
+        // Open lands on the runtime's own handoff endpoint, which exists only when the provider configured the
+        // current deployment for it (a release declaring managed-elsa-handoff-v1, deployed with Control's inputs).
+        var handoffConfigured = instance.CurrentDeploymentReference?.ManagedHandoff == true;
+        var openable = canOpen && healthy && handoffConfigured && currentIdentity is not null;
         return new ManagedElsaInstanceResponse(instance.OrganizationId, instance.Id, instance.Name, instance.Slug,
             instance.DesiredLifecycle, instance.ObservedLifecycle, instance.Health, openable,
             openable ? currentIdentity!.Audience : null,
             openable ? currentIdentity!.CallbackUri.AbsoluteUri : null,
-            !canOpen ? "Not authorized to open this instance." : !healthy ? "This instance is not currently available." : currentIdentity is null ? "The current identity binding is unavailable." : null)
+            !canOpen ? "Not authorized to open this instance." : !healthy ? "This instance is not currently available." : !handoffConfigured ? HandoffUnavailableReason : currentIdentity is null ? "The current identity binding is unavailable." : null)
         {
             Version = instance.Version,
             ETag = ETag(instance.Version),
@@ -608,7 +614,7 @@ public static class ManagedElsaInstanceEndpoints
                 currentIdentity!.Audience, currentIdentity.CallbackUri.AbsoluteUri,
                 currentIdentity.CallbackUri.GetLeftPart(UriPartial.Authority), currentIdentity.BindingVersion,
                 currentIdentity.ChangedAt) : null,
-            IdentityBindingState = !canOpen ? "not-authorized" : !healthy ? "instance-unavailable" : currentIdentity is null ? "identity-unavailable" : "available",
+            IdentityBindingState = !canOpen ? "not-authorized" : !healthy ? "instance-unavailable" : !handoffConfigured ? "handoff-unavailable" : currentIdentity is null ? "identity-unavailable" : "available",
             Intent = instance.Intent,
             Links = new Dictionary<string, string>
             {
@@ -635,10 +641,10 @@ public static class ManagedElsaInstanceEndpoints
     internal static ElsaInstanceAuditEventSummary RedactAudit(ElsaInstanceAuditEventSummary audit) =>
         audit with { OperatorSubject = null };
 
-    private static ManagedElsaInstanceResponse ToLegacyResponse(ManagedElsaInstanceSummary summary, bool canOpen)
+    private static ManagedElsaInstanceResponse ToLegacyResponse(ManagedElsaInstanceSummary summary, bool canOpen, bool controlHandoffEnabled)
     {
         var healthy = summary.DesiredLifecycle == ElsaDesiredLifecycle.Running && summary.ObservedLifecycle == ElsaObservedLifecycle.Ready && summary.Health == ElsaInstanceHealth.Healthy;
-        var openable = canOpen && healthy && summary.Audience is not null && summary.CallbackUri is not null;
+        var openable = canOpen && healthy && controlHandoffEnabled && summary.Audience is not null && summary.CallbackUri is not null;
         return new ManagedElsaInstanceResponse(summary.OrganizationId, summary.InstanceId, summary.Name, summary.Slug,
             summary.DesiredLifecycle, summary.ObservedLifecycle, summary.Health, openable,
             openable ? summary.Audience : null, openable ? summary.CallbackUri!.OriginalString : null,

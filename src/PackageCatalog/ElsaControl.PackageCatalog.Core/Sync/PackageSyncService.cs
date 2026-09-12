@@ -30,6 +30,7 @@ public sealed class PackageSyncService(
     private const string NotReverifiedMessage = "Already indexed; the stored manifest was not re-verified in this run.";
     private const string NoManifestMessage = "Package does not contain elsa-package.json.";
     private const string NoManifestNotRereadMessage = "Previously found without elsa-package.json; not re-read in this run.";
+    internal const string InterruptedByRestartMessage = "Interrupted by an API restart.";
 
     // A verification counts once it has run to the end over all enabled sources. Runs that completed with item errors count
     // too: their failures stay visible on the run and its sources, and one persistently failing version must not turn every
@@ -166,6 +167,21 @@ public sealed class PackageSyncService(
             await ExecuteRunAsync(run, () => sources.ListAsync(cancellationToken), cancellationToken, addRun: false);
         }
     }
+
+    /// <summary>
+    /// Marks every run still Running with a StartedAt before <paramref name="processStartedAt"/> as Failed, so a run
+    /// left behind by a process that no longer exists does not stay Running forever.
+    /// </summary>
+    /// <remarks>
+    /// Safe to call once at this process's startup, before the scheduler's first run or any manual run: since
+    /// <see cref="SyncConcurrencyGuard"/> only guards one run at a time within this process, and today only one API
+    /// instance runs at a time, a run still Running from before this process started can only be one that instance's
+    /// predecessor left behind, never one racing it. A run this process starts always gets a StartedAt at or after
+    /// <paramref name="processStartedAt"/>, so it is never matched here, however early or late the caller runs this
+    /// relative to the scheduler or the admin sync endpoints.
+    /// </remarks>
+    public Task<int> ReconcileInterruptedRunsAsync(DateTimeOffset processStartedAt, CancellationToken cancellationToken = default) =>
+        syncRuns.ReconcileInterruptedRunsAsync(processStartedAt, _timeProvider.GetUtcNow(), InterruptedByRestartMessage, cancellationToken);
 
     public async Task MarkManualWorkItemFailedAsync(PackageSyncWorkItem workItem, string error, CancellationToken cancellationToken = default)
     {
@@ -368,7 +384,7 @@ public sealed class PackageSyncService(
             }
 
             package.Versions.Add(packageVersion);
-            UpdatePackageDisplayName(package);
+            await UpdatePackageDisplayNameAsync(package, packageVersion, cancellationToken);
 
             if (await catalog.GetPackageAsync(source.Id, discovered.PackageId, cancellationToken) is null)
                 await catalog.AddPackageAsync(package, cancellationToken);
@@ -456,17 +472,26 @@ public sealed class PackageSyncService(
                 ? ValidationStatus.Valid
                 : ValidationStatus.Invalid;
 
-    private static void UpdatePackageDisplayName(Package package)
+    // The stored versions come from the catalog, not from package.Versions: that collection holds only the versions the
+    // context happens to track, so an older version indexed in a fresh context would otherwise decide the display name.
+    private async Task UpdatePackageDisplayNameAsync(Package package, PackageVersion indexedVersion, CancellationToken cancellationToken)
     {
-        var latestValidVersion = package.Versions
-            .Where(x => x.ValidationStatus == ValidationStatus.Valid)
-            .OrderByDescending(x => x.Version, Comparer<string>.Create(CompareVersions))
+        IEnumerable<string> validVersions = await catalog.GetValidVersionsAsync(package.Id, cancellationToken);
+        if (indexedVersion.ValidationStatus == ValidationStatus.Valid)
+            validVersions = validVersions.Append(indexedVersion.Version);
+
+        var latestValidVersion = validVersions
+            .OrderByDescending(x => x, Comparer<string>.Create(CompareVersions))
             .FirstOrDefault();
 
         if (latestValidVersion is null)
             return;
 
-        var manifest = JsonSerializer.Deserialize<ElsaPackageManifest>(latestValidVersion.ManifestJson, ManifestJsonSerializerOptions.Default);
+        var manifestJson = latestValidVersion == indexedVersion.Version
+            ? indexedVersion.ManifestJson
+            : await catalog.GetManifestJsonAsync(package.Id, latestValidVersion, cancellationToken)
+              ?? throw new InvalidOperationException($"The manifest of {package.PackageId} {latestValidVersion} is no longer stored.");
+        var manifest = JsonSerializer.Deserialize<ElsaPackageManifest>(manifestJson, ManifestJsonSerializerOptions.Default);
         package.DisplayName = ResolveManifestDisplayName(package, manifest);
     }
 
@@ -542,8 +567,15 @@ public sealed class PackageSyncService(
 
 public interface ISyncCatalogStore
 {
+    /// <summary>The package, without a guarantee that <see cref="Package.Versions"/> holds its stored versions.</summary>
     Task<Package?> GetPackageAsync(Guid sourceId, string packageId, CancellationToken cancellationToken = default);
     Task<PackageVersion?> GetPackageVersionAsync(Guid packageId, string version, CancellationToken cancellationToken = default);
+
+    /// <summary>The version numbers of the package's stored versions whose validation status is valid.</summary>
+    Task<IReadOnlyList<string>> GetValidVersionsAsync(Guid packageId, CancellationToken cancellationToken = default);
+
+    /// <summary>The manifest of a stored version of the package, or null when that version is not stored.</summary>
+    Task<string?> GetManifestJsonAsync(Guid packageId, string version, CancellationToken cancellationToken = default);
     Task AddPackageAsync(Package package, CancellationToken cancellationToken = default);
     Task AddValidationResultAsync(ManifestValidationResultRecord result, CancellationToken cancellationToken = default);
     Task SaveChangesAsync(CancellationToken cancellationToken = default);
@@ -557,6 +589,13 @@ public interface ISyncRunStore
 
     /// <summary>The versions the run read without finding elsa-package.json: its Invalid items that stored no package version.</summary>
     Task<IReadOnlySet<SyncRunPackageVersionKey>> GetVersionsFoundWithoutManifestAsync(Guid runId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Marks every run still <see cref="SyncRunStatus.Running"/> with a <see cref="SyncRun.StartedAt"/> before
+    /// <paramref name="processStartedAt"/> as <see cref="SyncRunStatus.Failed"/>, with <paramref name="completedAt"/> and
+    /// <paramref name="message"/>. Returns the number of runs reconciled.
+    /// </summary>
+    Task<int> ReconcileInterruptedRunsAsync(DateTimeOffset processStartedAt, DateTimeOffset completedAt, string message, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyDictionary<Guid, SyncRunListMetadata>> GetListMetadataAsync(IReadOnlyCollection<Guid> runIds, CancellationToken cancellationToken = default);
     Task<SyncRunDeletionCandidate?> GetDeletionCandidateAsync(Guid id, CancellationToken cancellationToken = default);

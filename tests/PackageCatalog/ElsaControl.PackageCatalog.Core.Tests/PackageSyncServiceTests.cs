@@ -294,6 +294,30 @@ public sealed partial class PackageSyncServiceTests
         Assert.Equal("Sync canceled by operator.", run.Error);
     }
 
+    [Fact]
+    public async Task Reconciles_interrupted_runs_using_the_process_clock_and_a_value_free_message()
+    {
+        var now = new DateTimeOffset(2026, 9, 1, 12, 0, 0, TimeSpan.Zero);
+        var processStartedAt = now.AddMinutes(-1);
+        var syncRuns = new InMemorySyncRunStore();
+        var stale = new SyncRun { Trigger = SyncRunTrigger.Scheduled, Status = SyncRunStatus.Running, StartedAt = processStartedAt.AddHours(-1) };
+        syncRuns.Runs.Add(stale);
+        var service = CreateService(
+            new InMemorySourceStore([]),
+            new InMemorySyncCatalogStore(),
+            syncRuns,
+            new FakeDiscovery([]),
+            new FakeDownloader("{}"),
+            timeProvider: new FixedTimeProvider(now));
+
+        var reconciledCount = await service.ReconcileInterruptedRunsAsync(processStartedAt);
+
+        Assert.Equal(1, reconciledCount);
+        Assert.Equal(SyncRunStatus.Failed, stale.Status);
+        Assert.Equal(now, stale.CompletedAt);
+        Assert.Equal("Interrupted by an API restart.", stale.Error);
+    }
+
     private static PackageSyncService CreateService(
         IPackageSourceStore sources,
         ISyncCatalogStore catalog,
@@ -342,7 +366,19 @@ public sealed partial class PackageSyncServiceTests
             Task.FromResult(Packages.SingleOrDefault(x => x.SourceId == sourceId && x.PackageId == packageId));
 
         public Task<PackageVersion?> GetPackageVersionAsync(Guid packageId, string version, CancellationToken cancellationToken = default) =>
-            Task.FromResult(Packages.SelectMany(x => x.Versions).SingleOrDefault(x => x.PackageId == packageId && x.Version == version));
+            Task.FromResult(FindVersion(packageId, version));
+
+        public Task<IReadOnlyList<string>> GetValidVersionsAsync(Guid packageId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<string>>(Packages.SelectMany(x => x.Versions)
+                .Where(x => x.PackageId == packageId && x.ValidationStatus == ValidationStatus.Valid)
+                .Select(x => x.Version)
+                .ToList());
+
+        public Task<string?> GetManifestJsonAsync(Guid packageId, string version, CancellationToken cancellationToken = default) =>
+            Task.FromResult(FindVersion(packageId, version)?.ManifestJson);
+
+        private PackageVersion? FindVersion(Guid packageId, string version) =>
+            Packages.SelectMany(x => x.Versions).SingleOrDefault(x => x.PackageId == packageId && x.Version == version);
 
         public Task AddPackageAsync(Package package, CancellationToken cancellationToken = default)
         {
@@ -367,6 +403,18 @@ public sealed partial class PackageSyncServiceTests
                 .Where(x => x.SyncRunId == runId && x.Status == SyncRunItemStatus.Invalid && x.PackageVersionId is null)
                 .Select(x => new SyncRunPackageVersionKey(x.SourceId!.Value, x.PackageId!, x.Version!))
                 .ToHashSet());
+        public Task<int> ReconcileInterruptedRunsAsync(DateTimeOffset processStartedAt, DateTimeOffset completedAt, string message, CancellationToken cancellationToken = default)
+        {
+            var matches = Runs.Where(x => x.Status == SyncRunStatus.Running && x.StartedAt < processStartedAt).ToList();
+            foreach (var run in matches)
+            {
+                run.Status = SyncRunStatus.Failed;
+                run.CompletedAt = completedAt;
+                run.Error = message;
+            }
+
+            return Task.FromResult(matches.Count);
+        }
         public Task<IReadOnlyDictionary<Guid, SyncRunListMetadata>> GetListMetadataAsync(IReadOnlyCollection<Guid> runIds, CancellationToken cancellationToken = default)
         {
             var itemMetadata = Items
@@ -476,5 +524,10 @@ public sealed partial class PackageSyncServiceTests
             var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(json))).ToLowerInvariant();
             return PackageManifestReadResult.Found("elsa-package.json", json, hash, []);
         }
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
     }
 }

@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using ElsaControl.Deployment.Abstractions.Instances;
 
 namespace ElsaControl.Deployment.Azure;
 
@@ -73,6 +74,9 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         {
             return Failed(command, CurrentPhase(command.Step), "azure.runner.scope-invalid", exception.Message);
         }
+
+        if (BuildsTowardWorkload(command.Step) && CapacityFailure(command, CurrentPhase(command.Step)) is { } capacityFailure)
+            return capacityFailure;
 
         try
         {
@@ -469,6 +473,9 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         AzureProviderRunnerCommand command,
         CancellationToken cancellationToken)
     {
+        if (ManagedHandoffFailure(command, AzureProviderOperationPhase.FoundationSubmitted) is { } handoffFailure)
+            return handoffFailure;
+
         var resources = command.Resources with
         {
             ResourceGroupName = ResourceGroupName(command),
@@ -971,6 +978,9 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         AzureProviderRunnerCommand command,
         CancellationToken cancellationToken)
     {
+        if (ManagedHandoffFailure(command, AzureProviderOperationPhase.WorkloadReady) is { } handoffFailure)
+            return handoffFailure;
+
         var missing = RequireRegistry(command.Resources);
         if (missing is not null)
             return Failed(command, AzureProviderOperationPhase.WorkloadReady, "azure.workload.foundation-missing", missing);
@@ -1006,6 +1016,9 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         {
             return Failed(command, AzureProviderOperationPhase.WorkloadReady, "azure.workload.output-invalid", exception.Message);
         }
+        if (!HasExpectedManagedHandoffCallback(command, output.Value!.Value))
+            return Failed(command, AzureProviderOperationPhase.WorkloadReady, "azure.handoff.callback-mismatch",
+                "The workload handoff callback is not the callback of its verified endpoint origin.", resources);
 
         var adminReady = await EnsureExactSqlBootstrapAdminAsync(command, allowMissingServer: false, cancellationToken: cancellationToken);
         if (adminReady is null)
@@ -1882,6 +1895,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             $"adminPasswordSecretName={AdminPasswordSecretName}", $"adminUsername={_options.RuntimeAdminUsername}",
             $"elsaVersion={command.Plan.ElsaVersion}", ..ReleaseIdentityArguments(command),
             $"sqlWorkflowPackageVersion={command.Plan.SqlWorkflowPackageVersion}", $"sqlQuartzPackageVersion={command.Plan.SqlQuartzPackageVersion}",
+            ..CapacityArguments(command), ..ManagedHandoffArguments(command),
             $"templateFingerprint={command.Context.TemplateFingerprint}", "deployWorkload=false", "--query", "properties.outputs", "--output", "json", "--only-show-errors"];
 
     private IReadOnlyList<string> AcrDeploymentArguments(AzureProviderRunnerCommand command, string identityId, string principalId, string deploymentName) =>
@@ -1901,6 +1915,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             $"adminPasswordSecretName={AdminPasswordSecretName}", $"adminUsername={_options.RuntimeAdminUsername}",
             $"elsaVersion={command.Plan.ElsaVersion}", ..ReleaseIdentityArguments(command),
             $"sqlWorkflowPackageVersion={command.Plan.SqlWorkflowPackageVersion}", $"sqlQuartzPackageVersion={command.Plan.SqlQuartzPackageVersion}",
+            ..CapacityArguments(command), ..ManagedHandoffArguments(command),
             $"templateFingerprint={command.Context.TemplateFingerprint}", "deployWorkload=true", $"workloadRevisionSuffix={revision}",
             $"stableTrafficRevisionName={stable ?? string.Empty}", "--query", "properties.outputs", "--output", "json", "--only-show-errors"];
 
@@ -2110,6 +2125,18 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         new(AzureProviderRunnerOutcome.Uncertain, phase, resources ?? command.Resources, AzureProviderHealth.Unknown, null,
             AzureProviderSafeDiagnostics.Failure(command.Step, AzureProviderRunnerOutcome.Uncertain, code, processFailureKind), code, message);
 
+    /// <summary>
+    /// Steps that create or change resources on the way to a workload deployment. They all need
+    /// the plan capacity, so an operation without one (for example a legacy row restored after
+    /// the capacity migration) fails before its first Azure call instead of part-way through.
+    /// Cleanup, temporary-firewall cleanup, health, promotion and stable-traffic restore stay
+    /// available so an existing instance remains deletable and its traffic recoverable.
+    /// </summary>
+    private static bool BuildsTowardWorkload(AzureProviderRunnerStep step) => step is
+        AzureProviderRunnerStep.Foundation or AzureProviderRunnerStep.AcrPull or AzureProviderRunnerStep.SeedSecrets or
+        AzureProviderRunnerStep.SqlBootstrap or AzureProviderRunnerStep.SqlFirewallCreate or
+        AzureProviderRunnerStep.SqlBootstrapScript or AzureProviderRunnerStep.Workload;
+
     private static AzureProviderOperationPhase CurrentPhase(AzureProviderRunnerStep step) => step switch
     {
         AzureProviderRunnerStep.Foundation or AzureProviderRunnerStep.AcrPull or AzureProviderRunnerStep.SeedSecrets => AzureProviderOperationPhase.FoundationSubmitted,
@@ -2303,6 +2330,97 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private string[] ReleaseIdentityArguments(AzureProviderRunnerCommand command) => _options.DisposableProofMode
         ? []
         : [$"releaseLine={command.Plan.ReleaseLine}", $"releaseFeedServiceIndex={_options.NormalizeReleaseFeedServiceIndex()}"];
+
+    /// <summary>
+    /// The production template sizes the workload from the plan alone and has no capacity
+    /// defaults. A plan without an exact Container Apps mapping fails before any Azure call.
+    /// The disposable-proof template keeps its own cost-boxed sizing and takes no capacity.
+    /// </summary>
+    private AzureProviderRunnerResult? CapacityFailure(AzureProviderRunnerCommand command, AzureProviderOperationPhase phase) =>
+        _options.DisposableProofMode || AzureContainerAppsCapacity.Map(command.Plan.Capacity) is not null
+            ? null
+            : command.Plan.Capacity is null
+                ? Failed(command, phase, "azure.capacity.required", "The plan carries no workload capacity for the production template.")
+                : Failed(command, phase, "azure.capacity.unsupported", "The plan capacity has no exact Azure Container Apps consumption mapping.");
+
+    private string[] CapacityArguments(AzureProviderRunnerCommand command)
+    {
+        if (_options.DisposableProofMode)
+            return [];
+        var capacity = command.Plan.Capacity;
+        var size = AzureContainerAppsCapacity.Map(capacity)
+            ?? throw new InvalidOperationException("The plan capacity has no exact Azure Container Apps consumption mapping.");
+        return
+        [
+            $"workloadMinReplicas={capacity!.MinReplicas.ToString(CultureInfo.InvariantCulture)}",
+            $"workloadMaxReplicas={capacity.MaxReplicas.ToString(CultureInfo.InvariantCulture)}",
+            $"workloadCpu={size.Cpu}",
+            $"workloadMemory={size.Memory}"
+        ];
+    }
+
+    /// <summary>
+    /// A release that declares the managed handoff is deployed only with Control's handoff inputs, so the
+    /// runtime can never be created with the release's handoff capability but no configuration for it. The
+    /// disposable-proof template has no handoff and ignores the declaration.
+    /// </summary>
+    private AzureProviderRunnerResult? ManagedHandoffFailure(AzureProviderRunnerCommand command, AzureProviderOperationPhase phase) =>
+        _options.DisposableProofMode || !command.Plan.ManagedHandoff
+            ? null
+            : _options.ManagedHandoff is null
+                ? Failed(command, phase, "azure.handoff.configuration-required", "The release declares the managed handoff but Control supplied no handoff configuration.")
+                : command.Plan.Capacity is not { MinReplicas: 1, MaxReplicas: 1 }
+                    ? Failed(command, phase, "azure.handoff.replicas-unsupported", "The managed handoff requires exactly one always-running replica.")
+                    : null;
+
+    /// <summary>
+    /// Production deployments always state the handoff: disabled explicitly, or enabled with the instance
+    /// identity and Control's inputs. The audience comes from Control's identity-binding rule; the callback is
+    /// derived by the template from the workload origin and verified after deployment.
+    /// </summary>
+    private string[] ManagedHandoffArguments(AzureProviderRunnerCommand command)
+    {
+        if (_options.DisposableProofMode)
+            return [];
+        if (!command.Plan.ManagedHandoff)
+            return ["managedHandoffEnabled=false"];
+        var handoff = _options.ManagedHandoff
+            ?? throw new InvalidOperationException("The managed handoff configuration is unavailable.");
+        return
+        [
+            "managedHandoffEnabled=true",
+            $"managedHandoffInstanceId={command.Context.InstanceId:D}",
+            $"managedHandoffAudience={ElsaInstanceIdentityBinding.AudienceFor(command.Context.InstanceId)}",
+            $"managedHandoffControlBaseUrl={handoff.ControlBaseUrl}",
+            $"managedHandoffControlContinuationUrl={handoff.ControlContinuationUrl}",
+            $"managedHandoffRuntimeMaximumLifetime={handoff.RuntimeMaximumLifetimeValue}",
+            $"managedHandoffRuntimePermissions={JsonSerializer.Serialize(handoff.RuntimePermissions)}"
+        ];
+    }
+
+    /// <summary>
+    /// Control binds the instance's handoff callback to the verified endpoint origin. The runtime is only
+    /// reported as configured when the callback the template gave it is exactly that callback; a disabled
+    /// handoff must carry none.
+    /// </summary>
+    private bool HasExpectedManagedHandoffCallback(AzureProviderRunnerCommand command, DeploymentOutputs outputs)
+    {
+        if (_options.DisposableProofMode)
+            return true;
+        var callback = outputs.String("managedHandoffCallbackUri") ?? "";
+        if (!command.Plan.ManagedHandoff)
+            return callback.Length == 0;
+        var endpoint = outputs.String("containerAppEndpoint");
+        try
+        {
+            return endpoint is not null &&
+                   string.Equals(callback, ElsaInstanceIdentityBinding.CanonicalizeCallbackUri(endpoint), StringComparison.Ordinal);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
 
     private string[] SqlAuthenticationArguments() => _options.DisposableProofMode
         ? ["--authentication-method", "ActiveDirectoryDefault"]

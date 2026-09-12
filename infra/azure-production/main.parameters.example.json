@@ -40,6 +40,41 @@
     },
     "releaseFeedServiceIndex": {
       "value": "https://api.nuget.org/v3/index.json"
+    },
+    "workloadMinReplicas": {
+      "value": 1
+    },
+    "workloadMaxReplicas": {
+      "value": 1
+    },
+    "workloadCpu": {
+      "value": "0.5"
+    },
+    "workloadMemory": {
+      "value": "1Gi"
+    },
+    "managedHandoffEnabled": {
+      "value": true
+    },
+    "managedHandoffInstanceId": {
+      "value": "00000000-0000-4000-8000-000000000001"
+    },
+    "managedHandoffAudience": {
+      "value": "urn:elsa:instance:00000000-0000-4000-8000-000000000001"
+    },
+    "managedHandoffControlBaseUrl": {
+      "value": "https://control.example.invalid"
+    },
+    "managedHandoffControlContinuationUrl": {
+      "value": "https://control.example.invalid/admin/runtimes"
+    },
+    "managedHandoffRuntimeMaximumLifetime": {
+      "value": "08:00:00"
+    },
+    "managedHandoffRuntimePermissions": {
+      "value": [
+        "*"
+      ]
     }
   }
 }

@@ -766,6 +766,35 @@ public sealed class AzureProviderExecutorTests
         await Assert.ThrowsAsync<ArgumentException>(() => executor.ApplyAsync(CreateRequest(), plan));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Execution_rejects_a_plan_whose_managed_handoff_does_not_match_the_operation(bool operationConfiguresHandoff)
+    {
+        var store = new FakeOperationStore();
+        var executor = new AzureProviderExecutor(store, new RecordingRunner(), new StaticTimeProvider(Now), TimeSpan.FromMinutes(5));
+        var capacity = new AzureWorkloadCapacity(1, 1, 500, 1024);
+        var request = CreateRequest() with { Capacity = capacity, ManagedHandoff = operationConfiguresHandoff };
+        var plan = CreatePlan() with { Capacity = capacity, ManagedHandoff = !operationConfiguresHandoff };
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(() => executor.ApplyAsync(request, plan));
+        Assert.StartsWith("The provider plan does not match the operation request.", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Execution_rejects_plan_capacity_that_does_not_match_the_operation(bool operationRetainsCapacity)
+    {
+        var store = new FakeOperationStore();
+        var executor = new AzureProviderExecutor(store, new RecordingRunner(), new StaticTimeProvider(Now), TimeSpan.FromMinutes(5));
+        var retained = new AzureWorkloadCapacity(1, 1, 500, 1024);
+        var request = CreateRequest() with { Capacity = operationRetainsCapacity ? retained : null };
+        var plan = CreatePlan() with { Capacity = operationRetainsCapacity ? retained with { MaxReplicas = 3 } : retained };
+
+        await Assert.ThrowsAsync<ArgumentException>(() => executor.ApplyAsync(request, plan));
+    }
+
     [Fact]
     public async Task Execution_rejects_noncanonical_plan_secret_reference_keys()
     {

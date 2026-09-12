@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Text.Json;
 using ElsaControl.PackageCatalog.Abstractions.Catalog;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Core.Manifests;
@@ -9,6 +10,7 @@ using ElsaControl.PackageCatalog.Core.Sync;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using ElsaControl.PackageCatalog.Testing;
 using Elsa.Specifications.PackageManifests.Validation;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 
@@ -106,20 +108,7 @@ public sealed class SyncPersistenceTests
             .WithPackage("Elsa.Email", "1.0.0")
             .WithFeature()
             .BuildJson();
-        var service = new PackageSyncService(
-            new PackageSourceStore(db),
-            new SyncCatalogStore(db),
-            new SyncRunStore(db),
-            new FakeDiscovery([new DiscoveredPackageVersion("Elsa.Email", "1.0.0")]),
-            new FakeDownloader(manifestJson),
-            new FakeManifestReader(),
-            new ManifestValidator(),
-            new ManifestIngestionService(),
-            new PackageVersionPolicy(),
-            new NoopSyncDiagnostics(),
-            new SyncConcurrencyGuard(),
-            new SourceSyncActivityTracker(),
-            new SyncRunCancellationRegistry());
+        var service = CreateSyncService(db, [new DiscoveredPackageVersion("Elsa.Email", "1.0.0")], new FakeDownloader(manifestJson));
 
         var run = await service.SyncAllAsync();
 
@@ -299,20 +288,7 @@ public sealed class SyncPersistenceTests
         db.PackageSources.Add(source);
         await db.SaveChangesAsync();
 
-        var service = new PackageSyncService(
-            new PackageSourceStore(db),
-            new SyncCatalogStore(db),
-            new SyncRunStore(db),
-            new FakeDiscovery([]),
-            new FakeDownloader("{}"),
-            new FakeManifestReader(),
-            new ManifestValidator(),
-            new ManifestIngestionService(),
-            new PackageVersionPolicy(),
-            new NoopSyncDiagnostics(),
-            new SyncConcurrencyGuard(),
-            new SourceSyncActivityTracker(),
-            new SyncRunCancellationRegistry());
+        var service = CreateSyncService(db, [], new FakeDownloader("{}"));
 
         await service.SyncAllAsync();
 
@@ -412,6 +388,88 @@ public sealed class SyncPersistenceTests
     }
 
     [Fact]
+    public async Task Reconciliation_marks_a_run_left_running_by_a_previous_process_as_failed()
+    {
+        await using var db = await CreateOpenDbContextAsync();
+        var processStartedAt = DateTimeOffset.UtcNow;
+        var completedAt = processStartedAt.AddSeconds(1);
+        var stale = new SyncRun { Trigger = SyncRunTrigger.Scheduled, Status = SyncRunStatus.Running, StartedAt = processStartedAt.AddMinutes(-5) };
+        db.SyncRuns.Add(stale);
+        await db.SaveChangesAsync();
+
+        var reconciledCount = await new SyncRunStore(db).ReconcileInterruptedRunsAsync(processStartedAt, completedAt, "Interrupted by an API restart.");
+
+        var reconciled = await db.SyncRuns.SingleAsync(x => x.Id == stale.Id);
+        Assert.Equal(1, reconciledCount);
+        Assert.Equal(SyncRunStatus.Failed, reconciled.Status);
+        Assert.Equal(completedAt, reconciled.CompletedAt);
+        Assert.Equal("Interrupted by an API restart.", reconciled.Error);
+    }
+
+    [Fact]
+    public async Task Reconciliation_leaves_runs_started_by_the_current_process_and_already_completed_runs_untouched()
+    {
+        await using var db = await CreateOpenDbContextAsync();
+        var processStartedAt = DateTimeOffset.UtcNow;
+        var currentProcessRun = new SyncRun { Trigger = SyncRunTrigger.ManualAll, Status = SyncRunStatus.Running, StartedAt = processStartedAt };
+        var completed = CompletedRun(processStartedAt.AddMinutes(-10));
+        db.SyncRuns.AddRange(currentProcessRun, completed);
+        await db.SaveChangesAsync();
+
+        var reconciledCount = await new SyncRunStore(db).ReconcileInterruptedRunsAsync(processStartedAt, processStartedAt.AddSeconds(1), "Interrupted by an API restart.");
+
+        Assert.Equal(0, reconciledCount);
+        Assert.Equal(SyncRunStatus.Running, (await db.SyncRuns.SingleAsync(x => x.Id == currentProcessRun.Id)).Status);
+        var reloadedCompleted = await db.SyncRuns.SingleAsync(x => x.Id == completed.Id);
+        Assert.Equal(SyncRunStatus.Completed, reloadedCompleted.Status);
+        Assert.Equal(completed.CompletedAt, reloadedCompleted.CompletedAt);
+    }
+
+    [Fact]
+    public async Task Reconciliation_is_idempotent()
+    {
+        await using var db = await CreateOpenDbContextAsync();
+        var processStartedAt = DateTimeOffset.UtcNow;
+        var completedAt = processStartedAt.AddSeconds(1);
+        var stale = new SyncRun { Trigger = SyncRunTrigger.Scheduled, Status = SyncRunStatus.Running, StartedAt = processStartedAt.AddMinutes(-5) };
+        db.SyncRuns.Add(stale);
+        await db.SaveChangesAsync();
+        var store = new SyncRunStore(db);
+
+        var first = await store.ReconcileInterruptedRunsAsync(processStartedAt, completedAt, "Interrupted by an API restart.");
+        var second = await store.ReconcileInterruptedRunsAsync(processStartedAt, completedAt.AddSeconds(1), "Interrupted by an API restart.");
+
+        Assert.Equal(1, first);
+        Assert.Equal(0, second);
+        Assert.Equal(completedAt, (await db.SyncRuns.SingleAsync(x => x.Id == stale.Id)).CompletedAt);
+    }
+
+    [Fact]
+    public async Task Reconciled_run_is_excluded_from_the_latest_verification_selection()
+    {
+        await using var db = await CreateOpenDbContextAsync();
+        var processStartedAt = DateTimeOffset.UtcNow;
+        var interruptedVerification = new SyncRun
+        {
+            Trigger = SyncRunTrigger.Scheduled,
+            Mode = SyncRunMode.Verification,
+            Status = SyncRunStatus.Running,
+            StartedAt = processStartedAt.AddHours(-1)
+        };
+        db.SyncRuns.Add(interruptedVerification);
+        await db.SaveChangesAsync();
+        var store = new SyncRunStore(db);
+
+        await store.ReconcileInterruptedRunsAsync(processStartedAt, processStartedAt, "Interrupted by an API restart.");
+        var latest = await store.GetLatestRunAsync(
+            SyncRunMode.Verification,
+            [SyncRunTrigger.Scheduled, SyncRunTrigger.ManualAll],
+            [SyncRunStatus.Completed, SyncRunStatus.CompletedWithErrors]);
+
+        Assert.Null(latest);
+    }
+
+    [Fact]
     public async Task Latest_run_only_considers_runs_of_the_requested_mode_triggers_and_statuses()
     {
         await using var db = await CreateOpenDbContextAsync();
@@ -474,6 +532,96 @@ public sealed class SyncPersistenceTests
             versions);
     }
 
+    [Fact]
+    public async Task Regular_scheduled_run_loads_no_features_or_settings_of_stored_versions()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var source = PublicCatalogSeedData.CreatePackageSource();
+        await using (var seed = CreateContext(connection))
+        {
+            await seed.Database.EnsureCreatedAsync();
+            var package = PublicCatalogSeedData.CreatePackage(source);
+            foreach (var version in new[] { "1.0.0", "2.0.0" })
+            {
+                var stored = PublicCatalogSeedData.AddVersion(package, version);
+                PublicCatalogSeedData.AddFeature(stored, "email");
+                PublicCatalogSeedData.AddFeature(stored, "smtp");
+            }
+
+            var verification = CompletedRun(DateTimeOffset.UtcNow.AddHours(-1));
+            foreach (var (packageId, version) in new[] { ("Elsa.Email", "0.9.0"), ("Elsa.Legacy", "1.0.0") })
+                verification.Items.Add(new SyncRunItem { SyncRun = verification, SyncRunId = verification.Id, SourceId = source.Id, PackageId = packageId, Version = version, Status = SyncRunItemStatus.Invalid });
+            seed.AddRange(source, verification);
+            await seed.SaveChangesAsync();
+        }
+
+        var commandRecorder = new CommandRecorder();
+        await using var db = CreateContext(connection, commandRecorder);
+        var run = await CreateSyncService(
+                db,
+                [new("Elsa.Email", "1.0.0"), new("Elsa.Email", "2.0.0"), new("Elsa.Email", "0.9.0"), new("Elsa.Legacy", "1.0.0")],
+                new ThrowingDownloader())
+            .SyncScheduledAsync(TimeSpan.FromHours(24));
+
+        Assert.Equal(SyncRunMode.NewVersionsOnly, run.Mode);
+        Assert.Equal(SyncRunStatus.Completed, run.Status);
+        Assert.Equal(new Dictionary<string, int> { ["unchanged"] = 2, ["invalid"] = 2 }, JsonSerializer.Deserialize<Dictionary<string, int>>(run.SummaryCountersJson));
+        Assert.DoesNotContain(commandRecorder.Commands, command => command.Contains("\"Features\"", StringComparison.Ordinal) || command.Contains("\"FeatureSettings\"", StringComparison.Ordinal));
+        Assert.Empty(db.ChangeTracker.Entries<FeatureRecord>());
+        Assert.Empty(db.ChangeTracker.Entries<FeatureSettingRecord>());
+    }
+
+    [Theory]
+    [InlineData("2.0.0", "1.0.0")]
+    [InlineData("1.0.0", "2.0.0")]
+    public async Task Display_name_comes_from_the_latest_valid_version_when_each_version_is_indexed_in_a_fresh_context(string first, string second)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using (var seed = CreateContext(connection))
+        {
+            await seed.Database.EnsureCreatedAsync();
+            seed.PackageSources.Add(PublicCatalogSeedData.CreatePackageSource());
+            await seed.SaveChangesAsync();
+        }
+
+        foreach (var version in new[] { first, second })
+        {
+            await using var db = CreateContext(connection);
+            var manifestJson = new ManifestFixtureBuilder().WithPackage("Elsa.Email", version).WithDisplayName($"Email {version}").WithFeature().BuildJson();
+            var run = await CreateSyncService(db, [new("Elsa.Email", version)], new FakeDownloader(manifestJson)).SyncAllAsync();
+            Assert.Single(run.Items, x => x.Status == SyncRunItemStatus.Indexed);
+        }
+
+        await using var reader = CreateContext(connection);
+        var package = await reader.Packages.SingleAsync();
+        Assert.Equal("Email 2.0.0", package.DisplayName);
+        Assert.Equal("2.0.0", package.LatestVersion);
+    }
+
+    private static CatalogDbContext CreateContext(DbConnection connection, params IInterceptor[] interceptors) =>
+        new(new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(connection)
+            .AddInterceptors(interceptors)
+            .Options);
+
+    private static PackageSyncService CreateSyncService(CatalogDbContext db, IReadOnlyList<DiscoveredPackageVersion> discovered, IPackageArchiveDownloader downloader) =>
+        new(
+            new PackageSourceStore(db),
+            new SyncCatalogStore(db),
+            new SyncRunStore(db),
+            new FakeDiscovery(discovered),
+            downloader,
+            new FakeManifestReader(),
+            new ManifestValidator(),
+            new ManifestIngestionService(),
+            new PackageVersionPolicy(),
+            new NoopSyncDiagnostics(),
+            new SyncConcurrencyGuard(),
+            new SourceSyncActivityTracker(),
+            new SyncRunCancellationRegistry());
+
     private static async Task<CatalogDbContext> CreateOpenDbContextAsync()
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
@@ -515,6 +663,16 @@ public sealed class SyncPersistenceTests
             Commands.Add(command.CommandText);
             return ValueTask.FromResult(result);
         }
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            Commands.Add(command.CommandText);
+            return ValueTask.FromResult(result);
+        }
     }
 
     private sealed class FakeDiscovery(IReadOnlyList<DiscoveredPackageVersion> versions) : IPackageVersionDiscoveryClient
@@ -526,6 +684,12 @@ public sealed class SyncPersistenceTests
     {
         public Task<Stream> DownloadPackageAsync(PackageSource source, string packageId, string version, CancellationToken cancellationToken = default) =>
             Task.FromResult<Stream>(new MemoryStream(System.Text.Encoding.UTF8.GetBytes(manifestJson)));
+    }
+
+    private sealed class ThrowingDownloader : IPackageArchiveDownloader
+    {
+        public Task<Stream> DownloadPackageAsync(PackageSource source, string packageId, string version, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException($"A regular run must not download {packageId} {version}.");
     }
 
     private sealed class FakeManifestReader : IPackageArchiveManifestReader

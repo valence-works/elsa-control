@@ -1,255 +1,349 @@
-import { Activity, Archive, Boxes, CheckCircle2, Clock3, PackageSearch, Rocket, TriangleAlert } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
+import "./overview.css";
+
+import { ArrowUpRight, CircleAlert, ChevronRight, Search, Server, ShieldCheck } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { Badge } from "@/components/ui";
+import { useQuery } from "@tanstack/react-query";
 import { useWorkspaceContext } from "@/app/WorkspaceContextProvider";
-import { listWorkspaceArtifacts } from "@/features/artifacts/artifactApi";
-import { getDeploymentCockpit } from "@/features/deployments/deploymentApi";
-import { listPackages } from "@/features/packages/packageApi";
-import { packageApprovalStatus } from "@/features/packages/packageModels";
+import { RequestStateView } from "@/components/states/RequestStateViews";
+import { getDeploymentCockpit, getDeploymentPermissions } from "@/features/deployments/deploymentApi";
+import type {
+  DeploymentCockpit,
+  DeploymentHealth,
+  EnvironmentSummary,
+  WorkflowApplication,
+  WorkflowEngineRegistration
+} from "@/features/deployments/deploymentModels";
+import { ApiError } from "@/lib/api/httpClient";
+import { permissionLinkProps } from "@/lib/auth/permissionLinkProps";
 import { queryKeys } from "@/lib/query/queryClient";
-import { cn } from "@/lib/utils";
 
-const controlSignals: Signal[] = [
-  {
-    label: "Runtime builder",
-    value: "4 configs",
-    description: "Saved runtime configurations are planned as a Elsa Control module.",
-    icon: Boxes,
-    status: "Roadmap"
-  },
-  {
-    label: "Managed operations",
-    value: "Not enabled",
-    description: "Health, backup, restore, upgrade, and rollback views are reserved.",
-    icon: Activity,
-    status: "Future"
-  }
-];
+type EngineHealth = DeploymentHealth | "Unknown";
+type EngineFilter = "all" | "attention" | "healthy";
 
-const activityItems = [
-  {
-    title: "Package source sync completed",
-    detail: "NuGet professional feed scanned 148 packages with 2 validation warnings.",
-    time: "12 min ago",
-    icon: CheckCircle2
-  },
-  {
-    title: "Artifact provenance module reserved",
-    detail: "Artifact details will track manifest, payload, checksum, plan, dry-run, apply, and history.",
-    time: "Planned",
-    icon: Archive
-  },
-  {
-    title: "Environment workbench reserved",
-    detail: "Deployment environments will collect desired state, last artifact, runtime health, and operations.",
-    time: "Planned",
-    icon: Rocket
-  }
-];
-
-type Signal = {
-  label: string;
-  value: string;
-  description: string;
-  icon: LucideIcon;
-  status: string;
-  tone?: "warning";
-  to?: string;
+type EngineContext = {
+  engine: WorkflowEngineRegistration;
+  application: WorkflowApplication | null;
+  environment: EnvironmentSummary | null;
 };
 
 export function OverviewPage() {
-  const { selectedWorkspaceId } = useWorkspaceContext();
-  const artifacts = useQuery({
-    queryKey: queryKeys.artifacts(selectedWorkspaceId),
-    queryFn: () => listWorkspaceArtifacts(selectedWorkspaceId),
+  const { selectedWorkspaceId, selectedWorkspace } = useWorkspaceContext();
+  const [engineSearch, setEngineSearch] = useState("");
+  const [engineFilter, setEngineFilter] = useState<EngineFilter>("all");
+  const [selectedEngineId, setSelectedEngineId] = useState<string | null>(null);
+  const cockpit = useQuery({
+    queryKey: queryKeys.deploymentCockpit(selectedWorkspaceId ?? ""),
+    queryFn: () => getDeploymentCockpit(selectedWorkspaceId as string),
+    enabled: Boolean(selectedWorkspaceId),
+    refetchInterval: 5_000
+  });
+  const permissions = useQuery({
+    queryKey: queryKeys.deploymentPermissions(selectedWorkspaceId ?? ""),
+    queryFn: () => getDeploymentPermissions(selectedWorkspaceId as string),
     enabled: Boolean(selectedWorkspaceId)
   });
-  const packageCatalog = useQuery({
-    queryKey: queryKeys.packages,
-    queryFn: listPackages
-  });
-  const deploymentCockpit = useQuery({
-    queryKey: queryKeys.deploymentCockpit(selectedWorkspaceId),
-    queryFn: () => getDeploymentCockpit(selectedWorkspaceId),
-    enabled: Boolean(selectedWorkspaceId)
-  });
-  const artifactCount = artifacts.data?.items.length ?? 0;
-  const packageItems = packageCatalog.data ?? [];
-  const pendingPackageCount = packageItems.filter((packageItem) => packageApprovalStatus(packageItem) === "Pending").length;
-  const applicationCount = deploymentCockpit.data?.applications.length ?? 0;
-  const environmentCount = deploymentCockpit.data?.applications.reduce((total, application) => total + application.environments.length, 0) ?? 0;
-  const engineCount = deploymentCockpit.data?.engines.length ?? 0;
-  const deploymentReadinessSignal: Signal = {
-    label: "Deployment readiness",
-    value: artifacts.isLoading ? "Loading" : pluralize(artifactCount, "artifact"),
-    description: artifactCount === 0
-      ? "Register artifacts before creating revisions and promotion targets."
-      : "Registered artifacts available for revision creation and deployment promotion.",
-    icon: Archive,
-    status: artifacts.isLoading ? "Loading" : artifactCount > 0 ? "Ready" : "Setup",
-    to: "/admin/artifacts"
-  };
-  const applicationsSignal: Signal = {
-    label: "Applications",
-    value: deploymentCockpit.isLoading ? "Loading" : pluralize(applicationCount, "application"),
-    description: deploymentCockpit.isLoading
-      ? "Loading application environments and engine registrations."
-      : applicationCount === 0
-        ? "Create application setups before defining environments and engines."
-        : `${pluralize(environmentCount, "environment")} and ${pluralize(engineCount, "engine")} registered for deployment management.`,
-    icon: Rocket,
-    status: deploymentCockpit.isLoading ? "Loading" : applicationCount > 0 ? "Ready" : "Setup",
-    to: "/admin/deployments/applications"
-  };
-  const packageApprovalSignal: Signal = {
-    label: "Package approvals",
-    value: packageCatalog.isLoading ? "Loading" : `${pendingPackageCount} pending`,
-    description: packageCatalog.isLoading
-      ? "Loading indexed packages and approval state."
-      : `${pluralize(packageItems.length, "package")} indexed; ${pluralize(pendingPackageCount, "package")} awaiting approval.`,
-    icon: PackageSearch,
-    status: packageCatalog.isLoading ? "Loading" : pendingPackageCount > 0 ? "Needs review" : "Ready",
-    tone: pendingPackageCount > 0 || packageCatalog.isLoading ? "warning" : undefined,
-    to: pendingPackageCount > 0 ? "/admin/packages?approval=Pending" : "/admin/packages"
-  };
-  const signals = [deploymentReadinessSignal, applicationsSignal, packageApprovalSignal, ...controlSignals];
+  const data = cockpit.data;
+  const canManageSetup = permissions.isSuccess && permissions.data.permissions.includes("deployments.setup.manage");
+  const contexts = useMemo(() => data ? buildEngineContexts(data) : [], [data]);
+  const filteredContexts = useMemo(
+    () => filterEngines(contexts, engineSearch, engineFilter),
+    [contexts, engineFilter, engineSearch]
+  );
+  const selectedContext = filteredContexts.find(({ engine }) => engine.id === selectedEngineId) ?? filteredContexts[0] ?? null;
+  const workspaceName = selectedWorkspace?.name ?? data?.applications[0]?.workspaceName ?? "Workspace";
+
+  useEffect(() => {
+    setEngineSearch("");
+    setEngineFilter("all");
+    setSelectedEngineId(null);
+  }, [selectedWorkspaceId]);
+
+  if (!selectedWorkspaceId) {
+    return <RequestStateView state="empty" title="Select a workspace" description="Choose a workspace to inspect its deployment control plane." />;
+  }
+
+  if (cockpit.isPending) {
+    return <ApertureLoading />;
+  }
+
+  const authorizationFailed = cockpit.error instanceof ApiError && ["Unauthorized", "Forbidden"].includes(cockpit.error.kind);
+  if (cockpit.isError && (!data || authorizationFailed)) {
+    if (authorizationFailed) {
+      return <RequestStateView state="unauthorized" title="Workspace access required" description="You do not have permission to view this workspace control plane." />;
+    }
+
+    return <RequestStateView state="unexpected" title="Overview unavailable" description="The workspace control plane could not be loaded. Try again when the API is available." />;
+  }
+
+  if (!data) {
+    return <RequestStateView state="unexpected" title="Overview unavailable" description="The workspace control plane returned no data." />;
+  }
 
   return (
-    <section className="space-y-8">
-      <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-        <div className="max-w-3xl space-y-3">
-          <h1 className="font-display text-3xl font-semibold tracking-normal md:text-4xl">Control Overview</h1>
-          <p className="text-sm leading-6 text-muted-foreground md:text-base">
-            One Elsa Control console for package governance, runtime building, deployment artifacts, environment workbenches, and managed
-            runtime operations.
-          </p>
-        </div>
-        <div className="flex items-center gap-2 rounded-ui border border-border bg-surface px-3 py-2 text-sm text-muted-foreground">
-          <Clock3 aria-hidden className="h-4 w-4 text-primary" />
-          <span>SignalR activity stream reserved</span>
-        </div>
-      </div>
-
-      <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-        {signals.map((signal) => <SignalCard key={signal.label} signal={signal} />)}
-      </div>
-
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-        <section className="rounded-ui border border-border bg-surface">
-          <div className="border-b border-border px-4 py-3">
-            <h2 className="font-display text-lg font-semibold">Control Plane Modules</h2>
-            <p className="mt-1 text-sm text-muted-foreground">Option A shell with environment and provenance modules reserved.</p>
+    <div className="aperture-overview">
+      <div className="aperture-overview__main">
+        <header className="aperture-overview__heading">
+          <div>
+            <p className="aperture-overview__kicker"><span className="aperture-overview__square" aria-hidden />WORKSPACE</p>
+            <h1>{workspaceName}</h1>
+            <p>{data.engines.length} engine{data.engines.length === 1 ? "" : "s"} · {data.applications.length} application{data.applications.length === 1 ? "" : "s"}</p>
           </div>
-          <div className="divide-y divide-border">
-            <ModuleRow
-              title="Package Catalog"
-              description="Sources, package versions, approval, validation, manifests, and sync runs."
-              status="Active"
-            />
-            <ModuleRow
-              title="Deployment"
-              description="Manifests, immutable artifacts, validation, diff, dry-run, apply, and history."
-              status="Roadmap"
-            />
-            <ModuleRow
-              title="Environment Workbench"
-              description="Option B module for desired state, last artifact, runtime health, diagnostics, and operations per environment."
-              status="Roadmap"
-            />
-            <ModuleRow
-              title="Artifact Provenance"
-              description="Option C module for manifest, payload, checksum inventory, package requirements, plans, and deployment runs."
-              status="Roadmap"
-            />
-            <ModuleRow
-              title="Runtime Operations"
-              description="Managed runtime health, logs, backups, restores, controlled upgrades, rollback, and audit events."
-              status="Future"
-            />
+          <div className="flex flex-col items-end gap-2">
+            <Link
+              to="/admin/engines/connect"
+              className={`aperture-overview__primary${canManageSetup ? "" : " pointer-events-none opacity-50"}`}
+              aria-describedby={!canManageSetup ? "overview-setup-access" : undefined}
+              {...permissionLinkProps(canManageSetup)}
+            >
+              Connect engine <ArrowUpRight aria-hidden />
+            </Link>
+            {!canManageSetup && <div id="overview-setup-access" role="status" className="text-xs text-muted-foreground">
+              {permissions.isPending ? "Checking access…" : permissions.isError ? <>
+                Could not check access. <button className="underline underline-offset-2" disabled={permissions.isFetching} onClick={() => void permissions.refetch()}>Retry access check</button>
+              </> : "Setup permission required"}
+            </div>}
           </div>
-        </section>
+        </header>
 
-        <section className="rounded-ui border border-border bg-surface">
-          <div className="border-b border-border px-4 py-3">
-            <h2 className="font-display text-lg font-semibold">Recent Activity</h2>
-            <p className="mt-1 text-sm text-muted-foreground">Static until Elsa Control activity APIs are introduced.</p>
+        {cockpit.isRefetchError && <div role="status" className="flex items-center justify-between gap-3 border border-warning/40 bg-warning/10 px-4 py-3 text-sm">
+          <span>Refresh failed. Showing last known health.</span>
+          <button className="shrink-0 underline underline-offset-2" disabled={cockpit.isFetching} onClick={() => void cockpit.refetch()}>Retry refresh</button>
+        </div>}
+
+        {data.engines.length === 0 ? (
+          <ApertureEmptyState />
+        ) : (
+          <div className="aperture-overview__workspace">
+            <EngineInventory
+              contexts={filteredContexts}
+              totalCount={contexts.length}
+              search={engineSearch}
+              filter={engineFilter}
+              selectedEngineId={selectedContext?.engine.id ?? null}
+              onSearchChange={setEngineSearch}
+              onFilterChange={setEngineFilter}
+              onSelect={setSelectedEngineId}
+            />
+            <EngineInspector context={selectedContext} />
           </div>
-          <div className="space-y-4 p-4">
-            {activityItems.map((item) => (
-              <div key={item.title} className="flex gap-3">
-                <div className="mt-0.5 rounded-ui border border-border bg-background p-2 text-primary">
-                  <item.icon aria-hidden className="h-4 w-4" />
-                </div>
-                <div className="min-w-0 space-y-1">
-                  <p className="text-sm font-medium">{item.title}</p>
-                  <p className="text-sm leading-5 text-muted-foreground">{item.detail}</p>
-                  <p className="text-xs text-muted-foreground">{item.time}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-      </div>
-    </section>
-  );
-}
+        )}
 
-function SignalCard({ signal }: { signal: Signal }) {
-  const content = (
-    <article
-      className={cn(
-        "h-full rounded-ui border border-border bg-surface p-4",
-        signal.to ? "transition-colors hover:border-primary/50 hover:bg-muted/30" : ""
-      )}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="rounded-ui border border-border bg-background p-2 text-primary">
-          <signal.icon aria-hidden className="h-4 w-4" />
-        </div>
-        <Badge
-          className={
-            signal.tone === "warning"
-              ? "border-warning/30 bg-warning/10 text-warning"
-              : "border-primary/30 bg-primary/10 text-primary"
-          }
-        >
-          {signal.status}
-        </Badge>
+        <footer className="aperture-overview__footer">
+          <span>{workspaceName}</span>
+        </footer>
       </div>
-      <div className="mt-4 space-y-1">
-        <p className="text-sm text-muted-foreground">{signal.label}</p>
-        <p className="text-2xl font-semibold">{signal.value}</p>
-        <p className="text-sm leading-5 text-muted-foreground">{signal.description}</p>
-      </div>
-    </article>
-  );
-
-  return signal.to ? (
-    <Link to={signal.to} className="block rounded-ui focus:outline-none focus:ring-2 focus:ring-primary/50">
-      {content}
-    </Link>
-  ) : content;
-}
-
-function ModuleRow({ title, description, status }: { title: string; description: string; status: string }) {
-  const isActive = status === "Active";
-
-  return (
-    <div className="flex flex-col gap-3 px-4 py-4 md:flex-row md:items-center md:justify-between">
-      <div className="min-w-0">
-        <p className="font-medium">{title}</p>
-        <p className="mt-1 text-sm leading-5 text-muted-foreground">{description}</p>
-      </div>
-      <Badge className={isActive ? "border-primary/30 bg-primary/10 text-primary" : "text-muted-foreground"}>
-        {isActive ? <CheckCircle2 aria-hidden className="mr-1 h-3 w-3" /> : <TriangleAlert aria-hidden className="mr-1 h-3 w-3" />}
-        {status}
-      </Badge>
     </div>
   );
 }
 
-function pluralize(count: number, singular: string) {
-  return `${count} ${singular}${count === 1 ? "" : "s"}`;
+function EngineInventory({
+  contexts,
+  totalCount,
+  search,
+  filter,
+  selectedEngineId,
+  onSearchChange,
+  onFilterChange,
+  onSelect
+}: {
+  contexts: EngineContext[];
+  totalCount: number;
+  search: string;
+  filter: EngineFilter;
+  selectedEngineId: string | null;
+  onSearchChange: (value: string) => void;
+  onFilterChange: (value: EngineFilter) => void;
+  onSelect: (engineId: string) => void;
+}) {
+  return (
+    <section className="aperture-overview__inventory" aria-label="Engine inventory">
+      <div className="aperture-overview__section-head">
+        <h2>Engine inventory</h2>
+        <span className="aperture-overview__count">{String(contexts.length).padStart(2, "0")} / {String(totalCount).padStart(2, "0")} ENGINES</span>
+      </div>
+      <div className="aperture-overview__tools">
+        <label className="aperture-overview__search">
+          <Search aria-hidden />
+          <span className="aperture-overview__sr-only">Search engines</span>
+          <input
+            type="search"
+            aria-label="Search engines"
+            value={search}
+            onChange={(event) => onSearchChange(event.target.value)}
+            placeholder="Search inventory"
+          />
+        </label>
+        <label className="aperture-overview__filter">
+          <span className="aperture-overview__sr-only">Filter engines</span>
+          <select aria-label="Filter engines" value={filter} onChange={(event) => onFilterChange(event.target.value as EngineFilter)}>
+            <option value="all">All states</option>
+            <option value="attention">Needs attention</option>
+            <option value="healthy">Healthy only</option>
+          </select>
+        </label>
+      </div>
+      {contexts.length > 0 ? (
+        <div className="aperture-overview__rows">
+          {contexts.map((context, index) => (
+            <EngineRow
+              key={context.engine.id}
+              context={context}
+              index={index}
+              selected={context.engine.id === selectedEngineId}
+              onSelect={onSelect}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="aperture-overview__no-results" role="status">
+          <p>No engines match this view.</p>
+          <span>Adjust the search or health filter.</span>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function EngineRow({ context, index, selected, onSelect }: { context: EngineContext; index: number; selected: boolean; onSelect: (engineId: string) => void }) {
+  const { engine, application, environment } = context;
+  const name = engine.name || engine.id;
+  return (
+    <button
+      type="button"
+      className={`aperture-overview__row${selected ? " is-selected" : ""}`}
+      aria-label={`Inspect ${name}`}
+      aria-describedby={`engine-placement-${engine.id} engine-health-${engine.id}`}
+      aria-pressed={selected}
+      onClick={() => onSelect(engine.id)}
+    >
+      <span className="aperture-overview__index">{String(index + 1).padStart(2, "0")}</span>
+      <span className="aperture-overview__identity">
+        <span className="aperture-overview__name">{name}</span>
+        <span id={`engine-placement-${engine.id}`} className="aperture-overview__sub">{application?.name ?? "Unmapped application"} / {environment?.name ?? "Unmapped environment"}</span>
+      </span>
+      <span id={`engine-health-${engine.id}`}><HealthStatus health={engineHealth(engine)} /></span>
+      <ChevronRight aria-hidden />
+    </button>
+  );
+}
+
+function EngineInspector({ context }: { context: EngineContext | null }) {
+  return (
+    <aside className="aperture-overview__inspector" aria-label="Selected engine">
+      <p className="aperture-overview__mono aperture-overview__inspector-label">Selected engine</p>
+      {context ? <SelectedEngine context={context} /> : <div className="aperture-overview__inspector-empty" role="status"><Server aria-hidden /><p>No engine selected</p><span>Adjust the inventory filters to inspect an engine.</span></div>}
+    </aside>
+  );
+}
+
+function SelectedEngine({ context }: { context: EngineContext }) {
+  const { engine, application, environment } = context;
+  const name = engine.name || engine.id;
+  const detailPath = application && environment ? enginePath(application, environment, engine.id) : null;
+  const certificateStatus = engine.endpoint?.certificateStatus ?? "Unknown";
+  const credentialStatus = engine.credentialAssignmentStatus === "Deferred"
+    ? "Deferred"
+    : engine.credentialReference?.verificationStatus ?? "Unknown";
+  const certificateDetail = certificateStatus === "Trusted" ? "Trusted" : certificateStatus === "Expiring" ? "Expiring" : certificateStatus === "Untrusted" ? "Untrusted" : "Not reported";
+  const showDiagnostic = engineHealth(engine) !== "Healthy" || !["Verified", "NotVerifiable", "Deferred"].includes(credentialStatus);
+
+  return (
+    <>
+      <h2>{name}</h2>
+      <HealthStatus health={engineHealth(engine)} />
+      <dl className="aperture-overview__details">
+        <Detail label="Environment" value={environment ? environmentLabel(environment) : "Unmapped"} />
+        <Detail label="Version" value={engine.endpoint?.version || "Not reported"} mono />
+        <Detail label="Endpoint" value={engine.endpoint?.baseUrl || "Not reported"} />
+        <Detail label="Credential" value={credentialStatus} />
+      </dl>
+      <div className={`aperture-overview__certificate${certificateStatus === "Trusted" ? " is-trusted" : ""}`}>
+        {certificateStatus === "Trusted" ? <ShieldCheck aria-hidden /> : <CircleAlert aria-hidden />}
+        <span>Certificate<br />{certificateDetail}</span>
+      </div>
+      {showDiagnostic && engine.verificationMessage ? <p className="aperture-overview__verification">{engine.verificationMessage}</p> : null}
+      <div className="aperture-overview__inspector-links">
+        {detailPath ? <Link to={detailPath}>View engine <ArrowUpRight aria-hidden /></Link> : null}
+        {application ? <Link to={`/admin/deployments/applications/${encodeURIComponent(application.id)}`}>View application <ArrowUpRight aria-hidden /></Link> : null}
+      </div>
+    </>
+  );
+}
+
+function Detail({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return <div><dt>{label}</dt><dd className={mono ? "aperture-overview__mono" : undefined}>{value}</dd></div>;
+}
+
+function HealthStatus({ health }: { health: EngineHealth }) {
+  return <span className={`aperture-overview__health aperture-overview__health--${health.toLowerCase()}`}><span aria-hidden />{health}</span>;
+}
+
+function ApertureEmptyState() {
+  return (
+    <section className="aperture-overview__empty" role="status">
+      <Server aria-hidden />
+      <p className="aperture-overview__mono">ENGINE INVENTORY</p>
+      <h2>Connect your first engine</h2>
+      <span>Start receiving health and deployment signals from this workspace.</span>
+    </section>
+  );
+}
+
+function ApertureLoading() {
+  return <section className="aperture-overview aperture-overview--loading" aria-busy="true" aria-label="Loading workspace overview"><div className="aperture-overview__main"><div className="aperture-overview__loading-heading" /><div className="aperture-overview__loading-grid"><div /><div /></div></div></section>;
+}
+
+function buildEngineContexts(data: DeploymentCockpit): EngineContext[] {
+  const environments = new Map<string, { application: WorkflowApplication; environment: EnvironmentSummary }>();
+  for (const application of data.applications) {
+    for (const environment of application.environments) environments.set(environment.id, { application, environment });
+  }
+  return data.engines.map((engine) => ({
+    engine,
+    application: environments.get(engine.environmentId)?.application ?? null,
+    environment: environments.get(engine.environmentId)?.environment ?? null
+  }));
+}
+
+function filterEngines(contexts: EngineContext[], search: string, filter: EngineFilter) {
+  const query = search.trim().toLowerCase();
+  return contexts.filter((context) => {
+    const health = engineHealth(context.engine);
+    const matchesFilter = filter === "all" || (filter === "healthy" ? health === "Healthy" : hasAttention(context));
+    const haystack = [
+      context.engine.name,
+      context.engine.id,
+      context.application?.name,
+      context.environment?.name,
+      context.environment?.tierName,
+      context.engine.endpoint?.region,
+      context.engine.endpoint?.version
+    ].filter(Boolean).join(" ").toLowerCase();
+    return matchesFilter && (!query || haystack.includes(query));
+  });
+}
+
+function hasAttention({ engine, environment }: EngineContext) {
+  const credentialStatus = engine.credentialAssignmentStatus === "Deferred"
+    ? "Deferred"
+    : engine.credentialReference?.verificationStatus;
+  return engineHealth(engine) !== "Healthy"
+    || (credentialStatus !== undefined && !["Verified", "NotVerifiable"].includes(credentialStatus))
+    || (engine.endpoint?.certificateStatus !== undefined && engine.endpoint.certificateStatus !== "Trusted")
+    || environment?.driftStatus !== "InSync"
+    || environment?.deploymentStatus === "Blocked";
+}
+
+function engineHealth(engine: WorkflowEngineRegistration): EngineHealth {
+  return engine.health ?? "Unknown";
+}
+
+function environmentLabel(environment: EnvironmentSummary) {
+  const tier = environment.tierName ?? environment.tier;
+  return environment.name === tier ? environment.name : `${environment.name} · ${tier}`;
+}
+
+function enginePath(application: WorkflowApplication, environment: EnvironmentSummary, engineId: string) {
+  return `/admin/deployments/applications/${encodeURIComponent(application.id)}/environments/${encodeURIComponent(environment.id)}/engines/${encodeURIComponent(engineId)}`;
 }

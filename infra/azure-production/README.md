@@ -17,6 +17,29 @@ The template does not select an Elsa generation or feed by branching on a versio
 
 The workload name, owner, plan fingerprint and release values are retained as safe resource tags and as `ELSA_RELEASE_LINE` / `ELSA_RELEASE_VERSION` environment metadata. This keeps ownership and release provenance visible without embedding a particular Elsa release line in infrastructure code.
 
+## Workload capacity
+
+The workload is sized from the resolved plan's governed capacity, never from template literals. `workloadMinReplicas`, `workloadMaxReplicas`, `workloadCpu` and `workloadMemory` are required and have no defaults, so a caller that omits them fails the deployment instead of scaling to zero. The provider runner maps the plan's millicores and MiB to the exact Azure Container Apps consumption pair (0.25/0.5Gi through 2/4Gi in 0.25 vCPU steps) and refuses a plan with no exact pair, a minimum outside 0-300 or a maximum outside 1-300 before any Azure call. The container-app module additionally selects its resources by the requested pair, so an unlisted combination fails the deployment rather than being rounded.
+
+Consumption ephemeral storage is derived from the CPU size (up to 2 GiB for 0.5 vCPU, 4 GiB for 1 vCPU, 8 GiB above that) and cannot be set, so it is not a template parameter; plan admission rejects a capacity that asks for more than its CPU size provides. Capacity is part of the provider plan fingerprint and of `planFingerprint` here, so a capacity change always produces a new revision.
+
+## Managed Elsa handoff
+
+The console's Open action sends the browser to the workload's `/managed-elsa/handoff/start`. The runtime maps that endpoint only when its `ManagedElsa:Handoff` section is enabled and complete, so the template configures it from typed, non-secret parameters. `managedHandoffEnabled` is required and has no default. The provider runner sets it to true only when the admitted release declares `managed-elsa-handoff-v1` and the workload runs as a single replica (the runtime keeps handoff state and sessions in process); otherwise the app receives `ManagedElsa__Handoff__Enabled=false` explicitly.
+
+When enabled, the runner supplies:
+
+| Parameter | Runtime setting | Source |
+| --- | --- | --- |
+| `managedHandoffInstanceId` | `InstanceId` | Control's instance ID (lowercase canonical) |
+| `managedHandoffAudience` | `Audience` | `urn:elsa:instance:<id>`, Control's identity-binding rule |
+| `managedHandoffControlBaseUrl` | `ControlBaseUrl` | Control's `ControlPlane:Origin`; the runtime redeems at `/api/managed-elsa/handoff/redeem` |
+| `managedHandoffControlContinuationUrl` | `ControlContinuationUrl` | `ControlPlane:Origin` + `/admin/runtimes`, the console page that completes the handoff |
+| `managedHandoffRuntimeMaximumLifetime` | `RuntimeMaximumLifetime` | Control's `ManagedElsa:Handoff:RuntimeSessionMaximumLifetime` (at most 8 hours) |
+| `managedHandoffRuntimePermissions` | `RuntimePermissions__N` | Control's operator grant |
+
+`CallbackUri` is not a parameter. The template derives it as `https://<workloadName>-app.<environment default domain>/managed-elsa/handoff/callback`, which is the origin Container Apps serves the external app on and the origin Control binds the instance's handoff callback to; the environment exists from the foundation phase, so no ordering gap arises. The runner rejects a workload deployment whose `managedHandoffCallbackUri` output differs from the callback derived from its `containerAppEndpoint` output. `UpstreamAuthenticationScheme` (`Jwt-or-ApiKey`), `SuccessPath` (`/`) and `StateLifetime` (`00:05:00`) are the runtime's documented values, and `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` lets the runtime observe the HTTPS scheme that Container Apps ingress terminates. An enabled handoff with any empty input, or on more than one replica, fails the deployment instead of producing a revision whose startup validation would reject it or whose replicas would reject each other's callbacks and sessions.
+
 ## Identity and data protection
 
 The SQL server uses Microsoft Entra-only administration and the workload identity is created as a contained service-principal user by `sql-bootstrap.sql`. Key Vault uses RBAC: the workload can read secrets and the bootstrap operator can seed them, but neither receives broad vault administration through the template. SQL backup retention remains explicit so the provider can make its own recovery decision.
