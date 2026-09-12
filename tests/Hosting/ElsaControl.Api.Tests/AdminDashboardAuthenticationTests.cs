@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
@@ -169,13 +170,16 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
         Assert.NotNull(sources);
     }
 
-    [Fact]
-    public async Task Control_admin_session_authorizes_admin_api()
+    [Theory]
+    [InlineData("role")]
+    [InlineData("roles")]
+    [InlineData(ClaimTypes.Role)]
+    public async Task Control_admin_session_authorizes_admin_api(string roleClaimType)
     {
         var app = _app;
         await app.SeedAsync(_ => Task.CompletedTask);
         var client = app.CreateClient(new() { AllowAutoRedirect = false });
-        app.AddControlSessionCookie(client, new Claim("role", AdminAuthorization.ControlAdminRole));
+        app.AddControlSessionCookie(client, new Claim(roleClaimType, AdminAuthorization.ControlAdminRole));
 
         var response = await client.GetAsync("/api/admin/sources");
 
@@ -193,6 +197,18 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
         var response = await client.GetAsync("/api/admin/sources");
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Unauthenticated_request_is_unauthorized_for_admin_api()
+    {
+        var app = _app;
+        await app.SeedAsync(_ => Task.CompletedTask);
+
+        var response = await app.CreateClient(new() { AllowAutoRedirect = false })
+            .GetAsync("/api/admin/sources");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
     [Fact]
@@ -231,6 +247,40 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
         var result = await authorization.AuthorizeAsync(principal, resource: null, AdminAuthorization.Policy);
 
         Assert.True(result.Succeeded);
+    }
+
+    [Fact]
+    public async Task Production_default_denies_authenticated_customer_session_without_control_admin()
+    {
+        var productionSettings = FindProductionAppSettingsPath();
+        using (var document = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(productionSettings)))
+        {
+            Assert.False(document.RootElement
+                .GetProperty("Authentication")
+                .GetProperty("Admin")
+                .GetProperty("AllowAuthenticatedCustomerSession")
+                .GetBoolean());
+        }
+
+        var configuration = new ConfigurationBuilder()
+            .AddJsonFile(productionSettings, optional: false, reloadOnChange: false)
+            .Build();
+        var services = new ServiceCollection();
+        services.AddSingleton<IConfiguration>(configuration);
+        services.AddLogging();
+        services.AddCatalogAuthorization();
+        services.AddSingleton<IWebHostEnvironment>(new TestWebHostEnvironment(Environments.Production));
+        await using var provider = services.BuildServiceProvider();
+        Assert.False(provider.GetRequiredService<IOptions<AdminAuthorizationOptions>>().Value.AllowAuthenticatedCustomerSession);
+
+        var authorization = provider.GetRequiredService<IAuthorizationService>();
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(
+            [new Claim("sub", "customer-user")],
+            CustomerAuthenticationDefaults.CookieScheme));
+
+        var result = await authorization.AuthorizeAsync(principal, resource: null, AdminAuthorization.Policy);
+
+        Assert.False(result.Succeeded);
     }
 
     [Fact]
@@ -374,6 +424,18 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
         var response = await app.CreateClient().GetAsync("/health");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    private static string FindProductionAppSettingsPath()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            var candidate = Path.Combine(directory.FullName, "src", "Hosting", "ElsaControl.Api", "appsettings.Production.json");
+            if (File.Exists(candidate))
+                return candidate;
+        }
+
+        throw new InvalidOperationException("src/Hosting/ElsaControl.Api/appsettings.Production.json was not found.");
     }
 
     private sealed class TestWebHostEnvironment(string environmentName) : IWebHostEnvironment

@@ -96,8 +96,9 @@ if (builder.ExecutionContext.IsPublishMode)
         .WithEnvironment("Authentication__ControlIdentity__Claims__DisplayName__1", "preferred_username")
         .WithEnvironment("Authentication__ControlIdentity__Claims__Email__0", "email")
         .WithEnvironment("Authentication__ControlIdentity__Claims__Email__1", "preferred_username")
-        // The admin dashboard accepts the operator's Entra session rather than a separate API key.
-        .WithEnvironment("Authentication__Admin__AllowAuthenticatedCustomerSession", "true")
+        // Published deployments require the Entra `control_admin` app role (or the admin API key).
+        // Do not admit arbitrary authenticated customer sessions (#371).
+        .WithEnvironment("Authentication__Admin__AllowAuthenticatedCustomerSession", "false")
         // The Elsa Hub runtime-builder configurator calls the public builder API from the browser, so
         // its origins are allow-listed and it authenticates /api/builder/bundle with a client API key.
         .WithEnvironment("Authentication__BuilderClientApiKey", builderClientApiKey)
@@ -137,6 +138,7 @@ else
         .WithEnvironment("Authentication__ControlIdentity__RedirectUri", "/api/auth/callback")
         .WithEnvironment("Authentication__ControlIdentity__PostLogoutRedirectUri", "/admin")
         .WithEnvironment("Authentication__ControlIdentity__RequireHttpsMetadata", "false")
+        // Local Keycloak only: the first-run console can use any signed-in session. Production never sets this.
         .WithEnvironment("Authentication__Admin__AllowAuthenticatedCustomerSession", "true")
         .WithEnvironment("Authentication__WorkspaceTrustedHeaders__Enabled", "false")
         .WaitFor(keycloak);
