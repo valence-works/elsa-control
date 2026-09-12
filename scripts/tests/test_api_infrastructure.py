@@ -239,6 +239,10 @@ class ApiInfrastructureTests(unittest.TestCase):
             self.assertIn(directory, regeneration)
         self.assertNotIn("dashboard", module.lower())
         self.assertNotIn("WEBSITE_ENABLE_ASPIRE_OTEL_SIDECAR", module)
+        self.assertLess(
+            regeneration.index("trap restore_preserved_infra EXIT"),
+            regeneration.index('mv "infra/$relative_path"'),
+        )
 
     def test_published_deployment_does_not_admit_authenticated_customer_sessions(self) -> None:
         apphost = APPHOST.read_text()
@@ -254,10 +258,6 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertNotRegex(
             module,
             r"name: 'Authentication__Admin__AllowAuthenticatedCustomerSession'\s+value: 'true'",
-        )
-        self.assertLess(
-            regeneration.index("trap restore_preserved_infra EXIT"),
-            regeneration.index('mv "infra/$relative_path"'),
         )
 
     def test_operator_documentation_preserves_identity_and_deployment_boundaries(self) -> None:
