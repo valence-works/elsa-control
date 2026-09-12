@@ -104,7 +104,8 @@ public sealed record AzureProviderOperationRequest(
     Guid? OrganizationId = null,
     Guid? InstanceId = null,
     ElsaInstanceOperationAction? LifecycleAction = null,
-    Guid? ProviderAssignmentId = null);
+    Guid? ProviderAssignmentId = null,
+    AzureWorkloadCapacity? Capacity = null);
 
 public sealed record AzureProviderResourceReferences(
     string? ResourceGroupName = null,
@@ -172,7 +173,8 @@ public sealed record AzureProviderOperation(
     Guid? InstanceId = null,
     ElsaInstanceOperationAction? LifecycleAction = null,
     Guid? ProviderAssignmentId = null,
-    AzureProviderRunnerStep? AttemptedStep = null)
+    AzureProviderRunnerStep? AttemptedStep = null,
+    AzureWorkloadCapacity? Capacity = null)
 {
     [JsonIgnore]
     public IReadOnlyDictionary<string, string> SafeSecretReferences => SecretReferences ?? EmptySecretReferences;

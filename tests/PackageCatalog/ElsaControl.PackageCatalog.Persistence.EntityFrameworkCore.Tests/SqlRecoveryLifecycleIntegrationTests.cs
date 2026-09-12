@@ -202,7 +202,8 @@ exit 93
                     workspace.OrganizationId,
                     instanceId,
                     ElsaInstanceOperationAction.Reconcile,
-                    assignment.Id),
+                    assignment.Id,
+                    providerPlan.Capacity),
                 DateTimeOffset.Parse("2026-09-05T16:00:00Z"));
             var now = DateTimeOffset.Parse("2026-09-05T16:00:00Z");
             var claimed = Assert.IsType<AzureProviderOperation>(await operationStore.ClaimAsync(

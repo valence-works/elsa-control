@@ -96,6 +96,45 @@ param owner string = 'elsa-control'
 @description('Create the externally reachable Container App. Set false for the foundation phase while the runbook seeds Key Vault secrets.')
 param deployWorkload bool = true
 
+// Workload capacity comes from the resolved plan and has no defaults: a caller that omits it
+// fails the deployment instead of silently scaling to zero. Values are the exact Container Apps
+// consumption representation; workloadMemory must be the consumption pair of workloadCpu.
+@description('Minimum workload replicas from the resolved plan capacity. Zero permits scale-to-zero only when the plan asks for it.')
+@minValue(0)
+@maxValue(300)
+param workloadMinReplicas int
+
+@description('Maximum workload replicas from the resolved plan capacity.')
+@minValue(1)
+@maxValue(300)
+param workloadMaxReplicas int
+
+@description('Container Apps consumption vCPU for the workload container, mapped exactly from the plan millicores.')
+@allowed([
+  '0.25'
+  '0.5'
+  '0.75'
+  '1'
+  '1.25'
+  '1.5'
+  '1.75'
+  '2'
+])
+param workloadCpu string
+
+@description('Container Apps consumption memory for the workload container, mapped exactly from the plan MiB.')
+@allowed([
+  '0.5Gi'
+  '1Gi'
+  '1.5Gi'
+  '2Gi'
+  '2.5Gi'
+  '3Gi'
+  '3.5Gi'
+  '4Gi'
+])
+param workloadMemory string
+
 @description('SHA-256 of the compiled main template. The runbook supplies this so IaC changes produce a new plan and revision identity.')
 @minLength(64)
 @maxLength(64)
@@ -113,7 +152,7 @@ param stableTrafficRevisionName string = ''
 param additionalTags object = {}
 
 var effectiveReleaseVersion = empty(releaseVersion) ? elsaVersion : releaseVersion
-var planInput = 'template=${toLower(templateFingerprint)}|name=${workloadName}|location=${location}|image=${imageRepository}@sha256:${toLower(imageDigest)}|elsa=${elsaVersion}|release-line=${releaseLine}|release-version=${effectiveReleaseVersion}|release-feed=${releaseFeedName}/${releaseFeedServiceIndex}|sql-workflow=${sqlWorkflowPackageVersion}|sql-quartz=${sqlQuartzPackageVersion}|topology=combined|acr=${registrySubscriptionId}/${registryResourceGroupName}/${registryName}|sql-bootstrap=${sqlBootstrapObjectId}/${sqlBootstrapLogin}|admin=${adminUsername}|secrets=${sqlConnectionSecretName}/${signingKeySecretName}/${adminPasswordSecretName}'
+var planInput = 'template=${toLower(templateFingerprint)}|name=${workloadName}|location=${location}|image=${imageRepository}@sha256:${toLower(imageDigest)}|elsa=${elsaVersion}|release-line=${releaseLine}|release-version=${effectiveReleaseVersion}|release-feed=${releaseFeedName}/${releaseFeedServiceIndex}|sql-workflow=${sqlWorkflowPackageVersion}|sql-quartz=${sqlQuartzPackageVersion}|topology=combined|capacity=${workloadMinReplicas}/${workloadMaxReplicas}/${workloadCpu}/${workloadMemory}|acr=${registrySubscriptionId}/${registryResourceGroupName}/${registryName}|sql-bootstrap=${sqlBootstrapObjectId}/${sqlBootstrapLogin}|admin=${adminUsername}|secrets=${sqlConnectionSecretName}/${signingKeySecretName}/${adminPasswordSecretName}'
 // Bicep 0.43 has no SHA-256 function. uniqueString is deterministic for the
 // canonical input, including the externally computed compiled-template hash.
 var planFingerprint = uniqueString(planInput)
@@ -210,6 +249,10 @@ module workload 'modules/container-app.bicep' = if (deployWorkload) {
     sqlQuartzPackageVersion: sqlQuartzPackageVersion
     revisionSuffix: revisionSuffix
     stableTrafficRevisionName: stableTrafficRevisionName
+    minReplicas: workloadMinReplicas
+    maxReplicas: workloadMaxReplicas
+    cpu: workloadCpu
+    memory: workloadMemory
     tags: tags
   }
 }

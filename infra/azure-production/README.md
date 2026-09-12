@@ -17,6 +17,12 @@ The template does not select an Elsa generation or feed by branching on a versio
 
 The workload name, owner, plan fingerprint and release values are retained as safe resource tags and as `ELSA_RELEASE_LINE` / `ELSA_RELEASE_VERSION` environment metadata. This keeps ownership and release provenance visible without embedding a particular Elsa release line in infrastructure code.
 
+## Workload capacity
+
+The workload is sized from the resolved plan's governed capacity, never from template literals. `workloadMinReplicas`, `workloadMaxReplicas`, `workloadCpu` and `workloadMemory` are required and have no defaults, so a caller that omits them fails the deployment instead of scaling to zero. The provider runner maps the plan's millicores and MiB to the exact Azure Container Apps consumption pair (0.25/0.5Gi through 2/4Gi in 0.25 vCPU steps) and refuses a plan with no exact pair, a minimum outside 0-300 or a maximum outside 1-300 before any Azure call. The container-app module additionally selects its resources by the requested pair, so an unlisted combination fails the deployment rather than being rounded.
+
+Consumption ephemeral storage is derived from the CPU size (up to 2 GiB for 0.5 vCPU, 4 GiB for 1 vCPU, 8 GiB above that) and cannot be set, so it is not a template parameter; plan admission rejects a capacity that asks for more than its CPU size provides. Capacity is part of the provider plan fingerprint and of `planFingerprint` here, so a capacity change always produces a new revision.
+
 ## Identity and data protection
 
 The SQL server uses Microsoft Entra-only administration and the workload identity is created as a contained service-principal user by `sql-bootstrap.sql`. Key Vault uses RBAC: the workload can read secrets and the bootstrap operator can seed them, but neither receives broad vault administration through the template. SQL backup retention remains explicit so the provider can make its own recovery decision.

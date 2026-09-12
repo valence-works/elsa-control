@@ -24,6 +24,11 @@ internal sealed class AzureProviderOperationEntity
     public string? ProviderScopeFingerprint { get; set; }
     public string? SqlWorkflowPackageVersion { get; set; }
     public string? SqlQuartzPackageVersion { get; set; }
+    // Workload capacity is all-or-nothing; rows retained before it existed carry none.
+    public int? CapacityMinReplicas { get; set; }
+    public int? CapacityMaxReplicas { get; set; }
+    public int? CapacityCpuMillicores { get; set; }
+    public int? CapacityMemoryMiB { get; set; }
     public string ElsaVersion { get; set; } = "";
     public string ReleaseLine { get; set; } = "";
     public string Topology { get; set; } = "";

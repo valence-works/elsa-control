@@ -4,6 +4,7 @@ using System.Text.Json;
 
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
+using ElsaControl.RuntimeBuilder.Abstractions.Plans;
 
 namespace ElsaControl.Deployment.Azure.Tests;
 
@@ -27,7 +28,74 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         StableTrafficRevisionName = "proof-app--stable"
     };
     private const string ExactSqlBootstrapFirewall = "[{\"name\":\"elsa-bootstrap\",\"startIpAddress\":\"203.0.113.10\",\"endIpAddress\":\"203.0.113.10\"}]";
+    private static readonly AzureWorkloadCapacity StandardSmall = GovernedCapacity("standard-small");
     private readonly RunnerFixture _fixture = new();
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.Foundation, "standard-small", "1", "1", "0.5", "1Gi")]
+    [InlineData(AzureProviderRunnerStep.Workload, "standard-small", "1", "1", "0.5", "1Gi")]
+    [InlineData(AzureProviderRunnerStep.Foundation, "standard", "1", "3", "1", "2Gi")]
+    [InlineData(AzureProviderRunnerStep.Workload, "standard", "1", "3", "1", "2Gi")]
+    public async Task Production_deployment_passes_the_exact_governed_capacity_to_Bicep(
+        AzureProviderRunnerStep step, string profile, string minReplicas, string maxReplicas, string cpu, string memory)
+    {
+        var deployment = await ProductionDeploymentAsync(step, _fixture.Plan with { Capacity = GovernedCapacity(profile) });
+
+        Assert.Equal(
+            [$"workloadMinReplicas={minReplicas}", $"workloadMaxReplicas={maxReplicas}", $"workloadCpu={cpu}", $"workloadMemory={memory}"],
+            deployment.Where(IsCapacityArgument));
+    }
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.Foundation, 1, 1, 500, 2048)]
+    [InlineData(AzureProviderRunnerStep.Workload, 1, 1, 500, 2048)]
+    [InlineData(AzureProviderRunnerStep.Workload, 1, 1, 300, 600)]
+    [InlineData(AzureProviderRunnerStep.Workload, 1, 1, 4000, 8192)]
+    [InlineData(AzureProviderRunnerStep.Workload, 0, 0, 500, 1024)]
+    [InlineData(AzureProviderRunnerStep.Workload, 2, 1, 500, 1024)]
+    [InlineData(AzureProviderRunnerStep.Foundation, 1, 301, 500, 1024)]
+    public async Task Production_deployment_without_an_exact_Container_Apps_mapping_fails_before_any_Azure_call(
+        AzureProviderRunnerStep step, int minReplicas, int maxReplicas, int cpuMillicores, int memoryMiB)
+    {
+        var (result, process) = await RunWithCapacityAsync(step, new(minReplicas, maxReplicas, cpuMillicores, memoryMiB));
+
+        AssertFailedClosed(result, process, "azure.capacity.unsupported");
+    }
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.Foundation)]
+    [InlineData(AzureProviderRunnerStep.Workload)]
+    public async Task Production_deployment_of_a_plan_retained_without_capacity_fails_before_any_Azure_call(AzureProviderRunnerStep step)
+    {
+        var (result, process) = await RunWithCapacityAsync(step, capacity: null);
+
+        AssertFailedClosed(result, process, "azure.capacity.required");
+    }
+
+    [Fact]
+    public async Task Disposable_deployment_keeps_the_cost_boxed_template_sizing_and_takes_no_capacity()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args is ["group", "exists", ..], "false");
+        process.Success(args => args is ["group", "create", ..]);
+        process.Success(args => args.Contains("deployment") && args.Contains("create"), FoundationOutputs());
+        var options = _fixture.Options with
+        {
+            DisposableProofMode = true,
+            DisposableExpiryUtc = new DateOnly(2026, 9, 30),
+            AzureCliClientId = null
+        };
+        var command = _fixture.Command(AzureProviderRunnerStep.Foundation) with
+        {
+            Plan = _fixture.Plan with { Capacity = null },
+            Context = _fixture.Context with { ProviderScopeFingerprint = options.ComputeProviderScopeFingerprint(_fixture.Scope) }
+        };
+
+        var result = await new AzureBicepProviderRunner(options, _fixture.Scope, process).RunAsync(command);
+
+        Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
+        Assert.DoesNotContain(process.Calls.Single(call => call.Contains("deployment")), IsCapacityArgument);
+    }
 
     [Fact]
     public async Task Disposable_foundation_preserves_the_proof_template_and_ownership_contract()
@@ -2072,6 +2140,71 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         return _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Foundation));
     }
 
+    private static AzureWorkloadCapacity GovernedCapacity(string profile)
+    {
+        var governed = ElsaInstancePlanResolutionOptions.Default.EffectiveCapacityProfiles[profile];
+        return new(governed.MinReplicas, governed.MaxReplicas, governed.CpuMillicores, governed.MemoryMiB);
+    }
+
+    private static bool IsCapacityArgument(string argument) =>
+        argument.StartsWith("workloadMinReplicas=", StringComparison.Ordinal) ||
+        argument.StartsWith("workloadMaxReplicas=", StringComparison.Ordinal) ||
+        argument.StartsWith("workloadCpu=", StringComparison.Ordinal) ||
+        argument.StartsWith("workloadMemory=", StringComparison.Ordinal);
+
+    private AzureProviderResourceReferences RegistryReadyResources() => _fixture.FoundationResources with
+    {
+        RegistryResourceId = _fixture.RegistryId,
+        AcrPullDeploymentId = _fixture.RegistryDeploymentId,
+        AcrPullRoleAssignmentId = _fixture.RegistryRoleAssignmentId
+    };
+
+    /// <summary>Runs a converging production foundation or workload step and returns its deployment arguments.</summary>
+    private async Task<string[]> ProductionDeploymentAsync(AzureProviderRunnerStep step, AzureWorkloadPlan plan)
+    {
+        var process = new FakeCommandProcess();
+        if (step == AzureProviderRunnerStep.Foundation)
+        {
+            process.Success(args => args is ["group", "exists", ..], "false");
+            process.Success(args => args is ["group", "create", ..]);
+            process.Success(args => args.Contains("deployment") && args.Contains("create"), FoundationOutputs());
+        }
+        else
+        {
+            process.Success(args => args.Contains("resource") && args.Contains("list"), "0");
+            process.Success(args => args.Contains("resource") && args.Contains("list"), "0");
+            process.Success(args => args.Contains("deployment") && args.Contains("create"), WorkloadOutputs());
+            process.Success(args => args.Contains("sql") && args.Contains("server") && args.Contains("list"), "1");
+            process.Success(args => args.Contains("ad-admin") && args.Contains("list"), "[{\"login\":\"proof-bootstrap\",\"sid\":\"11111111-1111-1111-1111-111111111111\"}]");
+            process.Success(args => args.Contains("ad-only-auth") && args.Contains("enable"));
+        }
+
+        var result = await _fixture.Runner(process).RunAsync(
+            _fixture.Command(step, step == AzureProviderRunnerStep.Foundation ? null : RegistryReadyResources()) with { Plan = plan });
+
+        Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
+        return process.Calls.Single(call => call.Contains("deployment") && call.Contains("create"));
+    }
+
+    private async Task<(AzureProviderRunnerResult Result, FakeCommandProcess Process)> RunWithCapacityAsync(
+        AzureProviderRunnerStep step,
+        AzureWorkloadCapacity? capacity)
+    {
+        // No scripted responses: any Azure command would fail the test double.
+        var process = new FakeCommandProcess();
+        var result = await _fixture.Runner(process).RunAsync(
+            _fixture.Command(step, RegistryReadyResources()) with { Plan = _fixture.Plan with { Capacity = capacity } });
+        return (result, process);
+    }
+
+    private static void AssertFailedClosed(AzureProviderRunnerResult result, FakeCommandProcess process, string code)
+    {
+        Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
+        Assert.Equal(code, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == code);
+        Assert.Empty(process.Calls);
+    }
+
     private string WorkloadOutputs() => """
         {
           "deploymentName": { "value": "workload" },
@@ -2131,7 +2264,8 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
             context.InstanceId,
             ElsaInstanceOperationAction.Reconcile,
             Guid.Parse(context.ProviderAssignmentId),
-            attemptedStep);
+            attemptedStep,
+            _fixture.Plan.Capacity);
         var assignmentId = Guid.Parse(context.ProviderAssignmentId);
         var assignment = new AzureProviderResourceAssignment(
             assignmentId,
@@ -2201,7 +2335,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
             "oci://release/manifest@sha256:" + new string('c', 64), "sha256:" + new string('c', 64),
             "oci://release/signature@sha256:" + new string('d', 64), "sha256:" + new string('d', 64),
             new Dictionary<string, string>(), new string('a', 64),
-            "3.8.0-preview.5413", "3.8.0-preview.342");
+            "3.8.0-preview.5413", "3.8.0-preview.342", StandardSmall);
         public AzureProviderResourceReferences FoundationResources { get; } = new(
             ResourceGroupName: "proof-rg",
             FoundationDeploymentId: "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/proof-rg/providers/Microsoft.Resources/deployments/foundation",

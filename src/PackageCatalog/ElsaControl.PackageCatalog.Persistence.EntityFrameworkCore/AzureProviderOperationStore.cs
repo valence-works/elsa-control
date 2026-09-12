@@ -460,6 +460,10 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                     ProviderScopeFingerprint = normalized.ProviderScopeFingerprint,
                     SqlWorkflowPackageVersion = normalized.SqlWorkflowPackageVersion,
                     SqlQuartzPackageVersion = normalized.SqlQuartzPackageVersion,
+                    CapacityMinReplicas = normalized.Capacity?.MinReplicas,
+                    CapacityMaxReplicas = normalized.Capacity?.MaxReplicas,
+                    CapacityCpuMillicores = normalized.Capacity?.CpuMillicores,
+                    CapacityMemoryMiB = normalized.Capacity?.MemoryMiB,
                     ElsaVersion = normalized.ElsaVersion,
                     ReleaseLine = normalized.ReleaseLine,
                     Topology = normalized.Topology,
@@ -1143,6 +1147,9 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
         AzureProviderOperationRequest request;
         try
         {
+            var (capacity, capacityInvalid) = ReadCapacity(operation);
+            if (capacityInvalid)
+                throw new InvalidOperationException();
             request = new(
                 operation.WorkspaceId,
                 operation.TargetKey,
@@ -1170,7 +1177,8 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                 operation.OrganizationId,
                 operation.InstanceId,
                 operation.LifecycleAction,
-                operation.ProviderAssignmentId);
+                operation.ProviderAssignmentId,
+                capacity);
             if (!string.Equals(
                     AzureProviderOperationValidation.ComputeRequestHash(request),
                     operation.RequestHash,
@@ -1388,6 +1396,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
     {
         var (diagnostics, diagnosticsInvalid) = ReadDiagnostics(x.DiagnosticsJson);
         var (secretReferences, secretReferencesInvalid) = ReadSecretReferences(x.SecretReferencesJson);
+        var (capacity, capacityInvalid) = ReadCapacity(x);
         return new(
             x.Id, x.WorkspaceId, x.TargetKey, x.Action, x.IdempotencyKey, x.RequestHash, x.OperationIdentity,
             x.PlanFingerprint, x.TemplateFingerprint, x.ElsaVersion, x.ReleaseLine, x.Topology, x.Isolation,
@@ -1401,7 +1410,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
             x.WorkerId, x.LeaseExpiresAt, x.HeartbeatAt, x.CreatedAt, x.UpdatedAt, x.CompletedAt,
             x.ReleaseManifestReference, x.ReleaseManifestSignatureReference,
             secretReferences,
-            diagnosticsInvalid || secretReferencesInvalid,
+            diagnosticsInvalid || secretReferencesInvalid || capacityInvalid,
             x.ProviderScopeFingerprint,
             x.SqlWorkflowPackageVersion,
             x.SqlQuartzPackageVersion,
@@ -1409,8 +1418,21 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
             x.InstanceId,
             x.LifecycleAction,
             x.ProviderAssignmentId,
-            x.AttemptedStep);
+            x.AttemptedStep,
+            capacity);
     }
+
+    /// <summary>
+    /// Capacity columns are written together. A partially populated set is corrupt metadata:
+    /// it marks the row invalid instead of restoring a plan with guessed sizing.
+    /// </summary>
+    private static (AzureWorkloadCapacity? Capacity, bool Invalid) ReadCapacity(AzureProviderOperationEntity x) =>
+        (x.CapacityMinReplicas, x.CapacityMaxReplicas, x.CapacityCpuMillicores, x.CapacityMemoryMiB) switch
+        {
+            (null, null, null, null) => (null, false),
+            ({ } min, { } max, { } cpu, { } memory) => (new AzureWorkloadCapacity(min, max, cpu, memory), false),
+            _ => (null, true)
+        };
 
     private static AzureProviderResourceAssignment ToModel(AzureProviderResourceAssignmentEntity x) => new(
         x.Id,

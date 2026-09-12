@@ -67,9 +67,10 @@ public static class AzureWorkloadPlanTranslator
         var releasePackages = normalized.Release.ComponentDeclarations?.Packages;
         var sqlWorkflowPackageVersion = RequiredPackageVersion(releasePackages, SqlWorkflowPackageId, findings);
         var sqlQuartzPackageVersion = RequiredPackageVersion(releasePackages, SqlQuartzPackageId, findings);
+        var component = normalized.Topology.Components.Single();
+        var capacity = RequiredCapacity(normalized.Capacity, component, findings);
         if (findings.Count > 0)
             return Rejected(findings);
-        var component = normalized.Topology.Components.Single();
         var evidence = normalized.Evidence.Single(x =>
             string.Equals(x.Kind, ReleaseManifestEvidenceKinds.Manifest, StringComparison.OrdinalIgnoreCase));
         var signatureEvidence = normalized.Evidence.Single(x =>
@@ -91,7 +92,9 @@ public static class AzureWorkloadPlanTranslator
         };
         var fingerprintInputs = new
         {
-            schema = "azure-workload-plan/v1",
+            // v2 binds the workload capacity. A capacity change therefore yields a new plan
+            // fingerprint and, through it, a new Container Apps revision suffix.
+            schema = "azure-workload-plan/v2",
             canonicalTarget.workloadName,
             canonicalTarget.location,
             elsaVersion = normalized.Release.Version,
@@ -110,6 +113,13 @@ public static class AzureWorkloadPlanTranslator
             releaseManifestSignatureDigest = signatureEvidence.Digest!.ToLowerInvariant(),
             sqlWorkflowPackageVersion,
             sqlQuartzPackageVersion,
+            capacity = new
+            {
+                minReplicas = capacity!.MinReplicas,
+                maxReplicas = capacity.MaxReplicas,
+                cpuMillicores = capacity.CpuMillicores,
+                memoryMiB = capacity.MemoryMiB
+            },
             secretReferences = secretReferences
                 .OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
                 .Select(x => new { key = x.Key.ToLowerInvariant(), reference = x.Value })
@@ -135,8 +145,39 @@ public static class AzureWorkloadPlanTranslator
                 secretReferences,
                 fingerprint,
                 sqlWorkflowPackageVersion,
-                sqlQuartzPackageVersion),
+                sqlQuartzPackageVersion,
+                capacity),
             []);
+    }
+
+    /// <summary>
+    /// Selects the governed capacity of the single workload component. Consumption ephemeral
+    /// storage is derived from CPU, so a plan asking for more than that CPU provides is
+    /// rejected rather than silently given less.
+    /// </summary>
+    private static AzureWorkloadCapacity? RequiredCapacity(
+        ResolvedCapacityOutcome resolvedCapacity,
+        ResolvedElsaComponent component,
+        ICollection<ResolvedPlanValidationFinding> findings)
+    {
+        var matches = resolvedCapacity.Components
+            .Where(x => string.Equals(x.ComponentId, component.Id, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (matches.Length != 1)
+        {
+            findings.Add(new("azure.capacity.required", "The admitted plan must carry exactly one capacity outcome for the Azure workload component.", $"capacity:{component.Id}"));
+            return null;
+        }
+
+        var resolved = matches[0];
+        var capacity = new AzureWorkloadCapacity(resolved.MinReplicas, resolved.MaxReplicas, resolved.CpuMillicores, resolved.MemoryMiB);
+        var size = AzureContainerAppsCapacity.Map(capacity);
+        if (size is null || resolved.EphemeralStorageMiB > size.EphemeralStorageMiB)
+        {
+            findings.Add(new("azure.capacity.unsupported", "The resolved capacity has no exact Azure Container Apps consumption mapping.", $"capacity:{component.Id}"));
+            return null;
+        }
+        return capacity;
     }
 
     private static string? RequiredPackageVersion(

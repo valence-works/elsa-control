@@ -394,6 +394,58 @@ public sealed class AzureProviderOperationValidationTests
         Assert.NotEqual(AzureProviderOperationValidation.ComputeOperationIdentity(first), AzureProviderOperationValidation.ComputeOperationIdentity(different));
     }
 
+    [Fact]
+    public void Capacity_is_bound_into_the_request_hash_and_identity_binds_it_through_the_plan_fingerprint()
+    {
+        var request = PersistedInstanceRequest();
+        var small = request with { Capacity = new AzureWorkloadCapacity(1, 1, 500, 1024) };
+        var scaled = request with { Capacity = new AzureWorkloadCapacity(1, 3, 500, 1024) };
+
+        Assert.NotEqual(AzureProviderOperationValidation.ComputeRequestHash(request), AzureProviderOperationValidation.ComputeRequestHash(small));
+        Assert.NotEqual(AzureProviderOperationValidation.ComputeRequestHash(small), AzureProviderOperationValidation.ComputeRequestHash(scaled));
+        Assert.Equal(AzureProviderOperationValidation.ComputeRequestHash(small), AzureProviderOperationValidation.ComputeRequestHash(small with { }));
+        Assert.Equal(AzureProviderOperationValidation.ComputeOperationIdentity(request), AzureProviderOperationValidation.ComputeOperationIdentity(small));
+    }
+
+    [Theory]
+    [InlineData(1, 1, 500, 2048)]
+    [InlineData(0, 0, 500, 1024)]
+    [InlineData(1, 301, 500, 1024)]
+    public void Persisted_capacity_without_a_Container_Apps_mapping_is_invalid(int minReplicas, int maxReplicas, int cpuMillicores, int memoryMiB)
+    {
+        var request = PersistedInstanceRequest() with { Capacity = new(minReplicas, maxReplicas, cpuMillicores, memoryMiB) };
+
+        Assert.Contains("capacity.invalid", AzureProviderOperationValidation.Validate(request));
+        Assert.Throws<ArgumentException>(() => AzureProviderOperationValidation.ComputeRequestHash(request));
+    }
+
+    [Fact]
+    public void Operations_persisted_before_capacity_keep_their_request_hash_and_identity()
+    {
+        var request = PersistedInstanceRequest();
+
+        Assert.Equal("3021364612d2e58f1e1fb806a7f6041dc008f01fd18e99d84c05de65485e3645", AzureProviderOperationValidation.ComputeRequestHash(request));
+        Assert.Equal("727f81908639e8055183f3ec0b3d8f28a56dfaa4d69b53d514cdd5e12006fbf7", AzureProviderOperationValidation.ComputeOperationIdentity(request));
+    }
+
+    /// <summary>
+    /// The exact shape the lifecycle adapter persisted for a managed instance before capacity
+    /// became part of the provider projection. Its hash and identity are golden values: a
+    /// change here would mark every retained operation unrestorable.
+    /// </summary>
+    private static AzureProviderOperationRequest PersistedInstanceRequest() => new(
+        Guid.Parse("11111111-1111-1111-1111-111111111111"), "e0123456789abcde", AzureProviderOperationAction.Reconcile,
+        "elsa-instance-operation:22222222-2222-2222-2222-222222222222",
+        new('a', 64), new('b', 64), "3.8.0", "3.8", "combined", "Dedicated", "westeurope",
+        "valenceruntimeimages.azurecr.io/runtime-combined", "sha256:" + new string('c', 64),
+        "sha256:" + new string('d', 64), "sha256:" + new string('e', 64),
+        "oci://evidence.example/manifest", "oci://evidence.example/signature",
+        new Dictionary<string, string> { ["database:connectionstring"] = "secret://azure-managed/sql-connection" },
+        new string('f', 64), "3.8.0-preview.5413", "3.8.0-preview.342",
+        Guid.Parse("33333333-3333-3333-3333-333333333333"), Guid.Parse("44444444-4444-4444-4444-444444444444"),
+        ElsaControl.Deployment.Abstractions.Instances.ElsaInstanceOperationAction.Create,
+        Guid.Parse("55555555-5555-5555-5555-555555555555"));
+
     private static AzureProviderOperationRequest ValidRequest() => new(
         Guid.NewGuid(), "workload-a", AzureProviderOperationAction.Reconcile, "request-1",
         new('a', 64), new('b', 64), "3.8.0", "3.8", "combined", "Dedicated", "westeurope",

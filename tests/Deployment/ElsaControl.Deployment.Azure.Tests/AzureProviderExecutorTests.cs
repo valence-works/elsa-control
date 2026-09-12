@@ -766,6 +766,20 @@ public sealed class AzureProviderExecutorTests
         await Assert.ThrowsAsync<ArgumentException>(() => executor.ApplyAsync(CreateRequest(), plan));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Execution_rejects_plan_capacity_that_does_not_match_the_operation(bool operationRetainsCapacity)
+    {
+        var store = new FakeOperationStore();
+        var executor = new AzureProviderExecutor(store, new RecordingRunner(), new StaticTimeProvider(Now), TimeSpan.FromMinutes(5));
+        var retained = new AzureWorkloadCapacity(1, 1, 500, 1024);
+        var request = CreateRequest() with { Capacity = operationRetainsCapacity ? retained : null };
+        var plan = CreatePlan() with { Capacity = operationRetainsCapacity ? retained with { MaxReplicas = 3 } : retained };
+
+        await Assert.ThrowsAsync<ArgumentException>(() => executor.ApplyAsync(request, plan));
+    }
+
     [Fact]
     public async Task Execution_rejects_noncanonical_plan_secret_reference_keys()
     {

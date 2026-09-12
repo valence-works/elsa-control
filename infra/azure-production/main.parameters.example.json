@@ -40,6 +40,18 @@
     },
     "releaseFeedServiceIndex": {
       "value": "https://api.nuget.org/v3/index.json"
+    },
+    "workloadMinReplicas": {
+      "value": 1
+    },
+    "workloadMaxReplicas": {
+      "value": 1
+    },
+    "workloadCpu": {
+      "value": "0.5"
+    },
+    "workloadMemory": {
+      "value": "1Gi"
     }
   }
 }

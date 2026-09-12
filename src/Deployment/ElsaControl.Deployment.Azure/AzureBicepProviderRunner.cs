@@ -469,6 +469,9 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         AzureProviderRunnerCommand command,
         CancellationToken cancellationToken)
     {
+        if (CapacityFailure(command, AzureProviderOperationPhase.FoundationSubmitted) is { } capacityFailure)
+            return capacityFailure;
+
         var resources = command.Resources with
         {
             ResourceGroupName = ResourceGroupName(command),
@@ -971,6 +974,9 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         AzureProviderRunnerCommand command,
         CancellationToken cancellationToken)
     {
+        if (CapacityFailure(command, AzureProviderOperationPhase.WorkloadReady) is { } capacityFailure)
+            return capacityFailure;
+
         var missing = RequireRegistry(command.Resources);
         if (missing is not null)
             return Failed(command, AzureProviderOperationPhase.WorkloadReady, "azure.workload.foundation-missing", missing);
@@ -1882,6 +1888,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             $"adminPasswordSecretName={AdminPasswordSecretName}", $"adminUsername={_options.RuntimeAdminUsername}",
             $"elsaVersion={command.Plan.ElsaVersion}", ..ReleaseIdentityArguments(command),
             $"sqlWorkflowPackageVersion={command.Plan.SqlWorkflowPackageVersion}", $"sqlQuartzPackageVersion={command.Plan.SqlQuartzPackageVersion}",
+            ..CapacityArguments(command),
             $"templateFingerprint={command.Context.TemplateFingerprint}", "deployWorkload=false", "--query", "properties.outputs", "--output", "json", "--only-show-errors"];
 
     private IReadOnlyList<string> AcrDeploymentArguments(AzureProviderRunnerCommand command, string identityId, string principalId, string deploymentName) =>
@@ -1901,6 +1908,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             $"adminPasswordSecretName={AdminPasswordSecretName}", $"adminUsername={_options.RuntimeAdminUsername}",
             $"elsaVersion={command.Plan.ElsaVersion}", ..ReleaseIdentityArguments(command),
             $"sqlWorkflowPackageVersion={command.Plan.SqlWorkflowPackageVersion}", $"sqlQuartzPackageVersion={command.Plan.SqlQuartzPackageVersion}",
+            ..CapacityArguments(command),
             $"templateFingerprint={command.Context.TemplateFingerprint}", "deployWorkload=true", $"workloadRevisionSuffix={revision}",
             $"stableTrafficRevisionName={stable ?? string.Empty}", "--query", "properties.outputs", "--output", "json", "--only-show-errors"];
 
@@ -2303,6 +2311,34 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private string[] ReleaseIdentityArguments(AzureProviderRunnerCommand command) => _options.DisposableProofMode
         ? []
         : [$"releaseLine={command.Plan.ReleaseLine}", $"releaseFeedServiceIndex={_options.NormalizeReleaseFeedServiceIndex()}"];
+
+    /// <summary>
+    /// The production template sizes the workload from the plan alone and has no capacity
+    /// defaults. A plan without an exact Container Apps mapping fails before any Azure call.
+    /// The disposable-proof template keeps its own cost-boxed sizing and takes no capacity.
+    /// </summary>
+    private AzureProviderRunnerResult? CapacityFailure(AzureProviderRunnerCommand command, AzureProviderOperationPhase phase) =>
+        _options.DisposableProofMode || AzureContainerAppsCapacity.Map(command.Plan.Capacity) is not null
+            ? null
+            : command.Plan.Capacity is null
+                ? Failed(command, phase, "azure.capacity.required", "The plan carries no workload capacity for the production template.")
+                : Failed(command, phase, "azure.capacity.unsupported", "The plan capacity has no exact Azure Container Apps consumption mapping.");
+
+    private string[] CapacityArguments(AzureProviderRunnerCommand command)
+    {
+        if (_options.DisposableProofMode)
+            return [];
+        var capacity = command.Plan.Capacity;
+        var size = AzureContainerAppsCapacity.Map(capacity)
+            ?? throw new InvalidOperationException("The plan capacity has no exact Azure Container Apps consumption mapping.");
+        return
+        [
+            $"workloadMinReplicas={capacity!.MinReplicas.ToString(CultureInfo.InvariantCulture)}",
+            $"workloadMaxReplicas={capacity.MaxReplicas.ToString(CultureInfo.InvariantCulture)}",
+            $"workloadCpu={size.Cpu}",
+            $"workloadMemory={size.Memory}"
+        ];
+    }
 
     private string[] SqlAuthenticationArguments() => _options.DisposableProofMode
         ? ["--authentication-method", "ActiveDirectoryDefault"]

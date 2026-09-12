@@ -2628,6 +2628,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                     })
                     .ToArray()
             },
+            Capacity = baselinePlan.Capacity with { Components = GovernedTestCapacity.StandardSmall(component.Id) },
             Isolation = AzureWorkloadPlanTranslator.SupportedIsolation,
             Configuration = new(
             [

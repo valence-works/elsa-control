@@ -104,6 +104,18 @@ param revisionSuffix string
 @maxLength(64)
 param stableTrafficRevisionName string = ''
 
+@description('Minimum replicas from the resolved plan capacity.')
+param minReplicas int
+
+@description('Maximum replicas from the resolved plan capacity.')
+param maxReplicas int
+
+@description('Consumption vCPU for the workload container.')
+param cpu string
+
+@description('Consumption memory for the workload container.')
+param memory string
+
 @description('Tags applied to the app.')
 param tags object = {}
 
@@ -112,6 +124,42 @@ resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' existing =
   scope: resourceGroup(registrySubscriptionId, registryResourceGroupName)
 }
 var immutableImage = '${imageRepository}@sha256:${toLower(imageDigest)}'
+// Consumption accepts only these CPU/memory pairs. Indexing by the requested pair fails the
+// deployment for any other combination rather than letting a default or rounding decide.
+var consumptionResources = {
+  '0.25/0.5Gi': {
+    cpu: json('0.25')
+    memory: '0.5Gi'
+  }
+  '0.5/1Gi': {
+    cpu: json('0.5')
+    memory: '1Gi'
+  }
+  '0.75/1.5Gi': {
+    cpu: json('0.75')
+    memory: '1.5Gi'
+  }
+  '1/2Gi': {
+    cpu: json('1')
+    memory: '2Gi'
+  }
+  '1.25/2.5Gi': {
+    cpu: json('1.25')
+    memory: '2.5Gi'
+  }
+  '1.5/3Gi': {
+    cpu: json('1.5')
+    memory: '3Gi'
+  }
+  '1.75/3.5Gi': {
+    cpu: json('1.75')
+    memory: '3.5Gi'
+  }
+  '2/4Gi': {
+    cpu: json('2')
+    memory: '4Gi'
+  }
+}
 var nuplaneFeedEnvironment = [
   {
     name: 'Nuplane__Setup__Feeds__0__Name'
@@ -259,10 +307,7 @@ resource app 'Microsoft.App/containerApps@2023-05-01' = {
         {
           name: topology
           image: immutableImage
-          resources: {
-            cpu: json('0.5')
-            memory: '1Gi'
-          }
+          resources: consumptionResources['${cpu}/${memory}']
           env: concat([
             {
               name: 'ASPNETCORE_ENVIRONMENT'
@@ -330,8 +375,8 @@ resource app 'Microsoft.App/containerApps@2023-05-01' = {
         }
       ]
       scale: {
-        minReplicas: 0
-        maxReplicas: 1
+        minReplicas: minReplicas
+        maxReplicas: maxReplicas
       }
     }
   }

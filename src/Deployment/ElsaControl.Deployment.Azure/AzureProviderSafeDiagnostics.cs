@@ -93,6 +93,8 @@ internal static class AzureProviderSafeDiagnostics
         "azure.acr.role-observation-uncertain",
         "azure.acr.role-scope-invalid",
         "azure.acr.scope-invalid",
+        "azure.capacity.required",
+        "azure.capacity.unsupported",
         "azure.cleanup.completed",
         "azure.cleanup.deployment-invalid",
         "azure.cleanup.deployment-scope-invalid",
