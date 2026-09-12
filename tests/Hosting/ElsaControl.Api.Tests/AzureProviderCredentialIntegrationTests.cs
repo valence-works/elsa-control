@@ -157,7 +157,8 @@ public sealed class AzureProviderCredentialIntegrationTests : IDisposable
         new Dictionary<string, string>(configuredReferences, StringComparer.OrdinalIgnoreCase),
         new string('4', 64),
         "5.0.1",
-        "5.0.2");
+        "5.0.2",
+        new AzureWorkloadCapacity(1, 1, 500, 1024));
 
     private static AzureProviderRunnerCommand Command(
         AzureProviderRunnerAuthority authority,
