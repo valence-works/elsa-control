@@ -22,7 +22,7 @@ Work is done only when applicable implementation, tests, integration/E2E evidenc
 
 ## Worker Assignment
 
-Issue Bus v1 ([`issue-bus.md`](issue-bus.md)) is the pickup, claim, and evidence protocol agents use to take Agent Ready tasks without an operator middleman. This section remains the program-level assignment policy; Issue Bus implements it on GitHub.
+Issue Bus v1 ([`issue-bus.md`](issue-bus.md)) is the pickup, claim, and evidence protocol. Codex and Claude self-serve Agent Ready tasks; Cursor cloud agents are CEO/Launch Ops dispatched when `worker:cursor` is set. This section remains the program-level assignment policy; Issue Bus implements it on GitHub.
 
 1. Select an unblocked Agent Ready task from the project.
 2. Mark it assigned/in progress before implementation.

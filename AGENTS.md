@@ -24,7 +24,10 @@
 <!-- MANUAL ADDITIONS START -->
 ## Issue Bus
 
-Agents pick, claim, and finish leaf work using the Issue Bus v1 protocol in `docs/product/issue-bus.md`. Do not wait for an operator to assign a Task.
+Leaf work follows the Issue Bus v1 protocol in `docs/product/issue-bus.md`. Worker lanes:
+
+- `worker:codex` / `worker:claude`: self-serve pickup after standing prompts. Do not wait for an operator to assign a Task.
+- `worker:cursor`: CEO / Launch Ops dispatches a Cursor cloud agent. Cursor sessions do not self-poll GitHub search and must not start without `ready-for-agent` + `worker:cursor`.
 
 ## Workroom model fallback
 
