@@ -39,4 +39,14 @@ describe("design preview fixtures", () => {
     expect(response.ok).toBe(true);
     expect(await response.json()).toMatchObject({ health: "Unreachable", lastHeartbeatAt: null, lastVerificationAt: null });
   });
+
+  it("keeps sample credential references consistent with their stores", async () => {
+    const stores = await (await window.fetch(previewUrl(`${workspacePath}/deployments/secret-stores`))).json();
+    const credentials = await (await window.fetch(previewUrl(`${workspacePath}/deployments/credential-references`))).json();
+    expect(stores.items).toHaveLength(2);
+    for (const credential of credentials.items) {
+      expect(stores.items).toContainEqual(expect.objectContaining({ id: credential.secretStoreId, type: credential.secretStoreType, status: "Active" }));
+      expect(credential.hasProtectedSecret).toBe(credential.secretStoreType === "LocalEncryptedDatabase");
+    }
+  });
 });

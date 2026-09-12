@@ -24,7 +24,10 @@ import type {
 
 const workspaceId = "workspace-preview";
 const organizationId = "organization-preview";
-const previewSecretStores: WorkspaceDeploymentSecretStore[] = [];
+const previewSecretStores = [
+  createSecretStore("store-credential-prod", "Production Key Vault", "AzureKeyVault", "azure-key-vault"),
+  createSecretStore("store-credential-staging", "Local protected store", "LocalEncryptedDatabase", "local-protected")
+];
 
 export const designPreviewFixtures = {
   authSession: {
@@ -213,8 +216,8 @@ export const designPreviewFixtures = {
   } satisfies WorkspaceDeploymentTiersResponse,
   credentials: {
     items: [
-      createCredential("credential-prod", "Production API", "Verified", "Active", "azure-key-vault", "prod/api"),
-      createCredential("credential-staging", "Staging API", "Unverified", "Active", "local-protected", "staging/api")
+      createCredential("credential-prod", "Production API", "Verified", "Active", previewSecretStores[0], "prod/api"),
+      createCredential("credential-staging", "Staging API", "Unverified", "Active", previewSecretStores[1], "staging/api")
     ]
   } satisfies WorkspaceDeploymentCredentialReferencesResponse,
   secretStores: {
@@ -370,7 +373,7 @@ async function previewResponse(method: string, path: string, request: Request) {
       updatedByAccountId: "account-preview",
       archivedAt: null,
       archivedByAccountId: null,
-      hasProtectedSecret: true,
+      hasProtectedSecret: store.type === "LocalEncryptedDatabase",
       usageCount: 0
     };
     designPreviewFixtures.credentials.items.push(credential);
@@ -484,8 +487,12 @@ function createTier(id: string, name: string, description: string, sortOrder: nu
   return { id, workspaceId, name, description, sortOrder, isDefault: sortOrder === 0, status: "Active", capabilities, environmentCount: sortOrder === 0 ? 1 : 1, createdAt: "2026-08-01T08:00:00Z", updatedAt: "2026-09-01T08:00:00Z", createdByAccountId: "account-preview", updatedByAccountId: "account-preview", archivedAt: null, archivedByAccountId: null };
 }
 
-function createCredential(id: string, name: string, verificationStatus: WorkspaceDeploymentCredentialReference["verificationStatus"], status: WorkspaceDeploymentCredentialReference["status"], secretStoreProvider: string, reference: string): WorkspaceDeploymentCredentialReference {
-  return { id, workspaceId, secretStoreId: `store-${id}`, secretStoreName: secretStoreProvider === "azure-key-vault" ? "Production Key Vault" : "Local protected store", secretStoreProvider, secretStoreType: secretStoreProvider === "azure-key-vault" ? "AzureKeyVault" : "LocalEncryptedDatabase", name, reference, description: `${name} used by preview engine registrations.`, status, verificationStatus, lastVerifiedAt: verificationStatus === "Verified" ? "2026-09-12T05:54:00Z" : null, createdAt: "2026-08-10T10:00:00Z", updatedAt: "2026-09-12T05:54:00Z", createdByAccountId: "account-preview", updatedByAccountId: "account-preview", archivedAt: null, archivedByAccountId: null, hasProtectedSecret: true, usageCount: 1 };
+function createSecretStore(id: string, name: string, type: WorkspaceDeploymentSecretStore["type"], provider: string): WorkspaceDeploymentSecretStore {
+  return { id, workspaceId, name, type, provider, description: null, status: "Active", createdAt: "2026-08-10T10:00:00Z", updatedAt: "2026-09-12T05:54:00Z", createdByAccountId: "account-preview", updatedByAccountId: "account-preview", archivedAt: null, archivedByAccountId: null };
+}
+
+function createCredential(id: string, name: string, verificationStatus: WorkspaceDeploymentCredentialReference["verificationStatus"], status: WorkspaceDeploymentCredentialReference["status"], store: WorkspaceDeploymentSecretStore, reference: string): WorkspaceDeploymentCredentialReference {
+  return { id, workspaceId, secretStoreId: store.id, secretStoreName: store.name, secretStoreProvider: store.provider, secretStoreType: store.type, name, reference, description: `${name} used by preview engine registrations.`, status, verificationStatus, lastVerifiedAt: verificationStatus === "Verified" ? "2026-09-12T05:54:00Z" : null, createdAt: "2026-08-10T10:00:00Z", updatedAt: "2026-09-12T05:54:00Z", createdByAccountId: "account-preview", updatedByAccountId: "account-preview", archivedAt: null, archivedByAccountId: null, hasProtectedSecret: store.type === "LocalEncryptedDatabase", usageCount: 1 };
 }
 
 function createEngine({ id, name, environmentId, health, credentialAssignmentStatus, verificationStatus, region, version, certificateStatus }: {

@@ -5310,7 +5310,7 @@ function summarizeApplicationHealth(application: DeploymentCockpit["applications
   if (applicationEngines.some((engine) => engine.health === "Unreachable")) return "Unreachable";
   if (
     applicationEngines.some((engine) => engine.health === "Degraded") ||
-    application.environments.some((environment) => environment.driftStatus === "DriftDetected")
+    application.environments.some((environment) => environment.driftStatus === "DriftDetected" || environment.deploymentStatus === "Blocked")
   ) {
     return "Needs review";
   }

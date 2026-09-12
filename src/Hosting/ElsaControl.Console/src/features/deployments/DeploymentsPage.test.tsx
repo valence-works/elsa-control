@@ -81,11 +81,12 @@ describe("DeploymentsPage", () => {
   });
 
   it.each([
-    { missingEngine: true, expectedHealth: "Needs setup" },
-    { missingEngine: false, expectedHealth: "Healthy" }
-  ])("reports $expectedHealth when an application has missingEngine=$missingEngine", async ({ missingEngine, expectedHealth }) => {
+    { missingEngine: true, blocked: false, expectedHealth: "Needs setup" },
+    { missingEngine: false, blocked: false, expectedHealth: "Healthy" },
+    { missingEngine: false, blocked: true, expectedHealth: "Needs review" }
+  ])("reports $expectedHealth for missingEngine=$missingEngine and blocked=$blocked", async ({ missingEngine, blocked, expectedHealth }) => {
     const application = deploymentCockpitFixture.applications[0];
-    const environments = application.environments.slice(0, 2);
+    const environments = application.environments.slice(0, 2).map(environment => ({ ...environment, deploymentStatus: blocked ? "Blocked" as const : environment.deploymentStatus }));
     const connectedIds = environments.slice(0, missingEngine ? 1 : 2).map(environment => environment.id);
     renderDeployments({
       ...deploymentCockpitFixture,

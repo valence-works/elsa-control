@@ -348,7 +348,7 @@ function ConnectEngineForm({
       setValues((current) => ({ ...current, credentialReferenceId: "", credentialSecret: "" }));
     } catch (submissionError) {
       setRetryBlocked(isAmbiguousWriteError(submissionError));
-      setError(errorMessage(submissionError, [values.credentialSecret]));
+      setError(errorMessage(submissionError, [values.credentialSecret, values.credentialSecret.trim()]));
     } finally {
       setIsSubmitting(false);
     }
@@ -595,7 +595,7 @@ async function ensurePlacement({ workspaceId, cockpit, values, activeTiers, exis
 
   let application: PlacementApplication | undefined = existingPlacement?.applicationId
     ? cockpit.applications.find((item) => item.id === existingPlacement.applicationId) ?? { id: existingPlacement.applicationId, name: existingPlacement.applicationName, environments: [] }
-    : cockpit.applications.find((item) => item.name === values.applicationName.trim());
+    : undefined;
   if (!application) {
     const created = await createDeploymentApplication(workspaceId, { name: values.applicationName.trim(), description: null });
     application = { id: created.id, name: created.name, environments: [] };

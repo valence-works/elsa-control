@@ -246,6 +246,40 @@ describe("ConnectEnginePage", () => {
     }));
   });
 
+  it("redacts the trimmed API key when a credential request echoes it", async () => {
+    vi.mocked(createDeploymentCredentialReference).mockRejectedValueOnce(new ApiError("Validation", "The API key secret-value was rejected.", 400));
+    renderPage();
+
+    await screen.findByRole("heading", { name: "Connect an engine" });
+    await userEvent.type(screen.getByLabelText("Engine name"), "new-engine");
+    await userEvent.type(screen.getByLabelText("Engine URL"), "https://new.example.com");
+    await userEvent.click(screen.getByRole("button", { name: "New API key" }));
+    await userEvent.type(screen.getByLabelText("Engine API key"), "  secret-value  ");
+    await userEvent.click(screen.getByRole("button", { name: "Connect engine →" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("[redacted]");
+    expect(alert).not.toHaveTextContent("secret-value");
+    expect(createDeploymentCredentialReference).toHaveBeenCalledWith("workspace-1", "store-local", expect.objectContaining({ secretValue: "secret-value" }));
+  });
+
+  it("creates a new application when its name matches an existing application", async () => {
+    renderPage();
+
+    await screen.findByRole("heading", { name: "Connect an engine" });
+    await userEvent.type(screen.getByLabelText("Engine name"), "new-engine");
+    await userEvent.type(screen.getByLabelText("Engine URL"), "https://new.example.com");
+    await userEvent.click(screen.getByRole("button", { name: "Change" }));
+    await userEvent.selectOptions(screen.getByLabelText("Placement mode"), "new");
+    const applicationName = screen.getByLabelText("Application name");
+    await userEvent.clear(applicationName);
+    await userEvent.type(applicationName, "Orders");
+    await userEvent.click(screen.getByRole("button", { name: "Connect engine →" }));
+
+    await waitFor(() => expect(createDeploymentApplication).toHaveBeenCalledWith("workspace-1", { name: "Orders", description: null }));
+    expect(createDeploymentEnvironment).toHaveBeenCalledWith("workspace-1", "app-new", expect.objectContaining({ name: "Development" }));
+  });
+
   it("uses the production legacy tier when no active custom tier is available", async () => {
     vi.mocked(getDeploymentCockpit).mockResolvedValue({ ...cockpitFixture, applications: [], engines: [] });
     renderPage();
