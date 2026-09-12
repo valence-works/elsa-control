@@ -166,6 +166,28 @@ describe("ConnectEnginePage", () => {
       })
     );
     expect(await screen.findByRole("heading", { name: "Your engine is connected." })).toBeInTheDocument();
+    expect(screen.getByTestId("connect-engine-health-icon")).toHaveClass("is-healthy");
+  });
+
+  it("keeps an unreachable registration visibly distinct from a verified connection", async () => {
+    vi.mocked(registerDeploymentEngine).mockResolvedValueOnce({
+      ...engineFixture,
+      health: "Unreachable",
+      lastVerificationAt: null,
+      verificationMessage: "Endpoint did not respond."
+    });
+    renderPage();
+
+    await screen.findByRole("heading", { name: "Connect an engine" });
+    await userEvent.type(screen.getByLabelText("Engine name"), "unreachable-engine");
+    await userEvent.type(screen.getByLabelText("Engine URL"), "https://unreachable.example.com");
+    await userEvent.click(screen.getByRole("button", { name: "Connect engine →" }));
+
+    expect(await screen.findByRole("heading", { name: "Your engine is registered." })).toBeInTheDocument();
+    expect(screen.getByText("Unreachable")).toBeInTheDocument();
+    expect(screen.getByText("Endpoint did not respond.")).toBeInTheDocument();
+    expect(screen.getByTestId("connect-engine-health-icon")).toHaveClass("is-error");
+    expect(screen.getByText("Not reported")).toBeInTheDocument();
   });
 
   it("selects a saved credential after delayed credentials load", async () => {
@@ -263,6 +285,30 @@ describe("ConnectEnginePage", () => {
       credentialReferenceId: "credential-new",
       credentialAssignmentStatus: "Assigned"
     }));
+  });
+
+  it("does not reuse a created secret store when connecting another engine", async () => {
+    vi.mocked(getDeploymentSecretStores).mockResolvedValue({ items: [] });
+    renderPage();
+
+    await screen.findByRole("heading", { name: "Connect an engine" });
+    await userEvent.type(screen.getByLabelText("Engine name"), "first-engine");
+    await userEvent.type(screen.getByLabelText("Engine URL"), "https://first.example.com");
+    const firstNewCredentialButton = screen.getByRole("button", { name: "New API key" });
+    await waitFor(() => expect(firstNewCredentialButton).not.toBeDisabled());
+    await userEvent.click(firstNewCredentialButton);
+    await userEvent.type(screen.getByLabelText("Engine API key"), "first-secret");
+    await userEvent.click(screen.getByRole("button", { name: "Connect engine →" }));
+    await screen.findByRole("heading", { name: "Your engine is connected." });
+
+    await userEvent.click(screen.getByRole("button", { name: "Connect another" }));
+    await userEvent.type(screen.getByLabelText("Engine name"), "second-engine");
+    await userEvent.type(screen.getByLabelText("Engine URL"), "https://second.example.com");
+    await userEvent.click(screen.getByRole("button", { name: "New API key" }));
+    await userEvent.type(screen.getByLabelText("Engine API key"), "second-secret");
+    await userEvent.click(screen.getByRole("button", { name: "Connect engine →" }));
+
+    await waitFor(() => expect(createDeploymentSecretStore).toHaveBeenCalledTimes(2));
   });
 
   it("suffixes an auto-generated credential name when the store already uses it", async () => {

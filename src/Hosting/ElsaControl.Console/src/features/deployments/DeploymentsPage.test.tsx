@@ -81,12 +81,13 @@ describe("DeploymentsPage", () => {
   });
 
   it.each([
-    { missingEngine: true, blocked: false, expectedHealth: "Needs setup" },
-    { missingEngine: false, blocked: false, expectedHealth: "Healthy" },
-    { missingEngine: false, blocked: true, expectedHealth: "Needs review" }
-  ])("reports $expectedHealth for missingEngine=$missingEngine and blocked=$blocked", async ({ missingEngine, blocked, expectedHealth }) => {
+    { environmentCount: 0, missingEngine: false, blocked: false, expectedHealth: "Needs setup" },
+    { environmentCount: 2, missingEngine: true, blocked: false, expectedHealth: "Needs setup" },
+    { environmentCount: 2, missingEngine: false, blocked: false, expectedHealth: "Healthy" },
+    { environmentCount: 2, missingEngine: false, blocked: true, expectedHealth: "Needs review" }
+  ])("reports $expectedHealth for environments=$environmentCount, missingEngine=$missingEngine and blocked=$blocked", async ({ environmentCount, missingEngine, blocked, expectedHealth }) => {
     const application = deploymentCockpitFixture.applications[0];
-    const environments = application.environments.slice(0, 2).map(environment => ({ ...environment, deploymentStatus: blocked ? "Blocked" as const : environment.deploymentStatus }));
+    const environments = application.environments.slice(0, environmentCount).map(environment => ({ ...environment, deploymentStatus: blocked ? "Blocked" as const : environment.deploymentStatus }));
     const connectedIds = environments.slice(0, missingEngine ? 1 : 2).map(environment => environment.id);
     renderDeployments({
       ...deploymentCockpitFixture,
@@ -96,7 +97,7 @@ describe("DeploymentsPage", () => {
 
     const card = await screen.findByRole("link", { name: application.name });
     expect(within(card).getByText(expectedHealth)).toBeInTheDocument();
-    if (missingEngine) expect(within(card).queryByText("Healthy")).not.toBeInTheDocument();
+    if (expectedHealth !== "Healthy") expect(within(card).queryByText("Healthy")).not.toBeInTheDocument();
   });
 
   it("reports Needs review when an application environment has unknown drift", async () => {

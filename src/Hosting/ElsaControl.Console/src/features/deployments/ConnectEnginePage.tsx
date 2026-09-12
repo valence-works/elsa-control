@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, CheckCircle2, ChevronDown, ChevronUp, KeyRound, Link2, LoaderCircle, RadioTower, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CheckCircle2, ChevronDown, ChevronUp, CircleX, KeyRound, Link2, LoaderCircle, RadioTower, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
@@ -365,6 +365,7 @@ function ConnectEngineForm({
   if (success) {
     const { engine, placement } = success;
     const healthTone = engine.health === "Healthy" ? "is-healthy" : engine.health === "Degraded" ? "is-warning" : engine.health === "Unreachable" ? "is-error" : "is-neutral";
+    const HealthIcon = engine.health === "Healthy" ? CheckCircle2 : engine.health === "Degraded" ? AlertTriangle : engine.health === "Unreachable" ? CircleX : RadioTower;
     return (
       <section className="connect-engine-page connect-engine-page-success">
         <Link to="/admin/deployments" className="connect-engine-back">
@@ -385,7 +386,7 @@ function ConnectEngineForm({
             </div>
           </div>
           <div className="connect-engine-success-card">
-            <div className={`connect-engine-success-icon ${healthTone}`}><CheckCircle2 className="h-6 w-6" /></div>
+            <div aria-hidden="true" data-testid="connect-engine-health-icon" className={`connect-engine-success-icon ${healthTone}`}><HealthIcon className="h-6 w-6" /></div>
             <Badge className={`connect-engine-success-badge ${healthTone}`}>{engine.health}</Badge>
             <h2>{engine.name}</h2>
             <p className="connect-engine-success-message">{engine.verificationMessage || "Registration completed."}</p>
@@ -397,7 +398,7 @@ function ConnectEngineForm({
             </dl>
             <div className="connect-engine-success-actions">
               <Button className="connect-engine-submit" type="button" onClick={() => navigate(enginePath(placement, engine.id))}>View engine</Button>
-              <SecondaryButton className="connect-engine-secondary" type="button" onClick={() => { credentialModeTouched.current = false; setSuccess(null); setError(null); setRetryBlocked(false); setCreatedPlacement(null); setCreatedCredentialReferenceId(null); setValues(initialValues(cockpit, activeCredentials, activeTiers, requestedEnvironmentId)); }}>Connect another</SecondaryButton>
+              <SecondaryButton className="connect-engine-secondary" type="button" onClick={() => { credentialModeTouched.current = false; setSuccess(null); setError(null); setRetryBlocked(false); setCreatedPlacement(null); setCreatedCredentialReferenceId(null); setCreatedSecretStoreId(null); setValues(initialValues(cockpit, activeCredentials, activeTiers, requestedEnvironmentId)); }}>Connect another</SecondaryButton>
             </div>
           </div>
         </div>

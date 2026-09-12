@@ -538,6 +538,18 @@
   background: hsl(var(--success) / 0.1);
 }
 
+.connect-engine-success-icon.is-warning {
+  border-color: hsl(var(--warning) / 0.28);
+  color: hsl(var(--warning));
+  background: hsl(var(--warning) / 0.1);
+}
+
+.connect-engine-success-icon.is-error {
+  border-color: hsl(var(--destructive) / 0.25);
+  color: hsl(var(--destructive));
+  background: hsl(var(--destructive) / 0.08);
+}
+
 .connect-engine-page .connect-engine-success-badge {
   min-height: 1.5rem;
   margin-top: 1.25rem;
