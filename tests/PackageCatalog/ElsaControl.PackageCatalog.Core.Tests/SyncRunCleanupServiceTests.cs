@@ -119,7 +119,7 @@ public sealed class SyncRunCleanupServiceTests
         public Task<SyncRun?> GetLatestRunAsync(SyncRunMode mode, IReadOnlyCollection<SyncRunTrigger> triggers, IReadOnlyCollection<SyncRunStatus> statuses, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
-        public Task<IReadOnlySet<SourcePackageVersion>> GetVersionsFoundWithoutManifestAsync(Guid runId, CancellationToken cancellationToken = default) =>
+        public Task<IReadOnlySet<SyncRunPackageVersionKey>> GetVersionsFoundWithoutManifestAsync(Guid runId, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
         public Task<IReadOnlyDictionary<Guid, SyncRunListMetadata>> GetListMetadataAsync(IReadOnlyCollection<Guid> runIds, CancellationToken cancellationToken = default) =>

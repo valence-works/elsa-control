@@ -30,7 +30,7 @@ public sealed class SyncRunStore(CatalogDbContext dbContext) : ISyncRunStore
             .FirstOrDefaultAsync(cancellationToken);
     }
 
-    public async Task<IReadOnlySet<SourcePackageVersion>> GetVersionsFoundWithoutManifestAsync(Guid runId, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlySet<SyncRunPackageVersionKey>> GetVersionsFoundWithoutManifestAsync(Guid runId, CancellationToken cancellationToken = default)
     {
         // One seek on the SyncRunId index for the whole run; an Invalid item stores a package version unless the archive had no manifest.
         var versions = await dbContext.SyncRunItems
@@ -41,7 +41,7 @@ public sealed class SyncRunStore(CatalogDbContext dbContext) : ISyncRunStore
                         x.SourceId != null &&
                         x.PackageId != null &&
                         x.Version != null)
-            .Select(x => new SourcePackageVersion(x.SourceId!.Value, x.PackageId!, x.Version!))
+            .Select(x => new SyncRunPackageVersionKey(x.SourceId!.Value, x.PackageId!, x.Version!))
             .ToListAsync(cancellationToken);
 
         return versions.ToHashSet();

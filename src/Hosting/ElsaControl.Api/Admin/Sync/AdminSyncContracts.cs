@@ -6,6 +6,7 @@ namespace ElsaControl.Api.Admin.Sync;
 public sealed record AdminSyncRunResponse(
     Guid Id,
     SyncRunTrigger Trigger,
+    SyncRunMode Mode,
     SyncRunStatus Status,
     DateTimeOffset StartedAt,
     DateTimeOffset? CompletedAt,

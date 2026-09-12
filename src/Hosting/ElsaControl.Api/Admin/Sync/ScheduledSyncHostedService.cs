@@ -10,11 +10,21 @@ public sealed class ScheduledSyncHostedService(IServiceProvider services, IConfi
         if (!enabled)
             return;
 
-        var interval = configuration.GetValue("Sync:Scheduled:Interval", TimeSpan.FromHours(1));
+        var defaultInterval = TimeSpan.FromHours(1);
+        var interval = configuration.GetValue("Sync:Scheduled:Interval", defaultInterval);
         if (interval <= TimeSpan.Zero)
-            throw new InvalidOperationException("Sync:Scheduled:Interval must be a positive duration.");
+        {
+            logger.LogWarning("Sync:Scheduled:Interval must be a positive duration; falling back to the default.");
+            interval = defaultInterval;
+        }
 
-        var verificationInterval = configuration.GetValue("Sync:Scheduled:VerificationInterval", TimeSpan.FromHours(24));
+        var defaultVerificationInterval = TimeSpan.FromHours(24);
+        var verificationInterval = configuration.GetValue("Sync:Scheduled:VerificationInterval", defaultVerificationInterval);
+        if (verificationInterval <= TimeSpan.Zero)
+        {
+            logger.LogWarning("Sync:Scheduled:VerificationInterval must be a positive duration; falling back to the default.");
+            verificationInterval = defaultVerificationInterval;
+        }
 
         while (true)
         {

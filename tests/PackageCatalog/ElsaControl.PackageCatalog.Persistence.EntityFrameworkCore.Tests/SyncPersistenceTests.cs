@@ -470,7 +470,7 @@ public sealed class SyncPersistenceTests
         var versions = await new SyncRunStore(db).GetVersionsFoundWithoutManifestAsync(verification.Id);
 
         Assert.Equal(
-            new HashSet<SourcePackageVersion> { new(source.Id, "Elsa.Legacy", "1.0.0"), new(otherSourceId, "Elsa.Legacy", "1.0.0") },
+            new HashSet<SyncRunPackageVersionKey> { new(source.Id, "Elsa.Legacy", "1.0.0"), new(otherSourceId, "Elsa.Legacy", "1.0.0") },
             versions);
     }
 

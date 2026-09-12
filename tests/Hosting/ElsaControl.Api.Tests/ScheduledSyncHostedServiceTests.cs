@@ -124,24 +124,56 @@ public sealed class ScheduledSyncHostedServiceTests : IAsyncLifetime
     [Theory]
     [InlineData("00:00:00")]
     [InlineData("-00:05:00")]
-    public async Task Rejects_an_interval_that_would_run_back_to_back(string interval)
+    public async Task Falls_back_to_the_default_interval_when_the_configured_value_is_not_positive(string interval)
     {
-        using var scheduler = CreateScheduler(interval);
+        using var scheduler = CreateScheduler(interval, "03:00:00");
 
         await scheduler.StartAsync(CancellationToken.None);
+        await _clock.NextTimerAsync();
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => scheduler.ExecuteTask!);
+        _clock.Advance(Interval - TimeSpan.FromTicks(1));
         Assert.Equal(0, _discovery.Calls);
+
+        _clock.Advance(TimeSpan.FromTicks(1));
+        (await _discovery.NextRunAsync()).SetResult();
+
+        Assert.False(scheduler.ExecuteTask!.IsCompleted);
     }
 
-    private ScheduledSyncHostedService CreateScheduler(string interval) =>
+    [Theory]
+    [InlineData("00:00:00")]
+    [InlineData("-00:05:00")]
+    public async Task Falls_back_to_the_default_verification_interval_when_the_configured_value_is_not_positive(string verificationInterval)
+    {
+        using var scheduler = CreateScheduler("01:00:00", verificationInterval);
+
+        await scheduler.StartAsync(CancellationToken.None);
+        await _clock.NextTimerAsync();
+
+        for (var i = 0; i < 3; i++)
+        {
+            _clock.Advance(Interval);
+            (await _discovery.NextRunAsync()).SetResult();
+            await _clock.NextTimerAsync();
+        }
+
+        var runs = await PersistedRunsAsync();
+        Assert.False(scheduler.ExecuteTask!.IsCompleted);
+        // The default verification interval is 24 hours, so with a 1 hour run interval only the first of these three
+        // runs re-verifies; a fallback of "0" (verify every run) would make every run a verification run instead.
+        Assert.Equal(
+            [SyncRunMode.Verification, SyncRunMode.NewVersionsOnly, SyncRunMode.NewVersionsOnly],
+            runs.Select(run => run.Mode));
+    }
+
+    private ScheduledSyncHostedService CreateScheduler(string interval, string verificationInterval = "03:00:00") =>
         new(
             _services,
             new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Sync:Scheduled:Enabled"] = "true",
                 ["Sync:Scheduled:Interval"] = interval,
-                ["Sync:Scheduled:VerificationInterval"] = "03:00:00"
+                ["Sync:Scheduled:VerificationInterval"] = verificationInterval
             }).Build(),
             _clock,
             NullLogger<ScheduledSyncHostedService>.Instance);

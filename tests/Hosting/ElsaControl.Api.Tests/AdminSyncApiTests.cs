@@ -50,6 +50,7 @@ public sealed class AdminSyncApiTests : IClassFixture<DefaultControlApiTestAppli
         var run = await response.Content.ReadControlJsonAsync<AdminSyncRunResponse>();
 
         Assert.Equal(SyncRunStatus.Running, run!.Status);
+        Assert.Equal(SyncRunMode.Verification, run.Mode);
 
         var runs = await client.GetControlJsonAsync<List<AdminSyncRunResponse>>("/api/admin/sync-runs");
         Assert.NotNull(runs);
@@ -75,6 +76,7 @@ public sealed class AdminSyncApiTests : IClassFixture<DefaultControlApiTestAppli
         Assert.NotNull(runs);
         var run = Assert.Single(runs!, x => x.Id == runId);
         Assert.Equal(1, run.ItemCount);
+        Assert.Equal(SyncRunMode.NewVersionsOnly, run.Mode);
         Assert.NotNull(run.Sources);
         Assert.Equal(new AdminSyncRunSourceResponse(sourceId, "Elsa Official"), Assert.Single(run.Sources!));
         Assert.NotNull(run.Items);
@@ -93,6 +95,7 @@ public sealed class AdminSyncApiTests : IClassFixture<DefaultControlApiTestAppli
         var run = await client.GetControlJsonAsync<AdminSyncRunResponse>($"/api/admin/sync-runs/{runId}");
 
         Assert.Equal(1, run!.ItemCount);
+        Assert.Equal(SyncRunMode.NewVersionsOnly, run.Mode);
         Assert.NotNull(run.Sources);
         Assert.Equal(new AdminSyncRunSourceResponse(sourceId, "Elsa Official"), Assert.Single(run.Sources!));
         Assert.NotNull(run.Items);
@@ -294,7 +297,8 @@ public sealed class AdminSyncApiTests : IClassFixture<DefaultControlApiTestAppli
             var run = new SyncRun
             {
                 Id = runId,
-                Trigger = SyncRunTrigger.ManualSource,
+                Trigger = SyncRunTrigger.Scheduled,
+                Mode = SyncRunMode.NewVersionsOnly,
                 Status = SyncRunStatus.Completed,
                 StartedAt = DateTimeOffset.UtcNow.AddMinutes(-1),
                 CompletedAt = DateTimeOffset.UtcNow

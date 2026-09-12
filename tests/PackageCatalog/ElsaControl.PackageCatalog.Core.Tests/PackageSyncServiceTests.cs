@@ -362,10 +362,10 @@ public sealed partial class PackageSyncServiceTests
         public Task<SyncRun?> GetAsync(Guid id, CancellationToken cancellationToken = default) => Task.FromResult(Runs.SingleOrDefault(x => x.Id == id));
         public Task<SyncRun?> GetLatestRunAsync(SyncRunMode mode, IReadOnlyCollection<SyncRunTrigger> triggers, IReadOnlyCollection<SyncRunStatus> statuses, CancellationToken cancellationToken = default) =>
             Task.FromResult(Runs.Where(x => x.Mode == mode && triggers.Contains(x.Trigger) && statuses.Contains(x.Status)).MaxBy(x => x.StartedAt));
-        public Task<IReadOnlySet<SourcePackageVersion>> GetVersionsFoundWithoutManifestAsync(Guid runId, CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlySet<SourcePackageVersion>>(Items
+        public Task<IReadOnlySet<SyncRunPackageVersionKey>> GetVersionsFoundWithoutManifestAsync(Guid runId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlySet<SyncRunPackageVersionKey>>(Items
                 .Where(x => x.SyncRunId == runId && x.Status == SyncRunItemStatus.Invalid && x.PackageVersionId is null)
-                .Select(x => new SourcePackageVersion(x.SourceId!.Value, x.PackageId!, x.Version!))
+                .Select(x => new SyncRunPackageVersionKey(x.SourceId!.Value, x.PackageId!, x.Version!))
                 .ToHashSet());
         public Task<IReadOnlyDictionary<Guid, SyncRunListMetadata>> GetListMetadataAsync(IReadOnlyCollection<Guid> runIds, CancellationToken cancellationToken = default)
         {
