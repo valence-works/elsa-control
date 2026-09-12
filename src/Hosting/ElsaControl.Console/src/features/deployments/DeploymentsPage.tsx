@@ -3,6 +3,8 @@ import {
   Activity,
   AlertTriangle,
   ArrowLeft,
+  ArrowUpRight,
+  Boxes,
   Bot,
   CheckCircle2,
   ClipboardCheck,
@@ -108,6 +110,7 @@ import {
 import { useWorkspaceContext } from "@/app/WorkspaceContextProvider";
 import { formatDateTime } from "@/lib/formatters";
 import { queryKeys } from "@/lib/query/queryClient";
+import { permissionLinkProps } from "@/lib/auth/permissionLinkProps";
 import { statusToneClass, type StatusTone } from "@/lib/status/statusBadges";
 import { cn } from "@/lib/utils";
 
@@ -284,15 +287,15 @@ export function DeploymentsPage() {
   return (
     <section className="space-y-5">
       <PageHeader
-        title="Deployment overview"
-        description="Dashboard view for workspace deployment posture, drift, health, recent activity, and operational shortcuts."
+        title="Deployments"
+        description="Releases, environment drift, and recent runs."
         actions={
           <>
             <Link to="/admin/deployments/applications" className={buttonClassName("secondary")}>
               <Rocket className="h-4 w-4" />
               Applications
             </Link>
-            <Link to="/admin/deployments/new" className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageSetup}>
+            <Link to="/admin/deployments/new" className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageSetup)}>
               <Plus className="h-4 w-4" />
               New application setup
             </Link>
@@ -347,7 +350,7 @@ export function DeploymentsPage() {
             <div className="font-medium">Workspace tiers</div>
             <p className="mt-1 text-xs text-muted-foreground">Configure tier capabilities and environment policy.</p>
           </Link>
-          <Link to="/admin/deployments/new" className={cn("rounded-ui border border-border bg-background p-3 text-sm transition-colors hover:bg-muted", !canManageSetup ? "pointer-events-none opacity-50" : "")} aria-disabled={!canManageSetup}>
+          <Link to="/admin/deployments/new" className={cn("rounded-ui border border-border bg-background p-3 text-sm transition-colors hover:bg-muted", !canManageSetup ? "pointer-events-none opacity-50" : "")} {...permissionLinkProps(canManageSetup)}>
             <div className="font-medium">New application setup</div>
             <p className="mt-1 text-xs text-muted-foreground">Create an application with its first environment and engine.</p>
           </Link>
@@ -374,19 +377,18 @@ function DeploymentApplicationsReady({ context }: { context: DeploymentContext }
 
   return (
     <section className="space-y-5">
-      <Breadcrumbs items={[{ label: "Deployments", to: "/admin/deployments" }, { label: "Applications" }]} />
       <PageHeader
         title="Applications"
-        description="Workflow applications registered for deployment management in this workspace."
+        description={`${data.applications.length} application${data.applications.length === 1 ? "" : "s"}`}
         actions={
-          <Link to="/admin/deployments/new" className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageSetup}>
+          <Link to="/admin/deployments/new" className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageSetup)}>
             <Plus className="h-4 w-4" />
             New application setup
           </Link>
         }
       />
 
-      <div className="grid gap-3 lg:grid-cols-[minmax(16rem,26rem)_auto] lg:items-center">
+      <div className="grid gap-3 lg:grid-cols-[minmax(16rem,26rem)_12rem] lg:items-center">
         <label className="relative block">
           <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input value={query} onChange={(event) => setQuery(event.target.value)} className="pl-9" placeholder="Search applications" />
@@ -401,11 +403,15 @@ function DeploymentApplicationsReady({ context }: { context: DeploymentContext }
       {data.applications.length === 0 ? (
         <EmptyState
           title="No deployment setup"
-          description="Create a workflow application, first environment, and first engine registration to start managing deployments."
+          description="Connect an engine to create your first application and environment."
           action={
-            <Link to="/admin/deployments/new" className={buttonClassName()}>
+            <Link
+              to="/admin/engines/connect"
+              className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)}
+              {...permissionLinkProps(canManageSetup)}
+            >
               <Plus className="h-4 w-4" />
-              New application setup
+              Connect engine
             </Link>
           }
         />
@@ -413,8 +419,7 @@ function DeploymentApplicationsReady({ context }: { context: DeploymentContext }
         <EmptyState title="No matching applications" description="Clear the search to see all workflow applications." />
       ) : (
         <section className="space-y-3">
-          <SectionHeader title="Workflow applications" description="Open an application to manage its environments and deployment operations." />
-          <ApplicationTable applications={applications} data={data} />
+          <ApplicationCards applications={applications} data={data} />
         </section>
       )}
     </section>
@@ -1312,11 +1317,11 @@ function DeploymentApplicationReady({ context, applicationId }: { context: Deplo
               <GitBranch className="h-4 w-4" />
               Revisions
             </Link>
-            <Link to={`/admin/deployments/applications/${application.id}/edit`} className={buttonClassName("secondary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageSetup}>
+            <Link to={`/admin/deployments/applications/${application.id}/edit`} className={buttonClassName("secondary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageSetup)}>
               <Pencil className="h-4 w-4" />
               Edit application
             </Link>
-            <Link to={`/admin/deployments/applications/${application.id}/environments/new`} className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageSetup}>
+            <Link to={`/admin/deployments/applications/${application.id}/environments/new`} className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageSetup)}>
               <Plus className="h-4 w-4" />
               Add environment
             </Link>
@@ -1415,7 +1420,7 @@ function DeploymentApplicationRevisionsReady({ context, applicationId }: { conte
             <Link
               to={newRevisionPath || applicationPath(application.id)}
               className={buttonClassName("primary", !canManageDesiredState || !newRevisionPath ? "pointer-events-none opacity-50" : undefined)}
-              aria-disabled={!canManageDesiredState || !newRevisionPath}
+              {...permissionLinkProps(canManageDesiredState && Boolean(newRevisionPath))}
             >
               <Plus className="h-4 w-4" />
               New revision
@@ -1451,7 +1456,7 @@ function DeploymentApplicationRevisionsReady({ context, applicationId }: { conte
           description="Create a desired-state revision from a registered artifact before deploying this application."
           action={
             newRevisionPath ? (
-              <Link to={newRevisionPath} className={buttonClassName("secondary", !canManageDesiredState ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageDesiredState}>
+              <Link to={newRevisionPath} className={buttonClassName("secondary", !canManageDesiredState ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageDesiredState)}>
                 <Plus className="h-4 w-4" />
                 New revision
               </Link>
@@ -2032,17 +2037,17 @@ function DeploymentEnvironmentReady({
         description={`${application.name} deployment environment`}
         actions={
           <>
-            <Link to={`${environmentPath(application.id, environment.id)}/edit`} className={buttonClassName("secondary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageSetup}>
+            <Link to={`${environmentPath(application.id, environment.id)}/edit`} className={buttonClassName("secondary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageSetup)}>
               <Pencil className="h-4 w-4" />
               Edit environment
             </Link>
-            <Link to={`${environmentPath(application.id, environment.id)}/revisions/new`} className={buttonClassName("secondary", !canManageDesiredState ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageDesiredState}>
+            <Link to={`${environmentPath(application.id, environment.id)}/revisions/new`} className={buttonClassName("secondary", !canManageDesiredState ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageDesiredState)}>
               <GitBranch className="h-4 w-4" />
               New revision
             </Link>
-            <Link to={`${environmentPath(application.id, environment.id)}/engines/new`} className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageSetup}>
+            <Link to={`${environmentPath(application.id, environment.id)}/engines/new`} className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageSetup)}>
               <Plus className="h-4 w-4" />
-              Register engine
+              Connect engine
             </Link>
           </>
         }
@@ -2064,7 +2069,15 @@ function DeploymentEnvironmentReady({
               <EmptyState
                 title="No engine registered"
                 description="Register an engine before verifying runtime health or running controls."
-                action={<Link to={`${environmentPath(application.id, environment.id)}/engines/new`} className={buttonClassName()}>Register engine</Link>}
+                action={
+                  <Link
+                    to={`${environmentPath(application.id, environment.id)}/engines/new`}
+                    className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)}
+                    {...permissionLinkProps(canManageSetup)}
+                  >
+                    Connect engine
+                  </Link>
+                }
               />
             ) : (
               <div className="space-y-3">
@@ -2886,41 +2899,19 @@ function useDeploymentContext(): DeploymentContextResult {
   };
 }
 
-function ApplicationTable({ applications, data }: { applications: DeploymentCockpit["applications"]; data: DeploymentCockpit }) {
-  return (
-    <Table>
-      <table className="min-w-full divide-y divide-border text-sm">
-        <thead className="bg-muted/40 text-left text-xs uppercase text-muted-foreground">
-          <tr>
-            <th className="px-3 py-2">Application</th>
-            <th className="px-3 py-2">Health</th>
-            <th className="px-3 py-2">Environments</th>
-            <th className="px-3 py-2">Engines</th>
-            <th className="px-3 py-2">Healthy</th>
-            <th className="px-3 py-2">Drift</th>
-            <th className="px-3 py-2">Actions</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-border">
-          {applications.map((application) => {
-            const engines = enginesForApplication(data, application);
-            const driftCount = application.environments.filter((environment) => environment.driftStatus === "DriftDetected").length;
-            return (
-              <tr key={application.id}>
-                <td className="px-3 py-3 font-medium"><Link to={applicationPath(application.id)}>{application.name}</Link></td>
-                <td className="px-3 py-3"><StatusBadge value={summarizeApplicationHealth(application, data.engines)} tone={applicationHealthTone(application, data.engines)} /></td>
-                <td className="px-3 py-3">{application.environments.length}</td>
-                <td className="px-3 py-3">{engines.length}</td>
-                <td className="px-3 py-3">{engines.filter((engine) => engine.health === "Healthy").length}</td>
-                <td className="px-3 py-3">{driftCount}</td>
-                <td className="px-3 py-3"><Link to={applicationPath(application.id)} className="text-xs font-medium text-primary hover:underline">Open</Link></td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </Table>
-  );
+function ApplicationCards({ applications, data }: { applications: DeploymentCockpit["applications"]; data: DeploymentCockpit }) {
+  return <section className="console-application-grid" aria-label="Workflow applications">
+    {applications.map((application) => {
+      const engines = enginesForApplication(data, application);
+      const driftCount = application.environments.filter(environment => environment.driftStatus === "DriftDetected").length;
+      return <Link key={application.id} to={applicationPath(application.id)} aria-label={application.name} aria-describedby={`application-health-${application.id} application-summary-${application.id} application-action-${application.id}`} className="console-application-card">
+        <div id={`application-health-${application.id}`} className="console-application-card-top"><Boxes aria-hidden size={24} strokeWidth={1.5} /><StatusBadge value={summarizeApplicationHealth(application, data.engines)} tone={applicationHealthTone(application, data.engines)} /></div>
+        <h2>{application.name}</h2>
+        <p id={`application-summary-${application.id}`}>{application.environments.length} environment{application.environments.length === 1 ? "" : "s"} · {engines.length} engine{engines.length === 1 ? "" : "s"}</p>
+        <div id={`application-action-${application.id}`} className="console-application-card-footer"><span>{driftCount ? `${driftCount} with drift` : "Open application"}</span><ArrowUpRight aria-hidden size={16} /></div>
+      </Link>;
+    })}
+  </section>;
 }
 
 function EnvironmentTable({
@@ -3174,7 +3165,7 @@ function EngineDetailSection({
             <RefreshCw className="h-4 w-4" />
             {isVerifying ? "Verifying" : "Verify"}
           </SecondaryButton>
-          <Link to={`${enginePath(application.id, environment.id, engine.id)}/edit`} className={buttonClassName("secondary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageSetup}>
+          <Link to={`${enginePath(application.id, environment.id, engine.id)}/edit`} className={buttonClassName("secondary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageSetup)}>
             <Pencil className="h-4 w-4" />
             Edit engine
           </Link>
@@ -4615,7 +4606,7 @@ function DeploymentBlockersPanel({
                     <Link
                       to={blocker.actionPath}
                       className={buttonClassName("secondary", !canManageDesiredState ? "pointer-events-none opacity-50" : undefined)}
-                      aria-disabled={!canManageDesiredState}
+                      {...permissionLinkProps(canManageDesiredState)}
                     >
                       <GitBranch className="h-4 w-4" />
                       {blocker.actionLabel ?? "Add binding to new revision"}
@@ -4664,10 +4655,10 @@ function FormPageShell({
 
 function PageHeader({ title, description, actions }: { title: string; description: string; actions?: ReactNode }) {
   return (
-    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+    <div className="console-page-header flex flex-col gap-4 pb-4 pt-2 lg:flex-row lg:items-end lg:justify-between">
       <div>
-        <h1 className="text-xl font-semibold">{title}</h1>
-        <p className="mt-1 max-w-3xl text-sm text-muted-foreground">{description}</p>
+        <h1 className="font-display text-3xl font-semibold">{title}</h1>
+        {description && <p className="mt-2 max-w-2xl text-sm text-muted-foreground">{description}</p>}
       </div>
       {actions ? <div className="flex flex-wrap gap-2">{actions}</div> : null}
     </div>
@@ -4678,7 +4669,7 @@ function SectionHeader({ title, description }: { title: string; description: str
   return (
     <div>
       <h2 className="text-sm font-semibold">{title}</h2>
-      <p className="mt-1 text-xs text-muted-foreground">{description}</p>
+      {description && <p className="mt-1 text-xs text-muted-foreground">{description}</p>}
     </div>
   );
 }
@@ -4709,17 +4700,17 @@ function ActionList({ title, actions, icon, muted = false }: { title: string; ac
 
 function MetricCard({ label, value, tone }: { label: string; value: string; tone?: StatusTone }) {
   return (
-    <div className="rounded-ui border border-border bg-surface p-3">
-      <div className={cn("text-2xl font-semibold", tone ? statusTextClass(tone) : "")}>{value}</div>
-      <div className="text-xs text-muted-foreground">{label}</div>
+    <div className="rounded-ui border border-border bg-surface px-5 py-4">
+      <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className={cn("mt-2 font-display text-3xl font-medium", tone ? statusTextClass(tone) : "")}>{value}</div>
     </div>
   );
 }
 
 function Panel({ title, icon, children }: { title: string; icon: ReactNode; children: ReactNode }) {
   return (
-    <section className="rounded-ui border border-border bg-surface p-4">
-      <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">{icon}{title}</h2>
+    <section className="rounded-ui border border-border bg-surface p-5">
+      <h2 className="mb-4 flex items-center gap-2 border-b border-border pb-4 font-display text-base font-semibold">{icon}{title}</h2>
       {children}
     </section>
   );
@@ -5332,16 +5323,19 @@ function summarizeApplicationHealth(application: DeploymentCockpit["applications
   if (applicationEngines.some((engine) => engine.health === "Unreachable")) return "Unreachable";
   if (
     applicationEngines.some((engine) => engine.health === "Degraded") ||
-    application.environments.some((environment) => environment.driftStatus === "DriftDetected")
+    application.environments.some((environment) => environment.driftStatus !== "InSync" || environment.deploymentStatus === "Blocked")
   ) {
     return "Needs review";
   }
-  return "Healthy";
+  const connectedEnvironmentIds = new Set(applicationEngines.map(engine => engine.environmentId));
+  if (application.environments.some(environment => !connectedEnvironmentIds.has(environment.id))) return "Needs setup";
+  return applicationEngines.every(engine => engine.health === "Healthy") ? "Healthy" : "Not checked";
 }
 
 function applicationHealthTone(application: DeploymentCockpit["applications"][number], engines: WorkflowEngineRegistration[]): StatusTone {
   const health = summarizeApplicationHealth(application, engines);
   if (health === "Healthy") return "success";
+  if (health === "Not checked") return "neutral";
   if (health === "Needs review" || health === "Needs setup") return "warning";
   return "destructive";
 }
