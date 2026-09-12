@@ -152,6 +152,7 @@ Machine-readable comments on the claimed issue:
 | Comment | When |
 |---------|------|
 | `claim: codex starting` or `claim: claude starting` | Immediately on claim |
+| `claim-abandoned: <claim-comment-id>` | When a previously posted claim loses collision resolution or no longer remains intact |
 | `pr: <url>` | When the implementing PR is open |
 | `blocked: <reason>` | When work cannot continue |
 
