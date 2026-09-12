@@ -122,6 +122,9 @@ public sealed class SyncRunCleanupServiceTests
         public Task<IReadOnlySet<SyncRunPackageVersionKey>> GetVersionsFoundWithoutManifestAsync(Guid runId, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
+        public Task<int> ReconcileInterruptedRunsAsync(DateTimeOffset processStartedAt, DateTimeOffset completedAt, string message, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
         public Task<IReadOnlyDictionary<Guid, SyncRunListMetadata>> GetListMetadataAsync(IReadOnlyCollection<Guid> runIds, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyDictionary<Guid, SyncRunListMetadata>>(new Dictionary<Guid, SyncRunListMetadata>());
 

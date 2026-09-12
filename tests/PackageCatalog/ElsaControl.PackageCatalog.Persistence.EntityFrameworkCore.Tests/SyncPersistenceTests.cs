@@ -388,6 +388,88 @@ public sealed class SyncPersistenceTests
     }
 
     [Fact]
+    public async Task Reconciliation_marks_a_run_left_running_by_a_previous_process_as_failed()
+    {
+        await using var db = await CreateOpenDbContextAsync();
+        var processStartedAt = DateTimeOffset.UtcNow;
+        var completedAt = processStartedAt.AddSeconds(1);
+        var stale = new SyncRun { Trigger = SyncRunTrigger.Scheduled, Status = SyncRunStatus.Running, StartedAt = processStartedAt.AddMinutes(-5) };
+        db.SyncRuns.Add(stale);
+        await db.SaveChangesAsync();
+
+        var reconciledCount = await new SyncRunStore(db).ReconcileInterruptedRunsAsync(processStartedAt, completedAt, "Interrupted by an API restart.");
+
+        var reconciled = await db.SyncRuns.SingleAsync(x => x.Id == stale.Id);
+        Assert.Equal(1, reconciledCount);
+        Assert.Equal(SyncRunStatus.Failed, reconciled.Status);
+        Assert.Equal(completedAt, reconciled.CompletedAt);
+        Assert.Equal("Interrupted by an API restart.", reconciled.Error);
+    }
+
+    [Fact]
+    public async Task Reconciliation_leaves_runs_started_by_the_current_process_and_already_completed_runs_untouched()
+    {
+        await using var db = await CreateOpenDbContextAsync();
+        var processStartedAt = DateTimeOffset.UtcNow;
+        var currentProcessRun = new SyncRun { Trigger = SyncRunTrigger.ManualAll, Status = SyncRunStatus.Running, StartedAt = processStartedAt };
+        var completed = CompletedRun(processStartedAt.AddMinutes(-10));
+        db.SyncRuns.AddRange(currentProcessRun, completed);
+        await db.SaveChangesAsync();
+
+        var reconciledCount = await new SyncRunStore(db).ReconcileInterruptedRunsAsync(processStartedAt, processStartedAt.AddSeconds(1), "Interrupted by an API restart.");
+
+        Assert.Equal(0, reconciledCount);
+        Assert.Equal(SyncRunStatus.Running, (await db.SyncRuns.SingleAsync(x => x.Id == currentProcessRun.Id)).Status);
+        var reloadedCompleted = await db.SyncRuns.SingleAsync(x => x.Id == completed.Id);
+        Assert.Equal(SyncRunStatus.Completed, reloadedCompleted.Status);
+        Assert.Equal(completed.CompletedAt, reloadedCompleted.CompletedAt);
+    }
+
+    [Fact]
+    public async Task Reconciliation_is_idempotent()
+    {
+        await using var db = await CreateOpenDbContextAsync();
+        var processStartedAt = DateTimeOffset.UtcNow;
+        var completedAt = processStartedAt.AddSeconds(1);
+        var stale = new SyncRun { Trigger = SyncRunTrigger.Scheduled, Status = SyncRunStatus.Running, StartedAt = processStartedAt.AddMinutes(-5) };
+        db.SyncRuns.Add(stale);
+        await db.SaveChangesAsync();
+        var store = new SyncRunStore(db);
+
+        var first = await store.ReconcileInterruptedRunsAsync(processStartedAt, completedAt, "Interrupted by an API restart.");
+        var second = await store.ReconcileInterruptedRunsAsync(processStartedAt, completedAt.AddSeconds(1), "Interrupted by an API restart.");
+
+        Assert.Equal(1, first);
+        Assert.Equal(0, second);
+        Assert.Equal(completedAt, (await db.SyncRuns.SingleAsync(x => x.Id == stale.Id)).CompletedAt);
+    }
+
+    [Fact]
+    public async Task Reconciled_run_is_excluded_from_the_latest_verification_selection()
+    {
+        await using var db = await CreateOpenDbContextAsync();
+        var processStartedAt = DateTimeOffset.UtcNow;
+        var interruptedVerification = new SyncRun
+        {
+            Trigger = SyncRunTrigger.Scheduled,
+            Mode = SyncRunMode.Verification,
+            Status = SyncRunStatus.Running,
+            StartedAt = processStartedAt.AddHours(-1)
+        };
+        db.SyncRuns.Add(interruptedVerification);
+        await db.SaveChangesAsync();
+        var store = new SyncRunStore(db);
+
+        await store.ReconcileInterruptedRunsAsync(processStartedAt, processStartedAt, "Interrupted by an API restart.");
+        var latest = await store.GetLatestRunAsync(
+            SyncRunMode.Verification,
+            [SyncRunTrigger.Scheduled, SyncRunTrigger.ManualAll],
+            [SyncRunStatus.Completed, SyncRunStatus.CompletedWithErrors]);
+
+        Assert.Null(latest);
+    }
+
+    [Fact]
     public async Task Latest_run_only_considers_runs_of_the_requested_mode_triggers_and_statuses()
     {
         await using var db = await CreateOpenDbContextAsync();
