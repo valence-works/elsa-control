@@ -37,7 +37,7 @@ public sealed class CatalogDbContextChangeDetectionTests : IAsyncLifetime
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task Save_scans_the_tracked_entities_at_most_twice_however_many_are_tracked(bool async)
+    public async Task Save_scans_the_tracked_entities_exactly_twice_however_many_are_tracked(bool async)
     {
         var runs = Enumerable.Range(0, 500).Select(_ => new SyncRun { Trigger = SyncRunTrigger.Scheduled }).ToArray();
         _db.SyncRuns.AddRange(runs);
@@ -50,7 +50,8 @@ public sealed class CatalogDbContextChangeDetectionTests : IAsyncLifetime
         else
             _db.SaveChanges();
 
-        Assert.InRange(_scans, 1, 2);
+        // One scan before the guards run, one inside the base save for what the guards changed.
+        Assert.Equal(2, _scans);
         Assert.Equal("Changed while tracked.", await ReadAsync(db => db.SyncRuns.Where(x => x.Id == runs[0].Id).Select(x => x.Error).SingleAsync()));
     }
 
