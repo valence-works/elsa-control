@@ -113,7 +113,7 @@ public sealed class ConfirmationConsumptionConcurrencyTests
 
     private static DbContextOptions<CatalogDbContext> CreateOptions(string databasePath) =>
         new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite($"Data Source={databasePath};Default Timeout=5")
+            .UseRetryingSqlite($"Data Source={databasePath};Default Timeout=5")
             .Options;
 
     private static void DeleteDatabase(string databasePath)

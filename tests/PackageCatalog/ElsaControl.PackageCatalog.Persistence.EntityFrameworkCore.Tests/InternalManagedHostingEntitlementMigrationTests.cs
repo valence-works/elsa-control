@@ -26,7 +26,7 @@ public sealed class InternalManagedHostingEntitlementMigrationTests : IAsyncLife
     {
         await _connection.OpenAsync();
         _sqlite = new(new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(_connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(_connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options);
     }
 

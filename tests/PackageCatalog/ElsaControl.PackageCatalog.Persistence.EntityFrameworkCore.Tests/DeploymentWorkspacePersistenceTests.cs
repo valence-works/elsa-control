@@ -719,7 +719,7 @@ public sealed class DeploymentWorkspacePersistenceTests : IDisposable
     private static CatalogDbContext CreateDbContext()
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite("Data Source=:memory:")
+            .UseRetryingSqlite("Data Source=:memory:")
             .Options;
         return new CatalogDbContext(options);
     }

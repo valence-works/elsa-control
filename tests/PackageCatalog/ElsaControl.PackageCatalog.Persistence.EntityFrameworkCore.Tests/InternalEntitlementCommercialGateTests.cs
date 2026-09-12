@@ -30,7 +30,7 @@ public sealed class InternalEntitlementCommercialGateTests : IAsyncLifetime
     public async Task InitializeAsync()
     {
         await _connection.OpenAsync();
-        _db = new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbContext>().UseSqlite(_connection).Options);
+        _db = new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbContext>().UseRetryingSqlite(_connection).Options);
         await _db.Database.EnsureCreatedAsync();
         _workspace = new Workspace { Name = "Dogfood workspace" };
         _db.Workspaces.Add(_workspace);

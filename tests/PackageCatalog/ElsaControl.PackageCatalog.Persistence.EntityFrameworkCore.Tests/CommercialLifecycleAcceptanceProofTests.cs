@@ -15,7 +15,7 @@ public sealed class CommercialLifecycleAcceptanceProofTests
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
-        await using var db = new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbContext>().UseSqlite(connection).Options);
+        await using var db = new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbContext>().UseRetryingSqlite(connection).Options);
         await db.Database.EnsureCreatedAsync();
         var organization = new Organization { Name = "Proof organization" };
         db.Organizations.Add(organization);
@@ -150,7 +150,7 @@ public sealed class CommercialLifecycleAcceptanceProofTests
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
-        await using var db = new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbContext>().UseSqlite(connection).Options);
+        await using var db = new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbContext>().UseRetryingSqlite(connection).Options);
         await db.Database.EnsureCreatedAsync();
         var organization = new Organization { Name = "Early deletion proof" };
         db.Organizations.Add(organization);

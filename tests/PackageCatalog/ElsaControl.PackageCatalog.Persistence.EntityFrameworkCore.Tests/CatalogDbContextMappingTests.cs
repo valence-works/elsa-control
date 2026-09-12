@@ -10,7 +10,7 @@ public sealed class CatalogDbContextMappingTests
     public async Task Can_create_schema_and_store_package_source()
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite("Data Source=:memory:")
+            .UseRetryingSqlite("Data Source=:memory:")
             .Options;
 
         await using var db = new CatalogDbContext(options);
@@ -34,7 +34,7 @@ public sealed class CatalogDbContextMappingTests
     public async Task Tracks_in_place_package_source_pattern_changes()
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite("Data Source=:memory:")
+            .UseRetryingSqlite("Data Source=:memory:")
             .Options;
 
         await using var db = new CatalogDbContext(options);
@@ -65,7 +65,7 @@ public sealed class CatalogDbContextMappingTests
     public void String_list_comparer_handles_null_values()
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite("Data Source=:memory:")
+            .UseRetryingSqlite("Data Source=:memory:")
             .Options;
 
         using var db = new CatalogDbContext(options);

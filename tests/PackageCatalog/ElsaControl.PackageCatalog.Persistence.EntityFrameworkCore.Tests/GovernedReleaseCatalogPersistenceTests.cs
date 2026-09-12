@@ -333,7 +333,7 @@ public sealed class GovernedReleaseCatalogPersistenceTests
     private static async Task<TestCatalogDatabase> CreateMigratedDatabaseAsync()
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite($"Data Source=release-catalog-{Guid.NewGuid():N};Mode=Memory;Cache=Shared")
+            .UseRetryingSqlite($"Data Source=release-catalog-{Guid.NewGuid():N};Mode=Memory;Cache=Shared")
             .Options;
         var db = new CatalogDbContext(options);
         await db.Database.OpenConnectionAsync();

@@ -502,7 +502,7 @@ public sealed class ElsaInstancePersistenceTests
         setup.ElsaInstances.Add(instance);
         await setup.SaveChangesAsync();
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         await using var first = new CatalogDbContext(options);
         await using var second = new CatalogDbContext(options);
@@ -537,7 +537,7 @@ public sealed class ElsaInstancePersistenceTests
         setup.ElsaInstances.Add(instance);
         await setup.SaveChangesAsync();
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         await using var first = new CatalogDbContext(options);
         await using var second = new CatalogDbContext(options);
@@ -598,7 +598,7 @@ public sealed class ElsaInstancePersistenceTests
         await setup.SaveChangesAsync();
 
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         await using var first = new CatalogDbContext(options);
         await using var second = new CatalogDbContext(options);
@@ -829,7 +829,7 @@ public sealed class ElsaInstancePersistenceTests
         await setup.SaveChangesAsync();
 
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         await using var first = new CatalogDbContext(options);
         await using var second = new CatalogDbContext(options);
@@ -1183,7 +1183,7 @@ public sealed class ElsaInstancePersistenceTests
     private static CatalogDbContext CreateMigratedContext(SqliteConnection connection)
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         return new CatalogDbContext(options);
     }
@@ -1191,7 +1191,7 @@ public sealed class ElsaInstancePersistenceTests
     private static CatalogDbContext CreateEnsureCreatedContext()
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite("Data Source=:memory:")
+            .UseRetryingSqlite("Data Source=:memory:")
             .Options;
         return new CatalogDbContext(options);
     }

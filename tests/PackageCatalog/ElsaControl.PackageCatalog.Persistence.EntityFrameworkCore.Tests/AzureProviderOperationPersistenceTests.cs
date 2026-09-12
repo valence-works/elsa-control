@@ -1143,7 +1143,7 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
         var path = Path.Combine(Path.GetTempPath(), $"elsa-azure-operation-{Guid.NewGuid():N}.db");
         try
         {
-            var options = new DbContextOptionsBuilder<CatalogDbContext>().UseSqlite($"Data Source={path}").Options;
+            var options = new DbContextOptionsBuilder<CatalogDbContext>().UseRetryingSqlite($"Data Source={path}").Options;
             await using (var seed = new CatalogDbContext(options))
             {
                 await seed.Database.EnsureCreatedAsync();
@@ -1207,7 +1207,7 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
         }
     }
 
-    private CatalogDbContext CreateContext() => new(new DbContextOptionsBuilder<CatalogDbContext>().UseSqlite(_connection).Options);
+    private CatalogDbContext CreateContext() => new(new DbContextOptionsBuilder<CatalogDbContext>().UseRetryingSqlite(_connection).Options);
 
     private async Task<AzureProviderResourceAssignment> Assignment(
         AzureProviderOperationStore store,

@@ -14,7 +14,7 @@ public sealed class CompatibilityQueriesTests
     {
         var commandCounter = new CommandCounterInterceptor();
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite("Data Source=:memory:")
+            .UseRetryingSqlite("Data Source=:memory:")
             .AddInterceptors(commandCounter)
             .Options;
 

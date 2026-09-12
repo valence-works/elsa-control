@@ -337,7 +337,7 @@ public sealed class DeploymentWorkspaceTierPersistenceTests : IDisposable
     private static CatalogDbContext CreateDbContext()
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite("Data Source=:memory:")
+            .UseRetryingSqlite("Data Source=:memory:")
             .Options;
         return new CatalogDbContext(options);
     }
@@ -345,7 +345,7 @@ public sealed class DeploymentWorkspaceTierPersistenceTests : IDisposable
     private static CatalogDbContext CreateMigratedDbContext()
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite("Data Source=:memory:", sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite("Data Source=:memory:", sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         return new CatalogDbContext(options);
     }

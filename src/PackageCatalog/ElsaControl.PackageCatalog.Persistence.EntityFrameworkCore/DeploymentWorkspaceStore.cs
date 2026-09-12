@@ -750,37 +750,38 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
         CancellationToken cancellationToken = default)
     {
         var leaseExpiresAt = now.Add(request.LeaseDuration);
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-        var updated = await dbContext.DeploymentCommands
-            .Where(x => x.WorkspaceId == workspaceId
-                && x.Id == commandId
-                && x.EngineId == request.EngineId
-                && x.Status == DeploymentCommandStatus.Pending
-                && (x.AvailableAt == null || x.AvailableAt <= now)
-                && (x.ExpiresAt == null || x.ExpiresAt > now))
-            .ExecuteUpdateAsync(
-                setters => setters
-                    .SetProperty(x => x.Status, DeploymentCommandStatus.Claimed)
-                    .SetProperty(x => x.WorkerId, request.WorkerId)
-                    .SetProperty(x => x.LeaseToken, leaseToken)
-                    .SetProperty(x => x.ClaimedAt, now)
-                    .SetProperty(x => x.HeartbeatAt, now)
-                    .SetProperty(x => x.LeaseExpiresAt, leaseExpiresAt)
-                    .SetProperty(x => x.AttemptNumber, x => x.AttemptNumber + 1)
-                    .SetProperty(x => x.UpdatedAt, now),
-                cancellationToken);
-        if (updated == 0)
-            await ThrowClaimConflictAsync(workspaceId, commandId, request.EngineId, now, cancellationToken);
+        return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Unspecified, async () =>
+        {
+            var updated = await dbContext.DeploymentCommands
+                .Where(x => x.WorkspaceId == workspaceId
+                    && x.Id == commandId
+                    && x.EngineId == request.EngineId
+                    && x.Status == DeploymentCommandStatus.Pending
+                    && (x.AvailableAt == null || x.AvailableAt <= now)
+                    && (x.ExpiresAt == null || x.ExpiresAt > now))
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(x => x.Status, DeploymentCommandStatus.Claimed)
+                        .SetProperty(x => x.WorkerId, request.WorkerId)
+                        .SetProperty(x => x.LeaseToken, leaseToken)
+                        .SetProperty(x => x.ClaimedAt, now)
+                        .SetProperty(x => x.HeartbeatAt, now)
+                        .SetProperty(x => x.LeaseExpiresAt, leaseExpiresAt)
+                        .SetProperty(x => x.AttemptNumber, x => x.AttemptNumber + 1)
+                        .SetProperty(x => x.UpdatedAt, now),
+                    cancellationToken);
+            if (updated == 0)
+                await ThrowClaimConflictAsync(workspaceId, commandId, request.EngineId, now, cancellationToken);
 
-        DetachTrackedCommand(commandId);
-        var command = await LoadCommandForUpdateAsync(workspaceId, commandId, cancellationToken);
+            DetachTrackedCommand(commandId);
+            var command = await LoadCommandForUpdateAsync(workspaceId, commandId, cancellationToken);
 
-        await TouchCommandRunHeartbeatAsync(command, request.WorkerId, now, cancellationToken);
+            await TouchCommandRunHeartbeatAsync(command, request.WorkerId, now, cancellationToken);
 
-        await AddCommandAndRunEventAsync(command, DeploymentCommandStatus.Claimed, "Deployment command claimed by runtime worker.", now, cancellationToken);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return ToDeploymentCommand(command);
+            await AddCommandAndRunEventAsync(command, DeploymentCommandStatus.Claimed, "Deployment command claimed by runtime worker.", now, cancellationToken);
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return ToDeploymentCommand(command);
+        }, cancellationToken);
     }
 
     public async Task<DeploymentCommand> HeartbeatCommandAsync(
@@ -820,41 +821,44 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
         return ToDeploymentCommand(command);
     }
 
-    public async Task<DeploymentCommand> CompleteCommandAsync(
+    public Task<DeploymentCommand> CompleteCommandAsync(
         Guid workspaceId,
         Guid commandId,
         CompleteDeploymentCommandRequest request,
         DateTimeOffset now,
-        CancellationToken cancellationToken = default)
-    {
-        var command = await LoadCommandForUpdateAsync(workspaceId, commandId, cancellationToken);
-        if (command.Status == DeploymentCommandStatus.Completed)
+        CancellationToken cancellationToken = default) =>
+        // The command and its run reach their terminal states in one transaction, and a retried
+        // attempt re-reads and revalidates the command instead of reusing an earlier load.
+        dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
         {
-            ValidateFinalLease(command, request.LeaseToken);
-            return ToDeploymentCommand(command);
-        }
-        ValidateLease(command, request.LeaseToken, now);
-        ValidateObservedArtifactDigest(command, request.ObservedArtifactDigest);
+            var command = await LoadCommandForUpdateAsync(workspaceId, commandId, cancellationToken);
+            if (command.Status == DeploymentCommandStatus.Completed)
+            {
+                ValidateFinalLease(command, request.LeaseToken);
+                return ToDeploymentCommand(command);
+            }
+            ValidateLease(command, request.LeaseToken, now);
+            ValidateObservedArtifactDigest(command, request.ObservedArtifactDigest);
 
-        command.Status = DeploymentCommandStatus.Completed;
-        command.ObservedArtifactDigestAlgorithm = request.ObservedArtifactDigest?.Algorithm;
-        command.ObservedArtifactDigest = request.ObservedArtifactDigest?.Value;
-        command.RuntimeReference = request.RuntimeReference;
-        command.DiagnosticsJson = JsonSerializer.Serialize(request.Diagnostics);
-        command.ArtifactJson = ApplyArtifactOutcomes(command.ArtifactJson, request.Artifacts);
-        command.CompletedAt = now;
-        command.UpdatedAt = now;
-        await AddCommandAndRunEventAsync(command, DeploymentCommandStatus.Completed, "Runtime command completed.", now, cancellationToken);
-        await UpdateRunStatusAsync(
-            workspaceId,
-            command.RunId,
-            command.Action == DeploymentCommandAction.Rollback ? WorkspaceDeploymentRunStatus.RolledBack : WorkspaceDeploymentRunStatus.Succeeded,
-            "Deployment command completed by runtime.",
-            now,
-            cancellationToken: cancellationToken);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        return ToDeploymentCommand(command);
-    }
+            command.Status = DeploymentCommandStatus.Completed;
+            command.ObservedArtifactDigestAlgorithm = request.ObservedArtifactDigest?.Algorithm;
+            command.ObservedArtifactDigest = request.ObservedArtifactDigest?.Value;
+            command.RuntimeReference = request.RuntimeReference;
+            command.DiagnosticsJson = JsonSerializer.Serialize(request.Diagnostics);
+            command.ArtifactJson = ApplyArtifactOutcomes(command.ArtifactJson, request.Artifacts);
+            command.CompletedAt = now;
+            command.UpdatedAt = now;
+            await AddCommandAndRunEventAsync(command, DeploymentCommandStatus.Completed, "Runtime command completed.", now, cancellationToken);
+            await UpdateRunStatusInTransactionAsync(
+                workspaceId,
+                command.RunId,
+                command.Action == DeploymentCommandAction.Rollback ? WorkspaceDeploymentRunStatus.RolledBack : WorkspaceDeploymentRunStatus.Succeeded,
+                "Deployment command completed by runtime.",
+                now,
+                cancellationToken: cancellationToken);
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return ToDeploymentCommand(command);
+        }, cancellationToken);
 
     public Task<DeploymentCommand> FailCommandAsync(
         Guid workspaceId,
@@ -878,28 +882,46 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
         CancellationToken cancellationToken = default)
     {
         var staleBefore = now.Subtract(staleAfter);
-        var commands = await dbContext.DeploymentCommands
+        var staleCommandIds = await dbContext.DeploymentCommands
+            .AsNoTracking()
             .Where(x => (x.Status == DeploymentCommandStatus.Claimed || x.Status == DeploymentCommandStatus.Running)
                 && (x.HeartbeatAt ?? x.ClaimedAt ?? x.CreatedAt) < staleBefore)
+            .Select(x => x.Id)
             .ToListAsync(cancellationToken);
 
-        foreach (var command in commands)
+        var recovered = 0;
+        foreach (var commandId in staleCommandIds)
         {
-            command.Status = DeploymentCommandStatus.RecoveryRequired;
-            command.UpdatedAt = now;
-            command.CompletedAt = now;
-            await AddCommandAndRunEventAsync(command, DeploymentCommandStatus.RecoveryRequired, "Runtime command requires recovery after stale heartbeat.", now, cancellationToken);
-            await UpdateRunStatusAsync(
-                command.WorkspaceId,
-                command.RunId,
-                WorkspaceDeploymentRunStatus.RecoveryRequired,
-                "Deployment command requires recovery after stale runtime heartbeat.",
-                now,
-                cancellationToken: cancellationToken);
+            // Each command moves to recovery together with its run. The unit re-reads the command,
+            // so a retried attempt, or a command that completed after the scan, is not overwritten.
+            var marked = await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+            {
+                var command = await dbContext.DeploymentCommands
+                    .SingleOrDefaultAsync(x => x.Id == commandId
+                        && (x.Status == DeploymentCommandStatus.Claimed || x.Status == DeploymentCommandStatus.Running)
+                        && (x.HeartbeatAt ?? x.ClaimedAt ?? x.CreatedAt) < staleBefore, cancellationToken);
+                if (command is null)
+                    return false;
+
+                command.Status = DeploymentCommandStatus.RecoveryRequired;
+                command.UpdatedAt = now;
+                command.CompletedAt = now;
+                await AddCommandAndRunEventAsync(command, DeploymentCommandStatus.RecoveryRequired, "Runtime command requires recovery after stale heartbeat.", now, cancellationToken);
+                await UpdateRunStatusInTransactionAsync(
+                    command.WorkspaceId,
+                    command.RunId,
+                    WorkspaceDeploymentRunStatus.RecoveryRequired,
+                    "Deployment command requires recovery after stale runtime heartbeat.",
+                    now,
+                    cancellationToken: cancellationToken);
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return true;
+            }, cancellationToken);
+            if (marked)
+                recovered++;
         }
 
-        await dbContext.SaveChangesAsync(cancellationToken);
-        return commands.Count;
+        return recovered;
     }
 
     public async Task<DeploymentCommandWebhookNotification> CreateWebhookNotificationAsync(
@@ -1072,7 +1094,23 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
         return ToWorkspaceDeploymentRun(run);
     }
 
-    public async Task<WorkspaceDeploymentRun> UpdateRunStatusAsync(
+    public Task<WorkspaceDeploymentRun> UpdateRunStatusAsync(
+        Guid workspaceId,
+        Guid runId,
+        WorkspaceDeploymentRunStatus status,
+        string message,
+        DateTimeOffset now,
+        string? failureMessage = null,
+        CancellationToken cancellationToken = default) =>
+        dbContext.ExecuteInTransactionAsync(
+            IsolationLevel.Serializable,
+            () => UpdateRunStatusInTransactionAsync(workspaceId, runId, status, message, now, failureMessage, cancellationToken),
+            cancellationToken);
+
+    /// <summary>
+    /// Applies a run status inside the caller's serializable catalog transaction.
+    /// </summary>
+    private async Task<WorkspaceDeploymentRun> UpdateRunStatusInTransactionAsync(
         Guid workspaceId,
         Guid runId,
         WorkspaceDeploymentRunStatus status,
@@ -1081,8 +1119,6 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
         string? failureMessage = null,
         CancellationToken cancellationToken = default)
     {
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(
-            IsolationLevel.Serializable, cancellationToken);
         // Persist any correlated command mutation inside this transaction before
         // detaching a previously tracked run for the set-based terminal CAS. EF
         // relationship fix-up can otherwise detach the pending command and events
@@ -1156,7 +1192,6 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
             CreatedAt = now
         }, cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
         return ToWorkspaceDeploymentRun(run);
     }
 
@@ -1176,50 +1211,52 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
         if (staleRunIds.Count == 0)
             return 0;
 
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(
-            IsolationLevel.Serializable, cancellationToken);
-        var markedCount = 0;
-        const string recoveryReason = "Worker heartbeat became stale.";
-
-        foreach (var runId in staleRunIds)
+        // The candidate ids are only a pre-read: every write below repeats the staleness
+        // predicate, so a retried attempt re-decides each run from current state.
+        return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
         {
-            var updated = await dbContext.DeploymentRuns
-                .Where(x => x.Id == runId
-                    && x.Status == WorkspaceDeploymentRunStatus.Running
-                    && (x.WorkerHeartbeatAt ?? x.StartedAt ?? x.QueuedAt) < staleBefore)
-                .ExecuteUpdateAsync(setters => setters
-                    .SetProperty(x => x.Status, WorkspaceDeploymentRunStatus.RecoveryRequired)
-                    .SetProperty(x => x.CompletedAt, (DateTimeOffset?)null)
-                    .SetProperty(x => x.RecoveryReason, recoveryReason), cancellationToken);
-            if (updated == 0)
-                continue;
+            var markedCount = 0;
+            const string recoveryReason = "Worker heartbeat became stale.";
 
-            DetachTrackedRun(runId);
-            var run = await dbContext.DeploymentRuns
-                .Include(x => x.Environment)
-                .SingleAsync(x => x.Id == runId, cancellationToken);
-            await dbContext.DeploymentRunHistoryEvents.AddAsync(new DeploymentRunHistoryEventEntity
+            foreach (var runId in staleRunIds)
             {
-                Id = Guid.NewGuid(),
-                WorkspaceId = run.WorkspaceId,
-                RunId = run.Id,
-                Status = WorkspaceDeploymentRunStatus.RecoveryRequired,
-                Message = "Deployment run requires recovery after stale worker heartbeat.",
-                CreatedAt = now
-            }, cancellationToken);
+                var updated = await dbContext.DeploymentRuns
+                    .Where(x => x.Id == runId
+                        && x.Status == WorkspaceDeploymentRunStatus.Running
+                        && (x.WorkerHeartbeatAt ?? x.StartedAt ?? x.QueuedAt) < staleBefore)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(x => x.Status, WorkspaceDeploymentRunStatus.RecoveryRequired)
+                        .SetProperty(x => x.CompletedAt, (DateTimeOffset?)null)
+                        .SetProperty(x => x.RecoveryReason, recoveryReason), cancellationToken);
+                if (updated == 0)
+                    continue;
 
-            await ProjectManagedRecoveryRequiredAsync(run, now, cancellationToken);
-            if (run.Environment is not null)
-            {
-                run.Environment.UpdatedAt = now;
-                run.Environment.DeploymentStatus = DeploymentStatus.Blocked;
+                DetachTrackedRun(runId);
+                var run = await dbContext.DeploymentRuns
+                    .Include(x => x.Environment)
+                    .SingleAsync(x => x.Id == runId, cancellationToken);
+                await dbContext.DeploymentRunHistoryEvents.AddAsync(new DeploymentRunHistoryEventEntity
+                {
+                    Id = Guid.NewGuid(),
+                    WorkspaceId = run.WorkspaceId,
+                    RunId = run.Id,
+                    Status = WorkspaceDeploymentRunStatus.RecoveryRequired,
+                    Message = "Deployment run requires recovery after stale worker heartbeat.",
+                    CreatedAt = now
+                }, cancellationToken);
+
+                await ProjectManagedRecoveryRequiredAsync(run, now, cancellationToken);
+                if (run.Environment is not null)
+                {
+                    run.Environment.UpdatedAt = now;
+                    run.Environment.DeploymentStatus = DeploymentStatus.Blocked;
+                }
+                markedCount++;
             }
-            markedCount++;
-        }
 
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return markedCount;
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return markedCount;
+        }, cancellationToken);
     }
 
     private async Task ProjectManagedRecoveryRequiredAsync(
@@ -2969,7 +3006,7 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
             ExpiresAt = request.ExpiresAt
         };
 
-    private async Task<DeploymentCommand> FinalizeCommandAsync(
+    private Task<DeploymentCommand> FinalizeCommandAsync(
         Guid workspaceId,
         Guid commandId,
         string leaseToken,
@@ -2978,37 +3015,39 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
         IReadOnlyList<DeploymentCommandArtifactOutcome>? artifacts,
         string message,
         DateTimeOffset now,
-        CancellationToken cancellationToken)
-    {
-        var command = await LoadCommandForUpdateAsync(workspaceId, commandId, cancellationToken);
-        if (command.Status == status)
+        CancellationToken cancellationToken) =>
+        // Same unit boundary as CompleteCommandAsync: command and run fail together.
+        dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
         {
-            ValidateFinalLease(command, leaseToken);
+            var command = await LoadCommandForUpdateAsync(workspaceId, commandId, cancellationToken);
+            if (command.Status == status)
+            {
+                ValidateFinalLease(command, leaseToken);
+                return ToDeploymentCommand(command);
+            }
+            if (IsFinal(command.Status))
+                throw new InvalidOperationException("Command is already final.");
+
+            ValidateLease(command, leaseToken, now);
+
+            command.Status = status;
+            command.DiagnosticsJson = JsonSerializer.Serialize(diagnostics);
+            command.ArtifactJson = ApplyArtifactOutcomes(command.ArtifactJson, artifacts);
+            command.CompletedAt = now;
+            command.UpdatedAt = now;
+
+            await AddCommandAndRunEventAsync(command, status, message, now, cancellationToken);
+            await UpdateRunStatusInTransactionAsync(
+                workspaceId,
+                command.RunId,
+                WorkspaceDeploymentRunStatus.Failed,
+                message,
+                now,
+                diagnostics.FirstOrDefault(x => x.Severity == DeploymentCommandDiagnosticSeverity.Error)?.Message,
+                cancellationToken);
+            await dbContext.SaveChangesAsync(cancellationToken);
             return ToDeploymentCommand(command);
-        }
-        if (IsFinal(command.Status))
-            throw new InvalidOperationException("Command is already final.");
-
-        ValidateLease(command, leaseToken, now);
-
-        command.Status = status;
-        command.DiagnosticsJson = JsonSerializer.Serialize(diagnostics);
-        command.ArtifactJson = ApplyArtifactOutcomes(command.ArtifactJson, artifacts);
-        command.CompletedAt = now;
-        command.UpdatedAt = now;
-
-        await AddCommandAndRunEventAsync(command, status, message, now, cancellationToken);
-        await UpdateRunStatusAsync(
-            workspaceId,
-            command.RunId,
-            WorkspaceDeploymentRunStatus.Failed,
-            message,
-            now,
-            diagnostics.FirstOrDefault(x => x.Severity == DeploymentCommandDiagnosticSeverity.Error)?.Message,
-            cancellationToken);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        return ToDeploymentCommand(command);
-    }
+        }, cancellationToken);
 
     private async Task ThrowClaimConflictAsync(
         Guid workspaceId,

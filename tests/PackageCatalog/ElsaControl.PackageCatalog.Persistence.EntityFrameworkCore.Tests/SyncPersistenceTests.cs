@@ -20,7 +20,7 @@ public sealed class SyncPersistenceTests
     public async Task Persists_sync_run_items_for_diagnostics()
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite("Data Source=:memory:", sqlite =>
+            .UseRetryingSqlite("Data Source=:memory:", sqlite =>
             {
                 sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly);
             })
@@ -44,7 +44,7 @@ public sealed class SyncPersistenceTests
     public async Task Initial_migration_creates_catalog_tables()
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite("Data Source=:memory:", sqlite =>
+            .UseRetryingSqlite("Data Source=:memory:", sqlite =>
             {
                 sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly);
             })
@@ -64,7 +64,7 @@ public sealed class SyncPersistenceTests
     public async Task Lists_most_recent_sync_runs_before_limiting()
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite("Data Source=:memory:")
+            .UseRetryingSqlite("Data Source=:memory:")
             .Options;
 
         await using var db = new CatalogDbContext(options);
@@ -90,7 +90,7 @@ public sealed class SyncPersistenceTests
     public async Task Sync_service_persists_new_run_items_without_concurrency_failure()
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite("Data Source=:memory:")
+            .UseRetryingSqlite("Data Source=:memory:")
             .Options;
 
         await using var db = new CatalogDbContext(options);
@@ -230,7 +230,7 @@ public sealed class SyncPersistenceTests
     {
         var commandRecorder = new CommandRecorder();
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite("Data Source=:memory:")
+            .UseRetryingSqlite("Data Source=:memory:")
             .AddInterceptors(commandRecorder)
             .Options;
 
@@ -288,7 +288,7 @@ public sealed class SyncPersistenceTests
     public async Task Bulk_sync_persists_source_last_synced_timestamp()
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite("Data Source=:memory:")
+            .UseRetryingSqlite("Data Source=:memory:")
             .Options;
 
         await using var db = new CatalogDbContext(options);
@@ -477,7 +477,7 @@ public sealed class SyncPersistenceTests
     private static async Task<CatalogDbContext> CreateOpenDbContextAsync()
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite("Data Source=:memory:")
+            .UseRetryingSqlite("Data Source=:memory:")
             .Options;
 
         var db = new CatalogDbContext(options);

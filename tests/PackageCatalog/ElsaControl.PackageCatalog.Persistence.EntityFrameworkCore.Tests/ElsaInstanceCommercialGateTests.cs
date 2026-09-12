@@ -219,7 +219,7 @@ public sealed class ElsaInstanceCommercialGateTests
     }
 
     private static CatalogDbContext CreateContext(SqliteConnection connection) =>
-        new(new DbContextOptionsBuilder<CatalogDbContext>().UseSqlite(connection).Options);
+        new(new DbContextOptionsBuilder<CatalogDbContext>().UseRetryingSqlite(connection).Options);
 
     private static ElsaInstanceIntent CreateIntent() => new(
         new ElsaReleaseIntent("valence-runtime", "3.8", "3.8.0", "stable"),

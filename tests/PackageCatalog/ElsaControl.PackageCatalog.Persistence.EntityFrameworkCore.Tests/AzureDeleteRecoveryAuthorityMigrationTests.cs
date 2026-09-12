@@ -140,7 +140,7 @@ public sealed class AzureDeleteRecoveryAuthorityMigrationTests
 
     private static CatalogDbContext CreateSqliteContext(SqliteConnection connection) =>
         new(new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(
                 CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options);
 

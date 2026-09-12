@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Text.Json;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
@@ -13,6 +14,7 @@ using ElsaControl.RuntimeBuilder.Abstractions.Plans;
 using ElsaControl.RuntimeBuilder.Abstractions.ReleaseManifests;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Migrations.Operations;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
@@ -459,7 +461,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         setup.ChangeTracker.Clear();
 
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         await using var firstDb = new CatalogDbContext(options);
         await using var secondDb = new CatalogDbContext(options);
@@ -509,7 +511,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         setup.ChangeTracker.Clear();
 
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         await using var firstDb = new CatalogDbContext(options);
         await using var secondDb = new CatalogDbContext(options);
@@ -550,7 +552,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 workspace.OrganizationId, workspace.Id, "Managed Elsa", "atomic-delete", CreateIntent(), "create-atomic-delete"));
         await CompleteOperationAsync(setup, created.Operation.Id);
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         await using var staleDb = new CatalogDbContext(options);
         var store = CreateStore(staleDb);
@@ -823,7 +825,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         setup.ChangeTracker.Clear();
 
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         await using var firstDb = new CatalogDbContext(options);
         await using var secondDb = new CatalogDbContext(options);
@@ -1086,7 +1088,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 workspace.OrganizationId, workspace.Id, "Worker Elsa", "concurrent-worker-elsa", WorkerIntent(), "concurrent-worker-create"));
         var target = await AddManagedEnvironmentAsync(setup, workspace, accepted.Instance.Id);
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         await using var firstDb = new CatalogDbContext(options);
         await using var secondDb = new CatalogDbContext(options);
@@ -1137,6 +1139,56 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
 
         Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Queued, result.Outcome);
         Assert.Equal(1, await db.DeploymentRuns.CountAsync());
+    }
+
+    [Fact]
+    public async Task A_lost_acknowledgement_after_a_successful_claim_commit_returns_no_work_and_does_not_double_claim()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var setup = CreateMigratedContext(connection);
+        await setup.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(setup, "Lost claim acknowledgement workspace");
+        var accepted = await new ElsaInstanceLifecycleService(CreateStore(setup), new FixedTimeProvider(Now))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                workspace.OrganizationId, workspace.Id, "Worker Elsa", "lost-ack-elsa", WorkerIntent(), "lost-ack-create"));
+        var target = await AddManagedEnvironmentAsync(setup, workspace, accepted.Instance.Id);
+        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var options = new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(connection,
+                sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
+                isTransient: exception => exception is LostCommitAcknowledgementException)
+            .AddInterceptors(acknowledgement)
+            .Options;
+        await using var db = new CatalogDbContext(options);
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, new StaticResolutionInputSource(accepted.Instance, target), new FixedTimeProvider(Now));
+
+        // The claim's commit below succeeds durably, but the acknowledgement interceptor simulates the
+        // caller never learning that: it throws once, after the commit, as a transient failure the
+        // execution strategy retries. The retried attempt must find no reclaimable work rather than
+        // claim the same operation a second time.
+        var item = await store.TryClaimNextAsync("worker-one", Now);
+
+        Assert.Null(item);
+        Assert.Equal(2, acknowledgement.Committed);
+        await using var verify = new CatalogDbContext(options);
+        var operation = await verify.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal("worker-one", operation.WorkerId);
+        Assert.Equal(ElsaInstanceOperationState.Accepted, operation.State);
+        Assert.Equal(1, operation.LeaseVersion);
+        Assert.Equal(1, await verify.ElsaInstanceOperations.CountAsync(x => x.WorkerId != null));
+
+        // Once that lease expires, the operation is claimable again, with exactly one rotated claim.
+        var reclaimed = await store.TryClaimNextAsync("worker-two", Now.AddMinutes(6));
+
+        Assert.NotNull(reclaimed);
+        Assert.Equal(accepted.Operation.Id, reclaimed!.Operation.Id);
+        Assert.Equal(2, reclaimed.LeaseVersion);
+        await using var verifyAfter = new CatalogDbContext(options);
+        Assert.Equal(1, await verifyAfter.ElsaInstanceOperations.CountAsync(x => x.Id == accepted.Operation.Id));
+        Assert.Equal("worker-two",
+            (await verifyAfter.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id)).WorkerId);
     }
 
     [Fact]
@@ -1461,6 +1513,54 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             new string('f', 64), "deletion.provider.unavailable", Now.AddMinutes(6));
         await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
             store.RequireDeletionRecoveryAsync(failure));
+    }
+
+    [Fact]
+    public async Task A_lost_acknowledgement_after_a_successful_deletion_claim_commit_returns_no_work_and_does_not_double_claim()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var setup = CreateMigratedContext(connection);
+        await setup.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(setup, "Lost deletion claim acknowledgement workspace");
+        var setupService = new ElsaInstanceLifecycleService(CreateStore(setup), new FixedTimeProvider(Now));
+        var created = await setupService.CreateAsync(new ElsaInstanceCreateRequest(
+            workspace.OrganizationId, workspace.Id, "Lease Elsa", "lost-ack-delete-elsa", WorkerIntent(), "lost-ack-delete-create"));
+        var deletion = await setupService.DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+            setup, workspace.Id, created.Instance.Id, created.Instance.Version, "lost-ack-delete"));
+        await CompleteOperationAsync(setup, created.Operation.Id);
+        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var options = new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(connection,
+                sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
+                isTransient: exception => exception is LostCommitAcknowledgementException)
+            .AddInterceptors(acknowledgement)
+            .Options;
+        await using var db = new CatalogDbContext(options);
+        var store = new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+
+        // As with TryClaimNextAsync: the commit below succeeds durably, but the acknowledgement is lost
+        // and the execution strategy retries the whole unit. The retry must find no reclaimable work.
+        var item = await store.TryClaimNextDeletionAsync("worker-one", Now);
+
+        Assert.Null(item);
+        Assert.Equal(2, acknowledgement.Committed);
+        await using var verify = new CatalogDbContext(options);
+        var operation = await verify.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == deletion.Operation.Id);
+        Assert.Equal("worker-one", operation.WorkerId);
+        Assert.Equal(1, operation.LeaseVersion);
+        Assert.Equal(1, await verify.ElsaInstanceOperations.CountAsync(x => x.WorkerId != null));
+
+        // Once that lease expires, the operation is claimable again, with exactly one rotated claim.
+        var reclaimed = await store.TryClaimNextDeletionAsync("worker-two", Now.AddMinutes(6));
+
+        Assert.NotNull(reclaimed);
+        Assert.Equal(deletion.Operation.Id, reclaimed!.Operation.Id);
+        Assert.Equal(2, reclaimed.LeaseVersion);
+        await using var verifyAfter = new CatalogDbContext(options);
+        Assert.Equal(1, await verifyAfter.ElsaInstanceOperations.CountAsync(x => x.Id == deletion.Operation.Id));
+        Assert.Equal("worker-two",
+            (await verifyAfter.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == deletion.Operation.Id)).WorkerId);
     }
 
     [Fact]
@@ -2703,10 +2803,39 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         public override DateTimeOffset GetUtcNow() => now;
     }
 
+    /// <summary>
+    /// Simulates a claim commit that succeeds durably but whose acknowledgement to the caller is lost:
+    /// it throws once, right after the transaction commits, an exception the test's execution strategy
+    /// classifies as transient so the whole unit is retried.
+    /// </summary>
+    private sealed class LostCommitAcknowledgementInterceptor(int failures = 1) : DbTransactionInterceptor
+    {
+        private int _failed;
+
+        public int Committed { get; private set; }
+
+        public override Task TransactionCommittedAsync(
+            DbTransaction transaction,
+            TransactionEndEventData eventData,
+            CancellationToken cancellationToken = default)
+        {
+            Committed++;
+            if (_failed < failures)
+            {
+                _failed++;
+                throw new LostCommitAcknowledgementException();
+            }
+
+            return base.TransactionCommittedAsync(transaction, eventData, cancellationToken);
+        }
+    }
+
+    private sealed class LostCommitAcknowledgementException : Exception;
+
     private static CatalogDbContext CreateMigratedContext(SqliteConnection connection)
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options;
         return new CatalogDbContext(options);
     }

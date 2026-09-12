@@ -458,9 +458,11 @@ public sealed class DeploymentCommandPersistenceTests : IDisposable
 
         var recovered = await _store.MarkStaleCommandsRecoveryRequiredAsync(claimedAt.AddMinutes(20), TimeSpan.FromMinutes(10));
         var recoveredRun = await _store.GetRunAsync(_workspaceId, run.Id);
+        var recoveredCommand = await _store.GetCommandAsync(_workspaceId, command.Id);
 
         Assert.Equal(1, recovered);
         Assert.Equal(WorkspaceDeploymentRunStatus.RecoveryRequired, recoveredRun!.Status);
+        Assert.Equal(DeploymentCommandStatus.RecoveryRequired, recoveredCommand!.Status);
     }
 
     [Fact]
@@ -735,7 +737,7 @@ public sealed class DeploymentCommandPersistenceTests : IDisposable
     private static CatalogDbContext CreateDbContext(string connectionString)
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(connectionString)
+            .UseRetryingSqlite(connectionString)
             .Options;
         return new CatalogDbContext(options);
     }

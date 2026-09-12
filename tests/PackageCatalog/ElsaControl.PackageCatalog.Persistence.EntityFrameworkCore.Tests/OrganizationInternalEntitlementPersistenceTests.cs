@@ -1,8 +1,11 @@
+using System.Data;
+using System.Data.Common;
 using System.Text.Json;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
@@ -284,12 +287,60 @@ public sealed class OrganizationInternalEntitlementPersistenceTests : IAsyncLife
     {
         // SQL Server's retrying strategy rejects user transactions opened outside it.
         await using var db = new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlite(_connection, sqlite => sqlite.ExecutionStrategy(dependencies => new RetryingExecutionStrategy(dependencies)))
+            .UseRetryingSqlite(_connection)
             .Options);
         var store = new OrganizationBillingStore(db);
 
         Assert.Equal(OrganizationInternalEntitlementOutcome.Granted, (await store.GrantInternalEntitlementAsync(Grant(), Now)).Outcome);
         Assert.Equal(OrganizationInternalEntitlementOutcome.Revoked, (await store.RevokeInternalEntitlementAsync(OrganizationId, OperatorSubject, Now.AddHours(1))).Outcome);
+    }
+
+    [Fact]
+    public async Task A_conflict_the_strategy_does_not_retry_reruns_the_whole_grant_in_a_new_serializable_transaction()
+    {
+        var writes = new LockedWrites(failures: 1);
+        await using var db = CreateLockingDb(writes);
+
+        var result = await new OrganizationBillingStore(db).GrantInternalEntitlementAsync(Grant(), Now);
+
+        // The first attempt rolled back, so the re-run decides from committed rows and grants once.
+        Assert.Equal(OrganizationInternalEntitlementOutcome.Granted, result.Outcome);
+        Assert.Equal([IsolationLevel.Serializable, IsolationLevel.Serializable], writes.Transactions);
+        var persisted = await ReadAsync();
+        Assert.Single(persisted.Subscriptions);
+        Assert.Single(persisted.Entitlements);
+        Assert.Single(persisted.Audits);
+    }
+
+    [Fact]
+    public async Task A_persistent_conflict_fails_after_the_conflict_loop_attempts_and_writes_nothing()
+    {
+        var writes = new LockedWrites(failures: int.MaxValue);
+        await using var db = CreateLockingDb(writes);
+
+        var exception = await Assert.ThrowsAsync<DbUpdateException>(() =>
+            new OrganizationBillingStore(db).GrantInternalEntitlementAsync(Grant(), Now));
+
+        Assert.Equal(5, Assert.IsType<SqliteException>(exception.InnerException).SqliteErrorCode);
+        // The conflict loop's three whole-unit runs; the strategy does not classify the failure and adds none.
+        Assert.Equal(3, writes.Transactions.Count);
+        AssertNothingWritten(await ReadAsync());
+    }
+
+    [Fact]
+    public async Task Exhausted_strategy_retries_are_not_multiplied_by_the_conflict_loop()
+    {
+        // Classified transient, as SQL Server's strategy classifies a deadlock: the strategy has already
+        // re-run the whole grant, so its exhaustion must propagate instead of starting the retries over.
+        var writes = new LockedWrites(failures: int.MaxValue);
+        await using var db = CreateLockingDb(writes, isTransient: exception => exception is SqliteException { SqliteErrorCode: 5 });
+
+        var exception = await Assert.ThrowsAsync<RetryLimitExceededException>(() =>
+            new OrganizationBillingStore(db).GrantInternalEntitlementAsync(Grant(), Now));
+
+        Assert.IsType<SqliteException>(exception.InnerException?.InnerException);
+        Assert.Equal(TestRetryingExecutionStrategy.MaxRetries + 1, writes.Transactions.Count);
+        AssertNothingWritten(await ReadAsync());
     }
 
     [Fact]
@@ -403,12 +454,63 @@ public sealed class OrganizationInternalEntitlementPersistenceTests : IAsyncLife
     }
 
     private static CatalogDbContext CreateDb(SqliteConnection connection) =>
-        new(new DbContextOptionsBuilder<CatalogDbContext>().UseSqlite(connection).Options);
+        new(new DbContextOptionsBuilder<CatalogDbContext>().UseRetryingSqlite(connection).Options);
 
-    private sealed class RetryingExecutionStrategy(ExecutionStrategyDependencies dependencies)
-        : ExecutionStrategy(dependencies, 1, TimeSpan.Zero)
+    private CatalogDbContext CreateLockingDb(LockedWrites writes, Func<Exception, bool>? isTransient = null) =>
+        new(new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(_connection, isTransient: isTransient)
+            .AddInterceptors(writes)
+            .Options);
+
+    /// <summary>
+    /// Fails the first <c>failures</c> write commands with SQLite's "database is locked", a conflict the
+    /// billing retry discipline re-runs, and records the isolation level of every transaction begun.
+    /// </summary>
+    private sealed class LockedWrites(int failures) : DbCommandInterceptor, IDbTransactionInterceptor
     {
-        protected override bool ShouldRetryOn(Exception exception) => false;
+        private int _failed;
+
+        public List<IsolationLevel> Transactions { get; } = [];
+
+        public ValueTask<InterceptionResult<DbTransaction>> TransactionStartingAsync(
+            DbConnection connection,
+            TransactionStartingEventData eventData,
+            InterceptionResult<DbTransaction> result,
+            CancellationToken cancellationToken = default)
+        {
+            Transactions.Add(eventData.IsolationLevel);
+            return ValueTask.FromResult(result);
+        }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            FailWrite(command);
+            return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+        }
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            FailWrite(command);
+            return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
+        }
+
+        private void FailWrite(DbCommand command)
+        {
+            var sql = command.CommandText.TrimStart();
+            if (_failed < failures && (sql.StartsWith("INSERT", StringComparison.OrdinalIgnoreCase) || sql.StartsWith("UPDATE", StringComparison.OrdinalIgnoreCase)))
+            {
+                _failed++;
+                throw new SqliteException("database is locked", 5);
+            }
+        }
     }
 
     private sealed record Persisted(

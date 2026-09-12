@@ -151,24 +151,23 @@ public sealed class SyncRunStore(CatalogDbContext dbContext) : ISyncRunStore
     public async Task<SyncRunCleanupResult> DeleteBeforeAsync(DateTimeOffset completedBefore, IReadOnlyCollection<SyncRunStatus> terminalStatuses, CancellationToken cancellationToken = default)
     {
         var terminalStatusValues = terminalStatuses.ToArray();
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+        {
+            var deletedRunIds = await EligibleRuns(completedBefore, terminalStatusValues)
+                .Select(x => x.Id)
+                .ToListAsync(cancellationToken);
+            var excludedRunCount = await CountProtectedRunsAsync(completedBefore, terminalStatusValues, cancellationToken);
+            var deletedItemCount = deletedRunIds.Count == 0
+                ? 0
+                : await dbContext.SyncRunItems
+                    .AsNoTracking()
+                    .CountAsync(x => EligibleRunIds(completedBefore, terminalStatusValues).Contains(x.SyncRunId), cancellationToken);
 
-        var deletedRunIds = await EligibleRuns(completedBefore, terminalStatusValues)
-            .Select(x => x.Id)
-            .ToListAsync(cancellationToken);
-        var excludedRunCount = await CountProtectedRunsAsync(completedBefore, terminalStatusValues, cancellationToken);
-        var deletedItemCount = deletedRunIds.Count == 0
-            ? 0
-            : await dbContext.SyncRunItems
-                .AsNoTracking()
-                .CountAsync(x => EligibleRunIds(completedBefore, terminalStatusValues).Contains(x.SyncRunId), cancellationToken);
+            if (deletedRunIds.Count > 0)
+                await EligibleRuns(completedBefore, terminalStatusValues).ExecuteDeleteAsync(cancellationToken);
 
-        if (deletedRunIds.Count > 0)
-            await EligibleRuns(completedBefore, terminalStatusValues).ExecuteDeleteAsync(cancellationToken);
-
-        await transaction.CommitAsync(cancellationToken);
-
-        return new SyncRunCleanupResult(deletedRunIds.Count, deletedItemCount, excludedRunCount, 0, completedBefore, deletedRunIds);
+            return new SyncRunCleanupResult(deletedRunIds.Count, deletedItemCount, excludedRunCount, 0, completedBefore, deletedRunIds);
+        }, cancellationToken);
     }
 
     public async Task AddAsync(SyncRun run, CancellationToken cancellationToken = default) =>
