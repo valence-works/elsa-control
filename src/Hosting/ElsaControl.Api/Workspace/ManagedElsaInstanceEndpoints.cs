@@ -5,6 +5,7 @@ using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.RuntimeBuilder.Abstractions.ReleaseCatalog;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Api.Workspace;
 
@@ -527,14 +528,14 @@ public static class ManagedElsaInstanceEndpoints
     {
         endpoints.MapGet("/api/workspaces/{workspaceId:guid}/managed-elsa/instances", async (
             Guid workspaceId, HttpContext context, WorkspacePermissionService permissions,
-            IManagedElsaInstanceCatalog instances, CancellationToken cancellationToken) =>
+            IManagedElsaInstanceCatalog instances, IOptions<ManagedElsaHandoffOptions> handoff, CancellationToken cancellationToken) =>
         {
             context.Response.Headers.CacheControl = "private, no-store";
             context.Response.Headers.Pragma = "no-cache";
             var canOpen = (await permissions.GetEffectivePermissionsAsync(workspaceId, context.GetWorkspaceAccess().AccountId, cancellationToken))
                 .Has(ManagedElsaInstancePermissions.Open);
             var summaries = await instances.ListAsync(workspaceId, cancellationToken);
-            return Results.Ok(summaries.Select(summary => ToLegacyResponse(summary, canOpen)).ToList());
+            return Results.Ok(summaries.Select(summary => ToLegacyResponse(summary, canOpen, handoff.Value.Enabled)).ToList());
         }).WithTags("Managed Elsa Instances").RequireWorkspaceAccess();
     }
 
@@ -640,10 +641,10 @@ public static class ManagedElsaInstanceEndpoints
     internal static ElsaInstanceAuditEventSummary RedactAudit(ElsaInstanceAuditEventSummary audit) =>
         audit with { OperatorSubject = null };
 
-    private static ManagedElsaInstanceResponse ToLegacyResponse(ManagedElsaInstanceSummary summary, bool canOpen)
+    private static ManagedElsaInstanceResponse ToLegacyResponse(ManagedElsaInstanceSummary summary, bool canOpen, bool controlHandoffEnabled)
     {
         var healthy = summary.DesiredLifecycle == ElsaDesiredLifecycle.Running && summary.ObservedLifecycle == ElsaObservedLifecycle.Ready && summary.Health == ElsaInstanceHealth.Healthy;
-        var openable = canOpen && healthy && summary.Audience is not null && summary.CallbackUri is not null;
+        var openable = canOpen && healthy && controlHandoffEnabled && summary.Audience is not null && summary.CallbackUri is not null;
         return new ManagedElsaInstanceResponse(summary.OrganizationId, summary.InstanceId, summary.Name, summary.Slug,
             summary.DesiredLifecycle, summary.ObservedLifecycle, summary.Health, openable,
             openable ? summary.Audience : null, openable ? summary.CallbackUri!.OriginalString : null,

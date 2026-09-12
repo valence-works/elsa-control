@@ -157,11 +157,12 @@ public static class AzureWorkloadPlanTranslator
     /// The handoff is configured only for a release whose selected image declares the exact
     /// <c>managed-elsa-handoff-v1</c> contract, and only on a single replica: the runtime keeps its
     /// handoff state keys and sessions in process, so a second replica would reject callbacks and
-    /// sessions it did not issue. Any other plan leaves the handoff disabled, which keeps Open unavailable
-    /// rather than advertising a sign-in that fails.
+    /// sessions it did not issue, and scaling to zero would discard them between start and callback.
+    /// Any other plan leaves the handoff disabled, which keeps Open unavailable rather than advertising
+    /// a sign-in that fails.
     /// </summary>
     private static bool ConfiguresManagedHandoff(ResolvedElsaComponent component, AzureWorkloadCapacity capacity) =>
-        capacity.MaxReplicas == 1 &&
+        capacity is { MinReplicas: 1, MaxReplicas: 1 } &&
         component.Capabilities.Contains(ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV1, StringComparer.Ordinal);
 
     /// <summary>

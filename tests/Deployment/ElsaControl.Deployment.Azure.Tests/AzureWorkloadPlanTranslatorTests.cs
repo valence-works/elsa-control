@@ -284,13 +284,14 @@ public sealed class AzureWorkloadPlanTranslatorTests
     }
 
     [Theory]
-    [InlineData(true, 1, true)]
-    [InlineData(false, 1, false)]
-    [InlineData(true, 3, false)]
-    public void Configures_the_managed_handoff_only_for_a_declaring_release_on_a_single_replica(
-        bool declared, int maxReplicas, bool expected)
+    [InlineData(true, 1, 1, true)]
+    [InlineData(false, 1, 1, false)]
+    [InlineData(true, 1, 3, false)]
+    [InlineData(true, 0, 1, false)]
+    public void Configures_the_managed_handoff_only_for_a_declaring_release_on_one_always_running_replica(
+        bool declared, int minReplicas, int maxReplicas, bool expected)
     {
-        var result = Translate(WithManagedHandoffCapability(declared, WithCapacity(1, maxReplicas, 500, 1024)));
+        var result = Translate(WithManagedHandoffCapability(declared, WithCapacity(minReplicas, maxReplicas, 500, 1024)));
 
         Assert.True(result.IsAccepted);
         Assert.Equal(expected, result.Plan!.ManagedHandoff);

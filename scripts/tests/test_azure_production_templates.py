@@ -132,7 +132,7 @@ class AzureProductionTemplateTests(unittest.TestCase):
         self.assertRegex(app, r"enabled: concat\(\[\s*\{\s*name: 'ManagedElsa__Handoff__Enabled'\s+value: 'true'")
         # No 'invalid' entry: an enabled handoff with a missing input or more than one replica fails the deployment.
         self.assertIn(
-            "var managedHandoffMode = !managedHandoffEnabled ? 'disabled' : managedHandoffInputsComplete && maxReplicas == 1 ? 'enabled' : 'invalid'",
+            "var managedHandoffMode = !managedHandoffEnabled ? 'disabled' : managedHandoffInputsComplete && minReplicas == 1 && maxReplicas == 1 ? 'enabled' : 'invalid'",
             app,
         )
         self.assertIn("}[managedHandoffMode]", app)

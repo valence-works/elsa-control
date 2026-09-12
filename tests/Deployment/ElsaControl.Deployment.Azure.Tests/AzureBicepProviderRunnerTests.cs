@@ -160,13 +160,22 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     [Theory]
     [InlineData(AzureProviderRunnerStep.Foundation)]
     [InlineData(AzureProviderRunnerStep.Workload)]
-    public async Task Production_deployment_of_a_handoff_on_more_than_one_replica_fails_before_any_Azure_call(AzureProviderRunnerStep step)
+    public async Task Production_deployment_of_a_handoff_on_more_than_one_replica_fails_before_any_Azure_call(AzureProviderRunnerStep step) =>
+        await AssertHandoffReplicasUnsupportedAsync(step, GovernedCapacity("standard"));
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.Foundation)]
+    [InlineData(AzureProviderRunnerStep.Workload)]
+    public async Task Production_deployment_of_a_handoff_that_can_scale_to_zero_fails_before_any_Azure_call(AzureProviderRunnerStep step) =>
+        await AssertHandoffReplicasUnsupportedAsync(step, new AzureWorkloadCapacity(0, 1, 500, 1024));
+
+    private async Task AssertHandoffReplicasUnsupportedAsync(AzureProviderRunnerStep step, AzureWorkloadCapacity capacity)
     {
         var options = _fixture.Options with { ManagedHandoff = ControlHandoff };
         var process = new FakeCommandProcess();
         var command = _fixture.Command(step, RegistryReadyResources()) with
         {
-            Plan = _fixture.Plan with { ManagedHandoff = true, Capacity = GovernedCapacity("standard") },
+            Plan = _fixture.Plan with { ManagedHandoff = true, Capacity = capacity },
             Context = ContextFor(options)
         };
 

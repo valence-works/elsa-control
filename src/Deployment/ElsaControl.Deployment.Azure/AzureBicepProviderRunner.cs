@@ -2369,8 +2369,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             ? null
             : _options.ManagedHandoff is null
                 ? Failed(command, phase, "azure.handoff.configuration-required", "The release declares the managed handoff but Control supplied no handoff configuration.")
-                : command.Plan.Capacity is not { MaxReplicas: 1 }
-                    ? Failed(command, phase, "azure.handoff.replicas-unsupported", "The managed handoff requires a single-replica workload.")
+                : command.Plan.Capacity is not { MinReplicas: 1, MaxReplicas: 1 }
+                    ? Failed(command, phase, "azure.handoff.replicas-unsupported", "The managed handoff requires exactly one always-running replica.")
                     : null;
 
     /// <summary>

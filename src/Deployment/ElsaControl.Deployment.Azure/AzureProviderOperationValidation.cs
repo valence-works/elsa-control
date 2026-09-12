@@ -375,7 +375,7 @@ public static class AzureProviderOperationValidation
             errors.Add("sqlQuartzPackageVersion.invalid");
         if ((request.ReleaseManifestReference is null) != (request.ReleaseManifestSignatureReference is null)) errors.Add("releaseManifestReferences.incomplete");
         if (request.Capacity is not null && AzureContainerAppsCapacity.Map(request.Capacity) is null) errors.Add("capacity.invalid");
-        if (request.ManagedHandoff && request.Capacity is not { MaxReplicas: 1 }) errors.Add("managedHandoff.replicasUnsupported");
+        if (request.ManagedHandoff && request.Capacity is not { MinReplicas: 1, MaxReplicas: 1 }) errors.Add("managedHandoff.replicasUnsupported");
         ValidateSecretReferences(request.SecretReferences, errors);
 
         BoundedSafe(request.TargetKey, 128, "target", errors);

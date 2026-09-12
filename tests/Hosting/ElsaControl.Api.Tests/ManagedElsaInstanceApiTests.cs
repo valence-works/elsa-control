@@ -1091,7 +1091,13 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
 
         public Fixture()
         {
+            // Open is offered only while Control's own handoff is enabled (ControlHandoffGatedIdentityStore).
             Application = new ControlApiTestApplication(
+                configuration: new Dictionary<string, string?>
+                {
+                    ["ManagedElsa:Handoff:Enabled"] = "true",
+                    ["ManagedElsa:Handoff:Issuer"] = "https://control.test"
+                },
                 configureServices: services =>
                 {
                     services.RemoveAll<IManagedElsaInstanceCatalog>();

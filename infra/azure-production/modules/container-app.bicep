@@ -269,12 +269,12 @@ var featureEnvironment = [
   }
 ]
 // The runtime maps its handoff endpoints only from a complete, valid set, and its startup validation
-// rejects a partial one. It also keeps handoff state and sessions in process, so the handoff holds only on a
-// single replica. Enabling it with a missing input or more replicas therefore fails the deployment here (no
+// rejects a partial one. It also keeps handoff state and sessions in process, so the handoff holds only on one
+// always-running replica. Enabling it with a missing input, more replicas or scale-to-zero fails the deployment here (no
 // 'invalid' entry below) instead of producing a revision that cannot start or rejects its own callbacks. A
 // disabled handoff is stated explicitly so an image default can never switch it on.
 var managedHandoffInputsComplete = !empty(managedHandoffInstanceId) && !empty(managedHandoffAudience) && !empty(managedHandoffControlBaseUrl) && !empty(managedHandoffControlContinuationUrl) && !empty(managedHandoffCallbackUri) && !empty(managedHandoffRuntimeMaximumLifetime) && !empty(managedHandoffRuntimePermissions)
-var managedHandoffMode = !managedHandoffEnabled ? 'disabled' : managedHandoffInputsComplete && maxReplicas == 1 ? 'enabled' : 'invalid'
+var managedHandoffMode = !managedHandoffEnabled ? 'disabled' : managedHandoffInputsComplete && minReplicas == 1 && maxReplicas == 1 ? 'enabled' : 'invalid'
 var managedHandoffPermissionEnvironment = [for (permission, index) in managedHandoffRuntimePermissions: {
   name: 'ManagedElsa__Handoff__RuntimePermissions__${index}'
   value: permission

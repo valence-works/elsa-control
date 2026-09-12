@@ -431,14 +431,15 @@ public sealed class AzureProviderOperationValidationTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void Persisted_managed_handoff_without_a_single_replica_workload_is_invalid(bool withCapacity)
+    [InlineData(null, null)]
+    [InlineData(1, 3)]
+    [InlineData(0, 1)]
+    public void Persisted_managed_handoff_without_one_always_running_replica_is_invalid(int? minReplicas, int? maxReplicas)
     {
         var request = PersistedInstanceRequest() with
         {
             ManagedHandoff = true,
-            Capacity = withCapacity ? new AzureWorkloadCapacity(1, 3, 500, 1024) : null
+            Capacity = minReplicas is { } min && maxReplicas is { } max ? new AzureWorkloadCapacity(min, max, 500, 1024) : null
         };
 
         Assert.Contains("managedHandoff.replicasUnsupported", AzureProviderOperationValidation.Validate(request));

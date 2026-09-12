@@ -363,7 +363,7 @@ public sealed class AzureProviderOperationService(
             throw new ArgumentException("Provider release package metadata is required and must use exact NuGet versions.", parameterName);
         if (plan.Capacity is not null && AzureContainerAppsCapacity.Map(plan.Capacity) is null)
             throw new ArgumentException("The provider capacity has no exact Azure Container Apps mapping.", parameterName);
-        if (plan.ManagedHandoff && plan.Capacity is not { MaxReplicas: 1 })
+        if (plan.ManagedHandoff && plan.Capacity is not { MinReplicas: 1, MaxReplicas: 1 })
             throw new ArgumentException("The managed handoff requires a single-replica workload.", parameterName);
     }
 
