@@ -106,6 +106,10 @@ def wait_for_api_exit() -> None:
     deadline = time.monotonic() + int(os.environ.get("REHEARSAL_API_STOP_WAIT_SECONDS", "45"))
     while not BARRIER_PATH.joinpath("api-exited").exists() and time.monotonic() < deadline:
         time.sleep(0.5)
+    # The wrapper writes api-exited immediately before its own exit; give it a moment to terminate so
+    # the probe's exit cannot make Container Instances kill it between the two.
+    if BARRIER_PATH.joinpath("api-exited").exists():
+        time.sleep(float(os.environ.get("REHEARSAL_API_EXIT_GRACE_SECONDS", "3")))
 
 
 def finish(code: str, passed: bool = False) -> None:

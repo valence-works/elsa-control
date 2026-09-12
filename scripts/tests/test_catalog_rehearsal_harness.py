@@ -294,7 +294,7 @@ if [ -e "$state/api-started" ]; then printf '%s\\n200' {health_json!r}; else pri
             "EXPECTED_IMAGE_ID": CANDIDATE_SOURCE if phase == "candidate" else PREVIOUS_SOURCE, "EXPECTED_BUILD_NUMBER": "96" if phase == "candidate" else "89",
             "EXPECTED_MIGRATION_IDS": " ".join(MIGRATIONS), "CATALOG_MI_PRINCIPAL_NAME": "api_identity",
             "API_START_TIMEOUT_SECONDS": "30", "HEALTH_SAMPLE_SECONDS": "1", "REHEARSAL_SQL_RESUME_DELAY_SECONDS": "0",
-            "REHEARSAL_API_STOP_WAIT_SECONDS": "10",
+            "REHEARSAL_API_STOP_WAIT_SECONDS": "10", "REHEARSAL_API_EXIT_GRACE_SECONDS": "0",
         })
         # Simulate the API container: when the barrier appears, "start" (curl answers) and mark the clone migrated.
         watcher = subprocess.Popen(["bash", "-c", f"""
