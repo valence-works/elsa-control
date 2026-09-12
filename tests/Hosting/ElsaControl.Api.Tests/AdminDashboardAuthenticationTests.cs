@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
@@ -251,15 +252,27 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
     [Fact]
     public async Task Production_default_denies_authenticated_customer_session_without_control_admin()
     {
+        var productionSettings = FindProductionAppSettingsPath();
+        using (var document = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(productionSettings)))
+        {
+            Assert.False(document.RootElement
+                .GetProperty("Authentication")
+                .GetProperty("Admin")
+                .GetProperty("AllowAuthenticatedCustomerSession")
+                .GetBoolean());
+        }
+
+        var configuration = new ConfigurationBuilder()
+            .AddJsonFile(productionSettings, optional: false, reloadOnChange: false)
+            .Build();
         var services = new ServiceCollection();
+        services.AddSingleton<IConfiguration>(configuration);
         services.AddLogging();
         services.AddCatalogAuthorization();
-        services.AddSingleton<IOptions<AdminAuthorizationOptions>>(Options.Create(new AdminAuthorizationOptions
-        {
-            AllowAuthenticatedCustomerSession = false
-        }));
         services.AddSingleton<IWebHostEnvironment>(new TestWebHostEnvironment(Environments.Production));
         await using var provider = services.BuildServiceProvider();
+        Assert.False(provider.GetRequiredService<IOptions<AdminAuthorizationOptions>>().Value.AllowAuthenticatedCustomerSession);
+
         var authorization = provider.GetRequiredService<IAuthorizationService>();
         var principal = new ClaimsPrincipal(new ClaimsIdentity(
             [new Claim("sub", "customer-user")],
@@ -411,6 +424,18 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
         var response = await app.CreateClient().GetAsync("/health");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    private static string FindProductionAppSettingsPath()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            var candidate = Path.Combine(directory.FullName, "src", "Hosting", "ElsaControl.Api", "appsettings.Production.json");
+            if (File.Exists(candidate))
+                return candidate;
+        }
+
+        throw new InvalidOperationException("src/Hosting/ElsaControl.Api/appsettings.Production.json was not found.");
     }
 
     private sealed class TestWebHostEnvironment(string environmentName) : IWebHostEnvironment
