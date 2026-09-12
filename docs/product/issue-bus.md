@@ -16,7 +16,7 @@ Issue Bus **extends** the program operating model. It does not replace Definitio
 Canonical repository query, oldest first:
 
 ```text
-repo:valence-works/elsa-control is:issue is:open label:ready-for-agent -label:blocked -label:needs:decision sort:created-asc
+repo:valence-works/elsa-control is:issue is:open label:ready-for-agent -label:blocked -label:"needs:decision" sort:created-asc
 ```
 
 This query is authoritative for repository-local labels and issue openness. Project Status and Agent State remain required preflight checks.
