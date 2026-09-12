@@ -64,13 +64,13 @@ describe("DeploymentsPage", () => {
     renderDeployments(multipleApplicationsCockpit, "/admin/deployments/applications");
 
     expect(await screen.findByRole("heading", { name: "Applications" })).toBeInTheDocument();
-    expect(screen.getByText("Workflow applications")).toBeInTheDocument();
+    expect(screen.getByLabelText("Workflow applications")).toBeInTheDocument();
     expect(linkByHref("/admin/deployments/applications/claims-ops")).toBeInTheDocument();
     expect(linkByHref("/admin/deployments/applications/policy-app")).toBeInTheDocument();
     expect(screen.getByText("Claims Operations")).toBeInTheDocument();
     expect(screen.getByLabelText("Sort applications")).toHaveValue("name");
-    expect(within(screen.getByRole("table")).getByRole("columnheader", { name: "Application" })).toBeInTheDocument();
-    expect(within(screen.getByRole("table")).queryByRole("columnheader", { name: "Workspace" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Claims Operations" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Policy" })).toBeInTheDocument();
 
     await userEvent.type(screen.getByPlaceholderText("Search applications"), "Policy");
 

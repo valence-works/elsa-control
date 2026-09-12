@@ -29,6 +29,7 @@ import type {
 } from "@/features/deployments/deploymentModels";
 import { queryKeys } from "@/lib/query/queryClient";
 import { ApiError } from "@/lib/api/httpClient";
+import "./connect-engine.css";
 
 type PlacementMode = "existing" | "new";
 type CredentialMode = "new" | "saved" | "deferred";
@@ -151,17 +152,17 @@ export function ConnectEnginePage() {
   const canManageSetup = Boolean(permissions.data?.permissions.includes("deployments.setup.manage"));
   if (!canManageSetup) {
     return (
-      <section className="mx-auto max-w-3xl space-y-5">
-        <Link to="/admin/deployments" className="inline-flex items-center gap-2 text-sm text-primary hover:underline">
+      <section className="connect-engine-page connect-engine-page-denied">
+        <Link to="/admin/deployments" className="connect-engine-back">
           <ArrowLeft className="h-4 w-4" />
           Back to deployments
         </Link>
-        <div className="rounded-ui border border-border bg-surface p-6">
-          <div className="flex items-start gap-3">
-            <ShieldCheck className="mt-0.5 h-5 w-5 text-warning" />
+        <div className="connect-engine-denied-panel">
+          <div className="connect-engine-denied-content">
+            <ShieldCheck className="connect-engine-denied-icon" />
             <div>
-              <h1 className="text-xl font-semibold">Connect an engine</h1>
-              <p className="mt-2 text-sm text-muted-foreground">Deployment setup permission is required to register a workflow engine.</p>
+              <h1>Connect an engine</h1>
+              <p>Deployment setup permission is required to register a workflow engine.</p>
             </div>
           </div>
         </div>
@@ -340,39 +341,40 @@ function ConnectEngineForm({
 
   if (success) {
     const { engine, placement } = success;
+    const healthTone = engine.health === "Healthy" ? "is-healthy" : engine.health === "Degraded" ? "is-warning" : engine.health === "Unreachable" ? "is-error" : "is-neutral";
     return (
-      <section className="mx-auto max-w-4xl space-y-5">
-        <Link to="/admin/deployments" className="inline-flex items-center gap-2 text-sm text-primary hover:underline">
+      <section className="connect-engine-page connect-engine-page-success">
+        <Link to="/admin/deployments" className="connect-engine-back">
           <ArrowLeft className="h-4 w-4" />
           Back to deployments
         </Link>
-        <div className="grid gap-8 lg:grid-cols-[minmax(0,0.8fr)_minmax(24rem,1.2fr)] lg:items-start">
-          <div className="pt-4">
-            <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-primary">Connection saved</span>
-            <h1 className="mt-4 font-display text-4xl font-semibold tracking-tight">{engine.health === "Healthy" ? "Your engine is connected." : "Your engine is registered."}</h1>
-            <p className="mt-4 max-w-md text-sm leading-7 text-muted-foreground">
+        <div className="connect-engine-success-layout">
+          <div className="connect-engine-success-intro">
+            <span className="connect-engine-kicker">Connection saved</span>
+            <h1>{engine.health === "Healthy" ? "Your engine is connected." : "Your engine is registered."}</h1>
+            <p className="connect-engine-success-copy">
               {engine.health === "Healthy" ? "The endpoint is reachable and ready for workspace operations." : "The engine record is saved. Review its health status before using it for operations."}
             </p>
-            <div className="mt-8 grid gap-4 border-t border-border pt-5 text-sm">
+            <div className="connect-engine-benefits">
               <Benefit icon={<Link2 className="h-4 w-4" />} title="Endpoint saved" detail={engine.endpoint.baseUrl} />
               <Benefit icon={<KeyRound className="h-4 w-4" />} title="Credential assignment" detail={engine.credentialAssignmentStatus === "Assigned" ? "Saved credential assigned" : "Deferred"} />
               <Benefit icon={<RadioTower className="h-4 w-4" />} title="Placement" detail={`${placement.applicationName} / ${placement.environmentName}`} />
             </div>
           </div>
-          <div className="rounded-ui border border-border bg-surface p-6 shadow-sm">
-            <div className="flex h-11 w-11 items-center justify-center rounded-full bg-primary/10 text-primary"><CheckCircle2 className="h-6 w-6" /></div>
-            <Badge className="mt-5 border-primary/20 bg-primary/10 text-primary">{engine.health}</Badge>
-            <h2 className="mt-3 text-xl font-semibold">{engine.name}</h2>
-            <p className="mt-2 text-sm text-muted-foreground">{engine.verificationMessage || "Registration completed."}</p>
-            <dl className="mt-6 grid gap-4 border-y border-border py-5 text-sm sm:grid-cols-2">
+          <div className="connect-engine-success-card">
+            <div className={`connect-engine-success-icon ${healthTone}`}><CheckCircle2 className="h-6 w-6" /></div>
+            <Badge className={`connect-engine-success-badge ${healthTone}`}>{engine.health}</Badge>
+            <h2>{engine.name}</h2>
+            <p className="connect-engine-success-message">{engine.verificationMessage || "Registration completed."}</p>
+            <dl className="connect-engine-summary-grid">
               <Summary label="Endpoint" value={engine.endpoint.baseUrl} />
               <Summary label="Environment" value={placement.environmentName} />
               <Summary label="Verification" value={engine.lastVerificationAt ? "Completed during registration" : "Not reported"} />
               <Summary label="Version" value={engine.endpoint.version || "Not reported"} />
             </dl>
-            <div className="mt-6 flex flex-wrap gap-2">
-              <Button type="button" onClick={() => navigate(enginePath(placement, engine.id))}>View engine</Button>
-              <SecondaryButton type="button" onClick={() => { setSuccess(null); setError(null); setRetryBlocked(false); setCreatedPlacement(null); setCreatedCredentialReferenceId(null); setValues(initialValues(cockpit, activeCredentials, activeTiers, requestedEnvironmentId)); }}>Connect another</SecondaryButton>
+            <div className="connect-engine-success-actions">
+              <Button className="connect-engine-submit" type="button" onClick={() => navigate(enginePath(placement, engine.id))}>View engine</Button>
+              <SecondaryButton className="connect-engine-secondary" type="button" onClick={() => { setSuccess(null); setError(null); setRetryBlocked(false); setCreatedPlacement(null); setCreatedCredentialReferenceId(null); setValues(initialValues(cockpit, activeCredentials, activeTiers, requestedEnvironmentId)); }}>Connect another</SecondaryButton>
             </div>
           </div>
         </div>
@@ -387,21 +389,21 @@ function ConnectEngineForm({
       : "Choose an application and environment");
 
   return (
-    <section className="mx-auto max-w-5xl space-y-6">
-      <Link to="/admin/deployments" className="inline-flex items-center gap-2 text-sm text-primary hover:underline">
+    <section className="connect-engine-page">
+      <Link to="/admin/deployments" className="connect-engine-back">
         <ArrowLeft className="h-4 w-4" />
         Back to deployments
       </Link>
-      <div className="grid gap-8 lg:grid-cols-[minmax(0,0.75fr)_minmax(30rem,1.25fr)] lg:items-start">
-          <div className="pt-4">
-          <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-primary">Engine setup</span>
-          <h1 className="mt-4 font-display text-4xl font-semibold tracking-tight">Connect an engine</h1>
-          <p className="mt-4 max-w-md text-sm leading-7 text-muted-foreground">Register an Elsa workflow engine so this workspace can deliver and operate it.</p>
+      <div className="connect-engine-layout">
+        <div className="connect-engine-intro">
+          <span className="connect-engine-kicker">NEW CONNECTION</span>
+          <h1>Connect an engine</h1>
+          <p>Add an Elsa engine to your workspace.</p>
         </div>
 
-        <form className="overflow-hidden rounded-ui border border-border bg-surface shadow-sm" onSubmit={handleSubmit} noValidate>
-          <div className="grid gap-6 px-6 py-6">
-            <div className="grid gap-4 sm:grid-cols-2">
+        <form className="connect-engine-form" onSubmit={handleSubmit} noValidate>
+          <div className="connect-engine-form-body">
+            <div className="connect-engine-field-grid">
               <Field label="Engine name" error={!values.engineName.trim() && error ? "Enter an engine name." : undefined}>
                 <Input aria-label="Engine name" required value={values.engineName} onChange={(event) => setValue("engineName", event.target.value)} placeholder="elsa-dev" disabled={isSubmitting} />
               </Field>
@@ -410,71 +412,71 @@ function ConnectEngineForm({
               </Field>
             </div>
 
-            <section aria-labelledby="credential-heading" className="space-y-3">
-              <div className="flex flex-wrap items-end justify-between gap-3">
+            <section aria-labelledby="credential-heading" className="connect-engine-section connect-engine-credentials">
+              <div className="connect-engine-section-heading">
                 <div>
-                  <h3 id="credential-heading" className="text-sm font-semibold">Authentication</h3>
+                  <h3 id="credential-heading">Authentication</h3>
                 </div>
-                <Link to="/admin/deployments/credentials" className="text-xs text-primary hover:underline">Manage credentials</Link>
+                <Link to="/admin/deployments/credentials" className="connect-engine-manage-link">Manage credentials</Link>
               </div>
-              <div className="flex flex-wrap gap-2" role="group" aria-label="Credential assignment mode">
-                <button type="button" className={buttonClassName(values.credentialMode === "new" ? "primary" : "secondary")} disabled={isSubmitting || credentialLocked || secretStoresLoading || secretStoresError} onClick={() => setValue("credentialMode", "new")}>New API key</button>
-                <button type="button" className={buttonClassName(values.credentialMode === "saved" ? "primary" : "secondary")} disabled={isSubmitting || credentialLocked || activeCredentials.length === 0} onClick={() => setValue("credentialMode", "saved")}>Saved credential</button>
-                <button type="button" className={buttonClassName(values.credentialMode === "deferred" ? "primary" : "secondary")} disabled={isSubmitting || credentialLocked} onClick={() => setValue("credentialMode", "deferred")}>Assign later</button>
+              <div className="connect-engine-choice-group" role="group" aria-label="Credential assignment mode">
+                <button type="button" aria-pressed={values.credentialMode === "new"} className={buttonClassName(values.credentialMode === "new" ? "primary" : "secondary", "connect-engine-choice")} disabled={isSubmitting || credentialLocked || secretStoresLoading || secretStoresError} onClick={() => setValue("credentialMode", "new")}>New API key</button>
+                <button type="button" aria-pressed={values.credentialMode === "saved"} className={buttonClassName(values.credentialMode === "saved" ? "primary" : "secondary", "connect-engine-choice")} disabled={isSubmitting || credentialLocked || activeCredentials.length === 0} onClick={() => setValue("credentialMode", "saved")}>Saved credential</button>
+                <button type="button" aria-pressed={values.credentialMode === "deferred"} className={buttonClassName(values.credentialMode === "deferred" ? "primary" : "secondary", "connect-engine-choice")} disabled={isSubmitting || credentialLocked} onClick={() => setValue("credentialMode", "deferred")}>Assign later</button>
               </div>
               {values.credentialMode === "new" ? (
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <label className="block text-sm font-medium">
+                <div className="connect-engine-credential-fields">
+                  <label className="connect-engine-field">
                     API key
-                    <Input className="mt-1" aria-label="Engine API key" type="password" value={values.credentialSecret} onChange={(event) => setValue("credentialSecret", event.target.value)} placeholder="Paste engine API key" autoComplete="new-password" disabled={isSubmitting || credentialLocked} />
+                    <Input aria-label="Engine API key" type="password" value={values.credentialSecret} onChange={(event) => setValue("credentialSecret", event.target.value)} placeholder="Paste engine API key" autoComplete="new-password" disabled={isSubmitting || credentialLocked} />
                   </label>
-                  <details className="text-sm sm:col-span-2">
-                    <summary className="cursor-pointer text-xs font-medium text-muted-foreground">Credential name (optional)</summary>
-                    <Input className="mt-2" aria-label="Credential name" value={values.credentialName} onChange={(event) => setValue("credentialName", event.target.value)} placeholder={values.engineName.trim() ? `${values.engineName.trim()} API key` : "Engine API key"} disabled={isSubmitting || credentialLocked} />
+                  <details className="connect-engine-credential-name">
+                    <summary>Credential name <span>(optional)</span></summary>
+                    <Input aria-label="Credential name" value={values.credentialName} onChange={(event) => setValue("credentialName", event.target.value)} placeholder={values.engineName.trim() ? `${values.engineName.trim()} API key` : "Engine API key"} disabled={isSubmitting || credentialLocked} />
                   </details>
                   {localSecretStores.length > 1 ? (
-                    <label className="block text-sm font-medium sm:col-span-2">
+                    <label className="connect-engine-field connect-engine-field-span">
                       Credential store
-                      <Select className="mt-1 w-full" aria-label="Credential store" value={values.credentialStoreId} onChange={(event) => setValue("credentialStoreId", event.target.value)} disabled={isSubmitting || credentialLocked}>
+                      <Select aria-label="Credential store" value={values.credentialStoreId} onChange={(event) => setValue("credentialStoreId", event.target.value)} disabled={isSubmitting || credentialLocked}>
                         {localSecretStores.map((store) => <option key={store.id} value={store.id}>{store.name}</option>)}
                       </Select>
                     </label>
                   ) : null}
-                  {localSecretStores.length === 0 ? <p className="rounded-ui border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground sm:col-span-2">A protected credential store will be created with this connection.</p> : null}
-                  <p className="text-xs text-muted-foreground sm:col-span-2">The API key is protected and is never displayed again.</p>
+                  {localSecretStores.length === 0 ? <p className="connect-engine-helper connect-engine-field-span">A protected credential store will be created with this connection.</p> : null}
+                  <p className="connect-engine-helper connect-engine-field-span">The API key is protected and is never displayed again.</p>
                 </div>
               ) : values.credentialMode === "saved" ? (
-                <label className="block text-sm font-medium">
+                <label className="connect-engine-field">
                   Credential reference
-                  <Select className="mt-1 w-full" aria-label="Credential reference" value={values.credentialReferenceId} onChange={(event) => setValue("credentialReferenceId", event.target.value)} disabled={isSubmitting || credentialLocked || activeCredentials.length === 0}>
+                  <Select aria-label="Credential reference" value={values.credentialReferenceId} onChange={(event) => setValue("credentialReferenceId", event.target.value)} disabled={isSubmitting || credentialLocked || activeCredentials.length === 0}>
                     {activeCredentials.length === 0 ? <option value="">No saved credentials available</option> : activeCredentials.map((reference) => <option key={reference.id} value={reference.id}>{reference.name} · {reference.secretStoreName}</option>)}
                   </Select>
                 </label>
               ) : (
-                <p className="rounded-ui border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">The engine will be registered without a credential assignment. You can add one from the engine detail screen.</p>
+                <p className="connect-engine-helper">The engine will be registered without a credential assignment. You can add one from the engine detail screen.</p>
               )}
-              {credentialsError ? <p className="text-xs text-warning">Saved credentials could not load. You can assign one later.</p> : null}
-              {secretStoresError ? <p className="text-xs text-warning">Credential stores could not load. Use a saved credential or assign one later.</p> : null}
+              {credentialsError ? <p className="connect-engine-warning">Saved credentials could not load. You can assign one later.</p> : null}
+              {secretStoresError ? <p className="connect-engine-warning">Credential stores could not load. Use a saved credential or assign one later.</p> : null}
             </section>
 
-            <section className="border-y border-border py-4" aria-labelledby="placement-heading">
-              <div className="flex items-center justify-between gap-3">
+            <section className="connect-engine-section connect-engine-placement" aria-labelledby="placement-heading">
+              <div className="connect-engine-placement-heading">
                 <div>
-                  <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground">Add to</span>
-                  <h3 id="placement-heading" className="mt-1 text-sm font-semibold">{selectedPlacementSummary}</h3>
+                  <span className="connect-engine-placement-kicker">Add to</span>
+                  <h3 id="placement-heading">{selectedPlacementSummary}</h3>
                 </div>
-                <button type="button" className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50" aria-expanded={placementOpen} disabled={isSubmitting} onClick={() => setPlacementOpen((open) => !open)}>
+                <button type="button" className="connect-engine-placement-toggle" aria-expanded={placementOpen} disabled={isSubmitting} onClick={() => setPlacementOpen((open) => !open)}>
                   {environmentLocked ? "Saved" : placementOpen ? "Close" : "Change"}
                   {placementOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                 </button>
               </div>
-              {values.placementMode === "new" && tiersLoading ? <p className="mt-3 text-xs text-muted-foreground">Loading workspace tiers…</p> : null}
-              {values.placementMode === "new" && tiersError ? <p className="mt-3 text-xs text-warning">Workspace tiers could not load. <button type="button" className="font-medium underline disabled:cursor-not-allowed disabled:opacity-50" disabled={isSubmitting} onClick={() => void queryClient.invalidateQueries({ queryKey: queryKeys.deploymentTiers(workspaceId) })}>Retry</button></p> : null}
+              {values.placementMode === "new" && tiersLoading ? <p className="connect-engine-helper">Loading workspace tiers…</p> : null}
+              {values.placementMode === "new" && tiersError ? <p className="connect-engine-warning">Workspace tiers could not load. <button type="button" className="connect-engine-inline-action" disabled={isSubmitting} onClick={() => void queryClient.invalidateQueries({ queryKey: queryKeys.deploymentTiers(workspaceId) })}>Retry</button></p> : null}
               {placementOpen ? (
-                <div className="mt-4 grid gap-4">
-                  <label className="block text-sm font-medium">
+                <div className="connect-engine-placement-fields">
+                  <label className="connect-engine-field">
                     Placement
-                    <Select className="mt-1 w-full" aria-label="Placement mode" value={values.placementMode === "new" ? "new" : values.environmentId} disabled={isSubmitting || applicationLocked} onChange={(event) => {
+                    <Select aria-label="Placement mode" value={values.placementMode === "new" ? "new" : values.environmentId} disabled={isSubmitting || applicationLocked} onChange={(event) => {
                       if (event.target.value === "new") {
                         setValues((current) => ({ ...current, placementMode: "new", applicationName: "My application", environmentName: "Development", environmentId: "" }));
                         if (!retryBlocked) setError(null);
@@ -488,7 +490,7 @@ function ConnectEngineForm({
                     </Select>
                   </label>
                   {values.placementMode === "new" ? (
-                    <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="connect-engine-new-placement-fields">
                       <Field label="Application">
                         <Input aria-label="Application name" required value={values.applicationName} maxLength={100} onChange={(event) => setValue("applicationName", event.target.value)} disabled={isSubmitting || applicationLocked} />
                       </Field>
@@ -496,23 +498,23 @@ function ConnectEngineForm({
                         <Input aria-label="Environment name" required value={values.environmentName} maxLength={100} onChange={(event) => setValue("environmentName", event.target.value)} disabled={isSubmitting || environmentLocked} />
                       </Field>
                       {activeTiers.length > 0 ? (
-                        <label className="block text-sm font-medium sm:col-span-2">
+                        <label className="connect-engine-field connect-engine-field-span">
                           Tier
-                          <Select className="mt-1 w-full" aria-label="Environment tier" value={values.tierId} onChange={(event) => setValue("tierId", event.target.value)} disabled={isSubmitting || environmentLocked}>
+                          <Select aria-label="Environment tier" value={values.tierId} onChange={(event) => setValue("tierId", event.target.value)} disabled={isSubmitting || environmentLocked}>
                             {activeTiers.map((tier) => <option key={tier.id} value={tier.id}>{tier.name}</option>)}
                           </Select>
                         </label>
-                      ) : <p className="text-xs text-muted-foreground sm:col-span-2">No active workspace tiers were returned. The API will apply its default tier.</p>}
+                      ) : <p className="connect-engine-helper connect-engine-field-span">No active workspace tiers were returned. The API will apply its default tier.</p>}
                     </div>
                   ) : null}
                 </div>
               ) : null}
             </section>
 
-            {error ? <div role="alert" className="rounded-ui border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"><strong>Connection could not be saved.</strong><p className="mt-1 text-destructive/90">{error}</p>{retryBlocked ? <p className="mt-2 text-xs">The request may have reached the server. Refresh deployment data before trying again, then <Link className="font-medium underline" to="/admin/deployments/credentials">review credentials</Link> and choose the existing placement if it appears.</p> : <p className="mt-2 text-xs">Your entries are still here. Correct them and try again.</p>}</div> : null}
+            {error ? <div role="alert" className="connect-engine-error"><strong>Connection could not be saved.</strong><p>{error}</p>{retryBlocked ? <p>The request may have reached the server. Refresh deployment data before trying again, then <Link to="/admin/deployments/credentials">review credentials</Link> and choose the existing placement if it appears.</p> : <p>Your entries are still here. Correct them and try again.</p>}</div> : null}
           </div>
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-6 py-4">
-            <Button type="submit" disabled={!formReady || isSubmitting}>{isSubmitting ? <><LoaderCircle className="h-4 w-4 animate-spin" />Connecting</> : "Connect engine →"}</Button>
+          <div className="connect-engine-form-footer">
+            <Button className="connect-engine-submit" type="submit" disabled={!formReady || isSubmitting}>{isSubmitting ? <><LoaderCircle className="h-4 w-4 animate-spin" />Connecting</> : "Connect engine →"}</Button>
           </div>
         </form>
       </div>
@@ -521,15 +523,15 @@ function ConnectEngineForm({
 }
 
 function Field({ label, hint, error, children }: { label: string; hint?: string; error?: string; children: ReactNode }) {
-  return <div><span className="block text-sm font-medium">{label}</span><div className="mt-1">{children}</div>{error ? <p className="mt-1 text-xs text-destructive">{error}</p> : hint ? <p className="mt-1 text-xs text-muted-foreground">{hint}</p> : null}</div>;
+  return <div className="connect-engine-field"><span className="connect-engine-field-label">{label}</span><div className="connect-engine-field-control">{children}</div>{error ? <p className="connect-engine-error-text">{error}</p> : hint ? <p className="connect-engine-hint">{hint}</p> : null}</div>;
 }
 
 function Benefit({ icon, title, detail }: { icon: ReactNode; title: string; detail: string }) {
-  return <div className="flex gap-3"><span className="mt-0.5 text-primary">{icon}</span><div><p className="text-sm font-medium">{title}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">{detail}</p></div></div>;
+  return <div className="connect-engine-benefit"><span className="connect-engine-benefit-icon">{icon}</span><div><p>{title}</p><span>{detail}</span></div></div>;
 }
 
 function Summary({ label, value }: { label: string; value: string }) {
-  return <div><dt className="text-xs text-muted-foreground">{label}</dt><dd className="mt-1 break-words text-sm font-medium">{value}</dd></div>;
+  return <div><dt>{label}</dt><dd>{value}</dd></div>;
 }
 
 function initialValues(cockpit: DeploymentCockpit, credentials: WorkspaceDeploymentCredentialReference[], tiers: WorkspaceDeploymentTier[], requestedEnvironmentId = ""): ConnectEngineValues {

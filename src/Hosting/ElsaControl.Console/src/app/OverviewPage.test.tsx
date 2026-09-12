@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { OverviewPage } from "@/app/OverviewPage";
 import { WorkspaceContextProvider } from "@/app/WorkspaceContextProvider";
 import { AuthProvider } from "@/lib/auth/AuthProvider";
+import type { DeploymentCockpit, DeploymentHealth, WorkflowEngineRegistration } from "@/features/deployments/deploymentModels";
 
 describe("OverviewPage", () => {
   afterEach(() => {
@@ -14,76 +15,77 @@ describe("OverviewPage", () => {
     window.localStorage?.clear();
   });
 
-  it("surfaces live engine topology and links engine rows to their detail route", async () => {
+  it("renders the live inventory with a selected engine inspector and real detail links", async () => {
     renderOverview();
 
     expect(await screen.findByRole("heading", { name: "Acme Insurance" })).toBeInTheDocument();
-    expect(screen.getByText("Engine fleet")).toBeInTheDocument();
-    expect(screen.getByText("2/3")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Artifacts 2 registered/i })).toBeInTheDocument();
-    expect(screen.queryByText("Package review")).not.toBeInTheDocument();
-    expect(screen.getByText("Claims")).toBeInTheDocument();
-    expect(screen.getByText("Claims Production")).toBeInTheDocument();
-
-    expect(screen.getByRole("link", { name: "Open Claims Dev" })).toHaveAttribute(
+    expect(screen.getByText("Engine inventory")).toBeInTheDocument();
+    expect(screen.getByText("03 / 03 ENGINES")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Claims Dev" })).toBeInTheDocument();
+    expect(screen.getAllByText("Healthy", { exact: true })).not.toHaveLength(0);
+    expect(screen.getByRole("link", { name: "View engine" })).toHaveAttribute(
       "href",
       "/admin/deployments/applications/claims/environments/claims-dev/engines/claims-dev-engine"
     );
-    expect(screen.getAllByRole("link", { name: /Connect engine/i }).at(-1)).toHaveAttribute("href", "/admin/engines/connect");
-    expect(screen.getByText(/Claims Production: Unreachable/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "View application" })).toHaveAttribute(
+      "href",
+      "/admin/deployments/applications/claims"
+    );
+    expect(screen.getByRole("link", { name: /Connect engine/ })).toHaveAttribute("href", "/admin/engines/connect");
   });
 
-  it("filters the real fleet by search and health state", async () => {
+  it("keeps the inspector on a visible engine while searching and filtering the inventory", async () => {
     const user = userEvent.setup();
     renderOverview();
 
-    const search = await screen.findByRole("textbox", { name: "Search engines" });
-    await user.type(search, "prod");
+    await screen.findByRole("heading", { name: "Acme Insurance" });
+    await user.click(screen.getByRole("button", { name: "Inspect Claims Production" }));
+    expect(screen.getByRole("heading", { name: "Claims Production" })).toBeInTheDocument();
+    expect(screen.getAllByText("Unreachable", { exact: true })).not.toHaveLength(0);
 
-    expect(screen.getByText("Claims Production")).toBeInTheDocument();
-    expect(screen.queryByText("Claims Dev")).not.toBeInTheDocument();
+    const search = screen.getByRole("searchbox", { name: "Search engines" });
+    await user.type(search, "policies");
+    expect(screen.getByRole("heading", { name: "Policies Dev" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Claims Production" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Inspect Policies Dev" })).toHaveAttribute("aria-pressed", "true");
 
     await user.clear(search);
-    await user.click(screen.getByRole("button", { name: /Attention 1/i }));
-    expect(screen.getByText("Claims Production")).toBeInTheDocument();
-    expect(screen.queryByText("Claims Dev")).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByRole("combobox", { name: "Filter engines" }), "attention");
+    expect(screen.getByRole("button", { name: "Inspect Claims Production" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Inspect Claims Dev" })).not.toBeInTheDocument();
+  });
+
+  it("shows Unknown when the API does not report engine health", async () => {
+    const cockpit = deploymentCockpitFixture();
+    const unknownEngine = { ...cockpit.engines[0], health: undefined } as unknown as WorkflowEngineRegistration;
+    renderOverview({ cockpit: { ...cockpit, engines: [unknownEngine] } });
+
+    expect(await screen.findByRole("heading", { name: "Claims Dev" })).toBeInTheDocument();
+    expect(screen.getAllByText("Unknown", { exact: true })).toHaveLength(2);
+    expect(screen.getByText("Certificate", { exact: false })).toBeInTheDocument();
   });
 
   it("handles a forbidden cockpit without rendering fabricated overview data", async () => {
     renderOverview({ cockpitResponse: Response.json({ title: "Forbidden" }, { status: 403 }) });
 
     expect(await screen.findByRole("heading", { name: "Workspace access required" })).toBeInTheDocument();
-    expect(screen.queryByText("Engine fleet")).not.toBeInTheDocument();
-    expect(screen.queryByText("0/0")).not.toBeInTheDocument();
+    expect(screen.queryByText("Engine inventory")).not.toBeInTheDocument();
+    expect(screen.queryByText("Healthy", { exact: true })).not.toBeInTheDocument();
   });
 
-  it("shows the registered empty state when the workspace has no applications", async () => {
+  it("keeps an empty fleet focused on connecting the first engine", async () => {
     renderOverview({ cockpit: { ...deploymentCockpitFixture(), applications: [], engines: [] } });
 
     expect(await screen.findByRole("heading", { name: "Connect your first engine" })).toBeInTheDocument();
-    expect(screen.getByText("0/0")).toBeInTheDocument();
-    expect(screen.getAllByRole("link", { name: /Connect engine/i }).at(-1)).toHaveAttribute("href", "/admin/engines/connect");
-    expect(screen.queryByRole("heading", { name: "Attention" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Applications and environments" })).not.toBeInTheDocument();
-  });
-
-  it("keeps an application without environments in a neutral state", async () => {
-    const cockpit = deploymentCockpitFixture();
-    renderOverview({
-      cockpit: {
-        ...cockpit,
-        applications: [...cockpit.applications, { id: "billing", name: "Billing", workspaceName: "Acme Insurance", environments: [] }]
-      }
-    });
-
-    const billing = await screen.findByRole("link", { name: /Billing/ });
-    expect(within(billing).getByText("No environments")).toBeInTheDocument();
-    expect(within(billing).queryByLabelText("Healthy")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: /Connect engine/ })).toHaveLength(1);
+    expect(screen.getByRole("link", { name: /Connect engine/ })).toHaveAttribute("href", "/admin/engines/connect");
+    expect(screen.queryByText("Engine inventory")).not.toBeInTheDocument();
+    expect(screen.queryByText("Healthy", { exact: true })).not.toBeInTheDocument();
   });
 });
 
 type RenderOptions = {
-  cockpit?: ReturnType<typeof deploymentCockpitFixture>;
+  cockpit?: DeploymentCockpit;
   cockpitResponse?: Response;
 };
 
@@ -95,9 +97,7 @@ function renderOverview(options: RenderOptions = {}) {
       return Response.json({ loginEnabled: true, authenticated: true, displayName: "Test User", email: "test@example.com", loginPath: "/api/auth/login", logoutPath: "/api/auth/logout" });
     }
     if (url.endsWith("/api/me/organizations")) return Response.json(workspaceContextFixture());
-    if (url.endsWith(`/api/workspaces/${workspaceId}/artifacts`)) return Response.json({ items: [{ id: "artifact-1" }, { id: "artifact-2" }] });
     if (url.endsWith(`/api/workspaces/${workspaceId}/deployments/cockpit`)) return options.cockpitResponse ?? Response.json(options.cockpit ?? deploymentCockpitFixture());
-    if (url.endsWith("/api/admin/packages")) return Response.json([packageItem("Elsa.Workflows", "Pending"), packageItem("Elsa.Http", "Approved"), packageItem("Elsa.Timers", "Pending")]);
     return Response.json({ title: "Not found" }, { status: 404 });
   }));
 
@@ -114,18 +114,6 @@ function renderOverview(options: RenderOptions = {}) {
   );
 }
 
-function packageItem(packageId: string, approvalStatus: "Pending" | "Approved") {
-  return {
-    packageId,
-    approved: approvalStatus === "Approved",
-    listed: true,
-    latestVersion: "1.0.0",
-    approvalStatus,
-    validationStatus: "Valid",
-    versions: [{ version: "1.0.0", approvalStatus, validationStatus: "Valid", isListed: true, suspiciousChangeDetected: false }]
-  };
-}
-
 function workspaceContextFixture() {
   return {
     account: { id: "account-1", displayName: "Test User", email: "test@example.com" },
@@ -134,7 +122,7 @@ function workspaceContextFixture() {
   };
 }
 
-function deploymentCockpitFixture() {
+function deploymentCockpitFixture(): DeploymentCockpit {
   return {
     applications: [
       {
@@ -188,7 +176,7 @@ function deploymentCockpitFixture() {
   };
 }
 
-function engine(id: string, environmentId: string, name: string, health: "Healthy" | "Unreachable") {
+function engine(id: string, environmentId: string, name: string, health: DeploymentHealth): WorkflowEngineRegistration {
   return {
     id,
     name,

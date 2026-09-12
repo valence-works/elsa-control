@@ -6,9 +6,9 @@ type EmptyStateTone = "neutral" | "warning" | "destructive";
 
 export function buttonClassName(variant: "primary" | "secondary" = "primary", className?: string) {
   return cn(
-    "inline-flex h-9 items-center justify-center gap-2 whitespace-nowrap rounded-ui border px-3 text-sm font-medium shadow-sm transition-[background-color,border-color,box-shadow,transform] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35 focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:-translate-y-px active:translate-y-0 disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-60 aria-disabled:pointer-events-none aria-disabled:cursor-not-allowed aria-disabled:opacity-60",
+    "inline-flex min-h-10 items-center justify-center gap-3 whitespace-nowrap rounded-ui border px-3.5 py-2 text-xs font-medium transition-colors duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-text disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-60 aria-disabled:pointer-events-none aria-disabled:cursor-not-allowed aria-disabled:opacity-60",
     variant === "primary"
-      ? "border-primary bg-primary text-primary-foreground shadow-primary/10 hover:border-primary/90 hover:bg-primary/90"
+      ? "border-primary bg-primary text-primary-foreground hover:border-primary/90 hover:bg-primary/90"
       : "border-border bg-surface text-foreground hover:border-primary/45 hover:bg-muted",
     className
   );
@@ -47,7 +47,7 @@ export function Input({ className, acceptPlaceholderOnTab = false, onKeyDown, ty
     <input
       type={type}
       className={cn(
-        "h-9 w-full rounded-ui border border-border bg-background px-3 text-sm text-foreground shadow-sm transition-[background-color,border-color,box-shadow] duration-150 placeholder:text-muted-foreground hover:border-primary/45 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:border-border disabled:bg-muted/45 disabled:text-muted-foreground disabled:opacity-80 read-only:bg-muted/25 aria-[invalid=true]:border-destructive aria-[invalid=true]:focus:border-destructive aria-[invalid=true]:focus:ring-destructive/20",
+        "h-10 w-full rounded-ui border border-border bg-background px-3 text-sm text-foreground transition-[background-color,border-color,box-shadow] duration-150 placeholder:text-muted-foreground hover:border-primary/45 focus:border-primary-text focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-primary-text disabled:cursor-not-allowed disabled:border-border disabled:bg-muted/45 disabled:text-muted-foreground disabled:opacity-80 read-only:bg-muted/25 aria-[invalid=true]:border-destructive aria-[invalid=true]:focus:border-destructive aria-[invalid=true]:focus:ring-destructive/20",
         className
       )}
       onKeyDown={handleKeyDown}
@@ -60,7 +60,7 @@ export function Select({ className, ...props }: SelectHTMLAttributes<HTMLSelectE
   return (
     <select
       className={cn(
-        "h-9 rounded-ui border border-border bg-background px-3 text-sm text-foreground shadow-sm transition-[background-color,border-color,box-shadow] duration-150 hover:border-primary/45 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:border-border disabled:bg-muted/45 disabled:text-muted-foreground disabled:opacity-80 aria-[invalid=true]:border-destructive aria-[invalid=true]:focus:border-destructive aria-[invalid=true]:focus:ring-destructive/20",
+        "h-10 rounded-ui border border-border bg-background px-3 text-sm text-foreground transition-[background-color,border-color,box-shadow] duration-150 hover:border-primary/45 focus:border-primary-text focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-primary-text disabled:cursor-not-allowed disabled:border-border disabled:bg-muted/45 disabled:text-muted-foreground disabled:opacity-80 aria-[invalid=true]:border-destructive aria-[invalid=true]:focus:border-destructive aria-[invalid=true]:focus:ring-destructive/20",
         className
       )}
       {...props}
@@ -96,7 +96,7 @@ export function EmptyState({
   return (
     <div
       className={cn(
-        "rounded-ui border border-border/80 bg-surface/80 px-6 py-9 text-center shadow-sm",
+        "rounded-ui border border-border/80 bg-surface/80 px-6 py-9 text-center",
         className
       )}
       role={role}
@@ -125,7 +125,7 @@ export function Table({ children }: { children: ReactNode }) {
   return (
     <div
       className={cn(
-        "overflow-x-auto rounded-ui border border-border bg-surface shadow-sm",
+        "overflow-x-auto rounded-ui border border-border bg-surface",
         "[&_table]:min-w-full [&_table]:text-sm",
         "[&_thead]:border-b [&_thead]:border-border [&_thead]:bg-muted/35",
         "[&_th]:px-3 [&_th]:py-2.5 [&_th]:text-left [&_th]:font-mono [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:tracking-[0.08em] [&_th]:text-muted-foreground",

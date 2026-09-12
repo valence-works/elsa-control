@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
   DEFAULT_THEME_PREFERENCES,
+  accentDefinitions,
   getTheme,
   themes,
   type ResolvedThemeMode,
@@ -13,8 +14,10 @@ import {
 } from "./themes";
 
 export { DEFAULT_THEME_PREFERENCES, themes } from "./themes";
+export { accentDefinitions, accents } from "./themes";
 export type {
   ResolvedThemeMode,
+  ThemeAccentDefinition,
   ThemeAccent,
   ThemeDefinition,
   ThemeId,
@@ -26,7 +29,8 @@ export type {
 export const appearanceStorageKey = "elsa-control-console-appearance";
 export const legacyThemeStorageKey = "elsa-control-console-theme";
 export const legacyAccentStorageKey = "elsa-control-console-theme-accent";
-export const appearanceStorageVersion = 1;
+export const appearanceStorageVersion = 2;
+const previousAppearanceStorageVersion = 1;
 
 type ThemeContextValue = {
   preferences: ThemePreferences;
@@ -51,32 +55,33 @@ const semanticVariables: Record<keyof ThemePalette, string> = {
   border: "--border",
   primary: "--primary",
   primaryForeground: "--primary-foreground",
+  primaryText: "--primary-text",
+  band: "--band",
+  bandForeground: "--band-foreground",
+  bandMuted: "--band-muted",
+  bandBorder: "--band-border",
   destructive: "--destructive",
   warning: "--warning",
   success: "--success"
 };
 
-const accentPrimary: Record<ThemeAccent, { light: { primary: string; primaryForeground: string }; dark: { primary: string; primaryForeground: string } }> = {
-  teal: {
-    light: { primary: "170 78% 29%", primaryForeground: "0 0% 100%" },
-    dark: { primary: "168 78% 52%", primaryForeground: "222 40% 8%" }
-  },
-  blue: {
-    light: { primary: "211 85% 44%", primaryForeground: "0 0% 100%" },
-    dark: { primary: "207 90% 64%", primaryForeground: "222 40% 8%" }
-  },
-  violet: {
-    light: { primary: "262 72% 52%", primaryForeground: "0 0% 100%" },
-    dark: { primary: "262 84% 70%", primaryForeground: "222 40% 8%" }
-  },
-  amber: {
-    light: { primary: "38 86% 42%", primaryForeground: "222 32% 10%" },
-    dark: { primary: "41 92% 62%", primaryForeground: "222 40% 8%" }
-  },
-  rose: {
-    light: { primary: "347 72% 46%", primaryForeground: "0 0% 100%" },
-    dark: { primary: "347 86% 68%", primaryForeground: "222 40% 8%" }
-  }
+const legacyThemeIds = new Set(["classic", "operations-canvas", "command-deck", "topology-atlas"]);
+const legacyAccentMap: Record<string, ThemeAccent> = {
+  teal: "lime",
+  blue: "glacier",
+  violet: "iris",
+  amber: "ember",
+  rose: "ember",
+  lime: "lime",
+  glacier: "glacier",
+  iris: "iris",
+  ember: "ember"
+};
+const legacyAccentByAccent: Record<ThemeAccent, string> = {
+  lime: "teal",
+  glacier: "blue",
+  iris: "violet",
+  ember: "amber"
 };
 
 const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
@@ -228,15 +233,15 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
       } else if (event.key === legacyThemeStorageKey || event.key === legacyAccentStorageKey) {
         // New-format preferences are authoritative. Legacy writes happen
         // after the new record for compatibility and must not reset a custom
-        // theme in another tab back to Classic.
+        // choice in another tab back to the Aperture defaults.
         if (parseVersionedPreferences(readStorageValue(appearanceStorageKey))) {
           return;
         }
         const legacyTheme = event.key === legacyThemeStorageKey ? event.newValue : readStorageValue(legacyThemeStorageKey);
         const legacyAccent = event.key === legacyAccentStorageKey ? event.newValue : readStorageValue(legacyAccentStorageKey);
         next = {
-          themeId: "classic",
-          mode: legacyTheme === "dark" ? "dark" : "light",
+          themeId: "aperture",
+          mode: legacyTheme === "dark" || legacyTheme === "light" ? legacyTheme : DEFAULT_THEME_PREFERENCES.mode,
           accent: parseAccent(legacyAccent)
         };
       }
@@ -266,13 +271,10 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
 
 function getPalette(theme: ThemeDefinition, mode: ResolvedThemeMode, accent: ThemeAccent): ThemePalette {
   const palette = theme.palettes[mode];
-  if (theme.id !== "classic") {
-    return palette;
-  }
-
+  const accentPalette = accentDefinitions.find((definition) => definition.id === accent)?.palettes[mode];
   return {
     ...palette,
-    ...accentPrimary[accent][mode]
+    ...(accentPalette ?? {})
   };
 }
 
@@ -290,17 +292,17 @@ function readStoredPreferences(): StoredPreferences {
     return { preferences: DEFAULT_THEME_PREFERENCES, shouldPersist: false };
   }
 
-  const versioned = parseVersionedPreferences(readStorageValue(appearanceStorageKey, storage));
+  const versioned = parseStoredPreferences(readStorageValue(appearanceStorageKey, storage));
   if (versioned) {
-    return { preferences: versioned, shouldPersist: false };
+    return { preferences: versioned.preferences, shouldPersist: versioned.version !== appearanceStorageVersion };
   }
 
   const legacyTheme = readStorageValue(legacyThemeStorageKey, storage);
   const legacyAccent = readStorageValue(legacyAccentStorageKey, storage);
   return {
     preferences: {
-      themeId: "classic",
-      mode: legacyTheme === "dark" ? "dark" : "light",
+      themeId: "aperture",
+      mode: legacyTheme === "dark" || legacyTheme === "light" ? legacyTheme : DEFAULT_THEME_PREFERENCES.mode,
       accent: parseAccent(legacyAccent)
     },
     shouldPersist: true
@@ -308,23 +310,51 @@ function readStoredPreferences(): StoredPreferences {
 }
 
 function parseVersionedPreferences(raw: string | null): ThemePreferences | undefined {
+  return parseStoredPreferences(raw)?.preferences;
+}
+
+function parseStoredPreferences(raw: string | null): { preferences: ThemePreferences; version: number } | undefined {
   if (!raw) {
     return undefined;
   }
 
   try {
     const value: unknown = JSON.parse(raw);
-    if (!isRecord(value) || value.version !== appearanceStorageVersion) {
+    if (!isRecord(value) || typeof value.version !== "number") {
       return undefined;
     }
 
-    if (!isThemeId(value.themeId) || !isThemeMode(value.mode) || !isThemeAccent(value.accent)) {
+    if (value.version === appearanceStorageVersion) {
+      if (!isThemeId(value.themeId) || !isThemeMode(value.mode) || !isThemeAccent(value.accent)) {
+        return undefined;
+      }
+      return {
+        preferences: {
+          themeId: value.themeId,
+          mode: value.mode,
+          accent: value.accent
+        },
+        version: value.version
+      };
+    }
+
+    if (value.version !== previousAppearanceStorageVersion) {
       return undefined;
     }
+
+    const migratedThemeId = migrateThemeId(value.themeId);
+    const migratedAccent = migrateAccent(value.accent);
+    if (!migratedThemeId || !isThemeMode(value.mode) || !migratedAccent) {
+      return undefined;
+    }
+
     return {
-      themeId: value.themeId,
-      mode: value.mode,
-      accent: value.accent
+      preferences: {
+        themeId: migratedThemeId,
+        mode: value.mode,
+        accent: migratedAccent
+      },
+      version: value.version
     };
   } catch {
     return undefined;
@@ -350,7 +380,7 @@ function persistPreferences(preferences: ThemePreferences) {
     // Keep the old keys readable for older console bundles. `system` has no
     // legacy representation, so its current resolved value is used there.
     storage.setItem(legacyThemeStorageKey, resolvedMode);
-    storage.setItem(legacyAccentStorageKey, normalized.accent);
+    storage.setItem(legacyAccentStorageKey, legacyAccentByAccent[normalized.accent]);
   } catch {
     // Browser storage can be unavailable in private browsing or embedded
     // documents. Theme selection remains an in-memory feature in that case.
@@ -402,7 +432,7 @@ function readStorageValue(key: string, storage: Storage | undefined = getStorage
 }
 
 function parseAccent(value: string | null): ThemeAccent {
-  return isThemeAccent(value) ? value : DEFAULT_THEME_PREFERENCES.accent;
+  return migrateAccent(value) ?? DEFAULT_THEME_PREFERENCES.accent;
 }
 
 function isThemeId(value: unknown): value is ThemeId {
@@ -414,7 +444,18 @@ function isThemeMode(value: unknown): value is ThemeMode {
 }
 
 function isThemeAccent(value: unknown): value is ThemeAccent {
-  return value === "teal" || value === "blue" || value === "violet" || value === "amber" || value === "rose";
+  return accentDefinitions.some(accent => accent.id === value);
+}
+
+function migrateThemeId(value: unknown): ThemeId | undefined {
+  if (isThemeId(value)) {
+    return value;
+  }
+  return typeof value === "string" && legacyThemeIds.has(value) ? DEFAULT_THEME_PREFERENCES.themeId : undefined;
+}
+
+function migrateAccent(value: unknown): ThemeAccent | undefined {
+  return typeof value === "string" && Object.hasOwn(legacyAccentMap, value) ? legacyAccentMap[value] : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -3,6 +3,8 @@ import {
   Activity,
   AlertTriangle,
   ArrowLeft,
+  ArrowUpRight,
+  Boxes,
   Bot,
   CheckCircle2,
   ClipboardCheck,
@@ -374,10 +376,9 @@ function DeploymentApplicationsReady({ context }: { context: DeploymentContext }
 
   return (
     <section className="space-y-5">
-      <Breadcrumbs items={[{ label: "Deployments", to: "/admin/deployments" }, { label: "Applications" }]} />
       <PageHeader
         title="Applications"
-        description="Your applications and their environments."
+        description={`${data.applications.length} application${data.applications.length === 1 ? "" : "s"}`}
         actions={
           <Link to="/admin/deployments/new" className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageSetup}>
             <Plus className="h-4 w-4" />
@@ -386,7 +387,7 @@ function DeploymentApplicationsReady({ context }: { context: DeploymentContext }
         }
       />
 
-      <div className="grid gap-3 lg:grid-cols-[minmax(16rem,26rem)_auto] lg:items-center">
+      <div className="grid gap-3 lg:grid-cols-[minmax(16rem,26rem)_12rem] lg:items-center">
         <label className="relative block">
           <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input value={query} onChange={(event) => setQuery(event.target.value)} className="pl-9" placeholder="Search applications" />
@@ -413,8 +414,7 @@ function DeploymentApplicationsReady({ context }: { context: DeploymentContext }
         <EmptyState title="No matching applications" description="Clear the search to see all workflow applications." />
       ) : (
         <section className="space-y-3">
-          <SectionHeader title="Workflow applications" description="" />
-          <ApplicationTable applications={applications} data={data} />
+          <ApplicationCards applications={applications} data={data} />
         </section>
       )}
     </section>
@@ -2886,41 +2886,19 @@ function useDeploymentContext(): DeploymentContextResult {
   };
 }
 
-function ApplicationTable({ applications, data }: { applications: DeploymentCockpit["applications"]; data: DeploymentCockpit }) {
-  return (
-    <Table>
-      <table className="min-w-full divide-y divide-border text-sm">
-        <thead className="bg-muted/40 text-left text-xs uppercase text-muted-foreground">
-          <tr>
-            <th className="px-3 py-2">Application</th>
-            <th className="px-3 py-2">Health</th>
-            <th className="px-3 py-2">Environments</th>
-            <th className="px-3 py-2">Engines</th>
-            <th className="px-3 py-2">Healthy</th>
-            <th className="px-3 py-2">Drift</th>
-            <th className="px-3 py-2">Actions</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-border">
-          {applications.map((application) => {
-            const engines = enginesForApplication(data, application);
-            const driftCount = application.environments.filter((environment) => environment.driftStatus === "DriftDetected").length;
-            return (
-              <tr key={application.id}>
-                <td className="px-3 py-3 font-medium"><Link to={applicationPath(application.id)}>{application.name}</Link></td>
-                <td className="px-3 py-3"><StatusBadge value={summarizeApplicationHealth(application, data.engines)} tone={applicationHealthTone(application, data.engines)} /></td>
-                <td className="px-3 py-3">{application.environments.length}</td>
-                <td className="px-3 py-3">{engines.length}</td>
-                <td className="px-3 py-3">{engines.filter((engine) => engine.health === "Healthy").length}</td>
-                <td className="px-3 py-3">{driftCount}</td>
-                <td className="px-3 py-3"><Link to={applicationPath(application.id)} className="text-xs font-medium text-primary hover:underline">Open</Link></td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </Table>
-  );
+function ApplicationCards({ applications, data }: { applications: DeploymentCockpit["applications"]; data: DeploymentCockpit }) {
+  return <div className="console-application-grid" aria-label="Workflow applications">
+    {applications.map((application) => {
+      const engines = enginesForApplication(data, application);
+      const driftCount = application.environments.filter(environment => environment.driftStatus === "DriftDetected").length;
+      return <Link key={application.id} to={applicationPath(application.id)} aria-label={application.name} className="console-application-card">
+        <div className="console-application-card-top"><Boxes aria-hidden size={24} strokeWidth={1.5} /><StatusBadge value={summarizeApplicationHealth(application, data.engines)} tone={applicationHealthTone(application, data.engines)} /></div>
+        <h2>{application.name}</h2>
+        <p>{application.environments.length} environment{application.environments.length === 1 ? "" : "s"} · {engines.length} engine{engines.length === 1 ? "" : "s"}</p>
+        <div className="console-application-card-footer"><span>{driftCount ? `${driftCount} with drift` : "Open application"}</span><ArrowUpRight aria-hidden size={16} /></div>
+      </Link>;
+    })}
+  </div>;
 }
 
 function EnvironmentTable({
@@ -5336,12 +5314,13 @@ function summarizeApplicationHealth(application: DeploymentCockpit["applications
   ) {
     return "Needs review";
   }
-  return "Healthy";
+  return applicationEngines.every(engine => engine.health === "Healthy") ? "Healthy" : "Not checked";
 }
 
 function applicationHealthTone(application: DeploymentCockpit["applications"][number], engines: WorkflowEngineRegistration[]): StatusTone {
   const health = summarizeApplicationHealth(application, engines);
   if (health === "Healthy") return "success";
+  if (health === "Not checked") return "neutral";
   if (health === "Needs review" || health === "Needs setup") return "warning";
   return "destructive";
 }

@@ -1,0 +1,731 @@
+.connect-engine-page {
+  --connect-link: hsl(var(--primary-text, var(--primary)));
+  width: min(100%, 72rem);
+  margin: 0 auto;
+  padding: 0.5rem 0 1.25rem;
+  color: hsl(var(--foreground));
+  font-family: var(--font-body, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+}
+
+.connect-engine-page h1,
+.connect-engine-page h2,
+.connect-engine-page h3,
+.connect-engine-page p,
+.connect-engine-page dl,
+.connect-engine-page dd {
+  margin: 0;
+}
+
+.connect-engine-page h1 {
+  font-family: var(--font-display, var(--font-body, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif));
+  font-size: clamp(2rem, 3.4vw, 2.875rem);
+  font-weight: 400;
+  line-height: 1.15;
+  letter-spacing: -0.06em;
+}
+
+.connect-engine-page h2 {
+  font-family: var(--font-display, var(--font-body, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif));
+  font-size: 1.125rem;
+  font-weight: 500;
+  line-height: 1.25;
+  letter-spacing: -0.035em;
+}
+
+.connect-engine-page h3 {
+  font-family: var(--font-body, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.connect-engine-page a {
+  color: var(--connect-link);
+}
+
+.connect-engine-page button,
+.connect-engine-page input,
+.connect-engine-page select {
+  font-family: inherit;
+}
+
+.connect-engine-page button:focus-visible,
+.connect-engine-page a:focus-visible,
+.connect-engine-page input:focus-visible,
+.connect-engine-page select:focus-visible,
+.connect-engine-page summary:focus-visible {
+  outline: 2px solid hsl(var(--primary));
+  outline-offset: 2px;
+}
+
+.connect-engine-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4375rem;
+  margin-bottom: 1.75rem;
+  padding: 0;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  text-decoration: none;
+}
+
+.connect-engine-back:hover {
+  color: hsl(var(--foreground));
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.connect-engine-back svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.connect-engine-layout,
+.connect-engine-success-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(30rem, 1.15fr);
+  gap: 3.25rem;
+  align-items: start;
+}
+
+.connect-engine-intro,
+.connect-engine-success-intro {
+  padding-top: 0.4375rem;
+}
+
+.connect-engine-kicker {
+  display: block;
+  margin-bottom: 1.25rem;
+  color: hsl(var(--muted-foreground));
+  font-family: var(--font-mono, "SFMono-Regular", Consolas, monospace);
+  font-size: 0.6875rem;
+  line-height: 1.6;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.connect-engine-intro h1 {
+  max-width: 15rem;
+}
+
+.connect-engine-intro > p {
+  max-width: 15rem;
+  margin-top: 1.25rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  line-height: 1.65;
+}
+
+.connect-engine-form,
+.connect-engine-success-card,
+.connect-engine-denied-panel {
+  overflow: hidden;
+  border: 1px solid hsl(var(--border));
+  border-top: 2px solid hsl(var(--foreground));
+  border-radius: 0 0 4px 4px;
+  background: hsl(var(--surface));
+  box-shadow: none;
+}
+
+.connect-engine-form-body {
+  display: grid;
+  gap: 1.5rem;
+  padding: 1.625rem;
+}
+
+.connect-engine-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.connect-engine-field {
+  display: block;
+  min-width: 0;
+  color: hsl(var(--foreground));
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.connect-engine-field-label {
+  display: block;
+}
+
+.connect-engine-field-control {
+  margin-top: 0;
+}
+
+.connect-engine-page input,
+.connect-engine-page select {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  min-height: 2.375rem;
+  margin-top: 0.4375rem;
+  padding: 0.625rem 0.6875rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: 3px;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  box-shadow: none;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+}
+
+.connect-engine-page input:hover,
+.connect-engine-page select:hover {
+  border-color: hsl(var(--primary) / 0.45);
+}
+
+.connect-engine-page input:focus,
+.connect-engine-page select:focus {
+  border-color: hsl(var(--primary-text, var(--primary)));
+  box-shadow: none;
+  outline: 2px solid hsl(var(--primary-text, var(--primary)));
+  outline-offset: 2px;
+}
+
+.connect-engine-page input[aria-invalid="true"],
+.connect-engine-page select[aria-invalid="true"] {
+  border-color: hsl(var(--destructive));
+}
+
+.connect-engine-page input[aria-invalid="true"]:focus,
+.connect-engine-page select[aria-invalid="true"]:focus {
+  border-color: hsl(var(--destructive));
+  outline-color: hsl(var(--destructive));
+}
+
+.connect-engine-page input::placeholder {
+  color: hsl(var(--muted-foreground));
+  opacity: 1;
+}
+
+.connect-engine-hint,
+.connect-engine-error-text {
+  margin-top: 0.4375rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+  line-height: 1.5;
+}
+
+.connect-engine-error-text {
+  color: hsl(var(--destructive));
+}
+
+.connect-engine-section {
+  border-top: 1px solid hsl(var(--border));
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+.connect-engine-credentials {
+  display: grid;
+  gap: 0.75rem;
+  border-top: 0;
+  padding-top: 0;
+}
+
+.connect-engine-section-heading,
+.connect-engine-placement-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.connect-engine-section-heading h3 {
+  font-size: 0.8125rem;
+}
+
+.connect-engine-manage-link {
+  font-size: 0.6875rem;
+  text-decoration: none;
+}
+
+.connect-engine-manage-link:hover,
+.connect-engine-inline-action:hover,
+.connect-engine-error a:hover {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.connect-engine-choice-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.connect-engine-page .connect-engine-choice {
+  min-height: 2rem;
+  height: auto;
+  padding: 0.4375rem 0.6875rem;
+  border-radius: 3px;
+  box-shadow: none;
+  font-size: 0.6875rem;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.connect-engine-page .connect-engine-choice[aria-pressed="true"] {
+  border-color: hsl(var(--primary));
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+}
+
+.connect-engine-page .connect-engine-choice[aria-pressed="false"] {
+  border-color: hsl(var(--border));
+  background: hsl(var(--surface));
+  color: hsl(var(--foreground));
+}
+
+.connect-engine-page .connect-engine-choice:hover:not(:disabled) {
+  border-color: hsl(var(--primary));
+  background: hsl(var(--primary) / 0.08);
+  color: hsl(var(--foreground));
+}
+
+.connect-engine-page .connect-engine-choice[aria-pressed="true"]:hover:not(:disabled) {
+  background: hsl(var(--primary) / 0.9);
+  color: hsl(var(--primary-foreground));
+}
+
+.connect-engine-credential-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1rem;
+}
+
+.connect-engine-field-span {
+  grid-column: 1 / -1;
+}
+
+.connect-engine-credential-name {
+  min-width: 0;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.connect-engine-credential-name summary {
+  cursor: pointer;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+  font-weight: 500;
+  list-style: none;
+}
+
+.connect-engine-credential-name summary::-webkit-details-marker {
+  display: none;
+}
+
+.connect-engine-credential-name summary span {
+  font-weight: 400;
+}
+
+.connect-engine-credential-name input {
+  margin-top: 0.5rem;
+}
+
+.connect-engine-helper {
+  padding: 0.625rem 0.75rem;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--muted) / 0.3);
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+  line-height: 1.55;
+}
+
+.connect-engine-warning {
+  color: hsl(var(--warning));
+  font-size: 0.6875rem;
+  line-height: 1.5;
+}
+
+.connect-engine-inline-action {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--connect-link);
+  font-size: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.connect-engine-placement {
+  padding: 1rem 0;
+}
+
+.connect-engine-placement-heading {
+  align-items: center;
+}
+
+.connect-engine-placement-kicker {
+  display: block;
+  color: hsl(var(--muted-foreground));
+  font-family: var(--font-mono, "SFMono-Regular", Consolas, monospace);
+  font-size: 0.6875rem;
+  line-height: 1.6;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.connect-engine-placement-heading h3 {
+  margin-top: 0.25rem;
+  overflow-wrap: anywhere;
+}
+
+.connect-engine-placement-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0;
+  border: 0;
+  background: transparent;
+  color: var(--connect-link);
+  font-size: 0.75rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.connect-engine-placement-toggle:hover:not(:disabled) {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.connect-engine-placement-fields {
+  display: grid;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.connect-engine-new-placement-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.connect-engine-error {
+  padding: 0.75rem 1rem;
+  border: 1px solid hsl(var(--destructive) / 0.3);
+  background: hsl(var(--destructive) / 0.08);
+  color: hsl(var(--destructive));
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.connect-engine-error p {
+  margin-top: 0.25rem;
+  color: hsl(var(--destructive) / 0.9);
+}
+
+.connect-engine-error p + p {
+  margin-top: 0.5rem;
+  color: hsl(var(--destructive));
+  font-size: 0.6875rem;
+}
+
+.connect-engine-error a {
+  color: inherit;
+  font-weight: 500;
+}
+
+.connect-engine-form-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding: 1.25rem 1.625rem;
+  border-top: 1px solid hsl(var(--border));
+}
+
+.connect-engine-page .connect-engine-submit,
+.connect-engine-page .connect-engine-secondary {
+  min-height: 2.375rem;
+  height: auto;
+  border-radius: 3px;
+  box-shadow: none;
+  font-size: 0.75rem;
+}
+
+.connect-engine-page .connect-engine-submit {
+  border-color: hsl(var(--primary));
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+}
+
+.connect-engine-page .connect-engine-submit:hover:not(:disabled) {
+  border-color: hsl(var(--primary) / 0.9);
+  background: hsl(var(--primary) / 0.9);
+}
+
+.connect-engine-page .connect-engine-secondary {
+  border-color: hsl(var(--border));
+  background: hsl(var(--surface));
+  color: hsl(var(--foreground));
+}
+
+.connect-engine-page .connect-engine-secondary:hover:not(:disabled) {
+  border-color: hsl(var(--primary) / 0.45);
+  background: hsl(var(--muted));
+}
+
+.connect-engine-success-intro h1 {
+  max-width: 22rem;
+}
+
+.connect-engine-success-copy {
+  max-width: 25rem;
+  margin-top: 1.25rem !important;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.8125rem;
+  line-height: 1.7;
+}
+
+.connect-engine-benefits {
+  display: grid;
+  gap: 1rem;
+  margin-top: 2rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid hsl(var(--border));
+}
+
+.connect-engine-benefit {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.75rem;
+}
+
+.connect-engine-benefit-icon {
+  margin-top: 0.125rem;
+  color: var(--connect-link);
+}
+
+.connect-engine-benefit p {
+  font-weight: 500;
+}
+
+.connect-engine-benefit span {
+  display: block;
+  margin-top: 0.25rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.connect-engine-success-card {
+  padding: 1.625rem;
+}
+
+.connect-engine-success-icon {
+  display: grid;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  border: 1px solid hsl(var(--primary) / 0.2);
+  border-radius: 50%;
+  color: var(--connect-link);
+  background: hsl(var(--primary) / 0.1);
+}
+
+.connect-engine-success-icon.is-neutral {
+  border-color: hsl(var(--border));
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--muted) / 0.45);
+}
+
+.connect-engine-success-icon.is-healthy {
+  border-color: hsl(var(--success) / 0.25);
+  color: hsl(var(--success));
+  background: hsl(var(--success) / 0.1);
+}
+
+.connect-engine-page .connect-engine-success-badge {
+  min-height: 1.5rem;
+  margin-top: 1.25rem;
+  border-color: hsl(var(--primary) / 0.2);
+  border-radius: 3px;
+  background: hsl(var(--primary) / 0.1);
+  color: var(--connect-link);
+  font-size: 0.6875rem;
+}
+
+.connect-engine-page .connect-engine-success-badge.is-neutral {
+  border-color: hsl(var(--border));
+  background: hsl(var(--muted) / 0.45);
+  color: hsl(var(--muted-foreground));
+}
+
+.connect-engine-page .connect-engine-success-badge.is-healthy {
+  border-color: hsl(var(--success) / 0.25);
+  background: hsl(var(--success) / 0.1);
+  color: hsl(var(--success));
+}
+
+.connect-engine-page .connect-engine-success-badge.is-error {
+  border-color: hsl(var(--destructive) / .25);
+  background: hsl(var(--destructive) / .08);
+  color: hsl(var(--destructive));
+}
+
+.connect-engine-page .connect-engine-success-badge.is-warning {
+  border-color: hsl(var(--warning) / 0.28);
+  background: hsl(var(--warning) / 0.1);
+  color: hsl(var(--warning));
+}
+
+.connect-engine-success-card h2 {
+  margin-top: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.connect-engine-success-message {
+  margin-top: 0.5rem !important;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  line-height: 1.55;
+}
+
+.connect-engine-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin-top: 1.5rem !important;
+  padding: 1.25rem 0;
+  border-top: 1px solid hsl(var(--border));
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+.connect-engine-summary-grid dt {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+}
+
+.connect-engine-summary-grid dd {
+  margin-top: 0.25rem;
+  overflow-wrap: anywhere;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.connect-engine-success-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1.5rem;
+}
+
+.connect-engine-denied-panel {
+  max-width: 46rem;
+  padding: 1.5rem;
+}
+
+.connect-engine-denied-content {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.connect-engine-denied-icon {
+  flex: 0 0 auto;
+  margin-top: 0.125rem;
+  color: hsl(var(--warning));
+}
+
+.connect-engine-denied-content h1 {
+  font-size: 1.125rem;
+  letter-spacing: -0.035em;
+}
+
+.connect-engine-denied-content p {
+  margin-top: 0.5rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  line-height: 1.55;
+}
+
+@media (max-width: 900px) {
+  .connect-engine-layout,
+  .connect-engine-success-layout {
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    gap: 2rem;
+  }
+}
+
+@media (max-width: 720px) {
+  .connect-engine-page {
+    padding-bottom: 1rem;
+  }
+
+  .connect-engine-layout,
+  .connect-engine-success-layout {
+    grid-template-columns: 1fr;
+    gap: 1.75rem;
+  }
+
+  .connect-engine-intro,
+  .connect-engine-success-intro {
+    padding-top: 0;
+  }
+
+  .connect-engine-intro h1,
+  .connect-engine-intro > p,
+  .connect-engine-success-intro h1,
+  .connect-engine-success-copy {
+    max-width: none;
+  }
+
+  .connect-engine-form {
+    width: 100%;
+  }
+}
+
+@media (max-width: 560px) {
+  .connect-engine-page h1 {
+    font-size: 2rem;
+  }
+
+  .connect-engine-field-grid,
+  .connect-engine-credential-fields,
+  .connect-engine-new-placement-fields,
+  .connect-engine-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .connect-engine-form-body,
+  .connect-engine-success-card {
+    padding: 1.25rem;
+  }
+
+  .connect-engine-form-footer {
+    padding: 1rem 1.25rem;
+  }
+
+  .connect-engine-form-footer .connect-engine-submit {
+    width: 100%;
+  }
+
+  .connect-engine-success-actions > * {
+    flex: 1 1 100%;
+  }
+}
+
+@media (pointer: coarse) {
+  .connect-engine-page button,
+  .connect-engine-page summary {
+    min-height: 2.75rem;
+  }
+
+  .connect-engine-page input,
+  .connect-engine-page select {
+    min-height: 2.75rem;
+    font-size: 1rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .connect-engine-page *,
+  .connect-engine-page *::before,
+  .connect-engine-page *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

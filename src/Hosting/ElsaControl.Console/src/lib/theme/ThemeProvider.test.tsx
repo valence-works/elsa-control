@@ -1,7 +1,9 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  accentDefinitions,
   appearanceStorageKey,
+  appearanceStorageVersion,
   ThemeProvider,
   initializeTheme,
   legacyAccentStorageKey,
@@ -11,17 +13,19 @@ import {
 import { themes } from "./themes";
 
 function ThemeProbe() {
-  const { preferences, resolvedMode, theme, setAccent, setMode, setThemeId } = useTheme();
+  const { preferences, resolvedMode, theme, setAccent, setMode } = useTheme();
 
   return (
     <div>
       <output data-testid="preferences">{JSON.stringify(preferences)}</output>
       <output data-testid="resolved-mode">{resolvedMode}</output>
       <output data-testid="theme-name">{theme.name}</output>
-      <button onClick={() => setThemeId("operations-canvas")}>operations</button>
       <button onClick={() => setMode("system")}>system</button>
       <button onClick={() => setMode("light")}>light</button>
-      <button onClick={() => setAccent("rose")}>rose</button>
+      <button onClick={() => setAccent("lime")}>lime</button>
+      <button onClick={() => setAccent("glacier")}>glacier</button>
+      <button onClick={() => setAccent("iris")}>iris</button>
+      <button onClick={() => setAccent("ember")}>ember</button>
     </div>
   );
 }
@@ -94,80 +98,142 @@ afterEach(() => {
 });
 
 describe("theme registry", () => {
-  it("contains complete semantic palettes and preview swatches", () => {
-    expect(themes.map((theme) => theme.id)).toEqual(["classic", "operations-canvas", "command-deck", "topology-atlas"]);
+  it("contains the Aperture base and future-ready accent metadata", () => {
+    expect(themes.map((theme) => theme.id)).toEqual(["aperture"]);
+    expect(accentDefinitions.map((accent) => accent.id)).toEqual(["lime", "glacier", "iris", "ember"]);
+
+    expect(themes[0].palettes.light).toMatchObject({
+      background: "80 18% 97%",
+      foreground: "193 11% 16%",
+      surface: "0 0% 100%",
+      band: "193 12% 14%",
+      bandForeground: "120 13% 94%",
+      bandMuted: "160 9% 73%",
+      bandBorder: "174 6% 31%"
+    });
+    expect(themes[0].palettes.dark).toMatchObject({
+      background: "200 10% 11%",
+      foreground: "144 13% 92%",
+      surface: "202 11% 15%",
+      band: "189 17% 8%",
+      bandForeground: "120 13% 94%",
+      bandMuted: "160 9% 73%",
+      bandBorder: "174 6% 31%"
+    });
+
     for (const theme of themes) {
+      expect(theme.layout).toBe("topbar");
       expect(theme.version).toBeGreaterThan(0);
       expect(Object.keys(theme.palettes.light)).toEqual(Object.keys(theme.palettes.dark));
-      expect(theme.palettes.light.primary).toMatch(/^\d+ \d+% \d+%$/);
-      expect(theme.palettes.dark.primary).toMatch(/^\d+ \d+% \d+%$/);
-      for (const palette of [theme.palettes.light, theme.palettes.dark]) {
-        expect(contrast(palette.primaryForeground, palette.primary)).toBeGreaterThanOrEqual(4.5);
-      }
+      expect(theme.fontDisplay).toBe('-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif');
+      expect(theme.fontMono).toBe('"SFMono-Regular", Consolas, monospace');
     }
   });
 
-  it("keeps normal text and primary labels readable in curated palettes", () => {
-    for (const theme of themes.filter((item) => item.id !== "classic")) {
-      for (const palette of [theme.palettes.light, theme.palettes.dark]) {
-        expect(contrast(palette.foreground, palette.background)).toBeGreaterThanOrEqual(4.5);
-        expect(contrast(palette.foreground, palette.surface)).toBeGreaterThanOrEqual(4.5);
-        expect(contrast(palette.foreground, palette.muted)).toBeGreaterThanOrEqual(4.5);
-        expect(contrast(palette.mutedForeground, palette.background)).toBeGreaterThanOrEqual(4.5);
-        expect(contrast(palette.mutedForeground, palette.surface)).toBeGreaterThanOrEqual(4.5);
-        expect(contrast(palette.mutedForeground, palette.muted)).toBeGreaterThanOrEqual(4.5);
+  it("keeps accent fills and text readable in both modes", () => {
+    const theme = themes[0];
+    for (const accent of accentDefinitions) {
+      for (const mode of ["light", "dark"] as const) {
+        const palette = accent.palettes[mode];
         expect(contrast(palette.primaryForeground, palette.primary)).toBeGreaterThanOrEqual(4.5);
+        expect(contrast(palette.primaryText, theme.palettes[mode].background)).toBeGreaterThanOrEqual(4.5);
       }
     }
   });
 });
 
 describe("ThemeProvider", () => {
-  it("migrates the legacy light/dark and accent keys into versioned preferences", () => {
+  it("uses Aperture dark and Lime for fresh preferences", () => {
+    renderTheme();
+
+    expect(screen.getByTestId("preferences")).toHaveTextContent(
+      '{"themeId":"aperture","mode":"dark","accent":"lime"}'
+    );
+    expect(screen.getByTestId("theme-name")).toHaveTextContent("Aperture");
+    expect(document.documentElement).toHaveClass("dark");
+    expect(document.documentElement).toHaveAttribute("data-console-theme", "aperture");
+    expect(document.documentElement).toHaveAttribute("data-console-layout", "topbar");
+    expect(JSON.parse(window.localStorage.getItem(appearanceStorageKey)!)).toEqual({
+      version: appearanceStorageVersion,
+      themeId: "aperture",
+      mode: "dark",
+      accent: "lime"
+    });
+  });
+
+  it("migrates legacy keys to Aperture accents while preserving mode", () => {
     window.localStorage.setItem(legacyThemeStorageKey, "dark");
     window.localStorage.setItem(legacyAccentStorageKey, "violet");
 
-    expect(initializeTheme()).toEqual({ themeId: "classic", mode: "dark", accent: "violet" });
+    expect(initializeTheme()).toEqual({ themeId: "aperture", mode: "dark", accent: "iris" });
     expect(JSON.parse(window.localStorage.getItem(appearanceStorageKey)!)).toEqual({
-      version: 1,
-      themeId: "classic",
+      version: appearanceStorageVersion,
+      themeId: "aperture",
       mode: "dark",
-      accent: "violet"
+      accent: "iris"
     });
+    expect(window.localStorage.getItem(legacyAccentStorageKey)).toBe("violet");
     expect(document.documentElement).toHaveClass("dark");
-    expect(document.documentElement).toHaveAttribute("data-console-theme", "classic");
-    expect(document.documentElement).toHaveAttribute("data-theme-accent", "violet");
+    expect(document.documentElement).toHaveAttribute("data-theme-accent", "iris");
   });
 
-  it("loads valid versioned preferences on a later render", () => {
+  it("migrates v1 theme and accent values without losing system mode", () => {
+    let matches = true;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => ({ matches, addEventListener: vi.fn(), removeEventListener: vi.fn() }))
+    });
     window.localStorage.setItem(
       appearanceStorageKey,
-      JSON.stringify({ version: 1, themeId: "topology-atlas", mode: "dark", accent: "amber" })
+      JSON.stringify({ version: 1, themeId: "topology-atlas", mode: "system", accent: "rose" })
+    );
+
+    expect(initializeTheme()).toEqual({ themeId: "aperture", mode: "system", accent: "ember" });
+    expect(document.documentElement).toHaveClass("dark");
+    expect(JSON.parse(window.localStorage.getItem(appearanceStorageKey)!)).toEqual({
+      version: appearanceStorageVersion,
+      themeId: "aperture",
+      mode: "system",
+      accent: "ember"
+    });
+
+    matches = false;
+    expect(initializeTheme()).toEqual({ themeId: "aperture", mode: "system", accent: "ember" });
+    expect(document.documentElement).not.toHaveClass("dark");
+  });
+
+  it("loads valid current preferences on a later render", () => {
+    window.localStorage.setItem(
+      appearanceStorageKey,
+      JSON.stringify({ version: appearanceStorageVersion, themeId: "aperture", mode: "light", accent: "glacier" })
     );
 
     renderTheme();
 
-    expect(screen.getByTestId("preferences")).toHaveTextContent("topology-atlas");
-    expect(screen.getByTestId("theme-name")).toHaveTextContent("Topology Atlas");
-    expect(document.documentElement).toHaveAttribute("data-console-theme", "topology-atlas");
-    expect(document.documentElement.style.getPropertyValue("--primary")).toBe("255 100% 81%");
-    expect(document.documentElement.style.getPropertyValue("--radius-ui")).toBe("0.6875rem");
+    expect(screen.getByTestId("preferences")).toHaveTextContent("glacier");
+    expect(screen.getByTestId("resolved-mode")).toHaveTextContent("light");
+    expect(document.documentElement).not.toHaveClass("dark");
+    expect(document.documentElement.style.getPropertyValue("--primary")).toBe("191 64% 74%");
+    expect(document.documentElement.style.getPropertyValue("--primary-text")).toBe("193 45% 16%");
+    expect(document.documentElement.style.getPropertyValue("--radius-ui")).toBe("4px");
   });
 
-  it("falls back safely from malformed or invalid versioned input", () => {
+  it.each(["not-an-accent", "__proto__", "constructor"])("falls back safely from malformed storage and invalid accent %s", (accent) => {
     window.localStorage.setItem(appearanceStorageKey, "{not-json");
     window.localStorage.setItem(legacyThemeStorageKey, "not-a-mode");
-    window.localStorage.setItem(legacyAccentStorageKey, "not-an-accent");
+    window.localStorage.setItem(legacyAccentStorageKey, accent);
 
     renderTheme();
 
-    expect(screen.getByTestId("preferences")).toHaveTextContent('{"themeId":"classic","mode":"light","accent":"teal"}');
-    expect(document.documentElement).not.toHaveClass("dark");
+    expect(screen.getByTestId("preferences")).toHaveTextContent(
+      '{"themeId":"aperture","mode":"dark","accent":"lime"}'
+    );
+    expect(document.documentElement).toHaveClass("dark");
     expect(JSON.parse(window.localStorage.getItem(appearanceStorageKey)!)).toEqual({
-      version: 1,
-      themeId: "classic",
-      mode: "light",
-      accent: "teal"
+      version: appearanceStorageVersion,
+      themeId: "aperture",
+      mode: "dark",
+      accent: "lime"
     });
   });
 
@@ -181,9 +247,10 @@ describe("ThemeProvider", () => {
 
     expect(() => initializeTheme()).not.toThrow();
     expect(() => renderTheme()).not.toThrow();
-    expect(screen.getByTestId("preferences")).toHaveTextContent('{"themeId":"classic","mode":"light","accent":"teal"}');
-    fireEvent.click(screen.getByRole("button", { name: "operations" }));
-    expect(document.documentElement).toHaveAttribute("data-console-theme", "operations-canvas");
+    expect(screen.getByTestId("preferences")).toHaveTextContent(
+      '{"themeId":"aperture","mode":"dark","accent":"lime"}'
+    );
+    expect(document.documentElement).toHaveClass("dark");
   });
 
   it("responds to system color scheme changes", () => {
@@ -204,7 +271,10 @@ describe("ThemeProvider", () => {
       configurable: true,
       value: vi.fn(() => media)
     });
-    window.localStorage.setItem(appearanceStorageKey, JSON.stringify({ version: 1, themeId: "classic", mode: "system", accent: "teal" }));
+    window.localStorage.setItem(
+      appearanceStorageKey,
+      JSON.stringify({ version: appearanceStorageVersion, themeId: "aperture", mode: "system", accent: "lime" })
+    );
 
     renderTheme();
     expect(screen.getByTestId("resolved-mode")).toHaveTextContent("dark");
@@ -228,7 +298,7 @@ describe("ThemeProvider", () => {
   it("applies valid cross-tab updates without writing them back", () => {
     renderTheme();
     const setItem = vi.spyOn(window.localStorage, "setItem");
-    const remote = JSON.stringify({ version: 1, themeId: "command-deck", mode: "dark", accent: "rose" });
+    const remote = JSON.stringify({ version: appearanceStorageVersion, themeId: "aperture", mode: "light", accent: "iris" });
 
     act(() => {
       window.dispatchEvent(
@@ -239,65 +309,48 @@ describe("ThemeProvider", () => {
       );
     });
 
-    expect(screen.getByTestId("preferences")).toHaveTextContent("command-deck");
-    expect(document.documentElement).toHaveClass("dark");
+    expect(screen.getByTestId("preferences")).toHaveTextContent("iris");
+    expect(document.documentElement).not.toHaveClass("dark");
     expect(setItem).not.toHaveBeenCalled();
   });
 
   it("keeps the canonical cross-tab theme when compatibility keys arrive afterward", () => {
     renderTheme();
-    const remote = JSON.stringify({ version: 1, themeId: "command-deck", mode: "dark", accent: "rose" });
+    const remote = JSON.stringify({ version: appearanceStorageVersion, themeId: "aperture", mode: "light", accent: "iris" });
     window.localStorage.setItem(appearanceStorageKey, remote);
     const setItem = vi.spyOn(window.localStorage, "setItem");
 
     act(() => {
-      window.dispatchEvent(
-        new StorageEvent("storage", {
-          key: appearanceStorageKey,
-          newValue: remote
-        })
-      );
-      window.dispatchEvent(
-        new StorageEvent("storage", {
-          key: legacyThemeStorageKey,
-          newValue: "dark"
-        })
-      );
-      window.dispatchEvent(
-        new StorageEvent("storage", {
-          key: legacyAccentStorageKey,
-          newValue: "rose"
-        })
-      );
+      window.dispatchEvent(new StorageEvent("storage", { key: appearanceStorageKey, newValue: remote }));
+      window.dispatchEvent(new StorageEvent("storage", { key: legacyThemeStorageKey, newValue: "dark" }));
+      window.dispatchEvent(new StorageEvent("storage", { key: legacyAccentStorageKey, newValue: "violet" }));
     });
 
-    expect(screen.getByTestId("preferences")).toHaveTextContent("command-deck");
+    expect(screen.getByTestId("preferences")).toHaveTextContent("iris");
     expect(setItem).not.toHaveBeenCalled();
   });
 
-  it("keeps curated palettes when an accent changes outside Classic", () => {
+  it("changes only primary tokens when the accent changes", () => {
     renderTheme();
-    fireEvent.click(screen.getByRole("button", { name: "operations" }));
-    const curatedPrimary = document.documentElement.style.getPropertyValue("--primary");
+    const statuses = ["--destructive", "--warning", "--success"].map((name) =>
+      document.documentElement.style.getPropertyValue(name)
+    );
+    const bandTokens = ["--band", "--band-foreground", "--band-muted", "--band-border"].map((name) =>
+      document.documentElement.style.getPropertyValue(name)
+    );
+    const limePrimary = document.documentElement.style.getPropertyValue("--primary");
 
-    fireEvent.click(screen.getByRole("button", { name: "rose" }));
+    fireEvent.click(screen.getByRole("button", { name: "iris" }));
 
-    expect(document.documentElement.style.getPropertyValue("--primary")).toBe(curatedPrimary);
-    expect(document.documentElement).toHaveAttribute("data-theme-accent", "rose");
-  });
-
-  it("removes previous theme styling when switching themes", () => {
-    renderTheme();
-    expect(document.documentElement).toHaveAttribute("data-console-layout", "sidebar");
-    const classicRadius = document.documentElement.style.getPropertyValue("--radius-ui");
-    const classicFont = document.documentElement.style.getPropertyValue("--font-display");
-
-    fireEvent.click(screen.getByRole("button", { name: "operations" }));
-
-    expect(document.documentElement).toHaveAttribute("data-console-layout", "topbar");
-    expect(document.documentElement.style.getPropertyValue("--radius-ui")).not.toBe(classicRadius);
-    expect(document.documentElement.style.getPropertyValue("--font-display")).not.toBe(classicFont);
-    expect(document.documentElement.style.getPropertyValue("--primary")).toBe("175 88% 26%");
+    expect(document.documentElement.style.getPropertyValue("--primary")).not.toBe(limePrimary);
+    expect(document.documentElement.style.getPropertyValue("--primary-text")).toBe("254 62% 82%");
+    expect(["--destructive", "--warning", "--success"].map((name) => document.documentElement.style.getPropertyValue(name))).toEqual(
+      statuses
+    );
+    expect(["--band", "--band-foreground", "--band-muted", "--band-border"].map((name) =>
+      document.documentElement.style.getPropertyValue(name)
+    )).toEqual(bandTokens);
+    expect(document.documentElement).toHaveAttribute("data-theme-accent", "iris");
   });
 });
 

@@ -68,38 +68,49 @@ normal entry continues to use real authentication and APIs. The preview banner
 identifies sample data. Simulated changes last only until reload.
 The preview entry is not included in the normal production build.
 
-## Console themes
+## Console appearance
 
-Open **Appearance** in the shell to choose Classic, Operations Canvas, Command
-Deck, or Topology Atlas. Each supports Light, Dark, and System mode. Classic also
-retains the accent choices. Changes apply immediately while preserving the
-current route and form state. Preferences belong to the current browser, persist
-across reloads, and synchronize across tabs; they are not account settings.
-When browser storage is unavailable, choices last for the current page session.
-There is no in-app feedback collection or telemetry.
+Aperture is the shared console design: a compact top bar, engine inventory with
+an inspector, application cards, and a single connection form. Workspace and
+Applications are always available in the header. **More** opens all pages and
+the organization/workspace switcher; Cmd/Ctrl+K opens quick navigation.
 
-`src/lib/theme/themes.ts` is the theme registry. Each theme has a stable ID,
-display name, version, complete light/dark semantic palettes, font stacks,
-corner radius, background pattern, and shell layout. Command Deck uses an icon
-rail, Operations Canvas a horizontal navigation bar, and Topology Atlas a grouped
-sidebar and grid canvas. Smaller screens use the shared responsive navigation.
-To add a theme, extend `ThemeId` and add a complete registry entry;
-the selector and previews discover it automatically. Increment a theme's version
-when its visual design changes so feedback can identify the revision (the card's
-tooltip shows the version). Use already loaded fonts or update `index.html`.
+Open **Appearance** for Lime, Glacier, Iris, or Ember accents and Light, Dark, or
+System mode. Fresh preferences start with charcoal and Lime. Changes apply
+immediately without remounting the current route or resetting form state.
+Preferences persist in the browser and synchronize across tabs. They are not
+account settings; blocked storage falls back to the current session. Feedback
+is collected externally by email; no in-app feedback or telemetry is added.
 
-Components use semantic Tailwind utilities such as `bg-surface`, `text-foreground`,
-`text-primary`, `font-display`, and `rounded-ui`. Avoid theme-specific component
-branches and hardcoded colors. `ThemeProvider` maps registry values to CSS
-variables; `initializeTheme()` applies saved preferences before React renders.
-`styles.css` contains the Classic light fallback and shared appearance UI styles.
-`console-layout.css` defines the reusable sidebar, rail, topbar, and grid treatments.
+### Extending the framework
 
-The versioned `elsa-control-console-appearance` record is authoritative. The old
-theme/accent keys are migrated and retained for older bundles. Invalid settings
-fall back safely. New palettes should be checked in both modes for text contrast,
-focus visibility, controls, validation states, and narrow screens. Run the console
-quality gates above after changing the framework.
+`src/lib/theme/themes.ts` separates style definitions from curated accent
+palettes. A style owns complete light/dark surfaces, semantic status colors,
+header band colors, display/body/mono font stacks, and corner radius. An accent
+owns its fill, the text on that fill, and readable accent text for each mode.
+Success, warning, and destructive colors remain independent of accents.
+
+To add an accent, extend `ThemeAccent` and `accentDefinitions`. To add a style,
+extend `ThemeId` and `themes`; the picker shows style choices when there is more
+than one. Keep the shared page layout and navigation. Different fonts, surfaces,
+and corners belong in tokens, not separate page implementations. Native fonts
+are used by default, with no remote font request.
+
+`ThemeProvider` applies those tokens before React renders, and the shared CSS
+consumes them. Use `bg-primary` for accent fills, `text-primary-foreground` for
+text on those fills, and `text-primary` for accent links (mapped separately to
+`--primary-text` for light-mode contrast). Use `font-display`, `font-mono`, and
+`rounded-ui` rather than fixed fonts or corner sizes in new components.
+
+The version-2 `elsa-control-console-appearance` record is authoritative. Earlier
+style choices migrate to Aperture, preserving mode and mapping teal to Lime,
+blue to Glacier, violet to Iris, and amber/rose to Ember. Legacy keys remain
+readable by older bundles. Invalid settings fall back safely.
+
+Verify new combinations for text and focus contrast, form/error states,
+keyboard navigation, text wrapping, and narrow screens. Run the console quality
+gates above after changing the framework. The development design preview renders
+the same production components with sample data for visual checks.
 
 ## Deployment
 

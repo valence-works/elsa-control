@@ -34,7 +34,9 @@ describe("AppShell", () => {
   it("renders the unified Elsa Control navigation with package catalog active links", async () => {
     renderAppShell();
 
-    const navigationText = screen.getAllByRole("navigation", { name: "Primary" })[0].textContent ?? "";
+    expect(screen.getByRole("link", { name: "Workspace" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Browse console" }));
+    const navigationText = screen.getByRole("navigation", { name: "All pages" }).textContent ?? "";
     expect(screen.getAllByRole("link", { name: "Overview" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: "Sources" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: "Packages" }).length).toBeGreaterThan(0);
@@ -58,6 +60,7 @@ describe("AppShell", () => {
 
   it("shows the application build number", async () => {
     renderAppShell("2026.05.16.7");
+    await userEvent.click(screen.getByRole("button", { name: "Browse console" }));
 
     const buildLabels = await screen.findAllByLabelText("Application build number");
     expect(buildLabels).toHaveLength(1);
@@ -78,71 +81,46 @@ describe("AppShell", () => {
     expect(screen.queryByRole("dialog", { name: "Go to a page" })).not.toBeInTheDocument();
   });
 
-  it("exposes only available destinations in a collapsible mobile navigation", async () => {
+  it("exposes all destinations in the shared navigation dialog", async () => {
     renderAppShell();
     const user = userEvent.setup();
-    const toggle = screen.getByRole("button", { name: "Open navigation" });
+    const toggle = screen.getByRole("button", { name: "Browse console" });
     await user.click(toggle);
-    expect(screen.getByRole("button", { name: "Close navigation" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("dialog", { name: "Browse console" })).toHaveAttribute("open");
     expect(screen.queryByText("Soon")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Close navigation" }));
-    expect(screen.getByRole("button", { name: "Open navigation" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("button", { name: "Browse console" })).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("changes the selected theme and color mode without disturbing the console content", async () => {
-    renderAppShell();
-
-    const overviewLinksBefore = screen.getAllByRole("link", { name: "Overview" });
-    expect(document.documentElement).toHaveAttribute("data-console-theme", "classic");
-    expect(document.documentElement).not.toHaveClass("dark");
-
-    await userEvent.click(screen.getAllByRole("button", { name: "Appearance" })[0]);
-
-    expect(screen.getByRole("dialog", { name: "Appearance" })).toHaveAttribute("open");
-    expect(screen.getByRole("radio", { name: "Classic" })).toBeChecked();
-    expect(screen.getByRole("radio", { name: "Light" })).toBeChecked();
-
-    await userEvent.click(screen.getByRole("radio", { name: "Operations Canvas" }));
-    expect(document.documentElement).toHaveAttribute("data-console-theme", "operations-canvas");
-    expect(screen.getAllByRole("link", { name: "Overview" })).toHaveLength(overviewLinksBefore.length);
-    expect(screen.getAllByText("Elsa Control").length).toBeGreaterThan(0);
-
-    await userEvent.click(screen.getByRole("radio", { name: "Dark" }));
-
-    expect(document.documentElement).toHaveAttribute("data-console-theme", "operations-canvas");
+  it("changes accent and color mode without disturbing the current form", async () => {
+    renderAppShellRoute("/admin/engines/connect");
+    const user = userEvent.setup();
+    await user.type(screen.getByRole("textbox", { name: "Engine URL" }), "https://engine.example.test");
+    expect(document.documentElement).toHaveAttribute("data-console-theme", "aperture");
     expect(document.documentElement).toHaveClass("dark");
-    expect(window.localStorage.getItem("elsa-control-console-theme")).toBe("dark");
-    expect(window.localStorage.getItem("elsa-control-console-theme-accent")).toBe("teal");
+    await user.click(screen.getByRole("button", { name: "Appearance" }));
+    expect(screen.getByRole("radio", { name: "Dark" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Lime" })).toBeChecked();
+    await user.click(screen.getByRole("radio", { name: "Glacier" }));
+    await user.click(screen.getByRole("radio", { name: "Light" }));
+    expect(document.documentElement).toHaveAttribute("data-theme-accent", "glacier");
+    expect(document.documentElement).not.toHaveClass("dark");
+    await user.click(screen.getByRole("button", { name: "Close appearance" }));
+    expect(screen.getByRole("textbox", { name: "Engine URL" })).toHaveValue("https://engine.example.test");
+    expect(screen.getByRole("heading", { name: "Connection route" })).toBeInTheDocument();
   });
 
-  it("stores the Classic accent and keeps the selection after closing and reopening Appearance", async () => {
+  it("persists the accent and restores picker choices on reopen", async () => {
     renderAppShell();
-
-    await userEvent.click(screen.getAllByRole("button", { name: "Appearance" })[0]);
-
-    const dialog = screen.getByRole("dialog", { name: "Appearance" });
-    const accentPicker = screen.getByRole("combobox", { name: "Theme accent" });
-    expect(accentPicker).toHaveValue("teal");
-    await waitFor(() => expect(document.documentElement).toHaveAttribute("data-theme-accent", "teal"));
-
-    await userEvent.selectOptions(accentPicker, "violet");
-
-    expect(accentPicker).toHaveValue("violet");
-    expect(document.documentElement).toHaveAttribute("data-theme-accent", "violet");
-    expect(window.localStorage.getItem("elsa-control-console-theme-accent")).toBe("violet");
-
-    const persisted = JSON.parse(window.localStorage.getItem("elsa-control-console-appearance") ?? "null") as Record<string, unknown>;
-    expect(persisted).toMatchObject({ version: 1, themeId: "classic", mode: "light", accent: "violet" });
-
-    await userEvent.click(screen.getByRole("button", { name: "Close appearance" }));
-    expect(dialog).not.toHaveAttribute("open");
-
-    await userEvent.click(screen.getAllByRole("button", { name: "Appearance" })[0]);
-
-    expect(screen.getByRole("dialog", { name: "Appearance" })).toHaveAttribute("open");
-    expect(screen.getByRole("radio", { name: "Classic" })).toBeChecked();
-    expect(screen.getByRole("radio", { name: "Light" })).toBeChecked();
-    expect(screen.getByRole("combobox", { name: "Theme accent" })).toHaveValue("violet");
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Appearance" }));
+    await user.click(screen.getByRole("radio", { name: "Iris" }));
+    await user.click(screen.getByRole("radio", { name: "System" }));
+    expect(JSON.parse(window.localStorage.getItem("elsa-control-console-appearance") ?? "null")).toMatchObject({ version: 2, themeId: "aperture", mode: "system", accent: "iris" });
+    await user.click(screen.getByRole("button", { name: "Close appearance" }));
+    await user.click(screen.getByRole("button", { name: "Appearance" }));
+    expect(screen.getByRole("radio", { name: "Iris" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "System" })).toBeChecked();
   });
 
   it("opens Weaver as a global assistant drawer", async () => {
@@ -181,6 +159,7 @@ describe("AppShell", () => {
 
   it("keeps workspace choices scoped to the selected organization", async () => {
     renderAppShell("0.0.1", multiOrganizationContextFixture());
+    await userEvent.click(screen.getByRole("button", { name: "Browse console" }));
 
     const organizationSelect = (await screen.findAllByRole("combobox", { name: "Organization" }, { timeout: 5_000 }))[0];
     const workspaceSelect = screen.getAllByRole("combobox", { name: "Workspace" })[0];
@@ -264,7 +243,7 @@ function renderAppShellRoute(route: string) {
           <Routes>
             <Route path="/admin" element={<AppShell />}>
               <Route path="login" element={<AdminLoginPage />} />
-              <Route path="engines/connect" element={<h1>Connection route</h1>} />
+              <Route path="engines/connect" element={<><h1>Connection route</h1><input aria-label="Engine URL" /></>} />
               <Route path="*" element={<ConsoleNotFoundPage />} />
             </Route>
           </Routes>
