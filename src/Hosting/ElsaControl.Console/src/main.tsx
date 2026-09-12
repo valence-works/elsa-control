@@ -5,6 +5,10 @@ import { AuthProvider } from "@/lib/auth/AuthProvider";
 import { QueryProvider } from "@/lib/query/queryClient";
 import { router } from "@/app/routes";
 import "@/styles.css";
+import "@/console-layout.css";
+import { initializeTheme } from "@/lib/theme/themeRuntime";
+
+initializeTheme();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

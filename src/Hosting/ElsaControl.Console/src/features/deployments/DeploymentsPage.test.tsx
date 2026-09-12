@@ -47,7 +47,7 @@ describe("DeploymentsPage", () => {
   it("renders a workspace deployment overview without the application list", async () => {
     renderDeployments();
 
-    expect(await screen.findByRole("heading", { name: "Deployment overview" }, { timeout: 15000 })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /^Deployments$/ }, { timeout: 15000 })).toBeInTheDocument();
     expect(linkByHref("/admin/deployments/applications")).toBeInTheDocument();
     expect(linkByHref("/admin/deployments/new")).toBeInTheDocument();
     expect(linkByHref("/admin/deployments/tiers")).toBeInTheDocument();
@@ -64,19 +64,73 @@ describe("DeploymentsPage", () => {
     renderDeployments(multipleApplicationsCockpit, "/admin/deployments/applications");
 
     expect(await screen.findByRole("heading", { name: "Applications" })).toBeInTheDocument();
-    expect(screen.getByText("Workflow applications")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Workflow applications" })).toBeInTheDocument();
     expect(linkByHref("/admin/deployments/applications/claims-ops")).toBeInTheDocument();
     expect(linkByHref("/admin/deployments/applications/policy-app")).toBeInTheDocument();
     expect(screen.getByText("Claims Operations")).toBeInTheDocument();
     expect(screen.getByLabelText("Sort applications")).toHaveValue("name");
-    expect(within(screen.getByRole("table")).getByRole("columnheader", { name: "Application" })).toBeInTheDocument();
-    expect(within(screen.getByRole("table")).queryByRole("columnheader", { name: "Workspace" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Claims Operations" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Claims Operations" })).toHaveAccessibleDescription(/environment.*engine/);
+    expect(screen.getByRole("link", { name: "Policy" })).toBeInTheDocument();
 
     await userEvent.type(screen.getByPlaceholderText("Search applications"), "Policy");
 
     expect(screen.getByRole("link", { name: "Policy" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Claims Operations" })).not.toBeInTheDocument();
     expect(screen.queryByText("Deployment posture")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { environmentCount: 0, missingEngine: false, blocked: false, expectedHealth: "Needs setup" },
+    { environmentCount: 2, missingEngine: true, blocked: false, expectedHealth: "Needs setup" },
+    { environmentCount: 2, missingEngine: false, blocked: false, expectedHealth: "Healthy" },
+    { environmentCount: 2, missingEngine: false, blocked: true, expectedHealth: "Needs review" }
+  ])("reports $expectedHealth for environments=$environmentCount, missingEngine=$missingEngine and blocked=$blocked", async ({ environmentCount, missingEngine, blocked, expectedHealth }) => {
+    const application = deploymentCockpitFixture.applications[0];
+    const environments = application.environments.slice(0, environmentCount).map(environment => ({ ...environment, deploymentStatus: blocked ? "Blocked" as const : environment.deploymentStatus }));
+    const connectedIds = environments.slice(0, missingEngine ? 1 : 2).map(environment => environment.id);
+    renderDeployments({
+      ...deploymentCockpitFixture,
+      applications: [{ ...application, environments }],
+      engines: deploymentCockpitFixture.engines.filter(engine => connectedIds.includes(engine.environmentId))
+    }, "/admin/deployments/applications");
+
+    const card = await screen.findByRole("link", { name: application.name });
+    expect(within(card).getByText(expectedHealth)).toBeInTheDocument();
+    if (expectedHealth !== "Healthy") expect(within(card).queryByText("Healthy")).not.toBeInTheDocument();
+  });
+
+  it("reports Needs review when an application environment has unknown drift", async () => {
+    const application = deploymentCockpitFixture.applications[0];
+    renderDeployments({
+      ...deploymentCockpitFixture,
+      applications: [{
+        ...application,
+        environments: application.environments.map((environment, index) => ({
+          ...environment,
+          driftStatus: index === 0 ? "Unknown" as const : "InSync" as const,
+          deploymentStatus: "Succeeded" as const
+        }))
+      }],
+      engines: deploymentCockpitFixture.engines.map((engine) => ({ ...engine, health: "Healthy" as const }))
+    }, "/admin/deployments/applications");
+
+    const card = await screen.findByRole("link", { name: application.name });
+    expect(within(card).getByText("Needs review")).toBeInTheDocument();
+  });
+
+  it.each([
+    { path: "/admin/deployments/applications", heading: "Applications", action: "New application setup" },
+    { path: "/admin/deployments/applications/claims-ops/environments/claims-dev", heading: "Dev", action: "Connect engine" }
+  ])("prevents keyboard activation of $action without setup permission", async ({ path, heading, action }) => {
+    renderDeployments(undefined, path, { permissions: ["deployments.read"] });
+    await screen.findByRole("heading", { name: heading });
+    const link = screen.getByRole("link", { name: action });
+    expect(link).toHaveAttribute("aria-disabled", "true");
+    expect(link).toHaveAttribute("tabindex", "-1");
+    link.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
   });
 
   it("shows an empty application list state when no deployment setup exists", async () => {
@@ -91,8 +145,53 @@ describe("DeploymentsPage", () => {
     }, "/admin/deployments/applications");
 
     expect(await screen.findByText("No deployment setup")).toBeInTheDocument();
-    expect(screen.getByText("Create a workflow application, first environment, and first engine registration to start managing deployments.")).toBeInTheDocument();
-    expect(linkByHref("/admin/deployments/new")).toBeInTheDocument();
+    expect(screen.getByText("Connect an engine to create your first application and environment.")).toBeInTheDocument();
+    expect(linkByHref("/admin/engines/connect")).toBeInTheDocument();
+  });
+
+  it("keeps the empty-workspace Connect engine action read-only without setup permission", async () => {
+    renderDeployments({
+      applications: [],
+      engines: [],
+      comparisons: [],
+      observabilityBindings: [],
+      history: [],
+      driftReport: [],
+      assistantPlans: []
+    }, "/admin/deployments/applications", { permissions: ["deployments.read"] });
+
+    expect(await screen.findByText("No deployment setup")).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: "Connect engine" });
+    expect(link).toHaveAttribute("aria-disabled", "true");
+    expect(link).toHaveAttribute("tabindex", "-1");
+    link.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(screen.getByText("No deployment setup")).toBeInTheDocument();
+  });
+
+  it("keeps an empty environment engine action read-only without setup permission", async () => {
+    const cockpit: DeploymentCockpit = {
+      ...deploymentCockpitFixture,
+      applications: deploymentCockpitFixture.applications.map((application) => application.id === "claims-ops"
+        ? {
+            ...application,
+            environments: application.environments.map((environment) => environment.id === "claims-dev" ? { ...environment, engineIds: [] } : environment)
+          }
+        : application),
+      engines: deploymentCockpitFixture.engines.filter((engine) => engine.id !== "dev-engine")
+    };
+    renderDeployments(cockpit, "/admin/deployments/applications/claims-ops/environments/claims-dev", { permissions: ["deployments.read"] });
+
+    expect(await screen.findByRole("heading", { name: "Dev" })).toBeInTheDocument();
+    const links = screen.getAllByRole("link", { name: "Connect engine" });
+    expect(links).toHaveLength(2);
+    links.forEach((link) => {
+      expect(link).toHaveAttribute("aria-disabled", "true");
+      expect(link).toHaveAttribute("tabindex", "-1");
+    });
+    links[1].focus();
+    await userEvent.keyboard("{Enter}");
+    expect(screen.getByRole("heading", { name: "Dev" })).toBeInTheDocument();
   });
 
   it("creates application setup with environments and engines from the guided setup route", async () => {

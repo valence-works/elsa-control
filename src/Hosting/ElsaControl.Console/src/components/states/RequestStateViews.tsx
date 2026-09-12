@@ -1,3 +1,5 @@
+import { FileQuestion, Inbox, KeyRound, LoaderCircle, RefreshCw, TriangleAlert } from "lucide-react";
+import type { ReactNode } from "react";
 import { EmptyState } from "@/components/ui";
 
 export type RequestState = "loading" | "empty" | "stale" | "unauthorized" | "not-found" | "unexpected";
@@ -11,6 +13,15 @@ const defaultText: Record<RequestState, { title: string; description: string }> 
   unexpected: { title: "Something went wrong", description: "The console could not complete the request." }
 };
 
+const statePresentation: Record<RequestState, { icon: ReactNode; role: "status" | "alert"; tone: "neutral" | "warning" | "destructive" }> = {
+  loading: { icon: <LoaderCircle aria-hidden className="h-5 w-5 animate-spin" />, role: "status", tone: "neutral" },
+  empty: { icon: <Inbox aria-hidden className="h-5 w-5" />, role: "status", tone: "neutral" },
+  stale: { icon: <RefreshCw aria-hidden className="h-5 w-5" />, role: "status", tone: "warning" },
+  unauthorized: { icon: <KeyRound aria-hidden className="h-5 w-5" />, role: "alert", tone: "destructive" },
+  "not-found": { icon: <FileQuestion aria-hidden className="h-5 w-5" />, role: "status", tone: "neutral" },
+  unexpected: { icon: <TriangleAlert aria-hidden className="h-5 w-5" />, role: "alert", tone: "destructive" }
+};
+
 export function RequestStateView({
   state,
   title,
@@ -21,5 +32,14 @@ export function RequestStateView({
   description?: string;
 }) {
   const copy = defaultText[state];
-  return <EmptyState title={title ?? copy.title} description={description ?? copy.description} />;
+  const presentation = statePresentation[state];
+  return (
+    <EmptyState
+      title={title ?? copy.title}
+      description={description ?? copy.description}
+      icon={presentation.icon}
+      role={presentation.role}
+      tone={presentation.tone}
+    />
+  );
 }

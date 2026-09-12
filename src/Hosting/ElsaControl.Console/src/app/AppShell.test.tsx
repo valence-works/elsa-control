@@ -1,88 +1,128 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { createMemoryRouter, RouterProvider } from "react-router-dom";
+import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes } from "react-router-dom";
 import type { ReactNode } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppShell } from "@/app/AppShell";
 import { AdminLoginPage, ConsoleNotFoundPage } from "@/app/routes";
 import { AuthProvider } from "@/lib/auth/AuthProvider";
 
 describe("AppShell", () => {
+  let restoreDialogStub: (() => void) | undefined;
+
+  beforeEach(() => {
+    restoreDialogStub = installDialogStub();
+  });
+
   afterEach(() => {
     cleanup();
+    restoreDialogStub?.();
+    restoreDialogStub = undefined;
     vi.unstubAllGlobals();
     if (typeof window.localStorage?.clear === "function") {
       window.localStorage.clear();
     }
     document.documentElement.classList.remove("dark");
+    document.documentElement.removeAttribute("data-console-theme");
+    document.documentElement.removeAttribute("data-console-layout");
+    document.documentElement.removeAttribute("data-console-pattern");
     document.documentElement.removeAttribute("data-theme-accent");
+    document.documentElement.removeAttribute("style");
   });
 
   it("renders the unified Elsa Control navigation with package catalog active links", async () => {
     renderAppShell();
 
-    const navigationText = screen.getAllByRole("navigation", { name: "Primary" })[0].textContent ?? "";
+    expect(screen.getByRole("link", { name: "Workspace" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Browse console" }));
+    const navigationText = screen.getByRole("navigation", { name: "All pages" }).textContent ?? "";
     expect(screen.getAllByRole("link", { name: "Overview" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: "Sources" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: "Packages" }).length).toBeGreaterThan(0);
-    expect(screen.getAllByRole("link", { name: "Sync Runs" }).length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Deliver").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Operate").length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("link", { name: "Sync runs" }).length).toBeGreaterThan(0);
+    expect(screen.getByText("Library")).toBeInTheDocument();
+    expect(screen.getByText("Manage")).toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: "Applications" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: "Engine credentials" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: "Tiers" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: "Artifacts" }).length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Runtime Builder").length).toBeGreaterThan(0);
-    expect(screen.getAllByRole("link", { name: "Build configurations" }).length).toBeGreaterThan(0);
-    expect(screen.getAllByRole("link", { name: "Console" }).length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Managed Runtimes").length).toBeGreaterThan(0);
-    expect(screen.getAllByRole("link", { name: "Runtime Operations" }).length).toBeGreaterThan(0);
-    expect(screen.queryByRole("link", { name: "Audit" })).not.toBeInTheDocument();
-    expect(screen.getByText("Audit").closest("[aria-disabled='true']")).toBeInTheDocument();
-    expect(navigationText).toContain("ControlOverview");
-    expect(navigationText).toContain("DeliverOverviewApplicationsArtifacts");
-    expect(navigationText).toContain("OperateTiersEngine credentialsConsole");
-    expect(navigationText).toContain("Runtime BuilderBuild configurations");
+    expect(screen.getByRole("link", { name: "Runtime builder" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Logs" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Managed runtimes" })).toHaveAttribute("href", "/admin/runtimes");
+    expect(screen.getByRole("link", { name: "Runtime operations" })).toHaveAttribute("href", "/admin/operations");
+    expect(screen.getByRole("link", { name: "Billing" })).toHaveAttribute("href", "/admin/billing");
+    expect(navigationText).toContain("WorkspaceOverviewApplicationsDeployments");
+    expect(navigationText).toContain("LibraryArtifactsPackagesRuntime builder");
     expect(screen.queryByRole("link", { name: "Settings" })).not.toBeInTheDocument();
-    expect(await screen.findAllByRole("combobox", { name: "Organization" }, { timeout: 5_000 })).toHaveLength(2);
-    expect(screen.getAllByRole("combobox", { name: "Workspace" })).toHaveLength(2);
-    expect(await screen.findAllByLabelText("Application build number", {}, { timeout: 5_000 })).toHaveLength(2);
+    expect(await screen.findAllByRole("combobox", { name: "Organization" }, { timeout: 5_000 })).toHaveLength(1);
+    expect(screen.getAllByRole("combobox", { name: "Workspace" })).toHaveLength(1);
+    expect(await screen.findAllByLabelText("Application build number", {}, { timeout: 5_000 })).toHaveLength(1);
   });
 
   it("shows the application build number", async () => {
     renderAppShell("2026.05.16.7");
+    await userEvent.click(screen.getByRole("button", { name: "Browse console" }));
 
     const buildLabels = await screen.findAllByLabelText("Application build number");
-    expect(buildLabels).toHaveLength(2);
+    expect(buildLabels).toHaveLength(1);
     buildLabels.forEach((label) => expect(label).toHaveTextContent("Build 2026.05.16.7"));
   });
 
-  it("toggles between light and dark mode", async () => {
-    renderAppShell();
-
-    expect(document.documentElement).not.toHaveClass("dark");
-
-    await userEvent.click(screen.getAllByRole("button", { name: "Switch to dark mode" })[0]);
-
-    expect(document.documentElement).toHaveClass("dark");
-    expect(window.localStorage.getItem("elsa-control-console-theme")).toBe("dark");
-    expect(screen.getAllByRole("button", { name: "Switch to light mode" }).length).toBeGreaterThan(0);
+  it("opens keyboard navigation and follows a filtered destination with Enter", async () => {
+    renderAppShellRoute("/admin/login");
+    const user = userEvent.setup();
+    await user.keyboard("{Control>}k{/Control}");
+    expect(screen.getByRole("dialog", { name: "Go to a page" })).toHaveAttribute("open");
+    const search = screen.getByRole("textbox", { name: "Find a page" });
+    expect(search).toHaveFocus();
+    await user.type(search, "connect");
+    expect(screen.getByRole("link", { name: "Connect engine" })).toHaveAttribute("href", "/admin/engines/connect");
+    await user.keyboard("{Enter}");
+    expect(await screen.findByRole("heading", { name: "Connection route" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Go to a page" })).not.toBeInTheDocument();
   });
 
-  it("stores the selected accent theme", async () => {
+  it("exposes all destinations in the shared navigation dialog", async () => {
     renderAppShell();
+    const user = userEvent.setup();
+    const toggle = screen.getByRole("button", { name: "Browse console" });
+    await user.click(toggle);
+    expect(screen.getByRole("dialog", { name: "Browse console" })).toHaveAttribute("open");
+    expect(screen.queryByText("Soon")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Close navigation" }));
+    expect(screen.getByRole("button", { name: "Browse console" })).toHaveAttribute("aria-expanded", "false");
+  });
 
-    const accentPickers = screen.getAllByRole("combobox", { name: "Theme accent" });
-    expect(accentPickers).toHaveLength(2);
-    expect(accentPickers[0]).toHaveValue("teal");
-    await waitFor(() => expect(document.documentElement).toHaveAttribute("data-theme-accent", "teal"));
+  it("changes accent and color mode without disturbing the current form", async () => {
+    renderAppShellRoute("/admin/engines/connect");
+    const user = userEvent.setup();
+    await user.type(screen.getByRole("textbox", { name: "Engine URL" }), "https://engine.example.test");
+    expect(document.documentElement).toHaveAttribute("data-console-theme", "aperture");
+    expect(document.documentElement).toHaveClass("dark");
+    await user.click(screen.getByRole("button", { name: "Appearance" }));
+    expect(screen.getByRole("radio", { name: "Dark" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Lime" })).toBeChecked();
+    await user.click(screen.getByRole("radio", { name: "Glacier" }));
+    await user.click(screen.getByRole("radio", { name: "Light" }));
+    expect(document.documentElement).toHaveAttribute("data-theme-accent", "glacier");
+    expect(document.documentElement).not.toHaveClass("dark");
+    await user.click(screen.getByRole("button", { name: "Close appearance" }));
+    expect(screen.getByRole("textbox", { name: "Engine URL" })).toHaveValue("https://engine.example.test");
+    expect(screen.getByRole("heading", { name: "Connection route" })).toBeInTheDocument();
+  });
 
-    await userEvent.selectOptions(accentPickers[0], "violet");
-
-    expect(accentPickers[0]).toHaveValue("violet");
-    expect(document.documentElement).toHaveAttribute("data-theme-accent", "violet");
-    expect(window.localStorage.getItem("elsa-control-console-theme-accent")).toBe("violet");
+  it("persists the accent and restores picker choices on reopen", async () => {
+    renderAppShell();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Appearance" }));
+    await user.click(screen.getByRole("radio", { name: "Iris" }));
+    await user.click(screen.getByRole("radio", { name: "System" }));
+    expect(JSON.parse(window.localStorage.getItem("elsa-control-console-appearance") ?? "null")).toMatchObject({ version: 2, themeId: "aperture", mode: "system", accent: "iris" });
+    await user.click(screen.getByRole("button", { name: "Close appearance" }));
+    await user.click(screen.getByRole("button", { name: "Appearance" }));
+    expect(screen.getByRole("radio", { name: "Iris" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "System" })).toBeChecked();
   });
 
   it("opens Weaver as a global assistant drawer", async () => {
@@ -121,6 +161,7 @@ describe("AppShell", () => {
 
   it("keeps workspace choices scoped to the selected organization", async () => {
     renderAppShell("0.0.1", multiOrganizationContextFixture());
+    await userEvent.click(screen.getByRole("button", { name: "Browse console" }));
 
     const organizationSelect = (await screen.findAllByRole("combobox", { name: "Organization" }, { timeout: 5_000 }))[0];
     const workspaceSelect = screen.getAllByRole("combobox", { name: "Workspace" })[0];
@@ -147,6 +188,12 @@ describe("AppShell", () => {
     expect(await screen.findByRole("heading", { name: "Console page not found" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open overview" })).toHaveAttribute("href", "/admin/overview");
     expect(screen.queryByText("Unexpected Application Error!")).not.toBeInTheDocument();
+  });
+
+  it("uses the longest parent destination for nested breadcrumbs", async () => {
+    renderAppShellRoute("/admin/deployments/new");
+
+    await waitFor(() => expect(document.querySelector(".console-breadcrumb")).toHaveTextContent("Acme InsuranceDeployments"));
   });
 });
 
@@ -197,23 +244,18 @@ function renderAppShellRoute(route: string) {
       return Response.json(workspaceContextFixture());
     return Response.json({ name: "ElsaControl.Api", buildNumber: "0.0.1" });
   }));
-  const router = createMemoryRouter([
-    {
-      path: "/admin",
-      element: <AppShell />,
-      children: [
-        { path: "login", element: <AdminLoginPage /> },
-        { path: "*", element: <ConsoleNotFoundPage /> }
-      ]
-    }
-  ], {
-    initialEntries: [route]
-  });
-
   render(
     <TestQueryProvider>
       <AuthProvider>
-        <RouterProvider router={router} />
+        <MemoryRouter initialEntries={[route]}>
+          <Routes>
+            <Route path="/admin" element={<AppShell />}>
+              <Route path="login" element={<AdminLoginPage />} />
+              <Route path="engines/connect" element={<><h1>Connection route</h1><input aria-label="Engine URL" /></>} />
+              <Route path="*" element={<ConsoleNotFoundPage />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
       </AuthProvider>
     </TestQueryProvider>
   );
@@ -342,6 +384,39 @@ function installLocalStorageStub() {
       clear: () => storage.clear()
     }
   });
+}
+
+function installDialogStub() {
+  const dialogPrototype = HTMLDialogElement.prototype as unknown as Record<string, unknown>;
+  const previousShowModal = dialogPrototype.showModal;
+  const previousClose = dialogPrototype.close;
+
+  Object.defineProperty(dialogPrototype, "showModal", {
+    configurable: true,
+    value: vi.fn(function (this: HTMLDialogElement) {
+      this.setAttribute("open", "");
+    })
+  });
+  Object.defineProperty(dialogPrototype, "close", {
+    configurable: true,
+    value: vi.fn(function (this: HTMLDialogElement) {
+      this.removeAttribute("open");
+      this.dispatchEvent(new Event("close"));
+    })
+  });
+
+  return () => {
+    if (previousShowModal === undefined) {
+      delete dialogPrototype.showModal;
+    } else {
+      Object.defineProperty(dialogPrototype, "showModal", { configurable: true, value: previousShowModal });
+    }
+    if (previousClose === undefined) {
+      delete dialogPrototype.close;
+    } else {
+      Object.defineProperty(dialogPrototype, "close", { configurable: true, value: previousClose });
+    }
+  };
 }
 
 function TestQueryProvider({ children }: { children: ReactNode }) {

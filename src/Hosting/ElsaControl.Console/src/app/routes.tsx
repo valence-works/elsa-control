@@ -1,4 +1,4 @@
-import { createBrowserRouter, Link, Navigate, Outlet, useSearchParams } from "react-router-dom";
+import { createBrowserRouter, Link, Navigate, Outlet, useParams, useSearchParams } from "react-router-dom";
 import { AppShell } from "@/app/AppShell";
 import { OverviewPage } from "@/app/OverviewPage";
 import { RequestStateView } from "@/components/states/RequestStateViews";
@@ -15,7 +15,6 @@ import {
   DeploymentCredentialStoreEditPage,
   DeploymentEnginePage,
   DeploymentEngineEditPage,
-  DeploymentEngineRegisterPage,
   DeploymentCredentialsPage,
   DeploymentEnvironmentCreatePage,
   DeploymentEnvironmentEditPage,
@@ -41,6 +40,7 @@ import { ConsoleLogsPage } from "@/features/console/ConsoleLogsPage";
 import { ManagedElsaInstancesPage } from "@/features/managed-elsa/ManagedElsaInstancesPage";
 import { ManagedElsaOperationsPage } from "@/features/managed-elsa/ManagedElsaOperationsPage";
 import { OrganizationBillingPage } from "@/features/billing/OrganizationBillingPage";
+import { ConnectEnginePage } from "@/features/deployments/ConnectEnginePage";
 
 function PlaceholderPage({ title }: { title: string }) {
   return (
@@ -49,6 +49,11 @@ function PlaceholderPage({ title }: { title: string }) {
       <p className="text-sm text-muted-foreground">This operational view is ready for feature implementation.</p>
     </section>
   );
+}
+
+function LegacyEngineConnectionRoute() {
+  const { environmentId = "" } = useParams();
+  return <Navigate to={"/admin/engines/connect?environmentId=" + encodeURIComponent(environmentId)} replace />;
 }
 
 export function AdminLoginPage() {
@@ -123,6 +128,7 @@ export const router = createBrowserRouter([
         children: [
           { path: "overview", element: <OverviewPage /> },
           { path: "billing", element: <OrganizationBillingPage /> },
+          { path: "engines/connect", element: <ConnectEnginePage /> },
           { path: "sources", element: <SourcesPage /> },
           { path: "sources/new", element: <NewSourcePage /> },
           { path: "sources/:sourceId", element: <SourceDetailsPage /> },
@@ -150,7 +156,7 @@ export const router = createBrowserRouter([
           { path: "deployments/applications/:applicationId/environments/:environmentId", element: <DeploymentEnvironmentPage /> },
           { path: "deployments/applications/:applicationId/environments/:environmentId/edit", element: <DeploymentEnvironmentEditPage /> },
           { path: "deployments/applications/:applicationId/environments/:environmentId/revisions/new", element: <DeploymentRevisionCreatePage /> },
-          { path: "deployments/applications/:applicationId/environments/:environmentId/engines/new", element: <DeploymentEngineRegisterPage /> },
+          { path: "deployments/applications/:applicationId/environments/:environmentId/engines/new", element: <LegacyEngineConnectionRoute /> },
           { path: "deployments/applications/:applicationId/environments/:environmentId/engines/:engineId", element: <DeploymentEnginePage /> },
           { path: "deployments/applications/:applicationId/environments/:environmentId/engines/:engineId/edit", element: <DeploymentEngineEditPage /> },
           { path: "deployments/tiers", element: <DeploymentTiersPage /> },
