@@ -44,7 +44,7 @@ Before writing code:
 
 If any claim mutation fails (assignment, claim comment, label removal, Status update, or Agent State update), do not start work. Revert the claim completely if you can. Otherwise comment `blocked: claim failed - <reason>`, add `blocked`, move project Status to `Blocked`, set Agent State to `Not Ready`, unassign if possible, and stop. Only an operator may requeue that issue by removing `blocked` and restoring `ready-for-agent`, Status `Ready`, and Agent State `Agent Ready`.
 
-If an issue is assigned but has no active `claim:` comment and still shows `ready-for-agent`, Status `Ready`, and Agent State `Agent Ready` for 15 minutes, treat it as an orphaned claim: unassign it, then continue the claim flow from step 1.
+If an issue is assigned but has no active `claim:` comment and still shows `ready-for-agent`, Status `Ready`, and Agent State `Agent Ready` for 15 minutes, treat it as an orphaned claim from an interrupted session: unassign it, then continue the claim flow from step 1. This recovery applies only when no session completed the failure path above.
 
 ## While in flight
 
