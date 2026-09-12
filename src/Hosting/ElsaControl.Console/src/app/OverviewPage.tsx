@@ -35,7 +35,8 @@ export function OverviewPage() {
   const cockpit = useQuery({
     queryKey: queryKeys.deploymentCockpit(selectedWorkspaceId ?? ""),
     queryFn: () => getDeploymentCockpit(selectedWorkspaceId as string),
-    enabled: Boolean(selectedWorkspaceId)
+    enabled: Boolean(selectedWorkspaceId),
+    refetchInterval: 5_000
   });
   const permissions = useQuery({
     queryKey: queryKeys.deploymentPermissions(selectedWorkspaceId ?? ""),
@@ -66,8 +67,9 @@ export function OverviewPage() {
     return <ApertureLoading />;
   }
 
-  if (cockpit.isError) {
-    if (cockpit.error instanceof ApiError && cockpit.error.kind === "Forbidden") {
+  const authorizationFailed = cockpit.error instanceof ApiError && ["Unauthorized", "Forbidden"].includes(cockpit.error.kind);
+  if (cockpit.isError && (!data || authorizationFailed)) {
+    if (authorizationFailed) {
       return <RequestStateView state="unauthorized" title="Workspace access required" description="You do not have permission to view this workspace control plane." />;
     }
 

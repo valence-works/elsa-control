@@ -1,7 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OverviewPage } from "@/app/OverviewPage";
@@ -74,6 +73,28 @@ describe("OverviewPage", () => {
     expect(screen.queryByText("Healthy", { exact: true })).not.toBeInTheDocument();
   });
 
+  it("keeps cached inventory visible when a background refresh fails", async () => {
+    const { queryClient, fetchMock } = renderOverview({ backgroundCockpitResponse: Response.json({ title: "Temporary outage" }, { status: 503 }) });
+
+    expect(await screen.findByRole("heading", { name: "Claims Dev" })).toBeInTheDocument();
+    await queryClient.invalidateQueries({ queryKey: ["deployments", workspaceId, "cockpit"] });
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/deployments/cockpit"))).toHaveLength(2));
+
+    expect(await screen.findByRole("heading", { name: "Claims Dev" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Overview unavailable" })).not.toBeInTheDocument();
+  });
+
+  it("removes cached inventory after a background authorization loss", async () => {
+    const { queryClient, fetchMock } = renderOverview({ backgroundCockpitResponse: Response.json({ title: "Forbidden" }, { status: 403 }) });
+
+    expect(await screen.findByRole("heading", { name: "Claims Dev" })).toBeInTheDocument();
+    await queryClient.invalidateQueries({ queryKey: ["deployments", workspaceId, "cockpit"] });
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/deployments/cockpit"))).toHaveLength(2));
+
+    expect(await screen.findByRole("heading", { name: "Workspace access required" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Claims Dev" })).not.toBeInTheDocument();
+  });
+
   it("keeps an empty fleet focused on connecting the first engine", async () => {
     renderOverview({ cockpit: { ...deploymentCockpitFixture(), applications: [], engines: [] } });
 
@@ -100,12 +121,14 @@ describe("OverviewPage", () => {
 type RenderOptions = {
   cockpit?: DeploymentCockpit;
   cockpitResponse?: Response;
+  backgroundCockpitResponse?: Response;
   permissions?: string[];
 };
 
 function renderOverview(options: RenderOptions = {}) {
   installLocalStorageStub();
-  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+  let cockpitRequests = 0;
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = input instanceof Request ? input.url : input.toString();
     if (url.endsWith("/api/auth/session")) {
       return Response.json({ loginEnabled: true, authenticated: true, displayName: "Test User", email: "test@example.com", loginPath: "/api/auth/login", logoutPath: "/api/auth/logout" });
@@ -114,12 +137,18 @@ function renderOverview(options: RenderOptions = {}) {
     if (url.endsWith(`/api/workspaces/${workspaceId}/deployments/permissions`)) {
       return Response.json({ permissions: options.permissions ?? ["deployments.read", "deployments.setup.manage"] });
     }
-    if (url.endsWith(`/api/workspaces/${workspaceId}/deployments/cockpit`)) return options.cockpitResponse ?? Response.json(options.cockpit ?? deploymentCockpitFixture());
+    if (url.endsWith(`/api/workspaces/${workspaceId}/deployments/cockpit`)) {
+      cockpitRequests += 1;
+      if (cockpitRequests > 1 && options.backgroundCockpitResponse) return options.backgroundCockpitResponse;
+      return options.cockpitResponse ?? Response.json(options.cockpit ?? deploymentCockpitFixture());
+    }
     return Response.json({ title: "Not found" }, { status: 404 });
-  }));
+  });
+  vi.stubGlobal("fetch", fetchMock);
 
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(
-    <TestQueryProvider>
+    <QueryClientProvider client={queryClient}>
       <MemoryRouter>
         <AuthProvider>
           <WorkspaceContextProvider>
@@ -127,8 +156,9 @@ function renderOverview(options: RenderOptions = {}) {
           </WorkspaceContextProvider>
         </AuthProvider>
       </MemoryRouter>
-    </TestQueryProvider>
+    </QueryClientProvider>
   );
+  return { queryClient, fetchMock };
 }
 
 function workspaceContextFixture() {
@@ -214,11 +244,6 @@ function engine(id: string, environmentId: string, name: string, health: Deploym
 function installLocalStorageStub() {
   const storage = new Map<string, string>();
   Object.defineProperty(window, "localStorage", { configurable: true, value: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key), clear: () => storage.clear() } });
-}
-
-function TestQueryProvider({ children }: { children: ReactNode }) {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
 }
 
 const organizationId = "00000000-0000-0000-0000-000000000001";
