@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -281,7 +282,7 @@ if [ -e "$state/api-started" ]; then printf '%s\\n200' {health_json!r}; else pri
 """)
         (self.temp / "curl").chmod(0o755)
 
-    def run_probe(self, phase: str = "candidate", start_api: bool = True, api_exits: bool = False, **overrides: str) -> tuple[subprocess.CompletedProcess[str], Path]:
+    def run_probe(self, phase: str = "candidate", start_api: bool = True, api_exits: bool = False, exit_grace: str = "0", **overrides: str) -> tuple[subprocess.CompletedProcess[str], Path]:
         barrier = self.temp / "rehearsal"
         shutil.rmtree(barrier, ignore_errors=True)
         barrier.mkdir()
@@ -294,7 +295,7 @@ if [ -e "$state/api-started" ]; then printf '%s\\n200' {health_json!r}; else pri
             "EXPECTED_IMAGE_ID": CANDIDATE_SOURCE if phase == "candidate" else PREVIOUS_SOURCE, "EXPECTED_BUILD_NUMBER": "96" if phase == "candidate" else "89",
             "EXPECTED_MIGRATION_IDS": " ".join(MIGRATIONS), "CATALOG_MI_PRINCIPAL_NAME": "api_identity",
             "API_START_TIMEOUT_SECONDS": "30", "HEALTH_SAMPLE_SECONDS": "1", "REHEARSAL_SQL_RESUME_DELAY_SECONDS": "0",
-            "REHEARSAL_API_STOP_WAIT_SECONDS": "10",
+            "REHEARSAL_API_STOP_WAIT_SECONDS": "10", "REHEARSAL_API_EXIT_GRACE_SECONDS": exit_grace,
         })
         # Simulate the API container: when the barrier appears, "start" (curl answers) and mark the clone migrated.
         watcher = subprocess.Popen(["bash", "-c", f"""
@@ -369,6 +370,14 @@ fi"""])
         self.assertEqual((1, "baseline-migration-query-failed"), (completed.returncode, value["code"]))
         self.assertFalse((barrier / "start-api").exists())
         self.assertEqual("4", (self.temp / "state" / "calls").read_text())
+
+    def test_probe_stays_alive_for_the_grace_period_after_the_api_records_its_exit(self) -> None:
+        self.make_fakes(migrated=False)
+        completed, barrier = self.run_probe(exit_grace="1")
+        finished = time.time()
+        self.assertEqual(0, completed.returncode)
+        marker = (barrier / "api-exited").stat().st_mtime
+        self.assertGreaterEqual(finished - marker, 1.0)
 
     def test_baseline_mismatch_never_starts_the_api(self) -> None:
         self.make_fakes(migrated=True)  # clone already at 53 while the candidate phase expects 45
