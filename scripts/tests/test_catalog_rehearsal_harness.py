@@ -120,6 +120,7 @@ class RendererTests(HarnessCase):
         cases = {
             "tag image": {"CANDIDATE_IMAGE": f"{REGISTRY}/elsa-control/api:latest"},
             "foreign probe registry": {"PROBE_IMAGE": f"other.azurecr.io/proof@sha256:{'3' * 64}"},
+            "short catalog server name": {"CATALOG_SERVER": "controlsql"},
             "bad source": {"CANDIDATE_SOURCE_ID": "not-a-sha"},
             "bad build": {"CANDIDATE_BUILD_NUMBER": "0"},
             "wrong group prefix": {"REHEARSAL_GROUP_NAME": "catalog-rehearsal-previous-96"},
@@ -208,7 +209,7 @@ class ParserAndGateTests(HarnessCase):
 class ProbeTests(HarnessCase):
     """Runs probe.py against fake sqlcmd/curl. The fake sqlcmd answers by matching fixed fragments of the query."""
 
-    def make_fakes(self, migrated: bool, health_json: str = '{"status":"ok","buildNumber":"96","imageId":"%s"}' % CANDIDATE_SOURCE, sqlcmd_fail_after: int | None = None, answer_overrides: dict[str, str] | None = None) -> None:
+    def make_fakes(self, migrated: bool, health_json: str = '{"status":"ok","buildNumber":"96","imageId":"%s"}' % CANDIDATE_SOURCE, sqlcmd_fail_after: int | None = None, answer_overrides: dict[str, str] | None = None, resume_failures: int = 0, other_failures: int = 0) -> None:
         state = self.temp / "state"
         state.mkdir(exist_ok=True)
         (state / "migrated").write_text("1" if migrated else "0")
@@ -238,12 +239,18 @@ class ProbeTests(HarnessCase):
         answers.update(answer_overrides or {})
         (state / "answers.json").write_text(json.dumps(answers))
         (state / "sqlcmd-fail-after").write_text(str(sqlcmd_fail_after if sqlcmd_fail_after is not None else -1))
+        (state / "resume-failures").write_text(str(resume_failures))
+        (state / "other-failures").write_text(str(other_failures))
         (self.temp / "sqlcmd").write_text(f"""#!/usr/bin/env python3
 import json, sys, pathlib
 state = pathlib.Path({str(state)!r})
 calls = state / "calls"; n = int(calls.read_text()) + 1 if calls.exists() else 1; calls.write_text(str(n))
 fail_after = int((state / "sqlcmd-fail-after").read_text())
 if fail_after >= 0 and n > fail_after: sys.exit(1)
+if n <= int((state / "resume-failures").read_text()):
+    print("mssql: login error: Database is not currently available. Please retry the connection later. (Error 40613)", file=sys.stderr); sys.exit(1)
+if n <= int((state / "other-failures").read_text()):
+    print("mssql: login error: Login failed for user. (Error 18456)", file=sys.stderr); sys.exit(1)
 args = sys.argv[1:]
 if "--authentication-method" not in args or "ActiveDirectoryManagedIdentity" not in args or "-U" not in args: sys.exit(3)
 query = args[args.index("-Q") + 1]
@@ -283,7 +290,8 @@ if [ -e "$state/api-started" ]; then printf '%s\\n200' {health_json!r}; else pri
             "REHEARSAL_BARRIER_PATH": str(barrier), "SQLCMD_PATH": str(self.temp / "sqlcmd"), "CURL_PATH": str(self.temp / "curl"),
             "EXPECTED_IMAGE_ID": CANDIDATE_SOURCE if phase == "candidate" else PREVIOUS_SOURCE, "EXPECTED_BUILD_NUMBER": "96" if phase == "candidate" else "89",
             "EXPECTED_MIGRATION_IDS": " ".join(MIGRATIONS), "CATALOG_MI_PRINCIPAL_NAME": "api_identity",
-            "API_START_TIMEOUT_SECONDS": "30", "HEALTH_SAMPLE_SECONDS": "1",
+            "API_START_TIMEOUT_SECONDS": "30", "HEALTH_SAMPLE_SECONDS": "1", "REHEARSAL_SQL_RESUME_DELAY_SECONDS": "0",
+            "REHEARSAL_API_STOP_WAIT_SECONDS": "10",
         })
         # Simulate the API container: when the barrier appears, "start" (curl answers) and mark the clone migrated.
         watcher = subprocess.Popen(["bash", "-c", f"""
@@ -291,10 +299,17 @@ for i in $(seq 1 400); do
   if [ -e {str(barrier / 'start-api')!r} ]; then
     if [ {str(api_exits).lower()!r} = true ]; then printf 134 > {str(barrier / 'api-exited')!r}; exit 0; fi
     if [ {str(start_api).lower()!r} = true ]; then printf 1 > {str(state / 'migrated')!r}; touch {str(state / 'api-started')!r}; fi
-    exit 0
+    break
   fi
   sleep 0.05
-done"""])
+done
+# Simulate the API wrapper stopping on stop-api: it records its exit code only after a short shutdown.
+if [ -e {str(state / 'api-started')!r} ]; then
+  for i in $(seq 1 400); do
+    if [ -e {str(barrier / 'stop-api')!r} ]; then sleep 0.3; printf 0 > {str(barrier / 'api-exited')!r}; exit 0; fi
+    sleep 0.05
+  done
+fi"""])
         try:
             completed = subprocess.run(["python3", str(HARNESS / "probe.py")], capture_output=True, text=True, env={**os.environ, **env}, check=False, timeout=120)
         finally:
@@ -316,9 +331,33 @@ done"""])
         self.assertEqual((CANDIDATE_SOURCE, "96", "catalog-rehearsal-candidate-96"), (value["bakedImageId"], value["buildNumber"], value["rehearsalGroupName"]))
         self.assertTrue(all(value[k] for k in ("integrityChecks", "indexChecks", "permissionChecks", "principalChecks", "commonCountsEqual", "recoveryObservationAppendOnlyTriggerValid", "recoveryRequestColumnsValid", "attemptedStepColumnValid", "providerAssignmentSchemaPresent")))
         self.assertTrue((barrier / "start-api").exists() and (barrier / "stop-api").exists())
+        # The probe stays alive until the API wrapper records its own exit code (ACI kills the rest of the group).
+        self.assertEqual("0", (barrier / "api-exited").read_text())
         (self.temp / "out").write_text(completed.stdout)
         self.assertEqual(0, python("parse-result.py", str(self.temp / "out"), "candidate").returncode)
         self.assertNotIn("controlsql", completed.stdout)
+
+    def test_a_paused_serverless_clone_is_retried_while_it_resumes(self) -> None:
+        self.make_fakes(migrated=False, resume_failures=2)
+        completed, _ = self.run_probe()
+        value = self.result(completed)
+        self.assertEqual((0, "passed"), (completed.returncode, value["result"]))
+        self.assertEqual(45, len(value["baselineMigrationIds"]))
+
+    def test_other_sql_failures_are_not_retried(self) -> None:
+        self.make_fakes(migrated=False, other_failures=1)
+        completed, barrier = self.run_probe()
+        value = self.result(completed)
+        self.assertEqual((1, "baseline-migration-query-failed"), (completed.returncode, value["code"]))
+        self.assertFalse((barrier / "start-api").exists())
+
+    def test_a_clone_that_never_resumes_fails_after_bounded_attempts(self) -> None:
+        self.make_fakes(migrated=False, resume_failures=100)
+        completed, barrier = self.run_probe()
+        value = self.result(completed)
+        self.assertEqual((1, "baseline-migration-query-failed"), (completed.returncode, value["code"]))
+        self.assertFalse((barrier / "start-api").exists())
+        self.assertEqual("4", (self.temp / "state" / "calls").read_text())
 
     def test_baseline_mismatch_never_starts_the_api(self) -> None:
         self.make_fakes(migrated=True)  # clone already at 53 while the candidate phase expects 45
