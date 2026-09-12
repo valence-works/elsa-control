@@ -104,6 +104,15 @@ public sealed class SyncRunReconciliationHostedServiceTests : IAsyncLifetime
         Assert.Equal(firstCompletedAt, secondRun.CompletedAt);
     }
 
+    [Fact]
+    public async Task A_reconciliation_failure_does_not_keep_the_api_from_starting()
+    {
+        await using var unavailable = new ServiceCollection().BuildServiceProvider();
+        var service = new SyncRunReconciliationHostedService(unavailable, TimeProvider.System, NullLogger<SyncRunReconciliationHostedService>.Instance);
+
+        await service.StartAsync(CancellationToken.None);
+    }
+
     private SyncRunReconciliationHostedService CreateHostedService() =>
         new(_services, TimeProvider.System, NullLogger<SyncRunReconciliationHostedService>.Instance);
 

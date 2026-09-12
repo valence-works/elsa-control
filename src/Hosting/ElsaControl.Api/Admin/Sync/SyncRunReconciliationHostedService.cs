@@ -22,12 +22,20 @@ public sealed class SyncRunReconciliationHostedService(IServiceProvider services
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         var processStartedAt = timeProvider.GetUtcNow();
-        await using var scope = services.CreateAsyncScope();
-        var reconciledCount = await scope.ServiceProvider.GetRequiredService<PackageSyncService>()
-            .ReconcileInterruptedRunsAsync(processStartedAt, cancellationToken);
+        try
+        {
+            await using var scope = services.CreateAsyncScope();
+            var reconciledCount = await scope.ServiceProvider.GetRequiredService<PackageSyncService>()
+                .ReconcileInterruptedRunsAsync(processStartedAt, cancellationToken);
 
-        if (reconciledCount > 0)
-            logger.LogWarning("Reconciled {Count} package sync run(s) left running by a previous process.", reconciledCount);
+            if (reconciledCount > 0)
+                logger.LogWarning("Reconciled {Count} package sync run(s) left running by a previous process.", reconciledCount);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Housekeeping must not keep the API from starting; the stale rows are reconciled on the next start.
+            logger.LogWarning("Could not reconcile interrupted package sync runs ({ExceptionType}).", exception.GetType().Name);
+        }
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
