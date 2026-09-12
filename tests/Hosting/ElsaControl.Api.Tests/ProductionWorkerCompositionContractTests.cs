@@ -86,6 +86,42 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
     }
 
     [Fact]
+    public void Worker_composition_binds_the_runtime_handoff_to_Control_and_into_the_provider_scope()
+    {
+        // A runner-section value must never retarget the Control trust anchor the runtime redeems at.
+        var settings = new Dictionary<string, string?>(_settings)
+        {
+            ["Deployment:AzureProvider:Runner:ManagedHandoff:ControlBaseUrl"] = "https://elsewhere.example.test",
+            ["Deployment:AzureProvider:Runner:ManagedHandoff:ControlContinuationUrl"] = "https://elsewhere.example.test/admin/runtimes",
+            ["Deployment:AzureProvider:Runner:ManagedHandoff:RuntimeMaximumLifetime"] = "01:00:00",
+            ["Deployment:AzureProvider:Runner:ManagedHandoff:RuntimePermissions:0"] = "read:*"
+        };
+        Assert.True(Configuration(settings).GetSection(ElsaInstancePlanAuthorityOptions.ConfigurationSection)
+            .Get<ElsaInstancePlanAuthorityOptions>()!.TryGetOrigin(out var origin));
+
+        var authority = AzureProviderRunnerComposition.AddRunner(new ServiceCollection(), Configuration(settings));
+
+        var handoff = authority!.Options.ManagedHandoff;
+        Assert.NotNull(handoff);
+        Assert.Equal(origin, handoff.ControlBaseUrl);
+        Assert.Equal(origin + "/admin/runtimes", handoff.ControlContinuationUrl);
+        Assert.Equal(TimeSpan.FromHours(8), handoff.RuntimeMaximumLifetime);
+        Assert.Equal(["*"], handoff.RuntimePermissions);
+        var withoutHandoff = authority.Options with { ManagedHandoff = null };
+        Assert.NotEqual(withoutHandoff.ComputeProviderScopeFingerprint(authority.Scope), authority.ProviderScopeFingerprint);
+    }
+
+    [Fact]
+    public void Worker_composition_without_a_Control_origin_composes_no_runtime_handoff()
+    {
+        var settings = new Dictionary<string, string?>(_settings) { ["ControlPlane:Origin"] = null };
+
+        var authority = AzureProviderRunnerComposition.AddRunner(new ServiceCollection(), Configuration(settings));
+
+        Assert.Null(authority!.Options.ManagedHandoff);
+    }
+
+    [Fact]
     public async Task Worker_triplet_passes_the_startup_validator_with_a_succeeding_preflight()
     {
         var configuration = Configuration(_settings);

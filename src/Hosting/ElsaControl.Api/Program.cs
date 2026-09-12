@@ -239,7 +239,10 @@ builder.Services.AddSingleton<ManagedElsaHandoffKeyRing>(services =>
 builder.Services.AddScoped<EfCoreManagedElsaHandoffStore>();
 builder.Services.AddScoped<IManagedElsaHandoffReplayStore, EfCoreManagedElsaHandoffReplayStore>();
 builder.Services.AddScoped<IManagedElsaInstanceCatalog, EfCoreManagedElsaInstanceCatalog>();
-builder.Services.AddScoped<IManagedElsaInstanceIdentityStore, EfCoreManagedElsaInstanceIdentityStore>();
+builder.Services.AddScoped<EfCoreManagedElsaInstanceIdentityStore>();
+builder.Services.AddScoped<IManagedElsaInstanceIdentityStore>(services => new ControlHandoffGatedIdentityStore(
+    services.GetRequiredService<EfCoreManagedElsaInstanceIdentityStore>(),
+    services.GetRequiredService<IOptions<ManagedElsaHandoffOptions>>()));
 builder.Services.AddScoped<IManagedElsaHandoffAuthorizer, ManagedElsaInstanceHandoffAuthorizer>();
 builder.Services.AddScoped<IManagedElsaHandoffAuditSink, EfCoreManagedElsaHandoffAuditSink>();
 builder.Services.AddScoped<ManagedElsaHandoffIssuer>();

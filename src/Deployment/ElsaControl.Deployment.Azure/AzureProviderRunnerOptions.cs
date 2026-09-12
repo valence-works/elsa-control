@@ -60,6 +60,54 @@ public sealed record AzureProviderTargetScope(
 }
 
 /// <summary>
+/// Control-owned inputs for the runtime's managed Elsa handoff (<c>managed-elsa-handoff-v1</c>): the Control
+/// origin the runtime redeems codes at, the console route it returns the browser to, the runtime-session ceiling
+/// Control enforces and the runtime grant of a handed-off operator. The host derives them from Control's own
+/// configuration. They are bound into the provider scope fingerprint, so an admitted operation cannot deploy a
+/// different Control trust anchor, session ceiling or grant than the one it was admitted under.
+/// </summary>
+public sealed record AzureManagedHandoffOptions(
+    string ControlBaseUrl,
+    string ControlContinuationUrl,
+    TimeSpan RuntimeMaximumLifetime,
+    IReadOnlyList<string> RuntimePermissions)
+{
+    /// <summary>The runtime rejects a longer session ceiling at startup.</summary>
+    public static readonly TimeSpan MaximumRuntimeLifetime = TimeSpan.FromHours(8);
+
+    /// <summary>Exact <c>hh:mm:ss</c> value the runtime binds its session ceiling from.</summary>
+    public string RuntimeMaximumLifetimeValue =>
+        RuntimeMaximumLifetime.ToString("c", System.Globalization.CultureInfo.InvariantCulture);
+
+    public void Validate()
+    {
+        if (!TryGetHttpsUri(ControlBaseUrl, out var controlBase) || controlBase.AbsolutePath != "/" ||
+            !string.Equals(ControlBaseUrl, controlBase.GetLeftPart(UriPartial.Authority), StringComparison.Ordinal))
+            throw new ArgumentException("The managed handoff Control base URL must be a canonical HTTPS origin without a path.", nameof(ControlBaseUrl));
+        if (!TryGetHttpsUri(ControlContinuationUrl, out var continuation) || continuation.AbsolutePath == "/" ||
+            !string.Equals(continuation.GetLeftPart(UriPartial.Authority), ControlBaseUrl, StringComparison.Ordinal))
+            throw new ArgumentException("The managed handoff continuation must be a route on the Control origin without a query or fragment.", nameof(ControlContinuationUrl));
+        if (RuntimeMaximumLifetime <= TimeSpan.Zero || RuntimeMaximumLifetime > MaximumRuntimeLifetime ||
+            RuntimeMaximumLifetime.Ticks % TimeSpan.TicksPerSecond != 0)
+            throw new ArgumentOutOfRangeException(nameof(RuntimeMaximumLifetime), "The runtime session ceiling must be whole seconds, positive and at most eight hours.");
+        if (RuntimePermissions is not { Count: > 0 and <= 32 } ||
+            RuntimePermissions.Distinct(StringComparer.Ordinal).Count() != RuntimePermissions.Count ||
+            RuntimePermissions.Any(permission => string.IsNullOrWhiteSpace(permission) || permission.Length > 128 ||
+                                                 permission.Any(character => char.IsControl(character) || char.IsWhiteSpace(character) || character is ',' or '"')))
+            throw new ArgumentException("The runtime grant must be one to 32 distinct, safe permission names.", nameof(RuntimePermissions));
+    }
+
+    private static bool TryGetHttpsUri(string? value, out Uri uri)
+    {
+        uri = null!;
+        return !string.IsNullOrWhiteSpace(value) && value.Length <= 2048 && !value.Any(char.IsControl) &&
+               Uri.TryCreate(value, UriKind.Absolute, out uri!) &&
+               uri.Scheme == Uri.UriSchemeHttps && uri.HostNameType == UriHostNameType.Dns &&
+               string.IsNullOrEmpty(uri.UserInfo) && string.IsNullOrEmpty(uri.Query) && string.IsNullOrEmpty(uri.Fragment);
+    }
+}
+
+/// <summary>
 /// Hardened local tooling and policy options for the checked-in Azure Bicep lifecycle.
 /// Construction does not enable the provider; hosts must validate these options explicitly.
 /// </summary>
@@ -99,6 +147,11 @@ public sealed record AzureProviderRunnerOptions
     /// <summary>Full resource ID of the exact registry-scoped RBAC administrator assignment.</summary>
     public string? RegistryRoleAdministrationAssignmentId { get; init; }
     public string Owner { get; init; } = "elsa-control";
+    /// <summary>
+    /// Control's managed handoff inputs. Absent, a release that declares the handoff cannot be deployed:
+    /// the runner fails closed rather than creating a runtime Control would advertise as openable.
+    /// </summary>
+    public AzureManagedHandoffOptions? ManagedHandoff { get; init; }
     public TimeSpan CommandTimeout { get; init; } = TimeSpan.FromMinutes(15);
     public int MaximumOutputCharacters { get; init; } = 1_048_576;
     public int ObservationAttempts { get; init; } = 60;
@@ -143,6 +196,19 @@ public sealed record AzureProviderRunnerOptions
             writer.WriteString("roleDefinitionId", RegistryDeploymentMetadataRoleDefinitionId!.ToLowerInvariant());
             writer.WriteString("roleAssignmentId", RegistryDeploymentMetadataRoleAssignmentId!.ToLowerInvariant());
             writer.WriteString("roleAdministrationAssignmentId", RegistryRoleAdministrationAssignmentId!.ToLowerInvariant());
+            writer.WriteEndObject();
+        }
+        // Written only when configured, so a scope without the handoff keeps its prior fingerprint.
+        if (ManagedHandoff is { } handoff)
+        {
+            writer.WriteStartObject("managedHandoff");
+            writer.WriteString("controlBaseUrl", handoff.ControlBaseUrl);
+            writer.WriteString("controlContinuationUrl", handoff.ControlContinuationUrl);
+            writer.WriteString("runtimeMaximumLifetime", handoff.RuntimeMaximumLifetimeValue);
+            writer.WriteStartArray("runtimePermissions");
+            foreach (var permission in handoff.RuntimePermissions)
+                writer.WriteStringValue(permission);
+            writer.WriteEndArray();
             writer.WriteEndObject();
         }
         writer.WriteEndObject();
@@ -209,6 +275,12 @@ public sealed record AzureProviderRunnerOptions
             RegistryDeploymentMetadataRoleAssignmentId,
             RegistryRoleAdministrationAssignmentId);
         _ = NormalizeReleaseFeedServiceIndex();
+        if (ManagedHandoff is not null)
+        {
+            if (DisposableProofMode)
+                throw new ArgumentException("The disposable template does not configure the managed handoff.", nameof(ManagedHandoff));
+            ManagedHandoff.Validate();
+        }
         if (CommandTimeout <= TimeSpan.Zero || CommandTimeout > TimeSpan.FromHours(1))
             throw new ArgumentOutOfRangeException(nameof(CommandTimeout), "The command timeout must be positive and no longer than one hour.");
         if (MaximumOutputCharacters is < 1024 or > 16_777_216)

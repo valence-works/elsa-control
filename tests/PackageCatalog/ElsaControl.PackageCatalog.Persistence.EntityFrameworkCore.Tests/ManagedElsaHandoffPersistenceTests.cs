@@ -342,6 +342,52 @@ public sealed class ManagedElsaHandoffPersistenceTests
     }
 
     [Fact]
+    public async Task Openable_identity_requires_the_current_deployment_to_carry_the_managed_handoff()
+    {
+        await using var connection = NewConnection();
+        await connection.OpenAsync();
+        await using var db = CreateContext(connection);
+        await db.Database.MigrateAsync();
+        var instance = await SeedInstanceAsync(db);
+        instance.ObservedLifecycle = ElsaObservedLifecycle.Ready;
+        instance.Health = ElsaInstanceHealth.Healthy;
+        await db.SaveChangesAsync();
+        var identities = new EfCoreManagedElsaInstanceIdentityStore(db);
+        var catalog = new EfCoreManagedElsaInstanceCatalog(db);
+        Assert.True((await identities.BindAsync(instance.OrganizationId, instance.WorkspaceId, instance.Id,
+            "https://managed.example.test", expectedBindingVersion: null, DateTimeOffset.UtcNow)).Succeeded);
+
+        // Healthy and bound, but deployed without the runtime handoff: listing, issuing and redeeming all refuse it.
+        Assert.NotNull(await identities.FindAsync(instance.OrganizationId, instance.Id));
+        Assert.Null(await identities.FindOpenableAsync(instance.OrganizationId, instance.Id));
+        Assert.Empty(await identities.FindOpenableManyAsync(instance.OrganizationId, [instance.Id]));
+        Assert.Null(Assert.Single(await catalog.ListAsync(instance.WorkspaceId)).CallbackUri);
+
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE ElsaInstances SET CurrentDeploymentManagedHandoff = {true} WHERE Id = {instance.Id}");
+
+        Assert.NotNull(await identities.FindOpenableAsync(instance.OrganizationId, instance.Id));
+        Assert.Single(await identities.FindOpenableManyAsync(instance.OrganizationId, [instance.Id]));
+        Assert.Equal("https://managed.example.test/managed-elsa/handoff/callback",
+            Assert.Single(await catalog.ListAsync(instance.WorkspaceId)).CallbackUri?.AbsoluteUri);
+    }
+
+    [Fact]
+    public async Task A_managed_handoff_cannot_be_persisted_without_a_current_deployment_endpoint()
+    {
+        await using var connection = NewConnection();
+        await connection.OpenAsync();
+        await using var db = CreateContext(connection);
+        await db.Database.MigrateAsync();
+        var instance = await SeedInstanceAsync(db);
+
+        instance.CurrentDeploymentManagedHandoff = true;
+        instance.CurrentDeploymentEndpointUri = null;
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => db.SaveChangesAsync());
+    }
+
+    [Fact]
     public async Task Identity_store_does_not_create_binding_while_instance_is_deleting()
     {
         await using var connection = NewConnection();

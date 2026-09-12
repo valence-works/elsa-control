@@ -29,6 +29,8 @@ internal sealed class AzureProviderOperationEntity
     public int? CapacityMaxReplicas { get; set; }
     public int? CapacityCpuMillicores { get; set; }
     public int? CapacityMemoryMiB { get; set; }
+    // Whether the deployment configures the runtime handoff; rows retained before it existed never did.
+    public bool ManagedHandoff { get; set; }
     public string ElsaVersion { get; set; } = "";
     public string ReleaseLine { get; set; } = "";
     public string Topology { get; set; } = "";

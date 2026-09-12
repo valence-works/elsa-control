@@ -48,8 +48,10 @@ public sealed class AzureElsaInstanceProviderTests
         });
     }
 
-    [Fact]
-    public async Task Healthy_observation_projects_only_safe_provider_neutral_deployment_identity()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Healthy_observation_projects_only_safe_provider_neutral_deployment_identity(bool managedHandoff)
     {
         var workspaceId = Guid.Parse("11111111-1111-1111-1111-111111111111");
         var instanceId = Guid.Parse("22222222-2222-2222-2222-222222222222");
@@ -60,7 +62,8 @@ public sealed class AzureElsaInstanceProviderTests
             Status = AzureProviderOperationStatus.Succeeded,
             AttemptNumber = 2,
             Health = AzureProviderHealth.Healthy,
-            Endpoint = "https://runtime.example.test/"
+            Endpoint = "https://runtime.example.test/",
+            ManagedHandoff = managedHandoff
         };
         var provider = new AzureElsaInstanceProvider(
             new CapturingOperationService(operation),
@@ -84,6 +87,7 @@ public sealed class AzureElsaInstanceProviderTests
         Assert.Equal(operation.OperationIdentity, observation.CurrentDeploymentReference?.DeploymentId);
         Assert.Equal("attempt-2", observation.CurrentDeploymentReference?.RevisionId);
         Assert.Equal("https://runtime.example.test", observation.CurrentDeploymentReference?.EndpointUri);
+        Assert.Equal(managedHandoff, observation.CurrentDeploymentReference?.ManagedHandoff);
     }
 
     [Theory]

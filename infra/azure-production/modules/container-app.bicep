@@ -116,6 +116,30 @@ param cpu string
 @description('Consumption memory for the workload container.')
 param memory string
 
+@description('Enable the runtime managed Elsa handoff (managed-elsa-handoff-v1).')
+param managedHandoffEnabled bool
+
+@description('Lowercase canonical Elsa instance ID the handoff is bound to.')
+param managedHandoffInstanceId string = ''
+
+@description('Exact handoff audience of the instance.')
+param managedHandoffAudience string = ''
+
+@description('Elsa Control origin that redeems handoff codes.')
+param managedHandoffControlBaseUrl string = ''
+
+@description('Elsa Control console route the runtime returns the browser to.')
+param managedHandoffControlContinuationUrl string = ''
+
+@description('Exact public handoff callback on this app\'s own origin.')
+param managedHandoffCallbackUri string = ''
+
+@description('Upper bound of a runtime session (hh:mm:ss).')
+param managedHandoffRuntimeMaximumLifetime string = ''
+
+@description('Runtime permissions granted to a handed-off Control operator.')
+param managedHandoffRuntimePermissions array = []
+
 @description('Tags applied to the app.')
 param tags object = {}
 
@@ -244,6 +268,73 @@ var featureEnvironment = [
     secretRef: adminCredentialRef
   }
 ]
+// The runtime maps its handoff endpoints only from a complete, valid set, and its startup validation
+// rejects a partial one. It also keeps handoff state and sessions in process, so the handoff holds only on one
+// always-running replica. Enabling it with a missing input, more replicas or scale-to-zero fails the deployment here (no
+// 'invalid' entry below) instead of producing a revision that cannot start or rejects its own callbacks. A
+// disabled handoff is stated explicitly so an image default can never switch it on.
+var managedHandoffInputsComplete = !empty(managedHandoffInstanceId) && !empty(managedHandoffAudience) && !empty(managedHandoffControlBaseUrl) && !empty(managedHandoffControlContinuationUrl) && !empty(managedHandoffCallbackUri) && !empty(managedHandoffRuntimeMaximumLifetime) && !empty(managedHandoffRuntimePermissions)
+var managedHandoffMode = !managedHandoffEnabled ? 'disabled' : managedHandoffInputsComplete && minReplicas == 1 && maxReplicas == 1 ? 'enabled' : 'invalid'
+var managedHandoffPermissionEnvironment = [for (permission, index) in managedHandoffRuntimePermissions: {
+  name: 'ManagedElsa__Handoff__RuntimePermissions__${index}'
+  value: permission
+}]
+var managedHandoffEnvironment = {
+  disabled: [
+    {
+      name: 'ManagedElsa__Handoff__Enabled'
+      value: 'false'
+    }
+  ]
+  enabled: concat([
+    {
+      name: 'ManagedElsa__Handoff__Enabled'
+      value: 'true'
+    }
+    {
+      name: 'ManagedElsa__Handoff__ControlBaseUrl'
+      value: managedHandoffControlBaseUrl
+    }
+    {
+      name: 'ManagedElsa__Handoff__ControlContinuationUrl'
+      value: managedHandoffControlContinuationUrl
+    }
+    {
+      name: 'ManagedElsa__Handoff__InstanceId'
+      value: managedHandoffInstanceId
+    }
+    {
+      name: 'ManagedElsa__Handoff__Audience'
+      value: managedHandoffAudience
+    }
+    {
+      name: 'ManagedElsa__Handoff__CallbackUri'
+      value: managedHandoffCallbackUri
+    }
+    {
+      name: 'ManagedElsa__Handoff__UpstreamAuthenticationScheme'
+      value: 'Jwt-or-ApiKey'
+    }
+    {
+      name: 'ManagedElsa__Handoff__SuccessPath'
+      value: '/'
+    }
+    {
+      name: 'ManagedElsa__Handoff__StateLifetime'
+      value: '00:05:00'
+    }
+    {
+      name: 'ManagedElsa__Handoff__RuntimeMaximumLifetime'
+      value: managedHandoffRuntimeMaximumLifetime
+    }
+    {
+      // Container Apps ingress terminates TLS; the handoff cookies and host authentication must observe
+      // the external HTTPS scheme. Ingress is the only route into this dedicated environment.
+      name: 'ASPNETCORE_FORWARDEDHEADERS_ENABLED'
+      value: 'true'
+    }
+  ], managedHandoffPermissionEnvironment)
+}[managedHandoffMode]
 
 resource app 'Microsoft.App/containerApps@2023-05-01' = {
   name: name
@@ -333,7 +424,7 @@ resource app 'Microsoft.App/containerApps@2023-05-01' = {
               name: 'ELSA_TOPOLOGY'
               value: topology
             }
-          ], concat(nuplaneFeedEnvironment, featureEnvironment))
+          ], concat(nuplaneFeedEnvironment, featureEnvironment, managedHandoffEnvironment))
           probes: [
             {
               type: 'Startup'

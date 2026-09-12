@@ -229,6 +229,10 @@ public sealed record ElsaInstanceProviderObservation
     internal string ComputeFingerprint()
     {
         var canonical = $"{Kind}\n{ObservedLifecycle}\n{HealthGate}\n{OperationId:D}\n{AttemptNumber}\n{CorrelationId}\n{RetryEvidence?.Reference}\n{RetryEvidence?.Digest}\n{HasCurrentDeploymentProjection}\n{CurrentDeploymentReference?.DeploymentId}\n{CurrentDeploymentReference?.RevisionId}\n{CurrentDeploymentReference?.EndpointUri}\n";
+        // Observations recorded before the managed handoff existed never carried it; appending the line only
+        // when set keeps their evidence fingerprints stable while distinguishing a configured deployment.
+        if (CurrentDeploymentReference?.ManagedHandoff == true)
+            canonical += "managed-handoff\n";
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 }

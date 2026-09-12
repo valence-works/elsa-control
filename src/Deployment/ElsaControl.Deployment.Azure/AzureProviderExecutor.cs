@@ -1382,6 +1382,7 @@ public sealed class AzureProviderExecutor
             !string.Equals(plan.SqlWorkflowPackageVersion, operation.SqlWorkflowPackageVersion, StringComparison.Ordinal) ||
             !string.Equals(plan.SqlQuartzPackageVersion, operation.SqlQuartzPackageVersion, StringComparison.Ordinal) ||
             plan.Capacity != operation.Capacity ||
+            plan.ManagedHandoff != operation.ManagedHandoff ||
             !SecretReferencesMatch(plan.SecretReferences, operation.SecretReferences))
             throw new ArgumentException("The provider plan does not match the operation request.", nameof(request));
 

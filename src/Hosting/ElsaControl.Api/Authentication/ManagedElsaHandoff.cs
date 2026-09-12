@@ -25,6 +25,20 @@ public static class ManagedElsaHandoffDefaults
     public static readonly TimeSpan MaximumLifetime = TimeSpan.FromMinutes(5);
     public static readonly TimeSpan DefaultRuntimeSessionMaximumLifetime = TimeSpan.FromHours(8);
     public static readonly TimeSpan MaximumRuntimeSessionLifetime = TimeSpan.FromHours(8);
+
+    /// <summary>
+    /// Console page a managed runtime returns the browser to with <c>instanceId</c>, <c>state</c> and
+    /// <c>codeChallenge</c> (or <c>handoff_status</c>); it issues the code and posts it to the runtime callback.
+    /// </summary>
+    public const string ConsoleContinuationPath = "/admin/runtimes";
+
+    /// <summary>
+    /// Runtime permissions a Control operator holds in a handed-off managed runtime session. The product defines
+    /// no operator-to-runtime role mapping yet, so this is the only documented grant: the runtime image's handoff
+    /// configuration example, equal to its bootstrap administrator role. It is administrator-equivalent inside the
+    /// instance's dedicated runtime; narrow it here once a mapping is defined.
+    /// </summary>
+    public static readonly IReadOnlyList<string> RuntimeOperatorPermissions = ["*"];
 }
 
 public sealed class ManagedElsaHandoffOptions

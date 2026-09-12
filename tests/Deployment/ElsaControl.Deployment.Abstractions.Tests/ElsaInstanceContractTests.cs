@@ -661,6 +661,14 @@ public sealed class ElsaInstanceContractTests
     }
 
     [Fact]
+    public void Managed_handoff_belongs_to_a_verified_deployment_origin()
+    {
+        Assert.False(new ElsaCurrentDeploymentReference("deployment_01", endpointUri: "https://runtime.example.test").ManagedHandoff);
+        Assert.True(new ElsaCurrentDeploymentReference("deployment_01", endpointUri: "https://runtime.example.test", managedHandoff: true).ManagedHandoff);
+        Assert.Throws<ArgumentException>(() => new ElsaCurrentDeploymentReference("deployment_01", managedHandoff: true));
+    }
+
+    [Fact]
     public void Managed_deployment_endpoint_is_a_canonical_typed_https_origin()
     {
         var deployment = new ElsaCurrentDeploymentReference(

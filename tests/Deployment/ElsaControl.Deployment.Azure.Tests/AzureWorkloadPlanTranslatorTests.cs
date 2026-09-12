@@ -283,6 +283,45 @@ public sealed class AzureWorkloadPlanTranslatorTests
         Assert.Equal("capacity:runtime", finding.Scope);
     }
 
+    [Theory]
+    [InlineData(true, 1, 1, true)]
+    [InlineData(false, 1, 1, false)]
+    [InlineData(true, 1, 3, false)]
+    [InlineData(true, 0, 1, false)]
+    public void Configures_the_managed_handoff_only_for_a_declaring_release_on_one_always_running_replica(
+        bool declared, int minReplicas, int maxReplicas, bool expected)
+    {
+        var result = Translate(WithManagedHandoffCapability(declared, WithCapacity(minReplicas, maxReplicas, 500, 1024)));
+
+        Assert.True(result.IsAccepted);
+        Assert.Equal(expected, result.Plan!.ManagedHandoff);
+    }
+
+    [Fact]
+    public void Managed_handoff_requires_the_exact_versioned_capability()
+    {
+        var plan = CreatePlan();
+        var lookalike = plan with
+        {
+            Topology = plan.Topology with
+            {
+                Components = [plan.Topology.Components[0] with { Capabilities = ["Managed-Elsa-Handoff-V1", "managed-elsa-handoff-v2"] }]
+            }
+        };
+
+        Assert.False(Translate(lookalike).Plan!.ManagedHandoff);
+    }
+
+    [Fact]
+    public void Managed_handoff_is_bound_into_the_provider_plan_fingerprint()
+    {
+        var plain = Translate(CreatePlan());
+        var handoff = Translate(WithManagedHandoffCapability(true, CreatePlan()));
+
+        Assert.NotEqual(plain.Plan!.Fingerprint, handoff.Plan!.Fingerprint);
+        Assert.Equal(handoff.Plan.Fingerprint, Translate(WithManagedHandoffCapability(true, CreatePlan())).Plan!.Fingerprint);
+    }
+
     [Fact]
     public void Rejects_a_plan_without_capacity_for_the_workload_component()
     {
@@ -718,6 +757,26 @@ public sealed class AzureWorkloadPlanTranslatorTests
             Capacity = plan.Capacity with
             {
                 Components = [new("runtime", minReplicas, maxReplicas, cpuMillicores, memoryMiB, ephemeralStorageMiB)]
+            }
+        };
+    }
+
+    private static ResolvedElsaApplicationPlan WithManagedHandoffCapability(bool declared, ResolvedElsaApplicationPlan plan)
+    {
+        var component = plan.Topology.Components[0];
+        return plan with
+        {
+            Topology = plan.Topology with
+            {
+                Components =
+                [
+                    component with
+                    {
+                        Capabilities = declared
+                            ? [.. component.Capabilities, ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV1]
+                            : component.Capabilities
+                    }
+                ]
             }
         };
     }

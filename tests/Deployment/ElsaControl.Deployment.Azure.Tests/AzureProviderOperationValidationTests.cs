@@ -420,6 +420,33 @@ public sealed class AzureProviderOperationValidationTests
     }
 
     [Fact]
+    public void Managed_handoff_is_bound_into_the_request_hash_and_identity_binds_it_through_the_plan_fingerprint()
+    {
+        var request = PersistedInstanceRequest() with { Capacity = new AzureWorkloadCapacity(1, 1, 500, 1024) };
+        var handoff = request with { ManagedHandoff = true };
+
+        Assert.NotEqual(AzureProviderOperationValidation.ComputeRequestHash(request), AzureProviderOperationValidation.ComputeRequestHash(handoff));
+        Assert.Equal(AzureProviderOperationValidation.ComputeRequestHash(handoff), AzureProviderOperationValidation.ComputeRequestHash(handoff with { }));
+        Assert.Equal(AzureProviderOperationValidation.ComputeOperationIdentity(request), AzureProviderOperationValidation.ComputeOperationIdentity(handoff));
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData(1, 3)]
+    [InlineData(0, 1)]
+    public void Persisted_managed_handoff_without_one_always_running_replica_is_invalid(int? minReplicas, int? maxReplicas)
+    {
+        var request = PersistedInstanceRequest() with
+        {
+            ManagedHandoff = true,
+            Capacity = minReplicas is { } min && maxReplicas is { } max ? new AzureWorkloadCapacity(min, max, 500, 1024) : null
+        };
+
+        Assert.Contains("managedHandoff.replicasUnsupported", AzureProviderOperationValidation.Validate(request));
+        Assert.Throws<ArgumentException>(() => AzureProviderOperationValidation.ComputeRequestHash(request));
+    }
+
+    [Fact]
     public void Operations_persisted_before_capacity_keep_their_request_hash_and_identity()
     {
         var request = PersistedInstanceRequest();
