@@ -44,6 +44,12 @@ The release inputs are decided on #311: the Elsa preview feed on feedz.io, the A
 already holds AcrPull on the governed registry), the observed blob redirect host, and the keyless
 signing identity of the `elsa-production-image` build workflow on `main` with the GitHub Actions
 issuer. Tighten the signer to version tags before any release is marked Supported.
+Release verification reads the governed runtime registry `valenceruntimeimages` (resource group
+`rg-valence-runtime`) as the API identity. That identity's `AcrPull` assignment on that registry
+(assignment name `eae590a3-2208-4b1a-9500-7ac9feaeff41`, created 2026-09-05 for the #270
+verification work) is a live prerequisite that is not declared in this repository's infrastructure;
+the `elsa-control` module only grants pull on the Control registry to the image-pull identity.
+Without it, admission fails closed. Re-check it before enabling verification.
 `SqlBootstrapIp` is the static NAT address of the #310 egress deployment in Belgium Central; the
 API site routes all outbound traffic through it. No parameter is pending.
 A pending parameter is filled only by editing the parameter file in a reviewed PR. The renderer has
