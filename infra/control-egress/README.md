@@ -10,7 +10,7 @@ with regional VNet integration and routes all outbound traffic through it.
 
 Nothing inbound changes. No customer compute is created and the customer workload subscription is not
 touched. Regional VNet integration is available on Basic and above, and NAT gateway integration has no
-tier requirement beyond VNet integration (Microsoft docs, checked 2026-09-08), so the B1 plan stays.
+tier requirement beyond VNet integration (Microsoft docs, checked 2026-09-08); the Basic plan (B2 since #314, for in-process provisioning memory) supports it.
 Two documented caveats apply while outbound internet routing is on: traffic to Azure Storage accounts
 must use a service or private endpoint (the API has no direct Storage dependency; the platform content
 share and image pull keep their default public configuration route, which is left unchanged), and
