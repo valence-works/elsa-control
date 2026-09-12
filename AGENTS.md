@@ -22,6 +22,10 @@
 - codex/021-identity-tenancy: Added C# on .NET 10. + ASP.NET Core authentication/authorization, ASP.NET Core cookies, JWT bearer validation, EF Core, existing `ElsaControl.PackageCatalog.*` account/workspace services, xUnit and its built-in assertions for tests.
 
 <!-- MANUAL ADDITIONS START -->
+## Issue Bus
+
+Agents pick, claim, and finish leaf work using the Issue Bus v1 protocol in `docs/product/issue-bus.md`. Do not wait for an operator to assign a Task.
+
 ## Workroom model fallback
 
 - Root agent: use Sol 5.6 High. If unavailable, use the closest available Sol/Terra model at high reasoning, then the closest available frontier model; report the exact fallback.
