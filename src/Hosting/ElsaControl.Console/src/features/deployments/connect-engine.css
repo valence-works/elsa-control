@@ -122,7 +122,7 @@
   overflow: hidden;
   border: 1px solid hsl(var(--border));
   border-top: 2px solid hsl(var(--foreground));
-  border-radius: 0 0 4px 4px;
+  border-radius: 0 0 var(--radius-ui) var(--radius-ui);
   background: hsl(var(--surface));
   box-shadow: none;
 }
@@ -165,7 +165,7 @@
   margin-top: 0.4375rem;
   padding: 0.625rem 0.6875rem;
   border: 1px solid hsl(var(--border));
-  border-radius: 3px;
+  border-radius: var(--radius-ui);
   background: hsl(var(--background));
   color: hsl(var(--foreground));
   box-shadow: none;
@@ -260,7 +260,7 @@
   min-height: 2rem;
   height: auto;
   padding: 0.4375rem 0.6875rem;
-  border-radius: 3px;
+  border-radius: var(--radius-ui);
   box-shadow: none;
   font-size: 0.6875rem;
   transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
@@ -440,7 +440,7 @@
 .connect-engine-page .connect-engine-secondary {
   min-height: 2.375rem;
   height: auto;
-  border-radius: 3px;
+  border-radius: var(--radius-ui);
   box-shadow: none;
   font-size: 0.75rem;
 }
@@ -542,7 +542,7 @@
   min-height: 1.5rem;
   margin-top: 1.25rem;
   border-color: hsl(var(--primary) / 0.2);
-  border-radius: 3px;
+  border-radius: var(--radius-ui);
   background: hsl(var(--primary) / 0.1);
   color: var(--connect-link);
   font-size: 0.6875rem;

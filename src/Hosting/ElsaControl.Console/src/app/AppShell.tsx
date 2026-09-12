@@ -25,7 +25,7 @@ function AppShellLayout() {
   const location = useLocation();
   const { selectedWorkspace } = useWorkspaceContext();
   const currentPage = consoleNavigation.flatMap(section => section.items)
-    .filter(item => location.pathname === item.to || (!item.end && location.pathname.startsWith(item.to + "/")))
+    .filter(item => location.pathname === item.to || location.pathname.startsWith(item.to + "/"))
     .sort((a, b) => b.to.length - a.to.length)[0]?.label ?? (location.pathname.includes("engines/connect") ? "Connect engine" : "Console");
   const isWorkspacePage = location.pathname === "/admin/overview";
   const isConnectionPage = location.pathname === "/admin/engines/connect";

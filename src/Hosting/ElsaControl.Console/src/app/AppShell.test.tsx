@@ -189,6 +189,12 @@ describe("AppShell", () => {
     expect(screen.getByRole("link", { name: "Open overview" })).toHaveAttribute("href", "/admin/overview");
     expect(screen.queryByText("Unexpected Application Error!")).not.toBeInTheDocument();
   });
+
+  it("uses the longest parent destination for nested breadcrumbs", async () => {
+    renderAppShellRoute("/admin/deployments/new");
+
+    await waitFor(() => expect(document.querySelector(".console-breadcrumb")).toHaveTextContent("Acme InsuranceDeployments"));
+  });
 });
 
 function renderAppShell(

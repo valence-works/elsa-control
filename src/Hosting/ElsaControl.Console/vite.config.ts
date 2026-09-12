@@ -1,6 +1,6 @@
 import path from "node:path";
 import react from "@vitejs/plugin-react";
-import { defineConfig, loadEnv } from "vite";
+import { build, defineConfig, loadEnv } from "vite";
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, __dirname, "");
@@ -26,10 +26,23 @@ export default defineConfig(({ mode }) => {
   const devIdentityEmail = env.CATALOG_DEV_IDENTITY_EMAIL ?? "local-admin@example.test";
   const devIdentityName = env.CATALOG_DEV_IDENTITY_NAME ?? "Local Admin";
   const devAdminApiKey = env.CATALOG_DEV_ADMIN_API_KEY ?? "local-dev-key";
+  let themeBootstrap: Promise<string> | undefined;
 
   return {
     base: "/admin/",
-    plugins: [react()],
+    plugins: [react(), {
+      name: "console-theme-bootstrap",
+      transformIndexHtml: {
+        order: "pre",
+        async handler() {
+          themeBootstrap ??= buildThemeBootstrap();
+          return [{ tag: "script", attrs: { id: "console-theme-bootstrap" }, children: await themeBootstrap, injectTo: "head-prepend" }];
+        }
+      },
+      handleHotUpdate(context) {
+        if (context.file.includes("/lib/theme/")) themeBootstrap = undefined;
+      }
+    }],
     resolve: {
       alias: {
         "@": path.resolve(__dirname, "./src")
@@ -64,6 +77,22 @@ export default defineConfig(({ mode }) => {
     }
   };
 });
+
+async function buildThemeBootstrap(): Promise<string> {
+  const result = await build({
+    configFile: false,
+    logLevel: "silent",
+    build: {
+      write: false,
+      minify: true,
+      lib: { entry: path.resolve(__dirname, "src/lib/theme/bootstrap.ts"), name: "ElsaThemeBootstrap", formats: ["iife"] }
+    }
+  });
+  const outputs = Array.isArray(result) ? result : [result];
+  const chunks = outputs.flatMap(output => "output" in output ? output.output : []).filter(output => output.type === "chunk");
+  if (chunks.length !== 1) throw new Error("Expected one standalone theme bootstrap script.");
+  return chunks[0].code;
+}
 
 function requestTargetsAdminConsoleLogs(url: string | undefined) {
   if (!url)

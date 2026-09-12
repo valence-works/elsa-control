@@ -17,11 +17,21 @@ describe("design preview fixtures", () => {
   it.each([
     [billingPath, { organizationId: "organization-preview", subscription: null }],
     [`${workspacePath}/instances?page=1&pageSize=100`, { items: [], hasMore: false, totalCount: 0 }],
-    [`${workspacePath}/instances/onboarding-options`, { releases: [], previewReleases: [] }]
+    [`${workspacePath}/instances/onboarding-options`, { releases: [], previewReleases: [] }],
+    ["/api/admin/sync-runs", []],
+    [`${workspacePath}/runtime-configurations`, []],
+    ["/api/admin/console-logs/recent?limit=150", { items: [], dropped: [] }],
+    ["/api/admin/console-logs/sources", []]
   ])("supports the initial request for %s", async (path, expected) => {
     const response = await window.fetch(previewUrl(path));
     expect(response.ok).toBe(true);
     expect(await response.json()).toMatchObject(expected);
+  });
+
+  it("keeps live console log negotiation inside the preview", async () => {
+    const response = await window.fetch(previewUrl("/api/admin/console-logs/hub/negotiate?negotiateVersion=1"), { method: "POST" });
+    expect(response.status).toBe(501);
+    expect(await response.json()).toEqual({ title: "Live console streaming is unavailable in the sample-data preview." });
   });
 
   it.each(["checkout", "portal"])("keeps billing %s inside the preview", async (action) => {
@@ -48,5 +58,24 @@ describe("design preview fixtures", () => {
       expect(stores.items).toContainEqual(expect.objectContaining({ id: credential.secretStoreId, type: credential.secretStoreType, status: "Active" }));
       expect(credential.hasProtectedSecret).toBe(credential.secretStoreType === "LocalEncryptedDatabase");
     }
+  });
+
+  it("starts a new preview environment as unavailable with no desired revision", async () => {
+    const applicationResponse = await window.fetch(previewUrl(`${workspacePath}/deployments/applications`), {
+      method: "POST",
+      body: JSON.stringify({ name: "Preview application" })
+    });
+    const application = await applicationResponse.json();
+    await window.fetch(previewUrl(`${workspacePath}/deployments/applications/${application.id}/environments`), {
+      method: "POST",
+      body: JSON.stringify({ name: "Preview environment", tier: "Dev", tierId: "tier-development" })
+    });
+
+    const environment = designPreviewFixtures.cockpit.applications.find((item) => item.id === application.id)?.environments[0];
+    expect(environment).toMatchObject({
+      health: "Unreachable",
+      deploymentStatus: "Blocked",
+      desiredRevision: { id: "", revision: 0, commit: "", label: "No desired revision" }
+    });
   });
 });

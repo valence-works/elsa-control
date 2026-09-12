@@ -116,7 +116,7 @@
   gap: 18px;
   min-height: 40px;
   border: 1px solid var(--ap-accent);
-  border-radius: 4px;
+  border-radius: var(--radius-ui);
   background: var(--ap-accent);
   color: var(--ap-accent-ink);
   font-size: 12px;
@@ -359,7 +359,7 @@
   min-width: 0;
   border: 1px solid var(--ap-line);
   border-top: 2px solid var(--ap-ink);
-  border-radius: 0 0 4px 4px;
+  border-radius: 0 0 var(--radius-ui) var(--radius-ui);
   background: var(--ap-surface);
   padding: 21px 22px;
 }

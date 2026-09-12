@@ -6,6 +6,9 @@ import type { ManagedElsaInstanceList, ManagedElsaOnboardingOptions } from "@/fe
 import type { WorkspaceArtifact, WorkspaceArtifactListResponse } from "@/features/artifacts/artifactModels";
 import type { CatalogPackage } from "@/features/packages/packageModels";
 import type { PackageSource } from "@/features/sources/sourceModels";
+import type { ConsoleLogSource, RecentConsoleLogsResult } from "@/features/console/consoleLogModels";
+import type { RuntimeConfiguration } from "@/features/runtime-builder/runtimeBuilderModels";
+import type { SyncRun } from "@/features/sync-runs/syncRunModels";
 import type {
   CreatedDeploymentApplication,
   CreatedDeploymentEnvironment,
@@ -21,6 +24,7 @@ import type {
   WorkspaceDeploymentTier,
   WorkspaceDeploymentTiersResponse
 } from "@/features/deployments/deploymentModels";
+import { deploymentTierCapabilities } from "@/features/deployments/deploymentModels";
 
 const workspaceId = "workspace-preview";
 const organizationId = "organization-preview";
@@ -159,6 +163,13 @@ export const designPreviewFixtures = {
       updatedAt: "2026-09-11T20:04:00Z"
     }
   ] satisfies PackageSource[],
+  syncRuns: [] satisfies SyncRun[],
+  runtimeConfigurations: [] satisfies RuntimeConfiguration[],
+  consoleLogs: {
+    items: [],
+    dropped: []
+  } satisfies RecentConsoleLogsResult,
+  consoleLogSources: [] satisfies ConsoleLogSource[],
   artifacts: {
     items: [
       createArtifact({
@@ -210,8 +221,8 @@ export const designPreviewFixtures = {
   } satisfies WorkspaceDeploymentPermissionsResponse,
   tiers: {
     tiers: [
-      createTier("tier-development", "Development", "Fast iteration with validation warnings allowed.", 0, ["deployment.promotion.source"]),
-      createTier("tier-production", "Production", "Protected production environment with observability and rollback.", 1, ["deployment.promotion.target", "deployment.confirmation.required", "deployment.rollback.enabled", "deployment.production-like", "deployment.observability.required"])
+      createTier("tier-development", "Development", "Fast iteration with validation warnings allowed.", 0, [deploymentTierCapabilities.promotionSource]),
+      createTier("tier-production", "Production", "Protected production environment with observability and rollback.", 1, [deploymentTierCapabilities.promotionTarget, deploymentTierCapabilities.confirmationRequired, deploymentTierCapabilities.rollbackEnabled, deploymentTierCapabilities.productionLike, deploymentTierCapabilities.observabilityRequired])
     ]
   } satisfies WorkspaceDeploymentTiersResponse,
   credentials: {
@@ -258,6 +269,11 @@ async function previewResponse(method: string, path: string, request: Request) {
   if (method === "GET" && path === "/api/admin/application") return jsonResponse(designPreviewFixtures.applicationInfo);
   if (method === "GET" && path === "/api/admin/packages") return jsonResponse(designPreviewFixtures.packages);
   if (method === "GET" && path === "/api/admin/sources") return jsonResponse(designPreviewFixtures.sources);
+  if (method === "GET" && path === "/api/admin/sync-runs") return jsonResponse(designPreviewFixtures.syncRuns);
+  if (method === "GET" && path === `/api/workspaces/${workspaceId}/runtime-configurations`) return jsonResponse(designPreviewFixtures.runtimeConfigurations);
+  if (method === "GET" && path === "/api/admin/console-logs/recent") return jsonResponse(designPreviewFixtures.consoleLogs);
+  if (method === "GET" && path === "/api/admin/console-logs/sources") return jsonResponse(designPreviewFixtures.consoleLogSources);
+  if (method === "POST" && path === "/api/admin/console-logs/hub/negotiate") return jsonResponse({ title: "Live console streaming is unavailable in the sample-data preview." }, 501);
   if (method === "GET" && path === `/api/organizations/${organizationId}/billing/`) return jsonResponse({
     organizationId,
     subscription: null,
@@ -399,10 +415,10 @@ async function previewResponse(method: string, path: string, request: Request) {
       tierName: body?.tierId ? designPreviewFixtures.tiers.tiers.find((tier) => tier.id === body.tierId)?.name : "Development",
       tierStatus: "Active",
       tierCapabilities: body?.tierId ? designPreviewFixtures.tiers.tiers.find((tier) => tier.id === body.tierId)?.capabilities ?? [] : [],
-      health: "Healthy",
-      desiredRevision: { id: `revision-${environmentId}`, revision: 0, commit: "preview", label: "No revision yet", authoredAt: "2026-09-12T06:45:00Z" },
+      health: "Unreachable",
+      desiredRevision: { id: "", revision: 0, commit: "", label: "No desired revision", authoredAt: "2026-09-12T06:45:00Z" },
       deployedRevision: null,
-      deploymentStatus: "Succeeded",
+      deploymentStatus: "Blocked",
       driftStatus: "Unknown",
       engineIds: []
     };
@@ -532,15 +548,15 @@ function createCockpit(): DeploymentCockpit {
       name: "Checkout platform",
       workspaceName: "Operations workspace",
       environments: [
-        { id: "env-northstar-dev", name: "Development", tier: "Dev" as const, tierId: "tier-development", tierName: "Development", tierStatus: "Active" as const, tierCapabilities: ["deployment.promotion.source"], health: "Healthy" as const, desiredRevision: devRevision, deployedRevision: 18, deploymentStatus: "Succeeded" as const, driftStatus: "InSync" as const, engineIds: ["engine-northstar-dev"] },
-        { id: "env-northstar-prod", name: "Production", tier: "Production" as const, tierId: "tier-production", tierName: "Production", tierStatus: "Active" as const, tierCapabilities: ["deployment.promotion.target", "deployment.confirmation.required", "deployment.rollback.enabled", "deployment.production-like", "deployment.observability.required"], health: "Degraded" as const, desiredRevision: devRevision, deployedRevision: 16, deploymentStatus: "Blocked" as const, driftStatus: "DriftDetected" as const, engineIds: ["engine-northstar-prod"] }
+        { id: "env-northstar-dev", name: "Development", tier: "Dev" as const, tierId: "tier-development", tierName: "Development", tierStatus: "Active" as const, tierCapabilities: [deploymentTierCapabilities.promotionSource], health: "Healthy" as const, desiredRevision: devRevision, deployedRevision: 18, deploymentStatus: "Succeeded" as const, driftStatus: "InSync" as const, engineIds: ["engine-northstar-dev"] },
+        { id: "env-northstar-prod", name: "Production", tier: "Production" as const, tierId: "tier-production", tierName: "Production", tierStatus: "Active" as const, tierCapabilities: [deploymentTierCapabilities.promotionTarget, deploymentTierCapabilities.confirmationRequired, deploymentTierCapabilities.rollbackEnabled, deploymentTierCapabilities.productionLike, deploymentTierCapabilities.observabilityRequired], health: "Degraded" as const, desiredRevision: devRevision, deployedRevision: 16, deploymentStatus: "Blocked" as const, driftStatus: "DriftDetected" as const, engineIds: ["engine-northstar-prod"] }
       ]
     },
     {
       id: "app-automations",
       name: "Operations automations",
       workspaceName: "Operations workspace",
-      environments: [{ id: "env-automations-stage", name: "Staging", tier: "Stage" as const, tierId: "tier-development", tierName: "Development", tierStatus: "Active" as const, tierCapabilities: ["deployment.promotion.source"], health: "Healthy" as const, desiredRevision: productionRevision, deployedRevision: 12, deploymentStatus: "Succeeded" as const, driftStatus: "InSync" as const, engineIds: ["engine-automations-stage"] }]
+      environments: [{ id: "env-automations-stage", name: "Staging", tier: "Stage" as const, tierId: "tier-development", tierName: "Development", tierStatus: "Active" as const, tierCapabilities: [deploymentTierCapabilities.promotionSource], health: "Healthy" as const, desiredRevision: productionRevision, deployedRevision: 12, deploymentStatus: "Succeeded" as const, driftStatus: "InSync" as const, engineIds: ["engine-automations-stage"] }]
     }
   ];
   const engines = [

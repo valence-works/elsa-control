@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectEnginePage } from "@/features/deployments/ConnectEnginePage";
 import type { DeploymentCockpit, WorkflowEngineRegistration, WorkspaceDeploymentCredentialReference } from "@/features/deployments/deploymentModels";
 import { ApiError } from "@/lib/api/httpClient";
+import { queryKeys } from "@/lib/query/queryClient";
 import {
   createDeploymentApplication,
   createDeploymentCredentialReference,
@@ -217,6 +218,24 @@ describe("ConnectEnginePage", () => {
     expect(screen.queryByLabelText("Engine URL")).not.toBeInTheDocument();
   });
 
+  it("keeps local placement validation recoverable after deployment data changes", async () => {
+    const { queryClient } = renderPageWithQueryClient();
+
+    await screen.findByRole("heading", { name: "Connect an engine" });
+    await userEvent.type(screen.getByLabelText("Engine name"), "stale-placement-engine");
+    await userEvent.type(screen.getByLabelText("Engine URL"), "https://stale-placement.example.com");
+    queryClient.setQueryData(queryKeys.deploymentCockpit("workspace-1"), { ...cockpitFixture, applications: [], engines: [] });
+
+    await waitFor(() => expect(screen.getByText("Choose an application and environment")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Connect engine →" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Choose an application and environment before connecting the engine.");
+    expect(alert).toHaveTextContent("Your entries are still here. Correct them and try again.");
+    expect(alert).not.toHaveTextContent("The request may have reached the server.");
+    expect(registerDeploymentEngine).not.toHaveBeenCalled();
+  });
+
   it("creates a local API-key reference when the new credential mode is selected", async () => {
     vi.mocked(getDeploymentSecretStores).mockResolvedValue({ items: [] });
     renderPage();
@@ -419,14 +438,19 @@ describe("ConnectEnginePage", () => {
 });
 
 function renderPage(initialEntry = "/admin/engines/connect") {
+  return renderPageWithQueryClient(initialEntry).view;
+}
+
+function renderPageWithQueryClient(initialEntry = "/admin/engines/connect") {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const view = render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={[initialEntry]}>
         <ConnectEnginePage />
       </MemoryRouter>
     </QueryClientProvider>
   );
+  return { queryClient, view };
 }
 
 function createDelayedCredentials() {

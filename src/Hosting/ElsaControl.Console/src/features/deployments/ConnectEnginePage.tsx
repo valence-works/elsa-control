@@ -79,6 +79,13 @@ type PlacementApplication = {
   environments: Array<{ id: string; name: string }>;
 };
 
+class ConnectEngineValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConnectEngineValidationError";
+  }
+}
+
 const defaultValues: ConnectEngineValues = {
   engineName: "",
   baseUrl: "",
@@ -578,10 +585,10 @@ function flattenPlacements(cockpit: DeploymentCockpit): PlacementTarget[] {
 async function ensurePlacement({ workspaceId, cockpit, values, activeTiers, existingPlacement, onPlacementProgress, onMutationConfirmed }: { workspaceId: string; cockpit: DeploymentCockpit; values: ConnectEngineValues; activeTiers: WorkspaceDeploymentTier[]; existingPlacement: InProgressPlacement | null; onPlacementProgress: (placement: InProgressPlacement | null) => void; onMutationConfirmed: () => Promise<void> }): Promise<SavedPlacement> {
   if (values.placementMode === "existing") {
     const placement = flattenPlacements(cockpit).find((item) => item.environmentId === values.environmentId);
-    if (!placement) throw new Error("Choose an application and environment before connecting the engine.");
+    if (!placement) throw new ConnectEngineValidationError("Choose an application and environment before connecting the engine.");
     return { ...placement, createdApplication: false, createdEnvironment: false };
   }
-  if (!values.applicationName.trim() || !values.environmentName.trim()) throw new Error("Enter an application and environment name.");
+  if (!values.applicationName.trim() || !values.environmentName.trim()) throw new ConnectEngineValidationError("Enter an application and environment name.");
   if (existingPlacement?.environmentId) {
     return {
       applicationId: existingPlacement.applicationId,
@@ -632,7 +639,7 @@ async function ensureCredentialReference({ workspaceId, values, activeSecretStor
   let store = activeSecretStores.find((item) => item.id === values.credentialStoreId);
   const name = values.credentialName.trim() || `${values.engineName.trim()} API key`;
   const secretValue = values.credentialSecret.trim();
-  if (!secretValue) throw new Error("Enter the API key.");
+  if (!secretValue) throw new ConnectEngineValidationError("Enter the API key.");
   if (!store && existingSecretStoreId) {
     store = { id: existingSecretStoreId, name: "Protected credential store", type: "LocalEncryptedDatabase" } as WorkspaceDeploymentSecretStore;
   }
@@ -685,6 +692,7 @@ function enginePath(placement: PlacementTarget, engineId: string) {
 }
 
 function isAmbiguousWriteError(error: unknown) {
+  if (error instanceof ConnectEngineValidationError) return false;
   return !(error instanceof ApiError) || error.kind === "Unavailable" || error.kind === "Unexpected";
 }
 
