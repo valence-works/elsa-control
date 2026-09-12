@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectEnginePage } from "@/features/deployments/ConnectEnginePage";
-import type { DeploymentCockpit, WorkflowEngineRegistration } from "@/features/deployments/deploymentModels";
+import type { DeploymentCockpit, WorkflowEngineRegistration, WorkspaceDeploymentCredentialReference } from "@/features/deployments/deploymentModels";
 import { ApiError } from "@/lib/api/httpClient";
 import {
   createDeploymentApplication,
@@ -165,6 +165,40 @@ describe("ConnectEnginePage", () => {
       })
     );
     expect(await screen.findByRole("heading", { name: "Your engine is connected." })).toBeInTheDocument();
+  });
+
+  it("selects a saved credential after delayed credentials load", async () => {
+    const delayedCredentials = createDelayedCredentials();
+    vi.mocked(getDeploymentCredentialReferences).mockReturnValueOnce(delayedCredentials.promise);
+
+    renderPage();
+
+    await screen.findByRole("heading", { name: "Connect an engine" });
+    await userEvent.type(screen.getByLabelText("Engine name"), "delayed-engine");
+    await userEvent.type(screen.getByLabelText("Engine URL"), "https://delayed.example.com");
+    expect(screen.getByRole("button", { name: "Assign later" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Connect engine →" })).toBeDisabled();
+
+    delayedCredentials.resolve({ items: [credentialFixture] });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Saved credential" })).toHaveAttribute("aria-pressed", "true"));
+    await userEvent.click(screen.getByRole("button", { name: "Connect engine →" }));
+    await waitFor(() => expect(registerDeploymentEngine).toHaveBeenCalledWith("workspace-1", "env-development", expect.objectContaining({ credentialReferenceId: "credential-orders", credentialAssignmentStatus: "Assigned" })));
+  });
+
+  it("retains an explicit deferred choice when credentials arrive late", async () => {
+    const delayedCredentials = createDelayedCredentials();
+    vi.mocked(getDeploymentCredentialReferences).mockReturnValueOnce(delayedCredentials.promise);
+
+    renderPage();
+
+    await screen.findByRole("heading", { name: "Connect an engine" });
+    await userEvent.click(screen.getByRole("button", { name: "Assign later" }));
+    delayedCredentials.resolve({ items: [credentialFixture] });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Saved credential" })).not.toBeDisabled());
+    expect(screen.getByRole("button", { name: "Assign later" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Saved credential" })).toHaveAttribute("aria-pressed", "false");
   });
 
   it("explains when the caller cannot manage engine setup", async () => {
@@ -359,4 +393,12 @@ function renderPage(initialEntry = "/admin/engines/connect") {
       </MemoryRouter>
     </QueryClientProvider>
   );
+}
+
+function createDelayedCredentials() {
+  let resolve!: (value: { items: WorkspaceDeploymentCredentialReference[] }) => void;
+  const promise = new Promise<{ items: WorkspaceDeploymentCredentialReference[] }>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
 }

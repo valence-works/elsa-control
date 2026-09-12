@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, CheckCircle2, ChevronDown, ChevronUp, KeyRound, Link2, LoaderCircle, RadioTower, ShieldCheck } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { RequestStateView } from "@/components/states/RequestStateViews";
@@ -176,6 +176,7 @@ export function ConnectEnginePage() {
       workspaceId={workspaceId}
       cockpit={cockpit.data}
       credentials={credentialReferences.data?.items ?? []}
+      credentialsLoading={credentialReferences.isPending}
       credentialsError={credentialReferences.isError}
       secretStores={secretStores.data?.items ?? []}
       secretStoresError={secretStores.isError}
@@ -192,6 +193,7 @@ function ConnectEngineForm({
   workspaceId,
   cockpit,
   credentials,
+  credentialsLoading,
   credentialsError,
   secretStores,
   secretStoresError,
@@ -204,6 +206,7 @@ function ConnectEngineForm({
   workspaceId: string;
   cockpit: DeploymentCockpit;
   credentials: WorkspaceDeploymentCredentialReference[];
+  credentialsLoading: boolean;
   credentialsError: boolean;
   secretStores: WorkspaceDeploymentSecretStore[];
   secretStoresError: boolean;
@@ -216,6 +219,7 @@ function ConnectEngineForm({
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [values, setValues] = useState<ConnectEngineValues>(() => initialValues(cockpit, credentials, tiers, requestedEnvironmentId));
+  const credentialModeTouched = useRef(false);
   const [placementOpen, setPlacementOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -239,7 +243,9 @@ function ConnectEngineForm({
   const endpointError = values.baseUrl.trim() ? endpointValidationMessage(values.baseUrl) : null;
   const tierReady = values.placementMode === "existing" || (!tiersLoading && !tiersError && (activeTiers.length === 0 || Boolean(values.tierId && activeTiers.some((tier) => tier.id === values.tierId))));
   const placementReady = values.placementMode === "existing" || (values.applicationName.trim().length > 0 && values.environmentName.trim().length > 0);
-  const formReady = !retryBlocked && tierReady && placementReady && values.engineName.trim().length > 0 && values.baseUrl.trim().length > 0 && !endpointError && (values.credentialMode === "deferred" || canUseSavedCredential || canCreateCredential);
+  const waitingForCredentialDefault = !credentialModeTouched.current && values.credentialMode === "deferred" && activeCredentials.length > 0;
+  const credentialSelectionReady = credentialModeTouched.current || (!credentialsLoading && !waitingForCredentialDefault);
+  const formReady = !retryBlocked && credentialSelectionReady && tierReady && placementReady && values.engineName.trim().length > 0 && values.baseUrl.trim().length > 0 && !endpointError && (values.credentialMode === "deferred" || canUseSavedCredential || canCreateCredential);
 
   async function invalidateDeploymentData() {
     await Promise.allSettled([
@@ -258,7 +264,15 @@ function ConnectEngineForm({
         credentialReferenceId: activeCredentials[0]?.id ?? "",
         credentialStoreId: localSecretStores[0]?.id ?? ""
       }));
+      return;
     }
+    if (credentialModeTouched.current || values.credentialMode !== "deferred" || activeCredentials.length === 0) return;
+    setValues((current) => ({
+      ...current,
+      credentialMode: "saved",
+      credentialReferenceId: activeCredentials[0].id,
+      credentialStoreId: localSecretStores[0]?.id ?? ""
+    }));
   }, [activeCredentials, createdCredentialReferenceId, localSecretStores, values.credentialMode, values.credentialReferenceId]);
 
   useEffect(() => {
@@ -280,6 +294,7 @@ function ConnectEngineForm({
   }, [placements, values.environmentId, values.placementMode]);
 
   function setValue<K extends keyof ConnectEngineValues>(key: K, value: ConnectEngineValues[K]) {
+    if (key === "credentialMode") credentialModeTouched.current = true;
     setValues((current) => ({ ...current, [key]: value }));
     if (!retryBlocked) setError(null);
   }
@@ -374,7 +389,7 @@ function ConnectEngineForm({
             </dl>
             <div className="connect-engine-success-actions">
               <Button className="connect-engine-submit" type="button" onClick={() => navigate(enginePath(placement, engine.id))}>View engine</Button>
-              <SecondaryButton className="connect-engine-secondary" type="button" onClick={() => { setSuccess(null); setError(null); setRetryBlocked(false); setCreatedPlacement(null); setCreatedCredentialReferenceId(null); setValues(initialValues(cockpit, activeCredentials, activeTiers, requestedEnvironmentId)); }}>Connect another</SecondaryButton>
+              <SecondaryButton className="connect-engine-secondary" type="button" onClick={() => { credentialModeTouched.current = false; setSuccess(null); setError(null); setRetryBlocked(false); setCreatedPlacement(null); setCreatedCredentialReferenceId(null); setValues(initialValues(cockpit, activeCredentials, activeTiers, requestedEnvironmentId)); }}>Connect another</SecondaryButton>
             </div>
           </div>
         </div>
@@ -424,6 +439,7 @@ function ConnectEngineForm({
                 <button type="button" aria-pressed={values.credentialMode === "saved"} className={buttonClassName(values.credentialMode === "saved" ? "primary" : "secondary", "connect-engine-choice")} disabled={isSubmitting || credentialLocked || activeCredentials.length === 0} onClick={() => setValue("credentialMode", "saved")}>Saved credential</button>
                 <button type="button" aria-pressed={values.credentialMode === "deferred"} className={buttonClassName(values.credentialMode === "deferred" ? "primary" : "secondary", "connect-engine-choice")} disabled={isSubmitting || credentialLocked} onClick={() => setValue("credentialMode", "deferred")}>Assign later</button>
               </div>
+              {credentialsLoading ? <p className="connect-engine-helper">Loading saved credentials…</p> : null}
               {values.credentialMode === "new" ? (
                 <div className="connect-engine-credential-fields">
                   <label className="connect-engine-field">

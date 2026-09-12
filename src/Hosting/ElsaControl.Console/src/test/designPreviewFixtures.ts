@@ -1,6 +1,8 @@
 import type { ApplicationInfo } from "@/app/applicationApi";
 import type { OrganizationWorkspaceContextResponse } from "@/app/workspaceContextModels";
 import type { CustomerAuthSession } from "@/lib/auth/authModels";
+import type { OrganizationBillingStatus } from "@/features/billing/billingModels";
+import type { ManagedElsaInstanceList, ManagedElsaOnboardingOptions } from "@/features/managed-elsa/managedElsaModels";
 import type { WorkspaceArtifact, WorkspaceArtifactListResponse } from "@/features/artifacts/artifactModels";
 import type { CatalogPackage } from "@/features/packages/packageModels";
 import type { PackageSource } from "@/features/sources/sourceModels";
@@ -253,6 +255,27 @@ async function previewResponse(method: string, path: string, request: Request) {
   if (method === "GET" && path === "/api/admin/application") return jsonResponse(designPreviewFixtures.applicationInfo);
   if (method === "GET" && path === "/api/admin/packages") return jsonResponse(designPreviewFixtures.packages);
   if (method === "GET" && path === "/api/admin/sources") return jsonResponse(designPreviewFixtures.sources);
+  if (method === "GET" && path === `/api/organizations/${organizationId}/billing/`) return jsonResponse({
+    organizationId,
+    subscription: null,
+    entitlements: null,
+    capacity: { managedInstancesUsed: 0, managedInstancesLimit: null, workspacesUsed: 1, workspacesLimit: null },
+    capabilities: []
+  } satisfies OrganizationBillingStatus);
+  if (method === "POST" && (path === `/api/organizations/${organizationId}/billing/checkout` || path === `/api/organizations/${organizationId}/billing/portal`)) {
+    return jsonResponse({ title: "Billing actions are unavailable in the sample-data preview." }, 503);
+  }
+  if (method === "GET" && path === `/api/workspaces/${workspaceId}/instances`) return jsonResponse({
+    items: [], page: 1, pageSize: 100, totalCount: 0, hasMore: false
+  } satisfies ManagedElsaInstanceList);
+  if (method === "GET" && path === `/api/workspaces/${workspaceId}/instances/onboarding-options`) return jsonResponse({
+    releases: [],
+    previewReleases: [],
+    launchProfile: {
+      name: "Design preview", description: "Managed runtime provisioning is unavailable in this sample workspace.",
+      targetMode: "Preview", regionCode: "preview", isolationProfile: "preview", capacityProfile: "preview", networkOutcome: "preview", domainOutcome: "preview"
+    }
+  } satisfies ManagedElsaOnboardingOptions);
   if (method === "GET" && path.endsWith("/artifacts")) return jsonResponse(designPreviewFixtures.artifacts);
   if (method === "GET" && path.endsWith("/deployments/cockpit")) return jsonResponse(designPreviewFixtures.cockpit);
   if (method === "GET" && path.endsWith("/deployments/permissions")) return jsonResponse(designPreviewFixtures.permissions);
@@ -288,8 +311,8 @@ async function previewResponse(method: string, path: string, request: Request) {
         lastVerifiedAt: null
       },
       credentialAssignmentStatus: body?.credentialAssignmentStatus ?? (body?.credentialReferenceId ? "Assigned" : "Deferred"),
-      health: "Healthy",
-      lastHeartbeatAt: "2026-09-12T06:45:00Z",
+      health: "Unreachable",
+      lastHeartbeatAt: null,
       lastVerificationAt: null,
       verificationMessage: "Sample registration accepted in memory; no engine was contacted.",
       capabilities: body?.capabilities ?? template.capabilities,

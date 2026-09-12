@@ -98,6 +98,20 @@ describe("DeploymentsPage", () => {
     if (missingEngine) expect(within(card).queryByText("Healthy")).not.toBeInTheDocument();
   });
 
+  it.each([
+    { path: "/admin/deployments/applications", heading: "Applications", action: "New application setup" },
+    { path: "/admin/deployments/applications/claims-ops/environments/claims-dev", heading: "Dev", action: "Connect engine" }
+  ])("prevents keyboard activation of $action without setup permission", async ({ path, heading, action }) => {
+    renderDeployments(undefined, path, { permissions: ["deployments.read"] });
+    await screen.findByRole("heading", { name: heading });
+    const link = screen.getByRole("link", { name: action });
+    expect(link).toHaveAttribute("aria-disabled", "true");
+    expect(link).toHaveAttribute("tabindex", "-1");
+    link.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
+  });
+
   it("shows an empty application list state when no deployment setup exists", async () => {
     renderDeployments({
       applications: [],

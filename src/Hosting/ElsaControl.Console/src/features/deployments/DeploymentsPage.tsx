@@ -22,7 +22,7 @@ import {
   XCircle
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Badge, Button, buttonClassName, EmptyState, Input, SecondaryButton, Select, Table } from "@/components/ui";
 import { RequestStateView } from "@/components/states/RequestStateViews";
@@ -294,7 +294,7 @@ export function DeploymentsPage() {
               <Rocket className="h-4 w-4" />
               Applications
             </Link>
-            <Link to="/admin/deployments/new" className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageSetup}>
+            <Link to="/admin/deployments/new" className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageSetup)}>
               <Plus className="h-4 w-4" />
               New application setup
             </Link>
@@ -349,7 +349,7 @@ export function DeploymentsPage() {
             <div className="font-medium">Workspace tiers</div>
             <p className="mt-1 text-xs text-muted-foreground">Configure tier capabilities and environment policy.</p>
           </Link>
-          <Link to="/admin/deployments/new" className={cn("rounded-ui border border-border bg-background p-3 text-sm transition-colors hover:bg-muted", !canManageSetup ? "pointer-events-none opacity-50" : "")} aria-disabled={!canManageSetup}>
+          <Link to="/admin/deployments/new" className={cn("rounded-ui border border-border bg-background p-3 text-sm transition-colors hover:bg-muted", !canManageSetup ? "pointer-events-none opacity-50" : "")} {...permissionLinkProps(canManageSetup)}>
             <div className="font-medium">New application setup</div>
             <p className="mt-1 text-xs text-muted-foreground">Create an application with its first environment and engine.</p>
           </Link>
@@ -380,7 +380,7 @@ function DeploymentApplicationsReady({ context }: { context: DeploymentContext }
         title="Applications"
         description={`${data.applications.length} application${data.applications.length === 1 ? "" : "s"}`}
         actions={
-          <Link to="/admin/deployments/new" className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageSetup}>
+          <Link to="/admin/deployments/new" className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageSetup)}>
             <Plus className="h-4 w-4" />
             New application setup
           </Link>
@@ -1312,11 +1312,11 @@ function DeploymentApplicationReady({ context, applicationId }: { context: Deplo
               <GitBranch className="h-4 w-4" />
               Revisions
             </Link>
-            <Link to={`/admin/deployments/applications/${application.id}/edit`} className={buttonClassName("secondary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageSetup}>
+            <Link to={`/admin/deployments/applications/${application.id}/edit`} className={buttonClassName("secondary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageSetup)}>
               <Pencil className="h-4 w-4" />
               Edit application
             </Link>
-            <Link to={`/admin/deployments/applications/${application.id}/environments/new`} className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageSetup}>
+            <Link to={`/admin/deployments/applications/${application.id}/environments/new`} className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageSetup)}>
               <Plus className="h-4 w-4" />
               Add environment
             </Link>
@@ -1415,7 +1415,7 @@ function DeploymentApplicationRevisionsReady({ context, applicationId }: { conte
             <Link
               to={newRevisionPath || applicationPath(application.id)}
               className={buttonClassName("primary", !canManageDesiredState || !newRevisionPath ? "pointer-events-none opacity-50" : undefined)}
-              aria-disabled={!canManageDesiredState || !newRevisionPath}
+              {...permissionLinkProps(canManageDesiredState && Boolean(newRevisionPath))}
             >
               <Plus className="h-4 w-4" />
               New revision
@@ -1451,7 +1451,7 @@ function DeploymentApplicationRevisionsReady({ context, applicationId }: { conte
           description="Create a desired-state revision from a registered artifact before deploying this application."
           action={
             newRevisionPath ? (
-              <Link to={newRevisionPath} className={buttonClassName("secondary", !canManageDesiredState ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageDesiredState}>
+              <Link to={newRevisionPath} className={buttonClassName("secondary", !canManageDesiredState ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageDesiredState)}>
                 <Plus className="h-4 w-4" />
                 New revision
               </Link>
@@ -2032,15 +2032,15 @@ function DeploymentEnvironmentReady({
         description={`${application.name} deployment environment`}
         actions={
           <>
-            <Link to={`${environmentPath(application.id, environment.id)}/edit`} className={buttonClassName("secondary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageSetup}>
+            <Link to={`${environmentPath(application.id, environment.id)}/edit`} className={buttonClassName("secondary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageSetup)}>
               <Pencil className="h-4 w-4" />
               Edit environment
             </Link>
-            <Link to={`${environmentPath(application.id, environment.id)}/revisions/new`} className={buttonClassName("secondary", !canManageDesiredState ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageDesiredState}>
+            <Link to={`${environmentPath(application.id, environment.id)}/revisions/new`} className={buttonClassName("secondary", !canManageDesiredState ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageDesiredState)}>
               <GitBranch className="h-4 w-4" />
               New revision
             </Link>
-            <Link to={`${environmentPath(application.id, environment.id)}/engines/new`} className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageSetup}>
+            <Link to={`${environmentPath(application.id, environment.id)}/engines/new`} className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageSetup)}>
               <Plus className="h-4 w-4" />
               Connect engine
             </Link>
@@ -3152,7 +3152,7 @@ function EngineDetailSection({
             <RefreshCw className="h-4 w-4" />
             {isVerifying ? "Verifying" : "Verify"}
           </SecondaryButton>
-          <Link to={`${enginePath(application.id, environment.id, engine.id)}/edit`} className={buttonClassName("secondary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageSetup}>
+          <Link to={`${enginePath(application.id, environment.id, engine.id)}/edit`} className={buttonClassName("secondary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} {...permissionLinkProps(canManageSetup)}>
             <Pencil className="h-4 w-4" />
             Edit engine
           </Link>
@@ -4593,7 +4593,7 @@ function DeploymentBlockersPanel({
                     <Link
                       to={blocker.actionPath}
                       className={buttonClassName("secondary", !canManageDesiredState ? "pointer-events-none opacity-50" : undefined)}
-                      aria-disabled={!canManageDesiredState}
+                      {...permissionLinkProps(canManageDesiredState)}
                     >
                       <GitBranch className="h-4 w-4" />
                       {blocker.actionLabel ?? "Add binding to new revision"}
@@ -5398,4 +5398,14 @@ function statusTextClass(tone: StatusTone) {
   if (tone === "warning") return "text-warning";
   if (tone === "destructive") return "text-destructive";
   return "";
+}
+
+function permissionLinkProps(enabled: boolean) {
+  return {
+    "aria-disabled": !enabled,
+    tabIndex: enabled ? undefined : -1,
+    onClick: (event: MouseEvent<HTMLAnchorElement>) => {
+      if (!enabled) event.preventDefault();
+    }
+  };
 }

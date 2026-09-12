@@ -66,6 +66,9 @@ a populated preview using the actual console components and sample data. This
 separate development entry installs API fixtures before loading the app; the
 normal entry continues to use real authentication and APIs. The preview banner
 identifies sample data. Simulated changes last only until reload.
+Billing and managed runtime pages show their initial empty states; billing actions
+and managed provisioning are unavailable in this preview. New sample engines are
+unverified, with no heartbeat, because the preview never contacts an engine.
 The preview entry is not included in the normal production build.
 
 ## Console appearance
