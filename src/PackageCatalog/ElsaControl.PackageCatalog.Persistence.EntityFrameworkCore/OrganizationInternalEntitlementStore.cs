@@ -15,6 +15,10 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 /// instance cap and its expiry; every other capability field is preserved.
 /// Each attempt runs inside the configured execution strategy because the SQL
 /// Server provider's retrying strategy rejects user-initiated transactions.
+/// Unlike the other billing audit records, a grant's audit summary deliberately
+/// carries the operator's reason (#312 requires the grant to be audited with a
+/// reason); the policy bounds it to 200 characters and rejects control,
+/// formatting and separator characters, and it is never echoed in responses.
 /// </summary>
 public sealed partial class OrganizationBillingStore : IOrganizationInternalEntitlementStore
 {
