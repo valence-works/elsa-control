@@ -2900,7 +2900,7 @@ function useDeploymentContext(): DeploymentContextResult {
 }
 
 function ApplicationCards({ applications, data }: { applications: DeploymentCockpit["applications"]; data: DeploymentCockpit }) {
-  return <div className="console-application-grid" aria-label="Workflow applications">
+  return <section className="console-application-grid" aria-label="Workflow applications">
     {applications.map((application) => {
       const engines = enginesForApplication(data, application);
       const driftCount = application.environments.filter(environment => environment.driftStatus === "DriftDetected").length;
@@ -2911,7 +2911,7 @@ function ApplicationCards({ applications, data }: { applications: DeploymentCock
         <div id={`application-action-${application.id}`} className="console-application-card-footer"><span>{driftCount ? `${driftCount} with drift` : "Open application"}</span><ArrowUpRight aria-hidden size={16} /></div>
       </Link>;
     })}
-  </div>;
+  </section>;
 }
 
 function EnvironmentTable({
@@ -5323,7 +5323,7 @@ function summarizeApplicationHealth(application: DeploymentCockpit["applications
   if (applicationEngines.some((engine) => engine.health === "Unreachable")) return "Unreachable";
   if (
     applicationEngines.some((engine) => engine.health === "Degraded") ||
-    application.environments.some((environment) => environment.driftStatus === "DriftDetected" || environment.deploymentStatus === "Blocked")
+    application.environments.some((environment) => environment.driftStatus !== "InSync" || environment.deploymentStatus === "Blocked")
   ) {
     return "Needs review";
   }

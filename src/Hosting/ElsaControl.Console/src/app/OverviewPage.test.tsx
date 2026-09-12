@@ -82,6 +82,8 @@ describe("OverviewPage", () => {
 
     expect(await screen.findByRole("heading", { name: "Claims Dev" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Overview unavailable" })).not.toBeInTheDocument();
+    expect(screen.getByText("Refresh failed. Showing last known health.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry refresh" })).toBeEnabled();
   });
 
   it("removes cached inventory after a background authorization loss", async () => {
@@ -105,6 +107,15 @@ describe("OverviewPage", () => {
     expect(screen.queryByText("Healthy", { exact: true })).not.toBeInTheDocument();
   });
 
+  it("explains a failed setup access check and offers a retry", async () => {
+    renderOverview({ permissionsResponse: Response.json({ title: "Unavailable" }, { status: 503 }) });
+
+    expect(await screen.findByRole("heading", { name: "Claims Dev" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Connect engine/ })).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByText("Could not check access.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry access check" })).toBeEnabled();
+  });
+
   it("keeps the overview Connect engine action read-only without setup permission", async () => {
     renderOverview({ permissions: ["deployments.read"] });
 
@@ -123,6 +134,7 @@ type RenderOptions = {
   cockpitResponse?: Response;
   backgroundCockpitResponse?: Response;
   permissions?: string[];
+  permissionsResponse?: Response;
 };
 
 function renderOverview(options: RenderOptions = {}) {
@@ -135,12 +147,12 @@ function renderOverview(options: RenderOptions = {}) {
     }
     if (url.endsWith("/api/me/organizations")) return Response.json(workspaceContextFixture());
     if (url.endsWith(`/api/workspaces/${workspaceId}/deployments/permissions`)) {
-      return Response.json({ permissions: options.permissions ?? ["deployments.read", "deployments.setup.manage"] });
+      return options.permissionsResponse?.clone() ?? Response.json({ permissions: options.permissions ?? ["deployments.read", "deployments.setup.manage"] });
     }
     if (url.endsWith(`/api/workspaces/${workspaceId}/deployments/cockpit`)) {
       cockpitRequests += 1;
-      if (cockpitRequests > 1 && options.backgroundCockpitResponse) return options.backgroundCockpitResponse;
-      return options.cockpitResponse ?? Response.json(options.cockpit ?? deploymentCockpitFixture());
+      if (cockpitRequests > 1 && options.backgroundCockpitResponse) return options.backgroundCockpitResponse.clone();
+      return options.cockpitResponse?.clone() ?? Response.json(options.cockpit ?? deploymentCockpitFixture());
     }
     return Response.json({ title: "Not found" }, { status: 404 });
   });

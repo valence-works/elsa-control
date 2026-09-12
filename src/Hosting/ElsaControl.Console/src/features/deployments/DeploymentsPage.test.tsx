@@ -64,7 +64,7 @@ describe("DeploymentsPage", () => {
     renderDeployments(multipleApplicationsCockpit, "/admin/deployments/applications");
 
     expect(await screen.findByRole("heading", { name: "Applications" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Workflow applications")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Workflow applications" })).toBeInTheDocument();
     expect(linkByHref("/admin/deployments/applications/claims-ops")).toBeInTheDocument();
     expect(linkByHref("/admin/deployments/applications/policy-app")).toBeInTheDocument();
     expect(screen.getByText("Claims Operations")).toBeInTheDocument();
@@ -97,6 +97,25 @@ describe("DeploymentsPage", () => {
     const card = await screen.findByRole("link", { name: application.name });
     expect(within(card).getByText(expectedHealth)).toBeInTheDocument();
     if (missingEngine) expect(within(card).queryByText("Healthy")).not.toBeInTheDocument();
+  });
+
+  it("reports Needs review when an application environment has unknown drift", async () => {
+    const application = deploymentCockpitFixture.applications[0];
+    renderDeployments({
+      ...deploymentCockpitFixture,
+      applications: [{
+        ...application,
+        environments: application.environments.map((environment, index) => ({
+          ...environment,
+          driftStatus: index === 0 ? "Unknown" as const : "InSync" as const,
+          deploymentStatus: "Succeeded" as const
+        }))
+      }],
+      engines: deploymentCockpitFixture.engines.map((engine) => ({ ...engine, health: "Healthy" as const }))
+    }, "/admin/deployments/applications");
+
+    const card = await screen.findByRole("link", { name: application.name });
+    expect(within(card).getByText("Needs review")).toBeInTheDocument();
   });
 
   it.each([

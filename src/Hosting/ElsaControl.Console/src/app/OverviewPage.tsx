@@ -44,7 +44,7 @@ export function OverviewPage() {
     enabled: Boolean(selectedWorkspaceId)
   });
   const data = cockpit.data;
-  const canManageSetup = permissions.data?.permissions.includes("deployments.setup.manage") ?? false;
+  const canManageSetup = permissions.isSuccess && permissions.data.permissions.includes("deployments.setup.manage");
   const contexts = useMemo(() => data ? buildEngineContexts(data) : [], [data]);
   const filteredContexts = useMemo(
     () => filterEngines(contexts, engineSearch, engineFilter),
@@ -89,14 +89,27 @@ export function OverviewPage() {
             <h1>{workspaceName}</h1>
             <p>{data.engines.length} engine{data.engines.length === 1 ? "" : "s"} · {data.applications.length} application{data.applications.length === 1 ? "" : "s"}</p>
           </div>
-          <Link
-            to="/admin/engines/connect"
-            className={`aperture-overview__primary${canManageSetup ? "" : " pointer-events-none opacity-50"}`}
-            {...permissionLinkProps(canManageSetup)}
-          >
-            Connect engine <ArrowUpRight aria-hidden />
-          </Link>
+          <div className="flex flex-col items-end gap-2">
+            <Link
+              to="/admin/engines/connect"
+              className={`aperture-overview__primary${canManageSetup ? "" : " pointer-events-none opacity-50"}`}
+              aria-describedby={!canManageSetup ? "overview-setup-access" : undefined}
+              {...permissionLinkProps(canManageSetup)}
+            >
+              Connect engine <ArrowUpRight aria-hidden />
+            </Link>
+            {!canManageSetup && <div id="overview-setup-access" role="status" className="text-xs text-muted-foreground">
+              {permissions.isPending ? "Checking access…" : permissions.isError ? <>
+                Could not check access. <button className="underline underline-offset-2" disabled={permissions.isFetching} onClick={() => void permissions.refetch()}>Retry access check</button>
+              </> : "Setup permission required"}
+            </div>}
+          </div>
         </header>
+
+        {cockpit.isRefetchError && <div role="status" className="flex items-center justify-between gap-3 border border-warning/40 bg-warning/10 px-4 py-3 text-sm">
+          <span>Refresh failed. Showing last known health.</span>
+          <button className="shrink-0 underline underline-offset-2" disabled={cockpit.isFetching} onClick={() => void cockpit.refetch()}>Retry refresh</button>
+        </div>}
 
         {data.engines.length === 0 ? (
           <ApertureEmptyState />
