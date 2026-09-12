@@ -30,6 +30,7 @@ public sealed class SyncRun
 {
     public Guid Id { get; set; } = Guid.NewGuid();
     public SyncRunTrigger Trigger { get; set; }
+    public SyncRunMode Mode { get; set; } = SyncRunMode.Verification;
     public SyncRunStatus Status { get; set; } = SyncRunStatus.Running;
     public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? CompletedAt { get; set; }

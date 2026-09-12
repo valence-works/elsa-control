@@ -8,7 +8,7 @@ using Elsa.Specifications.PackageManifests.Validation;
 
 namespace ElsaControl.PackageCatalog.Core.Tests;
 
-public sealed class PackageSyncServiceTests
+public sealed partial class PackageSyncServiceTests
 {
     [Fact]
     public async Task Indexes_valid_manifest_and_records_sync_item()
@@ -301,7 +301,8 @@ public sealed class PackageSyncServiceTests
         IPackageVersionDiscoveryClient discovery,
         IPackageArchiveDownloader downloader,
         SourceSyncActivityTracker? syncActivity = null,
-        SyncRunCancellationRegistry? cancellationRegistry = null) =>
+        SyncRunCancellationRegistry? cancellationRegistry = null,
+        TimeProvider? timeProvider = null) =>
         new(
             sources,
             catalog,
@@ -315,7 +316,8 @@ public sealed class PackageSyncServiceTests
             new NoopSyncDiagnostics(),
             new SyncConcurrencyGuard(),
             syncActivity ?? new SourceSyncActivityTracker(),
-            cancellationRegistry ?? new SyncRunCancellationRegistry());
+            cancellationRegistry ?? new SyncRunCancellationRegistry(),
+            timeProvider: timeProvider);
 
     private sealed class InMemorySourceStore(IReadOnlyList<PackageSource> sources) : IPackageSourceStore
     {
@@ -358,6 +360,13 @@ public sealed class PackageSyncServiceTests
         public List<SyncRunItem> Items { get; } = [];
         public Task<IReadOnlyList<SyncRun>> ListAsync(CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<SyncRun>>(Runs);
         public Task<SyncRun?> GetAsync(Guid id, CancellationToken cancellationToken = default) => Task.FromResult(Runs.SingleOrDefault(x => x.Id == id));
+        public Task<SyncRun?> GetLatestRunAsync(SyncRunMode mode, IReadOnlyCollection<SyncRunTrigger> triggers, IReadOnlyCollection<SyncRunStatus> statuses, CancellationToken cancellationToken = default) =>
+            Task.FromResult(Runs.Where(x => x.Mode == mode && triggers.Contains(x.Trigger) && statuses.Contains(x.Status)).MaxBy(x => x.StartedAt));
+        public Task<IReadOnlySet<SyncRunPackageVersionKey>> GetVersionsFoundWithoutManifestAsync(Guid runId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlySet<SyncRunPackageVersionKey>>(Items
+                .Where(x => x.SyncRunId == runId && x.Status == SyncRunItemStatus.Invalid && x.PackageVersionId is null)
+                .Select(x => new SyncRunPackageVersionKey(x.SourceId!.Value, x.PackageId!, x.Version!))
+                .ToHashSet());
         public Task<IReadOnlyDictionary<Guid, SyncRunListMetadata>> GetListMetadataAsync(IReadOnlyCollection<Guid> runIds, CancellationToken cancellationToken = default)
         {
             var itemMetadata = Items
@@ -439,8 +448,11 @@ public sealed class PackageSyncServiceTests
 
     private sealed class FakeDownloader(string manifestJson, IReadOnlyDictionary<string, string>? manifestsByVersion = null) : IPackageArchiveDownloader
     {
+        public List<string> DownloadedVersions { get; } = [];
+
         public Task<Stream> DownloadPackageAsync(PackageSource source, string packageId, string version, CancellationToken cancellationToken = default)
         {
+            DownloadedVersions.Add(version);
             var json = manifestsByVersion?.GetValueOrDefault(version) ?? manifestJson;
             return Task.FromResult<Stream>(new MemoryStream(System.Text.Encoding.UTF8.GetBytes(json)));
         }
@@ -458,6 +470,9 @@ public sealed class PackageSyncServiceTests
         {
             using var reader = new StreamReader(packageStream);
             var json = await reader.ReadToEndAsync(cancellationToken);
+            if (json.Length == 0)
+                return PackageManifestReadResult.Missing();
+
             var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(json))).ToLowerInvariant();
             return PackageManifestReadResult.Found("elsa-package.json", json, hash, []);
         }

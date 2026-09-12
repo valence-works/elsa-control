@@ -108,6 +108,7 @@ public static class AdminSyncEndpoints
         return new AdminSyncRunResponse(
             run.Id,
             run.Trigger,
+            run.Mode,
             run.Status,
             run.StartedAt,
             run.CompletedAt,

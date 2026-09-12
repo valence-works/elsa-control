@@ -19,6 +19,34 @@ public sealed class SyncRunStore(CatalogDbContext dbContext) : ISyncRunStore
             .Include(x => x.Items)
             .SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
 
+    public Task<SyncRun?> GetLatestRunAsync(SyncRunMode mode, IReadOnlyCollection<SyncRunTrigger> triggers, IReadOnlyCollection<SyncRunStatus> statuses, CancellationToken cancellationToken = default)
+    {
+        var triggerValues = triggers.ToArray();
+        var statusValues = statuses.ToArray();
+        return dbContext.SyncRuns
+            .AsNoTracking()
+            .Where(x => x.Mode == mode && triggerValues.Contains(x.Trigger) && statusValues.Contains(x.Status))
+            .OrderByDescending(x => x.StartedAt)
+            .FirstOrDefaultAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlySet<SyncRunPackageVersionKey>> GetVersionsFoundWithoutManifestAsync(Guid runId, CancellationToken cancellationToken = default)
+    {
+        // One seek on the SyncRunId index for the whole run; an Invalid item stores a package version unless the archive had no manifest.
+        var versions = await dbContext.SyncRunItems
+            .AsNoTracking()
+            .Where(x => x.SyncRunId == runId &&
+                        x.Status == SyncRunItemStatus.Invalid &&
+                        x.PackageVersionId == null &&
+                        x.SourceId != null &&
+                        x.PackageId != null &&
+                        x.Version != null)
+            .Select(x => new SyncRunPackageVersionKey(x.SourceId!.Value, x.PackageId!, x.Version!))
+            .ToListAsync(cancellationToken);
+
+        return versions.ToHashSet();
+    }
+
     public async Task<IReadOnlyDictionary<Guid, SyncRunListMetadata>> GetListMetadataAsync(IReadOnlyCollection<Guid> runIds, CancellationToken cancellationToken = default)
     {
         if (runIds.Count == 0)
