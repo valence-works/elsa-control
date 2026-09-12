@@ -74,6 +74,9 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             return Failed(command, CurrentPhase(command.Step), "azure.runner.scope-invalid", exception.Message);
         }
 
+        if (BuildsTowardWorkload(command.Step) && CapacityFailure(command, CurrentPhase(command.Step)) is { } capacityFailure)
+            return capacityFailure;
+
         try
         {
             return command.Step switch
@@ -469,9 +472,6 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         AzureProviderRunnerCommand command,
         CancellationToken cancellationToken)
     {
-        if (CapacityFailure(command, AzureProviderOperationPhase.FoundationSubmitted) is { } capacityFailure)
-            return capacityFailure;
-
         var resources = command.Resources with
         {
             ResourceGroupName = ResourceGroupName(command),
@@ -974,9 +974,6 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         AzureProviderRunnerCommand command,
         CancellationToken cancellationToken)
     {
-        if (CapacityFailure(command, AzureProviderOperationPhase.WorkloadReady) is { } capacityFailure)
-            return capacityFailure;
-
         var missing = RequireRegistry(command.Resources);
         if (missing is not null)
             return Failed(command, AzureProviderOperationPhase.WorkloadReady, "azure.workload.foundation-missing", missing);
@@ -2117,6 +2114,18 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private static AzureProviderRunnerResult Uncertain(AzureProviderRunnerCommand command, AzureProviderOperationPhase phase, string code, string message, AzureProviderResourceReferences? resources = null, AzureCommandProcessFailureKind? processFailureKind = null) =>
         new(AzureProviderRunnerOutcome.Uncertain, phase, resources ?? command.Resources, AzureProviderHealth.Unknown, null,
             AzureProviderSafeDiagnostics.Failure(command.Step, AzureProviderRunnerOutcome.Uncertain, code, processFailureKind), code, message);
+
+    /// <summary>
+    /// Steps that create or change resources on the way to a workload deployment. They all need
+    /// the plan capacity, so an operation without one (for example a legacy row restored after
+    /// the capacity migration) fails before its first Azure call instead of part-way through.
+    /// Cleanup, temporary-firewall cleanup, health, promotion and stable-traffic restore stay
+    /// available so an existing instance remains deletable and its traffic recoverable.
+    /// </summary>
+    private static bool BuildsTowardWorkload(AzureProviderRunnerStep step) => step is
+        AzureProviderRunnerStep.Foundation or AzureProviderRunnerStep.AcrPull or AzureProviderRunnerStep.SeedSecrets or
+        AzureProviderRunnerStep.SqlBootstrap or AzureProviderRunnerStep.SqlFirewallCreate or
+        AzureProviderRunnerStep.SqlBootstrapScript or AzureProviderRunnerStep.Workload;
 
     private static AzureProviderOperationPhase CurrentPhase(AzureProviderRunnerStep step) => step switch
     {

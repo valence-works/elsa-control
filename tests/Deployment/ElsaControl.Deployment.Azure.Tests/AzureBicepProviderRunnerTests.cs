@@ -64,12 +64,30 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
 
     [Theory]
     [InlineData(AzureProviderRunnerStep.Foundation)]
+    [InlineData(AzureProviderRunnerStep.AcrPull)]
+    [InlineData(AzureProviderRunnerStep.SeedSecrets)]
+    [InlineData(AzureProviderRunnerStep.SqlBootstrap)]
+    [InlineData(AzureProviderRunnerStep.SqlFirewallCreate)]
+    [InlineData(AzureProviderRunnerStep.SqlBootstrapScript)]
     [InlineData(AzureProviderRunnerStep.Workload)]
     public async Task Production_deployment_of_a_plan_retained_without_capacity_fails_before_any_Azure_call(AzureProviderRunnerStep step)
     {
         var (result, process) = await RunWithCapacityAsync(step, capacity: null);
 
         AssertFailedClosed(result, process, "azure.capacity.required");
+    }
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.SqlFirewallCleanup)]
+    [InlineData(AzureProviderRunnerStep.Health)]
+    [InlineData(AzureProviderRunnerStep.Promotion)]
+    [InlineData(AzureProviderRunnerStep.RestoreStableTraffic)]
+    [InlineData(AzureProviderRunnerStep.Cleanup)]
+    public async Task Steps_that_keep_an_existing_instance_recoverable_do_not_require_capacity(AzureProviderRunnerStep step)
+    {
+        var (result, _) = await RunWithCapacityAsync(step, capacity: null);
+
+        Assert.False(result.Code.StartsWith("azure.capacity.", StringComparison.Ordinal), result.Code);
     }
 
     [Fact]
