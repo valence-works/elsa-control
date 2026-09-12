@@ -1650,7 +1650,12 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                     b.HasIndex("WorkspaceId", "LifecycleOperationId", "ObservedAt");
 
-                    b.ToTable("AzureProviderRecoveryObservations");
+                    b.ToTable("AzureProviderRecoveryObservations", t =>
+                        {
+                            t.HasTrigger("TR_AzureProviderRecoveryObservations_AppendOnly_Delete");
+
+                            t.HasTrigger("TR_AzureProviderRecoveryObservations_AppendOnly_Update");
+                        });
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.AzureProviderResourceAssignmentEntity", b =>
@@ -2165,7 +2170,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.HasIndex("WorkspaceId", "ApplicationId", "Name")
                         .IsUnique();
 
-                    b.ToTable("DeploymentEnvironments");
+                    b.ToTable("DeploymentEnvironments", t =>
+                        {
+                            t.HasTrigger("TR_DeploymentEnvironments_ManagedInstanceBinding_Update");
+                        });
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.DeploymentRunEntity", b =>
@@ -2252,7 +2260,12 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                     b.HasIndex("WorkspaceId", "EnvironmentId", "Status");
 
-                    b.ToTable("DeploymentRuns");
+                    b.ToTable("DeploymentRuns", t =>
+                        {
+                            t.HasTrigger("TR_DeploymentRuns_ManagedInstanceBinding_Insert");
+
+                            t.HasTrigger("TR_DeploymentRuns_ManagedInstanceBinding_Update");
+                        });
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.DeploymentRunHistoryEventEntity", b =>
@@ -2660,7 +2673,12 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                     b.HasIndex("OrganizationId", "WorkspaceId", "InstanceId");
 
-                    b.ToTable("ElsaInstanceAuditEvents");
+                    b.ToTable("ElsaInstanceAuditEvents", t =>
+                        {
+                            t.HasTrigger("TR_ElsaInstanceAuditEvents_AppendOnly_Delete");
+
+                            t.HasTrigger("TR_ElsaInstanceAuditEvents_AppendOnly_Update");
+                        });
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceEntity", b =>
@@ -2876,7 +2894,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .IsUnique()
                         .HasFilter("DeletedAt IS NULL");
 
-                    b.ToTable("ElsaInstances");
+                    b.ToTable("ElsaInstances", t =>
+                        {
+                            t.HasTrigger("TR_ElsaInstances_NoDelete");
+                        });
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceIdentityBindingEntity", b =>
@@ -3053,7 +3074,12 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                     b.HasIndex("OrganizationId", "WorkspaceId", "InstanceId");
 
-                    b.ToTable("ElsaInstanceIntentRevisions");
+                    b.ToTable("ElsaInstanceIntentRevisions", t =>
+                        {
+                            t.HasTrigger("TR_ElsaInstanceIntentRevisions_AppendOnly_Delete");
+
+                            t.HasTrigger("TR_ElsaInstanceIntentRevisions_AppendOnly_Update");
+                        });
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceLifecycleOutboxEntity", b =>
@@ -3105,7 +3131,12 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                     b.HasIndex("WorkspaceId", "InstanceId", "CreatedAt");
 
-                    b.ToTable("ElsaInstanceLifecycleOutbox");
+                    b.ToTable("ElsaInstanceLifecycleOutbox", t =>
+                        {
+                            t.HasTrigger("TR_ElsaInstanceLifecycleOutbox_AppendOnly_Delete");
+
+                            t.HasTrigger("TR_ElsaInstanceLifecycleOutbox_AppendOnly_Update");
+                        });
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceMigrationEntity", b =>
@@ -3261,7 +3292,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                     b.HasIndex("Phase", "SourceRetainUntil", "SourceReleaseClaimedUntil");
 
-                    b.ToTable("ElsaInstanceMigrations");
+                    b.ToTable("ElsaInstanceMigrations", t =>
+                        {
+                            t.HasTrigger("TR_ElsaInstanceMigrations_NoDelete");
+                        });
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceOperationEntity", b =>
@@ -3443,6 +3477,12 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                     b.ToTable("ElsaInstanceOperations", null, t =>
                         {
+                            t.HasTrigger("TR_ElsaInstanceOperations_LeaseVersion_Range_Insert");
+
+                            t.HasTrigger("TR_ElsaInstanceOperations_LeaseVersion_Range_Update");
+
+                            t.HasTrigger("TR_ElsaInstanceOperations_NoDelete");
+
                             t.HasCheckConstraint("CK_ElsaInstanceOperations_LeaseVersion_Range", "LeaseVersion >= 0 AND LeaseVersion < 2147483647");
 
                             t.HasCheckConstraint("CK_ElsaInstanceOperations_NullInstanceOnlyCreate", "InstanceId IS NOT NULL OR Action = 'Create'");
@@ -3451,10 +3491,6 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceRecoveryRequestEntity", b =>
                 {
-                    b.Property<string>("AzureDeleteRecoveryAuthority")
-                        .HasMaxLength(4096)
-                        .HasColumnType("TEXT");
-
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
@@ -3464,6 +3500,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                     b.Property<int>("AttemptNumber")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("AzureDeleteRecoveryAuthority")
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
 
                     b.Property<long>("CreatedAt")
                         .HasColumnType("INTEGER");
@@ -3519,7 +3559,12 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.HasIndex("WorkspaceId", "IdempotencyScope", "IdempotencyKey")
                         .IsUnique();
 
-                    b.ToTable("ElsaInstanceRecoveryRequests", (string)null);
+                    b.ToTable("ElsaInstanceRecoveryRequests", null, t =>
+                        {
+                            t.HasTrigger("TR_ElsaInstanceRecoveryRequests_AppendOnly_Delete");
+
+                            t.HasTrigger("TR_ElsaInstanceRecoveryRequests_AppendOnly_Update");
+                        });
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceResolvedPlanEntity", b =>
@@ -3572,7 +3617,12 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.HasIndex("WorkspaceId", "InstanceId", "PlanId")
                         .IsUnique();
 
-                    b.ToTable("ElsaInstanceResolvedPlans");
+                    b.ToTable("ElsaInstanceResolvedPlans", t =>
+                        {
+                            t.HasTrigger("TR_ElsaInstanceResolvedPlans_AppendOnly_Delete");
+
+                            t.HasTrigger("TR_ElsaInstanceResolvedPlans_AppendOnly_Update");
+                        });
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.EngineCapabilityEntity", b =>
@@ -4101,7 +4151,12 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                     b.HasIndex("Jti", "OccurredAt");
 
-                    b.ToTable("ManagedElsaHandoffAuditEvents", (string)null);
+                    b.ToTable("ManagedElsaHandoffAuditEvents", null, t =>
+                        {
+                            t.HasTrigger("TR_ManagedElsaHandoffAuditEvents_AppendOnly_Delete");
+
+                            t.HasTrigger("TR_ManagedElsaHandoffAuditEvents_AppendOnly_Update");
+                        });
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ManagedElsaHandoffReplayEntity", b =>
@@ -4120,7 +4175,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                     b.HasIndex("ExpiresAt");
 
-                    b.ToTable("ManagedElsaHandoffReplayConsumptions", (string)null);
+                    b.ToTable("ManagedElsaHandoffReplayConsumptions", null, t =>
+                        {
+                            t.HasTrigger("TR_ManagedElsaHandoffReplayConsumptions_AppendOnly_Update");
+                        });
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ObservabilityBindingEntity", b =>

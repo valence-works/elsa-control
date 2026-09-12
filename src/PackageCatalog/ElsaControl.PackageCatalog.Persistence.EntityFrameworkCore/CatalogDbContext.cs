@@ -185,6 +185,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         modelBuilder.ApplyConfiguration(new Models.GovernedReleaseCatalogComponentCapabilityConfiguration());
         modelBuilder.ApplyConfiguration(new Models.GovernedReleaseCatalogEndpointConfiguration());
         modelBuilder.ApplyConfiguration(new Models.GovernedReleaseCatalogEvidenceConfiguration());
+        Models.CatalogTableTriggers.Declare(modelBuilder, Database.ProviderName);
 
         if (Database.ProviderName == "Microsoft.EntityFrameworkCore.SqlServer")
         {
