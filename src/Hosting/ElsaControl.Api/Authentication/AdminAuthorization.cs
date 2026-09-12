@@ -70,8 +70,9 @@ public sealed class AdminAuthorizationOptions
     public const string ConfigurationSection = "Authentication:Admin";
 
     /// <summary>
-    /// Allows any authenticated customer session to use the global admin API. The identity provider
-    /// must restrict application assignment to trusted operators when this is enabled.
+    /// Allows any authenticated customer session to use the global admin API. Keep this off in
+    /// published deployments; production authorizes operators through the <c>control_admin</c> role
+    /// or the admin API key. Local Keycloak may enable it for first-run convenience.
     /// </summary>
     public bool AllowAuthenticatedCustomerSession { get; init; }
 }

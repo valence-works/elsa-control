@@ -175,7 +175,7 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
         }
         {
           name: 'Authentication__Admin__AllowAuthenticatedCustomerSession'
-          value: 'true'
+          value: 'false'
         }
         {
           name: 'Authentication__BuilderClientApiKey'

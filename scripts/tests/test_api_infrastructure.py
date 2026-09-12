@@ -15,6 +15,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+APPHOST = ROOT / "src" / "Hosting" / "ElsaControl.AppHost" / "AppHost.cs"
 API_MODULE = ROOT / "infra" / "api" / "api-website.module.bicep"
 API_PARAMETERS = ROOT / "src" / "Hosting" / "ElsaControl.AppHost" / "infra" / "api" / "api.tmpl.bicepparam"
 REGENERATE_INFRA = ROOT / "dev" / "regenerate-infra.sh"
@@ -87,6 +88,7 @@ class ApiInfrastructureTests(unittest.TestCase):
             settings["ConnectionStrings__Catalog"],
             f"Server=tcp:sql.example,1433;Encrypt=True;TrustServerCertificate=False;Authentication=Active Directory Managed Identity;User Id={API_CLIENT_ID};Database=Catalog",
         )
+        self.assertEqual(settings["Authentication__Admin__AllowAuthenticatedCustomerSession"], "false")
 
     @staticmethod
     def generated_api_module() -> str:
@@ -237,6 +239,22 @@ class ApiInfrastructureTests(unittest.TestCase):
             self.assertIn(directory, regeneration)
         self.assertNotIn("dashboard", module.lower())
         self.assertNotIn("WEBSITE_ENABLE_ASPIRE_OTEL_SIDECAR", module)
+
+    def test_published_deployment_does_not_admit_authenticated_customer_sessions(self) -> None:
+        apphost = APPHOST.read_text()
+        module = API_MODULE.read_text()
+        publish_block = apphost.split("if (builder.ExecutionContext.IsPublishMode)", 1)[1].split("\nelse\n", 1)[0]
+
+        self.assertIn('Authentication__Admin__AllowAuthenticatedCustomerSession", "false"', publish_block)
+        self.assertNotIn('Authentication__Admin__AllowAuthenticatedCustomerSession", "true"', publish_block)
+        self.assertRegex(
+            module,
+            r"name: 'Authentication__Admin__AllowAuthenticatedCustomerSession'\s+value: 'false'",
+        )
+        self.assertNotRegex(
+            module,
+            r"name: 'Authentication__Admin__AllowAuthenticatedCustomerSession'\s+value: 'true'",
+        )
         self.assertLess(
             regeneration.index("trap restore_preserved_infra EXIT"),
             regeneration.index('mv "infra/$relative_path"'),

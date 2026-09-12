@@ -169,13 +169,16 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
         Assert.NotNull(sources);
     }
 
-    [Fact]
-    public async Task Control_admin_session_authorizes_admin_api()
+    [Theory]
+    [InlineData("role")]
+    [InlineData("roles")]
+    [InlineData(ClaimTypes.Role)]
+    public async Task Control_admin_session_authorizes_admin_api(string roleClaimType)
     {
         var app = _app;
         await app.SeedAsync(_ => Task.CompletedTask);
         var client = app.CreateClient(new() { AllowAutoRedirect = false });
-        app.AddControlSessionCookie(client, new Claim("role", AdminAuthorization.ControlAdminRole));
+        app.AddControlSessionCookie(client, new Claim(roleClaimType, AdminAuthorization.ControlAdminRole));
 
         var response = await client.GetAsync("/api/admin/sources");
 
@@ -193,6 +196,18 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
         var response = await client.GetAsync("/api/admin/sources");
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Unauthenticated_request_is_unauthorized_for_admin_api()
+    {
+        var app = _app;
+        await app.SeedAsync(_ => Task.CompletedTask);
+
+        var response = await app.CreateClient(new() { AllowAutoRedirect = false })
+            .GetAsync("/api/admin/sources");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
     [Fact]
@@ -231,6 +246,28 @@ public sealed class AdminDashboardAuthenticationTests : IClassFixture<DefaultCon
         var result = await authorization.AuthorizeAsync(principal, resource: null, AdminAuthorization.Policy);
 
         Assert.True(result.Succeeded);
+    }
+
+    [Fact]
+    public async Task Production_default_denies_authenticated_customer_session_without_control_admin()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddCatalogAuthorization();
+        services.AddSingleton<IOptions<AdminAuthorizationOptions>>(Options.Create(new AdminAuthorizationOptions
+        {
+            AllowAuthenticatedCustomerSession = false
+        }));
+        services.AddSingleton<IWebHostEnvironment>(new TestWebHostEnvironment(Environments.Production));
+        await using var provider = services.BuildServiceProvider();
+        var authorization = provider.GetRequiredService<IAuthorizationService>();
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(
+            [new Claim("sub", "customer-user")],
+            CustomerAuthenticationDefaults.CookieScheme));
+
+        var result = await authorization.AuthorizeAsync(principal, resource: null, AdminAuthorization.Policy);
+
+        Assert.False(result.Succeeded);
     }
 
     [Fact]

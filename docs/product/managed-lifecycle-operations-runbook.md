@@ -463,11 +463,10 @@ DELETE /api/admin/organizations/{organizationId}/internal-entitlement
 ```
 
 The routes use the admin API policy: the admin API key (`X-Api-Key`) or a control
-session with the `control_admin` role. Production also sets
-`Authentication:Admin:AllowAuthenticatedCustomerSession`, under which any
-authenticated Entra session passes the admin policy; that is only safe while the Entra
-application's user assignment is restricted to operators, so prefer the admin API key.
-Browser-session mutations additionally need a same-origin `Origin` header.
+session with the `control_admin` role. Production sets
+`Authentication:Admin:AllowAuthenticatedCustomerSession=false`, so an authenticated
+Entra session without that role is denied. Browser-session mutations additionally need
+a same-origin `Origin` header.
 
 `PUT` grants, or re-grants with a new cap and expiry, and returns the current state:
 
