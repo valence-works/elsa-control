@@ -28,7 +28,7 @@ Optional worker-lane preference filters when the session is bound to one impleme
 
 If the session is lane-bound, prefer a matching lane issue. Do not take an issue labeled for the other worker. An issue with `ready-for-agent` and no `worker:*` label is available to either worker.
 
-Skip an issue that does not have project Status `Ready` and Agent State `Agent Ready`, is already assigned, or is a Feature, Epic, or Program. Treat a `claim:` comment as active only until a later `claim-abandoned: <claim-comment-id>` for that claim, a later `blocked:` comment, or until an operator removes `blocked` and restores `ready-for-agent`, Status `Ready`, and Agent State `Agent Ready` for requeue. `type:task` is the usual leaf, and a `type:bug` or `type:spike` that satisfies the same readiness checks is also valid.
+Skip an issue that does not have project Status `Ready` and Agent State `Agent Ready`, is already assigned, or is a Feature, Epic, or Program. Treat a `claim:` comment as active only until a later `claim-abandoned: <claim-comment-id>` for that claim, a later `blocked:` comment, claim expiry (15 minutes with no removal of `ready-for-agent`, no Status move to `In Progress`, and no Agent State move to `Assigned`), or until an operator removes `blocked` and restores `ready-for-agent`, Status `Ready`, and Agent State `Agent Ready` for requeue. `type:task` is the usual leaf, and a `type:bug` or `type:spike` that satisfies the same readiness checks is also valid.
 
 ## Claim
 
@@ -43,6 +43,8 @@ Before writing code:
 7. Take only this one Task for the session.
 
 If any claim mutation fails (assignment, claim comment, label removal, Status update, or Agent State update), do not start work. Revert the claim completely if you can. Otherwise comment `blocked: claim failed - <reason>`, add `blocked`, move project Status to `Blocked`, set Agent State to `Not Ready`, unassign if possible, and stop. Only an operator may requeue that issue by removing `blocked` and restoring `ready-for-agent`, Status `Ready`, and Agent State `Agent Ready`.
+
+If an issue is assigned but has no active `claim:` comment and still shows `ready-for-agent`, Status `Ready`, and Agent State `Agent Ready` for 15 minutes, treat it as an orphaned claim: unassign it, then continue the claim flow from step 1.
 
 ## While in flight
 
