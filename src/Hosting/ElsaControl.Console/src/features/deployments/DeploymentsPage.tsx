@@ -284,8 +284,8 @@ export function DeploymentsPage() {
   return (
     <section className="space-y-5">
       <PageHeader
-        title="Deployment overview"
-        description="Dashboard view for workspace deployment posture, drift, health, recent activity, and operational shortcuts."
+        title="Deployments"
+        description="Releases, environment drift, and recent runs."
         actions={
           <>
             <Link to="/admin/deployments/applications" className={buttonClassName("secondary")}>
@@ -377,7 +377,7 @@ function DeploymentApplicationsReady({ context }: { context: DeploymentContext }
       <Breadcrumbs items={[{ label: "Deployments", to: "/admin/deployments" }, { label: "Applications" }]} />
       <PageHeader
         title="Applications"
-        description="Workflow applications registered for deployment management in this workspace."
+        description="Your applications and their environments."
         actions={
           <Link to="/admin/deployments/new" className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageSetup}>
             <Plus className="h-4 w-4" />
@@ -401,11 +401,11 @@ function DeploymentApplicationsReady({ context }: { context: DeploymentContext }
       {data.applications.length === 0 ? (
         <EmptyState
           title="No deployment setup"
-          description="Create a workflow application, first environment, and first engine registration to start managing deployments."
+          description="Connect an engine to create your first application and environment."
           action={
-            <Link to="/admin/deployments/new" className={buttonClassName()}>
+            <Link to="/admin/engines/connect" className={buttonClassName()}>
               <Plus className="h-4 w-4" />
-              New application setup
+              Connect engine
             </Link>
           }
         />
@@ -413,7 +413,7 @@ function DeploymentApplicationsReady({ context }: { context: DeploymentContext }
         <EmptyState title="No matching applications" description="Clear the search to see all workflow applications." />
       ) : (
         <section className="space-y-3">
-          <SectionHeader title="Workflow applications" description="Open an application to manage its environments and deployment operations." />
+          <SectionHeader title="Workflow applications" description="" />
           <ApplicationTable applications={applications} data={data} />
         </section>
       )}
@@ -2042,7 +2042,7 @@ function DeploymentEnvironmentReady({
             </Link>
             <Link to={`${environmentPath(application.id, environment.id)}/engines/new`} className={buttonClassName("primary", !canManageSetup ? "pointer-events-none opacity-50" : undefined)} aria-disabled={!canManageSetup}>
               <Plus className="h-4 w-4" />
-              Register engine
+              Connect engine
             </Link>
           </>
         }
@@ -2064,7 +2064,7 @@ function DeploymentEnvironmentReady({
               <EmptyState
                 title="No engine registered"
                 description="Register an engine before verifying runtime health or running controls."
-                action={<Link to={`${environmentPath(application.id, environment.id)}/engines/new`} className={buttonClassName()}>Register engine</Link>}
+                action={<Link to={`${environmentPath(application.id, environment.id)}/engines/new`} className={buttonClassName()}>Connect engine</Link>}
               />
             ) : (
               <div className="space-y-3">
@@ -4664,10 +4664,10 @@ function FormPageShell({
 
 function PageHeader({ title, description, actions }: { title: string; description: string; actions?: ReactNode }) {
   return (
-    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+    <div className="console-page-header flex flex-col gap-4 pb-4 pt-2 lg:flex-row lg:items-end lg:justify-between">
       <div>
-        <h1 className="text-xl font-semibold">{title}</h1>
-        <p className="mt-1 max-w-3xl text-sm text-muted-foreground">{description}</p>
+        <h1 className="font-display text-3xl font-semibold">{title}</h1>
+        {description && <p className="mt-2 max-w-2xl text-sm text-muted-foreground">{description}</p>}
       </div>
       {actions ? <div className="flex flex-wrap gap-2">{actions}</div> : null}
     </div>
@@ -4678,7 +4678,7 @@ function SectionHeader({ title, description }: { title: string; description: str
   return (
     <div>
       <h2 className="text-sm font-semibold">{title}</h2>
-      <p className="mt-1 text-xs text-muted-foreground">{description}</p>
+      {description && <p className="mt-1 text-xs text-muted-foreground">{description}</p>}
     </div>
   );
 }
@@ -4709,17 +4709,17 @@ function ActionList({ title, actions, icon, muted = false }: { title: string; ac
 
 function MetricCard({ label, value, tone }: { label: string; value: string; tone?: StatusTone }) {
   return (
-    <div className="rounded-ui border border-border bg-surface p-3">
-      <div className={cn("text-2xl font-semibold", tone ? statusTextClass(tone) : "")}>{value}</div>
-      <div className="text-xs text-muted-foreground">{label}</div>
+    <div className="rounded-ui border border-border bg-surface px-5 py-4">
+      <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className={cn("mt-2 font-display text-3xl font-medium", tone ? statusTextClass(tone) : "")}>{value}</div>
     </div>
   );
 }
 
 function Panel({ title, icon, children }: { title: string; icon: ReactNode; children: ReactNode }) {
   return (
-    <section className="rounded-ui border border-border bg-surface p-4">
-      <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">{icon}{title}</h2>
+    <section className="rounded-ui border border-border bg-surface p-5">
+      <h2 className="mb-4 flex items-center gap-2 border-b border-border pb-4 font-display text-base font-semibold">{icon}{title}</h2>
       {children}
     </section>
   );

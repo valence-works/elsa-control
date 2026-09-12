@@ -10,7 +10,7 @@
   --muted: 210 24% 94%;
   --muted-foreground: 218 13% 43%;
   --border: 214 24% 88%;
-  --primary: 170 78% 33%;
+  --primary: 170 78% 29%;
   --primary-foreground: 0 0% 100%;
   --destructive: 0 72% 45%;
   --warning: 36 90% 42%;
@@ -91,6 +91,11 @@ select option {
 .theme-preview-rail i:first-child {
   background: var(--preview-accent);
 }
+
+.theme-preview[data-layout="rail"] .theme-preview-rail { width: 8px; }
+.theme-preview[data-layout="topbar"] { flex-direction: column; gap: 7px; }
+.theme-preview[data-layout="topbar"] .theme-preview-rail { flex-direction: row; width: 100%; padding-top: 0; }
+.theme-preview[data-layout="topbar"] .theme-preview-rail i { width: 20%; height: 3px; }
 
 .theme-preview-page {
   display: flex;

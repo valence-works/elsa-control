@@ -5,6 +5,7 @@ import { AuthProvider } from "@/lib/auth/AuthProvider";
 import { QueryProvider } from "@/lib/query/queryClient";
 import { router } from "@/app/routes";
 import "@/styles.css";
+import "@/console-layout.css";
 import { initializeTheme } from "@/lib/theme/ThemeProvider";
 
 initializeTheme();

@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { createMemoryRouter, RouterProvider } from "react-router-dom";
+import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes } from "react-router-dom";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppShell } from "@/app/AppShell";
@@ -25,6 +25,8 @@ describe("AppShell", () => {
     }
     document.documentElement.classList.remove("dark");
     document.documentElement.removeAttribute("data-console-theme");
+    document.documentElement.removeAttribute("data-console-layout");
+    document.documentElement.removeAttribute("data-console-pattern");
     document.documentElement.removeAttribute("data-theme-accent");
     document.documentElement.removeAttribute("style");
   });
@@ -36,36 +38,55 @@ describe("AppShell", () => {
     expect(screen.getAllByRole("link", { name: "Overview" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: "Sources" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: "Packages" }).length).toBeGreaterThan(0);
-    expect(screen.getAllByRole("link", { name: "Sync Runs" }).length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Deliver").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Operate").length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("link", { name: "Sync runs" }).length).toBeGreaterThan(0);
+    expect(screen.getByText("Library")).toBeInTheDocument();
+    expect(screen.getByText("Manage")).toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: "Applications" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: "Engine credentials" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: "Tiers" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: "Artifacts" }).length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Runtime Builder").length).toBeGreaterThan(0);
-    expect(screen.getAllByRole("link", { name: "Build configurations" }).length).toBeGreaterThan(0);
-    expect(screen.getAllByRole("link", { name: "Console" }).length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Managed Runtimes").length).toBeGreaterThan(0);
-    expect(screen.getAllByRole("link", { name: "Runtime Operations" }).length).toBeGreaterThan(0);
-    expect(screen.queryByRole("link", { name: "Audit" })).not.toBeInTheDocument();
-    expect(screen.getByText("Audit").closest("[aria-disabled='true']")).toBeInTheDocument();
-    expect(navigationText).toContain("ControlOverview");
-    expect(navigationText).toContain("DeliverOverviewApplicationsArtifacts");
-    expect(navigationText).toContain("OperateTiersEngine credentialsConsole");
-    expect(navigationText).toContain("Runtime BuilderBuild configurations");
+    expect(screen.getByRole("link", { name: "Runtime builder" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Logs" })).toBeInTheDocument();
+    expect(screen.queryByText("Managed Runtimes")).not.toBeInTheDocument();
+    expect(navigationText).toContain("WorkspaceOverviewApplicationsDeployments");
+    expect(navigationText).toContain("LibraryArtifactsPackagesRuntime builder");
     expect(screen.queryByRole("link", { name: "Settings" })).not.toBeInTheDocument();
-    expect(await screen.findAllByRole("combobox", { name: "Organization" }, { timeout: 5_000 })).toHaveLength(2);
-    expect(screen.getAllByRole("combobox", { name: "Workspace" })).toHaveLength(2);
-    expect(await screen.findAllByLabelText("Application build number", {}, { timeout: 5_000 })).toHaveLength(2);
+    expect(await screen.findAllByRole("combobox", { name: "Organization" }, { timeout: 5_000 })).toHaveLength(1);
+    expect(screen.getAllByRole("combobox", { name: "Workspace" })).toHaveLength(1);
+    expect(await screen.findAllByLabelText("Application build number", {}, { timeout: 5_000 })).toHaveLength(1);
   });
 
   it("shows the application build number", async () => {
     renderAppShell("2026.05.16.7");
 
     const buildLabels = await screen.findAllByLabelText("Application build number");
-    expect(buildLabels).toHaveLength(2);
+    expect(buildLabels).toHaveLength(1);
     buildLabels.forEach((label) => expect(label).toHaveTextContent("Build 2026.05.16.7"));
+  });
+
+  it("opens keyboard navigation and follows a filtered destination with Enter", async () => {
+    renderAppShellRoute("/admin/login");
+    const user = userEvent.setup();
+    await user.keyboard("{Control>}k{/Control}");
+    expect(screen.getByRole("dialog", { name: "Go to a page" })).toHaveAttribute("open");
+    const search = screen.getByRole("textbox", { name: "Find a page" });
+    expect(search).toHaveFocus();
+    await user.type(search, "connect");
+    expect(screen.getByRole("link", { name: "Connect engine" })).toHaveAttribute("href", "/admin/engines/connect");
+    await user.keyboard("{Enter}");
+    expect(await screen.findByRole("heading", { name: "Connection route" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Go to a page" })).not.toBeInTheDocument();
+  });
+
+  it("exposes only available destinations in a collapsible mobile navigation", async () => {
+    renderAppShell();
+    const user = userEvent.setup();
+    const toggle = screen.getByRole("button", { name: "Open navigation" });
+    await user.click(toggle);
+    expect(screen.getByRole("button", { name: "Close navigation" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.queryByText("Soon")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Close navigation" }));
+    expect(screen.getByRole("button", { name: "Open navigation" })).toHaveAttribute("aria-expanded", "false");
   });
 
   it("changes the selected theme and color mode without disturbing the console content", async () => {
@@ -236,23 +257,18 @@ function renderAppShellRoute(route: string) {
       return Response.json(workspaceContextFixture());
     return Response.json({ name: "ElsaControl.Api", buildNumber: "0.0.1" });
   }));
-  const router = createMemoryRouter([
-    {
-      path: "/admin",
-      element: <AppShell />,
-      children: [
-        { path: "login", element: <AdminLoginPage /> },
-        { path: "*", element: <ConsoleNotFoundPage /> }
-      ]
-    }
-  ], {
-    initialEntries: [route]
-  });
-
   render(
     <TestQueryProvider>
       <AuthProvider>
-        <RouterProvider router={router} />
+        <MemoryRouter initialEntries={[route]}>
+          <Routes>
+            <Route path="/admin" element={<AppShell />}>
+              <Route path="login" element={<AdminLoginPage />} />
+              <Route path="engines/connect" element={<h1>Connection route</h1>} />
+              <Route path="*" element={<ConsoleNotFoundPage />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
       </AuthProvider>
     </TestQueryProvider>
   );

@@ -1,9 +1,8 @@
 # Elsa Control Console
 
-Unified React console for Elsa Control workspace users and operators. Package
-Catalog is the first active module; deployment artifacts, Runtime Builder,
-environment workbenches, managed runtimes, runtime operations, and audit views
-are reserved as Elsa Control modules from the beginning.
+React console for Elsa Control workspace users and operators. The workspace
+overview leads with engine health, application environments, and actionable
+deployment signals, backed by the existing workspace APIs.
 
 ## Development
 
@@ -43,26 +42,48 @@ The page covers canonical package casing, version routes, visibility blockers,
 validation findings, feature/settings inspection, manifest review, and
 version-scoped approval/rejection actions.
 
-The first active module exposes Overview, Sources, Packages, and Sync Runs.
-Deployment, artifact, Runtime Builder, target, runtime, operations, and audit
-modules may be visible as roadmap affordances but must not imply implemented
-mutations before backend contracts exist. The catalog module must not include
-Settings, package identity approval controls, hard-delete source controls,
-realtime streaming logs, or manifest editing.
+Navigation groups available features into Workspace, Library, and Manage.
+Planned modules are not shown as disabled navigation. Cmd/Ctrl+K opens page
+navigation; the engine fleet has its own name/context/health filters.
+
+## Connect an engine
+
+`/admin/engines/connect` combines endpoint, credentials, and placement in one
+form. Placement is disclosed on demand. Existing environment registration links
+redirect here with an environment selection. The flow uses current workspace
+permissions and APIs; engine registration performs the health check. It does not
+claim to discover or verify an endpoint before registration.
+
+Application, environment, credential, and engine writes are separate backend
+operations. Confirmed resource IDs are kept for retry within the form. An
+ambiguous network failure requires reconciliation rather than guessing a saved
+resource by name. Leaving or reloading the page discards in-memory form progress.
+
+## Design preview
+
+With the Vite development server running, open `/admin/design-preview.html` for
+a populated preview using the actual console components and sample data. This
+separate development entry installs API fixtures before loading the app; the
+normal entry continues to use real authentication and APIs. The preview banner
+identifies sample data. Simulated changes last only until reload.
+The preview entry is not included in the normal production build.
 
 ## Console themes
 
 Open **Appearance** in the shell to choose Classic, Operations Canvas, Command
 Deck, or Topology Atlas. Each supports Light, Dark, and System mode. Classic also
-retains the existing accent choices. Changes apply immediately without replacing
-page content or navigation. Preferences belong to the current browser, persist
+retains the accent choices. Changes apply immediately while preserving the
+current route and form state. Preferences belong to the current browser, persist
 across reloads, and synchronize across tabs; they are not account settings.
 When browser storage is unavailable, choices last for the current page session.
 There is no in-app feedback collection or telemetry.
 
 `src/lib/theme/themes.ts` is the theme registry. Each theme has a stable ID,
-display name, version, complete light/dark semantic palettes, font stacks, and a
-corner radius. To add a theme, extend `ThemeId` and add a complete registry entry;
+display name, version, complete light/dark semantic palettes, font stacks,
+corner radius, background pattern, and shell layout. Command Deck uses an icon
+rail, Operations Canvas a horizontal navigation bar, and Topology Atlas a grouped
+sidebar and grid canvas. Smaller screens use the shared responsive navigation.
+To add a theme, extend `ThemeId` and add a complete registry entry;
 the selector and previews discover it automatically. Increment a theme's version
 when its visual design changes so feedback can identify the revision (the card's
 tooltip shows the version). Use already loaded fonts or update `index.html`.
@@ -72,6 +93,7 @@ Components use semantic Tailwind utilities such as `bg-surface`, `text-foregroun
 branches and hardcoded colors. `ThemeProvider` maps registry values to CSS
 variables; `initializeTheme()` applies saved preferences before React renders.
 `styles.css` contains the Classic light fallback and shared appearance UI styles.
+`console-layout.css` defines the reusable sidebar, rail, topbar, and grid treatments.
 
 The versioned `elsa-control-console-appearance` record is authoritative. The old
 theme/accent keys are migrated and retained for older bundles. Invalid settings

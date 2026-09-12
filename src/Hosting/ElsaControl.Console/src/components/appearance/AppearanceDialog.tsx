@@ -93,7 +93,7 @@ function ThemePreview({ theme, mode }: { theme: ThemeDefinition; mode: "light" |
     fontFamily: theme.fontDisplay
   } as CSSProperties;
   return (
-    <span aria-hidden="true" className="theme-preview" style={style}>
+    <span aria-hidden="true" className="theme-preview" data-layout={theme.layout} style={style}>
       <span className="theme-preview-rail"><i /><i /><i /></span>
       <span className="theme-preview-page"><b>Engines</b><span className="theme-preview-line" /><span className="theme-preview-row"><i /><span /></span><span className="theme-preview-row"><i /><span /></span></span>
     </span>

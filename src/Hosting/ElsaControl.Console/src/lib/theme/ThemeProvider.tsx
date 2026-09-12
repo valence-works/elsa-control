@@ -58,7 +58,7 @@ const semanticVariables: Record<keyof ThemePalette, string> = {
 
 const accentPrimary: Record<ThemeAccent, { light: { primary: string; primaryForeground: string }; dark: { primary: string; primaryForeground: string } }> = {
   teal: {
-    light: { primary: "170 78% 33%", primaryForeground: "0 0% 100%" },
+    light: { primary: "170 78% 29%", primaryForeground: "0 0% 100%" },
     dark: { primary: "168 78% 52%", primaryForeground: "222 40% 8%" }
   },
   blue: {
@@ -125,6 +125,8 @@ export function applyThemePreferences(
   root.style.setProperty("--font-mono", theme.fontMono);
 
   root.dataset.consoleTheme = theme.id;
+  root.dataset.consoleLayout = theme.layout;
+  root.dataset.consolePattern = theme.backgroundPattern;
   root.dataset.themeAccent = normalized.accent;
   root.classList.toggle("dark", resolvedMode === "dark");
   root.style.colorScheme = resolvedMode;

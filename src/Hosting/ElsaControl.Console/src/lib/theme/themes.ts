@@ -27,6 +27,8 @@ export interface ThemeDefinition {
   name: string;
   description: string;
   version: number;
+  layout: "sidebar" | "rail" | "topbar";
+  backgroundPattern: "none" | "grid";
   palettes: {
     light: ThemePalette;
     dark: ThemePalette;
@@ -56,7 +58,7 @@ const classicLight: ThemePalette = {
   muted: "210 24% 94%",
   mutedForeground: "218 13% 43%",
   border: "214 24% 88%",
-  primary: "170 78% 33%",
+  primary: "170 78% 29%",
   primaryForeground: "0 0% 100%",
   destructive: "0 72% 45%",
   warning: "36 90% 42%",
@@ -166,7 +168,9 @@ export const themes: ThemeDefinition[] = [
     id: "classic",
     name: "Classic",
     description: "The familiar Elsa Control console with a calm teal accent.",
-    version: 1,
+    version: 2,
+    layout: "sidebar",
+    backgroundPattern: "none",
     palettes: { light: classicLight, dark: classicDark },
     radius: "0.5rem",
     fontDisplay: '"Space Grotesk", Inter, ui-sans-serif, system-ui, sans-serif',
@@ -177,7 +181,9 @@ export const themes: ThemeDefinition[] = [
     id: "operations-canvas",
     name: "Operations Canvas",
     description: "A cool, spacious canvas for watching systems and deployment flow.",
-    version: 1,
+    version: 2,
+    layout: "topbar",
+    backgroundPattern: "none",
     palettes: { light: operationsCanvasLight, dark: operationsCanvasDark },
     radius: "0.75rem",
     fontDisplay: 'Georgia, "Times New Roman", serif',
@@ -188,7 +194,9 @@ export const themes: ThemeDefinition[] = [
     id: "command-deck",
     name: "Command Deck",
     description: "High-signal amber and charcoal treatment for decisive operations.",
-    version: 1,
+    version: 2,
+    layout: "rail",
+    backgroundPattern: "none",
     palettes: { light: commandDeckLight, dark: commandDeckDark },
     radius: "0.5rem",
     fontDisplay: '"Space Grotesk", Inter, ui-sans-serif, system-ui, sans-serif',
@@ -199,7 +207,9 @@ export const themes: ThemeDefinition[] = [
     id: "topology-atlas",
     name: "Topology Atlas",
     description: "A layered violet palette for navigating complex runtime topology.",
-    version: 1,
+    version: 2,
+    layout: "sidebar",
+    backgroundPattern: "grid",
     palettes: { light: topologyAtlasLight, dark: topologyAtlasDark },
     radius: "0.6875rem",
     fontDisplay: 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',

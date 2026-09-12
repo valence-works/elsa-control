@@ -73,6 +73,8 @@ beforeEach(() => {
   });
   window.localStorage.clear();
   document.documentElement.removeAttribute("data-console-theme");
+  document.documentElement.removeAttribute("data-console-layout");
+  document.documentElement.removeAttribute("data-console-pattern");
   document.documentElement.removeAttribute("data-theme-accent");
   document.documentElement.classList.remove("dark");
   document.documentElement.removeAttribute("style");
@@ -99,6 +101,9 @@ describe("theme registry", () => {
       expect(Object.keys(theme.palettes.light)).toEqual(Object.keys(theme.palettes.dark));
       expect(theme.palettes.light.primary).toMatch(/^\d+ \d+% \d+%$/);
       expect(theme.palettes.dark.primary).toMatch(/^\d+ \d+% \d+%$/);
+      for (const palette of [theme.palettes.light, theme.palettes.dark]) {
+        expect(contrast(palette.primaryForeground, palette.primary)).toBeGreaterThanOrEqual(4.5);
+      }
     }
   });
 
@@ -283,11 +288,13 @@ describe("ThemeProvider", () => {
 
   it("removes previous theme styling when switching themes", () => {
     renderTheme();
+    expect(document.documentElement).toHaveAttribute("data-console-layout", "sidebar");
     const classicRadius = document.documentElement.style.getPropertyValue("--radius-ui");
     const classicFont = document.documentElement.style.getPropertyValue("--font-display");
 
     fireEvent.click(screen.getByRole("button", { name: "operations" }));
 
+    expect(document.documentElement).toHaveAttribute("data-console-layout", "topbar");
     expect(document.documentElement.style.getPropertyValue("--radius-ui")).not.toBe(classicRadius);
     expect(document.documentElement.style.getPropertyValue("--font-display")).not.toBe(classicFont);
     expect(document.documentElement.style.getPropertyValue("--primary")).toBe("175 88% 26%");

@@ -47,7 +47,7 @@ describe("DeploymentsPage", () => {
   it("renders a workspace deployment overview without the application list", async () => {
     renderDeployments();
 
-    expect(await screen.findByRole("heading", { name: "Deployment overview" }, { timeout: 15000 })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /^Deployments$/ }, { timeout: 15000 })).toBeInTheDocument();
     expect(linkByHref("/admin/deployments/applications")).toBeInTheDocument();
     expect(linkByHref("/admin/deployments/new")).toBeInTheDocument();
     expect(linkByHref("/admin/deployments/tiers")).toBeInTheDocument();
@@ -91,8 +91,8 @@ describe("DeploymentsPage", () => {
     }, "/admin/deployments/applications");
 
     expect(await screen.findByText("No deployment setup")).toBeInTheDocument();
-    expect(screen.getByText("Create a workflow application, first environment, and first engine registration to start managing deployments.")).toBeInTheDocument();
-    expect(linkByHref("/admin/deployments/new")).toBeInTheDocument();
+    expect(screen.getByText("Connect an engine to create your first application and environment.")).toBeInTheDocument();
+    expect(linkByHref("/admin/engines/connect")).toBeInTheDocument();
   });
 
   it("creates application setup with environments and engines from the guided setup route", async () => {
