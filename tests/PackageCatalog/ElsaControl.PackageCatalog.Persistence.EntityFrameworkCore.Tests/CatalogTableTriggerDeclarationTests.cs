@@ -1,5 +1,5 @@
+using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using System.Data.Common;
-using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -47,30 +47,38 @@ public sealed partial class CatalogTableTriggerDeclarationTests
         Assert.Equal(Describe(created.Select(x => (x.Table, x.Name))), Describe(DeclaredTriggers(db.Model)));
     }
 
-    // Tables whose rows pass the context's save guards without domain setup; the parity tests
-    // above cover the declaration for every trigger-guarded table.
-    [Theory]
-    [InlineData("DeploymentRuns")]
-    [InlineData("DeploymentEnvironments")]
-    public async Task Sql_server_updates_on_trigger_guarded_tables_do_not_use_a_bare_output_clause(string table)
+    [Fact]
+    public async Task Sql_server_deployment_run_update_has_no_bare_output_clause()
+    {
+        var run = new DeploymentRunEntity
+        {
+            Id = Guid.NewGuid(), WorkspaceId = Guid.NewGuid(), ApplicationId = Guid.NewGuid(), EnvironmentId = Guid.NewGuid(),
+            EngineId = Guid.NewGuid(), SourceRevisionId = Guid.NewGuid(), ConfirmationId = Guid.NewGuid(), ActorAccountId = Guid.NewGuid(),
+        };
+
+        await AssertUpdateHasNoBareOutputClauseAsync("DeploymentRuns", run, x => x.AttemptNumber = 2);
+    }
+
+    [Fact]
+    public async Task Sql_server_deployment_environment_update_has_no_bare_output_clause()
+    {
+        var environment = new DeploymentEnvironmentEntity { Id = Guid.NewGuid(), WorkspaceId = Guid.NewGuid(), ApplicationId = Guid.NewGuid() };
+
+        await AssertUpdateHasNoBareOutputClauseAsync("DeploymentEnvironments", environment, x => x.Name = "Updated");
+    }
+
+    private static async Task AssertUpdateHasNoBareOutputClauseAsync<TEntity>(string table, TEntity entity, Action<TEntity> update)
+        where TEntity : class
     {
         var capture = new CommandCapture();
         await using var db = CreateSqlServerContext(capture);
         db.Database.AutoTransactionBehavior = AutoTransactionBehavior.Never;
-        var entityType = db.Model.GetEntityTypes().Single(x => x.GetTableName() == table && x.BaseType is null);
-        var entity = RuntimeHelpers.GetUninitializedObject(entityType.ClrType);
-        var entry = db.Entry(entity);
-        foreach (var key in entityType.FindPrimaryKey()!.Properties)
-            entry.Property(key.Name).CurrentValue = SampleKeyValue(key.ClrType);
-        foreach (var ownership in entityType.GetProperties().Where(x => x.ClrType == typeof(Guid) && !x.IsKey() && !x.IsShadowProperty()))
-            entry.Property(ownership.Name).CurrentValue = Guid.NewGuid();
-        entry.State = EntityState.Unchanged;
-        var updated = entityType.GetProperties().First(x => !x.IsKey() && !x.IsConcurrencyToken && !x.IsShadowProperty() && x.ValueGenerated == ValueGenerated.Never);
-        entry.Property(updated.Name).IsModified = true;
+        db.Attach(entity);
+        update(entity);
 
         var failure = await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
-        Assert.IsType<CommandCapturedException>(failure.InnerException);
 
+        Assert.IsType<CommandCapturedException>(failure.InnerException);
         Assert.Contains($"UPDATE [{table}]", capture.CommandText, StringComparison.Ordinal);
         Assert.DoesNotMatch(BareOutputClause(), capture.CommandText);
     }
@@ -102,15 +110,6 @@ public sealed partial class CatalogTableTriggerDeclarationTests
 
     private static string[] Describe(IEnumerable<(string Table, string Name)> triggers) =>
         triggers.Select(x => $"{x.Table}:{x.Name}").Distinct().Order(StringComparer.Ordinal).ToArray();
-
-    private static object SampleKeyValue(Type type) => (Nullable.GetUnderlyingType(type) ?? type) switch
-    {
-        var t when t == typeof(Guid) => Guid.NewGuid(),
-        var t when t == typeof(string) => "trigger-declaration",
-        var t when t == typeof(long) => 1L,
-        var t when t == typeof(int) => 1,
-        var t => throw new NotSupportedException($"No sample key value for {t}."),
-    };
 
     [GeneratedRegex(@"\bOUTPUT\b(?![^;]*\bINTO\b)", RegexOptions.IgnoreCase)]
     private static partial Regex BareOutputClause();
