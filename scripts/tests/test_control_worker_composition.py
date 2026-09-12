@@ -14,9 +14,6 @@ renderer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(renderer)
 
 GUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-ARM_ID = re.compile(r"^/subscriptions/[0-9a-f-]{36}(/resourceGroups/[A-Za-z0-9._()-]+)?(/providers/[A-Za-z0-9./_-]+)+$")
-ORIGIN = re.compile(r"^https://[a-z0-9.-]+$")
-TOKEN = re.compile(r"^[A-Za-z0-9._@#-]{1,128}$")
 
 
 class CompositionFilesTests(unittest.TestCase):
@@ -59,20 +56,27 @@ class CompositionFilesTests(unittest.TestCase):
     def test_production_parameters_are_non_secret_identifiers(self):
         for name, value in self.resolved.items():
             with self.subTest(name=name):
-                self.assertTrue(
-                    GUID.match(value) or ARM_ID.match(value) or ORIGIN.match(value) or TOKEN.match(value),
-                    f"{name} does not look like an identifier")
+                shapes = (renderer.NAMED_PARAMETER_SHAPES[name],) if name in renderer.NAMED_PARAMETER_SHAPES else renderer.PARAMETER_SHAPES
+                self.assertTrue(any(shape.match(value) for shape in shapes), f"{name} does not look like an identifier")
                 self.assertNotRegex(value, r"[=;]")
 
     def test_only_the_named_decisions_are_pending(self):
-        self.assertEqual({
-            "SqlBootstrapIp": "#310",
-            "ReleaseFeedServiceIndex": "#311",
-            "ReleaseVerificationClientId": "#311",
-            "ReleaseVerificationBlobRedirectHost": "#311",
-            "ReleaseProducerSignatureSubject": "#311",
-            "ReleaseProducerOidcIssuer": "#311",
-        }, self.pending)
+        self.assertEqual({}, self.pending)
+
+    def test_sql_bootstrap_address_is_the_control_egress_nat_address(self):
+        # Output of infra/control-egress (#310): the single static address all API egress uses.
+        self.assertEqual("9.160.165.252", self.resolved["SqlBootstrapIp"])
+
+    def test_release_verification_binds_the_decided_producer_and_the_api_identity(self):
+        self.assertEqual(
+            "https://github.com/valence-works/elsa-production-image/.github/workflows/build-and-push.yml@refs/heads/main",
+            self.resolved["ReleaseProducerSignatureSubject"])
+        self.assertEqual("https://token.actions.githubusercontent.com", self.resolved["ReleaseProducerOidcIssuer"])
+        self.assertEqual("c5055d7d-d66d-468d-8984-077214496243", self.resolved["ReleaseVerificationClientId"])
+        self.assertEqual("becmanaged36.blob.core.windows.net", self.resolved["ReleaseVerificationBlobRedirectHost"])
+        self.assertEqual("https://f.feedz.io/elsa-workflows/elsa-3/nuget/index.json", self.resolved["ReleaseFeedServiceIndex"])
+        rendered = renderer.render(self.verification, self.resolved, self.pending)
+        self.assertEqual("valenceruntimeimages.azurecr.io", rendered["ReleaseCatalog__Verification__RegistryHost"])
 
     def test_production_scope_binds_the_customer_workload_subscription_and_the_governed_registry(self):
         self.assertEqual("a54cd7b1-3d13-48ce-9dce-5ae013142c85", self.resolved["WorkloadSubscriptionId"])
@@ -97,19 +101,24 @@ class RenderTests(unittest.TestCase):
     def setUp(self):
         self.workers = renderer.load_template(renderer.WORKER_TEMPLATE)
         self.resolved, self.pending = renderer.load_parameters(renderer.PRODUCTION_PARAMETERS)
-        self.overrides = {"SqlBootstrapIp": "203.0.113.10", "ReleaseFeedServiceIndex": "https://api.nuget.org/v3/index.json"}
+        self.overrides = {}
 
-    def test_production_render_is_blocked_while_a_decision_is_pending(self):
+    def test_render_is_blocked_while_a_decision_is_pending(self):
+        resolved = {name: value for name, value in self.resolved.items() if name != "SqlBootstrapIp"}
         with self.assertRaises(renderer.CompositionError) as raised:
-            renderer.render(self.workers, self.resolved, self.pending)
+            renderer.render(self.workers, resolved, {"SqlBootstrapIp": "#310"})
         self.assertIn("#310", str(raised.exception))
         self.assertNotIn("ada5e428", str(raised.exception))
+
+    def test_production_render_succeeds_with_every_decision_made(self):
+        rendered = renderer.render(self.workers, self.resolved, self.pending)
+        self.assertEqual("9.160.165.252", rendered["Deployment__AzureProvider__Runner__SqlBootstrapIp"])
 
     def test_render_with_resolved_decisions_produces_only_template_keys(self):
         rendered = renderer.render(self.workers, self.resolved, self.pending, self.overrides)
         self.assertEqual(set(self.workers), set(rendered))
         self.assertFalse(any("${" in value for value in rendered.values()))
-        self.assertEqual("203.0.113.10", rendered["Deployment__AzureProvider__Runner__SqlBootstrapIp"])
+        self.assertEqual("9.160.165.252", rendered["Deployment__AzureProvider__Runner__SqlBootstrapIp"])
 
     def test_render_refuses_half_enabled_workers(self):
         template = dict(self.workers)
@@ -137,6 +146,18 @@ class RenderTests(unittest.TestCase):
                 path.write_text(json.dumps({key: "x"}))
                 with self.assertRaises(renderer.CompositionError, msg=key):
                     renderer.load_template(path)
+
+    def test_signer_identity_accepts_only_an_exact_github_actions_workflow_ref(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "p.json"
+            for value in ("https://example.com/signer", "https://github.com/valence-works/elsa-production-image",
+                          "https://github.com/valence-works/*/.github/workflows/build.yml@refs/heads/main"):
+                path.write_text(json.dumps({"parameters": {"ReleaseProducerSignatureSubject": value}}))
+                with self.assertRaises(renderer.CompositionError, msg=value):
+                    renderer.load_parameters(path)
+            path.write_text(json.dumps({"parameters": {"ReleaseProducerOidcIssuer": "https://issuer.example"}}))
+            with self.assertRaises(renderer.CompositionError):
+                renderer.load_parameters(path)
 
     def test_parameter_loader_refuses_credential_shaped_values(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -168,9 +189,8 @@ class RenderTests(unittest.TestCase):
     def test_cli_status_and_pending_exit_code(self):
         self.assertEqual(0, renderer.main(["status"]))
         with tempfile.TemporaryDirectory() as directory:
-            self.assertEqual(2, renderer.main(["workers", "--output", str(Path(directory) / "w.json")]))
-            self.assertEqual(2, renderer.main(["release-verification", "--output", str(Path(directory) / "v.json")]))
-            self.assertFalse((Path(directory) / "w.json").exists())
+            self.assertEqual(0, renderer.main(["workers", "--output", str(Path(directory) / "w.json")]))
+            self.assertEqual(0, renderer.main(["release-verification", "--output", str(Path(directory) / "v.json")]))
             self.assertEqual(0, renderer.main(["rollback", "--output", str(Path(directory) / "r.json")]))
 
     def test_cli_has_no_value_override_so_only_the_checked_in_parameters_reach_production(self):
