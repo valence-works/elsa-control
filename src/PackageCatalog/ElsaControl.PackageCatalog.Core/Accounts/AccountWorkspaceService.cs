@@ -134,6 +134,54 @@ public sealed class AccountWorkspaceService
     public Task<OrganizationEntitlementSnapshot?> GetLatestOrganizationEntitlementAsync(Guid organizationId, CancellationToken cancellationToken = default) =>
         _store.GetLatestOrganizationEntitlementAsync(organizationId, cancellationToken);
 
+    /// <summary>
+    /// Creates an operator-owned organization and its default shared workspace through the
+    /// catalog mint path. The optional owner defaults to the current trusted identity; API-key
+    /// callers must therefore provide an explicit owner account id.
+    /// </summary>
+    public async Task<OrganizationCreateResult> CreateOrganizationAsync(
+        string? name,
+        Guid? ownerAccountId,
+        TrustedWorkspaceIdentity? currentIdentity,
+        string? operatorSubject,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedName = name?.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedName))
+            return OrganizationCreateResult.Denied(OrganizationCreateFailure.NameRequired);
+        if (normalizedName.Length > 256)
+            return OrganizationCreateResult.Denied(OrganizationCreateFailure.NameTooLong);
+
+        ExternalIdentityLookup? currentAccount = null;
+        if (currentIdentity is not null)
+            currentAccount = await _store.FindByExternalIdentityAsync(
+                currentIdentity.Issuer.Trim(),
+                currentIdentity.Subject.Trim(),
+                cancellationToken);
+
+        var resolvedOwnerAccountId = ownerAccountId;
+        if (!resolvedOwnerAccountId.HasValue)
+        {
+            if (currentIdentity is null)
+                return OrganizationCreateResult.Denied(OrganizationCreateFailure.OwnerAccountRequired);
+            if (currentAccount is null)
+                return OrganizationCreateResult.Denied(OrganizationCreateFailure.OwnerAccountRequired);
+
+            resolvedOwnerAccountId = currentAccount.Context.Account.Id;
+        }
+
+        var result = await _store.CreateOrganizationAsync(new CreateOrganizationRequest(
+            normalizedName,
+            resolvedOwnerAccountId.Value,
+            currentAccount?.Context.Account.Id,
+            operatorSubject), cancellationToken);
+        if (!result.Succeeded)
+            return result;
+
+        await ProvisionOwnerAsync(result.WorkspaceId, result.OwnerAccountId, cancellationToken);
+        return result;
+    }
+
     public Task<int> ActiveWorkspaceCountAsync(Guid organizationId, CancellationToken cancellationToken = default) =>
         _store.ActiveWorkspaceCountAsync(organizationId, cancellationToken);
 
@@ -268,6 +316,7 @@ public sealed class AccountWorkspaceService
 public interface IAccountWorkspaceStore
 {
     Task<ExternalIdentityLookup?> FindByExternalIdentityAsync(string issuer, string subject, CancellationToken cancellationToken = default);
+    Task<OrganizationCreateResult> CreateOrganizationAsync(CreateOrganizationRequest request, CancellationToken cancellationToken = default);
     Task AddAccountAsync(Account account, CancellationToken cancellationToken = default);
     Task UpdateExternalIdentitySeenAsync(Guid externalIdentityId, string? displayName, string? email, CancellationToken cancellationToken = default);
     Task<bool> WorkspaceExistsAsync(Guid workspaceId, CancellationToken cancellationToken = default);
@@ -335,6 +384,31 @@ public sealed record WorkspaceAccess(
 }
 
 public sealed record CreateOrganizationWorkspaceRequest(string Name, IReadOnlyList<InitialWorkspaceMember> InitialMembers);
+
+public sealed record CreateOrganizationRequest(
+    string Name,
+    Guid OwnerAccountId,
+    Guid? ActorAccountId,
+    string? OperatorSubject);
+
+public enum OrganizationCreateFailure
+{
+    NameRequired,
+    NameTooLong,
+    OwnerAccountRequired,
+    OwnerAccountNotFound
+}
+
+public sealed record OrganizationCreateResult(
+    Guid OrganizationId,
+    Guid WorkspaceId,
+    Guid OwnerAccountId,
+    OrganizationCreateFailure? Failure = null)
+{
+    public bool Succeeded => Failure is null && OrganizationId != Guid.Empty && WorkspaceId != Guid.Empty;
+
+    public static OrganizationCreateResult Denied(OrganizationCreateFailure failure) => new(Guid.Empty, Guid.Empty, Guid.Empty, failure);
+}
 
 public sealed record InitialWorkspaceMember(Guid AccountId, WorkspaceRole Role);
 

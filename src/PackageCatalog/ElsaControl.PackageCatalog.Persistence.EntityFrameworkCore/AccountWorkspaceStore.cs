@@ -50,6 +50,75 @@ public sealed class AccountWorkspaceStore(CatalogDbContext dbContext) : IAccount
             });
     }
 
+    public Task<OrganizationCreateResult> CreateOrganizationAsync(
+        CreateOrganizationRequest request,
+        CancellationToken cancellationToken = default) =>
+        dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+        {
+            var ownerExists = await dbContext.Accounts
+                .AsNoTracking()
+                .AnyAsync(x => x.Id == request.OwnerAccountId, cancellationToken);
+            if (!ownerExists)
+                return OrganizationCreateResult.Denied(OrganizationCreateFailure.OwnerAccountNotFound);
+
+            var now = DateTimeOffset.UtcNow;
+            var organization = new Organization
+            {
+                Name = request.Name.Trim(),
+                CreatedByAccountId = request.ActorAccountId,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            var workspace = new Workspace
+            {
+                OrganizationId = organization.Id,
+                Organization = organization,
+                Name = organization.Name,
+                Kind = WorkspaceKind.Shared,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            var organizationMembership = new OrganizationMembership
+            {
+                OrganizationId = organization.Id,
+                Organization = organization,
+                AccountId = request.OwnerAccountId,
+                Role = OrganizationRole.Owner,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            var workspaceMembership = new WorkspaceMembership
+            {
+                WorkspaceId = workspace.Id,
+                Workspace = workspace,
+                AccountId = request.OwnerAccountId,
+                Role = WorkspaceRole.Owner,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            var audit = new OrganizationAuditRecord
+            {
+                OrganizationId = organization.Id,
+                Organization = organization,
+                ActorAccountId = request.ActorAccountId,
+                OperatorSubject = OrganizationInternalEntitlementPolicy.FingerprintOperatorSubject(request.OperatorSubject),
+                Action = OrganizationAuditAction.OrganizationCreated,
+                TargetType = "organization",
+                TargetId = organization.Id.ToString("D"),
+                Summary = $"Organization created with default workspace {workspace.Id:D} for owner account {request.OwnerAccountId:D}.",
+                CreatedAt = now
+            };
+
+            dbContext.Organizations.Add(organization);
+            dbContext.Workspaces.Add(workspace);
+            dbContext.OrganizationMemberships.Add(organizationMembership);
+            dbContext.WorkspaceMemberships.Add(workspaceMembership);
+            dbContext.OrganizationAuditRecords.Add(audit);
+            await dbContext.SaveChangesAsync(cancellationToken);
+
+            return new OrganizationCreateResult(organization.Id, workspace.Id, request.OwnerAccountId);
+        }, cancellationToken);
+
     public async Task AddAccountAsync(Account account, CancellationToken cancellationToken = default) =>
         await dbContext.Accounts.AddAsync(account, cancellationToken);
 

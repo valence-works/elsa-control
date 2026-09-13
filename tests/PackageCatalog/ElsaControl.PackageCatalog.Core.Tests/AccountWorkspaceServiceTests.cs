@@ -116,6 +116,9 @@ public sealed class AccountWorkspaceServiceTests
         public Task<ExternalIdentityLookup?> FindByExternalIdentityAsync(string issuer, string subject, CancellationToken cancellationToken = default) =>
             Task.FromResult(Lookup);
 
+        public Task<OrganizationCreateResult> CreateOrganizationAsync(CreateOrganizationRequest request, CancellationToken cancellationToken = default) =>
+            throw Unsupported();
+
         public Task AddAccountAsync(Account account, CancellationToken cancellationToken = default)
         {
             AddedAccounts.Add(account);

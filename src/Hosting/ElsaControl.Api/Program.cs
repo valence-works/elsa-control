@@ -655,6 +655,7 @@ app.MapAdminPackageEndpoints();
 app.MapAdminApprovalEndpoints();
 app.MapAdminValidationEndpoints();
 app.MapAdminWorkspaceEntitlementEndpoints();
+app.MapAdminOrganizationEndpoints();
 app.MapAdminOrganizationInternalEntitlementEndpoints();
 app.MapAdminReleaseCatalogEndpoints();
 app.MapConsoleLogStreaming();

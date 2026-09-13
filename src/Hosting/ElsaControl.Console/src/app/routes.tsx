@@ -44,6 +44,7 @@ import { ReleasesPage } from "@/features/release-catalog/ReleasesPage";
 import { OrganizationBillingPage } from "@/features/billing/OrganizationBillingPage";
 import { ConnectEnginePage } from "@/features/deployments/ConnectEnginePage";
 import { EngineProvisioningPage } from "@/features/engine-provisioning/EngineProvisioningPage";
+import { AdminOrganizationsPage } from "@/features/organizations/AdminOrganizationsPage";
 
 function PlaceholderPage({ title }: { title: string }) {
   return (
@@ -131,6 +132,7 @@ export const router = createBrowserRouter([
         children: [
           { path: "overview", element: <OverviewPage /> },
           { path: "billing", element: <OrganizationBillingPage /> },
+          { path: "organizations", element: <AdminOrganizationsPage /> },
           { path: "engines/connect", element: <ConnectEnginePage /> },
           { path: "engines/provision", element: <EngineProvisioningPage /> },
           { path: "sources", element: <SourcesPage /> },

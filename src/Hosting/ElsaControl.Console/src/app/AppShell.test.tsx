@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppShell } from "@/app/AppShell";
 import { AdminLoginPage, ConsoleNotFoundPage } from "@/app/routes";
+import { AdminOrganizationsPage } from "@/features/organizations/AdminOrganizationsPage";
 import { AuthProvider } from "@/lib/auth/AuthProvider";
 
 describe("AppShell", () => {
@@ -191,6 +192,13 @@ describe("AppShell", () => {
     expect(screen.queryByText("Unexpected Application Error!")).not.toBeInTheDocument();
   });
 
+  it("does not provision workspace context on the admin organizations route", async () => {
+    const fetchMock = renderAdminOrganizationsAppShell();
+
+    expect(await screen.findByRole("heading", { name: "Organizations" })).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith("/api/me/organizations", expect.anything());
+  });
+
   it("uses the longest parent destination for nested breadcrumbs", async () => {
     renderAppShellRoute("/admin/deployments/new");
 
@@ -260,6 +268,33 @@ function renderAppShellRoute(route: string) {
       </AuthProvider>
     </TestQueryProvider>
   );
+}
+
+function renderAdminOrganizationsAppShell() {
+  installLocalStorageStub();
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    if (url.endsWith("/api/auth/session"))
+      return Response.json({ loginEnabled: true, authenticated: true, isAdmin: true, displayName: "Operator", email: "ops@example.com", loginPath: "/api/auth/login", logoutPath: "/api/auth/logout" });
+    if (url.endsWith("/api/me/organizations"))
+      throw new Error("workspace context should not be fetched on admin organization administration routes");
+    return Response.json({ name: "ElsaControl.Api", buildNumber: "0.0.1" });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  render(
+    <TestQueryProvider>
+      <AuthProvider>
+        <MemoryRouter initialEntries={["/admin/organizations"]}>
+          <Routes>
+            <Route path="/admin" element={<AppShell />}>
+              <Route path="organizations" element={<AdminOrganizationsPage />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </AuthProvider>
+    </TestQueryProvider>
+  );
+  return fetchMock;
 }
 
 function workspaceContextFixture() {
