@@ -1,3 +1,4 @@
+using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.RuntimeBuilder.Abstractions.Plans;
 using ElsaControl.Deployment.Core.Telemetry;
 
@@ -116,45 +117,96 @@ public sealed class ElsaInstanceLifecycleWorker(
         {
             // GetAsync returning null (catalog reconstruct, preview digest, or
             // managed target/audit) used to throw here and become opaque
-            // resolution.invalid — the Dogfood2 *-build.N UpdateIntent symptom.
+            // resolution.invalid. After #413 that path is input-unavailable.
+            // The live residual after promote was AttachResolvedPlan throwing
+            // when replacing an already-projected pin release.
             if (item.Resolution is null)
                 return (await FailAsync(item, workerId, "resolution.input-unavailable", cancellationToken), 0);
 
-            item.Validate();
-            var resolution = await resolver.ResolveAsync(item.Resolution.PlanRequest, cancellationToken);
+            try
+            {
+                item.Validate();
+            }
+            catch (InvalidOperationException)
+            {
+                return (await FailAsync(item, workerId, "resolution.work-item-invalid", cancellationToken), 0);
+            }
+
+            ElsaInstancePlanResolutionResult resolution;
+            try
+            {
+                resolution = await resolver.ResolveAsync(item.Resolution.PlanRequest, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                return (await FailAsync(item, workerId, "resolution.unexpected", cancellationToken), 0);
+            }
+
             if (!resolution.Succeeded)
                 return (await FailAsync(item, workerId, FirstSafeFindingCode(resolution.Findings) ?? "resolution.failed", cancellationToken), 0);
 
             if (resolution.Plan is null || resolution.Reference is null || resolution.CurrentResolvedRelease is null)
                 return (await FailAsync(item, workerId, "resolution.invalid", cancellationToken), 0);
 
-            var planJson = ResolvedElsaApplicationPlanSerialization.Serialize(resolution.Plan);
-            var contentHash = ResolvedElsaApplicationPlanSerialization.ComputeContentHash(resolution.Plan);
+            string planJson;
+            string contentHash;
+            try
+            {
+                planJson = ResolvedElsaApplicationPlanSerialization.Serialize(resolution.Plan);
+                contentHash = ResolvedElsaApplicationPlanSerialization.ComputeContentHash(resolution.Plan);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                return (await FailAsync(item, workerId, "resolution.commit-invalid", cancellationToken), 0);
+            }
+
             if (!string.Equals(contentHash, resolution.Reference.ContentHash, StringComparison.Ordinal) ||
                 !Equals(resolution.CurrentResolvedRelease.PlanReference, resolution.Reference) ||
                 !string.Equals(resolution.Reference.PlanId, item.Resolution.PlanRequest.PlanId, StringComparison.Ordinal) ||
                 !string.Equals(resolution.Reference.PlanUri, item.Resolution.PlanRequest.PlanUri, StringComparison.Ordinal))
                 return (await FailAsync(item, workerId, "resolution.invalid", cancellationToken), 0);
 
-            var resolvedInstance = item.Instance.AttachResolvedPlan(
-                resolution.Reference,
-                resolution.CurrentResolvedRelease);
+            ElsaInstance resolvedInstance;
+            try
+            {
+                resolvedInstance = item.Instance.AttachResolvedPlan(
+                    resolution.Reference,
+                    resolution.CurrentResolvedRelease);
+            }
+            catch (ArgumentException)
+            {
+                return (await FailAsync(item, workerId, "resolution.plan-replace-invalid", cancellationToken), 0);
+            }
+
             var queuedOperation = item.Operation.TransitionTo(
                 ElsaControl.Deployment.Abstractions.Instances.ElsaInstanceOperationState.Queued);
-            var commit = new ElsaInstanceLifecycleResolutionCommit(
-                item.Outbox.WorkspaceId,
-                item.Outbox.InstanceId,
-                item.Outbox.OperationId,
-                item.Outbox.Id,
-                item.Outbox.RequestHash,
-                workerId,
-                queuedOperation,
-                resolvedInstance,
-                new ElsaInstanceLifecycleResolvedPlan(resolution.Reference, planJson),
-                item.Resolution.DeploymentTarget,
-                _timeProvider.GetUtcNow(),
-                item.LeaseToken,
-                item.LeaseVersion);
+            ElsaInstanceLifecycleResolutionCommit commit;
+            try
+            {
+                commit = new ElsaInstanceLifecycleResolutionCommit(
+                    item.Outbox.WorkspaceId,
+                    item.Outbox.InstanceId,
+                    item.Outbox.OperationId,
+                    item.Outbox.Id,
+                    item.Outbox.RequestHash,
+                    workerId,
+                    queuedOperation,
+                    resolvedInstance,
+                    new ElsaInstanceLifecycleResolvedPlan(resolution.Reference, planJson),
+                    item.Resolution.DeploymentTarget,
+                    _timeProvider.GetUtcNow(),
+                    item.LeaseToken,
+                    item.LeaseVersion);
+            }
+            catch (InvalidOperationException)
+            {
+                return (await FailAsync(item, workerId, "resolution.commit-invalid", cancellationToken), 0);
+            }
+
             var result = await store.CommitResolvedAsync(commit, cancellationToken);
             if (_provider is null || result.Outcome is not ElsaInstanceLifecycleWorkerOutcome.Queued)
                 return (result, 0);
@@ -281,9 +333,13 @@ public sealed class ElsaInstanceLifecycleWorker(
         {
             return (Conflict(item), 0);
         }
+        catch (InvalidOperationException) when (item is not null)
+        {
+            return (await FailAsync(item, workerId, "resolution.commit-invalid", cancellationToken), 0);
+        }
         catch (Exception) when (item is not null)
         {
-            return (await FailAsync(item, workerId, "resolution.invalid", cancellationToken), 0);
+            return (await FailAsync(item, workerId, "resolution.unexpected", cancellationToken), 0);
         }
     }
 
@@ -320,6 +376,10 @@ public sealed class ElsaInstanceLifecycleWorker(
         {
             "resolution.invalid" => "Lifecycle work item could not be resolved safely.",
             "resolution.input-unavailable" => "Lifecycle resolution input could not be reconstructed from the catalog projection.",
+            "resolution.work-item-invalid" => "Lifecycle work item identity or intent hash is invalid.",
+            "resolution.commit-invalid" => "Resolved plan could not be committed as a safe immutable identity.",
+            "resolution.plan-replace-invalid" => "Resolved plan could not replace the instance's current release projection.",
+            "resolution.unexpected" => "Lifecycle plan resolution failed unexpectedly.",
             _ => "Lifecycle plan resolution was rejected."
         };
 

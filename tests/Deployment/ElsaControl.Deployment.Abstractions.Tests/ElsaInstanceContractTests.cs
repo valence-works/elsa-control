@@ -592,6 +592,55 @@ public sealed class ElsaInstanceContractTests
     }
 
     [Fact]
+    public void AttachResolvedPlan_replaces_an_existing_pin_projection_with_the_build_suffix_release()
+    {
+        var pinPlan = new ElsaResolvedPlanReference(
+            "release-61a8b8179b13f1b9b0560c3eb8723c4a98f69930b9fff02c0b7c5c3f0d56f4d7",
+            1,
+            Digest('a'),
+            "https://control.example.test/api/workspaces/11111111-1111-1111-1111-111111111111/instances/22222222-2222-2222-2222-222222222222/resolved-plans/release-61a8b8179b13f1b9b0560c3eb8723c4a98f69930b9fff02c0b7c5c3f0d56f4d7");
+        var buildPlan = new ElsaResolvedPlanReference(
+            "release-3935507cf7ef56b895bb6c32d0fb7cd2d607981470c06e15cf1d01f10d529837",
+            1,
+            Digest('b'),
+            "https://control.example.test/api/workspaces/11111111-1111-1111-1111-111111111111/instances/22222222-2222-2222-2222-222222222222/resolved-plans/release-3935507cf7ef56b895bb6c32d0fb7cd2d607981470c06e15cf1d01f10d529837");
+        var pinRelease = new ElsaCurrentResolvedRelease(
+            pinPlan,
+            "valence-runtime",
+            "3.8",
+            "3.8.0-preview.5567",
+            Digest('c'),
+            [new ElsaComponentDigest("combined", Digest('d'))]);
+        var buildRelease = new ElsaCurrentResolvedRelease(
+            buildPlan,
+            "valence-runtime",
+            "3.8",
+            "3.8.0-preview.5567-build.153",
+            Digest('e'),
+            [new ElsaComponentDigest("combined", Digest('f'))]);
+        var instance = ElsaInstance.Hydrate(
+            Guid.Parse("22222222-2222-2222-2222-222222222222"),
+            Guid.NewGuid(),
+            Guid.Parse("11111111-1111-1111-1111-111111111111"),
+            "Dogfood2",
+            "dogfood2",
+            InstanceIntent("3.8", "3.8.0-preview.5567-build.153"),
+            ElsaObservedLifecycle.Ready,
+            ElsaInstanceHealth.Healthy,
+            2,
+            resolvedPlanReference: pinPlan,
+            currentResolvedRelease: pinRelease);
+
+        var replaced = instance.AttachResolvedPlan(buildPlan, buildRelease);
+
+        Assert.Equal(buildPlan, replaced.ResolvedPlanReference);
+        Assert.Equal("3.8.0-preview.5567-build.153", replaced.CurrentResolvedRelease!.Version);
+        Assert.NotEqual(pinPlan, replaced.ResolvedPlanReference);
+        Assert.Equal(instance.Version, replaced.Version);
+        Assert.Equal(instance.ObservedLifecycle, replaced.ObservedLifecycle);
+    }
+
+    [Fact]
     public void Requested_version_must_belong_to_selected_release_line()
     {
         Assert.Throws<ArgumentException>(() => InstanceIntent("3.8", requestedVersion: "3.9.0"));
