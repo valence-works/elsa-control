@@ -13,6 +13,7 @@ internal static class CatalogTableTriggers
 {
     private static readonly IReadOnlyDictionary<string, string[]> SqlServer = new Dictionary<string, string[]>(StringComparer.Ordinal)
     {
+        ["AzureProviderAssignmentRebinds"] = ["TR_AzureProviderAssignmentRebinds_AppendOnly"],
         ["AzureProviderRecoveryObservations"] = ["TR_AzureProviderRecoveryObservations_AppendOnly"],
         ["DeploymentEnvironments"] = ["TR_DeploymentEnvironments_ManagedInstanceBinding"],
         ["DeploymentRuns"] = ["TR_DeploymentRuns_ManagedInstanceBinding"],
@@ -30,6 +31,7 @@ internal static class CatalogTableTriggers
 
     private static readonly IReadOnlyDictionary<string, string[]> Sqlite = new Dictionary<string, string[]>(StringComparer.Ordinal)
     {
+        ["AzureProviderAssignmentRebinds"] = ["TR_AzureProviderAssignmentRebinds_AppendOnly_Delete", "TR_AzureProviderAssignmentRebinds_AppendOnly_Update"],
         ["AzureProviderRecoveryObservations"] = ["TR_AzureProviderRecoveryObservations_AppendOnly_Delete", "TR_AzureProviderRecoveryObservations_AppendOnly_Update"],
         ["DeploymentEnvironments"] = ["TR_DeploymentEnvironments_ManagedInstanceBinding_Update"],
         ["DeploymentRuns"] = ["TR_DeploymentRuns_ManagedInstanceBinding_Insert", "TR_DeploymentRuns_ManagedInstanceBinding_Update"],
