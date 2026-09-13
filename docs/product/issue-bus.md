@@ -49,19 +49,47 @@ Required Status transitions for every lane:
 
 ## Claim
 
-Before writing code:
+The repository-owned claim command is the only supported pickup path:
 
-1. Confirm the issue still matches the pickup query (or, for Cursor, that CEO / Launch Ops dispatched this session for a `ready-for-agent` + `worker:cursor` issue), is unassigned, and has no active `claim:` comment.
-2. Self-assign the issue to the agent identity used for this session. For Cursor, the agent or CEO on its behalf may complete the claim mutations.
-3. Comment exactly `claim: <codex|claude|cursor> starting`.
-4. Re-read the issue before any further mutation. The earliest active `claim:` comment wins; a losing session must comment `claim-abandoned: <claim-comment-id>`, unassign itself if needed, and stop before changing issue state or writing code.
-5. Remove `ready-for-agent`, move project Status to `In Progress`, and set Agent State to `Assigned` so other agents skip it. Prefer this over leaving `ready-for-agent` on a claimed issue.
-6. Re-read the issue after all claim mutations. If your claim state is no longer intact, comment `claim-abandoned: <claim-comment-id>`, unassign yourself if needed, and stop.
-7. Take only this one Task for the session.
+```bash
+python3 scripts/issue_bus.py claim <issue-number> --worker codex
+python3 scripts/issue_bus.py claim <issue-number> --worker claude
+python3 scripts/issue_bus.py claim <issue-number> --worker cursor
+```
 
-If any claim mutation fails (assignment, claim comment, label removal, Status update, or Agent State update), do not start work. Revert the claim completely if you can. Otherwise comment `blocked: claim failed - <reason>`, add `blocked`, move project Status to `Blocked`, set Agent State to `Not Ready`, unassign if possible, and stop. Only an operator may requeue that issue by removing `blocked` and restoring `ready-for-agent`, Status `Ready`, and Agent State `Agent Ready`.
+Use `--dry-run` when inspecting a candidate without changing GitHub. Before
+writing code, the command performs all of these preflight checks and hard-skips
+the issue when any check fails:
 
-If an issue is assigned but has no active `claim:` comment and still shows `ready-for-agent`, Status `Ready`, and Agent State `Agent Ready` for 15 minutes, treat it as an orphaned claim from an interrupted session: unassign it, then continue the claim flow from step 1. This recovery applies only when no session completed the failure path above.
+1. The issue is open, is a leaf (`type:task`, `type:bug`, or `type:spike`), has `ready-for-agent`, has neither `blocked` nor `needs:decision`, is unassigned, has no active claim, and has no linked open PR.
+2. The Project item exists with Status exactly `Ready` and Agent State exactly `Agent Ready`.
+3. Every `worker:*` label is compatible with the requested lane. A lane label for another worker is a hard skip; an issue without a worker lane remains eligible to Codex and Claude.
+4. The command obtains the authenticated `gh` login and posts exactly `claim: <worker> starting`. The immutable GitHub comment `node_id` returned by the authenticated API is the unique machine-readable lease identity.
+5. The command re-reads the issue after the claim comment. The earliest active claim, ordered by `createdAt` and then comment id, wins. A losing session posts `claim-abandoned: <claim-comment-id>` and stops without touching assignment or claim-state fields.
+6. A winning session assigns the authenticated login, then must complete all three claim-state mutations: remove `ready-for-agent`, set Project Status to `In Progress`, and set Agent State to `Assigned`. These are mandatory together; none is an alternative to another.
+7. The command re-reads the issue and Project item after all three mutations. It only reports success when the lease, assignment, label removal, Status, and Agent State remain intact.
+8. The worker takes only this one Task for the session.
+
+An open pull request linked from the issue is always a preflight hard skip,
+including when its worker lane appears available. Generic `worker:*` lanes are
+data, not a hard-coded allow-list; every lane other than the requested lane is
+conflicting.
+
+If any claim mutation or permission check fails, implementation is forbidden. The command records `claim-abandoned` and reverses the mutations it can verify. If complete safe rollback is not possible, it follows the canonical blocked path: comment `blocked: claim failed - <reason>`, add `blocked`, set Project Status to `Blocked`, set Agent State to `Not Ready`, unassign if possible, and stop. Only an operator may requeue that issue by removing `blocked` and restoring `ready-for-agent`, Status `Ready`, and Agent State `Agent Ready`.
+
+Arbitration is client-side and deterministic for v1. Each client re-reads and
+selects the earliest active lease, then abandons a losing or partial claim.
+Server-side serialization is deliberately deferred until a suitable
+Project-capable GitHub App or organization token exists; this repository does
+not provision credentials or an unusable hosted workflow.
+
+An active claim expires after 15 minutes only while the issue still has
+`ready-for-agent`, Project Status `Ready`, and Agent State `Agent Ready`; a
+missing or malformed timestamp remains active. If an issue is assigned but has
+no active claim and still shows that fully-ready state, it is an orphaned claim
+from an interrupted session. Operator reconciliation must unassign it before
+requeueing. The command never auto-unassigns an assignee before it has reserved
+the issue, because that mutation is unsafe during a race.
 
 ## While in flight
 
@@ -95,6 +123,32 @@ Never pick up or continue:
 - A second Task in the same session
 
 `needs:live-proof` is not an automatic skip. Take it only when the session can run the required live proof; otherwise leave it for an operator or a later session.
+
+## Drift checks
+
+Control-room reconciliation can inspect one issue or the entire Project item
+set without mutating GitHub:
+
+```bash
+python3 scripts/issue_bus.py drift 371
+python3 scripts/issue_bus.py drift --all --json
+```
+
+Single-issue claim and drift reads use targeted GitHub REST requests: the issue
+and paginated comments, the canonical linked pull request, and Project #7's
+`fields` plus `items?q=<issue-number>&fields=<Status-id>,<Agent-State-id>`
+endpoints. They never enumerate the board. Project mutations use the numeric
+REST item/field IDs and one PATCH containing both claim-state field updates.
+All these calls send `X-GitHub-Api-Version: 2026-03-10`. `drift --all` is the
+explicit whole-board operation and uses the paginated Project REST items
+adapter (100 items per page), then checks linked PRs only for rows carrying
+`ready-for-agent`; it is intentionally not part of the claim path.
+
+The check reports at least `ready-for-agent` with Status `In Progress`,
+`ready-for-agent` with a linked open PR, and Status `Done` with Agent State
+`Review Required`. It also reports multiple worker lanes and issues that
+cannot be read safely. These checks cover the contradictory label, board, and
+linked-PR state observed in the #371 collision.
 
 ## Who writes tickets
 
@@ -172,7 +226,7 @@ Machine-readable comments on the claimed issue:
 
 | Comment | When |
 |---------|------|
-| `claim: codex starting`, `claim: claude starting`, or `claim: cursor starting` | Immediately on claim |
+| `claim: <worker> starting` (the immutable comment `node_id` is the lease identity) | Immediately on claim |
 | `claim-abandoned: <claim-comment-id>` | When a previously posted claim loses collision resolution or no longer remains intact |
 | `pr: <url>` | When the implementing PR is open |
 | `blocked: <reason>` | When work cannot continue |
