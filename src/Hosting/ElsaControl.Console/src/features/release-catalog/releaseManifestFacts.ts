@@ -20,6 +20,7 @@ export function parseProducerFacts(payload: string, manifestDigest = ""): Releas
   const workflow = asObject(source?.workflow);
   const topologies = parseTopologyIds(root);
   const capabilities = parseCapabilities(root);
+  const sourceRunId = firstString(workflow ?? {}, ["runId", "id"]) ?? firstString(source ?? {}, ["runId"]) ?? "";
 
   return {
     distributionId: firstString(release, ["distributionId", "id"]) ?? "",
@@ -31,10 +32,10 @@ export function parseProducerFacts(payload: string, manifestDigest = ""): Releas
     catalogLifecycle: null,
     registryClass: "paid",
     manifestDigest: digestPattern.test(manifestDigest.trim()) ? manifestDigest.trim() : "",
-    sourceRunId: firstString(workflow ?? {}, ["runId", "id"]) ?? firstString(source ?? {}, ["runId"]) ?? "",
+    sourceRunId,
     topologies,
     capabilities,
-    build: extractBuild(releaseVersion)
+    build: resolveBuildIdentity(releaseVersion, sourceRunId)
   };
 }
 
@@ -56,7 +57,7 @@ export function factsFromCatalogEntries(entries: ReleaseCatalogEntry[] | undefin
     sourceRunId: first.distribution.source.runId,
     topologies,
     capabilities,
-    build: extractBuild(first.distribution.releaseVersion)
+    build: resolveBuildIdentity(first.distribution.releaseVersion, first.distribution.source.runId)
   };
 }
 
@@ -87,6 +88,40 @@ export function identityTuple(facts: ReleaseCatalogIdentityFacts) {
 export function extractBuild(version: string) {
   const match = version.match(/build\.(\d+)/i);
   return match?.[1] ?? null;
+}
+
+export function resolveBuildIdentity(version: string, sourceRunId = "") {
+  const fromVersion = extractBuild(version);
+  if (fromVersion) return fromVersion;
+  const run = sourceRunId.trim();
+  return /^\d+$/.test(run) ? run : null;
+}
+
+export function formatBuildIdentity(facts: Pick<ReleaseCatalogIdentityFacts, "build" | "releaseVersion" | "sourceRunId">) {
+  const build = facts.build ?? resolveBuildIdentity(facts.releaseVersion, facts.sourceRunId);
+  return build ? `build.${build.replace(/^build\./i, "")}` : "—";
+}
+
+export function existingCatalogFocusKey(facts: Pick<ReleaseCatalogIdentityFacts, "distributionId" | "releaseLine" | "releaseVersion">) {
+  return [facts.distributionId, facts.releaseLine, facts.releaseVersion]
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join("|");
+}
+
+export function existingCatalogHref(facts: Pick<ReleaseCatalogIdentityFacts, "distributionId" | "releaseLine" | "releaseVersion"> | null) {
+  if (!facts?.releaseVersion.trim()) return "/admin/releases";
+  const params = new URLSearchParams({ existing: existingCatalogFocusKey(facts) });
+  return `/admin/releases?${params.toString()}`;
+}
+
+export function catalogEntryMatchesExistingFocus(entry: ReleaseCatalogEntry, focusKey: string) {
+  if (!focusKey.trim()) return false;
+  return existingCatalogFocusKey({
+    distributionId: entry.distribution.id,
+    releaseLine: entry.distribution.releaseLine,
+    releaseVersion: entry.distribution.releaseVersion
+  }).toLowerCase() === focusKey.trim().toLowerCase();
 }
 
 export function catalogIdentityKey(entry: ReleaseCatalogEntry) {

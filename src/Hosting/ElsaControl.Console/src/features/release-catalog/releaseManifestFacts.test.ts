@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  catalogEntryMatchesExistingFocus,
+  existingCatalogHref,
   extractBuild,
   factsFromCatalogEntries,
+  formatBuildIdentity,
   fingerprintsUnchanged,
   identityTuple,
-  parseProducerFacts
+  parseProducerFacts,
+  resolveBuildIdentity
 } from "@/features/release-catalog/releaseManifestFacts";
 import type { ReleaseCatalogEntry } from "@/features/release-catalog/releaseCatalogModels";
 
@@ -62,6 +66,54 @@ describe("releaseManifestFacts", () => {
     expect(extractBuild("3.8.0-preview.5567-build.160")).toBe("160");
     expect(extractBuild("3.8.0-preview.5567-build.151")).toBe("151");
     expect(extractBuild("3.8.0-preview.5567")).toBeNull();
+  });
+
+  it("resolves 149/151 recovery build identity from source run when version has no build.N", () => {
+    expect(resolveBuildIdentity("3.8.0-preview.5567", "149")).toBe("149");
+    expect(resolveBuildIdentity("3.8.0-preview.5567", "151")).toBe("151");
+    expect(resolveBuildIdentity("3.8.0-preview.5567-build.160", "987")).toBe("160");
+    expect(resolveBuildIdentity("3.8.0-preview.5567", "workflow-main")).toBeNull();
+    expect(formatBuildIdentity({
+      build: "149",
+      releaseVersion: "3.8.0-preview.5567",
+      sourceRunId: "149"
+    })).toBe("build.149");
+    expect(formatBuildIdentity({
+      build: null,
+      releaseVersion: "3.8.0-preview.5567",
+      sourceRunId: ""
+    })).toBe("—");
+
+    const existing = factsFromCatalogEntries([entryFixture({
+      distribution: {
+        ...entryFixture().distribution,
+        releaseVersion: "3.8.0-preview.5567",
+        source: { repository: "https://example", commit: "abc", runId: "149" }
+      }
+    })]);
+    expect(existing).toMatchObject({
+      releaseVersion: "3.8.0-preview.5567",
+      sourceRunId: "149",
+      build: "149"
+    });
+    expect(formatBuildIdentity(existing!)).toBe("build.149");
+  });
+
+  it("builds an Open existing deep-link for the conflicting catalog identity", () => {
+    const href = existingCatalogHref({
+      distributionId: "valence-runtime",
+      releaseLine: "3.8",
+      releaseVersion: "3.8.0-preview.5567"
+    });
+    expect(href).toBe("/admin/releases?existing=valence-runtime%7C3.8%7C3.8.0-preview.5567");
+    expect(existingCatalogHref(null)).toBe("/admin/releases");
+    expect(catalogEntryMatchesExistingFocus(entryFixture({
+      distribution: {
+        ...entryFixture().distribution,
+        releaseVersion: "3.8.0-preview.5567"
+      }
+    }), "valence-runtime|3.8|3.8.0-preview.5567")).toBe(true);
+    expect(catalogEntryMatchesExistingFocus(entryFixture(), "valence-runtime|3.8|3.8.0-preview.5567")).toBe(false);
   });
 });
 

@@ -117,6 +117,14 @@ describe("ReleasesPage", () => {
     expect(drawer).toHaveTextContent("3.8.0-preview.5567");
     expect(drawer).toHaveTextContent(digestA);
     expect(drawer).toHaveTextContent(digestB);
+    const existingCard = within(drawer).getByRole("heading", { name: "Existing (owns identity)" }).closest("section");
+    const incomingCard = within(drawer).getByRole("heading", { name: "Incoming (blocked)" }).closest("section");
+    expect(existingCard?.querySelector('[data-fact="build"]')).toHaveTextContent("build.149");
+    expect(incomingCard?.querySelector('[data-fact="build"]')).toHaveTextContent("build.151");
+    expect(within(drawer).getByRole("link", { name: "Open existing" })).toHaveAttribute(
+      "href",
+      "/admin/releases?existing=valence-runtime%7C3.8%7C3.8.0-preview.5567"
+    );
     expect(within(drawer).getByText(/A — Publish a new catalog identity/)).toBeInTheDocument();
     expect(within(drawer).getByText("PRIMARY")).toBeInTheDocument();
     expect(within(drawer).getByText(releaseCatalogCopy.primaryRecovery)).toBeInTheDocument();
@@ -149,6 +157,103 @@ describe("ReleasesPage", () => {
     const drawer = await screen.findByRole("dialog", { name: releaseCatalogCopy.conflictTitle });
     expect(within(drawer).getByRole("button", { name: "Retry identical admit" })).toBeEnabled();
     expect(drawer).toHaveTextContent("Fingerprints match");
+  });
+
+  it("focuses the matching catalog row when Open existing deep-links with existing facts", async () => {
+    installFetch({
+      catalog: [catalogEntry({
+        distribution: {
+          ...catalogEntry().distribution,
+          releaseVersion: "3.8.0-preview.5567",
+          source: { repository: "https://example", commit: "abc", runId: "149" }
+        },
+        manifestDigest: digestA
+      })],
+      admitError: {
+        status: 409,
+        body: {
+          title: "Release catalog identity conflict.",
+          code: releaseCatalogIdentityConflictCode,
+          existing: [catalogEntry({
+            distribution: {
+              ...catalogEntry().distribution,
+              releaseVersion: "3.8.0-preview.5567",
+              source: { repository: "https://example", commit: "abc", runId: "149" }
+            },
+            manifestDigest: digestA
+          })],
+          incoming: [catalogEntry({
+            distribution: {
+              ...catalogEntry().distribution,
+              releaseVersion: "3.8.0-preview.5567",
+              source: { repository: "https://example", commit: "abc", runId: "151" }
+            },
+            manifestDigest: digestB
+          })]
+        }
+      }
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await fillAdmitForm(user, "3.8.0-preview.5567", digestB);
+    await user.click(screen.getByRole("button", { name: "Admit" }));
+
+    const drawer = await screen.findByRole("dialog", { name: releaseCatalogCopy.conflictTitle });
+    await user.click(within(drawer).getByRole("link", { name: "Open existing" }));
+
+    expect(screen.queryByRole("dialog", { name: releaseCatalogCopy.conflictTitle })).not.toBeInTheDocument();
+    const focusedRow = await screen.findByRole("row", { current: true });
+    expect(focusedRow).toHaveAttribute("data-existing-focus", "true");
+    expect(focusedRow).toHaveTextContent("3.8.0-preview.5567");
+    expect(focusedRow).toHaveTextContent("Focused existing catalog identity");
+    expect(focusedRow).toHaveFocus();
+    expect(screen.queryByRole("button", { name: /supersede/i })).not.toBeInTheDocument();
+  });
+
+  it("highlights the existing catalog row from a deep-link without opening the conflict drawer", async () => {
+    installFetch({
+      catalog: [
+        catalogEntry(),
+        catalogEntry({
+          distribution: {
+            ...catalogEntry().distribution,
+            releaseVersion: "3.8.0-preview.5567",
+            source: { repository: "https://example", commit: "abc", runId: "149" }
+          },
+          manifestDigest: digestA
+        })
+      ]
+    });
+    renderPage("/admin/releases?existing=valence-runtime%7C3.8%7C3.8.0-preview.5567");
+
+    const focusedRow = await screen.findByRole("row", { current: true });
+    expect(focusedRow).toHaveAttribute("data-existing-focus", "true");
+    expect(focusedRow).toHaveTextContent("3.8.0-preview.5567");
+    expect(focusedRow).toHaveFocus();
+    expect(screen.queryByRole("dialog", { name: releaseCatalogCopy.conflictTitle })).not.toBeInTheDocument();
+    expect(screen.getByText("3.8.0-preview.5567-build.160")).toBeInTheDocument();
+  });
+
+  it("does not invent a catalog-row deep-link when existing facts are absent", async () => {
+    installFetch({
+      catalog: [catalogEntry()],
+      admitError: {
+        status: 409,
+        body: {
+          title: "Release catalog identity conflict.",
+          code: releaseCatalogIdentityConflictCode
+        }
+      }
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await fillAdmitForm(user, "9.9.9-preview.1", digestB);
+    await user.click(screen.getByRole("button", { name: "Admit" }));
+
+    const drawer = await screen.findByRole("dialog", { name: releaseCatalogCopy.conflictTitle });
+    expect(within(drawer).getByRole("link", { name: "Open existing" })).toHaveAttribute("href", "/admin/releases");
+    await user.click(within(drawer).getByRole("link", { name: "Open existing" }));
+    expect(screen.queryByRole("row", { current: true })).not.toBeInTheDocument();
   });
 
   it("lists admitted catalog identities and filters them", async () => {
@@ -222,10 +327,10 @@ function catalogEntry(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderPage() {
+function renderPage(path = "/admin/releases") {
   render(
     <TestQueryProvider>
-      <MemoryRouter initialEntries={["/admin/releases"]}>
+      <MemoryRouter initialEntries={[path]}>
         <AuthProvider>
           <WorkspaceContextProvider>
             <ReleasesPage />
