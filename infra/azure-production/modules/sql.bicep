@@ -76,15 +76,22 @@ resource existingDatabase 'Microsoft.Sql/servers/databases@2023-08-01' existing 
   name: databaseName
 }
 
-resource shortTermRetention 'Microsoft.Sql/servers/databases/backupShortTermRetentionPolicies@2023-08-01' = {
-  name: '${server.name}/${databaseName}/default'
+resource newDatabaseShortTermRetention 'Microsoft.Sql/servers/databases/backupShortTermRetentionPolicies@2023-08-01' = if (provisionDatabase) {
+  parent: database
+  name: 'default'
   properties: {
     retentionDays: shortTermRetentionDays
     diffBackupIntervalInHours: differentialBackupIntervalHours
   }
-  dependsOn: [
-    database
-  ]
+}
+
+resource existingDatabaseShortTermRetention 'Microsoft.Sql/servers/databases/backupShortTermRetentionPolicies@2023-08-01' = if (!provisionDatabase) {
+  parent: existingDatabase
+  name: 'default'
+  properties: {
+    retentionDays: shortTermRetentionDays
+    diffBackupIntervalInHours: differentialBackupIntervalHours
+  }
 }
 
 // ACA has public egress in this no-VNet provider profile. The rule is removed
@@ -102,4 +109,6 @@ output id string = server.id
 output name string = server.name
 output fullyQualifiedDomainName string = server.properties.fullyQualifiedDomainName
 output databaseName string = provisionDatabase ? database!.name : existingDatabase!.name
-output shortTermRetentionDays int = shortTermRetention.properties.retentionDays
+output shortTermRetentionDays int = provisionDatabase
+  ? newDatabaseShortTermRetention!.properties.retentionDays
+  : existingDatabaseShortTermRetention!.properties.retentionDays

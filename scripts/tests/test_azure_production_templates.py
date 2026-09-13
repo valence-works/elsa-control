@@ -178,6 +178,10 @@ class AzureProductionTemplateTests(unittest.TestCase):
         self.assertIn("param provisionDatabase bool = true", source)
         self.assertIn("= if (provisionDatabase) {", source)
         self.assertIn("existing = if (!provisionDatabase) {", source)
+        self.assertIn("newDatabaseShortTermRetention", source)
+        self.assertIn("parent: database", source)
+        self.assertIn("existingDatabaseShortTermRetention", source)
+        self.assertIn("parent: existingDatabase", source)
         self.assertRegex(source, r"sku:\s*\{\s*name: 'S0'\s*tier: 'Standard'\s*capacity: 10\s*\}")
         for serverless_setting in ("GP_S_Gen5", "family: 'Gen5'", "autoPauseDelay", "minCapacity"):
             self.assertNotIn(serverless_setting, source)

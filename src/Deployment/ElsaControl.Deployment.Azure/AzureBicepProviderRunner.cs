@@ -536,17 +536,20 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             if (!adminReady.Value)
                 return Failed(command, AzureProviderOperationPhase.FoundationSubmitted, "azure.foundation.sql-admin-invalid", "The existing SQL administrator does not match the governed bootstrap identity.");
 
-            var databaseCount = await ExecuteAzAsync(command,
-                ["resource", "list", "--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command),
-                    "--resource-type", "Microsoft.Sql/servers/databases", "--query", "[?name=='" + command.Plan.WorkloadName + "-sql/Elsa'] | length(@)",
-                    "--output", "tsv", "--only-show-errors"],
-                ParseIntegerAsync,
-                cancellationToken);
-            if (!databaseCount.Succeeded)
-                return Uncertain(command, AzureProviderOperationPhase.FoundationSubmitted, "azure.foundation.sql-database-observation-uncertain", "The existing SQL database could not be observed before reconciliation.", resources);
-            if (databaseCount.Value!.Value > 1)
-                return Failed(command, AzureProviderOperationPhase.FoundationSubmitted, "azure.foundation.sql-database-ambiguous", "Expected at most one governed SQL database.");
-            provisionDatabase = databaseCount.Value.Value == 0;
+            if (!_options.DisposableProofMode)
+            {
+                var databaseCount = await ExecuteAzAsync(command,
+                    ["resource", "list", "--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command),
+                        "--resource-type", "Microsoft.Sql/servers/databases", "--query", "[?name=='" + command.Plan.WorkloadName + "-sql/Elsa'] | length(@)",
+                        "--output", "tsv", "--only-show-errors"],
+                    ParseIntegerAsync,
+                    cancellationToken);
+                if (!databaseCount.Succeeded)
+                    return Uncertain(command, AzureProviderOperationPhase.FoundationSubmitted, "azure.foundation.sql-database-observation-uncertain", "The existing SQL database could not be observed before reconciliation.", resources);
+                if (databaseCount.Value!.Value > 1)
+                    return Failed(command, AzureProviderOperationPhase.FoundationSubmitted, "azure.foundation.sql-database-ambiguous", "Expected at most one governed SQL database.");
+                provisionDatabase = databaseCount.Value.Value == 0;
+            }
         }
 
         var deploymentName = FoundationDeploymentName(command);

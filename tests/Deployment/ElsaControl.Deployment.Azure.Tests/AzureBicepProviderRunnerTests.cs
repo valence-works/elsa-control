@@ -143,6 +143,37 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         Assert.DoesNotContain(deployment, argument => argument.StartsWith("provisionDatabase=", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task Disposable_foundation_reapply_keeps_the_proof_database_reconciliation_contract()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args is ["group", "exists", ..], "true");
+        process.Success(args => args is ["group", "show", ..],
+            "{\"proof\":\"108\",\"owner\":\"elsa-control\",\"proof-name\":\"proof\",\"expiry\":\"2026-09-30\",\"sqlBootstrapObjectId\":\"11111111-1111-1111-1111-111111111111\"}");
+        process.Success(args => args is ["tag", "update", ..]);
+        process.Success(args => args.Contains("sql") && args.Contains("server") && args.Contains("list"), "1");
+        process.Success(args => args.Contains("ad-admin") && args.Contains("list"), "[{\"login\":\"proof-bootstrap\",\"sid\":\"11111111-1111-1111-1111-111111111111\"}]");
+        process.Success(args => args.Contains("ad-only-auth") && args.Contains("enable"));
+        process.Success(args => args.Contains("deployment") && args.Contains("create"), FoundationOutputs());
+        var options = _fixture.Options with
+        {
+            DisposableProofMode = true,
+            DisposableExpiryUtc = new DateOnly(2026, 9, 30),
+            AzureCliClientId = null
+        };
+        var command = _fixture.Command(AzureProviderRunnerStep.Foundation) with
+        {
+            Context = ContextFor(options)
+        };
+
+        var result = await new AzureBicepProviderRunner(options, _fixture.Scope, process).RunAsync(command);
+
+        Assert.True(result.Outcome == AzureProviderRunnerOutcome.Completed, $"{result.Code}: {result.Message}");
+        Assert.DoesNotContain(process.Calls, call => call.Contains("Microsoft.Sql/servers/databases"));
+        var deployment = process.Calls.Single(call => call.Contains("deployment") && call.Contains("create"));
+        Assert.DoesNotContain(deployment, argument => argument.StartsWith("provisionDatabase=", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData(AzureProviderRunnerStep.Foundation)]
     [InlineData(AzureProviderRunnerStep.Workload)]
@@ -1827,6 +1858,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
 
         Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
         Assert.Equal("azure.foundation.sql-database-observation-uncertain", result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == result.Code);
         Assert.DoesNotContain(process.Calls, call => call.Contains("deployment") && call.Contains("create"));
     }
 
@@ -1846,6 +1878,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
 
         Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
         Assert.Equal("azure.foundation.sql-database-ambiguous", result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == result.Code);
         Assert.DoesNotContain(process.Calls, call => call.Contains("deployment") && call.Contains("create"));
     }
 
