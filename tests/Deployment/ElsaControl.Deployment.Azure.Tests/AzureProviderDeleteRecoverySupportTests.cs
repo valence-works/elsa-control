@@ -30,12 +30,10 @@ public sealed class AzureProviderDeleteRecoverySupportTests
     [InlineData("assignment-workspace")]
     [InlineData("assignment-organization")]
     [InlineData("assignment-instance")]
-    [InlineData("assignment-scope")]
     [InlineData("operation-workspace")]
     [InlineData("operation-organization")]
     [InlineData("operation-instance")]
     [InlineData("target")]
-    [InlineData("scope")]
     [InlineData("invalid-metadata")]
     [InlineData("terminal-operation")]
     [InlineData("active-assignment")]
@@ -48,7 +46,6 @@ public sealed class AzureProviderDeleteRecoverySupportTests
             AzureProviderOperationStatus.RecoveryRequired,
             AzureProviderAssignmentState.Unknown);
         var alternate = Guid.Parse("99999999-9999-9999-9999-999999999999");
-        var alternateFingerprint = new string('b', 64);
 
         (operation, assignment) = mutation switch
         {
@@ -68,12 +65,10 @@ public sealed class AzureProviderDeleteRecoverySupportTests
             "assignment-workspace" => (operation, assignment with { WorkspaceId = alternate }),
             "assignment-organization" => (operation, assignment with { OrganizationId = alternate }),
             "assignment-instance" => (operation, assignment with { InstanceId = alternate }),
-            "assignment-scope" => (operation, assignment with { ProviderScopeFingerprint = alternateFingerprint }),
             "operation-workspace" => (operation with { WorkspaceId = alternate }, assignment),
             "operation-organization" => (operation with { OrganizationId = alternate }, assignment),
             "operation-instance" => (operation with { InstanceId = alternate }, assignment),
             "target" => (operation with { TargetKey = "foreign-workload" }, assignment),
-            "scope" => (operation with { ProviderScopeFingerprint = alternateFingerprint }, assignment),
             "invalid-metadata" => (operation with { PersistedMetadataInvalid = true }, assignment),
             "terminal-operation" => (operation with { Status = AzureProviderOperationStatus.Succeeded }, assignment),
             "active-assignment" => (operation, assignment with { State = AzureProviderAssignmentState.Deleting }),
@@ -85,6 +80,17 @@ public sealed class AzureProviderDeleteRecoverySupportTests
         };
 
         Assert.False(AzureProviderDeleteRecoverySupport.IsVerifiedCleanupEligible(operation, assignment));
+    }
+
+    [Fact]
+    public void Verified_cleanup_accepts_a_template_only_scope_rotation()
+    {
+        var (operation, assignment) = Fixture(
+            AzureProviderOperationStatus.RecoveryRequired,
+            AzureProviderAssignmentState.Unknown);
+        assignment = assignment with { ProviderScopeFingerprint = new string('b', 64) };
+
+        Assert.True(AzureProviderDeleteRecoverySupport.IsVerifiedCleanupEligible(operation, assignment));
     }
 
     [Fact]

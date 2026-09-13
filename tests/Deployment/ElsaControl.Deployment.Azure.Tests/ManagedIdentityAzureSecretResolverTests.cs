@@ -277,6 +277,23 @@ public sealed class ManagedIdentityAzureSecretResolverTests
         Assert.Equal(1, reader.Calls);
     }
 
+    [Fact]
+    public async Task Keeps_authorization_after_a_template_only_scope_rotation()
+    {
+        var reader = new FakeReader();
+        var authorization = Authorization() with
+        {
+            Operation = Operation() with { ProviderScopeFingerprint = new string('z', 64) }
+        };
+        var resolver = new ManagedIdentityAzureSecretResolver(new FakeAuthorizationStore(authorization), reader);
+
+        Assert.True(await resolver.IsAuthorizedAsync(Request()));
+        await using var lease = await resolver.ResolveAsync(Request());
+
+        Assert.Equal("resolved-value", lease.Value.ToString());
+        Assert.Equal(1, reader.Calls);
+    }
+
     [Theory]
     [InlineData("identity:signingkey", AzureManagedSecretReferences.AdminPassword)]
     [InlineData("admin:password", AzureManagedSecretReferences.IdentitySigningKey)]
@@ -336,7 +353,6 @@ public sealed class ManagedIdentityAzureSecretResolverTests
     [InlineData("WrongOperationInstance")]
     [InlineData("WrongOperationAssignment")]
     [InlineData("WrongOperationTarget")]
-    [InlineData("WrongOperationScope")]
     [InlineData("WrongOperationStatus")]
     [InlineData("DeleteOperation")]
     [InlineData("InvalidOperationAction")]
@@ -418,9 +434,6 @@ public sealed class ManagedIdentityAzureSecretResolverTests
                 break;
             case "WrongOperationTarget":
                 authorization = authorization with { Operation = authorization.Operation with { TargetKey = "other-workload" } };
-                break;
-            case "WrongOperationScope":
-                authorization = authorization with { Operation = authorization.Operation with { ProviderScopeFingerprint = new string('z', 64) } };
                 break;
             case "WrongOperationStatus":
                 authorization = authorization with { Operation = authorization.Operation with { Status = AzureProviderOperationStatus.Accepted } };
