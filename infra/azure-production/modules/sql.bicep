@@ -71,9 +71,15 @@ resource database 'Microsoft.Sql/servers/databases@2023-08-01' = if (provisionDa
   }
 }
 
-resource existingDatabase 'Microsoft.Sql/servers/databases@2023-08-01' existing = if (!provisionDatabase) {
+resource reconciledDatabase 'Microsoft.Sql/servers/databases@2023-08-01' = if (!provisionDatabase) {
   parent: server
   name: databaseName
+  location: location
+  tags: tags
+  properties: {
+    requestedBackupStorageRedundancy: 'Local'
+    zoneRedundant: false
+  }
 }
 
 resource newDatabaseShortTermRetention 'Microsoft.Sql/servers/databases/backupShortTermRetentionPolicies@2023-08-01' = if (provisionDatabase) {
@@ -86,7 +92,7 @@ resource newDatabaseShortTermRetention 'Microsoft.Sql/servers/databases/backupSh
 }
 
 resource existingDatabaseShortTermRetention 'Microsoft.Sql/servers/databases/backupShortTermRetentionPolicies@2023-08-01' = if (!provisionDatabase) {
-  parent: existingDatabase
+  parent: reconciledDatabase
   name: 'default'
   properties: {
     retentionDays: shortTermRetentionDays
@@ -108,7 +114,7 @@ resource azureServicesFirewallRule 'Microsoft.Sql/servers/firewallRules@2023-08-
 output id string = server.id
 output name string = server.name
 output fullyQualifiedDomainName string = server.properties.fullyQualifiedDomainName
-output databaseName string = provisionDatabase ? database!.name : existingDatabase!.name
+output databaseName string = provisionDatabase ? database!.name : reconciledDatabase!.name
 output shortTermRetentionDays int = provisionDatabase
   ? newDatabaseShortTermRetention!.properties.retentionDays
   : existingDatabaseShortTermRetention!.properties.retentionDays
