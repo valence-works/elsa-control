@@ -949,6 +949,7 @@ internal sealed class AzureProviderResourceAssignmentConfiguration : IEntityType
         builder.HasIndex(x => new { x.WorkspaceId, x.InstanceId, x.ProviderScopeFingerprint }).IsUnique();
         builder.HasIndex(x => new { x.State, x.UpdatedAt, x.Id });
         builder.HasOne(x => x.Workspace).WithMany().HasForeignKey(x => x.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasMany(x => x.Rebinds).WithOne(x => x.Assignment).HasForeignKey(x => x.AssignmentId).OnDelete(DeleteBehavior.Restrict);
     }
 
     private static void ConfigureDateTime(PropertyBuilder<DateTimeOffset> property) =>
@@ -957,6 +958,23 @@ internal sealed class AzureProviderResourceAssignmentConfiguration : IEntityType
     private static void ConfigureNullableDateTime(PropertyBuilder<DateTimeOffset?> property) =>
         property.HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null,
             value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
+}
+
+internal sealed class AzureProviderAssignmentRebindConfiguration : IEntityTypeConfiguration<AzureProviderAssignmentRebindEntity>
+{
+    public void Configure(EntityTypeBuilder<AzureProviderAssignmentRebindEntity> builder)
+    {
+        builder.ToTable("AzureProviderAssignmentRebinds");
+        builder.HasKey(x => x.Id);
+        builder.Property(x => x.FromProviderScopeFingerprint).HasMaxLength(64).IsRequired();
+        builder.Property(x => x.ToProviderScopeFingerprint).HasMaxLength(64).IsRequired();
+        builder.Property(x => x.TriggeredBy).HasMaxLength(64).IsRequired();
+        builder.Property(x => x.OccurredAt)
+            .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        builder.HasIndex(x => new { x.WorkspaceId, x.AssignmentId, x.OccurredAt });
+        builder.HasIndex(x => new { x.AssignmentId, x.FromProviderScopeFingerprint, x.ToProviderScopeFingerprint });
+        builder.HasOne<Workspace>().WithMany().HasForeignKey(x => x.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+    }
 }
 
 internal sealed class AzureProviderOperationTransitionConfiguration : IEntityTypeConfiguration<AzureProviderOperationTransitionEntity>

@@ -83,9 +83,21 @@ Generated credentials are retained for the assignment lifetime. Reuse requires
 exact provider-assignment, instance, slot and generation tags, read through the
 metadata-only secret list API. Missing, foreign or ambiguous metadata never
 authorizes overwriting an existing value. An absent generated credential during
-resume requires explicit recovery rather than silent regeneration. Automatic
-rotation and restore/rebind are not implemented; a create retry is not a rotation
-operation. These gates do not replace the separate two-instance negative
+resume requires explicit recovery rather than silent regeneration. A create retry
+is not a rotation operation. Secret tags bind to the placement-stable assignment
+identity, not the template fingerprint, so a governed rebind does not need to
+re-tag existing secrets.
+
+A template-only or tool-digest change rotates the provider-scope fingerprint
+without changing subscription, resource group, identity, or assigned resources.
+The assignment store then performs an explicit, audited rebind: it records the
+old and new fingerprints and the lifecycle trigger, and updates the live
+assignment and its ownership key to the current scope. Admitted operations keep
+the fingerprint they were submitted with; observe, cleanup, and recovery accept
+that lineage. Rebind refuses when an Accepted, Queued, EntitlementHeld, or
+Running operation must drain first. RecoveryRequired operations are rebound so
+parked recovery can resume on the new Control build. A placement change is
+never rebound. These gates do not replace the separate two-instance negative
 authentication and confirmed-cleanup acceptance proof tracked in #287.
 
 ## Secret-seeding generation guard

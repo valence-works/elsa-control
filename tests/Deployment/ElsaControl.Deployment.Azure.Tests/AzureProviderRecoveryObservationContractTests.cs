@@ -242,7 +242,6 @@ public sealed class AzureProviderRecoveryObservationContractTests
     [InlineData("instance")]
     [InlineData("last-operation")]
     [InlineData("target")]
-    [InlineData("scope")]
     public void Recovery_request_rejects_assignment_tuple_mismatch_before_observation(string mismatch)
     {
         var request = CreateRecoveryRequest();
@@ -255,12 +254,23 @@ public sealed class AzureProviderRecoveryObservationContractTests
             "instance" => assignment with { InstanceId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa") },
             "last-operation" => assignment with { LastOperationId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb") },
             "target" => assignment with { WorkloadName = "another-instance" },
-            "scope" => assignment with { ProviderScopeFingerprint = new string('c', 64) },
             _ => throw new InvalidOperationException()
         };
 
         var invalidRequest = request with { Assignment = assignment };
         Assert.Throws<InvalidOperationException>(invalidRequest.Validate);
+    }
+
+    [Fact]
+    public void Recovery_request_accepts_a_template_only_scope_rotation()
+    {
+        var request = CreateRecoveryRequest();
+        var rebound = request with
+        {
+            Assignment = request.Assignment! with { ProviderScopeFingerprint = new string('c', 64) }
+        };
+
+        rebound.Validate();
     }
 
     [Fact]

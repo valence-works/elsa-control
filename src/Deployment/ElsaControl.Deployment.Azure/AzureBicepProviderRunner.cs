@@ -2255,8 +2255,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             !string.Equals(plan.Location, assignment.Location, StringComparison.OrdinalIgnoreCase) ||
             assignment.State == AzureProviderAssignmentState.Deleted ||
             assignment.State == AzureProviderAssignmentState.Unknown && !correlatedUnknownRecovery ||
-            !string.Equals(operation.ProviderScopeFingerprint, assignment.ProviderScopeFingerprint, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(operation.ProviderScopeFingerprint, _options.ComputeProviderScopeFingerprint(_scope), StringComparison.OrdinalIgnoreCase))
+            !string.Equals(assignment.ProviderScopeFingerprint, _options.ComputeProviderScopeFingerprint(_scope), StringComparison.OrdinalIgnoreCase))
             return false;
 
         var operationResources = operation.Resources;

@@ -90,6 +90,90 @@ public sealed class AzureElsaInstanceProviderTests
         Assert.Equal(managedHandoff, observation.CurrentDeploymentReference?.ManagedHandoff);
     }
 
+    [Fact]
+    public async Task Observation_rebinds_a_template_only_scope_rotation_and_keeps_the_assignment()
+    {
+        var workspaceId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        var operationId = Guid.Parse("33333333-3333-3333-3333-333333333333");
+        var assignmentId = Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
+        var plan = TranslateForInstance("5.0", "5.0.0");
+        var operation = CreateOperation(workspaceId, plan, operationId) with
+        {
+            Status = AzureProviderOperationStatus.Succeeded,
+            AttemptNumber = 2,
+            Health = AzureProviderHealth.Healthy,
+            Endpoint = "https://runtime.example.test/",
+            OrganizationId = TestOrganizationId,
+            InstanceId = TestInstanceId,
+            ProviderAssignmentId = assignmentId,
+            ProviderScopeFingerprint = new string('a', 64)
+        };
+        var assignmentStore = new InMemoryAssignmentStore { AssignmentId = assignmentId };
+        await assignmentStore.CreateOrGetAsync(
+            new(
+                workspaceId, TestOrganizationId, TestInstanceId,
+                new string('a', 64), "11111111-1111-1111-1111-111111111111",
+                "rg-elsa", operation.TargetKey, operation.Location),
+            DateTimeOffset.UtcNow);
+        var provider = new AzureElsaInstanceProvider(
+            new CapturingOperationService(operation),
+            new CapturingOperationStore(operation),
+            assignmentStore,
+            options: EnabledOptions() with { ProviderScopeFingerprint = new string('b', 64) });
+
+        var observation = await provider.ObserveAsync(new(
+            workspaceId,
+            TestInstanceId,
+            operationId,
+            2,
+            ElsaDesiredLifecycle.Running,
+            null,
+            null));
+
+        Assert.Equal(ElsaInstanceProviderObservationKind.Confirmed, observation.Kind);
+        Assert.Equal(ElsaObservedLifecycle.Ready, observation.ObservedLifecycle);
+        Assert.Equal(assignmentId, (await assignmentStore.GetAsync(workspaceId, assignmentId))!.Id);
+        Assert.Equal(new string('b', 64), (await assignmentStore.GetAsync(workspaceId, assignmentId))!.ProviderScopeFingerprint);
+        var audit = Assert.Single(await assignmentStore.ListRebindsAsync(workspaceId, assignmentId));
+        Assert.Equal("lifecycle-observe", audit.TriggeredBy);
+        Assert.Equal(new string('a', 64), audit.FromProviderScopeFingerprint);
+        Assert.Equal(new string('b', 64), audit.ToProviderScopeFingerprint);
+    }
+
+    [Fact]
+    public async Task Observation_refuses_rebind_while_an_operation_is_in_flight()
+    {
+        var workspaceId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        var operationId = Guid.Parse("33333333-3333-3333-3333-333333333333");
+        var assignmentStore = new InMemoryAssignmentStore
+        {
+            BlockingOperationStatus = AzureProviderOperationStatus.Running
+        };
+        await assignmentStore.CreateOrGetAsync(
+            new(
+                workspaceId, TestOrganizationId, TestInstanceId,
+                new string('a', 64), "11111111-1111-1111-1111-111111111111",
+                "rg-elsa", AzureElsaInstanceProvider.WorkloadName(TestInstanceId), "westeurope"),
+            DateTimeOffset.UtcNow);
+        var provider = new AzureElsaInstanceProvider(
+            new CapturingOperationService(null),
+            new CapturingOperationStore(),
+            assignmentStore,
+            options: EnabledOptions() with { ProviderScopeFingerprint = new string('b', 64) });
+
+        var observation = await provider.ObserveAsync(new(
+            workspaceId,
+            TestInstanceId,
+            operationId,
+            1,
+            ElsaDesiredLifecycle.Running,
+            null,
+            null));
+
+        Assert.Equal(ElsaInstanceProviderObservationKind.Unknown, observation.Kind);
+        Assert.Equal(AzureProviderAssignmentRebindDiagnostics.OperationsInFlight, observation.CorrelationId);
+    }
+
     [Theory]
     [InlineData(AzureProviderHealth.Healthy, null)]
     [InlineData(AzureProviderHealth.Healthy, "https://runtime.example.test/api")]
@@ -255,6 +339,31 @@ public sealed class AzureElsaInstanceProviderTests
         Assert.Equal(1, fixture.ObservationStore.StrictCalls);
         Assert.Equal(0, fixture.Observer.Calls);
         Assert.Equal(0, fixture.OperationStore.ClaimRecoveryCalls);
+    }
+
+    [Fact]
+    public async Task Recovery_required_survives_a_template_only_scope_rotation()
+    {
+        var fixture = await CreateRecoveryFixtureAsync(
+            AzureProviderOperationStatus.RecoveryRequired,
+            includeStrictObservation: true);
+        var rotated = new AzureElsaInstanceProvider(
+            new CapturingOperationService(null),
+            fixture.OperationStore,
+            fixture.AssignmentStore,
+            options: EnabledOptions() with { ProviderScopeFingerprint = new string('b', 64) },
+            recoveryObserver: fixture.Observer,
+            recoveryObservationStore: fixture.ObservationStore);
+
+        var result = await rotated.RecoverAsync(fixture.Request);
+
+        Assert.NotEqual("azure.recovery.operation-unavailable", result.Code);
+        Assert.NotEqual("azure.recovery.identity-mismatch", result.Code);
+        Assert.NotEqual("azure.recovery.assignment-mismatch", result.Code);
+        Assert.Equal("azure.recovery.unavailable", result.Code);
+        Assert.Equal(new string('b', 64), (await fixture.AssignmentStore.GetAsync(
+            fixture.Request.Submission.WorkspaceId,
+            Guid.Parse(fixture.Request.Submission.PlacementAssignmentId!)))!.ProviderScopeFingerprint);
     }
 
     [Fact]
@@ -828,7 +937,8 @@ public sealed class AzureElsaInstanceProviderTests
             new(submission, envelope),
             observationStore,
             operationStore,
-            observer);
+            observer,
+            assignmentStore);
     }
 
     private static AzureProviderRecoveryObservationRecord CreateProviderRecoveryObservation(
@@ -946,7 +1056,8 @@ public sealed class AzureElsaInstanceProviderTests
         ElsaInstanceProviderRecoveryRequest Request,
         CapturingRecoveryObservationStore ObservationStore,
         CapturingOperationStore OperationStore,
-        CountingRecoveryObserver Observer);
+        CountingRecoveryObserver Observer,
+        InMemoryAssignmentStore AssignmentStore);
 
     private sealed class CapturingRecoveryObservationStore(
         AzureProviderRecoveryObservationRecord? strictObservation,
@@ -1108,10 +1219,12 @@ public sealed class AzureElsaInstanceProviderTests
     private sealed class InMemoryAssignmentStore : IAzureProviderResourceAssignmentStore
     {
         private AzureProviderResourceAssignment? _assignment;
+        private readonly List<AzureProviderAssignmentRebindRecord> _rebinds = [];
         public Guid AssignmentId { get; init; } = Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
         public AzureProviderAssignmentState State { get; init; } = AzureProviderAssignmentState.Reserved;
         public Guid? LastOperationId { get; init; }
         public AzureProviderResourceReferences Resources { get; init; } = new();
+        public AzureProviderOperationStatus? BlockingOperationStatus { get; init; }
 
         public Task<AzureProviderResourceAssignment> CreateOrGetAsync(
             AzureProviderResourceAssignmentRequest request,
@@ -1136,12 +1249,104 @@ public sealed class AzureElsaInstanceProviderTests
                 1,
                 now,
                 now);
-            return Task.FromResult(_assignment);
+            return RebindIfNeededAsync(
+                _assignment,
+                request.ProviderScopeFingerprint,
+                request.SubscriptionId,
+                request.ResourceGroupNamePrefix,
+                request.NamingVersion,
+                request.Rebind,
+                now);
         }
 
         public Task<AzureProviderResourceAssignment?> GetAsync(
             Guid workspaceId,
             Guid assignmentId,
             CancellationToken cancellationToken = default) => Task.FromResult(_assignment);
+
+        public async Task<AzureProviderResourceAssignment?> RebindToCurrentScopeAsync(
+            AzureProviderAssignmentScopeAuthority authority,
+            DateTimeOffset now,
+            CancellationToken cancellationToken = default) =>
+            _assignment is null
+                ? null
+                : await RebindIfNeededAsync(
+                    _assignment,
+                    authority.ProviderScopeFingerprint,
+                    authority.SubscriptionId,
+                    authority.ResourceGroupNamePrefix,
+                    authority.NamingVersion,
+                    authority.Rebind,
+                    now);
+
+        public Task<bool> HasRebindLineageAsync(
+            Guid workspaceId,
+            Guid assignmentId,
+            string fromProviderScopeFingerprint,
+            string toProviderScopeFingerprint,
+            CancellationToken cancellationToken = default)
+        {
+            if (string.Equals(fromProviderScopeFingerprint, toProviderScopeFingerprint, StringComparison.OrdinalIgnoreCase))
+                return Task.FromResult(true);
+            return Task.FromResult(_rebinds.Any(rebind =>
+                rebind.AssignmentId == assignmentId &&
+                string.Equals(rebind.FromProviderScopeFingerprint, fromProviderScopeFingerprint, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(rebind.ToProviderScopeFingerprint, toProviderScopeFingerprint, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        public Task<IReadOnlyList<AzureProviderAssignmentRebindRecord>> ListRebindsAsync(
+            Guid workspaceId,
+            Guid assignmentId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<AzureProviderAssignmentRebindRecord>>(
+                _rebinds.Where(rebind => rebind.AssignmentId == assignmentId).ToArray());
+
+        private Task<AzureProviderResourceAssignment> RebindIfNeededAsync(
+            AzureProviderResourceAssignment assignment,
+            string providerScopeFingerprint,
+            string subscriptionId,
+            string resourceGroupNamePrefix,
+            int namingVersion,
+            AzureProviderAssignmentRebindContext? rebind,
+            DateTimeOffset now)
+        {
+            if (string.Equals(assignment.ProviderScopeFingerprint, providerScopeFingerprint, StringComparison.OrdinalIgnoreCase))
+                return Task.FromResult(assignment);
+
+            var expectedGroup = AzureProviderResourceAssignmentNaming.ResourceGroupName(
+                resourceGroupNamePrefix, assignment.InstanceId, namingVersion);
+            if (!string.Equals(assignment.SubscriptionId, subscriptionId, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(assignment.ResourceGroupName, expectedGroup, StringComparison.Ordinal))
+                throw new AzureProviderAssignmentRebindException(
+                    AzureProviderAssignmentRebindDiagnostics.PlacementMismatch,
+                    "The Azure provider assignment cannot be rebound across a placement change.");
+            if (BlockingOperationStatus is AzureProviderOperationStatus.Accepted or AzureProviderOperationStatus.Queued
+                or AzureProviderOperationStatus.EntitlementHeld or AzureProviderOperationStatus.Running)
+                throw new AzureProviderAssignmentRebindException(
+                    AzureProviderAssignmentRebindDiagnostics.OperationsInFlight,
+                    "The Azure provider assignment cannot be rebound until in-flight operations drain.");
+
+            var from = assignment.ProviderScopeFingerprint;
+            _assignment = assignment with
+            {
+                ProviderScopeFingerprint = providerScopeFingerprint,
+                OwnershipKey = AzureProviderResourceAssignmentNaming.OwnershipKey(
+                    assignment.Id, assignment.InstanceId, providerScopeFingerprint),
+                Version = assignment.Version + 1,
+                UpdatedAt = now
+            };
+            var trigger = rebind ?? new AzureProviderAssignmentRebindContext("azure-provider-assignment-store");
+            _rebinds.Add(new(
+                Guid.NewGuid(),
+                assignment.Id,
+                assignment.WorkspaceId,
+                assignment.InstanceId,
+                from,
+                providerScopeFingerprint,
+                trigger.TriggeredBy,
+                trigger.TriggerOperationId,
+                now));
+            return Task.FromResult(_assignment);
+        }
     }
 }
