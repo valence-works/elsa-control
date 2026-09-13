@@ -323,7 +323,12 @@ public sealed class GovernedReleaseCatalogStore(DbContextOptions<CatalogDbContex
     }
 
     private static bool Matches(GovernedReleaseCatalogEntry entry, GovernedReleaseCatalogQuery query) =>
-        (query.TopologyId is null || string.Equals(entry.Topology.Id, query.TopologyId, StringComparison.Ordinal))
+        (query.DistributionId is null || string.Equals(entry.Distribution.Id, query.DistributionId, StringComparison.OrdinalIgnoreCase))
+        && (query.ReleaseLine is null || string.Equals(entry.Distribution.ReleaseLine, query.ReleaseLine, StringComparison.OrdinalIgnoreCase))
+        && (query.ReleaseVersion is null || string.Equals(entry.Distribution.ReleaseVersion, query.ReleaseVersion, StringComparison.OrdinalIgnoreCase))
+        && (query.Channel is null || string.Equals(entry.Distribution.Channel, query.Channel, StringComparison.OrdinalIgnoreCase))
+        && (query.RegistryClass is null || string.Equals(entry.RegistryClass, query.RegistryClass, StringComparison.OrdinalIgnoreCase))
+        && (query.TopologyId is null || string.Equals(entry.Topology.Id, query.TopologyId, StringComparison.Ordinal))
         && (query.CatalogLifecycle is null || string.Equals(entry.CatalogLifecycle, query.CatalogLifecycle, StringComparison.OrdinalIgnoreCase))
         && (query.ProducerLifecycle is null || string.Equals(entry.Distribution.ProducerLifecycle, query.ProducerLifecycle, StringComparison.OrdinalIgnoreCase))
         && (query.RuntimeKind is null || entry.Topology.RuntimeKinds.Contains(query.RuntimeKind, StringComparer.Ordinal))

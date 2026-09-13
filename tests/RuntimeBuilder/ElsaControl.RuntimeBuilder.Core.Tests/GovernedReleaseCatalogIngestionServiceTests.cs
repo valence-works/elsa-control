@@ -65,6 +65,7 @@ public sealed class GovernedReleaseCatalogIngestionServiceTests
 
     [Theory]
     [InlineData("3.8", "3.8.0-preview.5413", 'a')]
+    [InlineData("3.8", "3.8.0-preview.5567-build.153", 'e')]
     [InlineData("3.9", "3.9.0", 'b')]
     [InlineData("4.1", "4.1.0", 'c')]
     [InlineData("5.0", "5.0.0", 'd')]

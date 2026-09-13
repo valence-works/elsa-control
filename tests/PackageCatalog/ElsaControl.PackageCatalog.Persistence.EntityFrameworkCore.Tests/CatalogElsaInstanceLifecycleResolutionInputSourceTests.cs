@@ -262,6 +262,76 @@ public sealed class CatalogElsaInstanceLifecycleResolutionInputSourceTests : IAs
     }
 
     [Fact]
+    public async Task Preview_build_suffix_matches_the_exact_catalog_row_and_resolves_a_plan()
+    {
+        const string pinVersion = "3.8.0-preview.5567";
+        const string buildVersion = "3.8.0-preview.5567-build.153";
+        var pin = CreateEntry("preview", "3.8", pinVersion, "preview", digestSeed: 'c', componentVersion: pinVersion);
+        var build = CreateEntry("preview", "3.8", buildVersion, "preview", digestSeed: 'd', componentVersion: pinVersion);
+        var catalog = new GovernedReleaseCatalogStore(_dbOptions);
+        Assert.Equal(GovernedReleaseCatalogWriteStatus.Stored, (await catalog.StoreAsync([pin])).Status);
+        Assert.Equal(GovernedReleaseCatalogWriteStatus.Stored, (await catalog.StoreAsync([build])).Status);
+
+        var pinMatches = await catalog.QueryAsync(new GovernedReleaseCatalogQuery(
+            DistributionId: "future-runtime",
+            ReleaseLine: "3.8",
+            ReleaseVersion: pinVersion,
+            Channel: "preview",
+            RegistryClass: "paid",
+            TopologyId: "combined"));
+        var buildMatches = await catalog.QueryAsync(new GovernedReleaseCatalogQuery(
+            DistributionId: "future-runtime",
+            ReleaseLine: "3.8",
+            ReleaseVersion: buildVersion,
+            Channel: "preview",
+            RegistryClass: "paid",
+            TopologyId: "combined"));
+        Assert.Equal(pinVersion, Assert.Single(pinMatches).Distribution.ReleaseVersion);
+        Assert.Equal(buildVersion, Assert.Single(buildMatches).Distribution.ReleaseVersion);
+        Assert.NotEqual(pinMatches[0].ManifestDigest, buildMatches[0].ManifestDigest);
+
+        var instance = new ElsaInstance(
+            _accepted.Instance.Id,
+            _accepted.Instance.OrganizationId,
+            _accepted.Instance.WorkspaceId,
+            _accepted.Instance.Name,
+            _accepted.Instance.Slug,
+            _accepted.Instance.Intent with
+            {
+                Release = new ElsaReleaseIntent(
+                    "future-runtime",
+                    "3.8",
+                    buildVersion,
+                    "preview",
+                    previewManifestDigest: "sha256:" + new string('d', 64))
+            });
+        var source = new CatalogElsaInstanceLifecycleResolutionInputSource(
+            _db,
+            catalog,
+            new ElsaInstancePlanAuthorityOptions { Origin = "https://control.example.test" },
+            GovernedSecrets);
+
+        var input = await source.GetAsync(instance, _accepted.Operation);
+
+        Assert.NotNull(input);
+        Assert.Equal(buildVersion, input!.PlanRequest.ReleaseManifest.Manifest!.Distribution.ReleaseVersion);
+        Assert.Equal(buildVersion, input.PlanRequest.InstanceIntent.Release.RequestedVersion);
+        Assert.NotEqual(pinVersion, input.PlanRequest.ReleaseManifest.Manifest.Distribution.ReleaseVersion);
+
+        var resolved = await new ElsaInstancePlanResolver(
+                new EmptyCatalog(),
+                new CompatibleCatalog(),
+                new(DefaultEgress: "unrestricted"))
+            .ResolveAsync(input.PlanRequest);
+
+        Assert.True(resolved.Succeeded, string.Join("; ", resolved.Findings.Select(x => x.Code)));
+        Assert.Equal(buildVersion, resolved.Plan!.Release.Version);
+        Assert.Equal(buildVersion, resolved.CurrentResolvedRelease!.Version);
+        Assert.NotEqual(pinVersion, resolved.Plan.Release.Version);
+        Assert.Equal(pinVersion, resolved.Plan.Release.ComponentDeclarations!.Packages[0].Version);
+    }
+
+    [Fact]
     public async Task Catalog_release_resolves_and_creates_a_durable_Azure_provider_operation()
     {
         var catalog = new GovernedReleaseCatalogStore(_dbOptions);
@@ -337,50 +407,60 @@ public sealed class CatalogElsaInstanceLifecycleResolutionInputSourceTests : IAs
                 "future-runtime", "5.0", "5.0.0", previewManifestDigest: "sha256:" + new string('c', 64))
         });
 
-    private GovernedReleaseCatalogEntry CreateEntry(string catalogLifecycle = "supported") => new(
-        "2.0.0",
-        "https://catalog.example.test/manifests/5.0.0.json",
-        "sha256:" + new string('c', 64),
-        "sha256:" + new string('d', 64),
-        "https://catalog.example.test/signatures/5.0.0.sig",
-        "sha256:" + new string('e', 64),
-        "paid",
-        new(
-            "future-runtime",
-            "commercial",
-            "5.0",
-            "5.0.0",
-            "stable",
-            "stable",
-            "commercial",
-            "https://github.com/example/runtime",
-            new string('a', 40),
-            "run-1"),
-        new(
-            "combined",
-            "1",
-            ["elsa.server"],
-            [],
-            [new GovernedReleaseComponentVersion("server", "5.0.0")],
-            [new GovernedReleaseComponent(
-                "server",
-                "valenceruntimeimages.azurecr.io/runtime-combined@sha256:" + new string('a', 64),
-                "sha256:" + new string('a', 64),
-                new Dictionary<string, string>(),
-                ["server"],
+    private GovernedReleaseCatalogEntry CreateEntry(
+        string catalogLifecycle = "supported",
+        string releaseLine = "5.0",
+        string releaseVersion = "5.0.0",
+        string channel = "stable",
+        char digestSeed = 'c',
+        string? componentVersion = null)
+    {
+        var bakedVersion = componentVersion ?? releaseVersion;
+        return new(
+            "2.0.0",
+            $"https://catalog.example.test/manifests/{releaseVersion}.json",
+            "sha256:" + new string(digestSeed, 64),
+            "sha256:" + new string((char)(digestSeed + 1), 64),
+            $"https://catalog.example.test/signatures/{releaseVersion}.sig",
+            "sha256:" + new string((char)(digestSeed + 2), 64),
+            "paid",
+            new(
+                "future-runtime",
+                "commercial",
+                releaseLine,
+                releaseVersion,
+                channel,
+                channel,
+                "commercial",
+                "https://github.com/example/runtime",
+                new string('a', 40),
+                "run-1"),
+            new(
+                "combined",
+                "1",
+                ["elsa.server"],
                 [],
-                [],
-                null)],
-            [new GovernedReleaseEvidence(ReleaseManifestEvidenceKinds.Sbom, "https://catalog.example.test/evidence/sbom", "sha256:" + new string('1', 64)),
-             new GovernedReleaseEvidence(ReleaseManifestEvidenceKinds.Provenance, "https://catalog.example.test/evidence/provenance", "sha256:" + new string('2', 64)),
-             new GovernedReleaseEvidence(ReleaseManifestEvidenceKinds.VulnerabilityScan, "https://catalog.example.test/evidence/scan", "sha256:" + new string('3', 64))]),
-        catalogLifecycle,
-        DateTimeOffset.UtcNow,
-        new(
-            "central-package-declarations-v1",
-            "sha256:" + new string('f', 64),
-            [new("Elsa.Persistence.EFCore.SqlServer", "5.0.0"),
-             new("Elsa.Scheduling.Quartz.EFCore.SqlServer", "5.0.0")]));
+                [new GovernedReleaseComponentVersion("server", bakedVersion)],
+                [new GovernedReleaseComponent(
+                    "server",
+                    "valenceruntimeimages.azurecr.io/runtime-combined@sha256:" + new string('a', 64),
+                    "sha256:" + new string('a', 64),
+                    new Dictionary<string, string>(),
+                    ["server"],
+                    [],
+                    [],
+                    null)],
+                [new GovernedReleaseEvidence(ReleaseManifestEvidenceKinds.Sbom, "https://catalog.example.test/evidence/sbom", "sha256:" + new string('1', 64)),
+                 new GovernedReleaseEvidence(ReleaseManifestEvidenceKinds.Provenance, "https://catalog.example.test/evidence/provenance", "sha256:" + new string('2', 64)),
+                 new GovernedReleaseEvidence(ReleaseManifestEvidenceKinds.VulnerabilityScan, "https://catalog.example.test/evidence/scan", "sha256:" + new string('3', 64))]),
+            catalogLifecycle,
+            DateTimeOffset.UtcNow,
+            new(
+                "central-package-declarations-v1",
+                "sha256:" + new string('f', 64),
+                [new("Elsa.Persistence.EFCore.SqlServer", bakedVersion),
+                 new("Elsa.Scheduling.Quartz.EFCore.SqlServer", bakedVersion)]));
+    }
 
     private static Guid DeterministicGuid(Guid seed, string purpose)
     {

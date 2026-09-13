@@ -55,6 +55,22 @@ public sealed class AzureWorkloadPlanTranslatorTests
     }
 
     [Fact]
+    public void Preview_build_suffix_stays_on_elsa_version_and_does_not_fall_back_to_the_pin()
+    {
+        const string pinVersion = "3.8.0-preview.5567";
+        const string buildVersion = "3.8.0-preview.5567-build.153";
+        var plan = CreatePlan("3.8", buildVersion);
+
+        var result = AzureWorkloadPlanTranslator.Translate(plan, new("workload-a", "westeurope"));
+
+        Assert.True(result.IsAccepted, string.Join("; ", result.Findings.Select(x => x.Code)));
+        Assert.Equal(buildVersion, result.Plan!.ElsaVersion);
+        Assert.NotEqual(pinVersion, result.Plan.ElsaVersion);
+        Assert.Equal("3.8.0-preview.5413", result.Plan.SqlWorkflowPackageVersion);
+        Assert.NotEqual(result.Plan.ElsaVersion, result.Plan.SqlWorkflowPackageVersion);
+    }
+
+    [Fact]
     public void Surfaces_resolved_plan_validation_and_does_not_translate()
     {
         var plan = CreatePlan() with
