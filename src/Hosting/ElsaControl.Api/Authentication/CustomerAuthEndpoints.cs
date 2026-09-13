@@ -29,7 +29,7 @@ public static class CustomerAuthEndpoints
                 CustomerAuthenticationDefaults.LoginPath,
                 CustomerAuthenticationDefaults.LogoutPath,
                 customerSession.Succeeded && customerSession.Principal is not null &&
-                AdminAuthorization.HasControlAdminRole(customerSession.Principal)));
+                AdminAuthorization.HasControlAdminRole(customerSession.Principal, options.Value)));
         }).AllowAnonymous();
 
         group.MapGet("/login", async (

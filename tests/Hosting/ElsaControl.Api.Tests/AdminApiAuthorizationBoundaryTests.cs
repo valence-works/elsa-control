@@ -122,7 +122,7 @@ public sealed class AdminApiAuthorizationBoundaryTests : IClassFixture<DefaultCo
         var principal = new ClaimsPrincipal(new ClaimsIdentity(
             [new Claim(claimType, AdminAuthorization.ControlAdminRole)]));
 
-        Assert.True(AdminAuthorization.HasControlAdminRole(principal));
+        Assert.True(AdminAuthorization.HasControlAdminRole(principal, new ControlIdentityOptions()));
     }
 
     [Fact]
@@ -131,8 +131,8 @@ public sealed class AdminApiAuthorizationBoundaryTests : IClassFixture<DefaultCo
         var otherRole = new ClaimsPrincipal(new ClaimsIdentity([new Claim("roles", "customer")]));
         var anonymous = new ClaimsPrincipal(new ClaimsIdentity());
 
-        Assert.False(AdminAuthorization.HasControlAdminRole(otherRole));
-        Assert.False(AdminAuthorization.HasControlAdminRole(anonymous));
+        Assert.False(AdminAuthorization.HasControlAdminRole(otherRole, new ControlIdentityOptions()));
+        Assert.False(AdminAuthorization.HasControlAdminRole(anonymous, new ControlIdentityOptions()));
     }
 
     private HttpClient CreateCustomerSessionClient()

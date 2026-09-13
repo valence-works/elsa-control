@@ -32,6 +32,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     public DbSet<ExternalIdentity> ExternalIdentities => Set<ExternalIdentity>();
     public DbSet<Organization> Organizations => Set<Organization>();
     public DbSet<OrganizationMembership> OrganizationMemberships => Set<OrganizationMembership>();
+    public DbSet<OrganizationIdentityBinding> OrganizationIdentityBindings => Set<OrganizationIdentityBinding>();
     public DbSet<OrganizationEntitlementSnapshot> OrganizationEntitlementSnapshots => Set<OrganizationEntitlementSnapshot>();
     public DbSet<OrganizationAuditRecord> OrganizationAuditRecords => Set<OrganizationAuditRecord>();
     public DbSet<OrganizationSubscription> OrganizationSubscriptions => Set<OrganizationSubscription>();
@@ -118,6 +119,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         modelBuilder.ApplyConfiguration(new Models.AccountConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ExternalIdentityConfiguration());
         modelBuilder.ApplyConfiguration(new Models.OrganizationConfiguration());
+        modelBuilder.ApplyConfiguration(new Models.OrganizationIdentityBindingConfiguration());
         modelBuilder.ApplyConfiguration(new Models.OrganizationMembershipConfiguration());
         modelBuilder.ApplyConfiguration(new Models.OrganizationEntitlementSnapshotConfiguration());
         modelBuilder.ApplyConfiguration(new Models.OrganizationAuditRecordConfiguration());

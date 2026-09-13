@@ -20,10 +20,28 @@ public sealed class ControlIdentityOptions
     public string? PostLogoutRedirectUri { get; init; }
     public bool RequireHttpsMetadata { get; init; } = true;
     public ControlIdentityClaimOptions Claims { get; init; } = new();
+    public ControlEntraIdentityOptions Entra { get; init; } = new();
 
     public bool IsCustomerLoginConfigured =>
         !string.IsNullOrWhiteSpace(Authority) &&
         !string.IsNullOrWhiteSpace(ClientId);
+
+    public bool IsEntraMultiTenant => Provider == ControlIdentityProviderKind.MicrosoftEntra && Entra.MultiTenant;
+}
+
+public sealed class ControlEntraIdentityOptions
+{
+    /// <summary>
+    /// Accepts work or school sign-ins from any Microsoft Entra tenant, validating each token's
+    /// issuer against its own <c>tid</c>. A customer tenant's first sign-in mints its organization.
+    /// </summary>
+    public bool MultiTenant { get; init; }
+
+    /// <summary>
+    /// Valence-operated tenants. Their users keep the dogfood identity keying and never take the
+    /// customer organization mint.
+    /// </summary>
+    public string[] DogfoodTenantIds { get; init; } = [];
 }
 
 public sealed class ControlIdentityClaimOptions

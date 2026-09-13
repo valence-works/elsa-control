@@ -39,6 +39,8 @@ internal static class CustomerOidcOptionsConfigurator
             ValidateAudience = !string.IsNullOrWhiteSpace(controlIdentity.ClientId),
             ValidAudience = string.IsNullOrWhiteSpace(controlIdentity.ClientId) ? null : controlIdentity.ClientId
         };
+        if (controlIdentity.IsEntraMultiTenant)
+            EntraMultiTenantIdentity.ConfigureIssuerValidation(options.TokenValidationParameters);
         options.Events.OnTokenValidated = context =>
         {
             if (context.Properties is { } properties)
