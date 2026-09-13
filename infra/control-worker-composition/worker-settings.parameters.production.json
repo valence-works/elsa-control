@@ -6,7 +6,7 @@
     "ProvisionerIdentityName": "mi-elsa-cloud-provisioner-prod-weu",
     "SqlBootstrapIp": "9.160.165.252",
     "RuntimeAdminUsername": "elsa-runtime-admin",
-    "ReleaseFeedServiceIndex": "https://f.feedz.io/elsa-workflows/elsa-3/nuget/index.json",
+    "ReleaseFeedServiceIndex": "https://api.nuget.org/v3/index.json",
     "RegistryDeploymentMetadataRoleDefinitionId": "/subscriptions/8e23037a-420f-4ad0-9594-9d194de29e84/providers/Microsoft.Authorization/roleDefinitions/a821f94b-8f8e-522d-845c-81da8bf0e7c2",
     "RegistryDeploymentMetadataRoleAssignmentId": "/subscriptions/8e23037a-420f-4ad0-9594-9d194de29e84/resourceGroups/rg-valence-runtime/providers/Microsoft.Authorization/roleAssignments/395da5c4-283d-5ae7-af7a-2609d3d51926",
     "RegistryRoleAdministrationAssignmentId": "/subscriptions/8e23037a-420f-4ad0-9594-9d194de29e84/resourceGroups/rg-valence-runtime/providers/Microsoft.ContainerRegistry/registries/valenceruntimeimages/providers/Microsoft.Authorization/roleAssignments/2a85661e-fe81-58f6-b7dc-11793c71f92e",

@@ -100,6 +100,8 @@ internal static class AzureProviderRunnerComposition
             provider.GetRequiredService<AzureBicepProviderRunner>());
         services.AddScoped<IAzureProviderRecoveryObserver>(provider =>
             provider.GetRequiredService<AzureBicepProviderRunner>());
+        services.AddScoped<IAzureRuntimeHealthProbe>(provider =>
+            provider.GetRequiredService<AzureBicepProviderRunner>());
         return new(options, scope);
     }
 

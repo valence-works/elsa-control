@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using ElsaControl.Deployment.Abstractions.Instances;
+using ElsaControl.Deployment.Core.Instances;
 
 namespace ElsaControl.Deployment.Azure;
 
@@ -14,7 +15,7 @@ namespace ElsaControl.Deployment.Azure;
 /// successful response into bounded resource references. It never returns provider payloads,
 /// command output, or resolved secret values.
 /// </summary>
-public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProviderRecoveryObserver
+public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProviderRecoveryObserver, IAzureRuntimeHealthProbe
 {
     private const string AcrPullRoleDefinitionId = "7f951dda-4ed3-4680-a7ca-43fe172d538d";
     private const string KeyVaultSecretsUserRoleDefinitionId = "4633458b-17de-408a-b874-0445c86b69e6";
@@ -1164,13 +1165,20 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                     throw new FormatException();
                 var rawEndpoint = host.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ? host : $"https://{host}";
                 var endpoint = AzureProviderOperationValidation.NormalizeEndpoint(rawEndpoint)!;
-                if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) ||
-                    !uri.Host.EndsWith(".azurecontainerapps.io", StringComparison.OrdinalIgnoreCase) ||
-                    !uri.Host.StartsWith(AppName(command) + ".", StringComparison.OrdinalIgnoreCase))
+                if (!IsWorkloadOrigin(endpoint, AppName(command)))
                     throw new FormatException();
                 return new SafeValue<string>(endpoint);
             },
             cancellationToken);
+
+    /// <summary>
+    /// A workload's public origin is the Container Apps managed host of its own app: a host that
+    /// starts with <c>{app}.</c> under <c>azurecontainerapps.io</c>.
+    /// </summary>
+    private static bool IsWorkloadOrigin(string endpoint, string appName) =>
+        Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) &&
+        uri.Host.EndsWith(".azurecontainerapps.io", StringComparison.OrdinalIgnoreCase) &&
+        uri.Host.StartsWith(appName + ".", StringComparison.OrdinalIgnoreCase);
 
     private async Task<AzureProviderRunnerResult> RunRestoreStableTrafficAsync(
         AzureProviderRunnerCommand command,
@@ -1419,11 +1427,63 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private async Task<AzureCommandProcessResult<SafeValue<string>>> ExecuteHealthProbeAsync(AzureProviderRunnerCommand command, string endpoint, CancellationToken cancellationToken)
     {
         _options.ValidateExecutionAuthority(command.Context, _scope);
-        var request = new AzureCommandProcessRequest(
-            _options.CurlPath,
-            new[] { "--fail", "--silent", "--show-error", "--retry", "30", "--retry-all-errors", "--retry-delay", "5", "--max-time", "10", endpoint }
-                .Select(AzureCommandArgument.Safe).ToArray());
-        return await _process.ExecuteAsync(request, ParseHealthReportAsync, cancellationToken);
+        return await ExecuteCurlHealthAsync(["--retry", "30", "--retry-all-errors", "--retry-delay", "5", "--max-time", "10"], endpoint, cancellationToken);
+    }
+
+    private Task<AzureCommandProcessResult<SafeValue<string>>> ExecuteCurlHealthAsync(
+        IEnumerable<string> bounds,
+        string endpoint,
+        CancellationToken cancellationToken) =>
+        _process.ExecuteAsync(
+            new AzureCommandProcessRequest(
+                _options.CurlPath,
+                new[] { "--fail", "--silent", "--show-error" }.Concat(bounds).Append(endpoint)
+                    .Select(AzureCommandArgument.Safe).ToArray()),
+            ParseHealthReportAsync,
+            cancellationToken);
+
+    /// <summary>
+    /// Read-only probe of a Ready workload's runtime health route for the periodic health monitor
+    /// (#394). It reuses the promotion probe's curl transport, bounded body and byte-exact report
+    /// classification but makes one attempt bounded by <paramref name="timeout"/>: the monitor's
+    /// hysteresis, not curl retries, absorbs a cold start. The endpoint must be the verified origin
+    /// of <paramref name="workloadName"/>'s own app. No Azure authority is exercised, nothing is
+    /// mutated, and only a classification and a fixed code are returned.
+    /// </summary>
+    public async Task<ElsaInstanceHealthProbeResult> ProbeAsync(
+        string workloadName,
+        string endpointOrigin,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(workloadName) ||
+            !ElsaManagedEndpointOrigin.TryCreate(endpointOrigin, out var origin) ||
+            !IsWorkloadOrigin(origin.Value, WorkloadAppName(workloadName)))
+            return new(ElsaInstanceHealth.Unknown, "azure.health.endpoint-unbound");
+
+        var seconds = (int)Math.Clamp(Math.Ceiling(timeout.TotalSeconds), 1, 60);
+        var probe = await ExecuteCurlHealthAsync(
+            ["--max-time", seconds.ToString(CultureInfo.InvariantCulture)],
+            $"{origin.Value.TrimEnd('/')}/health",
+            cancellationToken);
+        return probe.Status switch
+        {
+            AzureCommandProcessStatus.Succeeded => ClassifyRuntimeHealth(probe.Value?.Value) switch
+            {
+                RuntimeHealthReport.Healthy => new(ElsaInstanceHealth.Healthy, "azure.health.healthy"),
+                RuntimeHealthReport.NotHealthy => new(ElsaInstanceHealth.Degraded, "azure.health.not-healthy"),
+                _ => new(ElsaInstanceHealth.Unknown, "azure.health.report-invalid")
+            },
+            AzureCommandProcessStatus.TimedOut or AzureCommandProcessStatus.Cancelled =>
+                new(ElsaInstanceHealth.Unreachable, "azure.health.timed-out"),
+            AzureCommandProcessStatus.OutputLimitExceeded => new(ElsaInstanceHealth.Unknown, "azure.health.report-invalid"),
+            // curl exits non-zero for a transport failure or an HTTP error status (--fail); 28 is its own time limit.
+            _ when probe.FailureKind == AzureCommandProcessFailureKind.NonZeroExitCode =>
+                new(ElsaInstanceHealth.Unreachable, probe.ExitCode == 28 ? "azure.health.timed-out" : "azure.health.unreachable"),
+            _ when probe.FailureKind == AzureCommandProcessFailureKind.InvalidOutput =>
+                new(ElsaInstanceHealth.Unknown, "azure.health.report-invalid"),
+            _ => new(ElsaInstanceHealth.Unknown, "azure.health.probe-unavailable")
+        };
     }
 
     private const int MaximumHealthReportCharacters = 64;
@@ -2176,7 +2236,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
 
     private string RegistryResourceId() =>
         $"/subscriptions/{_scope.RegistrySubscriptionId}/resourceGroups/{_scope.RegistryResourceGroupName}/providers/Microsoft.ContainerRegistry/registries/{_scope.RegistryName}";
-    private static string AppName(AzureProviderRunnerCommand command) => $"{command.Plan.WorkloadName}-app";
+    private static string AppName(AzureProviderRunnerCommand command) => WorkloadAppName(command.Plan.WorkloadName);
+    private static string WorkloadAppName(string workloadName) => $"{workloadName}-app";
     private static string SqlServerName(AzureProviderRunnerCommand command) => $"{command.Plan.WorkloadName}-sql";
     private string ResourceGroupName(AzureProviderRunnerCommand command)
     {

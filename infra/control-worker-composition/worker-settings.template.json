@@ -6,6 +6,7 @@
   "Deployment__AzureProvider__PollInterval": "00:00:05",
   "Deployment__AzureProvider__BatchSize": "10",
   "Deployment__AzureProvider__InstanceLifecycle__Enabled": "true",
+  "Deployment__ElsaInstanceHealthMonitor__Enabled": "true",
   "Deployment__AzureProvider__Runner__Enabled": "true",
   "Deployment__AzureProvider__Runner__DisposableProofMode": "false",
   "Deployment__AzureProvider__Runner__AzureCliClientId": "${ProvisionerClientId}",

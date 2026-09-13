@@ -298,6 +298,7 @@ builder.Services.AddScoped<IElsaInstanceEntitlementHoldStore>(services => servic
 builder.Services.AddScoped<IElsaInstanceProviderPendingOperationStore>(services => services.GetRequiredService<EfCoreElsaInstanceLifecycleStore>());
 builder.Services.AddScoped<IElsaInstanceProviderReconciliationStore>(services => services.GetRequiredService<EfCoreElsaInstanceLifecycleStore>());
 builder.Services.AddScoped<IElsaInstanceDeletionStore>(services => services.GetRequiredService<EfCoreElsaInstanceLifecycleStore>());
+builder.Services.AddScoped<IElsaInstanceHealthMonitorStore>(services => services.GetRequiredService<EfCoreElsaInstanceLifecycleStore>());
 builder.Services.Configure<ElsaInstancePlanAuthorityOptions>(
     builder.Configuration.GetSection(ElsaInstancePlanAuthorityOptions.ConfigurationSection));
 var azureInstanceLifecycleConfigured = builder.Configuration.GetValue<bool>(
@@ -492,6 +493,11 @@ if (instanceLifecycleWorkerEnabled && azureInstanceLifecycleEnabled && !builder.
     builder.Services.AddHostedService<ElsaInstanceProviderReconciliationHostedService>();
 if (instanceLifecycleWorkerEnabled && azureInstanceLifecycleEnabled && !builder.Environment.IsEnvironment("Testing"))
     builder.Services.AddHostedService<ElsaInstanceDeletionHostedService>();
+ElsaInstanceHealthMonitorComposition.AddHealthMonitor(
+    builder.Services,
+    builder.Configuration,
+    providerPipelineComposed: instanceLifecycleWorkerEnabled && azureInstanceLifecycleEnabled,
+    runWorkers: !builder.Environment.IsEnvironment("Testing"));
 var azureProviderWorkerEnabled = builder.Configuration.GetValue("Deployment:AzureProvider:WorkerEnabled", false);
 if (azureProviderWorkerEnabled && !builder.Environment.IsEnvironment("Testing"))
     builder.Services.AddHostedService<AzureProviderOperationHostedService>();

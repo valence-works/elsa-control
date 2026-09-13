@@ -125,6 +125,26 @@ public static class ManagedLifecycleTelemetry
         return operation;
     }
 
+    /// <summary>
+    /// Records one periodic endpoint health evaluation of a Ready instance, which runs outside any
+    /// lifecycle operation. It carries the read-only <see cref="ElsaInstanceOperationAction.Reconcile"/>
+    /// action and no operation state, so the same six-label contract applies and no operation
+    /// counter or duration moves.
+    /// </summary>
+    public static void RecordEndpointHealthEvaluation(
+        string outcome,
+        ElsaDesiredLifecycle desiredLifecycle,
+        ElsaObservedLifecycle observedLifecycle,
+        ElsaInstanceHealth health) =>
+        EndpointHealthCounter.Add(1, ToMetricTags(Tags(
+            ElsaInstanceOperationAction.Reconcile,
+            outcome,
+            desiredLifecycle,
+            observedLifecycle,
+            health,
+            null,
+            null)));
+
     internal static TagList Tags(
         ElsaInstanceOperationAction action,
         string outcome,
