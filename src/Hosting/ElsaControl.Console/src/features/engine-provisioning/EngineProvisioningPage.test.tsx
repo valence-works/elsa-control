@@ -141,6 +141,7 @@ describe("EngineProvisioningPage", () => {
 
     expect(await screen.findByRole("heading", { name: "Provision an engine" })).toBeInTheDocument();
     const environment = screen.getByRole("combobox", { name: "Environment" });
+    expect(await within(environment).findByRole("option", { name: "Development" })).toBeInTheDocument();
     expect(within(environment).queryByRole("option", { name: "Production" })).not.toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Events runtime" })).toBeInTheDocument();
 
@@ -168,7 +169,7 @@ describe("EngineProvisioningPage", () => {
     renderPage();
 
     const environment = await screen.findByRole("combobox", { name: "Environment" });
-    expect(within(environment).getByRole("option", { name: "Production" })).toBeInTheDocument();
+    expect(await within(environment).findByRole("option", { name: "Production" })).toBeInTheDocument();
     expect(within(environment).queryByRole("option", { name: "Development" })).not.toBeInTheDocument();
   });
 

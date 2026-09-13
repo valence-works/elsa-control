@@ -140,8 +140,14 @@ function EngineProvisioningWorkspace({ workspace }: { workspace: WorkspaceState 
   const selectedRelease = choices[Number(releaseIndex)] as ProvisionRelease | undefined;
   const previewReleaseRequired = Boolean(selectedRelease && "previewManifestDigest" in selectedRelease && selectedRelease.previewManifestDigest);
   const selectedConfiguration = configurations.data?.find((configuration) => configuration.id === selectedConfigurationId) ?? null;
-  const applicationEnvironments = environments.filter((item) => item.application.id === applicationId);
-  const selectedEnvironment = applicationEnvironments.find((item) => item.environment.id === environmentId) ?? null;
+  const selectedApplicationId = environments.some((item) => item.application.id === applicationId)
+    ? applicationId
+    : environments[0]?.application.id ?? "";
+  const applicationEnvironments = environments.filter((item) => item.application.id === selectedApplicationId);
+  const selectedEnvironmentId = applicationEnvironments.some((item) => item.environment.id === environmentId)
+    ? environmentId
+    : applicationEnvironments[0]?.environment.id ?? "";
+  const selectedEnvironment = applicationEnvironments.find((item) => item.environment.id === selectedEnvironmentId) ?? null;
   const operation = useQuery<ManagedElsaOperation>({
     queryKey: queryKeys.managedElsaOperation(workspaceId, pending?.instanceId ?? "", pending?.operationId ?? ""),
     queryFn: () => getManagedElsaOperation(workspaceId, pending!.instanceId, pending!.operationId),
@@ -381,8 +387,8 @@ function EngineProvisioningWorkspace({ workspace }: { workspace: WorkspaceState 
         <ConfigureView
           name={name}
           slug={slug}
-          applicationId={applicationId}
-          environmentId={environmentId}
+          applicationId={selectedApplicationId}
+          environmentId={selectedEnvironmentId}
           releaseIndex={releaseIndex}
           selectedConfigurationId={selectedConfigurationId}
           selectedConfiguration={selectedConfiguration}
