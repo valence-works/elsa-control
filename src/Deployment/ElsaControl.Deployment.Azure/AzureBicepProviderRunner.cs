@@ -1909,7 +1909,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             $"elsaVersion={command.Plan.ElsaVersion}", ..ReleaseIdentityArguments(command),
             $"sqlWorkflowPackageVersion={command.Plan.SqlWorkflowPackageVersion}", $"sqlQuartzPackageVersion={command.Plan.SqlQuartzPackageVersion}",
             ..CapacityArguments(command), ..ManagedHandoffArguments(command),
-            $"templateFingerprint={command.Context.TemplateFingerprint}", "deployWorkload=false", $"provisionDatabase={provisionDatabase.ToString().ToLowerInvariant()}",
+            $"templateFingerprint={command.Context.TemplateFingerprint}", "deployWorkload=false", ..DatabaseProvisioningArguments(provisionDatabase),
             "--query", "properties.outputs", "--output", "json", "--only-show-errors"];
 
     private IReadOnlyList<string> AcrDeploymentArguments(AzureProviderRunnerCommand command, string identityId, string principalId, string deploymentName) =>
@@ -1930,7 +1930,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             $"elsaVersion={command.Plan.ElsaVersion}", ..ReleaseIdentityArguments(command),
             $"sqlWorkflowPackageVersion={command.Plan.SqlWorkflowPackageVersion}", $"sqlQuartzPackageVersion={command.Plan.SqlQuartzPackageVersion}",
             ..CapacityArguments(command), ..ManagedHandoffArguments(command),
-            $"templateFingerprint={command.Context.TemplateFingerprint}", "deployWorkload=true", "provisionDatabase=false", $"workloadRevisionSuffix={revision}",
+            $"templateFingerprint={command.Context.TemplateFingerprint}", "deployWorkload=true", ..DatabaseProvisioningArguments(provisionDatabase: false), $"workloadRevisionSuffix={revision}",
             $"stableTrafficRevisionName={stable ?? string.Empty}", "--query", "properties.outputs", "--output", "json", "--only-show-errors"];
 
     private void ValidateCommand(AzureProviderRunnerCommand command)
@@ -2339,6 +2339,10 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private string[] TemplateIdentityArguments(AzureProviderRunnerCommand command) => _options.DisposableProofMode
         ? [$"proofName={command.Plan.WorkloadName}", $"expiryUtc={_options.DisposableExpiryUtc!.Value:yyyy-MM-dd}"]
         : [$"workloadName={command.Plan.WorkloadName}"];
+
+    private string[] DatabaseProvisioningArguments(bool provisionDatabase) => _options.DisposableProofMode
+        ? []
+        : [$"provisionDatabase={provisionDatabase.ToString().ToLowerInvariant()}"];
 
     private string[] ReleaseIdentityArguments(AzureProviderRunnerCommand command) => _options.DisposableProofMode
         ? []

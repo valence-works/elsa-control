@@ -123,6 +123,29 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     [Theory]
     [InlineData(AzureProviderRunnerStep.Foundation)]
     [InlineData(AzureProviderRunnerStep.Workload)]
+    public async Task Disposable_deployment_omits_the_production_database_provisioning_argument(AzureProviderRunnerStep step)
+    {
+        var options = _fixture.Options with
+        {
+            DisposableProofMode = true,
+            DisposableExpiryUtc = new DateOnly(2026, 9, 30),
+            AzureCliClientId = null
+        };
+        var (result, process) = await RunProductionDeploymentAsync(
+            step,
+            _fixture.Plan with { Capacity = null },
+            options,
+            ContextFor(options),
+            handoffCallback: "");
+
+        Assert.True(result.Outcome == AzureProviderRunnerOutcome.Completed, $"{result.Code}: {result.Message}");
+        var deployment = process.Calls.Single(call => call.Contains("deployment") && call.Contains("create"));
+        Assert.DoesNotContain(deployment, argument => argument.StartsWith("provisionDatabase=", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.Foundation)]
+    [InlineData(AzureProviderRunnerStep.Workload)]
     public async Task Production_deployment_states_a_disabled_handoff_for_a_release_that_does_not_declare_it(AzureProviderRunnerStep step)
     {
         var options = _fixture.Options with { ManagedHandoff = ControlHandoff };
@@ -1808,6 +1831,25 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Foundation_reapply_stops_when_the_existing_database_observation_is_ambiguous()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args is ["group", "exists", ..], "true");
+        process.Success(args => args is ["group", "show", ..], OwnedGroupTags);
+        process.Success(args => args is ["tag", "update", ..]);
+        process.Success(args => args.Contains("sql") && args.Contains("server") && args.Contains("list"), "1");
+        process.Success(args => args.Contains("ad-admin") && args.Contains("list"), "[{\"login\":\"proof-bootstrap\",\"sid\":\"11111111-1111-1111-1111-111111111111\"}]");
+        process.Success(args => args.Contains("ad-only-auth") && args.Contains("enable"));
+        process.Success(args => args.Contains("resource") && args.Contains("list") && args.Contains("Microsoft.Sql/servers/databases"), "2");
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Foundation));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
+        Assert.Equal("azure.foundation.sql-database-ambiguous", result.Code);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("deployment") && call.Contains("create"));
+    }
+
+    [Fact]
     public async Task Workload_uses_a_deterministic_revision_and_preserves_the_exact_sql_admin()
     {
         var process = new FakeCommandProcess();
@@ -2320,10 +2362,12 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         argument.StartsWith("workloadCpu=", StringComparison.Ordinal) ||
         argument.StartsWith("workloadMemory=", StringComparison.Ordinal);
 
-    private AzureProviderResourceReferences RegistryReadyResources() => _fixture.FoundationResources with
+    private AzureProviderResourceReferences RegistryReadyResources(bool disposableProofMode = false) => _fixture.FoundationResources with
     {
         RegistryResourceId = _fixture.RegistryId,
-        AcrPullDeploymentId = _fixture.RegistryDeploymentId,
+        AcrPullDeploymentId = disposableProofMode
+            ? _fixture.RegistryDeploymentId.Replace("/elsa-proof-", "/elsa108-proof-", StringComparison.Ordinal)
+            : _fixture.RegistryDeploymentId,
         AcrPullRoleAssignmentId = _fixture.RegistryRoleAssignmentId
     };
 
@@ -2365,13 +2409,15 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
             process.Success(args => args.Contains("ad-only-auth") && args.Contains("enable"));
         }
 
-        options ??= _fixture.Options;
-        var command = _fixture.Command(step, step == AzureProviderRunnerStep.Foundation ? null : RegistryReadyResources()) with
+        var effectiveOptions = options ?? _fixture.Options;
+        var command = _fixture.Command(
+            step,
+            step == AzureProviderRunnerStep.Foundation ? null : RegistryReadyResources(effectiveOptions.DisposableProofMode)) with
         {
             Plan = plan,
-            Context = context ?? ContextFor(options)
+            Context = context ?? ContextFor(effectiveOptions)
         };
-        var result = await new AzureBicepProviderRunner(options, _fixture.Scope, process).RunAsync(command);
+        var result = await new AzureBicepProviderRunner(effectiveOptions, _fixture.Scope, process).RunAsync(command);
         return (result, process);
     }
 
