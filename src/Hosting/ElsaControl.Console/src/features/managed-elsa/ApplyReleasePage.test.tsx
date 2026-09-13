@@ -57,7 +57,7 @@ describe("ApplyReleasePage", () => {
     expect(screen.getByRole("link", { name: /Releases conflict drawer/ })).toHaveAttribute("href", "/admin/releases");
     expect(screen.getByRole("button", { name: "Apply release" })).toBeDisabled();
     expect(screen.queryByText(/V3 Pass/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Studio success/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Open Pass/i)).not.toBeInTheDocument();
   });
 
   it("offers Open after Healthy/Ready without claiming a Studio pass", async () => {

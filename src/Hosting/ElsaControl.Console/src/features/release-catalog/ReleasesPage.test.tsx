@@ -154,6 +154,7 @@ describe("ReleasesPage", () => {
 });
 
 async function fillAdmitForm(user: ReturnType<typeof userEvent.setup>, version = "3.8.0-preview.5567-build.160", digest = digestA) {
+    await screen.findByRole("heading", { name: "Admit release" });
     await user.click(screen.getByRole("textbox", { name: "OCI reference" }));
     await user.paste(`oci://example/manifest@${digest}`);
     await user.click(screen.getByRole("textbox", { name: "Manifest digest" }));
