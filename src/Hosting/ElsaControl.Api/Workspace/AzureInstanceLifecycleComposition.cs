@@ -1,5 +1,6 @@
 using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Instances;
+using ElsaControl.Deployment.Core.Provisioning;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -42,6 +43,7 @@ internal static class AzureInstanceLifecycleComposition
         options.Validate();
 
         services.AddSingleton(options);
+        services.AddSingleton<IEngineProvisioningModule, AzureEngineProvisioningModule>();
         services.AddScoped<AzureElsaInstanceProvider>();
         services.AddScoped<IElsaInstanceProviderSubmissionPort>(provider =>
             provider.GetRequiredService<AzureElsaInstanceProvider>());

@@ -5,6 +5,31 @@ The API composes `AzureBicepProviderRunner` only when
 explicitly enabled and fully validated. The default API configuration keeps the
 provider fail-closed.
 
+## Optional provisioning capability
+
+The Azure deployment project contributes `AzureEngineProvisioningModule` through
+the provider-neutral `IEngineProvisioningModule` contract. The API registers it
+only when `Deployment:AzureProvider:InstanceLifecycle:Enabled=true` and the
+existing Azure runner authority and lifecycle options validate successfully.
+There is no separate console feature flag that can enable the provider.
+
+Authenticated workspace members can discover enabled modules through
+`GET /api/workspaces/{workspaceId}/engine-provisioning/providers`. Its uncached
+response is `{ "providers": [] }` when none are enabled, or contains
+`{ "id": "azure", "displayName": "Azure" }` when Azure is composed. This is a
+capability signal; workspace permissions, commercial eligibility, and governed
+release admission still apply to creation.
+
+The console shows **Provision engine** beside **Connect engine** only after Azure
+discovery succeeds, and links to the shared
+[Provision engine / Runtime Builder flow](engine-provisioning-flow.md).
+When no provisioning module is composed, creation and onboarding-options requests
+return `503` with code `engine-provisioning.disabled`. Existing instance read
+routes remain available. Discovery does not itself establish the managed
+instance's deployment-environment and workflow-engine binding.
+
+## Runner configuration
+
 An enabled worker host must provide absolute, non-symbolic paths for the pinned
 `az`, `sqlcmd`, and `curl` executables, plus the checked-in Bicep/SQL template
 root. It must also provide the exact target subscription/resource-group/registry

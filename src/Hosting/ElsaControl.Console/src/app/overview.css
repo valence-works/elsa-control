@@ -130,6 +130,23 @@
   filter: brightness(.96);
 }
 
+.aperture-overview__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.aperture-overview__primary--secondary {
+  border-color: var(--ap-line);
+  background: transparent;
+  color: var(--ap-ink);
+}
+
+.aperture-overview__primary--secondary:hover {
+  border-color: var(--ap-accent);
+  background: var(--ap-surface);
+}
+
 .aperture-overview__primary svg {
   width: 15px;
   height: 15px;

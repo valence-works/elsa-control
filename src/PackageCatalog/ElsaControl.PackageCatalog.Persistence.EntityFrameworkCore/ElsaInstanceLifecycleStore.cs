@@ -213,6 +213,37 @@ public sealed class EfCoreElsaInstanceLifecycleStore(
                         run.Environment.DeployedRevisionId = run.SourceRevisionId;
                 }
 
+                // An accepted provider observation is the only authority that may
+                // replace the pending endpoint. Keep credential assignment and
+                // credential-verification metadata untouched; provider reachability
+                // is a separate projection from credential proof.
+                if (run.Status == WorkspaceDeploymentRunStatus.Succeeded &&
+                    commit.Instance.CurrentDeploymentReference?.EndpointUri is { } endpointUri &&
+                    run.Environment is not null)
+                {
+                    var engine = await dbContext.WorkflowEngines
+                        .SingleOrDefaultAsync(x => x.WorkspaceId == run.WorkspaceId &&
+                                                   x.EnvironmentId == run.Environment.Id &&
+                                                   x.Id == run.EngineId,
+                            cancellationToken);
+                    if (engine is null && instance.RequiresProvisioningContext)
+                        throw Conflict("The registered managed engine is missing from the provider target.");
+                    if (engine is not null)
+                    {
+                        engine.BaseUrl = endpointUri;
+                        engine.Health = commit.Instance.Health switch
+                        {
+                            ElsaInstanceHealth.Healthy => DeploymentHealth.Healthy,
+                            ElsaInstanceHealth.Degraded => DeploymentHealth.Degraded,
+                            ElsaInstanceHealth.Unreachable => DeploymentHealth.Unreachable,
+                            _ => engine.Health
+                        };
+                        engine.LastHeartbeatAt = commit.ReconciledAt.ToUniversalTime();
+                        engine.VerificationMessage = "Provider endpoint observation recorded.";
+                        engine.UpdatedAt = commit.ReconciledAt.ToUniversalTime();
+                    }
+                }
+
                 await dbContext.DeploymentRunHistoryEvents.AddAsync(new()
                 {
                     Id = Guid.NewGuid(),
@@ -256,6 +287,33 @@ public sealed class EfCoreElsaInstanceLifecycleStore(
             .Include(x => x.IdentityBinding)
             .SingleOrDefaultAsync(x => x.WorkspaceId == workspaceId && x.Id == instanceId, cancellationToken);
         return entity is null ? null : MapInstance(entity);
+    }
+
+    public async Task<ElsaInstanceProvisioningContext?> GetProvisioningContextAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        CancellationToken cancellationToken = default)
+    {
+        if (workspaceId == Guid.Empty || instanceId == Guid.Empty)
+            return null;
+
+        var entity = await dbContext.ElsaInstanceProvisioningContexts
+            .AsNoTracking()
+            .SingleOrDefaultAsync(x => x.WorkspaceId == workspaceId && x.InstanceId == instanceId,
+                cancellationToken);
+        if (entity is null)
+            return null;
+
+        return new ElsaInstanceProvisioningContext(
+            entity.ApplicationId,
+            entity.EnvironmentId,
+            entity.BuilderIntentJson,
+            entity.ConfigurationDigest,
+            entity.RuntimeConfigurationId,
+            entity.ConfigurationName,
+            entity.PreviewDigest,
+            entity.RequestDigest,
+            entity.ResolvedPlanDigest).Normalize();
     }
 
     public async Task<ElsaInstanceOperation?> GetActiveOperationAsync(
@@ -378,6 +436,12 @@ public sealed class EfCoreElsaInstanceLifecycleStore(
         ArgumentNullException.ThrowIfNull(operation);
         ArgumentNullException.ThrowIfNull(outbox);
         ValidateEnvelope(instance, operation, outbox);
+        if (context?.ProvisioningContext is { } provisioningContext)
+        {
+            if (operation.Action != ElsaInstanceOperationAction.Create)
+                throw Conflict("Provisioning context is only valid for instance creation.");
+            context = context with { ProvisioningContext = provisioningContext.Normalize() };
+        }
         try
         {
             return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
@@ -530,14 +594,19 @@ public sealed class EfCoreElsaInstanceLifecycleStore(
                 if (storedInstance is null)
                 {
                     await dbContext.ElsaInstances.AddAsync(instanceEntity, cancellationToken);
-                    // API-created managed instances carry the authenticated actor
-                    // context and receive their control-owned target shell here.
-                    // Keep the lower-level provider-neutral store usable for callers
-                    // that provision an explicit deployment target in the same
-                    // acceptance flow (including existing migration/test fixtures).
                     if (operation.Action == ElsaInstanceOperationAction.Create &&
-                        context?.ActorAccountId is { } actorAccountId && actorAccountId != Guid.Empty &&
-                        string.Equals(instance.PlacementIntent.TargetMode, "managed", StringComparison.OrdinalIgnoreCase))
+                        context?.ProvisioningContext is { } provisioning)
+                    {
+                        await BindManagedDeploymentTargetAsync(instanceEntity, provisioning, outbox.CreatedAt, cancellationToken);
+                        await dbContext.ElsaInstanceProvisioningContexts.AddAsync(
+                            ToEntity(provisioning, instanceEntity, outbox.CreatedAt), cancellationToken);
+                    }
+                    // Legacy callers that do not carry a reviewed target retain the
+                    // historical managed shell fallback. New managed provisioning
+                    // requests must use the explicit target path above.
+                    else if (operation.Action == ElsaInstanceOperationAction.Create &&
+                             context?.ActorAccountId is { } actorAccountId && actorAccountId != Guid.Empty &&
+                             string.Equals(instance.PlacementIntent.TargetMode, "managed", StringComparison.OrdinalIgnoreCase))
                         await AddManagedDeploymentTargetAsync(instanceEntity, outbox.CreatedAt, cancellationToken);
                 }
                 else
@@ -696,28 +765,102 @@ public sealed class EfCoreElsaInstanceLifecycleStore(
             CreatedAt = createdAt.ToUniversalTime(),
             UpdatedAt = createdAt.ToUniversalTime()
         };
-        var engine = new WorkflowEngineEntity
-        {
-            Id = Guid.NewGuid(),
-            WorkspaceId = instance.WorkspaceId,
-            EnvironmentId = environment.Id,
-            Name = "managed",
-            BaseUrl = "https://managed.invalid/",
-            CertificateStatus = CertificateStatus.Untrusted,
-            CredentialProvider = "provider-managed",
-            CredentialReference = $"managed-instance:{instance.Id:D}",
-            CredentialAssignmentStatus = EngineCredentialAssignmentStatus.Deferred,
-            CredentialVerificationStatus = CredentialVerificationStatus.NotVerifiable,
-            Health = DeploymentHealth.Unreachable,
-            VerificationMessage = "The managed provider has not established a healthy endpoint.",
-            HostingProvider = "managed",
-            CreatedAt = createdAt.ToUniversalTime(),
-            UpdatedAt = createdAt.ToUniversalTime()
-        };
+        var engine = CreatePendingManagedEngine(instance, environment.Id, "managed", createdAt);
         environment.Engines.Add(engine);
         application.Environments.Add(environment);
         await dbContext.DeploymentApplications.AddAsync(application, cancellationToken);
     }
+
+    private async Task BindManagedDeploymentTargetAsync(
+        ElsaInstanceEntity instance,
+        ElsaInstanceProvisioningContext context,
+        DateTimeOffset createdAt,
+        CancellationToken cancellationToken)
+    {
+        context.Validate();
+        if (!string.Equals(instance.TargetMode, "managed", StringComparison.OrdinalIgnoreCase))
+            throw Conflict("A provisioning context requires a managed instance target.");
+        instance.RequiresProvisioningContext = true;
+
+        var environment = await dbContext.DeploymentEnvironments
+            .Include(x => x.Engines)
+            .Include(x => x.Revisions)
+            .Include(x => x.ObservabilityBindings)
+            .Include(x => x.DriftReports)
+            .Where(EngineProvisioningTargetEligibility.IsAvailable)
+            .SingleOrDefaultAsync(x => x.WorkspaceId == instance.WorkspaceId &&
+                                       x.ApplicationId == context.ApplicationId &&
+                                       x.Id == context.EnvironmentId,
+                cancellationToken);
+        if (environment is null)
+        {
+            var targetExists = await dbContext.DeploymentEnvironments
+                .AnyAsync(x => x.WorkspaceId == instance.WorkspaceId &&
+                               x.ApplicationId == context.ApplicationId &&
+                               x.Id == context.EnvironmentId,
+                    cancellationToken);
+            throw Conflict(targetExists
+                ? "The provisioning target is occupied or already has deployment state."
+                : "The provisioning target does not belong to this workspace and application.");
+        }
+
+        environment.ElsaInstanceId = instance.Id;
+        environment.UpdatedAt = createdAt.ToUniversalTime();
+        environment.DeploymentStatus = DeploymentStatus.Blocked;
+        environment.DriftStatus = DriftStatus.Unknown;
+        if (instance.Name.Length > 200)
+            throw Conflict("A provisioning instance name cannot exceed 200 characters.");
+        var engine = CreatePendingManagedEngine(instance, environment.Id, instance.Name, createdAt);
+        environment.Engines.Add(engine);
+        // The target environment is already tracked as unchanged. Because the
+        // engine has a client-generated key, relationship fixup can otherwise
+        // classify it as Modified during the save pass. Mark the new row
+        // explicitly so the binding inserts exactly one pending engine.
+        dbContext.WorkflowEngines.Add(engine);
+    }
+
+    private static WorkflowEngineEntity CreatePendingManagedEngine(
+        ElsaInstanceEntity instance,
+        Guid environmentId,
+        string name,
+        DateTimeOffset createdAt) => new()
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = instance.WorkspaceId,
+            EnvironmentId = environmentId,
+            Name = name,
+            BaseUrl = "",
+            CertificateStatus = CertificateStatus.Untrusted,
+            CredentialProvider = "pending",
+            CredentialReference = $"managed-instance:{instance.Id:D}",
+            CredentialAssignmentStatus = EngineCredentialAssignmentStatus.Deferred,
+            CredentialVerificationStatus = CredentialVerificationStatus.NotVerifiable,
+            Health = DeploymentHealth.Unreachable,
+            VerificationMessage = "Awaiting provider endpoint observation.",
+            HostingProvider = "managed",
+            CreatedAt = createdAt.ToUniversalTime(),
+            UpdatedAt = createdAt.ToUniversalTime()
+        };
+
+    private static ElsaInstanceProvisioningContextEntity ToEntity(
+        ElsaInstanceProvisioningContext context,
+        ElsaInstanceEntity instance,
+        DateTimeOffset createdAt) => new()
+        {
+            InstanceId = instance.Id,
+            OrganizationId = instance.OrganizationId,
+            WorkspaceId = instance.WorkspaceId,
+            ApplicationId = context.ApplicationId,
+            EnvironmentId = context.EnvironmentId,
+            BuilderIntentJson = context.BuilderIntentJson,
+            ConfigurationDigest = context.ConfigurationDigest,
+            RuntimeConfigurationId = context.RuntimeConfigurationId,
+            ConfigurationName = context.ConfigurationName,
+            PreviewDigest = context.PreviewDigest,
+            RequestDigest = context.RequestDigest,
+            ResolvedPlanDigest = context.ResolvedPlanDigest,
+            CreatedAt = createdAt.ToUniversalTime()
+        };
 
     private static Guid DeterministicGuid(Guid seed, string purpose)
     {

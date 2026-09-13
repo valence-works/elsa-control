@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ArrowRight, Check, FileCode2, Pencil, Play, Plus, RefreshCw, Save, Search, Settings2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, FileCode2, Pencil, Play, Plus, RefreshCw, Rocket, Save, Search, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -39,6 +39,10 @@ import { sourceStatusTone, statusToneClass } from "@/lib/status/statusBadges";
 import { useWorkspaceContext } from "@/app/WorkspaceContextProvider";
 import { formatDateTime } from "@/lib/formatters";
 import { ApiError } from "@/lib/api/httpClient";
+import { createBuilderProvisioningHandoff } from "@/features/engine-provisioning/engineProvisioningModels";
+import { useEngineProvisioningProviders } from "@/features/engine-provisioning/useEngineProvisioningProviders";
+import { getDeploymentPermissions } from "@/features/deployments/deploymentApi";
+import type { WorkspaceDeploymentPermissionsResponse } from "@/features/deployments/deploymentModels";
 
 const defaultTarget: DeploymentTarget = "docker-compose";
 type WizardStep = "runtime" | "features" | "settings" | "infrastructure" | "review";
@@ -152,6 +156,14 @@ function RuntimeBuilderWorkspace({ mode, configurationId = "" }: { mode: "new" |
   const [runtimeKindNotice, setRuntimeKindNotice] = useState<RuntimeKindNotice | null>(null);
   const workspaceContext = useWorkspaceContext();
   const effectiveWorkspaceId = workspaceContext.selectedWorkspaceId;
+  const provisioning = useEngineProvisioningProviders(effectiveWorkspaceId);
+  const providerAvailable = provisioning.hasProvider("azure");
+  const permissions = useQuery<WorkspaceDeploymentPermissionsResponse>({
+    queryKey: queryKeys.deploymentPermissions(effectiveWorkspaceId),
+    queryFn: () => getDeploymentPermissions(effectiveWorkspaceId),
+    enabled: Boolean(effectiveWorkspaceId) && providerAvailable,
+    retry: false
+  });
 
   const catalog = useQuery({
     queryKey: queryKeys.runtimeBuilderCatalog(effectiveWorkspaceId),
@@ -446,12 +458,21 @@ function RuntimeBuilderWorkspace({ mode, configurationId = "" }: { mode: "new" |
   const findings = [...(plan.data?.findings ?? []), ...(bundle?.findings ?? []), ...planErrorFindings, ...bundleErrorFindings, ...saveErrorFindings];
   const canSubmit = Boolean(currentIntent && effectiveWorkspaceId && selectedImage);
   const canSaveConfiguration = canSubmit && Boolean(configurationName.trim());
+  const canProvision = providerAvailable && permissions.isSuccess && permissions.data.permissions.includes("deployments.setup.manage");
   const autoAdded = plan.data?.autoAdded;
   const hasPlannerAdditions = hasAutoAddedItems(autoAdded);
   const actionHandlers = {
     onPlan: () => plan.mutate(),
     onGenerateBundle: () => bundleGeneration.mutate(),
-    onSave: () => saveConfiguration.mutate()
+    onSave: () => saveConfiguration.mutate(),
+    onProvision: () => navigate("/admin/engines/provision", {
+      state: {
+        workspaceId: effectiveWorkspaceId,
+        runtimeConfigurationId: mode === "edit" ? configurationId : undefined,
+        configurationName: configurationName.trim() || undefined,
+        builderHandoffToken: currentIntent ? createBuilderProvisioningHandoff(currentIntent) : undefined
+      }
+    })
   };
 
   return (
@@ -834,6 +855,7 @@ function RuntimeBuilderWorkspace({ mode, configurationId = "" }: { mode: "new" |
                   isPlanning={plan.isPending}
                   isGenerating={bundleGeneration.isPending}
                   isSaving={saveConfiguration.isPending}
+                  canProvision={canProvision}
                   {...actionHandlers}
                 />
               </WizardPane>
@@ -877,6 +899,7 @@ function RuntimeBuilderWorkspace({ mode, configurationId = "" }: { mode: "new" |
                   isPlanning={plan.isPending}
                   isGenerating={bundleGeneration.isPending}
                   isSaving={saveConfiguration.isPending}
+                  canProvision={canProvision}
                   {...actionHandlers}
                 />
               </section>
@@ -898,9 +921,11 @@ function BuilderActions({
   isPlanning,
   isGenerating,
   isSaving,
+  canProvision,
   onPlan,
   onGenerateBundle,
   onSave,
+  onProvision,
   className,
   actionClassName
 }: {
@@ -910,9 +935,11 @@ function BuilderActions({
   isPlanning: boolean;
   isGenerating: boolean;
   isSaving: boolean;
+  canProvision: boolean;
   onPlan: () => void;
   onGenerateBundle: () => void;
   onSave: () => void;
+  onProvision: () => void;
   className?: string;
   actionClassName?: string;
 }) {
@@ -930,6 +957,10 @@ function BuilderActions({
         <Save className="h-4 w-4" />
         {mode === "edit" ? "Save changes" : "Create configuration"}
       </Button>
+      {canProvision ? <SecondaryButton type="button" className={actionClassName} disabled={!canSubmit} onClick={onProvision}>
+        <Rocket className="h-4 w-4" />
+        Provision engine
+      </SecondaryButton> : null}
     </div>
   );
 }

@@ -75,6 +75,12 @@ internal sealed class ElsaInstanceEntity
     public string? ConfigurationShapeRevisionId { get; set; }
 
     public string TargetMode { get; set; } = "";
+    /// <summary>
+    /// Indicates that creation was admitted with a durable managed-provisioning
+    /// snapshot. It prevents resolver fallback to the legacy dummy intent if that
+    /// snapshot is missing or corrupted after acceptance.
+    /// </summary>
+    public bool RequiresProvisioningContext { get; set; }
     public string RegionCode { get; set; } = "";
     public string IsolationProfile { get; set; } = "";
     public string CapacityProfile { get; set; } = "";
@@ -115,6 +121,30 @@ internal sealed class ElsaInstanceEntity
     public List<ElsaInstanceAuditEventEntity> AuditEvents { get; set; } = [];
     public List<ElsaInstanceMigrationEntity> Migrations { get; set; } = [];
     public ElsaInstanceIdentityBindingEntity? IdentityBinding { get; set; }
+    public ElsaInstanceProvisioningContextEntity? ProvisioningContext { get; set; }
+}
+
+/// <summary>
+/// Immutable snapshot of the validated managed-provisioning input selected when
+/// an instance was created. It is separate from the mutable aggregate projection
+/// so later lifecycle updates cannot rewrite the builder input used by workers.
+/// </summary>
+internal sealed class ElsaInstanceProvisioningContextEntity
+{
+    public Guid InstanceId { get; set; }
+    public Guid OrganizationId { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public ElsaInstanceEntity? Instance { get; set; }
+    public Guid ApplicationId { get; set; }
+    public Guid EnvironmentId { get; set; }
+    public string BuilderIntentJson { get; set; } = "";
+    public string ConfigurationDigest { get; set; } = "";
+    public Guid? RuntimeConfigurationId { get; set; }
+    public string? ConfigurationName { get; set; }
+    public string? PreviewDigest { get; set; }
+    public string? RequestDigest { get; set; }
+    public string? ResolvedPlanDigest { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
 }
 
 /// <summary>

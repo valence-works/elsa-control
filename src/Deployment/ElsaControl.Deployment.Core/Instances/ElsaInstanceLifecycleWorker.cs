@@ -170,6 +170,10 @@ public sealed class ElsaInstanceLifecycleWorker(
                 !string.Equals(resolution.Reference.PlanUri, item.Resolution.PlanRequest.PlanUri, StringComparison.Ordinal))
                 return (await FailAsync(item, workerId, "resolution.invalid", cancellationToken), 0);
 
+            if (item.Resolution.ExpectedPlanDigest is { } reviewedDigest &&
+                !string.Equals(contentHash, reviewedDigest, StringComparison.Ordinal))
+                return (await FailAsync(item, workerId, "provisioning.plan-changed", cancellationToken), 0);
+
             ElsaInstance resolvedInstance;
             try
             {

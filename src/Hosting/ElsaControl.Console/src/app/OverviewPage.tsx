@@ -7,6 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useWorkspaceContext } from "@/app/WorkspaceContextProvider";
 import { RequestStateView } from "@/components/states/RequestStateViews";
 import { getDeploymentCockpit, getDeploymentPermissions } from "@/features/deployments/deploymentApi";
+import { useEngineProvisioningProviders } from "@/features/engine-provisioning/useEngineProvisioningProviders";
 import type {
   DeploymentCockpit,
   DeploymentHealth,
@@ -32,6 +33,7 @@ export function OverviewPage() {
   const [engineSearch, setEngineSearch] = useState("");
   const [engineFilter, setEngineFilter] = useState<EngineFilter>("all");
   const [selectedEngineId, setSelectedEngineId] = useState<string | null>(null);
+  const provisioning = useEngineProvisioningProviders(selectedWorkspaceId);
   const cockpit = useQuery({
     queryKey: queryKeys.deploymentCockpit(selectedWorkspaceId ?? ""),
     queryFn: () => getDeploymentCockpit(selectedWorkspaceId as string),
@@ -90,14 +92,24 @@ export function OverviewPage() {
             <p>{data.engines.length} engine{data.engines.length === 1 ? "" : "s"} · {data.applications.length} application{data.applications.length === 1 ? "" : "s"}</p>
           </div>
           <div className="flex flex-col items-end gap-2">
-            <Link
-              to="/admin/engines/connect"
-              className={`aperture-overview__primary${canManageSetup ? "" : " pointer-events-none opacity-50"}`}
-              aria-describedby={!canManageSetup ? "overview-setup-access" : undefined}
-              {...permissionLinkProps(canManageSetup)}
-            >
-              Connect engine <ArrowUpRight aria-hidden />
-            </Link>
+            <div className="aperture-overview__actions">
+              {provisioning.hasProvider("azure") && <Link
+                to="/admin/engines/provision"
+                className={`aperture-overview__primary aperture-overview__primary--secondary${canManageSetup ? "" : " pointer-events-none opacity-50"}`}
+                aria-describedby={!canManageSetup ? "overview-setup-access" : undefined}
+                {...permissionLinkProps(canManageSetup)}
+              >
+                Provision engine <ArrowUpRight aria-hidden />
+              </Link>}
+              <Link
+                to="/admin/engines/connect"
+                className={`aperture-overview__primary${canManageSetup ? "" : " pointer-events-none opacity-50"}`}
+                aria-describedby={!canManageSetup ? "overview-setup-access" : undefined}
+                {...permissionLinkProps(canManageSetup)}
+              >
+                Connect engine <ArrowUpRight aria-hidden />
+              </Link>
+            </div>
             {!canManageSetup && <div id="overview-setup-access" role="status" className="text-xs text-muted-foreground">
               {permissions.isPending ? "Checking access…" : permissions.isError ? <>
                 Could not check access. <button className="underline underline-offset-2" disabled={permissions.isFetching} onClick={() => void permissions.refetch()}>Retry access check</button>

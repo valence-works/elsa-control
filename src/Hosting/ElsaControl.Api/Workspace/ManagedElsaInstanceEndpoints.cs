@@ -128,7 +128,8 @@ public static class ManagedElsaInstanceEndpoints
                 .ThenBy(x => x.TopologyId, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
             return Results.Ok(new ManagedElsaInstanceOnboardingOptionsResponse(releases, InitialLaunchProfile, previewReleases));
-        }).RequireWorkspaceAccess();
+        }).RequireWorkspaceAccess()
+            .AddEndpointFilter<EngineProvisioningRequiredFilter>();
 
         group.MapPost("", async (
             Guid workspaceId,
@@ -187,7 +188,8 @@ public static class ManagedElsaInstanceEndpoints
             {
                 return Problem("instance.shape-invalid", "The instance request is invalid.", StatusCodes.Status422UnprocessableEntity);
             }
-        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource);
+        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource)
+            .AddEndpointFilter<EngineProvisioningRequiredFilter>();
 
         group.MapGet("/{instanceId:guid}", async (
             Guid workspaceId,
@@ -446,6 +448,12 @@ public static class ManagedElsaInstanceEndpoints
         IGovernedReleaseCatalogStore catalog,
         ElsaInstanceIntent intent,
         CancellationToken cancellationToken)
+        => await FindEligibleCatalogEntryAsync(catalog, intent, cancellationToken) is not null;
+
+    internal static async Task<GovernedReleaseCatalogEntry?> FindEligibleCatalogEntryAsync(
+        IGovernedReleaseCatalogStore catalog,
+        ElsaInstanceIntent intent,
+        CancellationToken cancellationToken)
     {
         var previewConsentDigest = intent.Release.PreviewManifestDigest;
         var entries = await catalog.QueryAsync(new GovernedReleaseCatalogQuery(
@@ -462,7 +470,8 @@ public static class ManagedElsaInstanceEndpoints
             .ToArray();
         return eligible.Length == 1 &&
                (previewConsentDigest is null ||
-                string.Equals(eligible[0].ManifestDigest, previewConsentDigest, StringComparison.OrdinalIgnoreCase));
+                string.Equals(eligible[0].ManifestDigest, previewConsentDigest, StringComparison.OrdinalIgnoreCase))
+            ? eligible[0] : null;
     }
 
     private static bool IsEligibleCatalogLifecycle(string lifecycle, bool allowPreview) =>
@@ -513,7 +522,7 @@ public static class ManagedElsaInstanceEndpoints
                 alert.Severity,
                 alert.DedupeIdentity)).ToArray());
 
-    private static bool MatchesInitialLaunchProfile(ElsaPlacementIntent placement) =>
+    internal static bool MatchesInitialLaunchProfile(ElsaPlacementIntent placement) =>
         Equal(placement.TargetMode, InitialLaunchProfile.TargetMode) &&
         Equal(placement.RegionCode, InitialLaunchProfile.RegionCode) &&
         Equal(placement.IsolationProfile, InitialLaunchProfile.IsolationProfile) &&
@@ -539,14 +548,15 @@ public static class ManagedElsaInstanceEndpoints
         }).WithTags("Managed Elsa Instances").RequireWorkspaceAccess();
     }
 
-    private static async Task<IResult> AcceptedAsync(
+    internal static async Task<IResult> AcceptedAsync(
         Guid workspaceId,
         ElsaInstanceLifecycleAcceptance accepted,
         IManagedElsaInstanceApiStore queries,
         WorkspacePermissionService permissions,
         IManagedElsaInstanceIdentityStore identities,
         Guid accountId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, string>? additionalLinks = null)
     {
         var location = $"/api/workspaces/{workspaceId:D}/instances/{accepted.Instance.Id:D}/operations/{accepted.Operation.Id:D}";
         var operation = await queries.GetOperationAsync(
@@ -556,13 +566,15 @@ public static class ManagedElsaInstanceEndpoints
                 accepted.Operation.AttemptNumber, accepted.Operation.AcceptedAt, null, null,
                 null, null,
                 null, null, null, null);
+        var links = additionalLinks?.ToDictionary(x => x.Key, x => x.Value) ?? new Dictionary<string, string>();
+        links["self"] = location;
         return Results.Accepted(location, new ManagedElsaInstanceAcceptedResponse(
             await ToResponseAsync(accepted.Instance,
                 (await permissions.GetEffectivePermissionsAsync(workspaceId, accountId, cancellationToken))
                 .Has(ManagedElsaInstancePermissions.Open),
                 workspaceId, identities, cancellationToken),
             ToOperationResponse(workspaceId, accepted.Instance.Id, operation),
-            new Dictionary<string, string> { ["self"] = location }));
+            links));
     }
 
     private static async Task<ManagedElsaInstanceResponse> ToResponseAsync(

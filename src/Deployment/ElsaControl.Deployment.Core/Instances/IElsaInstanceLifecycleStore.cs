@@ -20,6 +20,16 @@ public interface IElsaInstanceLifecycleStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Reads the immutable managed-provisioning snapshot accepted for an instance.
+    /// Legacy instances have no snapshot and return null.
+    /// </summary>
+    Task<ElsaInstanceProvisioningContext?> GetProvisioningContextAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<ElsaInstanceProvisioningContext?>(null);
+
+    /// <summary>
     /// Finds any operation for a workspace/key, including completed operations. This
     /// is needed to replay a create whose service-generated instance ID is unknown to
     /// the retried caller.
@@ -54,6 +64,8 @@ public interface IElsaInstanceLifecycleStore
     {
         if (context.DeleteConfirmation is not null)
             throw new InvalidOperationException("Atomic delete confirmation persistence is not configured.");
+        if (context.ProvisioningContext is not null)
+            throw new InvalidOperationException("Atomic provisioning context persistence is not configured.");
         return await CommitAcceptedAsync(expectedInstance, instance, operation, outbox, cancellationToken);
     }
 }

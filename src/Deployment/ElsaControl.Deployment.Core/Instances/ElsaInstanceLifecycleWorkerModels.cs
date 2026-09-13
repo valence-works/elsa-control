@@ -31,7 +31,8 @@ public sealed record ElsaInstanceLifecycleDeploymentTarget(
 /// </summary>
 public sealed record ElsaInstanceLifecycleResolutionInput(
     ElsaInstancePlanResolutionRequest PlanRequest,
-    ElsaInstanceLifecycleDeploymentTarget DeploymentTarget)
+    ElsaInstanceLifecycleDeploymentTarget DeploymentTarget,
+    string? ExpectedPlanDigest = null)
 {
     public void Validate()
     {

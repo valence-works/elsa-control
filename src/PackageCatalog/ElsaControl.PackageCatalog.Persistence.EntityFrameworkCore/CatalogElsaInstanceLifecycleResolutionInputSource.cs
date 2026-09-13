@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.RuntimeBuilder.Abstractions;
@@ -52,6 +53,7 @@ public sealed class CatalogElsaInstanceLifecycleResolutionInputSource(
     IReadOnlyDictionary<string, string>? governedSecretReferences = null) : IElsaInstanceLifecycleResolutionInputSource
 {
     private readonly ElsaInstancePlanAuthorityOptions _authorityOptions = authorityOptions ?? new();
+    private static readonly JsonSerializerOptions BuilderIntentJsonOptions = new(JsonSerializerDefaults.Web);
 
     public async Task<ElsaInstanceLifecycleResolutionInput?> GetAsync(
         ElsaInstance instance,
@@ -98,9 +100,58 @@ public sealed class CatalogElsaInstanceLifecycleResolutionInputSource(
 
         var planId = PlanId(entry.ManifestDigest);
         var planUri = $"{planAuthority}/api/workspaces/{instance.WorkspaceId:D}/instances/{instance.Id:D}/resolved-plans/{planId}";
-        var builderIntent = new RuntimeBuilderIntent(
-            new RuntimeImageSelection("elsa-instance", null, null, null),
-            [], [], [], null);
+        var snapshot = await dbContext.ElsaInstanceProvisioningContexts
+            .AsNoTracking()
+            .SingleOrDefaultAsync(x => x.WorkspaceId == instance.WorkspaceId && x.InstanceId == instance.Id,
+                cancellationToken);
+        var requiresProvisioningContext = await dbContext.ElsaInstances
+            .AsNoTracking()
+            .Where(x => x.WorkspaceId == instance.WorkspaceId && x.Id == instance.Id)
+            .Select(x => x.RequiresProvisioningContext)
+            .SingleOrDefaultAsync(cancellationToken);
+        RuntimeBuilderIntent builderIntent;
+        if (snapshot is null)
+        {
+            if (requiresProvisioningContext)
+                return null;
+            // Instances accepted before managed provisioning carried no builder
+            // context. Keep their historical resolver input until they are
+            // explicitly recreated through the reviewed path.
+            builderIntent = new RuntimeBuilderIntent(
+                new RuntimeImageSelection("elsa-instance", null, null, null),
+                [], [], [], null);
+        }
+        else
+        {
+            ElsaInstanceProvisioningContext provisioningContext;
+            try
+            {
+                provisioningContext = new ElsaInstanceProvisioningContext(
+                    snapshot.ApplicationId,
+                    snapshot.EnvironmentId,
+                    snapshot.BuilderIntentJson,
+                    snapshot.ConfigurationDigest,
+                    snapshot.RuntimeConfigurationId,
+                    snapshot.ConfigurationName,
+                    snapshot.PreviewDigest,
+                    snapshot.RequestDigest,
+                    snapshot.ResolvedPlanDigest).Normalize();
+                if (provisioningContext.ApplicationId != target.ApplicationId ||
+                    provisioningContext.EnvironmentId != target.EnvironmentId)
+                    return null;
+                builderIntent = JsonSerializer.Deserialize<RuntimeBuilderIntent>(
+                    provisioningContext.BuilderIntentJson, BuilderIntentJsonOptions)
+                    ?? throw new JsonException("Builder intent JSON is null.");
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+            catch (Exception exception) when (exception is JsonException or NotSupportedException)
+            {
+                return null;
+            }
+        }
         var request = new ElsaInstancePlanResolutionRequest(
             instance.Intent,
             builderIntent,
@@ -109,7 +160,12 @@ public sealed class CatalogElsaInstanceLifecycleResolutionInputSource(
             planUri,
             instance.WorkspaceId,
             GovernedSecretReferences: governedSecretReferences);
-        return new ElsaInstanceLifecycleResolutionInput(request, target);
+        return new ElsaInstanceLifecycleResolutionInput(
+            request,
+            target,
+            operation.Action == ElsaInstanceOperationAction.Create
+                ? snapshot?.ResolvedPlanDigest
+                : null);
     }
 
     private async Task<ElsaInstanceLifecycleDeploymentTarget?> FindDeploymentTargetAsync(
@@ -175,7 +231,7 @@ public sealed class CatalogElsaInstanceLifecycleResolutionInputSource(
         string.Equals(lifecycle, "supported", StringComparison.OrdinalIgnoreCase) ||
         allowPreview && string.Equals(lifecycle, "preview", StringComparison.OrdinalIgnoreCase);
 
-    private static bool TryBuildManifest(
+    public static bool TryBuildManifest(
         GovernedReleaseCatalogEntry entry,
         out ReleaseManifestAdmissionResult admission)
     {
