@@ -414,6 +414,9 @@ public sealed class ManagedElsaHandoffTests
         Assert.Contains("<title>Opening managed Elsa</title>", html, StringComparison.Ordinal);
         var form = ParseAutoSubmitForm(html);
         Assert.Equal(setup.RedirectUri, form.Action);
+        Assert.EndsWith("/managed-elsa/handoff/callback", form.Action, StringComparison.Ordinal);
+        Assert.DoesNotContain("/authentication/external/callback", form.Action, StringComparison.Ordinal);
+        Assert.DoesNotContain("/login", form.Action, StringComparison.Ordinal);
         Assert.Equal(state, form.State);
         Assert.False(string.IsNullOrWhiteSpace(form.Code));
 
@@ -425,6 +428,58 @@ public sealed class ManagedElsaHandoffTests
         Assert.Equal(setup.OrganizationId, session.OrganizationId);
         Assert.Equal(setup.InstanceId, session.InstanceId);
         Assert.Contains(ManagedElsaHandoffDefaults.RuntimeSessionScope, session.Scopes);
+    }
+
+    [Fact]
+    public async Task Cookie_continuation_issues_and_auto_posts_to_the_bound_callback_not_studio_login()
+    {
+        var setup = await SeedManagedInstanceAsync(
+            ElsaDesiredLifecycle.Running,
+            ElsaObservedLifecycle.Ready,
+            ElsaInstanceHealth.Healthy,
+            bind: true);
+        await using var app = setup.App;
+        var challenge = ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier);
+        const string state = "state-value-that-is-long-enough";
+        var client = app.CreateClient(new() { AllowAutoRedirect = false });
+        app.AddControlSessionCookie(client, subject: setup.Subject, expiresUtc: DateTimeOffset.UtcNow.AddHours(2));
+
+        using var response = await client.GetAsync(ContinuationPath(setup.InstanceId, state, challenge));
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Null(response.Headers.Location);
+        Assert.DoesNotContain("Sign in", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("/login", html, StringComparison.Ordinal);
+        var form = ParseAutoSubmitForm(html);
+        Assert.Equal(setup.RedirectUri, form.Action);
+        Assert.EndsWith("/managed-elsa/handoff/callback", form.Action, StringComparison.Ordinal);
+        Assert.DoesNotContain("/authentication/external/callback", form.Action, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Cookie_continuation_without_ticket_expiry_returns_to_control_login_not_studio()
+    {
+        var setup = await SeedManagedInstanceAsync(
+            ElsaDesiredLifecycle.Running,
+            ElsaObservedLifecycle.Ready,
+            ElsaInstanceHealth.Healthy,
+            bind: true);
+        await using var app = setup.App;
+        var challenge = ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier);
+        const string state = "state-value-that-is-long-enough";
+        var path = ContinuationPath(setup.InstanceId, state, challenge);
+        var client = app.CreateClient(new() { AllowAutoRedirect = false });
+        app.AddControlSessionCookie(client, subject: "lifetime-less-cookie", expiresUtc: null);
+
+        using var response = await client.GetAsync(path);
+        var locationText = response.Headers.Location?.ToString() ?? "";
+        var loginPath = locationText.Split('?', 2)[0];
+
+        Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
+        Assert.Equal(ManagedElsaHandoffContinuation.LoginPath, loginPath);
+        Assert.NotEqual("/login", loginPath);
+        Assert.Contains(Uri.EscapeDataString(path), locationText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1011,7 +1066,8 @@ public sealed class ManagedElsaHandoffTests
             [$"{ManagedElsaHandoffDefaults.ConfigurationSection}:Enabled"] = "true"
         });
         await app.SeedAsync(_ => Task.CompletedTask);
-        var client = app.CreateControlIdentityClient($"managed-health-{Guid.NewGuid():N}");
+        var subject = $"managed-health-{Guid.NewGuid():N}";
+        var client = app.CreateControlIdentityClient(subject);
         var workspaceId = await client.GetDefaultWorkspaceIdAsync();
         var instanceId = Guid.NewGuid();
         Guid organizationId;
@@ -1065,7 +1121,7 @@ public sealed class ManagedElsaHandoffTests
                 throw new InvalidOperationException("Test instance binding could not be created.");
         }
 
-        return new(app, client, organizationId, workspaceId, instanceId, audience, redirectUri);
+        return new(app, client, subject, organizationId, workspaceId, instanceId, audience, redirectUri);
     }
 
     private static async Task SetInstanceStateAsync(
@@ -1094,6 +1150,7 @@ public sealed class ManagedElsaHandoffTests
     private sealed record ManagedInstanceSetup(
         ControlApiTestApplication App,
         HttpClient Client,
+        string Subject,
         Guid OrganizationId,
         Guid WorkspaceId,
         Guid InstanceId,

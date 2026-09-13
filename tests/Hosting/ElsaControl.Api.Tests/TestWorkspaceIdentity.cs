@@ -29,21 +29,40 @@ internal static class TestWorkspaceIdentity
     }
 
     /// <summary>Adds a protected customer session cookie, as issued after OIDC sign-in.</summary>
-    public static void AddControlSessionCookie(this ControlApiTestApplication app, HttpClient client, params Claim[] additionalClaims)
+    public static void AddControlSessionCookie(
+        this ControlApiTestApplication app,
+        HttpClient client,
+        params Claim[] additionalClaims) =>
+        AddControlSessionCookie(app, client, subject: "admin-user", expiresUtc: DateTimeOffset.UtcNow.AddHours(2), additionalClaims);
+
+    /// <summary>
+    /// Adds a protected customer session cookie with an explicit subject and ticket expiry.
+    /// Production Open continuation uses this cookie, not a bearer header.
+    /// </summary>
+    public static void AddControlSessionCookie(
+        this ControlApiTestApplication app,
+        HttpClient client,
+        string subject,
+        DateTimeOffset? expiresUtc,
+        params Claim[] additionalClaims)
     {
         var options = app.Services.GetRequiredService<IOptionsMonitor<CookieAuthenticationOptions>>()
             .Get(CustomerAuthenticationDefaults.CookieScheme);
         var claims = new List<Claim>
         {
-            new("sub", "admin-user"),
+            new("sub", subject),
             new("iss", ControlApiTestApplication.TestControlIdentityIssuer),
             new("name", "Admin User")
         };
         claims.AddRange(additionalClaims);
 
+        var properties = new AuthenticationProperties();
+        if (expiresUtc.HasValue)
+            properties.ExpiresUtc = expiresUtc;
         var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, CustomerAuthenticationDefaults.CookieScheme));
-        var ticket = new AuthenticationTicket(principal, CustomerAuthenticationDefaults.CookieScheme);
+        var ticket = new AuthenticationTicket(principal, properties, CustomerAuthenticationDefaults.CookieScheme);
         var cookie = options.TicketDataFormat.Protect(ticket);
+        client.DefaultRequestHeaders.Remove("Cookie");
         client.DefaultRequestHeaders.Add("Cookie", $"{CustomerAuthenticationDefaults.CookieName}={cookie}");
     }
 

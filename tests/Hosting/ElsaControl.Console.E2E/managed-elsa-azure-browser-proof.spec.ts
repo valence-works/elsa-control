@@ -1,4 +1,5 @@
 import { expect, type Page, test } from "@playwright/test";
+import { assertAuthenticatedStudioSession } from "./helpers/assertAuthenticatedStudioSession";
 
 const proofEnabled = process.env.MANAGED_ELSA_AZURE_BROWSER_PROOF === "1";
 const controlOrigin = (process.env.ADMIN_UI_BASE_URL ?? "").replace(/\/+$/, "");
@@ -39,13 +40,15 @@ test.describe("managed Elsa Azure browser proof", () => {
     const callbackResponse = await callbackResponsePromise;
     const callbackLocation = safeRedirectPath(callbackResponse.headers().location);
     try {
-      await expect(page).toHaveURL(new RegExp(`^${escapeRegExp(runtimeOrigin)}/`), { timeout: 30_000 });
+      await assertAuthenticatedStudioSession(page, runtimeOrigin, {
+        callbackStatus: callbackResponse.status(),
+        callbackLocation
+      });
     }
-    catch {
-      const cookieNames = (await page.context().cookies(runtimeOrigin)).map(cookie => cookie.name).sort();
+    catch (error) {
       throw new Error(
-        `Runtime handoff did not establish a session (callback ${callbackResponse.status()} -> ${callbackLocation}; ` +
-        `cookies: ${cookieNames.join(",") || "none"}; responses: ${runtimeResponses.join(" | ") || "none"}).`);
+        `${error instanceof Error ? error.message : String(error)} ` +
+        `responses: ${runtimeResponses.join(" | ") || "none"}.`);
     }
     expect(await protectedOperationStatus(page)).toBe(200);
 
@@ -129,10 +132,6 @@ function requirePublicHttpsOrigin(value: string, variableName: string) {
   }
   if (uri.protocol !== "https:" || uri.username || uri.password || uri.pathname !== "/" || uri.search || uri.hash)
     throw new Error(message);
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function safeRedirectPath(value: string | undefined) {
