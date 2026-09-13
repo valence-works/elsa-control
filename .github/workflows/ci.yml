@@ -25,7 +25,9 @@ jobs:
           ref: ${{ github.sha }}
 
       - name: Validate CI workflow contract
-        run: python3 scripts/tests/test_ci_workflow.py
+        run: |
+          python3 scripts/tests/test_ci_workflow.py
+          python3 scripts/tests/test_issue_bus.py
 
       - name: Validate Azure deployment workflow contract
         run: |
