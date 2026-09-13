@@ -59,6 +59,7 @@ describe("releaseManifestFacts", () => {
   });
 
   it("extracts build.N from preview versions", () => {
+    expect(extractBuild("3.8.0-preview.5567-build.160")).toBe("160");
     expect(extractBuild("3.8.0-preview.5567-build.151")).toBe("151");
     expect(extractBuild("3.8.0-preview.5567")).toBeNull();
   });

@@ -144,7 +144,7 @@ export function ApplyReleasePage() {
         <p className="text-xs font-medium uppercase tracking-[0.16em] text-primary">Admit → Apply → Open</p>
         <h1 className="font-display text-3xl font-semibold tracking-normal md:text-4xl">Apply release</h1>
         <p className="text-sm leading-6 text-muted-foreground md:text-base">
-          Apply an admitted catalog entry to this instance. {releaseCatalogCopy.admitBlockedUntilAdmitted}
+          Apply an admitted catalog entry to this instance. {releaseCatalogCopy.admitBlockedUntilAdmitted} {releaseCatalogCopy.happyPath}
         </p>
       </header>
 
@@ -219,7 +219,7 @@ export function ApplyReleasePage() {
                 <div>
                   <p className="font-medium">Apply is blocked until the release is admitted</p>
                   <p className="mt-1 text-muted-foreground">{releaseCatalogCopy.applyNotAdmitted}</p>
-                  <Link to="/admin/releases" className="mt-2 inline-block underline underline-offset-2">Open Releases conflict drawer</Link>
+                  <Link to="/admin/releases" className="mt-2 inline-block underline underline-offset-2">Admit from Releases</Link>
                 </div>
               </div>
             ) : null}

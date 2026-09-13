@@ -50,11 +50,28 @@ describe("ReleasesPage", () => {
     expect(await screen.findByText("Unchanged")).toBeInTheDocument();
     expect(screen.getByText(/already exists/)).toBeInTheDocument();
     expect(screen.queryByRole("dialog", { name: releaseCatalogCopy.conflictTitle })).not.toBeInTheDocument();
+    expect(screen.getByText(/Happy path: admit a unique preview releaseVersion/)).toBeInTheDocument();
   });
 
-  it("opens the identity.conflict drawer with A primary, B disabled, and C hidden", async () => {
+  it("tells operators Admit requires control_admin or an admin API key", async () => {
+    installFetch({
+      admitError: { status: 403, body: { title: "Forbidden" } }
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await fillAdmitForm(user);
+    await user.click(screen.getByRole("button", { name: "Admit" }));
+
+    expect(await screen.findByText("Admit is not authorized")).toBeInTheDocument();
+    expect(screen.getByText(releaseCatalogCopy.admitRequiresAdmin)).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: releaseCatalogCopy.conflictTitle })).not.toBeInTheDocument();
+  });
+
+  it("opens the identity.conflict drawer as recovery UX with A primary, B disabled, and C hidden", async () => {
     installFetch({
       catalog: [catalogEntry({
+        // Historical 149 vs 151 collision shape: same catalog identity, different fingerprint.
+        // Recovery UX fixture only — not a live Open / dogfood blocker (#393 closed on build.160).
         distribution: {
           ...catalogEntry().distribution,
           releaseVersion: "3.8.0-preview.5567",
@@ -93,6 +110,7 @@ describe("ReleasesPage", () => {
 
     const drawer = await screen.findByRole("dialog", { name: releaseCatalogCopy.conflictTitle });
     expect(drawer).toHaveTextContent(releaseCatalogCopy.conflictBody);
+    expect(drawer).toHaveTextContent(releaseCatalogCopy.happyPath);
     expect(drawer).toHaveTextContent(releaseCatalogCopy.admitBlockedUntilAdmitted);
     expect(drawer).toHaveTextContent("Existing (owns identity)");
     expect(drawer).toHaveTextContent("Incoming (blocked)");

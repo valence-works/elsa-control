@@ -94,7 +94,7 @@ export function ReleasesPage() {
         <p className="text-xs font-medium uppercase tracking-[0.16em] text-primary">Admit</p>
         <h1 className="font-display text-3xl font-semibold tracking-normal md:text-4xl">Admit release</h1>
         <p className="text-sm leading-6 text-muted-foreground md:text-base">
-          Admit a signed producer manifest into the governed catalog. {releaseCatalogCopy.admitBlockedUntilAdmitted} Happy path: Admit → Apply → Open.
+          Admit a signed producer manifest into the governed catalog. Preview identities must be unique (include build.N). {releaseCatalogCopy.admitBlockedUntilAdmitted} {releaseCatalogCopy.happyPath}
         </p>
       </header>
 
@@ -345,6 +345,7 @@ export function IdentityConflictDrawer({
             <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-primary">releaseCatalog.identity.conflict</p>
             <h2 id="identity-conflict-title" className="mt-2 font-display text-2xl font-semibold">{releaseCatalogCopy.conflictTitle}</h2>
             <p className="mt-2 text-sm leading-6 text-muted-foreground">{releaseCatalogCopy.conflictBody}</p>
+            <p className="mt-2 text-xs leading-5 text-muted-foreground">{releaseCatalogCopy.happyPath}</p>
           </div>
           <button type="button" className="console-icon-button" aria-label="Close conflict drawer" onClick={onClose}>
             <X aria-hidden size={18} />

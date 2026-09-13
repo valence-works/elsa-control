@@ -49,12 +49,12 @@ describe("ApplyReleasePage", () => {
     expect(body.intent.release.previewManifestDigest).toBe(digest);
   });
 
-  it("refuses Apply when the requested release is not admitted", async () => {
+  it("refuses Apply when a unique preview identity is not yet admitted", async () => {
     installFetch();
-    renderPage("/admin/runtimes/" + instanceId + "/apply?requestedVersion=3.8.0-preview.5567-build.151");
+    renderPage("/admin/runtimes/" + instanceId + "/apply?requestedVersion=3.8.0-preview.5567-build.200");
 
     expect(await screen.findByRole("alert")).toHaveTextContent(releaseCatalogCopy.applyNotAdmitted);
-    expect(screen.getByRole("link", { name: /Releases conflict drawer/ })).toHaveAttribute("href", "/admin/releases");
+    expect(screen.getByRole("link", { name: /Admit from Releases/ })).toHaveAttribute("href", "/admin/releases");
     expect(screen.getByRole("button", { name: "Apply release" })).toBeDisabled();
     expect(screen.queryByText(/V3 Pass/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/Open Pass/i)).not.toBeInTheDocument();

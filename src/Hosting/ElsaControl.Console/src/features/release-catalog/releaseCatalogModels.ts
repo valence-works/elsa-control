@@ -78,15 +78,18 @@ export const releaseCatalogIdentityConflictCode = "releaseCatalog.identity.confl
 
 export const releaseCatalogCopy = {
   admitBlockedUntilAdmitted: "You cannot Apply this build to an instance until it is admitted.",
+  happyPath:
+    "Happy path: admit a unique preview releaseVersion that includes build.N, then Apply, then Open.",
   conflictTitle: "Release catalog identity conflict",
-  conflictBody: "This release is not admitted. A different immutable release already owns this catalog identity.",
+  conflictBody:
+    "This release is not admitted. A different immutable release already owns this catalog identity. This drawer is recovery UX — not the happy path.",
   primaryRecovery:
-    "For preview builds, mint a unique releaseVersion that includes build.N, then Admit again.",
+    "Mint a unique preview releaseVersion that includes build.N, then Admit again. Identity collisions are recovered this way; they are not a live Open blocker.",
   idempotentRetry:
     "Disabled — fingerprints differ. Only works when the projection matches the existing identity (Unchanged).",
   openEdge:
     "Open may still fail until the instance is Healthy/Ready and handoff/auth is configured. Admit + Apply does not mean Open succeeded.",
   admitRequiresAdmin: "Admit requires a control_admin session or admin API key. Ordinary customer sessions cannot admit releases.",
   applyNotAdmitted:
-    "This release is not in the admitted catalog. Admit it from Releases first. If Admit returned an identity conflict, recover with a unique preview releaseVersion that includes build.N — do not overwrite the existing identity."
+    "This release is not in the admitted catalog. Admit the unique preview identity (include build.N) from Releases first, then return here. The conflict drawer is recovery UX if Admit returns 409 — do not overwrite the existing identity."
 } as const;
