@@ -450,8 +450,8 @@ public sealed class ManagedElsaHandoffTests
 
         Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
         Assert.Equal(ManagedElsaHandoffContinuation.LoginPath, loginPath);
+        Assert.NotEqual("/login", loginPath);
         Assert.Contains(Uri.EscapeDataString(path), locationText, StringComparison.Ordinal);
-        Assert.DoesNotContain("/login?", locationText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -540,9 +540,9 @@ public sealed class ManagedElsaHandoffTests
 
     private static (string Action, string Code, string State) ParseAutoSubmitForm(string html)
     {
-        var action = System.Text.RegularExpressions.Regex.Match(html, """<form method="post" action="([^"]+)">""").Groups[1].Value;
-        var code = System.Text.RegularExpressions.Regex.Match(html, """name="code" value="([^"]+)"""").Groups[1].Value;
-        var state = System.Text.RegularExpressions.Regex.Match(html, """name="state" value="([^"]+)"""").Groups[1].Value;
+        var action = System.Text.RegularExpressions.Regex.Match(html, "<form method=\"post\" action=\"([^\"]+)\">").Groups[1].Value;
+        var code = System.Text.RegularExpressions.Regex.Match(html, "name=\"code\" value=\"([^\"]+)\"").Groups[1].Value;
+        var state = System.Text.RegularExpressions.Regex.Match(html, "name=\"state\" value=\"([^\"]+)\"").Groups[1].Value;
         Assert.False(string.IsNullOrWhiteSpace(action));
         Assert.False(string.IsNullOrWhiteSpace(code));
         Assert.False(string.IsNullOrWhiteSpace(state));
