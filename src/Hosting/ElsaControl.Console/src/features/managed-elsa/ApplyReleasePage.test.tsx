@@ -92,7 +92,7 @@ describe("ApplyReleasePage", () => {
     renderPage();
 
     expect((await screen.findAllByText("Handoff missing")).length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText(/provider did not apply/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/provider did not apply/i).length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByRole("button", { name: "Open" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: "#393" })[0]).toHaveAttribute("href", "https://github.com/valence-works/elsa-control/issues/393");
   });

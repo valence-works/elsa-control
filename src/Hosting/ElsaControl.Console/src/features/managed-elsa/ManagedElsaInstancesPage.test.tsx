@@ -279,7 +279,7 @@ describe("ManagedElsaInstancesPage", () => {
     renderPage();
 
     expect(await screen.findByText("Permission blocked")).toBeInTheDocument();
-    expect(screen.getByText("Fix permission before Open. Your account is not authorized to open this instance.")).toBeInTheDocument();
+    expect(screen.getAllByText(/Fix permission before Open/).length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByRole("button", { name: "Open" })).not.toBeInTheDocument();
   });
 

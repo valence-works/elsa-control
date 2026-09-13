@@ -237,9 +237,7 @@ function ManagedElsaInstanceRow({
               {opening ? "Opening…" : "Open"}
             </Button>
           ) : (
-            <span className="self-center text-xs text-muted-foreground">
-              {classifyInstanceOpenFailure(instance).shortLabel}
-            </span>
+            <span className="self-center text-xs text-muted-foreground">Unavailable</span>
           )}
         </div>
       </td>
