@@ -355,7 +355,7 @@ public sealed class ManagedLifecycleTelemetryTests
             activity.OperationName == ManagedLifecycleTelemetry.WorkerActivityName &&
             activity.GetTagItem(ManagedLifecycleTelemetry.ActionTag)?.ToString() == "start" &&
             activity.GetTagItem(ManagedLifecycleTelemetry.OutcomeTag)?.ToString() == "failed" &&
-            activity.GetTagItem(ManagedLifecycleTelemetry.DiagnosticCodeTag)?.ToString() == "resolution.invalid" &&
+            activity.GetTagItem(ManagedLifecycleTelemetry.DiagnosticCodeTag)?.ToString() == "resolution.input-unavailable" &&
             activity.GetTagItem(ManagedLifecycleTelemetry.OrganizationIdTag)?.ToString() ==
             item.Instance.OrganizationId.ToString("D") &&
             activity.GetTagItem(ManagedLifecycleTelemetry.WorkspaceIdTag)?.ToString() == workspaceId.ToString("D") &&
