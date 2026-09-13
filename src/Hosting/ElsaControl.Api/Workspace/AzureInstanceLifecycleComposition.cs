@@ -54,6 +54,8 @@ internal static class AzureInstanceLifecycleComposition
         services.AddScoped<IElsaInstanceProviderDeleteRecoveryPort, ScopedAzureInstanceProviderDeleteRecoveryPort>();
         services.AddScoped<IElsaInstanceProviderRecoveryPort>(provider =>
             provider.GetRequiredService<AzureElsaInstanceProvider>());
+        services.AddScoped<IElsaInstanceProviderHealthProbePort>(provider =>
+            provider.GetRequiredService<AzureElsaInstanceProvider>());
         return true;
     }
 }

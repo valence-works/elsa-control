@@ -21,7 +21,7 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 /// is open so the preflight reads in the application service are not trusted as a
 /// concurrency boundary.
 /// </summary>
-public sealed class EfCoreElsaInstanceLifecycleStore(
+public sealed partial class EfCoreElsaInstanceLifecycleStore(
     CatalogDbContext dbContext,
     IElsaInstanceLifecycleResolutionInputSource resolutionInputSource,
     TimeProvider? timeProvider = null,
@@ -33,7 +33,8 @@ public sealed class EfCoreElsaInstanceLifecycleStore(
     IElsaInstanceProviderPendingOperationStore,
     IElsaInstanceProviderReconciliationStore,
     IElsaInstanceDeletionStore,
-    IElsaInstanceEntitlementHoldStore
+    IElsaInstanceEntitlementHoldStore,
+    IElsaInstanceHealthMonitorStore
 {
     private readonly IElsaInstanceLifecycleResolutionInputSource _resolutionInputSource =
         resolutionInputSource ?? throw new ArgumentNullException(nameof(resolutionInputSource));
@@ -2729,17 +2730,13 @@ public sealed class EfCoreElsaInstanceLifecycleStore(
         string? summary = null,
         Guid? actorAccountId = null)
     {
-        var lastSequence = await dbContext.ElsaInstanceAuditEvents
-            .Where(x => x.InstanceId == instance.Id)
-            .Select(x => (long?)x.Sequence)
-            .MaxAsync(cancellationToken) ?? 0;
         return new ElsaInstanceAuditEventEntity
         {
             Id = Guid.NewGuid(),
             OrganizationId = instance.OrganizationId,
             WorkspaceId = instance.WorkspaceId,
             InstanceId = instance.Id,
-            Sequence = checked(lastSequence + 1),
+            Sequence = await NextAuditSequenceAsync(instance.Id, cancellationToken),
             EventType = eventType,
             ActorAccountId = actorAccountId,
             OperationId = operation.Id,
@@ -2754,6 +2751,12 @@ public sealed class EfCoreElsaInstanceLifecycleStore(
             OccurredAt = occurredAt.ToUniversalTime()
         };
     }
+
+    private async Task<long> NextAuditSequenceAsync(Guid instanceId, CancellationToken cancellationToken) =>
+        checked((await dbContext.ElsaInstanceAuditEvents
+            .Where(x => x.InstanceId == instanceId)
+            .Select(x => (long?)x.Sequence)
+            .MaxAsync(cancellationToken) ?? 0) + 1);
 
     private static ElsaInstanceProviderReconciliationResult ReconciliationResult(
         ElsaInstanceOperationEntity operation,

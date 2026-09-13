@@ -5,6 +5,7 @@ using ElsaControl.RuntimeBuilder.Abstractions.ReleaseManifests;
 using System.Text.RegularExpressions;
 using ElsaControl.Api.Workspace;
 using ElsaControl.Deployment.Azure;
+using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using ElsaControl.RuntimeBuilder.Abstractions.Plans;
 using Microsoft.Extensions.Configuration;
@@ -51,6 +52,10 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IAzureProviderRunner));
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(AzureBicepProviderRunner));
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IAzureProviderRecoveryObserver));
+        Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IAzureRuntimeHealthProbe));
+        Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IElsaInstanceProviderHealthProbePort));
+        Assert.True(ElsaInstanceHealthMonitorComposition.AddHealthMonitor(
+            services, configuration, providerPipelineComposed: true, runWorkers: true));
 
         Assert.Equal("ada5e428-c5d8-4daf-b7f9-9f2c79d23815", authority.Options.AzureCliClientId);
         Assert.Equal("a54cd7b1-3d13-48ce-9dce-5ae013142c85", authority.Scope.SubscriptionId);
@@ -65,6 +70,8 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
         Assert.Equal(authority.ProviderScopeFingerprint, instanceProvider.ProviderScopeFingerprint);
         Assert.Equal(1, instanceProvider.ResourceGroupNamingVersion);
         Assert.Equal("unrestricted", provider.GetRequiredService<ElsaInstancePlanResolutionOptions>().DefaultEgress);
+        Assert.Equal(new ElsaInstanceHealthMonitorOptions { Enabled = true },
+            provider.GetRequiredService<IOptions<ElsaInstanceHealthMonitorOptions>>().Value);
     }
 
     [Fact]
@@ -134,8 +141,10 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
             Options.Create(configuration.GetSection(ElsaInstanceLifecycleWorkerOptions.ConfigurationSection).Get<ElsaInstanceLifecycleWorkerOptions>()!),
             Options.Create(configuration.GetSection(AzureProviderOperationOptions.ConfigurationSection).Get<AzureProviderOperationOptions>()!),
             provider.GetRequiredService<AzureElsaInstanceProviderOptions>(),
-            new SucceedingPreflight());
+            new SucceedingPreflight(),
+            HealthMonitorOptions(configuration));
 
+        Assert.True(HealthMonitorOptions(configuration).Value.Enabled);
         await validator.StartAsync(CancellationToken.None);
     }
 
@@ -151,13 +160,18 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
         var services = new ServiceCollection();
         Assert.Null(AzureProviderRunnerComposition.AddRunner(services, configuration));
         Assert.False(AzureInstanceLifecycleComposition.AddProviderPorts(services, configuration, null));
+        // Even with a composed pipeline, the rolled-back switch alone keeps the monitor off.
+        Assert.False(ElsaInstanceHealthMonitorComposition.AddHealthMonitor(
+            services, configuration, providerPipelineComposed: true, runWorkers: true));
         using var provider = services.BuildServiceProvider();
         using var scope = provider.CreateScope();
         Assert.IsType<UnconfiguredAzureProviderRunner>(scope.ServiceProvider.GetRequiredService<IAzureProviderRunner>());
 
         var validator = new ManagedAzureProviderConfigurationValidator(
             Options.Create(configuration.GetSection(ElsaInstanceLifecycleWorkerOptions.ConfigurationSection).Get<ElsaInstanceLifecycleWorkerOptions>()!),
-            Options.Create(configuration.GetSection(AzureProviderOperationOptions.ConfigurationSection).Get<AzureProviderOperationOptions>()!));
+            Options.Create(configuration.GetSection(AzureProviderOperationOptions.ConfigurationSection).Get<AzureProviderOperationOptions>()!),
+            healthMonitor: HealthMonitorOptions(configuration));
+        Assert.False(HealthMonitorOptions(configuration).Value.Enabled);
         await validator.StartAsync(CancellationToken.None);
     }
 
@@ -266,6 +280,10 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
 
     private static IConfiguration Configuration(IDictionary<string, string?> values) =>
         new ConfigurationBuilder().AddInMemoryCollection(values).Build();
+
+    private static IOptions<ElsaInstanceHealthMonitorOptions> HealthMonitorOptions(IConfiguration configuration) =>
+        Options.Create(configuration.GetSection(ElsaInstanceHealthMonitorOptions.ConfigurationSection).Get<ElsaInstanceHealthMonitorOptions>()
+                       ?? new ElsaInstanceHealthMonitorOptions());
 
     private static string FindRepositoryRoot()
     {

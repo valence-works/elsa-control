@@ -17,6 +17,11 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     private static bool IsCandidateReadinessProbe(string[] args) =>
         args.Contains("--fail") && args.Contains("https://proof-app--candidate.hash.azurecontainerapps.io/health");
 
+    private const string WorkloadOrigin = "https://proof-app.hash.azurecontainerapps.io";
+
+    private static bool IsPeriodicHealthProbe(string[] args) =>
+        args.SequenceEqual(["--fail", "--silent", "--show-error", "--max-time", "10", WorkloadOrigin + "/health"]);
+
     private AzureProviderResourceReferences PromotionResources() => _fixture.FoundationResources with
     {
         RegistryResourceId = _fixture.RegistryId,
@@ -1964,6 +1969,107 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         Assert.Equal("proof-app--stable", result.Resources.StableTrafficRevisionName);
     }
 
+    [Fact]
+    public async Task Promotion_health_probes_keep_their_bounded_retry_policy()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
+        process.Success(args => args.Contains("revision") && args.Contains("show"), HealthyCandidateRevision);
+        process.Success(IsCandidateReadinessProbe, "Healthy");
+        process.Success(args => args.Contains("traffic") && args.Contains("set"));
+        process.Success(args => args.Contains("show") && args.Any(x => x.Contains("traffic", StringComparison.Ordinal)), "[{\"revisionName\":\"proof-app--candidate\",\"weight\":100},{\"revisionName\":\"proof-app--stable\",\"weight\":0}]");
+        process.Success(args => args.Contains("--fail") && args.Contains(WorkloadOrigin + "/health"), "Healthy");
+
+        await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Promotion, PromotionResources()));
+
+        Assert.Equal(
+            new[] { "--fail", "--silent", "--show-error", "--retry", "30", "--retry-all-errors", "--retry-delay", "5", "--max-time", "10", WorkloadOrigin + "/health" },
+            process.Calls[^1]);
+    }
+
+    [Theory]
+    [InlineData("Healthy", ElsaInstanceHealth.Healthy, "azure.health.healthy")]
+    [InlineData("Degraded", ElsaInstanceHealth.Degraded, "azure.health.not-healthy")]
+    [InlineData("Unhealthy", ElsaInstanceHealth.Degraded, "azure.health.not-healthy")]
+    [InlineData("healthy", ElsaInstanceHealth.Unknown, "azure.health.report-invalid")]
+    [InlineData(" Healthy ", ElsaInstanceHealth.Unknown, "azure.health.report-invalid")]
+    [InlineData("Healthy\n", ElsaInstanceHealth.Unknown, "azure.health.report-invalid")]
+    [InlineData("<html>Healthy</html>", ElsaInstanceHealth.Unknown, "azure.health.report-invalid")]
+    [InlineData("", ElsaInstanceHealth.Unknown, "azure.health.report-invalid")]
+    public async Task Periodic_health_probe_makes_one_bounded_attempt_with_the_byte_exact_classification(
+        string report, ElsaInstanceHealth health, string code)
+    {
+        var process = new FakeCommandProcess();
+        process.Success(IsPeriodicHealthProbe, report);
+
+        var result = await _fixture.Runner(process).ProbeAsync("proof", WorkloadOrigin, TimeSpan.FromSeconds(10));
+
+        Assert.Equal((health, code), (result.Health, result.DiagnosticCode));
+        Assert.Single(process.Calls);
+    }
+
+    [Fact]
+    public async Task Periodic_health_probe_treats_an_oversized_report_as_outside_the_contract()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(IsPeriodicHealthProbe, new string('H', 65));
+
+        var result = await _fixture.Runner(process).ProbeAsync("proof", WorkloadOrigin, TimeSpan.FromSeconds(10));
+
+        Assert.Equal((ElsaInstanceHealth.Unknown, "azure.health.report-invalid"), (result.Health, result.DiagnosticCode));
+    }
+
+    [Theory]
+    [InlineData("Failed", "NonZeroExitCode", 22, ElsaInstanceHealth.Unreachable, "azure.health.unreachable")]
+    [InlineData("Failed", "NonZeroExitCode", 28, ElsaInstanceHealth.Unreachable, "azure.health.timed-out")]
+    [InlineData("TimedOut", "TimedOut", 1, ElsaInstanceHealth.Unreachable, "azure.health.timed-out")]
+    [InlineData("Cancelled", "Cancelled", 1, ElsaInstanceHealth.Unreachable, "azure.health.timed-out")]
+    [InlineData("OutputLimitExceeded", "OutputLimitExceeded", 1, ElsaInstanceHealth.Unknown, "azure.health.report-invalid")]
+    [InlineData("Failed", "ExecutableNotFound", 1, ElsaInstanceHealth.Unknown, "azure.health.probe-unavailable")]
+    [InlineData("TerminationUncertain", "TerminationUncertain", 1, ElsaInstanceHealth.Unknown, "azure.health.probe-unavailable")]
+    public async Task Periodic_health_probe_classifies_a_missing_answer_by_its_process_outcome_only(
+        string statusName, string failureKindName, int exitCode, ElsaInstanceHealth health, string code)
+    {
+        var process = new FakeCommandProcess();
+        process.Status(IsPeriodicHealthProbe, Enum.Parse<AzureCommandProcessStatus>(statusName),
+            Enum.Parse<AzureCommandProcessFailureKind>(failureKindName), exitCode);
+
+        var result = await _fixture.Runner(process).ProbeAsync("proof", WorkloadOrigin, TimeSpan.FromSeconds(10));
+
+        Assert.Equal((health, code), (result.Health, result.DiagnosticCode));
+    }
+
+    [Theory]
+    [InlineData(1.0, "1")]
+    [InlineData(2.5, "3")]
+    [InlineData(90.0, "60")]
+    public async Task Periodic_health_probe_bounds_curl_by_the_monitor_timeout(double seconds, string maxTime)
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.SkipWhile(x => x != "--max-time").Skip(1).FirstOrDefault() == maxTime, "Healthy");
+
+        await _fixture.Runner(process).ProbeAsync("proof", WorkloadOrigin, TimeSpan.FromSeconds(seconds));
+
+        Assert.Single(process.Calls);
+    }
+
+    [Theory]
+    [InlineData("proof", "https://other-app.hash.azurecontainerapps.io")]
+    [InlineData("proof", "https://proof-app.evil.example")]
+    [InlineData("proof", "https://proof-app.hash.azurecontainerapps.io/health")]
+    [InlineData("proof", "http://proof-app.hash.azurecontainerapps.io")]
+    [InlineData("other", WorkloadOrigin)]
+    [InlineData("", WorkloadOrigin)]
+    public async Task Periodic_health_probe_never_calls_an_endpoint_outside_the_workloads_own_origin(string workloadName, string endpoint)
+    {
+        var process = new FakeCommandProcess();
+
+        var result = await _fixture.Runner(process).ProbeAsync(workloadName, endpoint, TimeSpan.FromSeconds(10));
+
+        Assert.Equal((ElsaInstanceHealth.Unknown, "azure.health.endpoint-unbound"), (result.Health, result.DiagnosticCode));
+        Assert.Empty(process.Calls);
+    }
+
 
     [Fact]
     public async Task Stable_traffic_restore_requires_positive_zero_candidate_absence_proof()
@@ -2547,8 +2653,8 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         public void Success(Func<string[], bool> matcher, string output = "", Action? after = null) => _responses.Enqueue(new(matcher, AzureCommandProcessStatus.Succeeded, output, after));
         public void Failure(Func<string[], bool> matcher, string output = "") => _responses.Enqueue(new(matcher, AzureCommandProcessStatus.Failed, output, null));
         public void SqlBatchError(Func<string[], bool> matcher) => _responses.Enqueue(new(matcher, AzureCommandProcessStatus.Succeeded, "", null, SimulateSqlBatchError: true));
-        public void Status(Func<string[], bool> matcher, AzureCommandProcessStatus status, AzureCommandProcessFailureKind failureKind) =>
-            _responses.Enqueue(new(matcher, status, string.Empty, null, failureKind));
+        public void Status(Func<string[], bool> matcher, AzureCommandProcessStatus status, AzureCommandProcessFailureKind failureKind, int exitCode = 1) =>
+            _responses.Enqueue(new(matcher, status, string.Empty, null, failureKind, ExitCode: exitCode));
 
         public Task<AzureCommandProcessResult<T>> ExecuteAsync<T>(AzureCommandProcessRequest request, AzureCommandOutputProjector<T> outputProjector, CancellationToken cancellationToken = default)
             where T : AzureCommandSafeOutput
@@ -2561,7 +2667,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
                 ? args.Contains("-b") ? AzureCommandProcessStatus.Failed : AzureCommandProcessStatus.Succeeded
                 : response.Status;
             if (status != AzureCommandProcessStatus.Succeeded)
-                return Task.FromResult(new AzureCommandProcessResult<T>(status, response.FailureKind, 1, null, "test.command.failed", "The test command failed."));
+                return Task.FromResult(new AzureCommandProcessResult<T>(status, response.FailureKind, response.ExitCode, null, "test.command.failed", "The test command failed."));
             T projected;
             try
             {
@@ -2588,7 +2694,8 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
             string Output,
             Action? After,
             AzureCommandProcessFailureKind FailureKind = AzureCommandProcessFailureKind.NonZeroExitCode,
-            bool SimulateSqlBatchError = false);
+            bool SimulateSqlBatchError = false,
+            int ExitCode = 1);
     }
 
     private sealed class RecordingSecretResolver(string value) : IAzureSecretResolver

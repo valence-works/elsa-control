@@ -26,6 +26,7 @@ class CompositionFilesTests(unittest.TestCase):
     def test_worker_template_enables_all_three_workers_and_the_v1_scope(self):
         for key in renderer.WORKER_ENABLE_KEYS:
             self.assertEqual("true", self.workers[key])
+        self.assertEqual("true", self.workers[renderer.HEALTH_MONITOR_KEY])
         self.assertEqual("true", self.workers["Deployment__AzureProvider__Runner__Enabled"])
         self.assertEqual("false", self.workers["Deployment__AzureProvider__Runner__DisposableProofMode"])
         self.assertEqual("westeurope", self.workers["Deployment__AzureProvider__Runner__TargetScope__Location"])
@@ -126,6 +127,20 @@ class RenderTests(unittest.TestCase):
         with self.assertRaises(renderer.CompositionError):
             renderer.render(template, self.resolved, self.pending, self.overrides)
 
+    def test_render_refuses_a_health_monitor_without_the_workers(self):
+        template = {key: value for key, value in self.workers.items() if key not in renderer.WORKER_ENABLE_KEYS}
+        with self.assertRaises(renderer.CompositionError) as raised:
+            renderer.render(template, self.resolved, self.pending, self.overrides)
+        self.assertIn("health monitor", str(raised.exception))
+        template[renderer.HEALTH_MONITOR_KEY] = "false"
+        renderer.render(template, self.resolved, self.pending, self.overrides)
+
+    def test_render_refuses_a_non_boolean_health_monitor_switch(self):
+        template = dict(self.workers)
+        template[renderer.HEALTH_MONITOR_KEY] = "yes"
+        with self.assertRaises(renderer.CompositionError):
+            renderer.render(template, self.resolved, self.pending, self.overrides)
+
     def test_render_refuses_disposable_proof_mode(self):
         template = dict(self.workers)
         template["Deployment__AzureProvider__Runner__DisposableProofMode"] = "true"
@@ -182,9 +197,18 @@ class RenderTests(unittest.TestCase):
         self.assertEqual({"name", "value", "slotSetting"}, set(payload[0]))
         self.assertTrue(all(entry["slotSetting"] is False for entry in payload))
 
-    def test_rollback_disables_exactly_the_three_switches(self):
+    def test_rollback_disables_exactly_the_three_switches_and_the_health_monitor(self):
         payload = renderer.load_rollback()
-        self.assertEqual(set(renderer.WORKER_ENABLE_KEYS), {entry["name"] for entry in payload})
+        self.assertEqual({*renderer.WORKER_ENABLE_KEYS, renderer.HEALTH_MONITOR_KEY}, {entry["name"] for entry in payload})
+        self.assertTrue(all(entry["value"] == "false" for entry in payload))
+
+    def test_rollback_that_leaves_the_health_monitor_on_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollback.json"
+            path.write_text(json.dumps([{"name": key, "value": "false", "slotSetting": False}
+                                        for key in renderer.WORKER_ENABLE_KEYS]))
+            with self.assertRaises(renderer.CompositionError):
+                renderer.load_rollback(path)
 
     def test_cli_status_and_pending_exit_code(self):
         self.assertEqual(0, renderer.main(["status"]))
