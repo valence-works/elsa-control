@@ -17,6 +17,12 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     private static bool IsCandidateReadinessProbe(string[] args) =>
         args.Contains("--fail") && args.Contains("https://proof-app--candidate.hash.azurecontainerapps.io/health");
 
+    private static bool IsExactManagedDatabaseObservation(string[] args) =>
+        args.Contains("resource") &&
+        args.Contains("list") &&
+        args.Contains("Microsoft.Sql/servers/databases") &&
+        args.Contains("[?name=='proof-sql/Elsa'] | length(@)");
+
     private AzureProviderResourceReferences PromotionResources() => _fixture.FoundationResources with
     {
         RegistryResourceId = _fixture.RegistryId,
@@ -1830,7 +1836,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("ad-admin") && args.Contains("create"));
         process.Success(args => args.Contains("ad-admin") && args.Contains("list"), "[{\"login\":\"proof-bootstrap\",\"sid\":\"11111111-1111-1111-1111-111111111111\"}]");
         process.Success(args => args.Contains("ad-only-auth") && args.Contains("enable"));
-        process.Success(args => args.Contains("resource") && args.Contains("list") && args.Contains("Microsoft.Sql/servers/databases"), databaseCount);
+        process.Success(IsExactManagedDatabaseObservation, databaseCount);
         process.Success(args => args.Contains("deployment") && args.Contains("create"), FoundationOutputs());
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Foundation));
@@ -1852,7 +1858,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("sql") && args.Contains("server") && args.Contains("list"), "1");
         process.Success(args => args.Contains("ad-admin") && args.Contains("list"), "[{\"login\":\"proof-bootstrap\",\"sid\":\"11111111-1111-1111-1111-111111111111\"}]");
         process.Success(args => args.Contains("ad-only-auth") && args.Contains("enable"));
-        process.Failure(args => args.Contains("resource") && args.Contains("list") && args.Contains("Microsoft.Sql/servers/databases"));
+        process.Failure(IsExactManagedDatabaseObservation);
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Foundation));
 
@@ -1872,7 +1878,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("sql") && args.Contains("server") && args.Contains("list"), "1");
         process.Success(args => args.Contains("ad-admin") && args.Contains("list"), "[{\"login\":\"proof-bootstrap\",\"sid\":\"11111111-1111-1111-1111-111111111111\"}]");
         process.Success(args => args.Contains("ad-only-auth") && args.Contains("enable"));
-        process.Success(args => args.Contains("resource") && args.Contains("list") && args.Contains("Microsoft.Sql/servers/databases"), "2");
+        process.Success(IsExactManagedDatabaseObservation, "2");
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Foundation));
 
