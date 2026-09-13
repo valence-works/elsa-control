@@ -38,7 +38,9 @@ import { SyncRunsPage } from "@/features/sync-runs/SyncRunsPage";
 import { WeaverSessionPage } from "@/features/weaver/WeaverSessionPage";
 import { ConsoleLogsPage } from "@/features/console/ConsoleLogsPage";
 import { ManagedElsaInstancesPage } from "@/features/managed-elsa/ManagedElsaInstancesPage";
+import { ApplyReleasePage } from "@/features/managed-elsa/ApplyReleasePage";
 import { ManagedElsaOperationsPage } from "@/features/managed-elsa/ManagedElsaOperationsPage";
+import { ReleasesPage } from "@/features/release-catalog/ReleasesPage";
 import { OrganizationBillingPage } from "@/features/billing/OrganizationBillingPage";
 import { ConnectEnginePage } from "@/features/deployments/ConnectEnginePage";
 import { EngineProvisioningPage } from "@/features/engine-provisioning/EngineProvisioningPage";
@@ -172,7 +174,9 @@ export const router = createBrowserRouter([
           { path: "runtime-builder/:configurationId/edit", element: <EditRuntimeBuilderPage /> },
           { path: "console", element: <ConsoleLogsPage /> },
           { path: "targets", element: <PlaceholderPage title="Targets" /> },
+          { path: "releases", element: <ReleasesPage /> },
           { path: "runtimes", element: <ManagedElsaInstancesPage /> },
+          { path: "runtimes/:instanceId/apply", element: <ApplyReleasePage /> },
           { path: "operations", element: <ManagedElsaOperationsPage /> },
           { path: "weaver/sessions/:sessionId", element: <WeaverSessionPage /> },
           { path: "audit", element: <PlaceholderPage title="Audit" /> }

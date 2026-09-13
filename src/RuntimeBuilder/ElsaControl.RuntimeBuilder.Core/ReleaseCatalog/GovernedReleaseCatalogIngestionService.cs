@@ -68,8 +68,9 @@ public sealed class GovernedReleaseCatalogIngestionService(
 
         var write = await store.StoreAsync(entries, cancellationToken);
         return write.Status == GovernedReleaseCatalogWriteStatus.Conflict
-            ? new(false, write.Status, [],
-                [new("catalog.identity.conflict", "A different immutable release already owns this catalog identity.", "catalog")])
+            ? new(false, write.Status, write.Entries,
+                [new("catalog.identity.conflict", "A different immutable release already owns this catalog identity.", "catalog")],
+                IncomingEntries: entries)
             : new(true, write.Status, write.Entries, []);
     }
 

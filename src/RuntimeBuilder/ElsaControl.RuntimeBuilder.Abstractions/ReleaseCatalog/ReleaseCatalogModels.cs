@@ -142,4 +142,5 @@ public sealed record GovernedReleaseCatalogAdmissionResult(
     bool Accepted,
     GovernedReleaseCatalogWriteStatus? WriteStatus,
     IReadOnlyList<GovernedReleaseCatalogEntry> Entries,
-    IReadOnlyList<GovernedReleaseCatalogFinding> Findings);
+    IReadOnlyList<GovernedReleaseCatalogFinding> Findings,
+    IReadOnlyList<GovernedReleaseCatalogEntry>? IncomingEntries = null);

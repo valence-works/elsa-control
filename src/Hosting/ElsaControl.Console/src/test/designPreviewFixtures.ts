@@ -310,14 +310,22 @@ async function previewResponse(method: string, path: string, request: Request) {
   if (method === "GET" && path === `/api/workspaces/${workspaceId}/instances`) return jsonResponse({
     items: [], page: 1, pageSize: 100, totalCount: 0, hasMore: false
   } satisfies ManagedElsaInstanceList);
+  if (method === "GET" && path === `/api/workspaces/${workspaceId}/release-catalog`) return jsonResponse([]);
+  if (method === "POST" && path === "/api/admin/release-catalog/manifests") {
+    return jsonResponse({ title: "Admit is unavailable in the sample-data preview." }, 501);
+  }
   if (method === "GET" && path === `/api/workspaces/${workspaceId}/instances/onboarding-options`) return jsonResponse({
     releases: [],
     previewReleases: [],
     launchProfile: {
       name: "Design preview", description: "Managed runtime provisioning is unavailable in this sample workspace.",
-      targetMode: "Preview", regionCode: "preview", isolationProfile: "preview", capacityProfile: "preview", networkOutcome: "preview", domainOutcome: "preview"
+      targetMode: "Preview", regionCode: "preview", isolationProfile: "preview", capacityProfile: "preview", networkOutcome: "preview",       domainOutcome: "preview"
     }
   } satisfies ManagedElsaOnboardingOptions);
+  if (method === "GET" && /^\/api\/workspaces\/[^/]+\/instances\/[^/]+$/.test(path) && !path.endsWith("/onboarding-options"))
+    return jsonResponse({ title: "Preview instance not found" }, 404);
+  if (method === "PATCH" && /^\/api\/workspaces\/[^/]+\/instances\/[^/]+$/.test(path))
+    return jsonResponse({ title: "Apply is unavailable in the sample-data preview." }, 501);
   if (method === "GET" && path.endsWith("/artifacts")) return jsonResponse(designPreviewFixtures.artifacts);
   if (method === "GET" && path.endsWith("/deployments/cockpit")) return jsonResponse(designPreviewFixtures.cockpit);
   if (method === "GET" && path.endsWith("/deployments/permissions")) return jsonResponse(designPreviewFixtures.permissions);

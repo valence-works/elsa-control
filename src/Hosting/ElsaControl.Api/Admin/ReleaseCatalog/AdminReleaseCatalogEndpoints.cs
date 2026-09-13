@@ -56,7 +56,13 @@ public static class AdminReleaseCatalogEndpoints
                     code,
                     status,
                     "The release manifest could not be admitted into the governed catalog.",
-                    result.Findings);
+                    result.Findings,
+                    result.WriteStatus == GovernedReleaseCatalogWriteStatus.Conflict
+                        ? result.Entries.Select(ReleaseCatalogApiMappings.ToResponse).ToArray()
+                        : null,
+                    result.WriteStatus == GovernedReleaseCatalogWriteStatus.Conflict
+                        ? result.IncomingEntries?.Select(ReleaseCatalogApiMappings.ToResponse).ToArray()
+                        : null);
             }
 
             var response = new AdminReleaseCatalogAdmissionResponse(
@@ -77,16 +83,25 @@ public static class AdminReleaseCatalogEndpoints
         string code,
         int statusCode,
         string detail,
-        IReadOnlyList<GovernedReleaseCatalogFinding>? findings = null) =>
-        Results.Problem(
+        IReadOnlyList<GovernedReleaseCatalogFinding>? findings = null,
+        IReadOnlyList<ReleaseCatalogEntryResponse>? existing = null,
+        IReadOnlyList<ReleaseCatalogEntryResponse>? incoming = null)
+    {
+        var extensions = new Dictionary<string, object?>
+        {
+            ["code"] = code,
+            ["traceId"] = httpContext.TraceIdentifier,
+            ["findings"] = findings?.Select(x => new { x.Code, x.Scope, x.Message }).ToArray()
+        };
+        if (existing is not null)
+            extensions["existing"] = existing;
+        if (incoming is not null)
+            extensions["incoming"] = incoming;
+        return Results.Problem(
             type: $"urn:elsa-control:problem:{code.Replace(".", "-", StringComparison.Ordinal)}",
             title: title,
             detail: detail,
             statusCode: statusCode,
-            extensions: new Dictionary<string, object?>
-            {
-                ["code"] = code,
-                ["traceId"] = httpContext.TraceIdentifier,
-                ["findings"] = findings?.Select(x => new { x.Code, x.Scope, x.Message }).ToArray()
-            });
+            extensions: extensions);
+    }
 }
