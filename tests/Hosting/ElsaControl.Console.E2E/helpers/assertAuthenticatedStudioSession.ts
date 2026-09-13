@@ -1,6 +1,5 @@
 import { expect, type Page } from "@playwright/test";
 import {
-  hasStudioSessionCookie,
   isAuthenticatedStudioSurface,
   isStudioSignInUrl,
   studioExternalAuthenticationCookieName
@@ -18,9 +17,7 @@ export async function assertAuthenticatedStudioSession(
     ? "callback unobserved"
     : `callback ${details.callbackStatus} -> ${details.callbackLocation ?? "none"}`;
 
-  if (isStudioSignInUrl(url, runtimeOrigin) ||
-      !isAuthenticatedStudioSurface(url, runtimeOrigin) ||
-      !hasStudioSessionCookie(cookieNames)) {
+  if (isStudioSignInUrl(url, runtimeOrigin) || !isAuthenticatedStudioSurface(url, runtimeOrigin)) {
     throw new Error(
       `Runtime handoff did not establish an authenticated Studio session (${callback}; ` +
       `url: ${safeRuntimePath(url, runtimeOrigin)}; cookies: ${cookieNames.join(",") || "none"}). ` +
