@@ -43,7 +43,8 @@ with the image-owned cosign and trust-root files stood in by digest-matched fixt
 ## Pending decisions
 
 `python3 scripts/render-worker-settings.py status` lists resolved and pending parameters without values.
-The release inputs are decided on #311: the Elsa preview feed on feedz.io, the API identity (which
+The release inputs are decided on #311, with the feed moved to nuget.org on #439 once the runtime images
+pinned stable Elsa releases: nuget.org as the release feed, the API identity (which
 already holds AcrPull on the governed registry), the observed blob redirect host, and the keyless
 signing identity of the `elsa-production-image` build workflow on `main` with the GitHub Actions
 issuer. Tighten the signer to version tags before any release is marked Supported.
