@@ -23,7 +23,7 @@ The workload is sized from the resolved plan's governed capacity, never from tem
 
 Consumption ephemeral storage is derived from the CPU size (up to 2 GiB for 0.5 vCPU, 4 GiB for 1 vCPU, 8 GiB above that) and cannot be set, so it is not a template parameter; plan admission rejects a capacity that asks for more than its CPU size provides. Capacity is part of the provider plan fingerprint and of `planFingerprint` here, so a capacity change always produces a new revision.
 
-The dedicated-lite database default is the provisioned Standard S0 objective (10 DTUs). This is the bounded Preview and early-access baseline for new managed instances, not a GA or SLO claim. S1 remains an allowed follow-up only if the Elsa Combined DTU load test shows that S0 is insufficient.
+The dedicated-lite database default is the provisioned Standard S0 objective (10 DTUs). The provider applies this default only when the named database does not exist; later foundation reconciles and workload deployments preserve the existing database SKU. This is the bounded Preview and early-access baseline for new managed instances, not a GA or SLO claim. S1 remains an allowed follow-up only if the Elsa Combined DTU load test shows that S0 is insufficient.
 
 ## Managed Elsa handoff
 

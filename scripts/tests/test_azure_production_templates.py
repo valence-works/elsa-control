@@ -171,7 +171,13 @@ class AzureProductionTemplateTests(unittest.TestCase):
         self.assertEqual(2, vault.count("principalType: 'ServicePrincipal'"))
 
     def test_managed_database_uses_the_dedicated_lite_s0_default(self) -> None:
+        main = MAIN.read_text()
         source = SQL.read_text()
+        self.assertIn("param provisionDatabase bool = true", main)
+        self.assertIn("provisionDatabase: provisionDatabase", main)
+        self.assertIn("param provisionDatabase bool = true", source)
+        self.assertIn("= if (provisionDatabase) {", source)
+        self.assertIn("existing = if (!provisionDatabase) {", source)
         self.assertRegex(source, r"sku:\s*\{\s*name: 'S0'\s*tier: 'Standard'\s*capacity: 10\s*\}")
         for serverless_setting in ("GP_S_Gen5", "family: 'Gen5'", "autoPauseDelay", "minCapacity"):
             self.assertNotIn(serverless_setting, source)

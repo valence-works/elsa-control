@@ -22,6 +22,9 @@ param bootstrapLogin string
 @description('Tags applied to SQL resources.')
 param tags object = {}
 
+@description('Create the managed database with the dedicated-lite default. False preserves the existing database SKU during reconciliation.')
+param provisionDatabase bool = true
+
 @description('Point-in-time restore retention for the managed workload database.')
 @minValue(1)
 @maxValue(35)
@@ -52,7 +55,7 @@ resource server 'Microsoft.Sql/servers@2023-08-01' = {
   }
 }
 
-resource database 'Microsoft.Sql/servers/databases@2023-08-01' = {
+resource database 'Microsoft.Sql/servers/databases@2023-08-01' = if (provisionDatabase) {
   parent: server
   name: databaseName
   location: location
@@ -68,13 +71,20 @@ resource database 'Microsoft.Sql/servers/databases@2023-08-01' = {
   }
 }
 
+resource existingDatabase 'Microsoft.Sql/servers/databases@2023-08-01' existing = if (!provisionDatabase) {
+  parent: server
+  name: databaseName
+}
+
 resource shortTermRetention 'Microsoft.Sql/servers/databases/backupShortTermRetentionPolicies@2023-08-01' = {
-  parent: database
-  name: 'default'
+  name: '${server.name}/${databaseName}/default'
   properties: {
     retentionDays: shortTermRetentionDays
     diffBackupIntervalInHours: differentialBackupIntervalHours
   }
+  dependsOn: [
+    database
+  ]
 }
 
 // ACA has public egress in this no-VNet provider profile. The rule is removed
@@ -91,5 +101,5 @@ resource azureServicesFirewallRule 'Microsoft.Sql/servers/firewallRules@2023-08-
 output id string = server.id
 output name string = server.name
 output fullyQualifiedDomainName string = server.properties.fullyQualifiedDomainName
-output databaseName string = database.name
+output databaseName string = provisionDatabase ? database!.name : existingDatabase!.name
 output shortTermRetentionDays int = shortTermRetention.properties.retentionDays

@@ -96,6 +96,9 @@ param owner string = 'elsa-control'
 @description('Create the externally reachable Container App. Set false for the foundation phase while the runbook seeds Key Vault secrets.')
 param deployWorkload bool = true
 
+@description('Create the managed database with the current default. The provider sets false after the database exists so later reconciles preserve its SKU.')
+param provisionDatabase bool = true
+
 // Workload capacity comes from the resolved plan and has no defaults: a caller that omits it
 // fails the deployment instead of silently scaling to zero. Values are the exact Container Apps
 // consumption representation; workloadMemory must be the consumption pair of workloadCpu.
@@ -223,6 +226,7 @@ module database 'modules/sql.bicep' = {
     location: location
     bootstrapObjectId: sqlBootstrapObjectId
     bootstrapLogin: sqlBootstrapLogin
+    provisionDatabase: provisionDatabase
     tags: tags
   }
 }
