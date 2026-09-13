@@ -114,6 +114,8 @@ internal static class AzureProviderSafeDiagnostics
         "azure.foundation.ownership-invalid",
         "azure.foundation.sql-admin-invalid",
         "azure.foundation.sql-admin-uncertain",
+        "azure.foundation.sql-database-ambiguous",
+        "azure.foundation.sql-database-observation-uncertain",
         "azure.handoff.callback-mismatch",
         "azure.handoff.configuration-required",
         "azure.handoff.replicas-unsupported",

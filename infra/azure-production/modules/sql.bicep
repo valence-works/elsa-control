@@ -22,6 +22,9 @@ param bootstrapLogin string
 @description('Tags applied to SQL resources.')
 param tags object = {}
 
+@description('Create the managed database with the dedicated-lite default. False preserves the existing database SKU during reconciliation.')
+param provisionDatabase bool = true
+
 @description('Point-in-time restore retention for the managed workload database.')
 @minValue(1)
 @maxValue(35)
@@ -52,29 +55,44 @@ resource server 'Microsoft.Sql/servers@2023-08-01' = {
   }
 }
 
-resource database 'Microsoft.Sql/servers/databases@2023-08-01' = {
+resource database 'Microsoft.Sql/servers/databases@2023-08-01' = if (provisionDatabase) {
   parent: server
   name: databaseName
   location: location
   tags: tags
   sku: {
-    name: 'GP_S_Gen5'
-    tier: 'GeneralPurpose'
-    family: 'Gen5'
-    capacity: 1
+    name: 'S0'
+    tier: 'Standard'
+    capacity: 10
   }
   properties: {
-    // Serverless keeps the bounded initial production profile economical while
-    // preserving the same database contract for managed workload operations.
-    autoPauseDelay: 60
-    minCapacity: json('0.5')
     requestedBackupStorageRedundancy: 'Local'
     zoneRedundant: false
   }
 }
 
-resource shortTermRetention 'Microsoft.Sql/servers/databases/backupShortTermRetentionPolicies@2023-08-01' = {
+resource reconciledDatabase 'Microsoft.Sql/servers/databases@2023-08-01' = if (!provisionDatabase) {
+  parent: server
+  name: databaseName
+  location: location
+  tags: tags
+  properties: {
+    requestedBackupStorageRedundancy: 'Local'
+    zoneRedundant: false
+  }
+}
+
+resource newDatabaseShortTermRetention 'Microsoft.Sql/servers/databases/backupShortTermRetentionPolicies@2023-08-01' = if (provisionDatabase) {
   parent: database
+  name: 'default'
+  properties: {
+    retentionDays: shortTermRetentionDays
+    diffBackupIntervalInHours: differentialBackupIntervalHours
+  }
+}
+
+resource existingDatabaseShortTermRetention 'Microsoft.Sql/servers/databases/backupShortTermRetentionPolicies@2023-08-01' = if (!provisionDatabase) {
+  parent: reconciledDatabase
   name: 'default'
   properties: {
     retentionDays: shortTermRetentionDays
@@ -96,5 +114,7 @@ resource azureServicesFirewallRule 'Microsoft.Sql/servers/firewallRules@2023-08-
 output id string = server.id
 output name string = server.name
 output fullyQualifiedDomainName string = server.properties.fullyQualifiedDomainName
-output databaseName string = database.name
-output shortTermRetentionDays int = shortTermRetention.properties.retentionDays
+output databaseName string = provisionDatabase ? database!.name : reconciledDatabase!.name
+output shortTermRetentionDays int = provisionDatabase
+  ? newDatabaseShortTermRetention!.properties.retentionDays
+  : existingDatabaseShortTermRetention!.properties.retentionDays

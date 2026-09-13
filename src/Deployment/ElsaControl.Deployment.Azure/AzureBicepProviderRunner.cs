@@ -496,7 +496,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         if (!exists.Succeeded)
             return ProcessFailure(command, AzureProviderOperationPhase.FoundationSubmitted, exists, resources, mutation: false);
 
-        if (!exists.Value!.Value)
+        var provisionDatabase = !exists.Value!.Value;
+        if (provisionDatabase)
         {
             EnsureMutationAuthority(command);
             var created = await ExecuteAzAsync<AzureCommandNoOutput>(command,
@@ -535,12 +536,27 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 return Uncertain(command, AzureProviderOperationPhase.FoundationSubmitted, "azure.foundation.sql-admin-uncertain", "The SQL bootstrap administrator could not be confirmed for reconciliation.", resources);
             if (!adminReady.Value)
                 return Failed(command, AzureProviderOperationPhase.FoundationSubmitted, "azure.foundation.sql-admin-invalid", "The existing SQL administrator does not match the governed bootstrap identity.");
+
+            if (!_options.DisposableProofMode)
+            {
+                var databaseCount = await ExecuteAzAsync(command,
+                    ["resource", "list", "--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command),
+                        "--resource-type", "Microsoft.Sql/servers/databases", "--query", "[?name=='" + command.Plan.WorkloadName + "-sql/Elsa'] | length(@)",
+                        "--output", "tsv", "--only-show-errors"],
+                    ParseIntegerAsync,
+                    cancellationToken);
+                if (!databaseCount.Succeeded)
+                    return Uncertain(command, AzureProviderOperationPhase.FoundationSubmitted, "azure.foundation.sql-database-observation-uncertain", "The existing SQL database could not be observed before reconciliation.", resources);
+                if (databaseCount.Value!.Value > 1)
+                    return Failed(command, AzureProviderOperationPhase.FoundationSubmitted, "azure.foundation.sql-database-ambiguous", "Expected at most one governed SQL database.");
+                provisionDatabase = databaseCount.Value.Value == 0;
+            }
         }
 
         var deploymentName = FoundationDeploymentName(command);
         EnsureMutationAuthority(command);
         var output = await ExecuteAzAsync(command,
-            FoundationDeploymentArguments(command, deploymentName),
+            FoundationDeploymentArguments(command, deploymentName, provisionDatabase),
             ParseDeploymentOutputsAsync,
             cancellationToken);
         if (!output.Succeeded || output.Value is null)
@@ -1944,7 +1960,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         return false;
     }
 
-    private IReadOnlyList<string> FoundationDeploymentArguments(AzureProviderRunnerCommand command, string deploymentName) =>
+    private IReadOnlyList<string> FoundationDeploymentArguments(AzureProviderRunnerCommand command, string deploymentName, bool provisionDatabase) =>
         ["deployment", "group", "create", "--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command),
             "--name", deploymentName, "--template-file", Path.Combine(_options.TemplateRoot, "main.bicep"), "--parameters",
             ..TemplateIdentityArguments(command), $"location={_scope.Location}", $"imageRepository={command.Plan.ImageRepository}", $"imageDigest={command.Plan.ImageDigest}",
@@ -1956,7 +1972,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             $"elsaVersion={command.Plan.ElsaVersion}", ..ReleaseIdentityArguments(command),
             $"sqlWorkflowPackageVersion={command.Plan.SqlWorkflowPackageVersion}", $"sqlQuartzPackageVersion={command.Plan.SqlQuartzPackageVersion}",
             ..CapacityArguments(command), ..ManagedHandoffArguments(command),
-            $"templateFingerprint={command.Context.TemplateFingerprint}", "deployWorkload=false", "--query", "properties.outputs", "--output", "json", "--only-show-errors"];
+            $"templateFingerprint={command.Context.TemplateFingerprint}", "deployWorkload=false", ..DatabaseProvisioningArguments(provisionDatabase),
+            "--query", "properties.outputs", "--output", "json", "--only-show-errors"];
 
     private IReadOnlyList<string> AcrDeploymentArguments(AzureProviderRunnerCommand command, string identityId, string principalId, string deploymentName) =>
         ["deployment", "group", "create", "--subscription", _scope.RegistrySubscriptionId, "--resource-group", _scope.RegistryResourceGroupName,
@@ -1976,7 +1993,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             $"elsaVersion={command.Plan.ElsaVersion}", ..ReleaseIdentityArguments(command),
             $"sqlWorkflowPackageVersion={command.Plan.SqlWorkflowPackageVersion}", $"sqlQuartzPackageVersion={command.Plan.SqlQuartzPackageVersion}",
             ..CapacityArguments(command), ..ManagedHandoffArguments(command),
-            $"templateFingerprint={command.Context.TemplateFingerprint}", "deployWorkload=true", $"workloadRevisionSuffix={revision}",
+            $"templateFingerprint={command.Context.TemplateFingerprint}", "deployWorkload=true", ..DatabaseProvisioningArguments(provisionDatabase: false), $"workloadRevisionSuffix={revision}",
             $"stableTrafficRevisionName={stable ?? string.Empty}", "--query", "properties.outputs", "--output", "json", "--only-show-errors"];
 
     private void ValidateCommand(AzureProviderRunnerCommand command)
@@ -2386,6 +2403,10 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private string[] TemplateIdentityArguments(AzureProviderRunnerCommand command) => _options.DisposableProofMode
         ? [$"proofName={command.Plan.WorkloadName}", $"expiryUtc={_options.DisposableExpiryUtc!.Value:yyyy-MM-dd}"]
         : [$"workloadName={command.Plan.WorkloadName}"];
+
+    private string[] DatabaseProvisioningArguments(bool provisionDatabase) => _options.DisposableProofMode
+        ? []
+        : [$"provisionDatabase={provisionDatabase.ToString().ToLowerInvariant()}"];
 
     private string[] ReleaseIdentityArguments(AzureProviderRunnerCommand command) => _options.DisposableProofMode
         ? []

@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION = ROOT / "infra" / "azure-production"
 MAIN = PRODUCTION / "main.bicep"
 APP = PRODUCTION / "modules" / "container-app.bicep"
+SQL = PRODUCTION / "modules" / "sql.bicep"
 HANDOFF_STRING_PARAMETERS = (
     "managedHandoffInstanceId",
     "managedHandoffAudience",
@@ -168,6 +169,24 @@ class AzureProductionTemplateTests(unittest.TestCase):
         vault = (PRODUCTION / "modules/key-vault.bicep").read_text()
         self.assertNotIn("principalType: 'User'", vault)
         self.assertEqual(2, vault.count("principalType: 'ServicePrincipal'"))
+
+    def test_managed_database_uses_the_dedicated_lite_s0_default(self) -> None:
+        main = MAIN.read_text()
+        source = SQL.read_text()
+        self.assertIn("param provisionDatabase bool = true", main)
+        self.assertIn("provisionDatabase: provisionDatabase", main)
+        self.assertIn("param provisionDatabase bool = true", source)
+        self.assertIn("= if (provisionDatabase) {", source)
+        self.assertIn("resource reconciledDatabase", source)
+        self.assertIn("= if (!provisionDatabase) {", source)
+        self.assertEqual(1, source.count("sku:"), "Only the new-database branch may declare a SKU")
+        self.assertIn("newDatabaseShortTermRetention", source)
+        self.assertIn("parent: database", source)
+        self.assertIn("existingDatabaseShortTermRetention", source)
+        self.assertIn("parent: reconciledDatabase", source)
+        self.assertRegex(source, r"sku:\s*\{\s*name: 'S0'\s*tier: 'Standard'\s*capacity: 10\s*\}")
+        for serverless_setting in ("GP_S_Gen5", "family: 'Gen5'", "autoPauseDelay", "minCapacity"):
+            self.assertNotIn(serverless_setting, source)
 
     def test_runner_files_preserve_immutable_image_and_sql_bootstrap_contract(self) -> None:
         main = MAIN.read_text()
