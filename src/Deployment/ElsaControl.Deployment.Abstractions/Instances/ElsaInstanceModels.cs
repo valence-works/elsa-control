@@ -761,11 +761,30 @@ public sealed record ElsaInstance
         ArgumentNullException.ThrowIfNull(currentRelease);
         if (!Equals(reference, currentRelease.PlanReference))
             throw new ArgumentException("Current release must identify the resolved plan.", nameof(currentRelease));
-        return this with
-        {
-            ResolvedPlanReference = reference,
-            CurrentResolvedRelease = currentRelease
-        };
+
+        // Record `with` applies init setters one field at a time. An Apply that
+        // replaces an already-projected pin plan would otherwise validate the
+        // new reference against the still-attached pin release and throw
+        // ArgumentException — the Dogfood2 residual after #413.
+        return new ElsaInstance(
+            Id,
+            OrganizationId,
+            WorkspaceId,
+            Name,
+            Slug,
+            Intent,
+            ObservedLifecycle,
+            Health,
+            Version,
+            IdentityBinding,
+            DesiredStateRevisionId,
+            reference,
+            currentRelease,
+            CurrentDeploymentReference,
+            PlacementAssignmentReference,
+            ElsaTenantReference,
+            LastOperationId,
+            DeletedAt);
     }
 
     internal ElsaInstance ProjectObservation(

@@ -364,6 +364,25 @@ public sealed class ElsaInstanceLifecycleWorkerTests
     }
 
     [Fact]
+    public async Task Resolver_exceptions_fail_with_an_actionable_code()
+    {
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now));
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var accepted = await service.CreateAsync(CreateRequest("claims-resolver-throw", "create-resolver-throw"));
+        store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance));
+
+        var result = await new ElsaInstanceLifecycleWorker(
+                store,
+                new ThrowingResolver(),
+                new StaticTimeProvider(Now))
+            .ProcessAvailableAsync("lifecycle-worker-1");
+
+        Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Failed, Assert.Single(result.Results).Outcome);
+        Assert.Equal("resolution.unexpected", Assert.Single(store.Failures).Code);
+        Assert.Empty(store.DeploymentRuns);
+    }
+
+    [Fact]
     public async Task Unsafe_resolved_plan_fails_before_run_reservation_or_provider_submission()
     {
         var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now));
@@ -419,7 +438,7 @@ public sealed class ElsaInstanceLifecycleWorkerTests
         Assert.Empty(store.ResolvedPlans);
         Assert.Empty(store.DeploymentRuns);
         Assert.Empty(provider.Submissions);
-        Assert.Equal("resolution.invalid", Assert.Single(store.Failures).Code);
+        Assert.Equal("resolution.commit-invalid", Assert.Single(store.Failures).Code);
     }
 
     [Fact]
@@ -474,7 +493,7 @@ public sealed class ElsaInstanceLifecycleWorkerTests
         var nextResult = result.Results.Single(x => x.Operation.Id == second.Operation.Id);
         Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Failed, malformedResult.Outcome);
         Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Queued, nextResult.Outcome);
-        Assert.Equal("resolution.invalid", malformedResult.FailureCode);
+        Assert.Equal("resolution.work-item-invalid", malformedResult.FailureCode);
         Assert.Equal(ElsaInstanceOperationState.Failed, store.Operations.Single(x => x.Id == first.Operation.Id).State);
         Assert.Equal(ElsaInstanceOperationState.Queued, store.Operations.Single(x => x.Id == second.Operation.Id).State);
         Assert.Single(store.DeploymentRuns);
@@ -708,6 +727,14 @@ public sealed class ElsaInstanceLifecycleWorkerTests
             Calls++;
             return Task.FromResult(result);
         }
+    }
+
+    private sealed class ThrowingResolver : IElsaInstancePlanResolver
+    {
+        public Task<ElsaInstancePlanResolutionResult> ResolveAsync(
+            ElsaInstancePlanResolutionRequest request,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("resolver exploded");
     }
 
     private sealed class RecordingSubmissionPort(

@@ -108,6 +108,11 @@ public sealed class ElsaInstancePlanResolver(
             findings.Add(Error("plan.invalid", "Resolved application plan values are invalid.", "plan"));
             return ElsaInstancePlanResolutionResult.Failed(findings);
         }
+        catch (InvalidOperationException)
+        {
+            findings.Add(Error("manifest.projection.invalid", "The admitted release manifest cannot produce a valid application plan.", "releaseManifest"));
+            return ElsaInstancePlanResolutionResult.Failed(findings);
+        }
         var validationFindings = ResolvedElsaApplicationPlanValidator.Validate(plan);
         foreach (var finding in validationFindings)
             findings.Add(Error(finding.Code, SafeValidationMessage(finding.Code), SafeScope(finding.Scope)));
