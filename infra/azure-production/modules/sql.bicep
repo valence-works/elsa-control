@@ -58,16 +58,11 @@ resource database 'Microsoft.Sql/servers/databases@2023-08-01' = {
   location: location
   tags: tags
   sku: {
-    name: 'GP_S_Gen5'
-    tier: 'GeneralPurpose'
-    family: 'Gen5'
-    capacity: 1
+    name: 'S0'
+    tier: 'Standard'
+    capacity: 10
   }
   properties: {
-    // Serverless keeps the bounded initial production profile economical while
-    // preserving the same database contract for managed workload operations.
-    autoPauseDelay: 60
-    minCapacity: json('0.5')
     requestedBackupStorageRedundancy: 'Local'
     zoneRedundant: false
   }

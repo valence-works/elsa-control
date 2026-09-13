@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION = ROOT / "infra" / "azure-production"
 MAIN = PRODUCTION / "main.bicep"
 APP = PRODUCTION / "modules" / "container-app.bicep"
+SQL = PRODUCTION / "modules" / "sql.bicep"
 HANDOFF_STRING_PARAMETERS = (
     "managedHandoffInstanceId",
     "managedHandoffAudience",
@@ -168,6 +169,12 @@ class AzureProductionTemplateTests(unittest.TestCase):
         vault = (PRODUCTION / "modules/key-vault.bicep").read_text()
         self.assertNotIn("principalType: 'User'", vault)
         self.assertEqual(2, vault.count("principalType: 'ServicePrincipal'"))
+
+    def test_managed_database_uses_the_dedicated_lite_s0_default(self) -> None:
+        source = SQL.read_text()
+        self.assertRegex(source, r"sku:\s*\{\s*name: 'S0'\s*tier: 'Standard'\s*capacity: 10\s*\}")
+        for serverless_setting in ("GP_S_Gen5", "family: 'Gen5'", "autoPauseDelay", "minCapacity"):
+            self.assertNotIn(serverless_setting, source)
 
     def test_runner_files_preserve_immutable_image_and_sql_bootstrap_contract(self) -> None:
         main = MAIN.read_text()

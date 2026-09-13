@@ -23,6 +23,8 @@ The workload is sized from the resolved plan's governed capacity, never from tem
 
 Consumption ephemeral storage is derived from the CPU size (up to 2 GiB for 0.5 vCPU, 4 GiB for 1 vCPU, 8 GiB above that) and cannot be set, so it is not a template parameter; plan admission rejects a capacity that asks for more than its CPU size provides. Capacity is part of the provider plan fingerprint and of `planFingerprint` here, so a capacity change always produces a new revision.
 
+The dedicated-lite database default is the provisioned Standard S0 objective (10 DTUs). This is the bounded Preview and early-access baseline for new managed instances, not a GA or SLO claim. S1 remains an allowed follow-up only if the Elsa Combined DTU load test shows that S0 is insufficient.
+
 ## Managed Elsa handoff
 
 The console's Open action sends the browser to the workload's `/managed-elsa/handoff/start`. The runtime maps that endpoint only when its `ManagedElsa:Handoff` section is enabled and complete, so the template configures it from typed, non-secret parameters. `managedHandoffEnabled` is required and has no default. The provider runner sets it to true only when the admitted release declares `managed-elsa-handoff-v1` and the workload runs as a single replica (the runtime keeps handoff state and sessions in process); otherwise the app receives `ManagedElsa__Handoff__Enabled=false` explicitly.
