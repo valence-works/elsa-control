@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useLocation } from "react-router-dom";
 import { getOrganizationWorkspaceContext } from "@/app/workspaceContextApi";
 import type { OrganizationContext, OrganizationWorkspaceContextResponse, WorkspaceContext } from "@/app/workspaceContextModels";
 import { useAuth } from "@/lib/auth/AuthProvider";
@@ -28,12 +29,13 @@ const workspaceStorageKey = "elsa-control-console-selected-workspace-id";
 
 export function WorkspaceContextProvider({ children }: { children: ReactNode }) {
   const auth = useAuth();
+  const location = useLocation();
   const [selectedOrganizationId, setSelectedOrganizationIdState] = useState(() => readStoredValue(organizationStorageKey));
   const [selectedWorkspaceId, setSelectedWorkspaceIdState] = useState(() => readStoredValue(workspaceStorageKey));
   const context = useQuery({
     queryKey: queryKeys.workspaceContext,
     queryFn: getOrganizationWorkspaceContext,
-    enabled: Boolean(auth.session?.authenticated),
+    enabled: Boolean(auth.session?.authenticated) && !isAdminOrganizationsRoute(location.pathname),
     retry: false
   });
 
@@ -119,6 +121,10 @@ export function WorkspaceContextProvider({ children }: { children: ReactNode }) 
   ]);
 
   return <WorkspaceContext.Provider value={value}>{children}</WorkspaceContext.Provider>;
+}
+
+function isAdminOrganizationsRoute(pathname: string) {
+  return pathname === "/admin/organizations" || pathname.startsWith("/admin/organizations/");
 }
 
 export function useWorkspaceContext() {

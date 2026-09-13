@@ -79,6 +79,7 @@ function AppShellLayout() {
 }
 
 function NavigationDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const auth = useAuth();
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     if (open && !dialog.current?.open) dialog.current?.showModal();
@@ -92,6 +93,7 @@ function NavigationDialog({ open, onClose }: { open: boolean; onClose: () => voi
         <h3 className="console-nav-heading">{section.label}</h3>
         {section.items.map(item => <NavLink key={item.to} to={item.to} end={item.end} onClick={onClose} className={({ isActive }) => "console-nav-link " + (isActive ? "is-active" : "")}><item.icon aria-hidden size={16} /><span>{item.label}</span></NavLink>)}
       </div>)}
+      {auth.session?.isAdmin ? <div className="console-nav-group"><h3 className="console-nav-heading">Administration</h3><NavLink to="/admin/organizations" onClick={onClose} className={({ isActive }) => "console-nav-link " + (isActive ? "is-active" : "")}><Aperture aria-hidden size={16} /><span>Organizations</span></NavLink></div> : null}
     </nav>
     <ApplicationBuildNumber />
   </dialog>;

@@ -17,6 +17,7 @@ public static class CustomerAuthEndpoints
             IWorkspaceIdentityReader workspaceIdentityReader,
             IConfiguration configuration) =>
         {
+            var customerSession = await context.AuthenticateAsync(CustomerAuthenticationDefaults.CookieScheme);
             var identity = await workspaceIdentityReader.ReadAsync(context);
             var trustedHeadersEnabled = configuration.GetValue<bool>(TrustedHeaderWorkspaceIdentityReader.EnabledConfigurationKey);
             var loginEnabled = options.Value.IsCustomerLoginConfigured || trustedHeadersEnabled;
@@ -26,7 +27,9 @@ public static class CustomerAuthEndpoints
                 identity?.DisplayName,
                 identity?.Email,
                 CustomerAuthenticationDefaults.LoginPath,
-                CustomerAuthenticationDefaults.LogoutPath));
+                CustomerAuthenticationDefaults.LogoutPath,
+                customerSession.Succeeded && customerSession.Principal is not null &&
+                AdminAuthorization.HasControlAdminRole(customerSession.Principal)));
         }).AllowAnonymous();
 
         group.MapGet("/login", async (
@@ -111,4 +114,5 @@ public sealed record CustomerAuthSessionResponse(
     string? DisplayName,
     string? Email,
     string LoginPath,
-    string LogoutPath);
+    string LogoutPath,
+    bool IsAdmin);

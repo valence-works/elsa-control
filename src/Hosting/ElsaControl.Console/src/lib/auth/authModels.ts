@@ -5,4 +5,5 @@ export type CustomerAuthSession = {
   email: string | null;
   loginPath: string;
   logoutPath: string;
+  isAdmin?: boolean;
 };

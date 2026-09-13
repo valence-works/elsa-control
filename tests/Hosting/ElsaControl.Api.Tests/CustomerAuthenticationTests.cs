@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Claims;
 using ElsaControl.Api.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
@@ -30,6 +31,30 @@ public sealed class CustomerAuthenticationTests : IClassFixture<DefaultControlAp
         Assert.False(response.Authenticated);
         Assert.Equal(CustomerAuthenticationDefaults.LoginPath, response.LoginPath);
         Assert.Equal(CustomerAuthenticationDefaults.LogoutPath, response.LogoutPath);
+    }
+
+    [Fact]
+    public async Task Session_reports_control_admin_cookie_as_admin()
+    {
+        var client = _app.CreateClient();
+        _app.AddControlSessionCookie(client, new Claim("role", AdminAuthorization.ControlAdminRole));
+
+        var response = await client.GetControlJsonAsync<CustomerAuthSessionResponse>(CustomerAuthenticationDefaults.SessionPath);
+
+        Assert.True(response!.Authenticated);
+        Assert.True(response.IsAdmin);
+    }
+
+    [Fact]
+    public async Task Session_reports_ordinary_customer_cookie_as_non_admin()
+    {
+        var client = _app.CreateClient();
+        _app.AddControlSessionCookie(client, new Claim("role", "customer"));
+
+        var response = await client.GetControlJsonAsync<CustomerAuthSessionResponse>(CustomerAuthenticationDefaults.SessionPath);
+
+        Assert.True(response!.Authenticated);
+        Assert.False(response.IsAdmin);
     }
 
     [Fact]
