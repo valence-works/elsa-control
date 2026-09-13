@@ -123,6 +123,37 @@ internal sealed class AzureProviderResourceAssignmentEntity
     public DateTimeOffset UpdatedAt { get; set; }
     public DateTimeOffset? DeletedAt { get; set; }
     public List<AzureProviderOperationEntity> Operations { get; set; } = [];
+    public List<AzureProviderAssignmentRebindEntity> Rebinds { get; set; } = [];
+}
+
+/// <summary>
+/// Append-only audit of a placement-stable provider-scope rebind. Only fingerprints
+/// and the trigger identity are retained; secrets and provider payloads are not
+/// representable.
+/// </summary>
+internal sealed class AzureProviderAssignmentRebindEntity
+{
+    public Guid Id { get; set; }
+    public Guid AssignmentId { get; set; }
+    public AzureProviderResourceAssignmentEntity? Assignment { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public Guid InstanceId { get; set; }
+    public string FromProviderScopeFingerprint { get; set; } = "";
+    public string ToProviderScopeFingerprint { get; set; } = "";
+    public string TriggeredBy { get; set; } = "";
+    public Guid? TriggerOperationId { get; set; }
+    public DateTimeOffset OccurredAt { get; set; }
+
+    public AzureProviderAssignmentRebindRecord ToRecord() => new(
+        Id,
+        AssignmentId,
+        WorkspaceId,
+        InstanceId,
+        FromProviderScopeFingerprint,
+        ToProviderScopeFingerprint,
+        TriggeredBy,
+        TriggerOperationId,
+        OccurredAt);
 }
 
 internal sealed class AzureProviderOperationTransitionEntity

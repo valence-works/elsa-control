@@ -500,7 +500,7 @@ public sealed class AzureProviderExecutor
                     operation.Resources.StableTrafficRevisionName,
                     operation.AttemptNumber > 1,
                     operation.AttemptNumber,
-                    CreateExecutionContext(operation),
+                    CreateExecutionContext(operation, assignment),
                     assignment);
                 AzureProviderRunnerResult runnerResult;
                 try
@@ -757,7 +757,7 @@ public sealed class AzureProviderExecutor
                 operation.Resources.StableTrafficRevisionName,
                 operation.AttemptNumber > 1,
                 operation.AttemptNumber,
-                CreateExecutionContext(operation),
+                CreateExecutionContext(operation, assignment),
                 assignment);
             var run = await RunRunnerAsync(command, operation, leaseToken, cancellationToken);
             runnerResult = run.Result;
@@ -878,7 +878,7 @@ public sealed class AzureProviderExecutor
             operation.Resources.StableTrafficRevisionName,
             operation.AttemptNumber > 1,
             operation.AttemptNumber,
-            CreateExecutionContext(operation),
+            CreateExecutionContext(operation, assignment),
             assignment);
         try
         {
@@ -1287,7 +1287,9 @@ public sealed class AzureProviderExecutor
     private static IReadOnlyList<AzureProviderDiagnostic> SafeDiagnostics(IReadOnlyList<AzureProviderDiagnostic> diagnostics) =>
         AzureProviderSafeDiagnostics.Normalize(diagnostics);
 
-    private static AzureProviderExecutionContext CreateExecutionContext(AzureProviderOperation operation) => new(
+    private static AzureProviderExecutionContext CreateExecutionContext(
+        AzureProviderOperation operation,
+        AzureProviderResourceAssignment? assignment = null) => new(
         operation.WorkspaceId,
         operation.OrganizationId ?? throw new InvalidOperationException("The provider organization binding is unavailable."),
         operation.InstanceId ?? throw new InvalidOperationException("The provider instance binding is unavailable."),
@@ -1298,7 +1300,31 @@ public sealed class AzureProviderExecutor
         (operation.ProviderAssignmentId ?? throw new InvalidOperationException("The provider assignment binding is unavailable.")).ToString("D"),
         operation.PlanFingerprint,
         operation.TemplateFingerprint,
-        operation.ProviderScopeFingerprint);
+        assignment?.ProviderScopeFingerprint ?? operation.ProviderScopeFingerprint);
+
+    private async Task<bool> ScopeMatchesAssignmentAsync(
+        AzureProviderOperation operation,
+        AzureProviderResourceAssignment assignment,
+        CancellationToken cancellationToken)
+    {
+        if (string.Equals(assignment.ProviderScopeFingerprint, operation.ProviderScopeFingerprint, StringComparison.Ordinal))
+            return true;
+        if (operation.ProviderScopeFingerprint is null || _assignmentStore is null)
+            return false;
+        try
+        {
+            return await _assignmentStore.HasRebindLineageAsync(
+                operation.WorkspaceId,
+                assignment.Id,
+                operation.ProviderScopeFingerprint,
+                assignment.ProviderScopeFingerprint,
+                cancellationToken);
+        }
+        catch (NotSupportedException)
+        {
+            return false;
+        }
+    }
 
     private async Task<AzureProviderResourceAssignment?> LoadAssignmentAsync(
         AzureProviderOperation operation,
@@ -1329,7 +1355,7 @@ public sealed class AzureProviderExecutor
             assignment.WorkspaceId != operation.WorkspaceId ||
             assignment.OrganizationId != operation.OrganizationId ||
             assignment.InstanceId != operation.InstanceId ||
-            !string.Equals(assignment.ProviderScopeFingerprint, operation.ProviderScopeFingerprint, StringComparison.Ordinal) ||
+            !await ScopeMatchesAssignmentAsync(operation, assignment, cancellationToken) ||
             !string.Equals(assignment.WorkloadName, operation.TargetKey, StringComparison.OrdinalIgnoreCase) ||
             (assignment.State == AzureProviderAssignmentState.Deleted ||
              operation.Action == AzureProviderOperationAction.Delete &&

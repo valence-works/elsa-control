@@ -46,10 +46,13 @@ public sealed class AzureProviderOperationMigrationTests
         Assert.Contains("SqlWorkflowPackageVersion", columns);
         Assert.Contains("SqlQuartzPackageVersion", columns);
         Assert.Contains("AzureProviderResourceAssignments", tables);
+        Assert.Contains("AzureProviderAssignmentRebinds", tables);
         Assert.Contains("AzureProviderRecoveryObservations", tables);
         var triggers = await db.Database.SqlQueryRaw<string>("SELECT name AS Value FROM sqlite_master WHERE type = 'trigger'").ToListAsync();
         Assert.Contains("TR_AzureProviderRecoveryObservations_AppendOnly_Update", triggers);
         Assert.Contains("TR_AzureProviderRecoveryObservations_AppendOnly_Delete", triggers);
+        Assert.Contains("TR_AzureProviderAssignmentRebinds_AppendOnly_Update", triggers);
+        Assert.Contains("TR_AzureProviderAssignmentRebinds_AppendOnly_Delete", triggers);
         Assert.Contains("IX_AzureProviderOperations_ProviderAssignmentId", indexes);
         Assert.Contains("IX_AzureProviderResourceAssignments_State_UpdatedAt_Id", indexes);
         Assert.Contains("IX_AzureProviderResourceAssignments_WorkspaceId_InstanceId_ProviderScopeFingerprint", indexes);

@@ -453,7 +453,9 @@ public sealed class ManagedIdentityAzureSecretResolver : IAzureSecretResolver
             operation.InstanceId != request.InstanceId || operation.ProviderAssignmentId != assignmentId ||
             operation.Id != request.OperationId || operation.AttemptNumber != request.AttemptNumber ||
             !string.Equals(operation.TargetKey, assignment.WorkloadName, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(operation.ProviderScopeFingerprint, assignment.ProviderScopeFingerprint, StringComparison.Ordinal) ||
+            // Secret tags bind to the placement-stable assignment id. After a
+            // template-only rebind the assignment fingerprint is current while a
+            // resumed operation keeps the fingerprint it was admitted with.
             operation.Status != AzureProviderOperationStatus.Running ||
             operation.Action != AzureProviderOperationAction.Reconcile ||
             operation.Phase != AzureProviderOperationPhase.FoundationSubmitted ||

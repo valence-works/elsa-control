@@ -30,7 +30,6 @@ public static class AzureProviderDeleteRecoverySupport
             operation.Action != AzureProviderOperationAction.Delete ||
             operation.LifecycleAction != ElsaInstanceOperationAction.Delete ||
             !string.Equals(operation.TargetKey, assignment.WorkloadName, StringComparison.Ordinal) ||
-            !string.Equals(operation.ProviderScopeFingerprint, assignment.ProviderScopeFingerprint, StringComparison.Ordinal) ||
             operation.Phase != AzureProviderOperationPhase.CleanupVerified ||
             operation.AttemptedStep is not null ||
             operation.Status is not (AzureProviderOperationStatus.Running or AzureProviderOperationStatus.RecoveryRequired) ||

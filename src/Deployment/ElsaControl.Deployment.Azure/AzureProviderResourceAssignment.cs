@@ -47,7 +47,79 @@ public sealed record AzureProviderResourceAssignmentRequest(
     string ResourceGroupNamePrefix,
     string WorkloadName,
     string Location,
-    int NamingVersion = AzureProviderResourceAssignmentNaming.CurrentVersion);
+    int NamingVersion = AzureProviderResourceAssignmentNaming.CurrentVersion,
+    AzureProviderAssignmentRebindContext? Rebind = null);
+
+/// <summary>
+/// Host-owned current scope used to rebind an existing live assignment when only
+/// the template or tool fingerprint rotated and placement is unchanged.
+/// </summary>
+public sealed record AzureProviderAssignmentScopeAuthority(
+    Guid WorkspaceId,
+    Guid InstanceId,
+    string ProviderScopeFingerprint,
+    string SubscriptionId,
+    string ResourceGroupNamePrefix,
+    int NamingVersion = AzureProviderResourceAssignmentNaming.CurrentVersion,
+    AzureProviderAssignmentRebindContext? Rebind = null);
+
+/// <summary>
+/// Who or what requested a placement-stable provider-scope rebind. Only safe
+/// identifiers cross this boundary; it is not a credential or secret.
+/// </summary>
+public sealed record AzureProviderAssignmentRebindContext(
+    string TriggeredBy,
+    Guid? TriggerOperationId = null)
+{
+    public void Validate()
+    {
+        if (string.IsNullOrWhiteSpace(TriggeredBy) || TriggeredBy.Length > 64 ||
+            TriggeredBy.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '.' and not '-' and not '_'))
+            throw new ArgumentException("The Azure assignment rebind trigger is invalid.", nameof(TriggeredBy));
+        if (TriggerOperationId == Guid.Empty)
+            throw new ArgumentException("The Azure assignment rebind trigger operation is invalid.", nameof(TriggerOperationId));
+    }
+}
+
+/// <summary>
+/// Append-only audit of a governed assignment rebind. Records the old and new
+/// provider-scope fingerprints and the trigger that authorized the rotation.
+/// </summary>
+public sealed record AzureProviderAssignmentRebindRecord(
+    Guid Id,
+    Guid AssignmentId,
+    Guid WorkspaceId,
+    Guid InstanceId,
+    string FromProviderScopeFingerprint,
+    string ToProviderScopeFingerprint,
+    string TriggeredBy,
+    Guid? TriggerOperationId,
+    DateTimeOffset OccurredAt);
+
+public static class AzureProviderAssignmentRebindDiagnostics
+{
+    public const string OperationsInFlight = "assignment.rebind.operations-inflight";
+    public const string PlacementMismatch = "assignment.rebind.placement-mismatch";
+    public const string Ambiguous = "assignment.rebind.ambiguous";
+}
+
+/// <summary>
+/// Refuses a provider-scope rebind when placement changed, more than one live
+/// assignment exists, or an in-flight operation must drain first.
+/// </summary>
+public sealed class AzureProviderAssignmentRebindException : InvalidOperationException
+{
+    public AzureProviderAssignmentRebindException(string diagnosticCode, string message)
+        : base(message)
+    {
+        if (string.IsNullOrWhiteSpace(diagnosticCode) || diagnosticCode.Length > 128 ||
+            diagnosticCode.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '.' and not '-'))
+            throw new ArgumentException("The Azure assignment rebind diagnostic is invalid.", nameof(diagnosticCode));
+        DiagnosticCode = diagnosticCode;
+    }
+
+    public string DiagnosticCode { get; }
+}
 
 public interface IAzureProviderResourceAssignmentStore
 {
@@ -60,6 +132,31 @@ public interface IAzureProviderResourceAssignmentStore
         Guid workspaceId,
         Guid assignmentId,
         CancellationToken cancellationToken = default);
+
+    Task<AzureProviderResourceAssignment?> RebindToCurrentScopeAsync(
+        AzureProviderAssignmentScopeAuthority authority,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("Azure provider assignment rebind is not supported by this store.");
+
+    Task<bool> HasRebindLineageAsync(
+        Guid workspaceId,
+        Guid assignmentId,
+        string fromProviderScopeFingerprint,
+        string toProviderScopeFingerprint,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(
+            !string.IsNullOrWhiteSpace(fromProviderScopeFingerprint) &&
+            string.Equals(
+                fromProviderScopeFingerprint.Trim(),
+                toProviderScopeFingerprint?.Trim(),
+                StringComparison.OrdinalIgnoreCase));
+
+    Task<IReadOnlyList<AzureProviderAssignmentRebindRecord>> ListRebindsAsync(
+        Guid workspaceId,
+        Guid assignmentId,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<AzureProviderAssignmentRebindRecord>>([]);
 }
 
 public static class AzureProviderResourceAssignmentNaming

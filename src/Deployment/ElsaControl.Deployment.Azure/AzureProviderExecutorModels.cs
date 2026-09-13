@@ -185,14 +185,16 @@ public sealed record AzureProviderRecoveryRequest(
         {
             throw new InvalidOperationException("The Azure recovery operation is not bound to its retained plan.");
         }
+        // After a placement-stable rebind the assignment fingerprint is the current
+        // runner scope. The retained operation keeps the fingerprint it was admitted
+        // with; lineage is verified by the caller, not this identity check.
         if (Assignment is { } assignment &&
             (assignment.Id != Operation.ProviderAssignmentId ||
              assignment.OrganizationId != Operation.OrganizationId ||
              assignment.WorkspaceId != Operation.WorkspaceId ||
              assignment.InstanceId != Operation.InstanceId ||
              assignment.LastOperationId != Operation.Id ||
-             !string.Equals(assignment.WorkloadName, Operation.TargetKey, StringComparison.OrdinalIgnoreCase) ||
-             !string.Equals(assignment.ProviderScopeFingerprint, Operation.ProviderScopeFingerprint, StringComparison.Ordinal)))
+             !string.Equals(assignment.WorkloadName, Operation.TargetKey, StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException("The Azure recovery assignment is not bound to its retained operation.");
         try
         {

@@ -74,6 +74,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     internal DbSet<Models.DeploymentCommandEntity> DeploymentCommands => Set<Models.DeploymentCommandEntity>();
     internal DbSet<Models.DeploymentCommandEventEntity> DeploymentCommandEvents => Set<Models.DeploymentCommandEventEntity>();
     internal DbSet<Models.AzureProviderResourceAssignmentEntity> AzureProviderResourceAssignments => Set<Models.AzureProviderResourceAssignmentEntity>();
+    internal DbSet<Models.AzureProviderAssignmentRebindEntity> AzureProviderAssignmentRebinds => Set<Models.AzureProviderAssignmentRebindEntity>();
     internal DbSet<Models.AzureProviderOperationEntity> AzureProviderOperations => Set<Models.AzureProviderOperationEntity>();
     internal DbSet<Models.AzureProviderOperationTransitionEntity> AzureProviderOperationTransitions => Set<Models.AzureProviderOperationTransitionEntity>();
     internal DbSet<Models.AzureProviderRecoveryObservationEntity> AzureProviderRecoveryObservations => Set<Models.AzureProviderRecoveryObservationEntity>();
@@ -159,6 +160,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         modelBuilder.ApplyConfiguration(new Models.DeploymentCommandConfiguration());
         modelBuilder.ApplyConfiguration(new Models.DeploymentCommandEventConfiguration());
         modelBuilder.ApplyConfiguration(new Models.AzureProviderResourceAssignmentConfiguration());
+        modelBuilder.ApplyConfiguration(new Models.AzureProviderAssignmentRebindConfiguration());
         modelBuilder.ApplyConfiguration(new Models.AzureProviderOperationConfiguration());
         modelBuilder.ApplyConfiguration(new Models.AzureProviderOperationTransitionConfiguration());
         modelBuilder.ApplyConfiguration(new Models.AzureProviderRecoveryObservationConfiguration());
@@ -243,6 +245,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             EnsureWorkspacePermissionAuditIsAppendOnly();
             EnsureAzureOperationTransitionsAreAppendOnly();
             EnsureAzureProviderRecoveryObservationsAreAppendOnly();
+            EnsureAzureProviderAssignmentRebindsAreAppendOnly();
             EnsureElsaInstanceAuditIsAppendOnly();
             EnsureElsaInstanceDurableRowsAreNotDeleted();
             EnsureElsaInstanceIntentRevisionsAreAppendOnly();
@@ -636,6 +639,13 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         if (ChangeTracker.Entries<Models.AzureProviderRecoveryObservationEntity>()
             .Any(x => x.State is EntityState.Modified or EntityState.Deleted))
             throw new InvalidOperationException("Azure provider recovery observations are append-only.");
+    }
+
+    private void EnsureAzureProviderAssignmentRebindsAreAppendOnly()
+    {
+        if (ChangeTracker.Entries<Models.AzureProviderAssignmentRebindEntity>()
+            .Any(x => x.State is EntityState.Modified or EntityState.Deleted))
+            throw new InvalidOperationException("Azure provider assignment rebinds are append-only.");
     }
 
     private void ValidateAzureProviderRecoveryObservations()

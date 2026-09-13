@@ -131,7 +131,12 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                     providerOperation.OperationIdentity == authority.ProviderOperationIdentity &&
                     providerOperation.RequestHash == authority.ProviderRequestHash &&
                     providerOperation.TargetKey == authority.TargetKey &&
-                    providerOperation.ProviderScopeFingerprint == authority.ProviderScopeFingerprint &&
+                    await ScopeMatchesOrReboundAsync(
+                        request.WorkspaceId,
+                        authority.ProviderAssignmentId,
+                        authority.ProviderScopeFingerprint,
+                        providerOperation.ProviderScopeFingerprint,
+                        cancellationToken) &&
                     providerOperation.PlanFingerprint == authority.ProviderPlanFingerprint &&
                     providerOperation.TemplateFingerprint == authority.ProviderTemplateFingerprint &&
                     AzureProviderOperationValidation.IsLifecycleDeleteIdempotencyKey(
@@ -146,7 +151,12 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                     assignment.OrganizationId == recovery.OrganizationId && assignment.InstanceId == request.InstanceId &&
                     assignment.LastOperationId == authority.ProviderOperationId &&
                     string.Equals(assignment.WorkloadName, authority.TargetKey, StringComparison.OrdinalIgnoreCase) &&
-                    string.Equals(NormalizeProviderScope(assignment.ProviderScopeFingerprint), authority.ProviderScopeFingerprint, StringComparison.Ordinal) &&
+                    await ScopeMatchesOrReboundAsync(
+                        request.WorkspaceId,
+                        authority.ProviderAssignmentId,
+                        authority.ProviderScopeFingerprint,
+                        assignment.ProviderScopeFingerprint,
+                        cancellationToken) &&
                     (assignment.State != AzureProviderAssignmentState.Deleted || verifiedCleanupFinalization);
                 var competingOperation = providerOperation is not null && await db.AzureProviderOperations.AnyAsync(
                     x => x.Id != authority.ProviderOperationId && x.WorkspaceId == request.WorkspaceId &&
@@ -556,20 +566,24 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
     {
         ArgumentNullException.ThrowIfNull(request);
         ValidateAssignmentRequest(request);
+        request.Rebind?.Validate();
         try
         {
             return await db.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
             {
-                var existing = await db.AzureProviderResourceAssignments
-                    .SingleOrDefaultAsync(x => x.WorkspaceId == request.WorkspaceId &&
-                                               x.InstanceId == request.InstanceId &&
-                                               x.ProviderScopeFingerprint == request.ProviderScopeFingerprint,
-                        cancellationToken);
+                var existing = await TryGetOrRebindAssignmentAsync(
+                    request.WorkspaceId,
+                    request.InstanceId,
+                    NormalizeProviderScope(request.ProviderScopeFingerprint)!,
+                    request.SubscriptionId,
+                    request.ResourceGroupNamePrefix,
+                    request.NamingVersion,
+                    request.Rebind,
+                    now,
+                    createRequest: request,
+                    cancellationToken);
                 if (existing is not null)
-                {
-                    EnsureSameAssignment(existing, request);
                     return ToModel(existing);
-                }
 
                 var assignmentId = Guid.NewGuid();
                 var resourceGroupName = AzureProviderResourceAssignmentNaming.ResourceGroupName(
@@ -625,6 +639,69 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
         return entity is null ? null : ToModel(entity);
     }
 
+    async Task<AzureProviderResourceAssignment?> IAzureProviderResourceAssignmentStore.RebindToCurrentScopeAsync(
+        AzureProviderAssignmentScopeAuthority authority,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(authority);
+        ValidateScopeAuthority(authority);
+        authority.Rebind?.Validate();
+        return await db.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+        {
+            var entity = await TryGetOrRebindAssignmentAsync(
+                authority.WorkspaceId,
+                authority.InstanceId,
+                NormalizeProviderScope(authority.ProviderScopeFingerprint)!,
+                authority.SubscriptionId,
+                authority.ResourceGroupNamePrefix,
+                authority.NamingVersion,
+                authority.Rebind,
+                now,
+                createRequest: null,
+                cancellationToken);
+            return entity is null ? null : ToModel(entity);
+        }, cancellationToken);
+    }
+
+    async Task<bool> IAzureProviderResourceAssignmentStore.HasRebindLineageAsync(
+        Guid workspaceId,
+        Guid assignmentId,
+        string fromProviderScopeFingerprint,
+        string toProviderScopeFingerprint,
+        CancellationToken cancellationToken)
+    {
+        if (workspaceId == Guid.Empty || assignmentId == Guid.Empty)
+            throw new ArgumentException("The Azure assignment identity is invalid.");
+        var from = NormalizeProviderScope(fromProviderScopeFingerprint);
+        var to = NormalizeProviderScope(toProviderScopeFingerprint);
+        if (from is null || to is null)
+            return false;
+        if (string.Equals(from, to, StringComparison.Ordinal))
+            return true;
+
+        var edges = await db.AzureProviderAssignmentRebinds.AsNoTracking()
+            .Where(x => x.WorkspaceId == workspaceId && x.AssignmentId == assignmentId)
+            .Select(x => new { x.FromProviderScopeFingerprint, x.ToProviderScopeFingerprint })
+            .ToListAsync(cancellationToken);
+        return HasRebindPath(edges.Select(x => (x.FromProviderScopeFingerprint, x.ToProviderScopeFingerprint)), from, to);
+    }
+
+    async Task<IReadOnlyList<AzureProviderAssignmentRebindRecord>> IAzureProviderResourceAssignmentStore.ListRebindsAsync(
+        Guid workspaceId,
+        Guid assignmentId,
+        CancellationToken cancellationToken)
+    {
+        if (workspaceId == Guid.Empty || assignmentId == Guid.Empty)
+            throw new ArgumentException("The Azure assignment identity is invalid.");
+        var records = await db.AzureProviderAssignmentRebinds.AsNoTracking()
+            .Where(x => x.WorkspaceId == workspaceId && x.AssignmentId == assignmentId)
+            .OrderBy(x => x.OccurredAt)
+            .ThenBy(x => x.Id)
+            .ToListAsync(cancellationToken);
+        return records.Select(x => x.ToRecord()).ToArray();
+    }
+
     public async Task<IReadOnlyList<AzureProviderOperation>> ListRunnableAsync(
         DateTimeOffset now,
         int limit,
@@ -664,14 +741,12 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
 
         var normalizedTargetKey = targetKey.Trim().ToLowerInvariant();
         var normalizedProviderScopeFingerprint = providerScopeFingerprint?.Trim().ToLowerInvariant();
-        var entity = await db.AzureProviderOperations.AsNoTracking()
-            .Where(x => x.WorkspaceId == workspaceId && x.TargetKey == normalizedTargetKey &&
-                        x.ProviderScopeFingerprint == normalizedProviderScopeFingerprint &&
-                        x.Action == AzureProviderOperationAction.Reconcile)
-            .OrderByDescending(x => x.UpdatedAt)
-            .ThenByDescending(x => x.CreatedAt)
-            .ThenByDescending(x => x.Id)
-            .FirstOrDefaultAsync(cancellationToken);
+        var entity = await FindLatestReconcileEntityAsync(
+            workspaceId,
+            normalizedTargetKey,
+            normalizedProviderScopeFingerprint,
+            activeOnly: false,
+            cancellationToken);
         return entity is null ? null : ToModel(entity);
     }
 
@@ -690,16 +765,12 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
 
         var normalizedTargetKey = targetKey.Trim().ToLowerInvariant();
         var normalizedProviderScopeFingerprint = providerScopeFingerprint?.Trim().ToLowerInvariant();
-        var entity = await db.AzureProviderOperations.AsNoTracking()
-            .Where(x => x.WorkspaceId == workspaceId && x.TargetKey == normalizedTargetKey &&
-                        x.ProviderScopeFingerprint == normalizedProviderScopeFingerprint &&
-                        x.Action == AzureProviderOperationAction.Reconcile &&
-                        (x.Status == AzureProviderOperationStatus.Running ||
-                         x.Status == AzureProviderOperationStatus.RecoveryRequired))
-            .OrderByDescending(x => x.UpdatedAt)
-            .ThenByDescending(x => x.CreatedAt)
-            .ThenByDescending(x => x.Id)
-            .FirstOrDefaultAsync(cancellationToken);
+        var entity = await FindLatestReconcileEntityAsync(
+            workspaceId,
+            normalizedTargetKey,
+            normalizedProviderScopeFingerprint,
+            activeOnly: true,
+            cancellationToken);
         return entity is null ? null : ToModel(entity);
     }
 
@@ -1138,8 +1209,13 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
         if (assignment is null || assignment.OrganizationId != observation.OrganizationId ||
             assignment.InstanceId != observation.InstanceId ||
             assignment.LastOperationId != observation.ProviderOperationId ||
-            !string.Equals(assignment.ProviderScopeFingerprint, observation.ProviderScopeFingerprint, StringComparison.Ordinal) ||
-            !string.Equals(assignment.WorkloadName, observation.TargetKey, StringComparison.OrdinalIgnoreCase))
+            !string.Equals(assignment.WorkloadName, observation.TargetKey, StringComparison.OrdinalIgnoreCase) ||
+            !await ScopeMatchesOrReboundAsync(
+                observation.WorkspaceId,
+                observation.ProviderAssignmentId,
+                observation.ProviderScopeFingerprint ?? "",
+                assignment.ProviderScopeFingerprint,
+                cancellationToken))
             throw new InvalidOperationException("Recovery observation is not bound to the retained provider assignment.");
     }
 
@@ -1472,6 +1548,257 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
             throw new ArgumentException("The Azure provider assignment request is invalid.", nameof(request));
         _ = AzureProviderResourceAssignmentNaming.ResourceGroupName(
             request.ResourceGroupNamePrefix, request.InstanceId, request.NamingVersion);
+    }
+
+    private static void ValidateScopeAuthority(AzureProviderAssignmentScopeAuthority authority)
+    {
+        if (authority.WorkspaceId == Guid.Empty || authority.InstanceId == Guid.Empty ||
+            authority.ProviderScopeFingerprint is not { Length: 64 } || !authority.ProviderScopeFingerprint.All(char.IsAsciiHexDigit) ||
+            !Guid.TryParseExact(authority.SubscriptionId, "D", out _))
+            throw new ArgumentException("The Azure provider assignment scope authority is invalid.", nameof(authority));
+        _ = AzureProviderResourceAssignmentNaming.ResourceGroupName(
+            authority.ResourceGroupNamePrefix, authority.InstanceId, authority.NamingVersion);
+    }
+
+    private async Task<AzureProviderResourceAssignmentEntity?> TryGetOrRebindAssignmentAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        string providerScopeFingerprint,
+        string subscriptionId,
+        string resourceGroupNamePrefix,
+        int namingVersion,
+        AzureProviderAssignmentRebindContext? rebind,
+        DateTimeOffset now,
+        AzureProviderResourceAssignmentRequest? createRequest,
+        CancellationToken cancellationToken)
+    {
+        var expectedGroup = AzureProviderResourceAssignmentNaming.ResourceGroupName(
+            resourceGroupNamePrefix, instanceId, namingVersion);
+        var live = await db.AzureProviderResourceAssignments
+            .Where(x => x.WorkspaceId == workspaceId &&
+                        x.InstanceId == instanceId &&
+                        x.State != AzureProviderAssignmentState.Deleted)
+            .ToListAsync(cancellationToken);
+        if (live.Count == 0)
+            return null;
+        if (live.Count > 1)
+            throw new AzureProviderAssignmentRebindException(
+                AzureProviderAssignmentRebindDiagnostics.Ambiguous,
+                "More than one live Azure provider assignment exists for this instance.");
+
+        var existing = live[0];
+        if (string.Equals(
+                NormalizeProviderScope(existing.ProviderScopeFingerprint),
+                providerScopeFingerprint,
+                StringComparison.Ordinal))
+        {
+            if (createRequest is not null)
+                EnsureSameAssignment(existing, createRequest);
+            else
+                EnsurePlacementMatches(existing, subscriptionId, expectedGroup, namingVersion);
+            return existing;
+        }
+
+        if (!IsPlacementStable(existing, subscriptionId, expectedGroup, namingVersion, createRequest))
+            throw new AzureProviderAssignmentRebindException(
+                AzureProviderAssignmentRebindDiagnostics.PlacementMismatch,
+                "The Azure provider assignment cannot be rebound across a placement change.");
+
+        if (!ResourcesStayInPlacement(existing))
+            throw new AzureProviderAssignmentRebindException(
+                AzureProviderAssignmentRebindDiagnostics.PlacementMismatch,
+                "The Azure provider assignment cannot be rebound because its resources left the reserved placement.");
+
+        var inFlight = await db.AzureProviderOperations.AnyAsync(
+            x => x.ProviderAssignmentId == existing.Id &&
+                 (x.Status == AzureProviderOperationStatus.Accepted ||
+                  x.Status == AzureProviderOperationStatus.Queued ||
+                  x.Status == AzureProviderOperationStatus.EntitlementHeld ||
+                  x.Status == AzureProviderOperationStatus.Running),
+            cancellationToken);
+        if (inFlight)
+            throw new AzureProviderAssignmentRebindException(
+                AzureProviderAssignmentRebindDiagnostics.OperationsInFlight,
+                "The Azure provider assignment cannot be rebound until in-flight operations drain.");
+
+        var fromFingerprint = NormalizeProviderScope(existing.ProviderScopeFingerprint)!;
+        existing.ProviderScopeFingerprint = providerScopeFingerprint;
+        existing.OwnershipKey = AzureProviderResourceAssignmentNaming.OwnershipKey(
+            existing.Id, existing.InstanceId, providerScopeFingerprint);
+        existing.UpdatedAt = now;
+        existing.Version++;
+
+        var trigger = rebind ?? new AzureProviderAssignmentRebindContext("azure-provider-assignment-store");
+        trigger.Validate();
+        db.AzureProviderAssignmentRebinds.Add(new AzureProviderAssignmentRebindEntity
+        {
+            Id = Guid.NewGuid(),
+            AssignmentId = existing.Id,
+            WorkspaceId = existing.WorkspaceId,
+            InstanceId = existing.InstanceId,
+            FromProviderScopeFingerprint = fromFingerprint,
+            ToProviderScopeFingerprint = providerScopeFingerprint,
+            TriggeredBy = trigger.TriggeredBy,
+            TriggerOperationId = trigger.TriggerOperationId,
+            OccurredAt = now.ToUniversalTime()
+        });
+        await db.SaveChangesAsync(cancellationToken);
+        return existing;
+    }
+
+    private static bool IsPlacementStable(
+        AzureProviderResourceAssignmentEntity existing,
+        string subscriptionId,
+        string expectedGroup,
+        int namingVersion,
+        AzureProviderResourceAssignmentRequest? createRequest)
+    {
+        if (existing.State == AzureProviderAssignmentState.Deleted ||
+            existing.NamingVersion != namingVersion ||
+            !string.Equals(existing.SubscriptionId, subscriptionId, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(existing.ResourceGroupName, expectedGroup, StringComparison.Ordinal))
+            return false;
+        if (createRequest is null)
+            return true;
+        return existing.OrganizationId == createRequest.OrganizationId &&
+               string.Equals(existing.WorkloadName, createRequest.WorkloadName, StringComparison.OrdinalIgnoreCase) &&
+               string.Equals(existing.Location, createRequest.Location, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void EnsurePlacementMatches(
+        AzureProviderResourceAssignmentEntity existing,
+        string subscriptionId,
+        string expectedGroup,
+        int namingVersion)
+    {
+        if (!IsPlacementStable(existing, subscriptionId, expectedGroup, namingVersion, createRequest: null))
+            throw new AzureProviderAssignmentRebindException(
+                AzureProviderAssignmentRebindDiagnostics.PlacementMismatch,
+                "The Azure provider assignment cannot be rebound across a placement change.");
+    }
+
+    private static bool ResourcesStayInPlacement(AzureProviderResourceAssignmentEntity assignment)
+    {
+        var prefix = $"/subscriptions/{assignment.SubscriptionId}/resourceGroups/{assignment.ResourceGroupName}/";
+        foreach (var resourceId in new[]
+                 {
+                     assignment.FoundationDeploymentId,
+                     assignment.WorkloadDeploymentId,
+                     assignment.WorkloadResourceId,
+                     assignment.WorkloadIdentityResourceId,
+                     assignment.KeyVaultResourceId,
+                     assignment.SqlServerResourceId,
+                     assignment.ContainerAppsEnvironmentResourceId
+                 })
+        {
+            if (string.IsNullOrWhiteSpace(resourceId))
+                continue;
+            if (!resourceId.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+
+        return true;
+    }
+
+    private async Task<AzureProviderOperationEntity?> FindLatestReconcileEntityAsync(
+        Guid workspaceId,
+        string normalizedTargetKey,
+        string? normalizedProviderScopeFingerprint,
+        bool activeOnly,
+        CancellationToken cancellationToken)
+    {
+        var candidates = await db.AzureProviderOperations.AsNoTracking()
+            .Where(x => x.WorkspaceId == workspaceId && x.TargetKey == normalizedTargetKey &&
+                        x.Action == AzureProviderOperationAction.Reconcile &&
+                        (!activeOnly ||
+                         x.Status == AzureProviderOperationStatus.Running ||
+                         x.Status == AzureProviderOperationStatus.RecoveryRequired) &&
+                        (x.ProviderScopeFingerprint == normalizedProviderScopeFingerprint ||
+                         x.ProviderAssignmentId != null &&
+                         db.AzureProviderResourceAssignments.Any(assignment =>
+                             assignment.Id == x.ProviderAssignmentId &&
+                             assignment.WorkspaceId == workspaceId &&
+                             assignment.ProviderScopeFingerprint == normalizedProviderScopeFingerprint)))
+            .OrderByDescending(x => x.UpdatedAt)
+            .ThenByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
+            .Take(32)
+            .ToListAsync(cancellationToken);
+
+        foreach (var candidate in candidates)
+        {
+            if (string.Equals(candidate.ProviderScopeFingerprint, normalizedProviderScopeFingerprint, StringComparison.Ordinal))
+                return candidate;
+            if (candidate.ProviderAssignmentId is { } assignmentId &&
+                await ScopeMatchesOrReboundAsync(
+                    workspaceId,
+                    assignmentId,
+                    candidate.ProviderScopeFingerprint ?? "",
+                    normalizedProviderScopeFingerprint,
+                    cancellationToken))
+                return candidate;
+        }
+
+        return null;
+    }
+
+    private async Task<bool> ScopeMatchesOrReboundAsync(
+        Guid workspaceId,
+        Guid assignmentId,
+        string capturedFingerprint,
+        string? currentFingerprint,
+        CancellationToken cancellationToken)
+    {
+        var captured = NormalizeProviderScope(capturedFingerprint);
+        var current = NormalizeProviderScope(currentFingerprint);
+        if (captured is null || current is null)
+            return false;
+        if (string.Equals(captured, current, StringComparison.Ordinal))
+            return true;
+
+        var edges = await db.AzureProviderAssignmentRebinds
+            .Where(x => x.WorkspaceId == workspaceId && x.AssignmentId == assignmentId)
+            .Select(x => new { x.FromProviderScopeFingerprint, x.ToProviderScopeFingerprint })
+            .ToListAsync(cancellationToken);
+        return HasRebindPath(edges.Select(x => (x.FromProviderScopeFingerprint, x.ToProviderScopeFingerprint)), captured, current);
+    }
+
+    private static bool HasRebindPath(
+        IEnumerable<(string From, string To)> edges,
+        string from,
+        string to)
+    {
+        var adjacency = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var (source, target) in edges)
+        {
+            if (string.IsNullOrWhiteSpace(source) || string.IsNullOrWhiteSpace(target))
+                continue;
+            if (!adjacency.TryGetValue(source, out var targets))
+            {
+                targets = [];
+                adjacency[source] = targets;
+            }
+            targets.Add(target);
+        }
+
+        var seen = new HashSet<string>(StringComparer.Ordinal) { from };
+        var pending = new Queue<string>();
+        pending.Enqueue(from);
+        while (pending.Count > 0)
+        {
+            var current = pending.Dequeue();
+            if (string.Equals(current, to, StringComparison.Ordinal))
+                return true;
+            if (!adjacency.TryGetValue(current, out var targets))
+                continue;
+            foreach (var next in targets)
+            {
+                if (seen.Add(next))
+                    pending.Enqueue(next);
+            }
+        }
+
+        return false;
     }
 
     private static void EnsureSameAssignment(

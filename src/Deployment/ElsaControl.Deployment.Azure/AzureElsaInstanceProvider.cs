@@ -60,7 +60,8 @@ public sealed class AzureElsaInstanceProvider(
                     _options.ResourceGroupNamePrefix,
                     target.WorkloadName,
                     location,
-                    _options.ResourceGroupNamingVersion),
+                    _options.ResourceGroupNamingVersion,
+                    new AzureProviderAssignmentRebindContext("lifecycle-submit", request.OperationId)),
                 _timeProvider.GetUtcNow(),
                 cancellationToken);
             submission = new(
@@ -115,6 +116,18 @@ public sealed class AzureElsaInstanceProvider(
             throw new ArgumentException("Provider reconciliation request identity is invalid.", nameof(request));
         EnsureEnabled();
 
+        try
+        {
+            await EnsureCurrentScopeAsync(
+                request.WorkspaceId, request.InstanceId, "lifecycle-observe", request.OperationId, cancellationToken);
+        }
+        catch (AzureProviderAssignmentRebindException exception)
+        {
+            return new(ElsaInstanceProviderObservationKind.Unknown, ElsaObservedLifecycle.Unknown,
+                ElsaInstanceProviderHealthGate.Unknown, request.OperationId, request.AttemptNumber,
+                exception.DiagnosticCode);
+        }
+
         var operation = await operationStore.GetLatestReconcileAsync(
             request.WorkspaceId,
             WorkloadName(request.InstanceId),
@@ -133,7 +146,8 @@ public sealed class AzureElsaInstanceProvider(
             operation.Action != AzureProviderOperationAction.Reconcile ||
             !string.Equals(operation.IdempotencyKey, IdempotencyKey(request.OperationId), StringComparison.Ordinal) ||
             operation.InstanceId is { } boundInstanceId && boundInstanceId != request.InstanceId ||
-            !string.Equals(operation.ProviderScopeFingerprint, NormalizeScope(_options.ProviderScopeFingerprint), StringComparison.Ordinal))
+            !await ScopeIsCurrentAsync(
+                request.WorkspaceId, operation.ProviderAssignmentId, operation.ProviderScopeFingerprint, cancellationToken))
             return CorrelationMismatch(request);
 
         var correlation = operation.OperationIdentity;
@@ -281,6 +295,18 @@ public sealed class AzureElsaInstanceProvider(
             !Guid.TryParseExact(assignmentText, "D", out var assignmentId))
             return RecoveryRejected("azure.recovery.assignment-invalid");
 
+        try
+        {
+            await EnsureCurrentScopeAsync(
+                submission.WorkspaceId, submission.InstanceId, "lifecycle-recover", submission.OperationId, cancellationToken);
+        }
+        catch (AzureProviderAssignmentRebindException exception)
+        {
+            return exception.DiagnosticCode == AzureProviderAssignmentRebindDiagnostics.OperationsInFlight
+                ? RecoveryRequired(exception.DiagnosticCode)
+                : RecoveryRejected(exception.DiagnosticCode);
+        }
+
         // This durable lookup happens before any Azure observation. Every tuple is checked
         // against the lifecycle request so stale or cross-scope input cannot probe Azure.
         var operation = await operationStore.GetLatestReconcileAsync(
@@ -298,7 +324,8 @@ public sealed class AzureElsaInstanceProvider(
             operation.InstanceId != submission.InstanceId ||
             operation.LifecycleAction != submission.OperationAction ||
             operation.ProviderAssignmentId != assignmentId ||
-            !string.Equals(operation.ProviderScopeFingerprint, NormalizeScope(_options.ProviderScopeFingerprint), StringComparison.Ordinal))
+            !await ScopeIsCurrentAsync(
+                submission.WorkspaceId, operation.ProviderAssignmentId, operation.ProviderScopeFingerprint, cancellationToken))
             return RecoveryRejected("azure.recovery.identity-mismatch");
 
         // Recovery never resolves the current catalog intent. It may only use the exact
@@ -370,7 +397,8 @@ public sealed class AzureElsaInstanceProvider(
             recordedObservation = null;
         }
         if (recordedObservation is null ||
-            !IsRecordedObservationAuthoritative(recordedObservation, operation, assignmentId, submission, isReplay))
+            !IsRecordedObservationAuthoritative(recordedObservation, operation, assignmentId, submission, isReplay) ||
+            !await ObservationScopeIsAuthoritativeAsync(recordedObservation, operation, assignmentId, cancellationToken))
             return isReplay
                 ? RecoveryRejected("azure.recovery.observation-invalid")
                 : RecoveryRequired("azure.recovery.observation-invalid");
@@ -459,7 +487,6 @@ public sealed class AzureElsaInstanceProvider(
                      observation.ProviderCheckpointSequence == operation.CheckpointSequence) &&
                observation.ProviderAssignmentId == assignmentId &&
                string.Equals(observation.TargetKey, operation.TargetKey, StringComparison.OrdinalIgnoreCase) &&
-               string.Equals(observation.ProviderScopeFingerprint, operation.ProviderScopeFingerprint, StringComparison.Ordinal) &&
                string.Equals(observation.ProviderPlanFingerprint, operation.PlanFingerprint, StringComparison.Ordinal) &&
                string.Equals(observation.ProviderTemplateFingerprint, operation.TemplateFingerprint, StringComparison.Ordinal) &&
                (isReplay || AzureProviderRecoveryObservationSupport.IsCompatibleBoundary(
@@ -477,6 +504,21 @@ public sealed class AzureElsaInstanceProvider(
         if (request.PlacementAssignment is null ||
             !Guid.TryParseExact(request.PlacementAssignment.AssignmentId, "D", out var assignmentId))
             return CleanupUnknown(request, "deletion.provider-assignment-unavailable");
+
+        try
+        {
+            await EnsureCurrentScopeAsync(
+                request.WorkspaceId, request.InstanceId, "lifecycle-cleanup", request.OperationId, cancellationToken);
+        }
+        catch (AzureProviderAssignmentRebindException exception)
+        {
+            return CleanupUnknown(
+                request,
+                exception.DiagnosticCode,
+                exception.DiagnosticCode == AzureProviderAssignmentRebindDiagnostics.OperationsInFlight
+                    ? ElsaInstanceCleanupObservationKind.InProgress
+                    : ElsaInstanceCleanupObservationKind.Ambiguous);
+        }
 
         var assignment = await assignmentStore.GetAsync(request.WorkspaceId, assignmentId, cancellationToken);
         if (assignment is null ||
@@ -498,7 +540,7 @@ public sealed class AzureElsaInstanceProvider(
             // The assignment retains its immutable group name after deletion; only
             // live resource inventory is cleared by the durable store.
             return completed is not null && assignment.Resources == new AzureProviderResourceReferences(assignment.ResourceGroupName)
-                ? ObserveCleanup(request, assignment, completed)
+                ? await ObserveCleanupAsync(request, assignment, completed, cancellationToken)
                 : CleanupUnknown(request, "deletion.provider-evidence-unavailable");
         }
 
@@ -514,7 +556,8 @@ public sealed class AzureElsaInstanceProvider(
             reconcile.Action != AzureProviderOperationAction.Reconcile ||
             reconcile.ProviderAssignmentId != assignment.Id ||
             !string.Equals(reconcile.TargetKey, WorkloadName(request.InstanceId), StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(reconcile.ProviderScopeFingerprint, NormalizeScope(_options.ProviderScopeFingerprint), StringComparison.Ordinal) ||
+            !await ScopeIsCurrentAsync(
+                request.WorkspaceId, reconcile.ProviderAssignmentId, reconcile.ProviderScopeFingerprint, cancellationToken) ||
             AzureProviderOperationService.TryRestorePlan(reconcile) is not { } plan)
             return CleanupUnknown(request, "deletion.provider-plan-unavailable");
 
@@ -543,13 +586,14 @@ public sealed class AzureElsaInstanceProvider(
             return CleanupUnknown(request, "deletion.provider-unavailable");
         }
 
-        return ObserveCleanup(request, assignment, operation);
+        return await ObserveCleanupAsync(request, assignment, operation, cancellationToken);
     }
 
-    private ElsaInstanceCleanupObservation ObserveCleanup(
+    private async Task<ElsaInstanceCleanupObservation> ObserveCleanupAsync(
         ElsaInstanceCleanupRequest request,
         AzureProviderResourceAssignment assignment,
-        AzureProviderOperation observed)
+        AzureProviderOperation observed,
+        CancellationToken cancellationToken)
     {
         if (observed.WorkspaceId != request.WorkspaceId ||
             observed.InstanceId != request.InstanceId ||
@@ -559,7 +603,8 @@ public sealed class AzureElsaInstanceProvider(
             observed.LifecycleAction != ElsaInstanceOperationAction.Delete ||
             !AzureProviderOperationValidation.IsLifecycleDeleteIdempotencyKey(observed.IdempotencyKey, request.OperationId) ||
             !string.Equals(observed.TargetKey, WorkloadName(request.InstanceId), StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(observed.ProviderScopeFingerprint, NormalizeScope(_options.ProviderScopeFingerprint), StringComparison.Ordinal))
+            !await ScopeIsCurrentAsync(
+                request.WorkspaceId, observed.ProviderAssignmentId, observed.ProviderScopeFingerprint, cancellationToken))
             return CleanupUnknown(request, "deletion.provider-correlation-invalid", ElsaInstanceCleanupObservationKind.Ambiguous);
 
         var cleanupInventoryCleared =
@@ -604,6 +649,25 @@ public sealed class AzureElsaInstanceProvider(
 
         if (_executor is null || operationStore is not IAzureProviderDeleteRecoveryStore recoveryStore)
             return CleanupUnknown(request.Cleanup, "deletion.recovery.capability-unavailable", ElsaInstanceCleanupObservationKind.Unavailable);
+
+        try
+        {
+            await EnsureCurrentScopeAsync(
+                request.Cleanup.WorkspaceId,
+                request.Cleanup.InstanceId,
+                "lifecycle-delete-recover",
+                request.Cleanup.OperationId,
+                cancellationToken);
+        }
+        catch (AzureProviderAssignmentRebindException exception)
+        {
+            return CleanupUnknown(
+                request.Cleanup,
+                exception.DiagnosticCode,
+                exception.DiagnosticCode == AzureProviderAssignmentRebindDiagnostics.OperationsInFlight
+                    ? ElsaInstanceCleanupObservationKind.InProgress
+                    : ElsaInstanceCleanupObservationKind.Ambiguous);
+        }
 
         var authority = await recoveryStore.GetDeleteRecoveryAuthorityAsync(
             request.Cleanup.WorkspaceId,
@@ -656,7 +720,7 @@ public sealed class AzureElsaInstanceProvider(
             (assignment!.State != AzureProviderAssignmentState.Deleted ||
              assignment.Resources != new AzureProviderResourceReferences(assignment.ResourceGroupName)))
             return CleanupUnknown(request.Cleanup, "deletion.recovery.assignment-incomplete");
-        return ObserveCleanup(request.Cleanup, assignment!, result.Operation);
+        return await ObserveCleanupAsync(request.Cleanup, assignment!, result.Operation, cancellationToken);
 
         bool IsAssignmentBound(AzureProviderResourceAssignment? candidate) =>
             candidate is not null && candidate.Id == authority.ProviderAssignmentId &&
@@ -666,6 +730,80 @@ public sealed class AzureElsaInstanceProvider(
             candidate.LastOperationId == authority.ProviderOperationId &&
             string.Equals(candidate.WorkloadName, WorkloadName(request.Cleanup.InstanceId), StringComparison.OrdinalIgnoreCase) &&
             string.Equals(candidate.ProviderScopeFingerprint, NormalizeScope(_options.ProviderScopeFingerprint), StringComparison.Ordinal);
+    }
+
+    private async Task<AzureProviderResourceAssignment?> EnsureCurrentScopeAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        string triggeredBy,
+        Guid triggerOperationId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await assignmentStore.RebindToCurrentScopeAsync(
+                new(
+                    workspaceId,
+                    instanceId,
+                    _options.ProviderScopeFingerprint!,
+                    _options.SubscriptionId,
+                    _options.ResourceGroupNamePrefix,
+                    _options.ResourceGroupNamingVersion,
+                    new AzureProviderAssignmentRebindContext(triggeredBy, triggerOperationId)),
+                _timeProvider.GetUtcNow(),
+                cancellationToken);
+        }
+        catch (NotSupportedException)
+        {
+            return null;
+        }
+    }
+
+    private async Task<bool> ScopeIsCurrentAsync(
+        Guid workspaceId,
+        Guid? assignmentId,
+        string? persistedFingerprint,
+        CancellationToken cancellationToken)
+    {
+        var current = NormalizeScope(_options.ProviderScopeFingerprint);
+        if (string.Equals(persistedFingerprint, current, StringComparison.Ordinal))
+            return true;
+        if (assignmentId is not { } id || string.IsNullOrWhiteSpace(persistedFingerprint) || current is null)
+            return false;
+        try
+        {
+            return await assignmentStore.HasRebindLineageAsync(
+                workspaceId, id, persistedFingerprint, current, cancellationToken);
+        }
+        catch (NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    private async Task<bool> ObservationScopeIsAuthoritativeAsync(
+        AzureProviderRecoveryObservationRecord observation,
+        AzureProviderOperation operation,
+        Guid assignmentId,
+        CancellationToken cancellationToken)
+    {
+        if (string.Equals(observation.ProviderScopeFingerprint, operation.ProviderScopeFingerprint, StringComparison.Ordinal))
+            return true;
+        if (observation.ProviderScopeFingerprint is null || operation.ProviderScopeFingerprint is null)
+            return false;
+        try
+        {
+            return await assignmentStore.HasRebindLineageAsync(
+                observation.WorkspaceId,
+                assignmentId,
+                observation.ProviderScopeFingerprint,
+                operation.ProviderScopeFingerprint,
+                cancellationToken);
+        }
+        catch (NotSupportedException)
+        {
+            return false;
+        }
     }
 
     private void EnsureEnabled()
