@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { CheckCircle2, ExternalLink, LoaderCircle, RefreshCw, ShieldAlert, TriangleAlert } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 import { Badge, Button, EmptyState, SecondaryButton, Table } from "@/components/ui";
 import { RequestStateView } from "@/components/states/RequestStateViews";
 import { useWorkspaceContext } from "@/app/WorkspaceContextProvider";
@@ -14,7 +14,6 @@ import { ManagedElsaCreatePanel } from "@/features/managed-elsa/ManagedElsaCreat
 
 export function ManagedElsaInstancesPage() {
   const { selectedWorkspaceId, isLoading: workspaceLoading } = useWorkspaceContext();
-  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const handoffContinuation = useMemo(
     () => parseHandoffContinuation(searchParams),
@@ -46,10 +45,9 @@ export function ManagedElsaInstancesPage() {
     if (handledContinuation.current === handoffContinuation.key)
       return;
     handledContinuation.current = handoffContinuation.key;
-    // Remove the safe continuation values from the address bar before doing
-    // any follow-up work. The runtime still has the verifier in its protected
-    // correlation state; no handoff secret is carried by this URL.
-    navigate("/admin/runtimes", { replace: true });
+    // History was already scrubbed in layout. Do not navigate to /admin/runtimes
+    // here: that remounts the console list and is the bounce that leaves Open on
+    // the SPA instead of posting code+state to the runtime callback.
 
     const instance = instances.data.items.find((item) => item.instanceId === handoffContinuation.instanceId);
     if (!instance) {
@@ -84,7 +82,7 @@ export function ManagedElsaInstancesPage() {
     void issueAndSubmitHandoff(instance, handoffContinuation.state, handoffContinuation.codeChallenge)
       .catch((error) => setOpenError(managedElsaOpenError(error)))
       .finally(() => setOpeningInstanceId(null));
-  }, [handoffContinuation, instances.data, instances.isError, instances.isLoading, navigate, workspaceLoading]);
+  }, [handoffContinuation, instances.data, instances.isError, instances.isLoading, workspaceLoading]);
 
   if (workspaceLoading || instances.isLoading)
     return <RequestStateView state="loading" title="Loading managed Elsa instances" description="Checking current health and access." />;

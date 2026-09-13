@@ -352,6 +352,203 @@ public sealed class ManagedElsaHandoffTests
         Assert.Equal(HttpStatusCode.Forbidden, reissue.StatusCode);
     }
 
+    [Theory]
+    [InlineData("instanceId", "codeChallenge")]
+    [InlineData("instance_id", "code_challenge")]
+    public void Continuation_parser_accepts_runtime_camel_and_snake_query_names(string instanceKey, string challengeKey)
+    {
+        var instanceId = Guid.NewGuid();
+        const string state = "state-value-that-is-long-enough";
+        var challenge = ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier);
+        var query = new QueryCollection(new Dictionary<string, Microsoft.Extensions.Primitives.StringValues>
+        {
+            [instanceKey] = instanceId.ToString("D"),
+            ["state"] = state,
+            [challengeKey] = challenge
+        });
+
+        Assert.True(ManagedElsaHandoffContinuation.TryParse(query, out var parsed));
+        Assert.Equal(instanceId, parsed.InstanceId);
+        Assert.Equal(state, parsed.State);
+        Assert.Equal(challenge, parsed.CodeChallenge);
+    }
+
+    [Fact]
+    public void Continuation_parser_leaves_handoff_status_errors_to_the_console()
+    {
+        var query = new QueryCollection(new Dictionary<string, Microsoft.Extensions.Primitives.StringValues>
+        {
+            ["instanceId"] = Guid.NewGuid().ToString("D"),
+            ["state"] = "state-value-that-is-long-enough",
+            ["codeChallenge"] = ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier),
+            ["handoff_status"] = "403"
+        });
+
+        Assert.False(ManagedElsaHandoffContinuation.TryParse(query, out _));
+    }
+
+    [Fact]
+    public async Task CamelCase_continuation_get_issues_and_auto_posts_to_the_bound_callback()
+    {
+        var setup = await SeedManagedInstanceAsync(
+            ElsaDesiredLifecycle.Running,
+            ElsaObservedLifecycle.Ready,
+            ElsaInstanceHealth.Healthy,
+            bind: true);
+        await using var app = setup.App;
+        var challenge = ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier);
+        const string state = "state-value-that-is-long-enough";
+        var client = app.CreateClient(new() { AllowAutoRedirect = false });
+        client.DefaultRequestHeaders.Authorization = setup.Client.DefaultRequestHeaders.Authorization;
+
+        using var response = await client.GetAsync(ContinuationPath(setup.InstanceId, state, challenge));
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("text/html", response.Content.Headers.ContentType?.MediaType);
+        Assert.Contains("no-store", response.Headers.CacheControl?.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Null(response.Headers.Location);
+        Assert.DoesNotContain("/admin/runtimes", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("Sign in", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("/login", html, StringComparison.Ordinal);
+        Assert.Contains("<title>Opening managed Elsa</title>", html, StringComparison.Ordinal);
+        var form = ParseAutoSubmitForm(html);
+        Assert.Equal(setup.RedirectUri, form.Action);
+        Assert.Equal(state, form.State);
+        Assert.False(string.IsNullOrWhiteSpace(form.Code));
+
+        var redeem = await app.CreateClient().PostControlJsonAsync(
+            "/api/managed-elsa/handoff/redeem",
+            new ManagedElsaHandoffRedeemRequest(form.Code, setup.Audience, setup.RedirectUri, CodeVerifier));
+        Assert.Equal(HttpStatusCode.OK, redeem.StatusCode);
+        var session = (await redeem.Content.ReadControlJsonAsync<ManagedElsaHandoffRedeemResponse>())!;
+        Assert.Equal(setup.OrganizationId, session.OrganizationId);
+        Assert.Equal(setup.InstanceId, session.InstanceId);
+        Assert.Contains(ManagedElsaHandoffDefaults.RuntimeSessionScope, session.Scopes);
+    }
+
+    [Fact]
+    public async Task Unauthenticated_continuation_returns_to_control_login_not_studio()
+    {
+        var setup = await SeedManagedInstanceAsync(
+            ElsaDesiredLifecycle.Running,
+            ElsaObservedLifecycle.Ready,
+            ElsaInstanceHealth.Healthy,
+            bind: true);
+        await using var app = setup.App;
+        var challenge = ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier);
+        const string state = "state-value-that-is-long-enough";
+        var path = ContinuationPath(setup.InstanceId, state, challenge);
+        var client = app.CreateClient(new() { AllowAutoRedirect = false });
+
+        using var response = await client.GetAsync(path);
+        var location = response.Headers.Location;
+        var locationText = location?.ToString() ?? "";
+        var loginPath = location is { IsAbsoluteUri: true } absolute
+            ? absolute.AbsolutePath
+            : locationText.Split('?', 2)[0];
+
+        Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
+        Assert.Equal(ManagedElsaHandoffContinuation.LoginPath, loginPath);
+        Assert.Contains(Uri.EscapeDataString(path), locationText, StringComparison.Ordinal);
+        Assert.DoesNotContain("/login?", locationText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Continuation_get_denies_an_outsider_without_opening_studio()
+    {
+        var setup = await SeedManagedInstanceAsync(
+            ElsaDesiredLifecycle.Running,
+            ElsaObservedLifecycle.Ready,
+            ElsaInstanceHealth.Healthy,
+            bind: true);
+        await using var app = setup.App;
+        var challenge = ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier);
+        const string state = "state-value-that-is-long-enough";
+        var outsider = app.CreateControlIdentityClient("managed-outsider");
+
+        using var response = await outsider.GetAsync(ContinuationPath(setup.InstanceId, state, challenge));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        using var document = JsonDocument.Parse(body);
+        Assert.Equal("handoff.denied", document.RootElement.GetProperty("code").GetString());
+        Assert.DoesNotContain("Opening managed Elsa", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("/login", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Console_runtimes_route_without_continuation_params_is_not_intercepted()
+    {
+        var setup = await SeedManagedInstanceAsync(
+            ElsaDesiredLifecycle.Running,
+            ElsaObservedLifecycle.Ready,
+            ElsaInstanceHealth.Healthy,
+            bind: true);
+        await using var app = setup.App;
+
+        using var response = await setup.Client.GetAsync(ManagedElsaHandoffDefaults.ConsoleContinuationPath);
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("Elsa Control Console", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("Opening managed Elsa", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Handoff_status_continuation_is_left_to_the_console()
+    {
+        var setup = await SeedManagedInstanceAsync(
+            ElsaDesiredLifecycle.Running,
+            ElsaObservedLifecycle.Ready,
+            ElsaInstanceHealth.Healthy,
+            bind: true);
+        await using var app = setup.App;
+
+        using var response = await setup.Client.GetAsync(
+            $"{ManagedElsaHandoffDefaults.ConsoleContinuationPath}?instanceId={setup.InstanceId:D}&handoff_status=403");
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("Elsa Control Console", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("Opening managed Elsa", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Continuation_head_does_not_issue_a_code()
+    {
+        var setup = await SeedManagedInstanceAsync(
+            ElsaDesiredLifecycle.Running,
+            ElsaObservedLifecycle.Ready,
+            ElsaInstanceHealth.Healthy,
+            bind: true);
+        await using var app = setup.App;
+        var challenge = ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier);
+        const string state = "state-value-that-is-long-enough";
+        using var request = new HttpRequestMessage(HttpMethod.Head, ContinuationPath(setup.InstanceId, state, challenge));
+        request.Headers.Authorization = setup.Client.DefaultRequestHeaders.Authorization;
+
+        using var response = await app.CreateClient().SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Contains("no-store", response.Headers.CacheControl?.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.True((response.Content.Headers.ContentLength ?? 0) == 0);
+    }
+
+    private static string ContinuationPath(Guid instanceId, string state, string codeChallenge) =>
+        $"{ManagedElsaHandoffDefaults.ConsoleContinuationPath}?instanceId={instanceId:D}&state={state}&codeChallenge={codeChallenge}";
+
+    private static (string Action, string Code, string State) ParseAutoSubmitForm(string html)
+    {
+        var action = System.Text.RegularExpressions.Regex.Match(html, """<form method="post" action="([^"]+)">""").Groups[1].Value;
+        var code = System.Text.RegularExpressions.Regex.Match(html, """name="code" value="([^"]+)"""").Groups[1].Value;
+        var state = System.Text.RegularExpressions.Regex.Match(html, """name="state" value="([^"]+)"""").Groups[1].Value;
+        Assert.False(string.IsNullOrWhiteSpace(action));
+        Assert.False(string.IsNullOrWhiteSpace(code));
+        Assert.False(string.IsNullOrWhiteSpace(state));
+        return (action, code, state);
+    }
+
     private sealed class EmptyLifecycleResolutionInputSource : IElsaInstanceLifecycleResolutionInputSource
     {
         public Task<ElsaInstanceLifecycleResolutionInput?> GetAsync(

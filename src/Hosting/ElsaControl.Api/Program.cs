@@ -561,6 +561,10 @@ if (!app.Environment.IsEnvironment("Testing"))
 app.UseExceptionHandler();
 app.UseCors();
 app.UseAuthentication();
+// Must run after authentication so Control can issue a handoff JWT, and before the
+// /admin exact-path middleware + SPA fallback so GET /admin/runtimes?instanceId&state&codeChallenge
+// auto-posts to the runtime callback instead of leaving the browser on Sign in.
+app.UseManagedElsaHandoffContinuation();
 app.Use(async (context, next) =>
 {
     var combinedPath = context.Request.PathBase.Add(context.Request.Path);

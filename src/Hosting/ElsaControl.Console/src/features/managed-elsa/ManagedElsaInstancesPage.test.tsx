@@ -94,6 +94,30 @@ describe("ManagedElsaInstancesPage", () => {
     expect(form?.querySelector("[name=code_verifier]")).toBeNull();
   });
 
+  it("issues from camelCase runtime continuation and never renders Sign in or bounces the route", async () => {
+    const issue = {
+      token: "signed-handoff-token",
+      tokenType: managedElsaHandoffTokenType,
+      audience: "urn:elsa:instance:00000000-0000-0000-0000-000000000101",
+      redirectUri: callbackUri,
+      issuedAt: "2026-08-31T12:00:00Z",
+      expiresAt: "2026-08-31T12:01:00Z"
+    };
+    installFetch({ instances: [instanceFixture()], issue });
+    const submit = vi.spyOn(HTMLFormElement.prototype, "submit").mockImplementation(() => undefined);
+
+    renderPage(`?instanceId=${healthyInstanceId}&state=${state}&codeChallenge=${codeChallenge}`);
+
+    await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+    const form = document.querySelector(`form[action="${callbackUri}"]`);
+    expect(form).toHaveAttribute("method", "post");
+    expect(form?.querySelector("[name=code]")).toHaveValue(issue.token);
+    expect(form?.querySelector("[name=state]")).toHaveValue(state);
+    expect(screen.queryByRole("heading", { name: /sign in/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Managed Elsa" })).toBeInTheDocument();
+    expect(window.location.pathname).not.toBe("/login");
+  });
+
   it("does not blindly retry an issue request after a 401", async () => {
     const fetchMock = installFetch({
       instances: [instanceFixture()],
