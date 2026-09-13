@@ -88,7 +88,7 @@ export const releaseCatalogCopy = {
   idempotentRetry:
     "Disabled — fingerprints differ. Only works when the projection matches the existing identity (Unchanged).",
   openEdge:
-    "Open may still fail until the instance is Healthy/Ready and handoff/auth is configured. Admit + Apply does not mean Open succeeded.",
+    "Open may still fail until the instance is Healthy/Ready and handoff/auth is configured. A 404 is missing handoff (#383-class); a 500 with handoff present is runtime wiring (#397-class). Admit + Apply does not mean Open succeeded.",
   admitRequiresAdmin: "Admit requires a control_admin session or admin API key. Ordinary customer sessions cannot admit releases.",
   applyNotAdmitted:
     "This release is not in the admitted catalog. Admit the unique preview identity (include build.N) from Releases first, then return here. The conflict drawer is recovery UX if Admit returns 409 — do not overwrite the existing identity."

@@ -19,6 +19,12 @@ import {
 import {
   openManagedElsaInstance
 } from "@/features/managed-elsa/ManagedElsaInstancesPage";
+import { OpenFailureModeHelp, OpenFailureNotice } from "@/features/managed-elsa/OpenFailureNotice";
+import {
+  classifyInstanceOpenFailure,
+  classifyOpenFailureFromError,
+  type OpenFailureClassification
+} from "@/features/managed-elsa/openFailureTaxonomy";
 import {
   operationalHealthGuidance,
   type ManagedElsaAccepted,
@@ -41,7 +47,7 @@ export function ApplyReleasePage() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [idempotencyKey] = useState(() => crypto.randomUUID());
   const [accepted, setAccepted] = useState<ManagedElsaAccepted | null>(null);
-  const [openError, setOpenError] = useState<string | null>(null);
+  const [openError, setOpenError] = useState<OpenFailureClassification | null>(null);
 
   const instance = useQuery({
     queryKey: queryKeys.managedElsaInstance(selectedWorkspaceId, instanceId),
@@ -158,6 +164,11 @@ export function ApplyReleasePage() {
               <Detail label="Topology" value={current.intent?.application.topologyId ?? "—"} />
               <Detail label="Lifecycle" value={current.intent?.release.channel ?? current.desiredLifecycle} />
               <Detail label="Open" value={openEligibility(current, openEligible)} />
+              {!openEligible ? (
+                <div className="sm:col-span-2">
+                  <OpenFailureNotice failure={blockedOpenFailure(current, healthyReady)} compact />
+                </div>
+              ) : null}
             </dl>
           </section>
 
@@ -260,6 +271,7 @@ export function ApplyReleasePage() {
             <Step active={healthyReady} done={openEligible} label="Open Studio (handoff)" />
           </ol>
           <p className="text-xs text-muted-foreground">{releaseCatalogCopy.openEdge}</p>
+          <OpenFailureModeHelp />
           {accepted ? (
             <section className="rounded-ui border border-border bg-surface p-4 text-sm">
               <p className="font-medium">Reconcile</p>
@@ -276,8 +288,8 @@ export function ApplyReleasePage() {
                   setOpenError(null);
                   try {
                     openManagedElsaInstance(current);
-                  } catch {
-                    setOpenError("Open is not available yet. Confirm Healthy/Ready and handoff, then try again.");
+                  } catch (error) {
+                    setOpenError(classifyOpenFailureFromError(error, current));
                   }
                 }}
               >
@@ -285,10 +297,10 @@ export function ApplyReleasePage() {
                 Open
               </Button>
               <p className="text-xs text-muted-foreground">Open is offered after Healthy/Ready and handoff. This does not claim Studio success.</p>
-              {openError ? <p role="alert" className="text-sm text-warning">{openError}</p> : null}
+              {openError ? <OpenFailureNotice failure={openError} /> : null}
             </div>
           ) : (
-            <p className="text-xs text-muted-foreground">Open stays unavailable until Healthy/Ready and a current handoff binding exist.</p>
+            <OpenFailureNotice failure={blockedOpenFailure(current, healthyReady)} compact />
           )}
         </aside>
       </div>
@@ -344,8 +356,16 @@ function currentReleaseLabel(instance: ManagedElsaInstance) {
 
 function openEligibility(instance: ManagedElsaInstance, openEligible: boolean) {
   if (openEligible) return "Eligible when handoff + health hold";
-  if (instance.unavailableReason) return instance.unavailableReason;
-  return "Not eligible yet";
+  return blockedOpenFailure(instance, instance.health === "Healthy" && instance.observedLifecycle === "Ready").shortLabel;
+}
+
+function blockedOpenFailure(instance: ManagedElsaInstance, healthyReady: boolean): OpenFailureClassification {
+  return classifyInstanceOpenFailure({
+    ...instance,
+    canOpen: instance.canOpen && healthyReady,
+    identityBindingState: instance.canOpen && !healthyReady ? "instance-unavailable" : instance.identityBindingState,
+    health: healthyReady ? instance.health : "Unknown"
+  });
 }
 
 function applyIntent(

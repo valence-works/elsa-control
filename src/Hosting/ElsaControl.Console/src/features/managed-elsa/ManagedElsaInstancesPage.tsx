@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { CheckCircle2, ExternalLink, LoaderCircle, RefreshCw, ShieldAlert, TriangleAlert } from "lucide-react";
+import { CheckCircle2, ExternalLink, LoaderCircle, RefreshCw, TriangleAlert } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { Badge, Button, EmptyState, SecondaryButton, Table, buttonClassName } from "@/components/ui";
@@ -9,8 +9,15 @@ import { getDeploymentPermissions } from "@/features/deployments/deploymentApi";
 import type { WorkspaceDeploymentPermissionsResponse } from "@/features/deployments/deploymentModels";
 import { issueManagedElsaHandoff, listManagedElsaInstances } from "@/features/managed-elsa/managedElsaApi";
 import { managedElsaHandoffTokenType, type ManagedElsaInstance } from "@/features/managed-elsa/managedElsaModels";
+import { OpenFailureModeHelp, OpenFailureNotice } from "@/features/managed-elsa/OpenFailureNotice";
+import {
+  classifyInstanceOpenFailure,
+  classifyOpenFailure,
+  classifyOpenFailureFromError,
+  parseHandoffFailureSignal,
+  type OpenFailureClassification
+} from "@/features/managed-elsa/openFailureTaxonomy";
 import { useEngineProvisioningProviders } from "@/features/engine-provisioning/useEngineProvisioningProviders";
-import { ApiError } from "@/lib/api/httpClient";
 import { queryKeys } from "@/lib/query/queryClient";
 import { cn } from "@/lib/utils";
 
@@ -45,7 +52,7 @@ export function ManagedElsaInstancesPage() {
     retry: false
   });
   const [openingInstanceId, setOpeningInstanceId] = useState<string | null>(null);
-  const [openError, setOpenError] = useState<string | null>(null);
+  const [openError, setOpenError] = useState<OpenFailureClassification | null>(null);
   const handledContinuation = useRef<string | null>(null);
 
   useEffect(() => {
@@ -60,27 +67,50 @@ export function ManagedElsaInstancesPage() {
 
     const instance = instances.data.items.find((item) => item.instanceId === handoffContinuation.instanceId);
     if (!instance) {
-      setOpenError("This managed instance is no longer available. Refresh the page and try again.");
+      setOpenError(classifyOpenFailure({
+        canOpen: false,
+        identityBindingState: "instance-unavailable",
+        unavailableReason: "This managed instance is no longer available. Refresh the page and try again.",
+        source: "preflight"
+      }));
       return;
     }
 
-    if (handoffContinuation.failureStatus) {
+    if (handoffContinuation.failureStatus || handoffContinuation.failureCode) {
       if (handoffContinuation.failureStatus === 401) {
         try {
           if (retryExpiredHandoff(instance))
             return;
         } catch {
-          setOpenError("This managed instance is no longer available. Refresh the page and try again.");
+          setOpenError(classifyOpenFailure({
+            canOpen: false,
+            identityBindingState: "instance-unavailable",
+            unavailableReason: "This managed instance is no longer available. Refresh the page and try again.",
+            source: "preflight"
+          }));
           return;
         }
       }
-      setOpenError(managedElsaHandoffFailure(handoffContinuation.failureStatus));
+      setOpenError(classifyOpenFailure({
+        httpStatus: handoffContinuation.failureStatus,
+        diagnosticCode: handoffContinuation.failureCode,
+        canOpen: instance.canOpen,
+        identityBindingState: instance.identityBindingState,
+        unavailableReason: instance.unavailableReason,
+        source: "continuation"
+      }));
       return;
     }
 
     if (!instance.canOpen || !instance.audience || !instance.redirectUri ||
         !handoffContinuation.state || !handoffContinuation.codeChallenge) {
-      setOpenError("Elsa Control could not verify the managed-instance handoff. Open the instance again.");
+      setOpenError(classifyOpenFailure({
+        canOpen: instance.canOpen,
+        identityBindingState: instance.identityBindingState,
+        unavailableReason: instance.unavailableReason
+          ?? "Elsa Control could not verify the managed-instance handoff. Open the instance again.",
+        source: "preflight"
+      }));
       return;
     }
 
@@ -89,7 +119,7 @@ export function ManagedElsaInstancesPage() {
     // The runtime generated the state and retains the verifier in its protected
     // correlation state. Control only issues for the challenge and posts code/state.
     void issueAndSubmitHandoff(instance, handoffContinuation.state, handoffContinuation.codeChallenge)
-      .catch((error) => setOpenError(managedElsaOpenError(error)))
+      .catch((error) => setOpenError(classifyOpenFailureFromError(error, instance)))
       .finally(() => setOpeningInstanceId(null));
   }, [handoffContinuation, instances.data, instances.isError, instances.isLoading, workspaceLoading]);
 
@@ -115,15 +145,8 @@ export function ManagedElsaInstancesPage() {
         </SecondaryButton>
       </div>
 
-      {openError ? (
-        <div role="alert" className="flex items-start gap-3 rounded-ui border border-warning/30 bg-warning/10 p-4 text-sm">
-          <ShieldAlert aria-hidden className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
-          <div className="space-y-1">
-            <p className="font-medium">The managed instance could not be opened</p>
-            <p className="text-muted-foreground">{openError}</p>
-          </div>
-        </div>
-      ) : null}
+      {openError ? <OpenFailureNotice failure={openError} /> : null}
+      <OpenFailureModeHelp />
 
       {selectedWorkspaceId && provisioningProviders.hasProvider("azure") && provisioningPermissions.isSuccess && provisioningPermissions.data.permissions.includes("deployments.setup.manage") ? (
         <div className="flex justify-end">
@@ -160,7 +183,7 @@ export function ManagedElsaInstancesPage() {
                     try {
                       openManagedElsaInstance(instance);
                     } catch (error) {
-                      setOpenError(managedElsaOpenError(error));
+                      setOpenError(classifyOpenFailureFromError(error, instance));
                       setOpeningInstanceId(null);
                     }
                   }}
@@ -195,7 +218,13 @@ function ManagedElsaInstanceRow({
       </td>
       <td className="px-4 py-4 align-top">
         <span className="text-muted-foreground">{instance.observedLifecycle}</span>
-        {instance.unavailableReason ? <p className="mt-1 max-w-xs text-xs text-muted-foreground">{instance.unavailableReason}</p> : null}
+        {!instance.canOpen ? (
+          <div className="mt-1">
+            <OpenFailureNotice failure={classifyInstanceOpenFailure(instance)} compact />
+          </div>
+        ) : instance.unavailableReason ? (
+          <p className="mt-1 max-w-xs text-xs text-muted-foreground">{instance.unavailableReason}</p>
+        ) : null}
       </td>
       <td className="px-4 py-4 text-right align-top">
         <div className="flex flex-wrap justify-end gap-2">
@@ -331,39 +360,7 @@ function appendHiddenField(form: HTMLFormElement, name: string, value: string) {
 class ManagedElsaOpenError extends Error {
   constructor(public readonly reason: "unavailable") {
     super(reason);
-  }
-}
-
-function managedElsaOpenError(error: unknown) {
-  if (error instanceof ManagedElsaOpenError)
-    return "This managed instance is no longer available. Refresh the page and try again.";
-  if (error instanceof ApiError) {
-    switch (error.status) {
-      case 401:
-        return "Your Control session could not authorize this handoff. Sign in again and retry.";
-      case 403:
-        return "This managed instance is no longer available to your account.";
-      case 409:
-        return "This handoff has already been used. Open the instance again to create a new link.";
-      case 503:
-        return "Managed Elsa is temporarily unavailable. Try again shortly.";
-    }
-  }
-  return "Elsa Control could not open this managed instance. Try again shortly.";
-}
-
-function managedElsaHandoffFailure(status: number) {
-  switch (status) {
-    case 401:
-      return "Your managed-instance link has expired. Open Elsa again to create a new link.";
-    case 403:
-      return "This managed instance is no longer available to your account.";
-    case 409:
-      return "This handoff has already been used. Open the instance again to create a new link.";
-    case 503:
-      return "Managed Elsa is temporarily unavailable. Try again shortly.";
-    default:
-      return "Elsa Control could not open this managed instance. Try again shortly.";
+    this.name = "ManagedElsaOpenError";
   }
 }
 
@@ -373,6 +370,7 @@ type HandoffContinuation = {
   state: string | null;
   codeChallenge: string | null;
   failureStatus: number | null;
+  failureCode: string | null;
 };
 
 function parseHandoffContinuation(params: URLSearchParams): HandoffContinuation | null {
@@ -380,14 +378,15 @@ function parseHandoffContinuation(params: URLSearchParams): HandoffContinuation 
   const state = params.get("state");
   const codeChallenge = params.get("code_challenge") ?? params.get("codeChallenge");
   const rawStatus = params.get("handoff_status") ?? params.get("handoff_error") ?? params.get("error") ?? params.get("status");
-  const failureStatus = rawStatus && /^(401|403|409|503)$/.test(rawStatus) ? Number(rawStatus) : null;
-  if (!instanceId || (!state && !codeChallenge && !failureStatus))
+  const { failureStatus, failureCode } = parseHandoffFailureSignal(rawStatus);
+  if (!instanceId || (!state && !codeChallenge && !failureStatus && !failureCode))
     return null;
   return {
-    key: [instanceId, state, codeChallenge, failureStatus].join("|"),
+    key: [instanceId, state, codeChallenge, failureStatus, failureCode].join("|"),
     instanceId,
     state: state && /^[A-Za-z0-9_-]{16,256}$/.test(state) ? state : null,
     codeChallenge: codeChallenge && /^[A-Za-z0-9_-]{43}$/.test(codeChallenge) ? codeChallenge : null,
-    failureStatus
+    failureStatus,
+    failureCode
   };
 }

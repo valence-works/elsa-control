@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -55,9 +55,13 @@ describe("ManagedElsaInstancesPage", () => {
     renderPage();
 
     expect(await screen.findByRole("button", { name: "Open" })).toBeInTheDocument();
-    expect(screen.getAllByText("Unavailable")).toHaveLength(2);
+    expect(screen.getAllByText("Health blocked").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("Identity blocked").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByRole("button", { name: "Open" })).toHaveLength(1);
     expect(screen.queryByText(/urn:elsa:instance/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/V3 Pass/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Verification=Passed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/live AC still open/i)).not.toBeInTheDocument();
   });
 
   it("issues for the runtime challenge and posts only code and state to the exact callback", async () => {
@@ -218,7 +222,65 @@ describe("ManagedElsaInstancesPage", () => {
     renderPage(`?instance_id=${healthyInstanceId}&handoff_status=403`);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("This managed instance is no longer available to your account.");
+    expect(screen.getByRole("alert")).toHaveTextContent("Open failed after Control offered it");
     expect(screen.queryByText(/signed-handoff-token|code_verifier|state-value/)).not.toBeInTheDocument();
+  });
+
+  it("maps a 404 continuation to the #383-class missing-handoff taxonomy", async () => {
+    installFetch({
+      instances: [instanceFixture({
+        canOpen: false,
+        audience: null,
+        redirectUri: null,
+        identityBindingState: "handoff-unavailable",
+        unavailableReason: "Managed sign-in is not configured for this instance's current deployment."
+      })]
+    });
+
+    renderPage(`?instance_id=${healthyInstanceId}&handoff_status=404`);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Handoff missing");
+    expect(alert).toHaveTextContent("#383-class");
+    expect(alert).toHaveTextContent("not a Studio crash");
+    expect(alert).toHaveTextContent("open.handoff-missing");
+    expect(within(alert).getByRole("link", { name: "#383" })).toHaveAttribute("href", "https://github.com/valence-works/elsa-control/issues/383");
+    expect(within(alert).getByRole("link", { name: "#397" })).toHaveAttribute("href", "https://github.com/valence-works/elsa-control/issues/397");
+    expect(within(alert).getByRole("link", { name: "#393" })).toHaveAttribute("href", "https://github.com/valence-works/elsa-control/issues/393");
+    expect(screen.queryByText(/live AC still open/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/V3 Pass/i)).not.toBeInTheDocument();
+  });
+
+  it("maps a 500 continuation with handoff configured to the #397-class runtime taxonomy", async () => {
+    installFetch({ instances: [instanceFixture({ canOpen: true, identityBindingState: "available" })] });
+
+    renderPage(`?instance_id=${healthyInstanceId}&handoff_status=500`);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Runtime or auth failure");
+    expect(alert).toHaveTextContent("#397-class");
+    expect(alert).toHaveTextContent("Do not reopen #383");
+    expect(alert).toHaveTextContent("open.runtime-auth");
+    expect(alert).toHaveTextContent("canOpen was true");
+    expect(screen.queryByText(/Verification=Passed/i)).not.toBeInTheDocument();
+  });
+
+  it("explains IdentityBindingState when canOpen is false", async () => {
+    installFetch({
+      instances: [instanceFixture({
+        canOpen: false,
+        audience: null,
+        redirectUri: null,
+        identityBindingState: "not-authorized",
+        unavailableReason: "Not authorized to open this instance."
+      })]
+    });
+
+    renderPage();
+
+    expect(await screen.findByText("Permission blocked")).toBeInTheDocument();
+    expect(screen.getAllByText(/Fix permission before Open/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByRole("button", { name: "Open" })).not.toBeInTheDocument();
   });
 
   it("renders the shared provisioning link after Azure provider and setup permission checks succeed", async () => {
