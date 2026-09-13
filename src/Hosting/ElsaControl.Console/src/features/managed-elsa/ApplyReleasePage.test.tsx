@@ -72,7 +72,29 @@ describe("ApplyReleasePage", () => {
     await user.click(screen.getByRole("button", { name: "Apply release" }));
     expect(await screen.findByRole("button", { name: "Open" })).toBeInTheDocument();
     expect(screen.getByText(/does not claim Studio success/)).toBeInTheDocument();
+    expect(screen.getAllByText(/#383-class/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText(/#397-class/).length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText(/V3 Pass/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Verification=Passed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/live AC still open/i)).not.toBeInTheDocument();
+  });
+
+  it("maps canOpen false IdentityBindingState to Open taxonomy guidance", async () => {
+    installFetch({
+      instance: instanceFixture({
+        canOpen: false,
+        identityBindingState: "handoff-unavailable",
+        unavailableReason: "Managed sign-in is not configured for this instance's current deployment.",
+        audience: null,
+        redirectUri: null
+      })
+    });
+    renderPage();
+
+    expect((await screen.findAllByText("Handoff missing")).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText(/provider did not apply/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: "#393" })[0]).toHaveAttribute("href", "https://github.com/valence-works/elsa-control/issues/393");
   });
 });
 
