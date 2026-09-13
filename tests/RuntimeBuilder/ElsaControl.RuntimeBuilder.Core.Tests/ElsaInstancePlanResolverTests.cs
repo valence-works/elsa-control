@@ -241,6 +241,7 @@ public sealed class ElsaInstancePlanResolverTests
 
     [Theory]
     [InlineData("3.8", "3.8.0-preview.5413")]
+    [InlineData("3.8", "3.8.0-preview.5567-build.153")]
     [InlineData("3.9", "3.9.0-preview.1")]
     [InlineData("3.10", "3.10.0-preview.1")]
     [InlineData("4.0", "4.0.0-preview.1")]

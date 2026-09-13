@@ -114,10 +114,16 @@ public sealed class ElsaInstanceLifecycleWorker(
     {
         try
         {
+            // GetAsync returning null (catalog reconstruct, preview digest, or
+            // managed target/audit) used to throw here and become opaque
+            // resolution.invalid — the Dogfood2 *-build.N UpdateIntent symptom.
+            if (item.Resolution is null)
+                return (await FailAsync(item, workerId, "resolution.input-unavailable", cancellationToken), 0);
+
             item.Validate();
             var resolution = await resolver.ResolveAsync(item.Resolution.PlanRequest, cancellationToken);
             if (!resolution.Succeeded)
-                return (await FailAsync(item, workerId, "resolution.failed", cancellationToken), 0);
+                return (await FailAsync(item, workerId, FirstSafeFindingCode(resolution.Findings) ?? "resolution.failed", cancellationToken), 0);
 
             if (resolution.Plan is null || resolution.Reference is null || resolution.CurrentResolvedRelease is null)
                 return (await FailAsync(item, workerId, "resolution.invalid", cancellationToken), 0);
@@ -295,9 +301,7 @@ public sealed class ElsaInstanceLifecycleWorker(
             item.Outbox.RequestHash,
             workerId,
             code,
-            code == "resolution.failed"
-                ? "Lifecycle plan resolution was rejected."
-                : "Lifecycle work item could not be resolved safely.",
+            FailureSummary(code),
             _timeProvider.GetUtcNow(),
             item.LeaseToken,
             item.LeaseVersion);
@@ -310,6 +314,30 @@ public sealed class ElsaInstanceLifecycleWorker(
             return Conflict(item);
         }
     }
+
+    private static string FailureSummary(string code) =>
+        code switch
+        {
+            "resolution.invalid" => "Lifecycle work item could not be resolved safely.",
+            "resolution.input-unavailable" => "Lifecycle resolution input could not be reconstructed from the catalog projection.",
+            _ => "Lifecycle plan resolution was rejected."
+        };
+
+    private static string? FirstSafeFindingCode(IReadOnlyList<ElsaInstancePlanResolutionFinding> findings)
+    {
+        foreach (var finding in findings)
+        {
+            if (IsSafeDiagnosticCode(finding.Code))
+                return finding.Code;
+        }
+
+        return null;
+    }
+
+    private static bool IsSafeDiagnosticCode(string? value) =>
+        !string.IsNullOrWhiteSpace(value)
+        && value.Length <= 64
+        && value.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '-' or '_' or ':');
 
     private static ElsaInstanceLifecycleWorkerResult Conflict(ElsaInstanceLifecycleWorkItem item) =>
         new(

@@ -22,6 +22,7 @@ public sealed class ElsaInstanceContractTests
 
     [Theory]
     [InlineData("3.8.0-preview.5413+build.1")]
+    [InlineData("3.8.0-preview.5567-build.153")]
     [InlineData("future-release-line")]
     public void Catalog_values_support_future_prerelease_and_build_labels(string value)
     {
@@ -575,6 +576,19 @@ public sealed class ElsaInstanceContractTests
         Assert.Equal(allowed, transition.IsAllowed(
             minorApproved: expectedKind == ElsaReleaseTransitionKind.Minor && explicitApproval,
             migrationAuthorized: expectedKind == ElsaReleaseTransitionKind.Major && explicitApproval));
+    }
+
+    [Fact]
+    public void Preview_build_suffix_is_a_same_line_patch_not_a_pin_fallback()
+    {
+        var current = new ElsaReleaseSelection("valence-runtime", "3.8", "3.8.0-preview.5567", "preview");
+        var target = new ElsaReleaseSelection("valence-runtime", "3.8", "3.8.0-preview.5567-build.153", "preview");
+
+        var transition = ElsaReleaseTransitionRules.Classify(current, target);
+
+        Assert.Equal(ElsaReleaseTransitionKind.Patch, transition.Kind);
+        Assert.True(transition.IsAllowed(minorApproved: false, migrationAuthorized: false));
+        Assert.NotEqual(current.Version, target.Version);
     }
 
     [Fact]

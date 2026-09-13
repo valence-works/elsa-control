@@ -336,8 +336,31 @@ public sealed class ElsaInstanceLifecycleWorkerTests
         Assert.Equal(ElsaInstanceOperationState.Failed, Assert.Single(store.Operations).State);
         Assert.Empty(store.DeploymentRuns);
         var recordedFailure = Assert.Single(store.Failures);
-        Assert.Equal("resolution.failed", recordedFailure.Code);
-        Assert.DoesNotContain("catalog.unavailable", recordedFailure.Summary, StringComparison.Ordinal);
+        Assert.Equal("catalog.unavailable", recordedFailure.Code);
+        Assert.Equal("Lifecycle plan resolution was rejected.", recordedFailure.Summary);
+    }
+
+    [Fact]
+    public async Task Missing_resolution_input_fails_with_an_actionable_code()
+    {
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now));
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        await service.CreateAsync(CreateRequest("claims-missing-input", "create-missing-input"));
+
+        var result = await new ElsaInstanceLifecycleWorker(
+                store,
+                new RecordingResolver(SuccessfulResolution(WorkspaceId, Guid.NewGuid())),
+                new StaticTimeProvider(Now))
+            .ProcessAvailableAsync("lifecycle-worker-1");
+
+        Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Failed, Assert.Single(result.Results).Outcome);
+        Assert.Equal(ElsaInstanceOperationState.Failed, Assert.Single(store.Operations).State);
+        Assert.Empty(store.DeploymentRuns);
+        var recordedFailure = Assert.Single(store.Failures);
+        Assert.Equal("resolution.input-unavailable", recordedFailure.Code);
+        Assert.Equal(
+            "Lifecycle resolution input could not be reconstructed from the catalog projection.",
+            recordedFailure.Summary);
     }
 
     [Fact]
