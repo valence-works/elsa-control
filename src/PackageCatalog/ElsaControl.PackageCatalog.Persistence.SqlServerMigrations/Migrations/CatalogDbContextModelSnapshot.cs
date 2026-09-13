@@ -445,6 +445,27 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.ToTable("OrganizationEntitlementSnapshots");
                 });
 
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.OrganizationIdentityBinding", b =>
+                {
+                    b.Property<Guid>("OrganizationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("EntraTenantId")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("nvarchar(36)");
+
+                    b.HasKey("OrganizationId");
+
+                    b.HasIndex("EntraTenantId")
+                        .IsUnique();
+
+                    b.ToTable("OrganizationIdentityBindings");
+                });
+
             modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.OrganizationMembership", b =>
                 {
                     b.Property<Guid>("Id")
@@ -5460,6 +5481,17 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Navigation("Subscription");
                 });
 
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.OrganizationIdentityBinding", b =>
+                {
+                    b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Organization", "Organization")
+                        .WithOne("IdentityBinding")
+                        .HasForeignKey("ElsaControl.PackageCatalog.Core.Accounts.OrganizationIdentityBinding", "OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Organization");
+                });
+
             modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.OrganizationMembership", b =>
                 {
                     b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Account", "Account")
@@ -6395,6 +6427,8 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Navigation("BillingProviderEvents");
 
                     b.Navigation("EntitlementSnapshots");
+
+                    b.Navigation("IdentityBinding");
 
                     b.Navigation("Memberships");
 

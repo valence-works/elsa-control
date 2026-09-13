@@ -25,10 +25,11 @@ public static class AdminAuthorization
         return services;
     }
 
-    public static bool HasControlAdminRole(ClaimsPrincipal principal) =>
+    public static bool HasControlAdminRole(ClaimsPrincipal principal, ControlIdentityOptions identity) =>
         principal.Claims.Any(claim =>
             IsRoleClaim(claim.Type) &&
-            string.Equals(claim.Value, ControlAdminRole, StringComparison.OrdinalIgnoreCase));
+            string.Equals(claim.Value, ControlAdminRole, StringComparison.OrdinalIgnoreCase)) &&
+        EntraMultiTenantIdentity.MayHoldOperatorRoles(principal, identity);
 
     private static bool HasApiKeyIdentity(ClaimsPrincipal principal) =>
         principal.Identities.Any(identity =>
@@ -46,11 +47,12 @@ public static class AdminAuthorization
     private sealed class AdminApiRequirement : IAuthorizationRequirement;
 
     private sealed class AdminApiAuthorizationHandler(
-        IOptions<AdminAuthorizationOptions> options) : AuthorizationHandler<AdminApiRequirement>
+        IOptions<AdminAuthorizationOptions> options,
+        IOptions<ControlIdentityOptions> identityOptions) : AuthorizationHandler<AdminApiRequirement>
     {
         protected override Task HandleRequirementAsync(AuthorizationHandlerContext context, AdminApiRequirement requirement)
         {
-            if (HasApiKeyIdentity(context.User) || HasControlAdminRole(context.User))
+            if (HasApiKeyIdentity(context.User) || HasControlAdminRole(context.User, identityOptions.Value))
             {
                 context.Succeed(requirement);
                 return Task.CompletedTask;

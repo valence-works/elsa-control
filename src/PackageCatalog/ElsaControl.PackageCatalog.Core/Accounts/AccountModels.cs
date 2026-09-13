@@ -50,6 +50,11 @@ public sealed class Organization
     public DateTimeOffset? ArchivedAt { get; set; }
     public Guid? CreatedByAccountId { get; set; }
     public string? CustomerReference { get; set; }
+    /// <summary>
+    /// The customer identity-provider tenant this organization was minted for on first sign-in.
+    /// Null for personal, dogfood, and operator-created organizations.
+    /// </summary>
+    public OrganizationIdentityBinding? IdentityBinding { get; set; }
     public List<OrganizationMembership> Memberships { get; set; } = [];
     public List<Workspace> Workspaces { get; set; } = [];
     public List<OrganizationEntitlementSnapshot> EntitlementSnapshots { get; set; } = [];
@@ -58,6 +63,18 @@ public sealed class Organization
     public List<BillingProviderEventInboxEntry> BillingProviderEvents { get; set; } = [];
     public List<OrganizationBillingLifecycleNotice> BillingLifecycleNotices { get; set; } = [];
     public List<OrganizationBillingCleanup> BillingCleanups { get; set; } = [];
+}
+
+/// <summary>
+/// Binds a customer Microsoft Entra tenant (<c>tid</c>) to the organization its first sign-in
+/// minted. A tenant binds at most one organization, so every later sign-in from it joins that one.
+/// </summary>
+public sealed class OrganizationIdentityBinding
+{
+    public Guid OrganizationId { get; set; }
+    public Organization? Organization { get; set; }
+    public string EntraTenantId { get; set; } = "";
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
 public sealed class OrganizationMembership

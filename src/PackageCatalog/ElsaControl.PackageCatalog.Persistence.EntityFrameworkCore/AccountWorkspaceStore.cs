@@ -50,6 +50,13 @@ public sealed class AccountWorkspaceStore(CatalogDbContext dbContext) : IAccount
             });
     }
 
+    public Task<Organization?> FindOrganizationByEntraTenantIdAsync(string tenantId, CancellationToken cancellationToken = default) =>
+        dbContext.OrganizationIdentityBindings
+            .AsNoTracking()
+            .Where(x => x.EntraTenantId == tenantId)
+            .Select(x => x.Organization)
+            .SingleOrDefaultAsync(cancellationToken);
+
     public Task<OrganizationCreateResult> CreateOrganizationAsync(
         CreateOrganizationRequest request,
         CancellationToken cancellationToken = default) =>

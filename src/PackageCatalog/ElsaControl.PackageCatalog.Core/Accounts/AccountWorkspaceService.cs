@@ -23,45 +23,120 @@ public sealed class AccountWorkspaceService
     public async Task<AccountWorkspaceContext> GetOrCreateAsync(TrustedWorkspaceIdentity identity, CancellationToken cancellationToken = default)
     {
         var normalized = identity.Normalize();
-        var existing = await _store.FindByExternalIdentityAsync(normalized.Issuer, normalized.Subject, cancellationToken);
-        if (existing is not null)
+        // A conflicting concurrent first sign-in has created either this identity or, for a
+        // customer Entra tenant, the tenant's organization. One retry observes whichever won.
+        for (var attempt = 1; ; attempt++)
         {
-            await _store.UpdateExternalIdentitySeenAsync(existing.ExternalIdentityId, normalized.DisplayName, normalized.Email, cancellationToken);
-            await ProvisionOwnedWorkspacesAsync(existing.Context, cancellationToken);
-            return existing.Context with
-            {
-                Account = existing.Context.Account with
-                {
-                    DisplayName = normalized.DisplayName,
-                    Email = normalized.Email
-                }
-            };
-        }
+            var existing = await _store.FindByExternalIdentityAsync(normalized.Issuer, normalized.Subject, cancellationToken);
+            if (existing is not null)
+                return await RefreshAsync(existing, normalized, cancellationToken);
 
+            try
+            {
+                return await CreateAccountAsync(normalized, cancellationToken);
+            }
+            catch (AccountWorkspaceConflictException) when (attempt == 1)
+            {
+            }
+        }
+    }
+
+    private async Task<AccountWorkspaceContext> RefreshAsync(
+        ExternalIdentityLookup existing,
+        TrustedWorkspaceIdentity identity,
+        CancellationToken cancellationToken)
+    {
+        await _store.UpdateExternalIdentitySeenAsync(existing.ExternalIdentityId, identity.DisplayName, identity.Email, cancellationToken);
+        await ProvisionOwnedWorkspacesAsync(existing.Context, cancellationToken);
+        return existing.Context with
+        {
+            Account = existing.Context.Account with
+            {
+                DisplayName = identity.DisplayName,
+                Email = identity.Email
+            }
+        };
+    }
+
+    private async Task<AccountWorkspaceContext> CreateAccountAsync(TrustedWorkspaceIdentity identity, CancellationToken cancellationToken)
+    {
         var account = new Account
         {
-            DisplayName = normalized.DisplayName,
-            Email = normalized.Email
+            DisplayName = identity.DisplayName,
+            Email = identity.Email
         };
-        var externalIdentity = new ExternalIdentity
+        account.ExternalIdentities.Add(new ExternalIdentity
         {
             Account = account,
-            Issuer = normalized.Issuer,
-            Subject = normalized.Subject,
-            DisplayName = normalized.DisplayName,
-            Email = normalized.Email
-        };
-        var workspace = new Workspace
+            Issuer = identity.Issuer,
+            Subject = identity.Subject,
+            DisplayName = identity.DisplayName,
+            Email = identity.Email
+        });
+
+        if (identity.CustomerEntraTenantId is { } tenantId &&
+            await _store.FindOrganizationByEntraTenantIdAsync(tenantId, cancellationToken) is { } tenantOrganization)
+            return await JoinTenantOrganizationAsync(account, tenantOrganization, cancellationToken);
+
+        return await MintOwnedOrganizationAsync(account, identity, cancellationToken);
+    }
+
+    /// <summary>
+    /// Later sign-ins from a customer tenant join its organization as members without any
+    /// workspace access; owners grant workspaces through the existing membership endpoints.
+    /// </summary>
+    private async Task<AccountWorkspaceContext> JoinTenantOrganizationAsync(
+        Account account,
+        Organization organization,
+        CancellationToken cancellationToken)
+    {
+        account.OrganizationMemberships.Add(new OrganizationMembership
         {
-            Name = string.IsNullOrWhiteSpace(normalized.DisplayName) ? "Personal Workspace" : normalized.DisplayName,
-            Kind = WorkspaceKind.Personal
+            Account = account,
+            OrganizationId = organization.Id,
+            Role = OrganizationRole.Member
+        });
+
+        await _store.AddAccountAsync(account, cancellationToken);
+        await _store.SaveChangesAsync(cancellationToken);
+
+        return new AccountWorkspaceContext(new AccountSummary(account.Id, account.DisplayName, account.Email), [])
+        {
+            Organizations = organization.Status == OrganizationStatus.Active
+                ? [new OrganizationSummary(organization.Id, organization.Name, OrganizationRole.Member)]
+                : []
         };
+    }
+
+    /// <summary>
+    /// Mints the organization and default workspace the account owns: a personal one, or the
+    /// shared one bound to the customer's Entra tenant on that tenant's first sign-in.
+    /// </summary>
+    private async Task<AccountWorkspaceContext> MintOwnedOrganizationAsync(
+        Account account,
+        TrustedWorkspaceIdentity identity,
+        CancellationToken cancellationToken)
+    {
+        var tenantId = identity.CustomerEntraTenantId;
+        var workspace = tenantId is null
+            ? new Workspace
+            {
+                Name = string.IsNullOrWhiteSpace(identity.DisplayName) ? "Personal Workspace" : identity.DisplayName,
+                Kind = WorkspaceKind.Personal
+            }
+            : new Workspace
+            {
+                Name = TenantOrganizationName(identity.Email, tenantId),
+                Kind = WorkspaceKind.Shared
+            };
         var organization = new Organization
         {
             Name = workspace.Name,
             CreatedByAccountId = account.Id,
             Workspaces = { workspace }
         };
+        if (tenantId is not null)
+            organization.IdentityBinding = new OrganizationIdentityBinding { Organization = organization, EntraTenantId = tenantId };
         var organizationMembership = new OrganizationMembership
         {
             Account = account,
@@ -75,35 +150,13 @@ public sealed class AccountWorkspaceService
             Role = WorkspaceRole.Owner
         };
 
-        account.ExternalIdentities.Add(externalIdentity);
         account.OrganizationMemberships.Add(organizationMembership);
         account.Memberships.Add(membership);
         organization.Memberships.Add(organizationMembership);
         workspace.Memberships.Add(membership);
 
         await _store.AddAccountAsync(account, cancellationToken);
-        try
-        {
-            await _store.SaveChangesAsync(cancellationToken);
-        }
-        catch (AccountWorkspaceConflictException)
-        {
-            var concurrent = await _store.FindByExternalIdentityAsync(normalized.Issuer, normalized.Subject, cancellationToken);
-            if (concurrent is null)
-                throw;
-
-            await _store.UpdateExternalIdentitySeenAsync(concurrent.ExternalIdentityId, normalized.DisplayName, normalized.Email, cancellationToken);
-            await ProvisionOwnedWorkspacesAsync(concurrent.Context, cancellationToken);
-            return concurrent.Context with
-            {
-                Account = concurrent.Context.Account with
-                {
-                    DisplayName = normalized.DisplayName,
-                    Email = normalized.Email
-                }
-            };
-        }
-
+        await _store.SaveChangesAsync(cancellationToken);
         await ProvisionOwnerAsync(workspace.Id, account.Id, cancellationToken);
 
         return new AccountWorkspaceContext(
@@ -112,6 +165,14 @@ public sealed class AccountWorkspaceService
         {
             Organizations = [new OrganizationSummary(organization.Id, organization.Name, OrganizationRole.Owner)]
         };
+    }
+
+    // Entra tokens carry no tenant display name, so the binder's sign-in domain is the
+    // readable default. Display claims only name the organization; the tenant id keys it.
+    private static string TenantOrganizationName(string? email, string tenantId)
+    {
+        var domain = email?[(email.LastIndexOf('@') + 1)..];
+        return string.IsNullOrWhiteSpace(domain) || domain == email ? $"Entra tenant {tenantId}" : domain;
     }
 
     public async Task<WorkspaceAccess?> GetWorkspaceAccessAsync(TrustedWorkspaceIdentity identity, Guid workspaceId, CancellationToken cancellationToken = default)
@@ -316,6 +377,7 @@ public sealed class AccountWorkspaceService
 public interface IAccountWorkspaceStore
 {
     Task<ExternalIdentityLookup?> FindByExternalIdentityAsync(string issuer, string subject, CancellationToken cancellationToken = default);
+    Task<Organization?> FindOrganizationByEntraTenantIdAsync(string tenantId, CancellationToken cancellationToken = default);
     Task<OrganizationCreateResult> CreateOrganizationAsync(CreateOrganizationRequest request, CancellationToken cancellationToken = default);
     Task AddAccountAsync(Account account, CancellationToken cancellationToken = default);
     Task UpdateExternalIdentitySeenAsync(Guid externalIdentityId, string? displayName, string? email, CancellationToken cancellationToken = default);
@@ -342,8 +404,18 @@ public interface IAccountWorkspaceStore
 
 public sealed record TrustedWorkspaceIdentity(string Issuer, string Subject, string? DisplayName, string? Email)
 {
+    /// <summary>
+    /// The customer Microsoft Entra tenant (<c>tid</c>) of a validated multi-tenant sign-in.
+    /// A new account from such a tenant joins, or on first sign-in mints, the organization
+    /// bound to it. Null for every other identity, including Valence dogfood tenants.
+    /// </summary>
+    public string? CustomerEntraTenantId { get; init; }
+
     public TrustedWorkspaceIdentity Normalize() =>
-        new(Issuer.Trim(), Subject.Trim(), NormalizeBlank(DisplayName), NormalizeBlank(Email));
+        new(Issuer.Trim(), Subject.Trim(), NormalizeBlank(DisplayName), NormalizeBlank(Email))
+        {
+            CustomerEntraTenantId = NormalizeBlank(CustomerEntraTenantId)
+        };
 
     private static string? NormalizeBlank(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();

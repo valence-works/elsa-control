@@ -179,6 +179,46 @@ secured `infra.parameters.adminApiKey` parameter and required azd environment
 outputs for the run, then deploys either the application container or the full
 infrastructure path.
 
+### Multi-tenant Microsoft Entra sign-in (guided design partners)
+
+Control can accept work or school sign-ins from customer Microsoft Entra tenants, so a
+design partner signs in with its own Entra identity. This is Preview, guided onboarding:
+Valence sets it up per partner; it is not self-serve and not an Azure Marketplace
+offer. Signing in only creates the partner's organization. It does not bind an Azure
+subscription or grant any entitlement.
+
+It is off by default. Production currently pins a single Valence tenant through
+`Authentication__ControlIdentity__Authority` and `__Issuer`. To enable it:
+
+- Operator: change the Control Entra app registration's sign-in audience to accounts in any
+  organizational directory, and have each partner's tenant administrator grant consent.
+- `Authentication__ControlIdentity__Provider=MicrosoftEntra`
+- `Authentication__ControlIdentity__Authority=https://login.microsoftonline.com/organizations/v2.0`
+- `Authentication__ControlIdentity__Issuer` removed (empty). Each token is validated against
+  `https://login.microsoftonline.com/{tid}/v2.0` for its own `tid`, and personal Microsoft
+  accounts are rejected.
+- `Authentication__ControlIdentity__Entra__MultiTenant=true`
+- `Authentication__ControlIdentity__Entra__DogfoodTenantIds__0=<Valence tenant id>` (one entry per
+  Valence-operated tenant).
+- `Authentication__Admin__AllowAuthenticatedCustomerSession=false`. Startup refuses anything else,
+  because otherwise any customer tenant could administer Control.
+
+Behaviour once enabled:
+
+- Dogfood tenants keep today's identity key, `https://login.microsoftonline.com/{tid}/v2.0`
+  plus the configured subject claim, so existing Valence accounts still resolve. They never
+  take the customer mint.
+- A customer tenant's first sign-in creates one organization bound to its `tid`, plus a default
+  shared workspace. The organization is named after the sign-in domain. The first user owns both.
+  Every later user from that tenant joins that organization as a member with no workspace access,
+  and owners grant workspaces through the existing membership endpoints. A tenant never gets a
+  second organization from sign-in, and a sign-in never merges into an existing Stripe or
+  personal organization.
+- Customer accounts are keyed by the tenant issuer and the Entra object id (`oid`). Display
+  claims such as `preferred_username`, `email` and `name` are never keys.
+- The `control_admin` role is honoured only from dogfood tenants. A customer tenant
+  administrator can assign the app's roles inside their own tenant.
+
 ## GitHub/Azure Bootstrap
 
 Use the bootstrap script to recreate or refresh the GitHub `production`

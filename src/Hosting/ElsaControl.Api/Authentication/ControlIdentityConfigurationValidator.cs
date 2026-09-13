@@ -35,6 +35,18 @@ public sealed class ControlIdentityConfigurationValidator(
         if (!string.IsNullOrWhiteSpace(_options.ClientSecret) && string.IsNullOrWhiteSpace(_options.ClientId))
             yield return "Authentication:ControlIdentity:ClientId is required when ClientSecret is configured.";
 
+        if (_options.Entra.MultiTenant)
+        {
+            if (_options.Provider != ControlIdentityProviderKind.MicrosoftEntra)
+                yield return "Authentication:ControlIdentity:Entra:MultiTenant requires Provider MicrosoftEntra.";
+            if (!string.IsNullOrWhiteSpace(_options.Issuer))
+                yield return "Authentication:ControlIdentity:Issuer must be empty when Entra:MultiTenant is enabled; each token is validated against its own tenant issuer.";
+            if (_options.Entra.DogfoodTenantIds.Any(id => !EntraMultiTenantIdentity.TryNormalizeTenantId(id, out _)))
+                yield return "Authentication:ControlIdentity:Entra:DogfoodTenantIds must contain work or school tenant ids (GUIDs).";
+            if (configuration.GetValue<bool>($"{AdminAuthorizationOptions.ConfigurationSection}:{nameof(AdminAuthorizationOptions.AllowAuthenticatedCustomerSession)}"))
+                yield return "Authentication:Admin:AllowAuthenticatedCustomerSession must be false when Entra:MultiTenant is enabled; any customer tenant could otherwise administer Control.";
+        }
+
         if (_options.Provider == ControlIdentityProviderKind.Keycloak)
         {
             if (string.IsNullOrWhiteSpace(_options.Authority))

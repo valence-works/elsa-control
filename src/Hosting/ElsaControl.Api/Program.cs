@@ -171,6 +171,8 @@ builder.Services.AddOptions<JwtBearerOptions>(ControlIdentityDefaults.Scheme)
             ValidateLifetime = true,
             ClockSkew = TimeSpan.FromMinutes(1)
         };
+        if (controlIdentity.IsEntraMultiTenant)
+            EntraMultiTenantIdentity.ConfigureIssuerValidation(options.TokenValidationParameters);
     });
 // The public Runtime Builder API is called from browsers on other origins (the Elsa Hub
 // configurator), so those origins must be allow-listed. Everything else on this host is

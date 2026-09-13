@@ -82,23 +82,24 @@ internal static class ControlClaimsIdentityMapper
         if (user?.Identity is not { IsAuthenticated: true })
             return null;
 
+        var subject = ClaimValue(user, options.Claims.Subject)
+            ?? ClaimValue(user, ClaimTypes.NameIdentifier);
+        var displayName = FirstClaimValue(user, options.Claims.DisplayName)
+            ?? ClaimValue(user, JwtRegisteredClaimNames.Name)
+            ?? ClaimValue(user, ClaimTypes.Name);
+        var email = FirstClaimValue(user, options.Claims.Email)
+            ?? ClaimValue(user, JwtRegisteredClaimNames.Email)
+            ?? ClaimValue(user, ClaimTypes.Email);
+        if (options.IsEntraMultiTenant)
+            return EntraMultiTenantIdentity.ToTrustedWorkspaceIdentity(user, options.Entra, subject, displayName, email);
+
         var issuer = ClaimValue(user, JwtRegisteredClaimNames.Iss)
             ?? options.Issuer
             ?? options.Authority;
-        var subject = ClaimValue(user, options.Claims.Subject)
-            ?? ClaimValue(user, ClaimTypes.NameIdentifier);
         if (string.IsNullOrWhiteSpace(issuer) || string.IsNullOrWhiteSpace(subject))
             return null;
 
-        return new TrustedWorkspaceIdentity(
-            issuer,
-            subject,
-            FirstClaimValue(user, options.Claims.DisplayName)
-                ?? ClaimValue(user, JwtRegisteredClaimNames.Name)
-                ?? ClaimValue(user, ClaimTypes.Name),
-            FirstClaimValue(user, options.Claims.Email)
-                ?? ClaimValue(user, JwtRegisteredClaimNames.Email)
-                ?? ClaimValue(user, ClaimTypes.Email));
+        return new TrustedWorkspaceIdentity(issuer, subject, displayName, email);
     }
 
     private static string? FirstClaimValue(ClaimsPrincipal principal, IEnumerable<string> types)

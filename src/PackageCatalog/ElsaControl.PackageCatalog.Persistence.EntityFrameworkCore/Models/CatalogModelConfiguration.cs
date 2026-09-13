@@ -186,6 +186,18 @@ internal sealed class OrganizationConfiguration : IEntityTypeConfiguration<Organ
         builder.HasMany(x => x.Memberships).WithOne(x => x.Organization).HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Cascade);
         builder.HasMany(x => x.EntitlementSnapshots).WithOne(x => x.Organization).HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Cascade);
         builder.HasMany(x => x.AuditRecords).WithOne(x => x.Organization).HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Cascade);
+        builder.HasOne(x => x.IdentityBinding).WithOne(x => x.Organization).HasForeignKey<OrganizationIdentityBinding>(x => x.OrganizationId).OnDelete(DeleteBehavior.Cascade);
+    }
+}
+
+internal sealed class OrganizationIdentityBindingConfiguration : IEntityTypeConfiguration<OrganizationIdentityBinding>
+{
+    public void Configure(EntityTypeBuilder<OrganizationIdentityBinding> builder)
+    {
+        builder.HasKey(x => x.OrganizationId);
+        builder.Property(x => x.EntraTenantId).HasMaxLength(36).IsRequired();
+        builder.Property(x => x.CreatedAt).HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        builder.HasIndex(x => x.EntraTenantId).IsUnique();
     }
 }
 
