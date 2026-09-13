@@ -1,16 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
 import { CheckCircle2, ExternalLink, LoaderCircle, RefreshCw, ShieldAlert, TriangleAlert } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { Badge, Button, EmptyState, SecondaryButton, Table } from "@/components/ui";
+import { Link, useSearchParams } from "react-router-dom";
+import { Badge, Button, EmptyState, SecondaryButton, Table, buttonClassName } from "@/components/ui";
 import { RequestStateView } from "@/components/states/RequestStateViews";
 import { useWorkspaceContext } from "@/app/WorkspaceContextProvider";
+import { getDeploymentPermissions } from "@/features/deployments/deploymentApi";
+import type { WorkspaceDeploymentPermissionsResponse } from "@/features/deployments/deploymentModels";
 import { issueManagedElsaHandoff, listManagedElsaInstances } from "@/features/managed-elsa/managedElsaApi";
 import { managedElsaHandoffTokenType, type ManagedElsaInstance } from "@/features/managed-elsa/managedElsaModels";
+import { useEngineProvisioningProviders } from "@/features/engine-provisioning/useEngineProvisioningProviders";
 import { ApiError } from "@/lib/api/httpClient";
 import { queryKeys } from "@/lib/query/queryClient";
 import { cn } from "@/lib/utils";
-import { ManagedElsaCreatePanel } from "@/features/managed-elsa/ManagedElsaCreatePanel";
 
 export function ManagedElsaInstancesPage() {
   const { selectedWorkspaceId, isLoading: workspaceLoading } = useWorkspaceContext();
@@ -33,6 +35,13 @@ export function ManagedElsaInstancesPage() {
     queryKey: queryKeys.managedElsaInstances(selectedWorkspaceId),
     queryFn: () => listManagedElsaInstances(selectedWorkspaceId),
     enabled: Boolean(selectedWorkspaceId) && continuationScrubbed,
+    retry: false
+  });
+  const provisioningProviders = useEngineProvisioningProviders(selectedWorkspaceId, continuationScrubbed);
+  const provisioningPermissions = useQuery<WorkspaceDeploymentPermissionsResponse>({
+    queryKey: queryKeys.deploymentPermissions(selectedWorkspaceId),
+    queryFn: () => getDeploymentPermissions(selectedWorkspaceId),
+    enabled: Boolean(selectedWorkspaceId) && continuationScrubbed && provisioningProviders.hasProvider("azure"),
     retry: false
   });
   const [openingInstanceId, setOpeningInstanceId] = useState<string | null>(null);
@@ -116,7 +125,11 @@ export function ManagedElsaInstancesPage() {
         </div>
       ) : null}
 
-      {selectedWorkspaceId ? <ManagedElsaCreatePanel key={selectedWorkspaceId} workspaceId={selectedWorkspaceId} /> : null}
+      {selectedWorkspaceId && provisioningProviders.hasProvider("azure") && provisioningPermissions.isSuccess && provisioningPermissions.data.permissions.includes("deployments.setup.manage") ? (
+        <div className="flex justify-end">
+          <Link to="/admin/engines/provision" className={buttonClassName("secondary")}>Provision engine</Link>
+        </div>
+      ) : null}
 
       {items.length === 0 ? (
         <EmptyState

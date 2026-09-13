@@ -1,5 +1,6 @@
 using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Instances;
+using ElsaControl.Deployment.Core.Provisioning;
 using ElsaControl.Api.Workspace;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -70,6 +71,8 @@ public sealed class ElsaInstanceLifecycleCompositionTests : IDisposable
             descriptor.ServiceType == typeof(IElsaInstanceProviderCleanupPort));
         Assert.DoesNotContain(services, descriptor =>
             descriptor.ServiceType == typeof(IElsaInstanceProviderRecoveryPort));
+        Assert.DoesNotContain(services, descriptor =>
+            descriptor.ServiceType == typeof(IEngineProvisioningModule));
     }
 
     [Fact]
@@ -91,12 +94,17 @@ public sealed class ElsaInstanceLifecycleCompositionTests : IDisposable
             descriptor.ServiceType == typeof(IElsaInstanceProviderCleanupPort));
         Assert.Contains(services, descriptor =>
             descriptor.ServiceType == typeof(IElsaInstanceProviderRecoveryPort));
+        Assert.Contains(services, descriptor =>
+            descriptor.ServiceType == typeof(IEngineProvisioningModule));
         using var provider = services.BuildServiceProvider();
         var options = provider.GetRequiredService<AzureElsaInstanceProviderOptions>();
         Assert.Equal(authority.TemplateFingerprint, options.TemplateFingerprint);
         Assert.Equal(authority.ProviderScopeFingerprint, options.ProviderScopeFingerprint);
         Assert.Equal(authority.Scope.SubscriptionId, options.SubscriptionId);
         Assert.Equal(authority.Scope.ResourceGroupName, options.ResourceGroupNamePrefix);
+        var module = Assert.Single(provider.GetServices<IEngineProvisioningModule>());
+        Assert.Equal("azure", module.Id);
+        Assert.Equal("Azure", module.DisplayName);
     }
 
     [Fact]

@@ -738,13 +738,18 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         ElsaInstanceLifecycleOutboxMessage outbox,
         ElsaInstanceAcceptanceContext context,
         CancellationToken cancellationToken = default)
-        => CommitAcceptedCoreAsync(
+    {
+        if (context?.ProvisioningContext is not null)
+            throw new InvalidOperationException("In-memory lifecycle persistence does not support provisioning snapshots.");
+
+        return CommitAcceptedCoreAsync(
             expectedInstance,
             instance,
             operation,
             outbox,
             context?.DeleteConfirmation,
             cancellationToken);
+    }
 
     public Task<ElsaInstanceLifecycleWorkItem?> TryClaimNextAsync(
         string workerId,

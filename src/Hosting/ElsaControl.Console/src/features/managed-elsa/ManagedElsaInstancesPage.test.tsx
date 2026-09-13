@@ -1,6 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -17,6 +16,7 @@ const unboundInstanceId = "00000000-0000-0000-0000-000000000103";
 const callbackUri = "https://managed.example.test/managed-elsa/handoff/callback";
 const state = "state-value-that-is-long-enough";
 const codeChallenge = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFG";
+const azureProvisioningProvider = { id: "azure", displayName: "Azure" };
 
 describe("ManagedElsaInstancesPage", () => {
   afterEach(() => {
@@ -139,9 +139,13 @@ describe("ManagedElsaInstancesPage", () => {
   it("scrubs continuation parameters before fetching the authenticated instance list", async () => {
     const replaceState = vi.spyOn(window.history, "replaceState");
     let listFetchedBeforeScrub = false;
+    let providersFetchedBeforeScrub = false;
     let scrubbedUrlAtListFetch = "";
     installFetch({
       instances: [instanceFixture()],
+      onProvisioningProvidersRequest: () => {
+        providersFetchedBeforeScrub = replaceState.mock.calls.length === 0;
+      },
       onInstancesRequest: () => {
         listFetchedBeforeScrub = replaceState.mock.calls.length === 0;
         const lastReplace = replaceState.mock.calls[replaceState.mock.calls.length - 1];
@@ -154,6 +158,7 @@ describe("ManagedElsaInstancesPage", () => {
     expect(await screen.findByRole("button", { name: "Open" })).toBeInTheDocument();
     expect(replaceState).toHaveBeenCalled();
     expect(listFetchedBeforeScrub).toBe(false);
+    expect(providersFetchedBeforeScrub).toBe(false);
     expect(scrubbedUrlAtListFetch).not.toContain("state=");
     expect(scrubbedUrlAtListFetch).not.toContain("code_challenge=");
   });
@@ -198,102 +203,51 @@ describe("ManagedElsaInstancesPage", () => {
     expect(screen.queryByText(/signed-handoff-token|code_verifier|state-value/)).not.toBeInTheDocument();
   });
 
-  it("creates from arbitrary governed release data with an idempotency key", async () => {
-    const fetchMock = installFetch({ instances: [] });
-    const user = userEvent.setup();
+  it("renders the shared provisioning link after Azure provider and setup permission checks succeed", async () => {
+    installFetch({ instances: [], provisioningProviders: [azureProvisioningProvider] });
+
     renderPage();
 
-    await user.type(await screen.findByLabelText("Instance name"), "Future Elsa");
-    await user.selectOptions(screen.getByLabelText("Elsa release and topology"), "1");
-    await user.click(screen.getByRole("button", { name: "Create instance" }));
-
-    expect(await screen.findByText("Provisioning status: Succeeded")).toBeInTheDocument();
-    const createCall = fetchMock.mock.calls.find(([input, init]) =>
-      String(input).endsWith(`/api/workspaces/${workspaceId}/instances`) && init?.method === "POST");
-    const idempotencyKey = new Headers(createCall?.[1]?.headers).get("Idempotency-Key");
-    expect(idempotencyKey).toMatch(/^[0-9a-f-]{36}$/i);
-    expect(window.sessionStorage.getItem(`managed-elsa-idempotency:${workspaceId}`)).not.toBe(idempotencyKey);
-    const body = JSON.parse(String(createCall?.[1]?.body));
-    expect(body).toMatchObject({
-      name: "Future Elsa",
-      slug: "future-elsa",
-      intent: {
-        release: { distributionId: "future-runtime", releaseLine: "5.0", requestedVersion: "5.0.1" },
-        application: { topologyId: "combined" },
-        placement: { regionCode: "westeurope", isolationProfile: "dedicated" }
-      }
-    });
-    expect(body.intent.release).not.toHaveProperty("previewManifestDigest");
+    expect(await screen.findByRole("link", { name: "Provision engine" })).toHaveAttribute("href", "/admin/engines/provision");
   });
 
-  it("requires explicit Preview consent and sends only the selected immutable digest", async () => {
-    const preview = { ...releaseFixture("future-runtime", "5.0", "5.0.0-preview.1"), manifestDigest: `sha256:${"a".repeat(64)}` };
-    const fetchMock = installFetch({ instances: [], releaseOptions: [], previewReleases: [preview] });
-    const user = userEvent.setup();
+  it("hides provisioning when discovery has no recognized provider", async () => {
+    installFetch({ instances: [], provisioningProviders: [{ id: "unknown-provider", displayName: "Unknown" }] });
+
     renderPage();
 
-    await user.type(await screen.findByLabelText("Instance name"), "Preview Elsa");
-    expect(screen.getByRole("option", { name: /Preview/ })).toBeInTheDocument();
-    const consent = screen.getByRole("checkbox", { name: /I agree to use this Preview release/ });
-    expect(consent).not.toBeChecked();
-    expect(screen.getByRole("button", { name: "Create instance" })).toBeDisabled();
-    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
-
-    await user.click(consent);
-    await user.click(screen.getByRole("button", { name: "Create instance" }));
-    expect(await screen.findByText("Provisioning status: Succeeded")).toBeInTheDocument();
-    const call = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
-    expect(JSON.parse(String(call?.[1]?.body)).intent.release.previewManifestDigest).toBe(preview.manifestDigest);
+    expect(await screen.findByText("No managed Elsa instances")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Provision engine" })).not.toBeInTheDocument();
   });
 
-  it("clears Preview consent when release selection changes", async () => {
-    installFetch({ previewReleases: [{ ...releaseFixture("future-runtime", "5.0", "5.0.0-preview.1"), manifestDigest: `sha256:${"b".repeat(64)}` }] });
-    const user = userEvent.setup();
-    renderPage();
-    await user.type(await screen.findByLabelText("Instance name"), "Preview Elsa");
-    const selection = screen.getByLabelText("Elsa release and topology");
-    await user.selectOptions(selection, "2");
-    await user.click(screen.getByRole("checkbox"));
-    expect(screen.getByRole("button", { name: "Create instance" })).toBeEnabled();
-    await user.selectOptions(selection, "0");
-    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
-    await user.selectOptions(selection, "2");
-    expect(screen.getByRole("checkbox")).not.toBeChecked();
-    expect(screen.getByRole("button", { name: "Create instance" })).toBeDisabled();
-  });
-
-  it("maps create validation codes to accurate safe messages", async () => {
+  it("fails closed when provider discovery errors", async () => {
     installFetch({
       instances: [],
-      createResponse: Response.json({
-        title: "Managed hosting is not enabled for this organization.",
-        status: 422,
-        code: "instance.entitlement-required"
-      }, { status: 422 })
+      provisioningProvidersResponse: Response.json({ title: "Unavailable" }, { status: 503 })
     });
-    const user = userEvent.setup();
+
     renderPage();
 
-    await user.type(await screen.findByLabelText("Instance name"), "Unavailable Elsa");
-    await user.click(screen.getByRole("button", { name: "Create instance" }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("Managed hosting is not enabled for this organization.");
+    expect(await screen.findByText("No managed Elsa instances")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Provision engine" })).not.toBeInTheDocument();
   });
 
-  it("resumes durable provisioning status after a browser refresh", async () => {
-    const completedIdempotencyKey = "00000000-0000-0000-0000-000000000301";
-    window.sessionStorage.setItem(`managed-elsa-idempotency:${workspaceId}`, completedIdempotencyKey);
-    window.sessionStorage.setItem(`managed-elsa-operation:${workspaceId}`, JSON.stringify({
-      instanceId: healthyInstanceId,
-      operationId: "00000000-0000-0000-0000-000000000201"
-    }));
+  it("treats an older discovery endpoint as no available providers", async () => {
     installFetch({ instances: [] });
 
     renderPage();
 
-    expect(await screen.findByText("Provisioning status: Succeeded")).toBeInTheDocument();
-    expect(window.sessionStorage.getItem(`managed-elsa-operation:${workspaceId}`)).toBeNull();
-    expect(window.sessionStorage.getItem(`managed-elsa-idempotency:${workspaceId}`)).not.toBe(completedIdempotencyKey);
+    expect(await screen.findByText("No managed Elsa instances")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Provision engine" })).not.toBeInTheDocument();
+  });
+
+  it("hides provisioning when setup permission is missing", async () => {
+    installFetch({ instances: [], provisioningProviders: [azureProvisioningProvider], deploymentPermissions: [] });
+
+    renderPage();
+
+    expect(await screen.findByText("No managed Elsa instances")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Provision engine" })).not.toBeInTheDocument();
   });
 
   it("loads every canonical instance page", async () => {
@@ -325,83 +279,6 @@ describe("ManagedElsaInstancesPage", () => {
     expect(await screen.findByText("Managed instances could not load")).toBeInTheDocument();
   });
 
-  it("keeps durable progress state and retries a failed status refresh", async () => {
-    window.sessionStorage.setItem(`managed-elsa-operation:${workspaceId}`, JSON.stringify({
-      instanceId: healthyInstanceId,
-      operationId: "00000000-0000-0000-0000-000000000201"
-    }));
-    installFetch({
-      instances: [],
-      operationResponses: [Response.json({ title: "Unavailable" }, { status: 503 })]
-    });
-    const user = userEvent.setup();
-
-    renderPage();
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("Provisioning status could not be refreshed.");
-    expect(window.sessionStorage.getItem(`managed-elsa-operation:${workspaceId}`)).not.toBeNull();
-    await user.click(screen.getByRole("button", { name: "Retry status" }));
-    expect(await screen.findByText("Provisioning status: Succeeded")).toBeInTheDocument();
-  });
-
-  it("does not complete a durable operation from a mismatched response", async () => {
-    window.sessionStorage.setItem(`managed-elsa-operation:${workspaceId}`, JSON.stringify({
-      instanceId: healthyInstanceId,
-      operationId: "00000000-0000-0000-0000-000000000201"
-    }));
-    installFetch({
-      instances: [],
-      operationResponses: [Response.json({
-        id: "00000000-0000-0000-0000-000000000999",
-        instanceId: healthyInstanceId,
-        action: "Create",
-        state: "Succeeded",
-        attemptNumber: 1,
-        failureCode: null,
-        links: {}
-      })]
-    });
-
-    renderPage();
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("Provisioning status could not be refreshed.");
-    expect(window.sessionStorage.getItem(`managed-elsa-operation:${workspaceId}`)).not.toBeNull();
-    expect(screen.queryByText("Provisioning status: Succeeded")).not.toBeInTheDocument();
-  });
-
-  it("distinguishes managed-hosting entitlement denial", async () => {
-    installFetch({
-      instances: [],
-      onboardingResponse: Response.json({ title: "Not enabled" }, { status: 422 })
-    });
-
-    renderPage();
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("Managed hosting is not enabled for this organization.");
-  });
-
-  it("renders an empty governed release catalog explicitly", async () => {
-    installFetch({ instances: [], releaseOptions: [] });
-
-    renderPage();
-
-    expect(await screen.findByText("No managed Elsa releases are currently available.")).toHaveAttribute("role", "status");
-  });
-
-  it("keeps distinct governed release lines and channels selectable", async () => {
-    installFetch({
-      instances: [],
-      releaseOptions: [
-        releaseFixture("valence-runtime", "4.0", "4.0.0", "stable"),
-        releaseFixture("valence-runtime", "4.1", "4.0.0", "preview")
-      ]
-    });
-
-    renderPage();
-
-    expect(await screen.findByRole("option", { name: "Elsa 4.0.0 · 4.0 · stable · combined" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Elsa 4.0.0 · 4.1 · preview · combined" })).toBeInTheDocument();
-  });
 });
 
 function renderPage(search = "") {
@@ -425,11 +302,10 @@ function installFetch({
   issue,
   issueResponses = [],
   onInstancesRequest,
-  onboardingResponse,
-  releaseOptions,
-  previewReleases,
-  operationResponses = [],
-  createResponse
+  onProvisioningProvidersRequest,
+  provisioningProvidersResponse,
+  provisioningProviders,
+  deploymentPermissions,
 }: {
   instances?: ManagedElsaInstance[];
   instancePages?: ManagedElsaInstance[][];
@@ -437,11 +313,10 @@ function installFetch({
   issue?: Record<string, string>;
   issueResponses?: Response[];
   onInstancesRequest?: () => void;
-  onboardingResponse?: Response;
-  releaseOptions?: ReturnType<typeof releaseFixture>[];
-  previewReleases?: Array<ReturnType<typeof releaseFixture> & { manifestDigest: string }>;
-  operationResponses?: Response[];
-  createResponse?: Response;
+  onProvisioningProvidersRequest?: () => void;
+  provisioningProvidersResponse?: Response;
+  provisioningProviders?: Array<{ id: string; displayName: string }>;
+  deploymentPermissions?: string[];
 }) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = input instanceof Request ? input.url : input.toString();
@@ -453,6 +328,16 @@ function installFetch({
         organizations: [{ id: organizationId, name: "Acme Corp", role: "Owner" }],
         workspaces: [{ id: workspaceId, name: "Acme Insurance", kind: "Shared", role: "Owner", organizationId, organizationName: "Acme Corp", organizationRole: "Owner" }]
       });
+    if (url.endsWith(`/api/workspaces/${workspaceId}/engine-provisioning/providers`)) {
+      onProvisioningProvidersRequest?.();
+      if (provisioningProvidersResponse)
+        return provisioningProvidersResponse;
+      if (provisioningProviders)
+        return Response.json({ providers: provisioningProviders });
+      return Response.json({ title: "Not found" }, { status: 404 });
+    }
+    if (url.endsWith(`/api/workspaces/${workspaceId}/deployments/permissions`))
+      return Response.json({ permissions: deploymentPermissions ?? ["deployments.setup.manage"] });
     if (url.includes(`/api/workspaces/${workspaceId}/instances?`)) {
       onInstancesRequest?.();
       const response = instancePageResponses.shift();
@@ -470,30 +355,6 @@ function installFetch({
           : items.length,
         hasMore: page < pages.length
       });
-    }
-    if (url.endsWith(`/api/workspaces/${workspaceId}/instances/onboarding-options`)) {
-      if (onboardingResponse)
-        return onboardingResponse;
-      return Response.json({
-        releases: releaseOptions ?? [releaseFixture("valence-runtime", "3.8", "3.8.4"), releaseFixture("future-runtime", "5.0", "5.0.1")],
-        previewReleases,
-        launchProfile: { name: "West Europe Dedicated", description: "Managed hosting.", targetMode: "managed", regionCode: "westeurope", isolationProfile: "dedicated", capacityProfile: "standard-small", networkOutcome: "public", domainOutcome: "managed" }
-      });
-    }
-    if (url.endsWith(`/api/workspaces/${workspaceId}/instances`) && init?.method === "POST") {
-      if (createResponse)
-        return createResponse;
-      return Response.json({
-        instance: instanceFixture({ canOpen: false, observedLifecycle: "Pending", health: "Unknown", audience: null, redirectUri: null }),
-        operation: { id: "00000000-0000-0000-0000-000000000201", instanceId: healthyInstanceId, action: "Create", state: "Accepted", attemptNumber: 1, failureCode: null, links: {} },
-        links: {}
-      }, { status: 202 });
-    }
-    if (url.endsWith(`/api/workspaces/${workspaceId}/instances/${healthyInstanceId}/operations/00000000-0000-0000-0000-000000000201`)) {
-      const response = operationResponses.shift();
-      if (response)
-        return response;
-      return Response.json({ id: "00000000-0000-0000-0000-000000000201", instanceId: healthyInstanceId, action: "Create", state: "Succeeded", attemptNumber: 1, failureCode: null, links: {} });
     }
     if (url.endsWith("/api/managed-elsa/handoff/issue")) {
       const response = issueResponses.shift();
@@ -514,11 +375,6 @@ function installFetch({
   return fetchMock;
 }
 
-function releaseFixture(distributionId: string, releaseLine: string, releaseVersion: string, channel = "stable") {
-  return {
-    distributionId, releaseLine, version: releaseVersion, channel, topologyId: "combined"
-  };
-}
 
 function instanceFixture(overrides: Partial<ManagedElsaInstance> = {}): ManagedElsaInstance {
   return {

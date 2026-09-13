@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Cockpit;
@@ -9,7 +11,9 @@ using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using ElsaControl.RuntimeBuilder.Abstractions.ReleaseCatalog;
 using ElsaControl.RuntimeBuilder.Abstractions.ReleaseManifests;
+using ElsaControl.RuntimeBuilder.Abstractions;
 using ElsaControl.RuntimeBuilder.Core.Plans;
+using ElsaControl.RuntimeBuilder.Core.RuntimeConfigurations;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
@@ -80,6 +84,314 @@ public sealed class CatalogElsaInstanceLifecycleResolutionInputSourceTests : IAs
     {
         await _db.DisposeAsync();
         await _connection.DisposeAsync();
+    }
+
+    [Fact]
+    public void Reviewed_provisioning_context_requires_a_resolved_plan_digest()
+    {
+        var context = new ElsaInstanceProvisioningContext(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            "{}",
+            Hash("{}"),
+            PreviewDigest: Digest('a'),
+            RequestDigest: Digest('b'));
+
+        var error = Assert.Throws<ArgumentException>(() => context.Normalize());
+        Assert.Equal(nameof(ElsaInstanceProvisioningContext.ResolvedPlanDigest), error.ParamName);
+    }
+
+    [Fact]
+    public async Task Provisioning_context_is_bound_once_and_survives_context_reload()
+    {
+        var provisioned = await CreateProvisionedAsync("provisioning-context-create");
+
+        var environment = await _db.DeploymentEnvironments
+            .Include(x => x.Engines)
+            .SingleAsync(x => x.Id == provisioned.EnvironmentId);
+        Assert.Equal(provisioned.Accepted.Instance.Id, environment.ElsaInstanceId);
+        Assert.Single(environment.Engines);
+        Assert.Equal(provisioned.Accepted.Instance.Name, environment.Engines[0].Name);
+        Assert.Empty(environment.Engines[0].BaseUrl);
+        Assert.Equal(DeploymentHealth.Unreachable, environment.Engines[0].Health);
+        Assert.Equal("pending", environment.Engines[0].CredentialProvider);
+        Assert.Equal("managed", environment.Engines[0].HostingProvider);
+
+        var resolution = await CreateSource("https://control.example.test")
+            .GetAsync(provisioned.Accepted.Instance, provisioned.Accepted.Operation);
+        Assert.NotNull(resolution);
+        Assert.Equal("snapshot-image", resolution!.PlanRequest.BuilderIntent.Image.Slug);
+        Assert.Equal(provisioned.Context.ResolvedPlanDigest, resolution!.ExpectedPlanDigest);
+
+        await using (var restarted = new CatalogDbContext(_dbOptions))
+        {
+            var store = new EfCoreElsaInstanceLifecycleStore(restarted, EmptyResolutionInputSource.Instance);
+            var reloaded = await store.GetProvisioningContextAsync(_workspace.Id, provisioned.Accepted.Instance.Id);
+            Assert.Equal(provisioned.Context.Normalize(), reloaded);
+        }
+
+        var snapshot = await _db.ElsaInstanceProvisioningContexts
+            .SingleAsync(x => x.InstanceId == provisioned.Accepted.Instance.Id);
+        snapshot.ConfigurationName = "tampered";
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _db.SaveChangesAsync());
+        _db.ChangeTracker.Clear();
+
+        var mismatch = provisioned.Context with { ConfigurationName = "different" };
+        var replayRequest = new ElsaInstanceCreateRequest(
+            _workspace.OrganizationId,
+            _workspace.Id,
+            provisioned.Accepted.Instance.Name,
+            provisioned.Accepted.Instance.Slug,
+            provisioned.Accepted.Instance.Intent,
+            "provisioning-context-create",
+            provisioned.Accepted.Instance.Id,
+            ProvisioningContext: mismatch);
+        var conflict = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            new ElsaInstanceLifecycleService(new EfCoreElsaInstanceLifecycleStore(_db, EmptyResolutionInputSource.Instance))
+                .CreateAsync(replayRequest));
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.IdempotencyConflict, conflict.Reason);
+    }
+
+    [Fact]
+    public async Task Available_provisioning_targets_exclude_every_occupied_environment_state()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var owner = await new ElsaInstanceLifecycleService(
+                new EfCoreElsaInstanceLifecycleStore(_db, EmptyResolutionInputSource.Instance))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                _workspace.OrganizationId,
+                _workspace.Id,
+                "Availability owner",
+                "availability-owner",
+                _accepted.Instance.Intent,
+                "availability-owner-create",
+                ActorAccountId: null));
+        _db.ChangeTracker.Clear();
+
+        var targetIds = Enumerable.Range(0, 8)
+            .Select(_ => (ApplicationId: Guid.NewGuid(), EnvironmentId: Guid.NewGuid()))
+            .ToArray();
+        _db.DeploymentApplications.AddRange(targetIds.Select((target, index) => new DeploymentApplicationEntity
+        {
+            Id = target.ApplicationId,
+            WorkspaceId = _workspace.Id,
+            Name = $"Availability application {index}",
+            CreatedAt = now,
+            UpdatedAt = now
+        }));
+        var environments = targetIds.Select((target, index) => new DeploymentEnvironmentEntity
+        {
+            Id = target.EnvironmentId,
+            WorkspaceId = _workspace.Id,
+            ApplicationId = target.ApplicationId,
+            Name = $"Availability environment {index}",
+            Tier = EnvironmentTier.Production,
+            DeploymentStatus = DeploymentStatus.Blocked,
+            DriftStatus = DriftStatus.Unknown,
+            CreatedAt = now,
+            UpdatedAt = now
+        }).ToArray();
+        _db.DeploymentEnvironments.AddRange(environments);
+
+        // Each of these rows is independently ineligible. Keep the setup in one
+        // fixture so the query cannot accidentally omit one of the acceptance
+        // guards while still passing a single occupied-state example.
+        environments[0].ElsaInstanceId = owner.Instance.Id;
+        environments[1].DesiredRevisionId = Guid.NewGuid();
+        environments[2].DeployedRevisionId = Guid.NewGuid();
+        _db.DesiredStateRevisions.Add(new DesiredStateRevisionEntity
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = _workspace.Id,
+            ApplicationId = environments[3].ApplicationId,
+            EnvironmentId = environments[3].Id,
+            RevisionNumber = 1,
+            Label = "occupied revision",
+            ContentHash = new string('a', 64),
+            DesiredStateJson = "{}",
+            AuthoredAt = now,
+            CreatedAt = now
+        });
+        _db.ObservabilityBindings.Add(new ObservabilityBindingEntity
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = _workspace.Id,
+            EnvironmentId = environments[4].Id,
+            Kind = ObservabilityBindingKind.Logs,
+            Provider = "test",
+            Status = ObservabilityBindingStatus.Connected,
+            Scope = "*"
+        });
+        _db.DriftReportItems.Add(new DriftReportItemEntity
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = _workspace.Id,
+            EnvironmentId = environments[5].Id,
+            EngineId = Guid.NewGuid(),
+            Area = "engine",
+            Desired = "healthy",
+            Observed = "unknown",
+            Action = DriftAction.Review,
+            DetectedAt = now
+        });
+        _db.WorkflowEngines.Add(new WorkflowEngineEntity
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = _workspace.Id,
+            EnvironmentId = environments[6].Id,
+            Name = "occupied engine",
+            BaseUrl = "",
+            CertificateStatus = CertificateStatus.Untrusted,
+            CredentialProvider = "pending",
+            CredentialReference = "pending",
+            CredentialAssignmentStatus = EngineCredentialAssignmentStatus.Deferred,
+            CredentialVerificationStatus = CredentialVerificationStatus.NotVerifiable,
+            Health = DeploymentHealth.Unreachable,
+            VerificationMessage = "Awaiting provider endpoint observation.",
+            HostingProvider = "managed",
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await _db.SaveChangesAsync();
+
+        var targets = await new EfCoreEngineProvisioningTargetStore(_db)
+            .GetAvailableTargetsAsync(_workspace.Id);
+        var occupiedEnvironmentIds = targetIds
+            .Take(7)
+            .Select(x => x.EnvironmentId)
+            .ToHashSet();
+
+        Assert.Contains(targets, x => x.ApplicationId == targetIds[7].ApplicationId &&
+                                      x.EnvironmentId == targetIds[7].EnvironmentId);
+        Assert.DoesNotContain(targets, x => occupiedEnvironmentIds.Contains(x.EnvironmentId));
+    }
+
+    [Fact]
+    public async Task Available_provisioning_targets_are_scoped_to_the_requested_workspace()
+    {
+        var organization = new Organization { Id = Guid.NewGuid(), Name = "Foreign target organization" };
+        var foreignWorkspace = new Workspace
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = organization.Id,
+            Name = "Foreign target workspace",
+            Kind = WorkspaceKind.Shared
+        };
+        var applicationId = Guid.NewGuid();
+        var environmentId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        _db.Organizations.Add(organization);
+        _db.Workspaces.Add(foreignWorkspace);
+        _db.DeploymentApplications.Add(new DeploymentApplicationEntity
+        {
+            Id = applicationId,
+            WorkspaceId = foreignWorkspace.Id,
+            Name = "Foreign application",
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        _db.DeploymentEnvironments.Add(new DeploymentEnvironmentEntity
+        {
+            Id = environmentId,
+            WorkspaceId = foreignWorkspace.Id,
+            ApplicationId = applicationId,
+            Name = "Foreign environment",
+            Tier = EnvironmentTier.Production,
+            DeploymentStatus = DeploymentStatus.Blocked,
+            DriftStatus = DriftStatus.Unknown,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await _db.SaveChangesAsync();
+
+        var localTargets = await new EfCoreEngineProvisioningTargetStore(_db)
+            .GetAvailableTargetsAsync(_workspace.Id);
+        var foreignTargets = await new EfCoreEngineProvisioningTargetStore(_db)
+            .GetAvailableTargetsAsync(foreignWorkspace.Id);
+
+        Assert.DoesNotContain(localTargets, x => x.EnvironmentId == environmentId);
+        Assert.Contains(foreignTargets, x => x.ApplicationId == applicationId && x.EnvironmentId == environmentId);
+    }
+
+    [Fact]
+    public async Task Missing_provisioning_snapshot_for_marked_instance_fails_closed()
+    {
+        var provisioned = await CreateProvisionedAsync("provisioning-context-missing");
+        await _db.Database.ExecuteSqlInterpolatedAsync(
+            $"DELETE FROM ElsaInstanceProvisioningContexts WHERE InstanceId = {provisioned.Accepted.Instance.Id}");
+        _db.ChangeTracker.Clear();
+
+        var result = await CreateSource("https://control.example.test")
+            .GetAsync(provisioned.Accepted.Instance, provisioned.Accepted.Operation);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task Occupied_target_rolls_back_instance_and_snapshot_creation()
+    {
+        var applicationId = Guid.NewGuid();
+        var environmentId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        var occupiedInstance = await new ElsaInstanceLifecycleService(
+                new EfCoreElsaInstanceLifecycleStore(_db, EmptyResolutionInputSource.Instance))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                _workspace.OrganizationId,
+                _workspace.Id,
+                "Occupied target owner",
+                "occupied-target-owner",
+                _accepted.Instance.Intent,
+                "occupied-target-owner-create",
+                ActorAccountId: null));
+        _db.ChangeTracker.Clear();
+        _db.DeploymentApplications.Add(new DeploymentApplicationEntity
+        {
+            Id = applicationId,
+            WorkspaceId = _workspace.Id,
+            Name = "Occupied target application",
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        var occupiedInstanceId = occupiedInstance.Instance.Id;
+        _db.DeploymentEnvironments.Add(new DeploymentEnvironmentEntity
+        {
+            Id = environmentId,
+            WorkspaceId = _workspace.Id,
+            ApplicationId = applicationId,
+            ElsaInstanceId = occupiedInstanceId,
+            Name = "Occupied target",
+            Tier = EnvironmentTier.Production,
+            DeploymentStatus = DeploymentStatus.Blocked,
+            DriftStatus = DriftStatus.Unknown,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        var before = await _db.ElsaInstances.CountAsync();
+        var context = ProvisioningContext(applicationId, environmentId, "occupied");
+        var request = new ElsaInstanceCreateRequest(
+            _workspace.OrganizationId,
+            _workspace.Id,
+            "Occupied target instance",
+            "occupied-target-instance",
+            _accepted.Instance.Intent,
+            "occupied-target-create",
+            ProvisioningContext: context);
+
+        await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            new ElsaInstanceLifecycleService(new EfCoreElsaInstanceLifecycleStore(_db, EmptyResolutionInputSource.Instance))
+                .CreateAsync(request));
+
+        Assert.Equal(before, await _db.ElsaInstances.CountAsync());
+        Assert.Equal(0, await _db.ElsaInstanceProvisioningContexts.CountAsync(
+            x => x.EnvironmentId == environmentId));
+        var environment = await _db.DeploymentEnvironments
+            .Include(x => x.Engines)
+            .SingleAsync(x => x.Id == environmentId);
+        Assert.Equal(occupiedInstanceId, environment.ElsaInstanceId);
+        Assert.Empty(environment.Engines);
     }
 
     [Fact]
@@ -391,6 +703,76 @@ public sealed class CatalogElsaInstanceLifecycleResolutionInputSourceTests : IAs
         Assert.Equal(3, resolved.Plan!.Configuration.Entries.Count(entry => entry.Secret));
         Assert.Equal(2, resolved.Plan.Release.ComponentDeclarations!.Packages.Count);
     }
+
+    private async Task<(ElsaInstanceLifecycleAcceptance Accepted, ElsaInstanceProvisioningContext Context,
+        Guid ApplicationId, Guid EnvironmentId)> CreateProvisionedAsync(string idempotencyKey)
+    {
+        var applicationId = Guid.NewGuid();
+        var environmentId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        _db.DeploymentApplications.Add(new DeploymentApplicationEntity
+        {
+            Id = applicationId,
+            WorkspaceId = _workspace.Id,
+            Name = $"Provisioning application {applicationId:N}",
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        _db.DeploymentEnvironments.Add(new DeploymentEnvironmentEntity
+        {
+            Id = environmentId,
+            WorkspaceId = _workspace.Id,
+            ApplicationId = applicationId,
+            Name = "Provisioning environment",
+            Tier = EnvironmentTier.Production,
+            DeploymentStatus = DeploymentStatus.Blocked,
+            DriftStatus = DriftStatus.Unknown,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        var context = ProvisioningContext(applicationId, environmentId, idempotencyKey);
+        var accepted = await new ElsaInstanceLifecycleService(
+                new EfCoreElsaInstanceLifecycleStore(_db, EmptyResolutionInputSource.Instance))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                _workspace.OrganizationId,
+                _workspace.Id,
+                "Provisioned Elsa",
+                $"provisioned-{idempotencyKey}",
+                _accepted.Instance.Intent,
+                idempotencyKey,
+                ActorAccountId: Guid.NewGuid(),
+                ProvisioningContext: context));
+        _db.ChangeTracker.Clear();
+        return (accepted, context, applicationId, environmentId);
+    }
+
+    private static ElsaInstanceProvisioningContext ProvisioningContext(
+        Guid applicationId,
+        Guid environmentId,
+        string seed)
+    {
+        var builderIntent = new RuntimeBuilderIntent(
+            new RuntimeImageSelection("snapshot-image", null, null, null),
+            [], [], [], null);
+        var json = RuntimeConfigurationService.SerializeIntent(builderIntent);
+        return new ElsaInstanceProvisioningContext(
+            applicationId,
+            environmentId,
+            json,
+            Hash(json),
+            ConfigurationName: $"Configuration {seed}",
+            PreviewDigest: Digest('a'),
+            RequestDigest: Digest('b'),
+            ResolvedPlanDigest: Digest('d'));
+    }
+
+    private static string Hash(string value) =>
+        "sha256:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+
+    private static string Digest(char value) => "sha256:" + new string(value, 64);
 
     private CatalogElsaInstanceLifecycleResolutionInputSource CreateSource(string? origin) =>
         new(_db, new StaticCatalog(CreateEntry()), new ElsaInstancePlanAuthorityOptions { Origin = origin }, GovernedSecrets);

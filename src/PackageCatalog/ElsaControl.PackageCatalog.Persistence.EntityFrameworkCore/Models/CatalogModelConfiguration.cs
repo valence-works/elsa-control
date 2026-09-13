@@ -2,6 +2,7 @@ using System.Text.Json;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Cockpit;
+using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Core.Manifests;
@@ -1096,6 +1097,7 @@ internal sealed class ElsaInstanceConfiguration : IEntityTypeConfiguration<ElsaI
         builder.Property(x => x.PackagePolicy).HasMaxLength(128);
         builder.Property(x => x.ConfigurationShapeRevisionId).HasMaxLength(128);
         builder.Property(x => x.TargetMode).HasMaxLength(128).IsRequired();
+        builder.Property(x => x.RequiresProvisioningContext).IsRequired();
         builder.Property(x => x.RegionCode).HasMaxLength(128).IsRequired();
         builder.Property(x => x.IsolationProfile).HasMaxLength(128).IsRequired();
         builder.Property(x => x.CapacityProfile).HasMaxLength(128).IsRequired();
@@ -1143,6 +1145,38 @@ internal sealed class ElsaInstanceConfiguration : IEntityTypeConfiguration<ElsaI
         builder.HasMany(x => x.Migrations).WithOne(x => x.Instance)
             .HasForeignKey(x => new { x.OrganizationId, x.WorkspaceId, x.InstanceId })
             .HasPrincipalKey(x => new { x.OrganizationId, x.WorkspaceId, x.Id })
+            .OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+internal sealed class ElsaInstanceProvisioningContextConfiguration : IEntityTypeConfiguration<ElsaInstanceProvisioningContextEntity>
+{
+    public void Configure(EntityTypeBuilder<ElsaInstanceProvisioningContextEntity> builder)
+    {
+        builder.ToTable("ElsaInstanceProvisioningContexts");
+        builder.HasKey(x => x.InstanceId);
+        builder.Property(x => x.BuilderIntentJson)
+            .HasMaxLength(ElsaInstanceProvisioningContext.MaxBuilderIntentJsonLength)
+            .IsRequired();
+        builder.Property(x => x.ConfigurationDigest).HasMaxLength(71).IsRequired();
+        builder.Property(x => x.ConfigurationName).HasMaxLength(ElsaInstanceProvisioningContext.MaxConfigurationNameLength);
+        builder.Property(x => x.PreviewDigest).HasMaxLength(71);
+        builder.Property(x => x.RequestDigest).HasMaxLength(71);
+        builder.Property(x => x.ResolvedPlanDigest).HasMaxLength(71);
+        builder.Property(x => x.CreatedAt)
+            .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        builder.HasIndex(x => new { x.WorkspaceId, x.ApplicationId, x.EnvironmentId }).IsUnique();
+        builder.HasOne<ElsaInstanceEntity>(x => x.Instance)
+            .WithOne(x => x.ProvisioningContext)
+            .HasForeignKey<ElsaInstanceProvisioningContextEntity>(x => new { x.OrganizationId, x.WorkspaceId, x.InstanceId })
+            .HasPrincipalKey<ElsaInstanceEntity>(x => new { x.OrganizationId, x.WorkspaceId, x.Id })
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<Organization>().WithMany()
+            .HasForeignKey(x => x.OrganizationId)
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<Workspace>().WithMany()
+            .HasForeignKey(x => new { x.OrganizationId, x.WorkspaceId })
+            .HasPrincipalKey(x => new { x.OrganizationId, x.Id })
             .OnDelete(DeleteBehavior.Restrict);
     }
 }

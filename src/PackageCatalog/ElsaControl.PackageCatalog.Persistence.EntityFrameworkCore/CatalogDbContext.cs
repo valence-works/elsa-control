@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
+using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Manifests;
 using ElsaControl.PackageCatalog.Core.Accounts;
@@ -45,6 +46,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     internal DbSet<Models.DeploymentApplicationEntity> DeploymentApplications => Set<Models.DeploymentApplicationEntity>();
     internal DbSet<Models.DeploymentEnvironmentEntity> DeploymentEnvironments => Set<Models.DeploymentEnvironmentEntity>();
     internal DbSet<Models.ElsaInstanceEntity> ElsaInstances => Set<Models.ElsaInstanceEntity>();
+    internal DbSet<Models.ElsaInstanceProvisioningContextEntity> ElsaInstanceProvisioningContexts => Set<Models.ElsaInstanceProvisioningContextEntity>();
     internal DbSet<Models.ElsaInstanceIntentRevisionEntity> ElsaInstanceIntentRevisions => Set<Models.ElsaInstanceIntentRevisionEntity>();
     internal DbSet<Models.ElsaInstanceLifecycleOutboxEntity> ElsaInstanceLifecycleOutbox => Set<Models.ElsaInstanceLifecycleOutboxEntity>();
     internal DbSet<Models.ElsaInstanceOperationEntity> ElsaInstanceOperations => Set<Models.ElsaInstanceOperationEntity>();
@@ -131,6 +133,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         modelBuilder.ApplyConfiguration(new Models.DeploymentApplicationConfiguration());
         modelBuilder.ApplyConfiguration(new Models.DeploymentEnvironmentConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ElsaInstanceConfiguration());
+        modelBuilder.ApplyConfiguration(new Models.ElsaInstanceProvisioningContextConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ElsaInstanceIntentRevisionConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ElsaInstanceLifecycleOutboxConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ElsaInstanceOperationConfiguration());
@@ -249,6 +252,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             EnsureElsaInstanceAuditIsAppendOnly();
             EnsureElsaInstanceDurableRowsAreNotDeleted();
             EnsureElsaInstanceIntentRevisionsAreAppendOnly();
+            EnsureElsaInstanceProvisioningContextsAreAppendOnly();
             EnsureElsaInstanceLifecycleOutboxIsAppendOnly();
             EnsureElsaInstanceResolvedPlansAreAppendOnly();
             EnsureElsaInstanceRecoveryRequestsAreAppendOnly();
@@ -589,6 +593,13 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         if (ChangeTracker.Entries<Models.ElsaInstanceIntentRevisionEntity>()
             .Any(x => x.State is EntityState.Modified or EntityState.Deleted))
             throw new InvalidOperationException("Elsa instance intent revisions are append-only.");
+    }
+
+    private void EnsureElsaInstanceProvisioningContextsAreAppendOnly()
+    {
+        if (ChangeTracker.Entries<Models.ElsaInstanceProvisioningContextEntity>()
+            .Any(x => x.State is EntityState.Modified or EntityState.Deleted))
+            throw new InvalidOperationException("Elsa instance provisioning contexts are immutable.");
     }
 
     private void EnsureElsaInstanceLifecycleOutboxIsAppendOnly()
@@ -1020,6 +1031,48 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             if (instance is not null &&
                 (instance.OrganizationId != revision.OrganizationId || instance.WorkspaceId != revision.WorkspaceId))
                 throw new InvalidOperationException("Intent revision ownership must match its instance.");
+        }
+
+        foreach (var entry in ChangeTracker.Entries<Models.ElsaInstanceProvisioningContextEntity>()
+                     .Where(x => x.State == EntityState.Added))
+        {
+            var snapshot = entry.Entity;
+            if (snapshot.InstanceId == Guid.Empty || snapshot.OrganizationId == Guid.Empty ||
+                snapshot.WorkspaceId == Guid.Empty || snapshot.ApplicationId == Guid.Empty ||
+                snapshot.EnvironmentId == Guid.Empty)
+                throw new InvalidOperationException("A provisioning context requires stable ownership and target identifiers.");
+
+            var normalized = new ElsaInstanceProvisioningContext(
+                snapshot.ApplicationId,
+                snapshot.EnvironmentId,
+                snapshot.BuilderIntentJson,
+                snapshot.ConfigurationDigest,
+                snapshot.RuntimeConfigurationId,
+                snapshot.ConfigurationName,
+                snapshot.PreviewDigest,
+                snapshot.RequestDigest,
+                snapshot.ResolvedPlanDigest).Normalize();
+            if (!string.Equals(snapshot.BuilderIntentJson, normalized.BuilderIntentJson, StringComparison.Ordinal) ||
+                !string.Equals(snapshot.ConfigurationDigest, normalized.ConfigurationDigest, StringComparison.Ordinal) ||
+                !string.Equals(snapshot.ConfigurationName, normalized.ConfigurationName, StringComparison.Ordinal) ||
+                !string.Equals(snapshot.PreviewDigest, normalized.PreviewDigest, StringComparison.Ordinal) ||
+                !string.Equals(snapshot.RequestDigest, normalized.RequestDigest, StringComparison.Ordinal) ||
+                !string.Equals(snapshot.ResolvedPlanDigest, normalized.ResolvedPlanDigest, StringComparison.Ordinal))
+                throw new InvalidOperationException("Provisioning context values must be normalized before persistence.");
+
+            var instance = ChangeTracker.Entries<Models.ElsaInstanceEntity>()
+                .Select(x => x.Entity)
+                .FirstOrDefault(x => x.Id == snapshot.InstanceId);
+            instance ??= ElsaInstances.Find(snapshot.InstanceId);
+            if (instance is null || instance.OrganizationId != snapshot.OrganizationId ||
+                instance.WorkspaceId != snapshot.WorkspaceId ||
+                !string.Equals(instance.TargetMode, "managed", StringComparison.OrdinalIgnoreCase) ||
+                !instance.RequiresProvisioningContext)
+                throw new InvalidOperationException("Provisioning context ownership must match a managed instance.");
+
+            snapshot.CreatedAt = snapshot.CreatedAt.ToUniversalTime();
+            if (snapshot.CreatedAt == default)
+                throw new InvalidOperationException("Provisioning context timestamp is required.");
         }
 
         foreach (var entry in ChangeTracker.Entries<Models.ElsaInstanceResolvedPlanEntity>()

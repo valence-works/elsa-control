@@ -35,7 +35,8 @@ public sealed class ElsaInstanceLifecycleWorkerTests
         var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now));
         var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
         var accepted = await service.CreateAsync(CreateRequest("claims-prod", "create-1"));
-        store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance));
+        store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance) with
+        { ExpectedPlanDigest = SuccessfulResolution(WorkspaceId, accepted.Instance.Id).Reference!.ContentHash });
 
         var worker = new ElsaInstanceLifecycleWorker(store, new RecordingResolver(SuccessfulResolution(WorkspaceId, accepted.Instance.Id)), new StaticTimeProvider(Now));
 
@@ -54,6 +55,27 @@ public sealed class ElsaInstanceLifecycleWorkerTests
         Assert.Equal(accepted.Instance.Id, run.InstanceId);
         Assert.Single(store.ResolvedPlans);
         Assert.Equal(0, result.ProviderInvocations);
+    }
+
+    [Fact]
+    public async Task Reviewed_plan_drift_fails_before_creating_a_run_or_submitting_to_a_provider()
+    {
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now));
+        var accepted = await new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now))
+            .CreateAsync(CreateRequest("reviewed-engine", "reviewed-engine"));
+        store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance) with
+        { ExpectedPlanDigest = "sha256:" + new string('0', 64) });
+        var provider = new RecordingSubmissionPort();
+        var worker = new ElsaInstanceLifecycleWorker(store,
+            new RecordingResolver(SuccessfulResolution(WorkspaceId, accepted.Instance.Id)),
+            new StaticTimeProvider(Now), provider, store);
+
+        var result = await worker.ProcessAvailableAsync("review-worker");
+
+        Assert.Equal(0, result.ProviderInvocations);
+        Assert.Empty(provider.Submissions);
+        Assert.Empty(store.DeploymentRuns);
+        Assert.Equal("provisioning.plan-changed", Assert.Single(result.Results).FailureCode);
     }
 
     [Fact]

@@ -41,6 +41,7 @@ import { ManagedElsaInstancesPage } from "@/features/managed-elsa/ManagedElsaIns
 import { ManagedElsaOperationsPage } from "@/features/managed-elsa/ManagedElsaOperationsPage";
 import { OrganizationBillingPage } from "@/features/billing/OrganizationBillingPage";
 import { ConnectEnginePage } from "@/features/deployments/ConnectEnginePage";
+import { EngineProvisioningPage } from "@/features/engine-provisioning/EngineProvisioningPage";
 
 function PlaceholderPage({ title }: { title: string }) {
   return (
@@ -129,6 +130,7 @@ export const router = createBrowserRouter([
           { path: "overview", element: <OverviewPage /> },
           { path: "billing", element: <OrganizationBillingPage /> },
           { path: "engines/connect", element: <ConnectEnginePage /> },
+          { path: "engines/provision", element: <EngineProvisioningPage /> },
           { path: "sources", element: <SourcesPage /> },
           { path: "sources/new", element: <NewSourcePage /> },
           { path: "sources/:sourceId", element: <SourceDetailsPage /> },

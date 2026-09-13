@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using ElsaControl.Api.Workspace;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
+using ElsaControl.Deployment.Core.Provisioning;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
@@ -18,6 +19,31 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     private readonly Fixture _fixture;
 
     public ManagedElsaInstanceApiTests(Fixture fixture) => _fixture = fixture;
+
+    [Fact]
+    public async Task Disabled_provisioning_rejects_creation_and_options_without_hiding_existing_instances()
+    {
+        await using var app = new ControlApiTestApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = app.CreateControlIdentityClient(subject: "provisioning-disabled-owner");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/workspaces/{workspaceId}/instances")
+        {
+            Content = JsonContent.Create(new ManagedElsaInstanceCreateRequest("Runtime", "runtime", Intent()),
+                options: ControlApiTestApplication.JsonOptions)
+        };
+        request.Headers.Add("Idempotency-Key", "disabled-provisioning");
+
+        using var options = await client.GetAsync($"/api/workspaces/{workspaceId}/instances/onboarding-options");
+        using var create = await client.SendAsync(request);
+        using var list = await client.GetAsync($"/api/workspaces/{workspaceId}/instances");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, options.StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, create.StatusCode);
+        Assert.Contains("engine-provisioning.disabled", await create.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.OK, list.StatusCode);
+        Assert.Equal(0, await CountOperationsAsync(app));
+    }
 
     [Fact]
     public async Task Onboarding_options_are_server_owned_and_workspace_scoped()
@@ -1100,6 +1126,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
                 },
                 configureServices: services =>
                 {
+                    services.AddSingleton<IEngineProvisioningModule, TestProvisioningModule>();
                     services.RemoveAll<IManagedElsaInstanceCatalog>();
                     services.AddSingleton<IManagedElsaInstanceCatalog>(_instanceCatalog);
                     services.RemoveAll<IGovernedReleaseCatalogStore>();
@@ -1118,6 +1145,12 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         public Task InitializeAsync() => Task.CompletedTask;
 
         public async Task DisposeAsync() => await ((IAsyncDisposable)Application).DisposeAsync();
+    }
+
+    private sealed class TestProvisioningModule : IEngineProvisioningModule
+    {
+        public string Id => "test";
+        public string DisplayName => "Test provider";
     }
 
     private async Task<ControlApiTestApplication> PrepareApplicationAsync(

@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceContextProvider } from "@/app/WorkspaceContextProvider";
 import { EditRuntimeBuilderPage, NewRuntimeBuilderPage, RuntimeBuilderPage } from "@/features/runtime-builder/RuntimeBuilderPage";
@@ -427,6 +427,47 @@ describe("RuntimeBuilderPage", () => {
     expect(screen.queryByRole("heading", { name: "Quick actions" })).not.toBeInTheDocument();
   });
 
+  it("hands the saved editor configuration to the shared provisioning route", async () => {
+    const fetchMock = createRuntimeBuilderFetchMock({
+      configurations: [savedConfigurationFixture()],
+      planResponse: (intent) => ({
+        resolved: intent,
+        autoAdded: { packages: [], features: [], infrastructure: [] },
+        findings: []
+      })
+    });
+    renderRuntimeBuilder(fetchMock, { page: "edit" });
+
+    expect(await screen.findByRole("heading", { name: "Edit build configuration" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Provision engine" }));
+
+    const location = await screen.findByTestId("location-probe");
+    expect(location).toHaveTextContent("/admin/engines/provision");
+    expect(location).toHaveTextContent("runtimeConfigurationId");
+    expect(location).toHaveTextContent("builderHandoffToken");
+    expect(location).not.toHaveTextContent("Connection string");
+  });
+
+  it.each([
+    ["without the provisioning module", [], ["deployments.setup.manage"]],
+    ["without setup permission", [{ id: "azure", displayName: "Azure" }], []]
+  ] as const)("hides Provision engine %s", async (_reason, providers, permissions) => {
+    const fetchMock = createRuntimeBuilderFetchMock({
+      configurations: [savedConfigurationFixture()],
+      provisioningProviders: providers,
+      permissions,
+      planResponse: (intent) => ({
+        resolved: intent,
+        autoAdded: { packages: [], features: [], infrastructure: [] },
+        findings: []
+      })
+    });
+    renderRuntimeBuilder(fetchMock, { page: "edit" });
+
+    expect(await screen.findByRole("heading", { name: "Edit build configuration" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Provision engine" })).not.toBeInTheDocument());
+  });
+
   it("surfaces bundle request diagnostics when generation fails", async () => {
     const fetchMock = createRuntimeBuilderFetchMock({
       bundleFailure: {
@@ -533,11 +574,15 @@ const postgresqlInfrastructure = { kind: "Database", providerId: "postgresql", s
 function createRuntimeBuilderFetchMock({
   catalog = catalogFixture,
   configurations = [],
+  provisioningProviders = [{ id: "azure", displayName: "Azure" }],
+  permissions = ["deployments.setup.manage"],
   bundleFailure,
   planResponse
 }: {
   catalog?: BuilderCatalog;
   configurations?: RuntimeConfiguration[];
+  provisioningProviders?: ReadonlyArray<{ id: string; displayName: string }>;
+  permissions?: readonly string[];
   bundleFailure?: unknown;
   planResponse: (intent: RuntimeBuilderIntent) => BuilderPlanResponse;
 }) {
@@ -547,6 +592,10 @@ function createRuntimeBuilderFetchMock({
       return jsonResponse({ loginEnabled: true, authenticated: true, displayName: "Test User", email: "test@example.com", loginPath: "/api/auth/login", logoutPath: "/api/auth/logout" });
     if (url.endsWith("/api/me/organizations"))
       return jsonResponse(workspaceContextFixture());
+    if (url.endsWith(`/api/workspaces/${workspaceId}/engine-provisioning/providers`))
+      return jsonResponse({ providers: provisioningProviders });
+    if (url.endsWith(`/api/workspaces/${workspaceId}/deployments/permissions`))
+      return jsonResponse({ permissions });
     if (url.endsWith(`/api/workspaces/${workspaceId}/builder/catalog`)) {
       return jsonResponse(catalog);
     }
@@ -891,12 +940,18 @@ function renderRuntimeBuilder(
               <Route path="/admin/runtime-builder" element={<RuntimeBuilderPage />} />
               <Route path="/admin/runtime-builder/new" element={<NewRuntimeBuilderPage />} />
               <Route path="/admin/runtime-builder/:configurationId/edit" element={<EditRuntimeBuilderPage />} />
+              <Route path="/admin/engines/provision" element={<LocationProbe />} />
             </Routes>
           </WorkspaceContextProvider>
         </AuthProvider>
       </MemoryRouter>
     </QueryClientProvider>
   );
+}
+
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location-probe">{location.pathname} {JSON.stringify(location.state)}</output>;
 }
 
 function runtimeBuilderRouteConfig(page: "list" | "new" | "edit", route?: string) {

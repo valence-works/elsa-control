@@ -55,6 +55,26 @@ describe("OverviewPage", () => {
     expect(screen.queryByRole("button", { name: "Inspect Claims Dev" })).not.toBeInTheDocument();
   });
 
+  it("offers provisioning only when Azure contributes the capability", async () => {
+    renderOverview({ provisioningResponse: Response.json({ providers: [{ id: "azure", displayName: "Azure" }] }) });
+
+    expect(await screen.findByRole("link", { name: /Provision engine/ })).toHaveAttribute("href", "/admin/engines/provision");
+    expect(screen.getByRole("link", { name: /Connect engine/ })).toBeInTheDocument();
+  });
+
+  it.each([
+    ["disabled", { providers: [] }, 200],
+    ["unknown provider", { providers: [{ id: "other", displayName: "Other" }] }, 200],
+    ["unavailable", { title: "Unavailable" }, 503],
+    ["older server", { title: "Not found" }, 404]
+  ])("hides provisioning when module discovery is %s", async (_, body, status) => {
+    const { queryClient } = renderOverview({ provisioningResponse: Response.json(body, { status }) });
+
+    await screen.findByRole("heading", { name: "Acme Insurance" });
+    await waitFor(() => expect(queryClient.isFetching({ queryKey: ["engine-provisioning", workspaceId, "providers"] })).toBe(0));
+    expect(screen.queryByRole("link", { name: /Provision engine/ })).not.toBeInTheDocument();
+  });
+
   it("shows Unknown when the API does not report engine health", async () => {
     const cockpit = deploymentCockpitFixture();
     const unknownEngine = { ...cockpit.engines[0], health: undefined } as unknown as WorkflowEngineRegistration;
@@ -116,10 +136,16 @@ describe("OverviewPage", () => {
     expect(screen.getByRole("button", { name: "Retry access check" })).toBeEnabled();
   });
 
-  it("keeps the overview Connect engine action read-only without setup permission", async () => {
-    renderOverview({ permissions: ["deployments.read"] });
+  it("keeps setup actions read-only without setup permission", async () => {
+    renderOverview({
+      permissions: ["deployments.read"],
+      provisioningResponse: Response.json({ providers: [{ id: "azure", displayName: "Azure" }] })
+    });
 
     expect(await screen.findByRole("heading", { name: "Acme Insurance" })).toBeInTheDocument();
+    const provisionLink = await screen.findByRole("link", { name: /Provision engine/ });
+    expect(provisionLink).toHaveAttribute("aria-disabled", "true");
+    expect(provisionLink).toHaveAttribute("tabindex", "-1");
     const link = screen.getByRole("link", { name: /Connect engine/ });
     expect(link).toHaveAttribute("aria-disabled", "true");
     expect(link).toHaveAttribute("tabindex", "-1");
@@ -135,6 +161,7 @@ type RenderOptions = {
   backgroundCockpitResponse?: Response;
   permissions?: string[];
   permissionsResponse?: Response;
+  provisioningResponse?: Response;
 };
 
 function renderOverview(options: RenderOptions = {}) {
@@ -146,6 +173,9 @@ function renderOverview(options: RenderOptions = {}) {
       return Response.json({ loginEnabled: true, authenticated: true, displayName: "Test User", email: "test@example.com", loginPath: "/api/auth/login", logoutPath: "/api/auth/logout" });
     }
     if (url.endsWith("/api/me/organizations")) return Response.json(workspaceContextFixture());
+    if (url.endsWith(`/api/workspaces/${workspaceId}/engine-provisioning/providers`)) {
+      return options.provisioningResponse?.clone() ?? Response.json({ providers: [] });
+    }
     if (url.endsWith(`/api/workspaces/${workspaceId}/deployments/permissions`)) {
       return options.permissionsResponse?.clone() ?? Response.json({ permissions: options.permissions ?? ["deployments.read", "deployments.setup.manage"] });
     }

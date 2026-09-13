@@ -1957,6 +1957,27 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         await using var db = CreateMigratedContext(connection);
         await db.Database.MigrateAsync();
         var (_, accepted) = await QueueManagedLifecycleRunAsync(db, "Reconciliation persistence");
+        var queuedRun = await db.DeploymentRuns.SingleAsync(x => x.ElsaInstanceId == accepted.Instance.Id);
+        db.WorkflowEngines.Add(new WorkflowEngineEntity
+        {
+            Id = queuedRun.EngineId,
+            WorkspaceId = queuedRun.WorkspaceId,
+            EnvironmentId = queuedRun.EnvironmentId,
+            Name = accepted.Instance.Name,
+            BaseUrl = "",
+            CertificateStatus = CertificateStatus.Untrusted,
+            CredentialProvider = "pending",
+            CredentialReference = $"managed-instance:{accepted.Instance.Id:D}",
+            CredentialAssignmentStatus = EngineCredentialAssignmentStatus.Deferred,
+            CredentialVerificationStatus = CredentialVerificationStatus.NotVerifiable,
+            Health = DeploymentHealth.Unreachable,
+            VerificationMessage = "Awaiting provider endpoint observation.",
+            HostingProvider = "managed",
+            CreatedAt = Now,
+            UpdatedAt = Now
+        });
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
         var workspaceStore = new DeploymentWorkspaceStore(db);
         _ = await workspaceStore.ClaimNextQueuedRunAsync("deployment-worker", Now);
         Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
@@ -2014,6 +2035,14 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             operation.ReconciliationRetryEvidenceReference);
         Assert.Equal("sha256:" + new string('b', 64), operation.ReconciliationRetryEvidenceDigest);
         Assert.False(replay.RetrySafe);
+
+        var projectedEngine = await db.WorkflowEngines.SingleAsync(x => x.Id == run.EngineId);
+        Assert.Equal("https://managed.example.test", projectedEngine.BaseUrl);
+        Assert.Equal(DeploymentHealth.Healthy, projectedEngine.Health);
+        Assert.Equal("pending", projectedEngine.CredentialProvider);
+        Assert.Equal($"managed-instance:{accepted.Instance.Id:D}", projectedEngine.CredentialReference);
+        Assert.Equal(EngineCredentialAssignmentStatus.Deferred, projectedEngine.CredentialAssignmentStatus);
+        Assert.Equal(CredentialVerificationStatus.NotVerifiable, projectedEngine.CredentialVerificationStatus);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => lifecycleStore.CommitAsync(new(
             accepted.Instance.WorkspaceId,

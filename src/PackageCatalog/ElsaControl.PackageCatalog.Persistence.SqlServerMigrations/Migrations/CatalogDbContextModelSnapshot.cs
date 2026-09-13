@@ -2953,6 +2953,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         .HasMaxLength(128)
                         .HasColumnType("nvarchar(128)");
 
+                    b.Property<bool>("RequiresProvisioningContext")
+                        .HasColumnType("bit");
+
                     b.Property<string>("ResolvedPlanContentHash")
                         .HasMaxLength(71)
                         .HasColumnType("nvarchar(71)");
@@ -3591,6 +3594,71 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                             t.HasCheckConstraint("CK_ElsaInstanceOperations_LeaseVersion_Range", "LeaseVersion >= 0 AND LeaseVersion < 2147483647");
 
                             t.HasCheckConstraint("CK_ElsaInstanceOperations_NullInstanceOnlyCreate", "InstanceId IS NOT NULL OR Action = 'Create'");
+                        });
+
+                    b.HasAnnotation("SqlServer:UseSqlOutputClause", false);
+                });
+
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceProvisioningContextEntity", b =>
+                {
+                    b.Property<Guid>("InstanceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ApplicationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("BuilderIntentJson")
+                        .IsRequired()
+                        .HasMaxLength(131072)
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ConfigurationDigest")
+                        .IsRequired()
+                        .HasMaxLength(71)
+                        .HasColumnType("nvarchar(71)");
+
+                    b.Property<string>("ConfigurationName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("EnvironmentId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("OrganizationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("PreviewDigest")
+                        .HasMaxLength(71)
+                        .HasColumnType("nvarchar(71)");
+
+                    b.Property<string>("RequestDigest")
+                        .HasMaxLength(71)
+                        .HasColumnType("nvarchar(71)");
+
+                    b.Property<string>("ResolvedPlanDigest")
+                        .HasMaxLength(71)
+                        .HasColumnType("nvarchar(71)");
+
+                    b.Property<Guid?>("RuntimeConfigurationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("WorkspaceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("InstanceId");
+
+                    b.HasIndex("OrganizationId", "WorkspaceId", "InstanceId")
+                        .IsUnique();
+
+                    b.HasIndex("WorkspaceId", "ApplicationId", "EnvironmentId")
+                        .IsUnique();
+
+                    b.ToTable("ElsaInstanceProvisioningContexts", null, t =>
+                        {
+                            t.HasTrigger("TR_ElsaInstanceProvisioningContexts_AppendOnly");
                         });
 
                     b.HasAnnotation("SqlServer:UseSqlOutputClause", false);
@@ -5940,6 +6008,31 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Navigation("Instance");
                 });
 
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceProvisioningContextEntity", b =>
+                {
+                    b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Organization", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Workspace", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId", "WorkspaceId")
+                        .HasPrincipalKey("OrganizationId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceEntity", "Instance")
+                        .WithOne("ProvisioningContext")
+                        .HasForeignKey("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceProvisioningContextEntity", "OrganizationId", "WorkspaceId", "InstanceId")
+                        .HasPrincipalKey("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceEntity", "OrganizationId", "WorkspaceId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Instance");
+                });
+
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceRecoveryRequestEntity", b =>
                 {
                     b.HasOne("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceOperationEntity", "Operation")
@@ -6415,6 +6508,8 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Navigation("Migrations");
 
                     b.Navigation("Operations");
+
+                    b.Navigation("ProvisioningContext");
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.GovernedReleaseCatalogComponentEntity", b =>

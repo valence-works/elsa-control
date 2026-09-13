@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.DataProtection;
 using ElsaControl.Deployment.Artifacts;
 using ElsaControl.Deployment.Core.Cockpit;
 using ElsaControl.Deployment.Core.Instances;
+using ElsaControl.Deployment.Core.Provisioning;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.Deployment.Azure;
 using ElsaControl.PackageCatalog.Abstractions.Catalog;
@@ -311,6 +312,9 @@ builder.Services.AddScoped<IElsaInstanceLifecycleResolutionInputSource>(services
         services.GetRequiredService<IOptions<ElsaInstancePlanAuthorityOptions>>().Value,
         governedAzureSecretReferences));
 ElsaInstancePlanResolutionComposition.AddResolver(builder.Services, builder.Configuration);
+builder.Services.AddSingleton(new EngineProvisioningPlanContext(governedAzureSecretReferences));
+builder.Services.AddScoped<EngineProvisioningPreviewService>();
+builder.Services.AddScoped<IEngineProvisioningTargetStore, EfCoreEngineProvisioningTargetStore>();
 builder.Services.AddScoped<ElsaInstanceLifecycleService>();
 builder.Services.AddScoped<ElsaInstanceLifecycleWorker>();
 builder.Services.AddScoped<ElsaInstanceDeletionWorker>();
@@ -637,6 +641,8 @@ app.MapWorkspaceReleaseCatalogEndpoints();
 app.MapWorkspaceBuilderEndpoints();
 app.MapWorkspaceRuntimeConfigurationEndpoints();
 app.MapWorkspaceDeploymentEndpoints();
+app.MapEngineProvisioningEndpoints();
+app.MapEngineProvisioningWorkflowEndpoints();
 app.MapManagedElsaInstanceEndpoints();
 app.MapWorkspacePermissionManagementEndpoints();
 app.MapWorkspaceArtifactEndpoints();

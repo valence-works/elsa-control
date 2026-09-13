@@ -28,18 +28,22 @@ public sealed class ElsaInstanceLifecycleService(
         ValidateRequired(request.Name, nameof(request.Name), "Instance name is required.");
         ValidateRequired(request.Slug, nameof(request.Slug), "Instance slug is required.");
         ValidateActor(request.ActorAccountId);
+        var provisioningContext = request.ProvisioningContext?.Normalize();
         var key = RequireKey(request.IdempotencyKey);
         var name = ElsaInstanceValue.DisplayName(request.Name, nameof(request.Name));
         var slug = ElsaInstanceSlug.Normalize(request.Slug);
         var requestHash = ComputeCreateRequestHash(
             ElsaInstanceOperationAction.Create,
             expectedVersion: 1,
-            request.Intent.ComputeCanonicalHash(),
-            request.OrganizationId.ToString("D"),
-            request.WorkspaceId.ToString("D"),
-            name,
-            slug,
-            request.InstanceId?.ToString("D") ?? "generated");
+            [
+                request.Intent.ComputeCanonicalHash(),
+                request.OrganizationId.ToString("D"),
+                request.WorkspaceId.ToString("D"),
+                name,
+                slug,
+                request.InstanceId?.ToString("D") ?? "generated"
+            ],
+            provisioningContext?.ComputeCanonicalHash());
 
         var existingOperation = await store.FindOperationByKeyAsync(
             request.WorkspaceId, key, action: ElsaInstanceOperationAction.Create,
@@ -63,7 +67,8 @@ public sealed class ElsaInstanceLifecycleService(
                 requestHash,
                 idempotencyScope: CreateIdempotencyScope);
             return await CommitAsync(existing, replayTransition,
-                new ElsaInstanceAcceptanceContext(request.ActorAccountId, null), cancellationToken);
+                new ElsaInstanceAcceptanceContext(request.ActorAccountId, null,
+                    ProvisioningContext: provisioningContext), cancellationToken);
         }
 
         var instanceId = request.InstanceId ?? Guid.NewGuid();
@@ -84,7 +89,8 @@ public sealed class ElsaInstanceLifecycleService(
             expectedVersion: instance.Version,
             idempotencyScope: CreateIdempotencyScope);
         return await CommitAsync(null, transition,
-            new ElsaInstanceAcceptanceContext(request.ActorAccountId, null), cancellationToken);
+            new ElsaInstanceAcceptanceContext(request.ActorAccountId, null,
+                ProvisioningContext: provisioningContext), cancellationToken);
     }
 
     public Task<ElsaInstanceLifecycleAcceptance> UpdateIntentAsync(
@@ -426,13 +432,16 @@ public sealed class ElsaInstanceLifecycleService(
     private static string ComputeCreateRequestHash(
         ElsaInstanceOperationAction action,
         int expectedVersion,
-        params string[] values)
+        IReadOnlyList<string> values,
+        string? provisioningContextHash)
     {
         var canonical = new StringBuilder()
             .Append(action).Append('\n')
             .Append(expectedVersion.ToString(CultureInfo.InvariantCulture)).Append('\n');
         foreach (var value in values)
             canonical.Append(value.Length.ToString(CultureInfo.InvariantCulture)).Append(':').Append(value).Append('\n');
+        if (provisioningContextHash is not null)
+            AppendOptional(canonical, provisioningContextHash);
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())));
     }
 
