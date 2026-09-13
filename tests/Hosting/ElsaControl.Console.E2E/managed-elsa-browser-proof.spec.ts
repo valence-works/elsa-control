@@ -3,6 +3,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { expect, type Page, test } from "@playwright/test";
+import { assertAuthenticatedStudioSession } from "./helpers/assertAuthenticatedStudioSession";
 
 const execFileAsync = promisify(execFile);
 const proofEnabled = process.env.MANAGED_ELSA_BROWSER_PROOF === "1";
@@ -42,7 +43,7 @@ test.describe("managed Elsa browser proof", () => {
     });
 
     await openHealthyInstance(page);
-    await expect(page).toHaveURL(new RegExp(`^${escapeRegExp(runtimeOrigin)}/`), { timeout: 30_000 });
+    await assertAuthenticatedStudioSession(page, runtimeOrigin);
     const workflowProof = await createAndExecuteBasicWorkflow(page);
     expect(workflowProof.createStatus).toBe(200);
     expect(workflowProof.createdDefinitionId).toBe(workflowProof.definitionId);
@@ -287,8 +288,4 @@ async function runFixture(command: "restore" | "revoke" | "unavailable") {
     fixtureDatabase,
     runtimeOrigin
   ], { cwd: repositoryRoot });
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

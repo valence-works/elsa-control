@@ -6,7 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceContextProvider } from "@/app/WorkspaceContextProvider";
 import { AuthProvider } from "@/lib/auth/AuthProvider";
-import { claimExpiredHandoffRetry, ManagedElsaInstancesPage } from "@/features/managed-elsa/ManagedElsaInstancesPage";
+import { claimExpiredHandoffRetry, ManagedElsaInstancesPage, openManagedElsaInstance } from "@/features/managed-elsa/ManagedElsaInstancesPage";
 import { managedElsaHandoffTokenType, type ManagedElsaInstance } from "@/features/managed-elsa/managedElsaModels";
 
 const organizationId = "00000000-0000-0000-0000-000000000001";
@@ -116,6 +116,24 @@ describe("ManagedElsaInstancesPage", () => {
     expect(screen.queryByRole("heading", { name: /sign in/i })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Managed Elsa" })).toBeInTheDocument();
     expect(window.location.pathname).not.toBe("/login");
+  });
+
+  it("Open starts the runtime handoff and never assigns Studio /login", () => {
+    const assign = vi.fn();
+    const href = "https://console.example.test/admin/runtimes";
+    vi.stubGlobal("location", {
+      assign,
+      href,
+      pathname: "/admin/runtimes",
+      origin: "https://console.example.test"
+    });
+
+    openManagedElsaInstance(instanceFixture());
+
+    expect(assign).toHaveBeenCalledTimes(1);
+    expect(assign).toHaveBeenCalledWith("https://managed.example.test/managed-elsa/handoff/start");
+    expect(String(assign.mock.calls[0]?.[0])).not.toContain("/login");
+    expect(String(assign.mock.calls[0]?.[0])).not.toContain("/authentication/external/callback");
   });
 
   it("does not blindly retry an issue request after a 401", async () => {
