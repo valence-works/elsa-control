@@ -107,6 +107,32 @@ public sealed class ReleaseCatalogApiTests
     }
 
     [Fact]
+    public async Task Admin_ingestion_reports_identity_conflict_with_existing_and_incoming_facts()
+    {
+        await using var app = CreateApplication(services =>
+        {
+            services.RemoveAll<IReleaseManifestSignatureVerifier>();
+            services.AddSingleton<IReleaseManifestSignatureVerifier, FixtureSignatureVerifier>();
+        });
+        await app.SeedAsync(_ => Task.CompletedTask);
+        var client = CreateAdminClient(app);
+
+        var first = await client.PostControlJsonAsync("/api/admin/release-catalog/manifests", Request(Digest('a')));
+        Assert.Equal(HttpStatusCode.Created, first.StatusCode);
+
+        var conflict = await client.PostControlJsonAsync("/api/admin/release-catalog/manifests", Request(Digest('b')));
+        var body = await conflict.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        Assert.Contains("releaseCatalog.identity.conflict", body, StringComparison.Ordinal);
+        Assert.Contains("existing", body, StringComparison.Ordinal);
+        Assert.Contains("incoming", body, StringComparison.Ordinal);
+        Assert.Contains(Digest('a'), body, StringComparison.Ordinal);
+        Assert.Contains(Digest('b'), body, StringComparison.Ordinal);
+        Assert.DoesNotContain("supersede", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Admin_ingestion_rejects_missing_api_key()
     {
         await using var app = CreateApplication();
@@ -151,10 +177,10 @@ public sealed class ReleaseCatalogApiTests
         return client;
     }
 
-    private static AdminReleaseManifestIngestionRequest Request()
+    private static AdminReleaseManifestIngestionRequest Request(string? manifestDigest = null)
     {
         var payload = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "producer-release-manifest-2.0.0.json"));
-        var digest = Digest('a');
+        var digest = manifestDigest ?? Digest('a');
         return new(
             $"oci://valence-runtime/release-manifests/release-manifest@{digest}",
             digest,

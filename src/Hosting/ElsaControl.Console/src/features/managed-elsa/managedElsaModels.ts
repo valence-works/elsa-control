@@ -17,6 +17,13 @@ export type ManagedElsaHealth = "Healthy" | "Degraded" | "Unreachable" | "Unknow
 
 export const managedElsaHandoffTokenType = "elsa-handoff+jwt" as const;
 
+export type ManagedElsaCurrentResolvedRelease = {
+  distributionId: string;
+  releaseLine: string;
+  version: string;
+  manifestDigest: string;
+};
+
 export type ManagedElsaInstance = {
   organizationId: string;
   instanceId: string;
@@ -32,6 +39,8 @@ export type ManagedElsaInstance = {
   version?: number;
   eTag?: string;
   intent?: ManagedElsaInstanceIntent | null;
+  currentResolvedRelease?: ManagedElsaCurrentResolvedRelease | null;
+  identityBindingState?: string | null;
 };
 
 export type ManagedElsaInstanceList = {

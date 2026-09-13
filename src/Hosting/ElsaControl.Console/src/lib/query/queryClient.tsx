@@ -65,6 +65,9 @@ export const queryKeys = {
   engineProvisioningTargets: (workspaceId: string) => ["engine-provisioning", workspaceId, "targets"] as const,
   managedElsaOnboardingOptions: (workspaceId: string) => ["managed-elsa", workspaceId, "onboarding-options"] as const,
   managedElsaInstances: (workspaceId: string) => ["managed-elsa", workspaceId, "instances"] as const,
+  managedElsaInstance: (workspaceId: string, instanceId: string) => ["managed-elsa", workspaceId, "instances", instanceId] as const,
+  releaseCatalog: (workspaceId: string, releaseLine = "", lifecycle = "", topologyId = "") =>
+    ["release-catalog", workspaceId, releaseLine, lifecycle, topologyId] as const,
   managedElsaOperation: (workspaceId: string, instanceId: string, operationId: string) => ["managed-elsa", workspaceId, "operation", instanceId, operationId] as const,
   managedElsaInstanceHealth: (workspaceId: string, instanceId: string) => ["managed-elsa", workspaceId, "instances", instanceId, "health"] as const,
   managedElsaInstanceAudit: (workspaceId: string, instanceId: string) => ["managed-elsa", workspaceId, "instances", instanceId, "audit"] as const,

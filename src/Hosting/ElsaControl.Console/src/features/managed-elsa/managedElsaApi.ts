@@ -3,6 +3,7 @@ import type {
   ManagedElsaAccepted,
   ManagedElsaHandoffIssueRequest,
   ManagedElsaHandoffIssueResponse,
+  ManagedElsaInstance,
   ManagedElsaInstanceIntent,
   ManagedElsaInstanceList,
   ManagedElsaOnboardingOptions,
@@ -58,6 +59,32 @@ export function createManagedElsaInstance(
     headers: { "Idempotency-Key": idempotencyKey },
     body: JSON.stringify(request)
   });
+}
+
+export function getManagedElsaInstance(workspaceId: string, instanceId: string) {
+  return apiRequest<ManagedElsaInstance>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/instances/${encodeURIComponent(instanceId)}`
+  );
+}
+
+export function updateManagedElsaInstanceIntent(
+  workspaceId: string,
+  instanceId: string,
+  request: { intent: ManagedElsaInstanceIntent; reason?: string },
+  eTag: string,
+  idempotencyKey: string
+) {
+  return apiRequest<ManagedElsaAccepted>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/instances/${encodeURIComponent(instanceId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        "If-Match": eTag,
+        "Idempotency-Key": idempotencyKey
+      },
+      body: JSON.stringify(request)
+    }
+  );
 }
 
 export function getManagedElsaOperation(workspaceId: string, instanceId: string, operationId: string) {

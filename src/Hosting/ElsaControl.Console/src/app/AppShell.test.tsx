@@ -49,6 +49,7 @@ describe("AppShell", () => {
     expect(screen.getAllByRole("link", { name: "Artifacts" }).length).toBeGreaterThan(0);
     expect(screen.getByRole("link", { name: "Runtime builder" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Logs" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Releases" })).toHaveAttribute("href", "/admin/releases");
     expect(screen.getByRole("link", { name: "Managed runtimes" })).toHaveAttribute("href", "/admin/runtimes");
     expect(screen.getByRole("link", { name: "Runtime operations" })).toHaveAttribute("href", "/admin/operations");
     expect(screen.getByRole("link", { name: "Billing" })).toHaveAttribute("href", "/admin/billing");

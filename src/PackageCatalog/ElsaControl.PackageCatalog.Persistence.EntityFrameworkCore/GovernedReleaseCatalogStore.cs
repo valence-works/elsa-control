@@ -146,7 +146,9 @@ public sealed class GovernedReleaseCatalogStore(DbContextOptions<CatalogDbContex
         existing.Count == 1
         && string.Equals(existing[0].ProjectionFingerprint, fingerprint, StringComparison.Ordinal)
             ? new(GovernedReleaseCatalogWriteStatus.Unchanged, ToEntries(existing[0]))
-            : new(GovernedReleaseCatalogWriteStatus.Conflict, [], "catalog.identity.conflict");
+            : new(GovernedReleaseCatalogWriteStatus.Conflict,
+                existing.Count == 1 ? ToEntries(existing[0]) : [],
+                "catalog.identity.conflict");
 
     private static GovernedReleaseCatalogEntity ToEntity(
         IReadOnlyList<GovernedReleaseCatalogEntry> entries,

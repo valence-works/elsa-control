@@ -145,7 +145,7 @@ export function ManagedElsaInstancesPage() {
                 <th scope="col" className="px-4 py-3 font-medium">Instance</th>
                 <th scope="col" className="px-4 py-3 font-medium">Health</th>
                 <th scope="col" className="px-4 py-3 font-medium">Lifecycle</th>
-                <th scope="col" className="px-4 py-3 text-right font-medium">Action</th>
+                <th scope="col" className="px-4 py-3 text-right font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border bg-surface">
@@ -198,14 +198,19 @@ function ManagedElsaInstanceRow({
         {instance.unavailableReason ? <p className="mt-1 max-w-xs text-xs text-muted-foreground">{instance.unavailableReason}</p> : null}
       </td>
       <td className="px-4 py-4 text-right align-top">
-        {available ? (
-          <Button type="button" onClick={onOpen} disabled={opening}>
-            {opening ? <LoaderCircle aria-hidden className="h-4 w-4 animate-spin" /> : <ExternalLink aria-hidden className="h-4 w-4" />}
-            {opening ? "Opening…" : "Open"}
-          </Button>
-        ) : (
-          <span className="text-xs text-muted-foreground">Unavailable</span>
-        )}
+        <div className="flex flex-wrap justify-end gap-2">
+          <Link to={`/admin/runtimes/${encodeURIComponent(instance.instanceId)}/apply`} className={buttonClassName("secondary")}>
+            Apply
+          </Link>
+          {available ? (
+            <Button type="button" onClick={onOpen} disabled={opening}>
+              {opening ? <LoaderCircle aria-hidden className="h-4 w-4 animate-spin" /> : <ExternalLink aria-hidden className="h-4 w-4" />}
+              {opening ? "Opening…" : "Open"}
+            </Button>
+          ) : (
+            <span className="self-center text-xs text-muted-foreground">Unavailable</span>
+          )}
+        </div>
       </td>
     </tr>
   );
