@@ -43,10 +43,12 @@ with the image-owned cosign and trust-root files stood in by digest-matched fixt
 ## Pending decisions
 
 `python3 scripts/render-worker-settings.py status` lists resolved and pending parameters without values.
-The release inputs are decided on #311: the Elsa preview feed on feedz.io, the API identity (which
-already holds AcrPull on the governed registry), the observed blob redirect host, and the keyless
-signing identity of the `elsa-production-image` build workflow on `main` with the GitHub Actions
-issuer. Tighten the signer to version tags before any release is marked Supported.
+The release inputs are decided on #311: the release feed (nuget.org since #439, which followed the
+runtime images' earlier move to stable Elsa releases in valence-works/elsa-production-image#57 and
+valence-works/elsa-production-image#60), the API identity (which already holds AcrPull on the governed
+registry), the observed blob redirect host, and the keyless signing identity of the
+`elsa-production-image` build workflow on `main` with the GitHub Actions issuer. Tighten the signer to
+version tags before any release is marked Supported.
 Release verification reads the governed runtime registry `valenceruntimeimages` (resource group
 `rg-valence-runtime`) as the API identity. That identity's `AcrPull` assignment on that registry
 (assignment name `eae590a3-2208-4b1a-9500-7ac9feaeff41`, created 2026-09-05 for the #270

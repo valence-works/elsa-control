@@ -75,7 +75,7 @@ class CompositionFilesTests(unittest.TestCase):
         self.assertEqual("https://token.actions.githubusercontent.com", self.resolved["ReleaseProducerOidcIssuer"])
         self.assertEqual("c5055d7d-d66d-468d-8984-077214496243", self.resolved["ReleaseVerificationClientId"])
         self.assertEqual("becmanaged36.blob.core.windows.net", self.resolved["ReleaseVerificationBlobRedirectHost"])
-        self.assertEqual("https://f.feedz.io/elsa-workflows/elsa-3/nuget/index.json", self.resolved["ReleaseFeedServiceIndex"])
+        self.assertEqual("https://api.nuget.org/v3/index.json", self.resolved["ReleaseFeedServiceIndex"])
         rendered = renderer.render(self.verification, self.resolved, self.pending)
         self.assertEqual("valenceruntimeimages.azurecr.io", rendered["ReleaseCatalog__Verification__RegistryHost"])
 
