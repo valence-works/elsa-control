@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Copy, ExternalLink, LoaderCircle, ShieldAlert, TriangleAlert, X } from "lucide-react";
-import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { useWorkspaceContext } from "@/app/WorkspaceContextProvider";
 import { Badge, Button, EmptyState, Input, SecondaryButton, Select, Table, buttonClassName } from "@/components/ui";
 import { RequestStateView } from "@/components/states/RequestStateViews";
@@ -22,8 +22,11 @@ import {
   type ReleaseCatalogProblem
 } from "@/features/release-catalog/releaseCatalogModels";
 import {
+  catalogEntryMatchesExistingFocus,
+  existingCatalogHref,
   factsFromCatalogEntries,
   fingerprintsUnchanged,
+  formatBuildIdentity,
   identityTuple,
   parseProducerFacts
 } from "@/features/release-catalog/releaseManifestFacts";
@@ -33,6 +36,8 @@ const digestPattern = /^sha256:[0-9a-f]{64}$/i;
 export function ReleasesPage() {
   const { selectedWorkspaceId, isLoading: workspaceLoading } = useWorkspaceContext();
   const queryClient = useQueryClient();
+  const [searchParams] = useSearchParams();
+  const existingFocus = searchParams.get("existing") ?? "";
   const [reference, setReference] = useState("");
   const [digest, setDigest] = useState("");
   const [payload, setPayload] = useState("");
@@ -175,7 +180,7 @@ export function ReleasesPage() {
         </div>
       </form>
 
-      <section className="space-y-4">
+      <section id="admitted-catalog" className="space-y-4">
         <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
           <div>
             <h2 className="font-display text-xl font-semibold">Admitted catalog</h2>
@@ -196,7 +201,7 @@ export function ReleasesPage() {
         {catalog.data && catalog.data.length === 0 ? (
           <EmptyState title="No admitted identities" description="Admit a unique preview releaseVersion, including build.N, before Apply." />
         ) : null}
-        {catalog.data && catalog.data.length > 0 ? <CatalogTable entries={catalog.data} /> : null}
+        {catalog.data && catalog.data.length > 0 ? <CatalogTable entries={catalog.data} focusKey={existingFocus} /> : null}
       </section>
 
       {conflict ? (
@@ -269,7 +274,17 @@ function AdmitError({ error }: { error: unknown }) {
   );
 }
 
-function CatalogTable({ entries }: { entries: ReleaseCatalogEntry[] }) {
+function CatalogTable({ entries, focusKey }: { entries: ReleaseCatalogEntry[]; focusKey: string }) {
+  const focusedRow = useRef<HTMLTableRowElement | null>(null);
+
+  useEffect(() => {
+    if (!focusKey || !focusedRow.current) return;
+    focusedRow.current.scrollIntoView?.({ block: "nearest" });
+    focusedRow.current.focus();
+  }, [entries, focusKey]);
+
+  const firstFocusIndex = entries.findIndex((entry) => catalogEntryMatchesExistingFocus(entry, focusKey));
+
   return (
     <Table>
       <table>
@@ -284,25 +299,38 @@ function CatalogTable({ entries }: { entries: ReleaseCatalogEntry[] }) {
           </tr>
         </thead>
         <tbody>
-          {entries.map((entry) => (
-            <tr key={`${catalogIdentityRowKey(entry)}`}>
-              <td>
-                <p className="font-medium">{entry.distribution.releaseVersion}</p>
-                <p className="mt-1 text-xs text-muted-foreground">{entry.distribution.releaseLine} · {entry.distribution.channel}</p>
-              </td>
-              <td><Badge>{entry.distribution.catalogLifecycle}</Badge></td>
-              <td>{entry.topology.id}</td>
-              <td className="max-w-[16rem] truncate font-mono text-xs" title={entry.manifestDigest}>{entry.manifestDigest}</td>
-              <td className="text-right">
-                <Link
-                  to={`/admin/runtimes?apply=${encodeURIComponent(entry.distribution.releaseVersion)}`}
-                  className={buttonClassName("secondary")}
-                >
-                  Apply
-                </Link>
-              </td>
-            </tr>
-          ))}
+          {entries.map((entry, index) => {
+            const focused = catalogEntryMatchesExistingFocus(entry, focusKey);
+            const focusTarget = focused && index === firstFocusIndex;
+            return (
+              <tr
+                key={`${catalogIdentityRowKey(entry)}`}
+                id={catalogRowElementId(entry)}
+                ref={focusTarget ? focusedRow : undefined}
+                tabIndex={focusTarget ? -1 : undefined}
+                aria-current={focused ? "true" : undefined}
+                data-existing-focus={focused ? "true" : undefined}
+                className={cn(focused && "bg-primary/10 outline outline-2 outline-offset-[-2px] outline-primary")}
+              >
+                <td>
+                  <p className="font-medium">{entry.distribution.releaseVersion}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{entry.distribution.releaseLine} · {entry.distribution.channel}</p>
+                  {focused ? <p className="sr-only">Focused existing catalog identity</p> : null}
+                </td>
+                <td><Badge>{entry.distribution.catalogLifecycle}</Badge></td>
+                <td>{entry.topology.id}</td>
+                <td className="max-w-[16rem] truncate font-mono text-xs" title={entry.manifestDigest}>{entry.manifestDigest}</td>
+                <td className="text-right">
+                  <Link
+                    to={`/admin/runtimes?apply=${encodeURIComponent(entry.distribution.releaseVersion)}`}
+                    className={buttonClassName("secondary")}
+                  >
+                    Apply
+                  </Link>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </Table>
@@ -397,7 +425,7 @@ export function IdentityConflictDrawer({
             <Copy aria-hidden className="h-4 w-4" />
             Copy PRIMARY
           </SecondaryButton>
-          <Link to="/admin/releases" className={buttonClassName("secondary")} onClick={onClose}>
+          <Link to={existingCatalogHref(existing)} className={buttonClassName("secondary")} onClick={onClose}>
             Open existing
           </Link>
           <Button type="button" onClick={onClose}>Close</Button>
@@ -414,7 +442,7 @@ function CompareCard({ title, facts, incoming = false }: { title: string; facts:
       {facts ? (
         <dl className="mt-3 space-y-2 text-sm">
           <Fact label="Release" value={facts.releaseVersion} />
-          <Fact label="Build" value={facts.build ? `build.${facts.build}` : "—"} />
+          <Fact label="Build" value={formatBuildIdentity(facts)} />
           <Fact label="Line" value={facts.releaseLine} />
           <Fact label="Channel" value={facts.channel} />
           <Fact label="Digest" value={facts.manifestDigest || "—"} mono />
@@ -430,11 +458,15 @@ function CompareCard({ title, facts, incoming = false }: { title: string; facts:
 
 function Fact({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
-    <div>
+    <div data-fact={label.toLowerCase()}>
       <dt className="text-xs uppercase tracking-wide text-muted-foreground">{label}</dt>
       <dd className={cn("mt-0.5 break-all", mono ? "font-mono text-xs" : "text-sm")}>{value}</dd>
     </div>
   );
+}
+
+function catalogRowElementId(entry: ReleaseCatalogEntry) {
+  return `catalog-row-${catalogIdentityRowKey(entry)}`.replace(/[^a-zA-Z0-9_-]/g, "-");
 }
 
 function matchingCatalogFacts(entries: ReleaseCatalogEntry[] | undefined, incoming: ReleaseCatalogIdentityFacts | null) {
