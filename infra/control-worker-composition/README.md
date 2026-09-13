@@ -10,7 +10,7 @@ renderer that refuses to produce a payload until every referenced decision is ma
 | `worker-settings.template.json` | Every App Service setting the workers need; `${Name}` placeholders resolve from the parameter file. |
 | `release-verification.template.json` | Governed release-manifest signature verification for the dogfood release admission (#311). Pins the linux/amd64 cosign digest; the production App Service host is amd64. |
 | `worker-settings.parameters.production.json` | Production identifiers. A value shaped `{ "pending": "#N" }` is an undecided input and blocks rendering. |
-| `worker-rollback.json` | Turns the three worker switches off. Apply it as-is; it has no parameters. |
+| `worker-rollback.json` | Turns the three worker switches and the health monitor off. Apply it as-is; it has no parameters. |
 
 Contract gates: `python3 scripts/tests/test_control_worker_composition.py` (renderer and file shape) and
 `ProductionWorkerCompositionContractTests` in `tests/Hosting/ElsaControl.Api.Tests` (the rendered
@@ -25,6 +25,9 @@ with the image-owned cosign and trust-root files stood in by digest-matched fixt
 
 - Lifecycle worker, provider worker and instance provider are enabled together; the startup validator
   rejects any other combination.
+- The Ready-instance health monitor (`Deployment__ElsaInstanceHealthMonitor__Enabled`, #394) is on. It
+  may only run with the three workers (renderer and startup validator both refuse it alone); its code
+  default is off. See [Instance health monitor](#instance-health-monitor-394).
 - Runner identity is the provisioner `mi-elsa-cloud-provisioner-prod-weu` (already attached to the API),
   which is also the SQL bootstrap principal and login. Target scope is the anchor resource group in the
   **Elsa Cloud — Customer Workloads** subscription; sibling per-instance groups derive from it (v1 naming).
@@ -80,3 +83,44 @@ not this renderer.
 
 Rollback is the same `appsettings set` with `worker-rollback.json` followed by a restart; the other
 settings are inert while the switches are off and are removed only through a reviewed change.
+
+## Instance health monitor (#394)
+
+Without the monitor, Control's `Health` for a Ready instance is the observation of its last lifecycle
+operation. With it, every `Interval` the API re-probes each instance whose desired lifecycle is
+`Running` and observed lifecycle is `Ready`, that is managed, not tombstoned, has a current deployment
+endpoint and has no blocking lifecycle operation (`Accepted`, `WaitingForPriorOperation`, `Queued`,
+`EntitlementHeld`, `Running`, `RecoveryRequired`). Deleting, deleted, stopped and busy instances are
+never probed. The Azure probe is the promotion probe's `curl --fail` of `{origin}/health` on the
+instance's own verified Container Apps origin with the byte-exact `Healthy` classification, but a single
+attempt bounded by `ProbeTimeout` and no retries.
+
+`Health` changes to the probe's classification (`Degraded`, `Unreachable` for no answer or a timeout,
+`Unknown` when Control cannot classify) only after `UnhealthyThreshold` consecutive failed probes, and
+back to `Healthy` only after `HealthyThreshold` consecutive healthy probes. The observed lifecycle stays
+`Ready`. A change commits only over the exact instance version the probes ran against, so a concurrent
+lifecycle change always wins; each change appends one `lifecycle.health-changed` audit event, and every
+probe emits one `managed_lifecycle.endpoint.health.evaluations` measurement.
+
+| Setting (`Deployment__ElsaInstanceHealthMonitor__…`) | Default | Bounds |
+| --- | --- | --- |
+| `Enabled` | `false` (the template sets `true`) | requires the three worker switches |
+| `Interval` | `00:01:00` | 15 s – 1 h |
+| `MaxJitter` | `00:00:15` | 0 – half the interval; each instance keeps a stable offset |
+| `ProbeTimeout` | `00:00:10` | 1 s – 1 min, and `MaxJitter + ProbeTimeout` below the interval |
+| `MaxConcurrency` | `4` | 1 – 32 probes at a time |
+| `UnhealthyThreshold` | `3` | 1 – 10 consecutive failures |
+| `HealthyThreshold` | `2` | 1 – 10 consecutive successes |
+
+Operational notes:
+
+- A runtime whose capacity lets it scale to zero (minimum replicas 0) is kept warm by a probe every
+  minute, because Container Apps only scales in after an idle cooldown. Enabling the monitor therefore
+  changes that runtime's cost and load; raise `Interval` to trade freshness for load.
+- `Open` requires `Healthy`. An instance the monitor records non-healthy cannot be opened until it
+  recovers, including when Control itself cannot probe (for example the runner's curl is unavailable):
+  that fails closed after `UnhealthyThreshold` cycles.
+- Turning the monitor off freezes `Health` at its last value. An instance it left non-healthy returns
+  to `Healthy` only through a `Reconcile` operation or by turning the monitor back on.
+- Hysteresis streaks are in-process: a restart starts them over, and each scaled-out API instance probes
+  independently (commits stay safe through the version check).

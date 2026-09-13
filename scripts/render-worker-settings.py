@@ -9,7 +9,8 @@ rendered payload is the sole input to `az webapp config appsettings set --settin
 this script never prints values.
 
 Exit codes: 0 rendered, 2 the composition is not renderable (pending decision, unresolved
-placeholder, unknown parameter, forbidden key, unsafe value, or half-enabled workers).
+placeholder, unknown parameter, forbidden key, unsafe value, half-enabled workers, or a health
+monitor enabled without them).
 """
 from __future__ import annotations
 
@@ -31,6 +32,7 @@ ROLLBACK = COMPOSITION / "worker-rollback.json"
 PLACEHOLDER = re.compile(r"\$\{([A-Za-z][A-Za-z0-9_]*)\}")
 ALLOWED_KEY_PREFIXES = (
     "Deployment__ElsaInstanceLifecycle__",
+    "Deployment__ElsaInstanceHealthMonitor__",
     "Deployment__AzureProvider__",
     "RuntimeBuilder__InstancePlans__",
     "ControlPlane__",
@@ -49,6 +51,10 @@ WORKER_ENABLE_KEYS = (
     "Deployment__AzureProvider__WorkerEnabled",
     "Deployment__AzureProvider__InstanceLifecycle__Enabled",
 )
+# The Ready-instance health monitor (#394) probes through the provider pipeline, so it may only be on
+# while all three workers are; rollback turns it off together with them.
+HEALTH_MONITOR_KEY = "Deployment__ElsaInstanceHealthMonitor__Enabled"
+ROLLBACK_KEYS = (*WORKER_ENABLE_KEYS, HEALTH_MONITOR_KEY)
 SETTING_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,127}$")
 # Values are identifiers, locators or short tokens; anything resembling a credential is refused.
 SAFE_VALUE = re.compile(r"^[A-Za-z0-9._:/@#\-]{1,512}$")
@@ -147,6 +153,11 @@ def render(template: dict[str, str], parameters: dict[str, str], pending: dict[s
     enables = [rendered[key] for key in WORKER_ENABLE_KEYS if key in rendered]
     if enables and (len(enables) != len(WORKER_ENABLE_KEYS) or any(value != "true" for value in enables)):
         raise CompositionError("lifecycle, provider and instance-provider workers must be enabled together")
+    monitor = rendered.get(HEALTH_MONITOR_KEY)
+    if monitor is not None and monitor not in ("true", "false"):
+        raise CompositionError(f"{HEALTH_MONITOR_KEY} must be true or false")
+    if monitor == "true" and len(enables) != len(WORKER_ENABLE_KEYS):
+        raise CompositionError("the instance health monitor requires the lifecycle, provider and instance-provider workers")
     if rendered.get("Deployment__AzureProvider__Runner__DisposableProofMode", "false") != "false":
         raise CompositionError("production composition must not use disposable proof mode")
     for key, value in rendered.items():
@@ -171,8 +182,9 @@ def write_payload(payload: list[dict[str, object]], output: Path) -> str:
 
 def load_rollback(path: Path = ROLLBACK) -> list[dict[str, object]]:
     payload = load_json(path)
-    if not isinstance(payload, list) or {entry.get("name") for entry in payload} != set(WORKER_ENABLE_KEYS):
-        raise CompositionError("rollback must disable exactly the three worker switches")
+    if (not isinstance(payload, list) or len(payload) != len(ROLLBACK_KEYS)
+            or {entry.get("name") for entry in payload} != set(ROLLBACK_KEYS)):
+        raise CompositionError("rollback must disable exactly the three worker switches and the health monitor")
     for entry in payload:
         if entry.get("value") != "false" or entry.get("slotSetting") is not False:
             raise CompositionError("rollback entries must set the switches to false")
@@ -192,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "rollback":
             digest = write_payload(load_rollback(), args.output)
-            print(f"rendered {len(WORKER_ENABLE_KEYS)} settings to {args.output} sha256={digest}")
+            print(f"rendered {len(ROLLBACK_KEYS)} settings to {args.output} sha256={digest}")
             return 0
         resolved, pending = load_parameters(PRODUCTION_PARAMETERS)
         if args.command == "status":

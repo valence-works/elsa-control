@@ -373,6 +373,59 @@ public sealed class ManagedLifecycleTelemetryTests
     }
 
     [Fact]
+    public async Task Health_monitor_records_each_evaluation_with_only_the_bounded_dimensions()
+    {
+        using var capture = new TelemetryCapture();
+        var store = new FakeHealthMonitorStore();
+        var target = store.Add(ElsaInstanceHealth.Healthy);
+        var probe = new ScriptedHealthProbe();
+        probe.Returns(ElsaInstanceHealth.Unreachable, ElsaInstanceHealth.Unreachable, ElsaInstanceHealth.Unreachable);
+        var monitor = new ElsaInstanceHealthMonitor(new() { Enabled = true });
+
+        for (var evaluation = 0; evaluation < 3; evaluation++)
+            await monitor.EvaluateAsync(target, store, probe);
+
+        var measurements = capture.Measurements.Where(x => IsMetricInstrument(x.InstrumentName)).ToArray();
+        Assert.All(measurements, measurement =>
+        {
+            Assert.Equal(ManagedLifecycleTelemetry.EndpointHealthCounterName, measurement.InstrumentName);
+            AssertExactMetricDimensions(measurement);
+            Assert.Equal(
+                ("reconcile", "running", "ready", "unreachable", "unknown"),
+                (Tag(measurement, ManagedLifecycleTelemetry.ActionTag),
+                    Tag(measurement, ManagedLifecycleTelemetry.DesiredLifecycleTag),
+                    Tag(measurement, ManagedLifecycleTelemetry.ObservedLifecycleTag),
+                    Tag(measurement, ManagedLifecycleTelemetry.HealthTag),
+                    Tag(measurement, ManagedLifecycleTelemetry.OperationStateTag)));
+        });
+        Assert.Equal(
+            new[] { "succeeded", "succeeded", "transition" },
+            measurements.Select(measurement => Tag(measurement, ManagedLifecycleTelemetry.OutcomeTag)));
+    }
+
+    [Fact]
+    public async Task Health_monitor_records_nothing_for_a_skipped_instance_or_a_probe_cut_short_by_shutdown()
+    {
+        using var capture = new TelemetryCapture();
+        var store = new FakeHealthMonitorStore();
+        var target = store.Add();
+        var probe = new ScriptedHealthProbe();
+        var monitor = new ElsaInstanceHealthMonitor(new() { Enabled = true });
+        using var stopping = new CancellationTokenSource();
+        probe.Runs((_, _) =>
+        {
+            stopping.Cancel();
+            return Task.FromResult(ScriptedHealthProbe.Result(ElsaInstanceHealth.Unreachable));
+        });
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => monitor.EvaluateAsync(target, store, probe, stopping.Token));
+        store.Busy.Add(target.InstanceId);
+        await monitor.EvaluateAsync(target, store, probe);
+
+        Assert.DoesNotContain(capture.Measurements, measurement => IsMetricInstrument(measurement.InstrumentName));
+    }
+
+    [Fact]
     public void Retry_metric_is_low_cardinality_and_contains_no_correlation_identifiers()
     {
         using var capture = new TelemetryCapture();
@@ -433,6 +486,9 @@ public sealed class ManagedLifecycleTelemetryTests
         Assert.Equal(ExpectedMetricTagKeys, measurement.Tags.Select(tag => tag.Key).ToArray());
         Assert.DoesNotContain(measurement.Tags, tag => tag.Key == ManagedLifecycleTelemetry.DiagnosticCodeTag);
     }
+
+    private static string? Tag(Measurement measurement, string key) =>
+        measurement.Tags.Single(tag => tag.Key == key).Value?.ToString();
 
     private static ElsaInstance TestInstance(Guid instanceId, Guid workspaceId) => ElsaInstance.Hydrate(
         instanceId,

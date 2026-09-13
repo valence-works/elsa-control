@@ -833,6 +833,55 @@ public sealed class AzureElsaInstanceProviderTests
             Assert.Equal("deletion.provider-confirmed-absent", result.DiagnosticCode);
     }
 
+    [Fact]
+    public async Task Health_probe_asks_the_runtime_probe_for_this_instances_workload_and_current_endpoint()
+    {
+        var runtime = new RecordingRuntimeHealthProbe(new(ElsaInstanceHealth.Degraded, "azure.health.not-healthy"));
+
+        var result = await HealthProbeProvider(runtime).ProbeAsync(HealthProbeRequest("https://runtime.example.test"));
+
+        Assert.Equal((ElsaInstanceHealth.Degraded, "azure.health.not-healthy"), (result.Health, result.DiagnosticCode));
+        Assert.Equal(
+            (AzureElsaInstanceProvider.WorkloadName(TestInstanceId), "https://runtime.example.test", TimeSpan.FromSeconds(7)),
+            Assert.Single(runtime.Calls));
+    }
+
+    [Fact]
+    public async Task Health_probe_without_a_current_endpoint_or_a_runtime_probe_is_unknown_without_probing()
+    {
+        var runtime = new RecordingRuntimeHealthProbe(new(ElsaInstanceHealth.Healthy, "azure.health.healthy"));
+
+        var withoutEndpoint = await HealthProbeProvider(runtime).ProbeAsync(HealthProbeRequest(null));
+        var withoutProbe = await HealthProbeProvider(null).ProbeAsync(HealthProbeRequest("https://runtime.example.test"));
+
+        Assert.Equal((ElsaInstanceHealth.Unknown, "azure.health.endpoint-unavailable"), (withoutEndpoint.Health, withoutEndpoint.DiagnosticCode));
+        Assert.Equal((ElsaInstanceHealth.Unknown, "azure.health.probe-unavailable"), (withoutProbe.Health, withoutProbe.DiagnosticCode));
+        Assert.Empty(runtime.Calls);
+    }
+
+    private static AzureElsaInstanceProvider HealthProbeProvider(IAzureRuntimeHealthProbe? runtime) =>
+        new(new CapturingOperationService(null), new CapturingOperationStore(), new InMemoryAssignmentStore(),
+            options: EnabledOptions(), runtimeHealthProbe: runtime);
+
+    private static ElsaInstanceHealthProbeRequest HealthProbeRequest(string? endpoint) =>
+        new(Guid.Parse("11111111-1111-1111-1111-111111111111"), TestInstanceId,
+            new ElsaCurrentDeploymentReference("deployment-1", "attempt-1", endpoint), TimeSpan.FromSeconds(7));
+
+    private sealed class RecordingRuntimeHealthProbe(ElsaInstanceHealthProbeResult result) : IAzureRuntimeHealthProbe
+    {
+        public List<(string WorkloadName, string Endpoint, TimeSpan Timeout)> Calls { get; } = [];
+
+        public Task<ElsaInstanceHealthProbeResult> ProbeAsync(
+            string workloadName,
+            string endpointOrigin,
+            TimeSpan timeout,
+            CancellationToken cancellationToken = default)
+        {
+            Calls.Add((workloadName, endpointOrigin, timeout));
+            return Task.FromResult(result);
+        }
+    }
+
     private static AzureElsaInstanceProviderOptions EnabledOptions() =>
         new()
         {

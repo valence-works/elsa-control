@@ -94,10 +94,21 @@ The provider-neutral activity source and meter are
 - `managed_lifecycle.operations.errors` for errors crossing an operation boundary;
 - `managed_lifecycle.operations.transitions` for operation-state transitions;
 - `managed_lifecycle.operations.retries` for attempts after the first; and
-- `managed_lifecycle.endpoint.health.evaluations` for reconciliation health outcomes.
+- `managed_lifecycle.endpoint.health.evaluations` for reconciliation health outcomes
+  and for every probe of the periodic instance health monitor (#394).
 
 `managed_lifecycle.operations.duration` is the operation-duration histogram in
 milliseconds.
+
+A periodic health monitor measurement has `action` `reconcile`, `operation_state`
+`unknown` (no lifecycle operation exists), the instance's desired and observed
+lifecycle, `health` set to the probe's classification (not the recorded health),
+and `outcome` `succeeded` (recorded health unchanged), `transition` (recorded
+health changed), `conflict` (a due change was dropped because the instance changed
+concurrently) or `error`. It moves no operation counter or duration. The recorded
+health changes only after the configured number of consecutive probes; see the
+[worker composition](../../infra/control-worker-composition/README.md#instance-health-monitor-394)
+for the evaluated state set, bounds and rollback behaviour.
 
 Durably completed reconciliation replays remain visible as spans with outcome
 `already_completed`, but do not increment completion, duration, or endpoint
@@ -282,7 +293,10 @@ diagnostics available to the operator. Do not mark an instance Ready, healthy,
 or cutover-eligible from a control-plane enqueue alone. Once the endpoint is
 known healthy and no operation is blocking, use `Reconcile` to refresh the
 provider-neutral projection. A controlled `Restart` is an explicit lifecycle
-operation and must not be used to bypass an uncertain provider result.
+operation and must not be used to bypass an uncertain provider result. When the
+periodic health monitor is on, a Ready instance's health also returns to `Healthy`
+on its own after the configured number of consecutive healthy probes; its
+`lifecycle.health-changed` audit events carry the probe's safe diagnostic code.
 
 ### Retry exhaustion
 
@@ -440,10 +454,11 @@ digest only, and refuses to render while any referenced decision is pending (tod
 static SQL bootstrap egress address, #310, and the dogfood release inputs, #311). The
 rendered file is applied with `az webapp config appsettings set --settings @file` and a
 restart; `worker-rollback.json` is the reviewed rollback and turns the three worker
-switches off together. Hand-typed worker settings, renderer overrides (none exist),
-and partial enablement are out of contract: the startup validator rejects a half-enabled
-composition and the renderer rejects raw secret values, disposable proof mode and any
-attempt to override the image-owned tool paths. The offline contract tests
+switches and the instance health monitor off together. Hand-typed worker settings,
+renderer overrides (none exist), and partial enablement are out of contract: the
+startup validator rejects a half-enabled composition and the renderer rejects raw
+secret values, disposable proof mode and any attempt to override the image-owned tool
+paths. The offline contract tests
 (`scripts/tests/test_control_worker_composition.py` and
 `ProductionWorkerCompositionContractTests`) prove that the rendered settings compose
 through the production seams against the shipped `infra/azure-production` authority.

@@ -17,18 +17,21 @@ public sealed class AzureElsaInstanceProvider(
     AzureElsaInstanceProviderOptions? options = null,
     AzureProviderExecutor? executor = null,
     IAzureProviderRecoveryObserver? recoveryObserver = null,
-    IAzureProviderRecoveryObservationStore? recoveryObservationStore = null) :
+    IAzureProviderRecoveryObservationStore? recoveryObservationStore = null,
+    IAzureRuntimeHealthProbe? runtimeHealthProbe = null) :
     IElsaInstanceProviderSubmissionPort,
     IElsaInstanceProviderReconciliationPort,
     IElsaInstanceProviderCleanupPort,
     IElsaInstanceProviderRecoveryPort,
-    IElsaInstanceProviderDeleteRecoveryPort
+    IElsaInstanceProviderDeleteRecoveryPort,
+    IElsaInstanceProviderHealthProbePort
 {
     private readonly AzureElsaInstanceProviderOptions _options = options ?? new();
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
     private readonly AzureProviderExecutor? _executor = executor;
     private readonly IAzureProviderRecoveryObserver? _recoveryObserver = recoveryObserver;
     private readonly IAzureProviderRecoveryObservationStore? _recoveryObservationStore = recoveryObservationStore;
+    private readonly IAzureRuntimeHealthProbe? _runtimeHealthProbe = runtimeHealthProbe;
 
     public async Task<ElsaInstanceProviderSubmissionResult> SubmitAsync(
         ElsaInstanceProviderSubmission request,
@@ -190,6 +193,26 @@ public sealed class AzureElsaInstanceProvider(
                 ElsaInstanceProviderHealthGate.Unknown, request.OperationId, request.AttemptNumber, correlation,
                 retryEvidence)
         };
+    }
+
+    /// <summary>
+    /// Probes a Ready instance's runtime on its current deployment endpoint for the periodic health
+    /// monitor. The endpoint must be the verified origin of this instance's own workload; the probe is
+    /// the runner's read-only runtime health probe, so no provider operation or scope rebind is touched.
+    /// </summary>
+    public async Task<ElsaInstanceHealthProbeResult> ProbeAsync(
+        ElsaInstanceHealthProbeRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.WorkspaceId == Guid.Empty || request.InstanceId == Guid.Empty || request.Timeout <= TimeSpan.Zero)
+            throw new ArgumentException("Health probe request identity is invalid.", nameof(request));
+        EnsureEnabled();
+        if (_runtimeHealthProbe is null)
+            return new(ElsaInstanceHealth.Unknown, "azure.health.probe-unavailable");
+        return request.CurrentDeployment?.EndpointUri is { } endpoint
+            ? await _runtimeHealthProbe.ProbeAsync(WorkloadName(request.InstanceId), endpoint, request.Timeout, cancellationToken)
+            : new(ElsaInstanceHealth.Unknown, "azure.health.endpoint-unavailable");
     }
 
     /// <summary>
