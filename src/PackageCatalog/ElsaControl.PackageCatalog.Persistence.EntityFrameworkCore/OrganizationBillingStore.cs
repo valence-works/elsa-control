@@ -469,9 +469,6 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                 x.ProviderSubscriptionReference == providerSubscriptionReference);
         var eventMatches = await matches
             .Where(x => x.LastProviderEventId == providerEventId)
-            .ThenByDescending(x => x.UpdatedAt)
-            .ThenByDescending(x => x.CreatedAt)
-            .ThenByDescending(x => x.Id)
             .Take(2)
             .ToListAsync(cancellationToken);
         if (eventMatches.Count == 1)
@@ -480,9 +477,6 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             return null;
 
         var correlatedMatches = await matches
-            .OrderByDescending(x => x.UpdatedAt)
-            .ThenByDescending(x => x.CreatedAt)
-            .ThenByDescending(x => x.Id)
             .Take(2)
             .ToListAsync(cancellationToken);
         return correlatedMatches.Count == 1 ? correlatedMatches[0] : null;

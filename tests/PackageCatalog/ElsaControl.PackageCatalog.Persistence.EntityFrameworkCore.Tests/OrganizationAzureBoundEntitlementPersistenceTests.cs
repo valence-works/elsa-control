@@ -209,6 +209,22 @@ public sealed class OrganizationAzureBoundEntitlementPersistenceTests : IAsyncLi
     }
 
     [Fact]
+    public async Task Deleted_azure_bound_history_does_not_allow_replacement_while_managed_hosting_remains_enabled()
+    {
+        var subscription = await AddSubscriptionAsync(BillingProviderNames.AzureBound, OrganizationSubscriptionState.Deleted);
+        subscription.EarlyDeletionRequestedAt = Now.AddHours(-1);
+        var entitlement = await _db.OrganizationEntitlementSnapshots.SingleAsync(x => x.OrganizationId == OrganizationId);
+        entitlement.ManagedHostingEnabled = true;
+        entitlement.SubscriptionId = subscription.Id;
+        entitlement.SubscriptionState = OrganizationSubscriptionState.Deleted;
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        await Assert.ThrowsAsync<BillingProviderEventConflictException>(() =>
+            _store.StartTrialAsync(OrganizationId, BillingProviderNames.Stripe, Now.AddHours(1)));
+    }
+
+    [Fact]
     public async Task Prior_provider_cleanup_cannot_tombstone_a_replacement_azure_bound_subscription()
     {
         await AddBindAsync(OrganizationAzureSubscriptionBindState.Active);
