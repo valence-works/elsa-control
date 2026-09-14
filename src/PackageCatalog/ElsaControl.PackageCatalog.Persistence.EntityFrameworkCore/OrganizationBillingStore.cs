@@ -271,12 +271,27 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             if (isNewSubscription)
                 dbContext.OrganizationSubscriptions.Add(subscription);
             subscription.LastProviderEventOccurredAt = occurrence;
-            subscription.LastProviderEventId = providerEvent.ProviderEventId;
+            if (subscription.State == OrganizationSubscriptionState.Deleted)
+            {
+                subscription.ProviderCustomerReference = null;
+                subscription.ProviderSubscriptionReference = null;
+                subscription.LastProviderEventId = null;
+            }
+            else
+            {
+                subscription.LastProviderEventId = providerEvent.ProviderEventId;
+            }
             subscription.UpdatedAt = now;
             inbox.ProcessingStatus = BillingProviderEventProcessingStatus.Applied;
             inbox.ProcessedAt = now;
 
-            var entitlement = await ProjectEntitlementAsync(subscription, now, cancellationToken);
+            var hasReplacement = await dbContext.OrganizationSubscriptions.HasNonTerminalReplacementAsync(
+                subscription.OrganizationId,
+                subscription.Id,
+                cancellationToken);
+            var entitlement = hasReplacement
+                ? await CurrentEntitlementAsync(subscription.OrganizationId, cancellationToken)
+                : await ProjectEntitlementAsync(subscription, now, cancellationToken);
             AddBillingAudit(providerEvent.OrganizationId, inbox.Id, "A normalized billing provider event was consumed.", now);
             await dbContext.SaveChangesAsync(cancellationToken);
             return new BillingEventConsumptionResult(BillingEventConsumptionOutcome.Applied, subscription, entitlement, inbox);

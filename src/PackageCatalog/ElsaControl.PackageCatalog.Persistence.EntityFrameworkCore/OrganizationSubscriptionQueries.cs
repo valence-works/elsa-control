@@ -1,4 +1,5 @@
 using ElsaControl.PackageCatalog.Core.Accounts;
+using Microsoft.EntityFrameworkCore;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 
@@ -34,4 +35,16 @@ internal static class OrganizationSubscriptionQueries
             .ThenByDescending(x => x.UpdatedAt)
             .ThenByDescending(x => x.CreatedAt)
             .ThenByDescending(x => x.Id);
+
+    public static Task<bool> HasNonTerminalReplacementAsync(
+        this IQueryable<OrganizationSubscription> subscriptions,
+        Guid organizationId,
+        Guid subscriptionId,
+        CancellationToken cancellationToken) =>
+        subscriptions.AsNoTracking().AnyAsync(x =>
+            x.OrganizationId == organizationId &&
+            x.Id != subscriptionId &&
+            x.State != OrganizationSubscriptionState.Retained &&
+            x.State != OrganizationSubscriptionState.Deleted,
+            cancellationToken);
 }

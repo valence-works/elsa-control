@@ -408,11 +408,9 @@ public sealed partial class OrganizationBillingStore
                         .SingleOrDefaultAsync(x => x.OrganizationId == completion.OrganizationId && x.Id == completion.SubscriptionId, cancellationToken);
                     if (subscription is not null && subscription.State != OrganizationSubscriptionState.Deleted)
                     {
-                        var hasReplacement = await dbContext.OrganizationSubscriptions.AsNoTracking().AnyAsync(x =>
-                            x.OrganizationId == completion.OrganizationId &&
-                            x.Id != completion.SubscriptionId &&
-                            x.State != OrganizationSubscriptionState.Retained &&
-                            x.State != OrganizationSubscriptionState.Deleted,
+                        var hasReplacement = await dbContext.OrganizationSubscriptions.HasNonTerminalReplacementAsync(
+                            completion.OrganizationId,
+                            completion.SubscriptionId,
                             cancellationToken);
                         OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Deleted, completedAt, advanceLifecycleVersion: true);
                         subscription.ProviderCustomerReference = null;

@@ -322,7 +322,11 @@ public sealed class OrganizationAzureBoundEntitlementPersistenceTests : IAsyncLi
     public async Task First_seen_provider_event_uses_the_matching_historical_provider_after_replacement()
     {
         await AddBindAsync(OrganizationAzureSubscriptionBindState.Active);
-        var prior = await AddSubscriptionAsync(BillingProviderNames.Stripe, OrganizationSubscriptionState.Retained);
+        var prior = await AddSubscriptionAsync(
+            BillingProviderNames.Stripe,
+            OrganizationSubscriptionState.Retained,
+            providerCustomerReference: "cus-historical",
+            providerSubscriptionReference: "sub-historical");
         Assert.Equal(OrganizationAzureBoundEntitlementOutcome.Minted, (await MintAsync()).Outcome);
         _db.ChangeTracker.Clear();
 
@@ -343,6 +347,13 @@ public sealed class OrganizationAzureBoundEntitlementPersistenceTests : IAsyncLi
         Assert.Equal(prior.Id, applied.Subscription!.Id);
         Assert.Equal(BillingProviderNames.Stripe, applied.Subscription.Provider);
         Assert.Equal(OrganizationSubscriptionState.Deleted, applied.Subscription.State);
+        var current = await _db.OrganizationSubscriptions.AsNoTracking()
+            .SingleAsync(x => x.Provider == BillingProviderNames.AzureBound);
+        var entitlement = await _db.OrganizationEntitlementSnapshots.AsNoTracking().SingleAsync();
+        Assert.Equal(current.Id, entitlement.SubscriptionId);
+        Assert.True(entitlement.ManagedHostingEnabled);
+        var gate = new EfCoreElsaInstanceCommercialGate(_db, new FixedTimeProvider(Now.AddMinutes(2)));
+        Assert.True((await gate.EvaluateAsync(OrganizationId, ElsaInstanceOperationAction.Create, 0)).Allowed);
     }
 
     private Task<OrganizationAzureBoundEntitlementResult> MintAsync(
