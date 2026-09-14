@@ -464,6 +464,7 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             .Where(x =>
                 x.OrganizationId == organizationId &&
                 x.Provider == provider &&
+                (x.State == OrganizationSubscriptionState.Retained || x.State == OrganizationSubscriptionState.Deleted) &&
                 (providerCustomerReference is null || x.ProviderCustomerReference == providerCustomerReference) &&
                 (providerSubscriptionReference is null || x.ProviderSubscriptionReference == providerSubscriptionReference))
             .OrderByDescending(x => x.LastProviderEventId == providerEventId)
