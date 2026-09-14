@@ -175,6 +175,9 @@ public sealed class EfCoreManagedElsaInstanceIdentityStore(CatalogDbContext dbCo
             return Conflict();
 
         dbContext.ChangeTracker.Clear();
+        var verificationBindingVersion = 0;
+        var verificationChangedAt = changedAt;
+        var verificationEndpointOrigin = string.Empty;
         try
         {
             return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
@@ -243,8 +246,27 @@ public sealed class EfCoreManagedElsaInstanceIdentityStore(CatalogDbContext dbCo
                 }
 
                 await dbContext.SaveChangesAsync(cancellationToken);
+                verificationBindingVersion = binding.BindingVersion;
+                verificationChangedAt = binding.ChangedAt;
+                verificationEndpointOrigin = binding.VerifiedEndpointOrigin;
                 return new ManagedElsaInstanceIdentityBindingWriteResult(outcome, Map(entity, binding));
-            }, cancellationToken);
+            },
+                async (result, verificationCancellationToken) =>
+                {
+                    if (!result.Succeeded)
+                        return true;
+
+                    var binding = await dbContext.ElsaInstances.AsNoTracking()
+                        .Where(x => x.OrganizationId == organizationId && x.WorkspaceId == workspaceId && x.Id == instanceId)
+                        .Select(x => x.IdentityBinding)
+                        .SingleOrDefaultAsync(verificationCancellationToken);
+                    return binding is not null &&
+                        binding.InstanceId == instanceId &&
+                        binding.BindingVersion == verificationBindingVersion &&
+                        binding.VerifiedEndpointOrigin == verificationEndpointOrigin &&
+                        binding.ChangedAt == verificationChangedAt;
+                },
+                cancellationToken);
         }
         catch (DbUpdateConcurrencyException)
         {
