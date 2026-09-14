@@ -99,6 +99,8 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                     cancellationToken);
                 var verifiedCleanupFinalization = providerOperation is not null && assignment is not null &&
                     IsVerifiedCleanupEligible(providerOperation, assignment);
+                var terminalCleanupRetry = providerOperation is not null && assignment is not null &&
+                    IsTerminalCleanupRetryEligible(providerOperation, assignment);
 
                 var lifecycleLeaseHash = Hash(request.LeaseToken);
                 var nowUtc = now.ToUniversalTime();
@@ -142,11 +144,12 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                     AzureProviderOperationValidation.IsLifecycleDeleteIdempotencyKey(
                         providerOperation.IdempotencyKey, request.LifecycleOperationId);
                 var providerIsCurrent = providerIdentityIsCurrent &&
-                    providerOperation!.Status == AzureProviderOperationStatus.RecoveryRequired &&
-                    (providerOperation.Phase == AzureProviderOperationPhase.CleanupSubmitted &&
-                     providerOperation.AttemptedStep == AzureProviderRunnerStep.Cleanup &&
-                     assignment is not null && assignment.State != AzureProviderAssignmentState.Deleted ||
-                     verifiedCleanupFinalization);
+                    (terminalCleanupRetry ||
+                     providerOperation!.Status == AzureProviderOperationStatus.RecoveryRequired &&
+                     (providerOperation.Phase == AzureProviderOperationPhase.CleanupSubmitted &&
+                      providerOperation.AttemptedStep == AzureProviderRunnerStep.Cleanup &&
+                      assignment is not null && assignment.State != AzureProviderAssignmentState.Deleted ||
+                      verifiedCleanupFinalization));
                 var assignmentIsCurrent = assignment is not null &&
                     assignment.OrganizationId == recovery.OrganizationId && assignment.InstanceId == request.InstanceId &&
                     assignment.LastOperationId == authority.ProviderOperationId &&
@@ -205,6 +208,13 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
         AzureProviderOperationEntity operation,
         AzureProviderResourceAssignmentEntity assignment) =>
         AzureProviderDeleteRecoverySupport.IsVerifiedCleanupEligible(
+            ToModel(operation),
+            ToModel(assignment));
+
+    internal static bool IsTerminalCleanupRetryEligible(
+        AzureProviderOperationEntity operation,
+        AzureProviderResourceAssignmentEntity assignment) =>
+        AzureProviderDeleteRecoverySupport.IsTerminalCleanupRetryEligible(
             ToModel(operation),
             ToModel(assignment));
 

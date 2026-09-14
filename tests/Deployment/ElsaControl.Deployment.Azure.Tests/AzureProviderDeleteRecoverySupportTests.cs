@@ -104,6 +104,63 @@ public sealed class AzureProviderDeleteRecoverySupportTests
         Assert.False(AzureProviderDeleteRecoverySupport.IsVerifiedCleanupEligible(operation, null));
     }
 
+    [Theory]
+    [InlineData(AzureProviderOperationStatus.Failed, AzureProviderAssignmentState.Provisioning)]
+    [InlineData(AzureProviderOperationStatus.Failed, AzureProviderAssignmentState.Unknown)]
+    [InlineData(AzureProviderOperationStatus.Cancelled, AzureProviderAssignmentState.Deleting)]
+    [InlineData(AzureProviderOperationStatus.Cancelled, AzureProviderAssignmentState.Active)]
+    public void Terminal_cleanup_retry_accepts_only_a_bound_group_only_failed_attempt(
+        AzureProviderOperationStatus status,
+        AzureProviderAssignmentState assignmentState)
+    {
+        var (operation, assignment) = Fixture(status, assignmentState);
+        operation = operation with
+        {
+            Phase = AzureProviderOperationPhase.CleanupSubmitted,
+            AttemptedStep = AzureProviderRunnerStep.Cleanup
+        };
+
+        Assert.True(AzureProviderDeleteRecoverySupport.IsTerminalCleanupRetryEligible(operation, assignment));
+    }
+
+    [Theory]
+    [InlineData("operation-inventory")]
+    [InlineData("assignment-inventory")]
+    [InlineData("wrong-phase")]
+    [InlineData("wrong-step")]
+    [InlineData("wrong-status")]
+    [InlineData("deleted-assignment")]
+    public void Terminal_cleanup_retry_rejects_incomplete_or_inconsistent_authority(string mutation)
+    {
+        var (operation, assignment) = Fixture(
+            AzureProviderOperationStatus.Failed,
+            AzureProviderAssignmentState.Provisioning);
+        operation = operation with
+        {
+            Phase = AzureProviderOperationPhase.CleanupSubmitted,
+            AttemptedStep = AzureProviderRunnerStep.Cleanup
+        };
+
+        (operation, assignment) = mutation switch
+        {
+            "operation-inventory" => (operation with
+            {
+                Resources = operation.Resources with { WorkloadResourceId = "/owned/workload" }
+            }, assignment),
+            "assignment-inventory" => (operation, assignment with
+            {
+                Resources = assignment.Resources with { WorkloadResourceId = "/owned/workload" }
+            }),
+            "wrong-phase" => (operation with { Phase = AzureProviderOperationPhase.CleanupVerified }, assignment),
+            "wrong-step" => (operation with { AttemptedStep = null }, assignment),
+            "wrong-status" => (operation with { Status = AzureProviderOperationStatus.RecoveryRequired }, assignment),
+            "deleted-assignment" => (operation, assignment with { State = AzureProviderAssignmentState.Deleted }),
+            _ => throw new ArgumentOutOfRangeException(nameof(mutation), mutation, null)
+        };
+
+        Assert.False(AzureProviderDeleteRecoverySupport.IsTerminalCleanupRetryEligible(operation, assignment));
+    }
+
     private static (AzureProviderOperation Operation, AzureProviderResourceAssignment Assignment) Fixture(
         AzureProviderOperationStatus status,
         AzureProviderAssignmentState assignmentState)

@@ -119,7 +119,8 @@ public sealed class AzureProviderExecutor
             !IsPlanForOperation(retained, plan))
             return null;
 
-        if (retained.Status != AzureProviderOperationStatus.RecoveryRequired ||
+        if (retained.Status is not (AzureProviderOperationStatus.RecoveryRequired or
+                AzureProviderOperationStatus.Failed or AzureProviderOperationStatus.Cancelled) ||
             retained.AttemptNumber != authority.ProviderAttemptNumber ||
             retained.Version != authority.ProviderVersion ||
             retained.CheckpointSequence != authority.ProviderCheckpointSequence)

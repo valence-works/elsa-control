@@ -2504,28 +2504,32 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 providerOperation.IdempotencyKey, lifecycleOperation.Id))
             throw Conflict("Azure delete recovery provider authority is unavailable.");
 
-        // A terminal provider delete has no uncertain remote action to replay. Preserve the
-        // existing cleanup/finalization paths for that known outcome, while never downgrading a
-        // malformed or still-active Azure binding to ordinary cleanup.
+        // A successful provider delete has no uncertain remote action to replay. Preserve the
+        // existing finalization path for that known outcome, while never downgrading a malformed
+        // Azure binding to ordinary cleanup.
         if (providerOperation.Status == AzureProviderOperationStatus.Succeeded)
         {
             if (assignment.State != AzureProviderAssignmentState.Deleted)
                 throw Conflict("Azure delete recovery assignment authority is unavailable.");
             return null;
         }
+        var terminalCleanupRetry =
+            AzureProviderOperationStore.IsTerminalCleanupRetryEligible(providerOperation, assignment);
         if (providerOperation.Status is AzureProviderOperationStatus.Failed or AzureProviderOperationStatus.Cancelled)
         {
             if (assignment.State == AzureProviderAssignmentState.Deleted)
                 throw Conflict("Azure delete recovery assignment authority is unavailable.");
-            return null;
+            if (!terminalCleanupRetry)
+                return null;
         }
         var verifiedCleanupFinalization =
             AzureProviderOperationStore.IsVerifiedCleanupEligible(providerOperation, assignment);
-        if (providerOperation.Status != AzureProviderOperationStatus.RecoveryRequired ||
-            !verifiedCleanupFinalization &&
-            (assignment.State == AzureProviderAssignmentState.Deleted ||
-             providerOperation.Phase != AzureProviderOperationPhase.CleanupSubmitted ||
-             providerOperation.AttemptedStep != AzureProviderRunnerStep.Cleanup) ||
+        if ((!terminalCleanupRetry &&
+             (providerOperation.Status != AzureProviderOperationStatus.RecoveryRequired ||
+              !verifiedCleanupFinalization &&
+              (assignment.State == AzureProviderAssignmentState.Deleted ||
+               providerOperation.Phase != AzureProviderOperationPhase.CleanupSubmitted ||
+               providerOperation.AttemptedStep != AzureProviderRunnerStep.Cleanup))) ||
             providerOperation.AttemptNumber < 1 || providerOperation.CheckpointSequence < 1 ||
             providerOperation.LeaseExpiresAt is { } providerLeaseExpires &&
             providerLeaseExpires > acceptedAt.ToUniversalTime())

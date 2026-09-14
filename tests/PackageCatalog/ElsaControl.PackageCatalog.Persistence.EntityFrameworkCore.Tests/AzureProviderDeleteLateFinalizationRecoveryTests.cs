@@ -10,6 +10,118 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 
 public sealed partial class ElsaInstanceLifecycleStoreTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Terminal_failed_delete_recovery_retries_only_when_durable_inventories_are_empty(
+        bool retainAssignmentResource)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        await using var fixture = await SeedDeleteRecoveryClaimAsync(db);
+
+        var claimed = Assert.IsType<AzureProviderOperation>(await fixture.Store.ClaimDeleteRecoveryAsync(
+            fixture.Request, TimeSpan.FromMinutes(5), fixture.Now));
+        var failed = Assert.IsType<AzureProviderOperation>(await fixture.OperationStore.FinalizeAsync(
+            fixture.WorkspaceId,
+            fixture.ProviderOperationId,
+            fixture.Request.LeaseToken,
+            AzureProviderOperationStatus.Failed,
+            "azure.cleanup.failed",
+            fixture.Now.AddSeconds(1),
+            claimed.Version));
+        Assert.Equal(AzureProviderOperationPhase.CleanupSubmitted, failed.Phase);
+        Assert.Equal(AzureProviderRunnerStep.Cleanup, failed.AttemptedStep);
+
+        db.ChangeTracker.Clear();
+        var assignment = await db.AzureProviderResourceAssignments.SingleAsync(
+            x => x.Id == failed.ProviderAssignmentId);
+        if (retainAssignmentResource)
+            assignment.WorkloadRevisionName = "remaining-revision";
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var lifecycleStore = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(fixture.Now.AddSeconds(2)));
+        var outbox = await db.ElsaInstanceLifecycleOutbox.AsNoTracking()
+            .SingleAsync(x => x.OperationId == fixture.Request.LifecycleOperationId);
+        await lifecycleStore.RequireDeletionRecoveryAsync(new(
+            fixture.WorkspaceId,
+            fixture.InstanceId,
+            fixture.Request.LifecycleOperationId,
+            outbox.Id,
+            fixture.Request.InstanceVersion,
+            fixture.Request.LifecycleAttemptNumber,
+            null,
+            fixture.Request.WorkerId,
+            fixture.Request.LeaseToken,
+            fixture.Request.LeaseVersion,
+            new string('f', 64),
+            "deletion.provider-cleanup-failed",
+            fixture.Now.AddSeconds(2)));
+
+        var current = Assert.IsType<ElsaInstance>(await CreateStore(db).GetInstanceAsync(
+            fixture.WorkspaceId, fixture.InstanceId));
+        var accepted = await new ElsaInstanceLifecycleService(
+                CreateStore(db), new FixedTimeProvider(fixture.Now.AddMinutes(1)))
+            .RecoverAsync(new(
+                fixture.WorkspaceId,
+                fixture.InstanceId,
+                current.Version,
+                "terminal-delete-recovery"));
+        Assert.Equal(ElsaInstanceOperationState.Queued, accepted.Operation.State);
+        var recovery = await db.ElsaInstanceRecoveryRequests.AsNoTracking()
+            .SingleAsync(x => x.OperationId == fixture.Request.LifecycleOperationId &&
+                              x.AttemptNumber == accepted.Operation.AttemptNumber);
+        Assert.Equal(!retainAssignmentResource, recovery.AzureDeleteRecoveryAuthority is not null);
+
+        var (_, providerOptions) = DeleteRecoveryProviderConfiguration(fixture);
+        var operationStore = new AzureProviderOperationStore(db);
+        var runner = new ConfirmedAbsentCleanupRunner();
+        var provider = CreateProvider(operationStore, providerOptions, fixture.Now.AddMinutes(2));
+        var recoveryProvider = CreateProvider(
+            operationStore,
+            providerOptions,
+            fixture.Now.AddMinutes(2),
+            new AzureProviderExecutor(
+                operationStore,
+                runner,
+                new FixedTimeProvider(fixture.Now.AddMinutes(2)),
+                assignmentStore: operationStore));
+        var worker = new ElsaInstanceDeletionWorker(
+            new EfCoreElsaInstanceLifecycleStore(
+                db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(fixture.Now.AddMinutes(2))),
+            provider,
+            new FixedTimeProvider(fixture.Now.AddMinutes(2)),
+            recoveryProvider);
+
+        var batch = await worker.ProcessAvailableAsync(fixture.Request.WorkerId);
+
+        if (retainAssignmentResource)
+            Assert.Empty(batch.Results);
+        else
+            Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Deleted, Assert.Single(batch.Results).Outcome);
+        Assert.Equal(retainAssignmentResource ? 0 : 1, runner.Count);
+        db.ChangeTracker.Clear();
+        var instance = await db.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == fixture.InstanceId);
+        Assert.Equal(!retainAssignmentResource, instance.DeletedAt is not null);
+        Assert.Equal(
+            retainAssignmentResource ? ElsaObservedLifecycle.Deleting : ElsaObservedLifecycle.Deleted,
+            instance.ObservedLifecycle);
+        var lifecycle = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == fixture.Request.LifecycleOperationId);
+        Assert.Equal(
+            retainAssignmentResource ? ElsaInstanceOperationState.Running : ElsaInstanceOperationState.Succeeded,
+            lifecycle.State);
+        var persistedOperation = await fixture.OperationStore.GetAsync(
+            fixture.WorkspaceId, fixture.ProviderOperationId);
+        Assert.Equal(
+            retainAssignmentResource ? AzureProviderOperationStatus.Failed : AzureProviderOperationStatus.Succeeded,
+            persistedOperation?.Status);
+    }
+
     [PosixFact]
     public async Task Delete_recovery_accepts_stale_cleanup_verified_boundary_without_runner_replay()
     {
@@ -181,6 +293,27 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         CatalogDbContext db,
         DeleteClaimFixture fixture)
     {
+        var (_, providerOptions) = DeleteRecoveryProviderConfiguration(fixture);
+        var operationStore = new AzureProviderOperationStore(db);
+        var runner = new RejectLateFinalizationRunner();
+        var provider = CreateProvider(operationStore, providerOptions, fixture.Now.AddMinutes(8));
+        var recoveryProvider = CreateProvider(
+            operationStore,
+            providerOptions,
+            fixture.Now.AddMinutes(8),
+            new AzureProviderExecutor(operationStore, runner,
+                new FixedTimeProvider(fixture.Now.AddMinutes(8)), assignmentStore: operationStore));
+        return (new(
+            new EfCoreElsaInstanceLifecycleStore(
+                db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(fixture.Now.AddMinutes(8))),
+            provider,
+            new FixedTimeProvider(fixture.Now.AddMinutes(8)),
+            recoveryProvider), runner);
+    }
+
+    private static (AzureProviderTargetScope Scope, AzureElsaInstanceProviderOptions Options)
+        DeleteRecoveryProviderConfiguration(DeleteClaimFixture fixture)
+    {
         var scope = new AzureProviderTargetScope(
             "11111111-1111-1111-1111-111111111111",
             "rg-delete-claim",
@@ -197,21 +330,30 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             SubscriptionId = scope.SubscriptionId,
             ResourceGroupNamePrefix = scope.ResourceGroupName
         };
-        var operationStore = new AzureProviderOperationStore(db);
-        var runner = new RejectLateFinalizationRunner();
-        var provider = CreateProvider(operationStore, providerOptions, fixture.Now.AddMinutes(8));
-        var recoveryProvider = CreateProvider(
-            operationStore,
-            providerOptions,
-            fixture.Now.AddMinutes(8),
-            new AzureProviderExecutor(operationStore, runner,
-                new FixedTimeProvider(fixture.Now.AddMinutes(8)), assignmentStore: operationStore));
-        return (new(
-            new EfCoreElsaInstanceLifecycleStore(
-                db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(fixture.Now.AddMinutes(8))),
-            provider,
-            new FixedTimeProvider(fixture.Now.AddMinutes(8)),
-            recoveryProvider), runner);
+        return (scope, providerOptions);
+    }
+
+    private sealed class ConfirmedAbsentCleanupRunner : IAzureProviderRunner
+    {
+        public int Count { get; private set; }
+
+        public Task<AzureProviderRunnerResult> RunAsync(
+            AzureProviderRunnerCommand command,
+            CancellationToken cancellationToken = default)
+        {
+            Count++;
+            Assert.Equal(AzureProviderRunnerStep.Cleanup, command.Step);
+            return Task.FromResult(new AzureProviderRunnerResult(
+                AzureProviderRunnerOutcome.Completed,
+                AzureProviderOperationPhase.CleanupVerified,
+                new(),
+                AzureProviderHealth.Unknown,
+                null,
+                [],
+                "azure.cleanup.completed",
+                "Exact owned-resource cleanup was verified.",
+                OwnedResourcesAbsent: true));
+        }
     }
 
     private sealed class RejectLateFinalizationRunner : IAzureProviderRunner
