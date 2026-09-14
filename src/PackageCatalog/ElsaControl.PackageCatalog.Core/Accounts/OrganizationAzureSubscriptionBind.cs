@@ -125,7 +125,10 @@ public sealed class OrganizationAzureSubscriptionBindService(
     IAzureLighthouseAuthorityObserver authorityObserver,
     TimeProvider? timeProvider = null)
 {
-    private static readonly TimeSpan VerificationLeaseDuration = TimeSpan.FromMinutes(15);
+    // Lighthouse verification runs four sequential Azure CLI commands. The governed
+    // command timeout is at most one hour, so the lease covers that worst case plus
+    // enough hand-off margin before another caller may reclaim it.
+    private static readonly TimeSpan VerificationLeaseDuration = TimeSpan.FromHours(4) + TimeSpan.FromMinutes(15);
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
 
     public Task<OrganizationAzureSubscriptionBind?> GetAsync(Guid organizationId, Guid bindId, CancellationToken cancellationToken = default) =>
