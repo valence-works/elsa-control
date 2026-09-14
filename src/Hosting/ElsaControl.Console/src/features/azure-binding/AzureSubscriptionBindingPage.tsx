@@ -33,7 +33,7 @@ export function AzureSubscriptionBindingPage() {
     retry: false
   });
 
-  if (workspace.isLoading || binding.isPending) {
+  if (workspace.isLoading || binding.isLoading) {
     return <RequestStateView state="loading" title="Loading Azure subscription binding" description="Checking the guided onboarding state for this organization." />;
   }
 
@@ -71,8 +71,9 @@ export function AzureSubscriptionBindingSurface({
   useEffect(() => {
     setCurrentView(initialView);
     setStep(stepFor(initialView.bind?.state));
-    if (initialView.bind?.subscriptionId) setSubscriptionId(initialView.bind.subscriptionId);
-    if (initialView.bind?.customerTenantId) setCustomerTenantId(initialView.bind.customerTenantId);
+    setSubscriptionId(initialView.bind?.subscriptionId ?? "");
+    setCustomerTenantId(initialView.bind?.customerTenantId ?? "");
+    setConsentConfirmed(false);
   }, [initialView]);
 
   const createBind = useMutation({
@@ -239,7 +240,7 @@ function ReviewStep({
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">The customer deploys this subscription-scoped offer in Azure. There is no one-click Marketplace deployment from Control.</p>
               </div>
               <a href={offer.artifactUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 text-sm font-medium text-primary underline-offset-4 hover:underline">
-                {offer.artifactLabel ?? `Azure Lighthouse ARM artifact v${offer.version}`} <ExternalLink aria-hidden className="h-3.5 w-3.5" />
+                {offer.artifactLabel ?? `Azure Lighthouse ARM artifact ${offer.version}`} <ExternalLink aria-hidden className="h-3.5 w-3.5" />
               </a>
             </div>
             <ol className="mt-4 grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
@@ -338,7 +339,7 @@ function ProgressStep({
 
         <div className="mt-5 grid gap-3 sm:grid-cols-2">
           <DataTile label="Subscription ID" value={bind?.subscriptionId ?? "Waiting for bind record"} mono />
-          <DataTile label="Offer version" value={`v${offer.version}`} />
+          <DataTile label="Offer version" value={offer.version} />
           <DataTile label="Bind state" value={bind?.state ?? "Verifying"} />
           <DataTile label="Role check" value={bind?.state === "Degraded" ? "Needs attention" : "Not yet verified"} />
         </div>
@@ -413,7 +414,7 @@ function DataTile({ label, value, mono = false }: { label: string; value: string
 
 function stepFor(state: AzureSubscriptionBindState | undefined): BindingStep {
   if (state === "Active") return "landing";
-  if (state === "Verifying" || state === "Degraded") return "progress";
+  if (state === "PendingConsent" || state === "Verifying" || state === "Degraded") return "progress";
   return "review";
 }
 

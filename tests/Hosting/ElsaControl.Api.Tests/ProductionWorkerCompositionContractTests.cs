@@ -58,6 +58,7 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
             services, configuration, providerPipelineComposed: true, runWorkers: true));
 
         Assert.Equal("ada5e428-c5d8-4daf-b7f9-9f2c79d23815", authority.Options.AzureCliClientId);
+        Assert.Equal("f35bcd45-7991-4e24-84f1-e964394501ad", authority.Options.LighthouseManagingTenantId);
         Assert.Equal("a54cd7b1-3d13-48ce-9dce-5ae013142c85", authority.Scope.SubscriptionId);
         Assert.Equal("rg-elsa-cloud-workloads-platform-prod-weu", authority.Scope.ResourceGroupName);
         Assert.Equal("valenceruntimeimages", authority.Scope.RegistryName);

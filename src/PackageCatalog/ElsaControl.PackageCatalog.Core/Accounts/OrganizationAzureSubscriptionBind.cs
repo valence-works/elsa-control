@@ -94,6 +94,7 @@ public sealed record OrganizationAzureSubscriptionBindTransition(
     OrganizationAzureSubscriptionBindState ExpectedState,
     OrganizationAzureSubscriptionBindState NewState,
     DateTimeOffset ChangedAt,
+    DateTimeOffset? ExpectedUpdatedAt = null,
     DateTimeOffset? VerifiedAt = null,
     string? LastPreflightCode = null,
     string? UnbindReason = null,
@@ -124,6 +125,7 @@ public sealed class OrganizationAzureSubscriptionBindService(
     IAzureLighthouseAuthorityObserver authorityObserver,
     TimeProvider? timeProvider = null)
 {
+    private static readonly TimeSpan VerificationLeaseDuration = TimeSpan.FromMinutes(15);
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
 
     public Task<OrganizationAzureSubscriptionBind?> GetAsync(Guid organizationId, Guid bindId, CancellationToken cancellationToken = default) =>
@@ -186,8 +188,9 @@ public sealed class OrganizationAzureSubscriptionBindService(
             return current.State == OrganizationAzureSubscriptionBindState.Degraded
                 ? OrganizationAzureSubscriptionBindResult.Denied(OrganizationAzureSubscriptionBindFailure.DegradedBindRequiresUnbind)
                 : OrganizationAzureSubscriptionBindResult.Denied(OrganizationAzureSubscriptionBindFailure.AlreadyBound);
-        if (!TryNormalizeRequest(request, out var normalized) ||
-            string.Equals(current.SubscriptionId, normalized.SubscriptionId, StringComparison.Ordinal))
+        if (!TryNormalizeRequest(request, out var normalized))
+            return OrganizationAzureSubscriptionBindResult.Denied(OrganizationAzureSubscriptionBindFailure.InvalidRequest);
+        if (string.Equals(current.SubscriptionId, normalized.SubscriptionId, StringComparison.Ordinal))
             return OrganizationAzureSubscriptionBindResult.Denied(OrganizationAzureSubscriptionBindFailure.SubscriptionMustChange);
         return await CreateAsync(organizationId, request, createdByAccountId, cancellationToken);
     }
@@ -204,11 +207,20 @@ public sealed class OrganizationAzureSubscriptionBindService(
             return OrganizationAzureSubscriptionBindResult.Denied(OrganizationAzureSubscriptionBindFailure.InvalidState);
 
         var now = _timeProvider.GetUtcNow();
+        if (bind.State == OrganizationAzureSubscriptionBindState.Verifying &&
+            now - bind.UpdatedAt < VerificationLeaseDuration)
+            return OrganizationAzureSubscriptionBindResult.Denied(OrganizationAzureSubscriptionBindFailure.BindInFlight);
+
         var started = await store.TransitionAsync(new(
             organizationId, bindId, bind.State,
-            OrganizationAzureSubscriptionBindState.Verifying, now), cancellationToken);
+            OrganizationAzureSubscriptionBindState.Verifying, now,
+            ExpectedUpdatedAt: bind.UpdatedAt,
+            LastPreflightCode: bind.State == OrganizationAzureSubscriptionBindState.Verifying
+                ? "azure.lighthouse.verification-restarted"
+                : null), cancellationToken);
         if (!started.Succeeded)
             return started;
+        var leaseUpdatedAt = started.Bind!.UpdatedAt;
 
         AzureLighthouseAuthorityObservationResult observation;
         try
@@ -233,6 +245,7 @@ public sealed class OrganizationAzureSubscriptionBindService(
                     OrganizationAzureSubscriptionBindState.Verifying,
                     OrganizationAzureSubscriptionBindState.Degraded,
                     _timeProvider.GetUtcNow(),
+                    ExpectedUpdatedAt: leaseUpdatedAt,
                     LastPreflightCode: "azure.lighthouse.verification-cancelled"), CancellationToken.None);
             }
             catch (Exception)
@@ -253,8 +266,9 @@ public sealed class OrganizationAzureSubscriptionBindService(
             OrganizationAzureSubscriptionBindState.Verifying,
             observation.Succeeded ? OrganizationAzureSubscriptionBindState.Active : OrganizationAzureSubscriptionBindState.Degraded,
             _timeProvider.GetUtcNow(),
-            observation.Succeeded ? _timeProvider.GetUtcNow() : null,
-            observation.Code,
+            ExpectedUpdatedAt: leaseUpdatedAt,
+            VerifiedAt: observation.Succeeded ? _timeProvider.GetUtcNow() : null,
+            LastPreflightCode: observation.Code,
             RegistrationDefinitionFingerprint: observation.Succeeded
                 ? observation.RegistrationDefinitionFingerprint
                 : null), CancellationToken.None);
@@ -281,6 +295,7 @@ public sealed class OrganizationAzureSubscriptionBindService(
             organizationId, bindId, bind.State,
             OrganizationAzureSubscriptionBindState.Unbound,
             _timeProvider.GetUtcNow(),
+            ExpectedUpdatedAt: bind.UpdatedAt,
             UnbindReason: string.IsNullOrWhiteSpace(reason) ? null : reason.Trim()), cancellationToken);
         return result;
     }

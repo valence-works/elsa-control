@@ -59,4 +59,13 @@ public static class AzureLighthouseOfferIdentity
 
         return $"/subscriptions/{subscription:D}/providers/Microsoft.ManagedServices/registrationDefinitions/{RegistrationDefinitionName}";
     }
+
+    /// <summary>Mirrors the fixed registration assignment name in the v1 artifact.</summary>
+    public static string RegistrationAssignmentId(string subscriptionId)
+    {
+        if (!Guid.TryParseExact(subscriptionId, "D", out var subscription) || subscription == Guid.Empty)
+            throw new ArgumentException("The subscription ID must be a GUID.", nameof(subscriptionId));
+
+        return $"/subscriptions/{subscription:D}/providers/Microsoft.ManagedServices/registrationAssignments/{RegistrationAssignmentName}";
+    }
 }

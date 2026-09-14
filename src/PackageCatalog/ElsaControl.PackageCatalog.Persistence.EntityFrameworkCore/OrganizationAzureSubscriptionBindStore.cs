@@ -58,6 +58,7 @@ public sealed class OrganizationAzureSubscriptionBindStore(CatalogDbContext dbCo
             catch (DbUpdateException)
             {
                 // The filtered unique indexes protect the policy when two requests race.
+                dbContext.Entry(bind).State = EntityState.Detached;
                 return OrganizationAzureSubscriptionBindResult.Denied(OrganizationAzureSubscriptionBindFailure.BindInFlight);
             }
         }, cancellationToken);
@@ -71,7 +72,9 @@ public sealed class OrganizationAzureSubscriptionBindStore(CatalogDbContext dbCo
                 .SingleOrDefaultAsync(x => x.OrganizationId == transition.OrganizationId && x.Id == transition.BindId, cancellationToken);
             if (bind is null)
                 return OrganizationAzureSubscriptionBindResult.Denied(OrganizationAzureSubscriptionBindFailure.BindNotFound);
-            if (bind.State != transition.ExpectedState || !OrganizationAzureSubscriptionBindLifecycle.CanTransition(bind.State, transition.NewState))
+            if (bind.State != transition.ExpectedState ||
+                (transition.ExpectedUpdatedAt.HasValue && bind.UpdatedAt != transition.ExpectedUpdatedAt.Value) ||
+                !OrganizationAzureSubscriptionBindLifecycle.CanTransition(bind.State, transition.NewState))
                 return OrganizationAzureSubscriptionBindResult.Denied(OrganizationAzureSubscriptionBindFailure.InvalidState);
 
             bind.State = transition.NewState;

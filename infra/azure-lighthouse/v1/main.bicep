@@ -9,9 +9,10 @@ targetScope = 'subscription'
 @maxLength(36)
 param managingTenantId string
 
-@description('Object IDs of the managing-tenant service principal, managed identity, or security group to authorize.')
-@minLength(1)
-param managingPrincipalObjectIds array
+@description('Object ID of the single managing-tenant service principal, managed identity, or security group authorized by v1.')
+@minLength(36)
+@maxLength(36)
+param managingPrincipalObjectId string
 
 @description('Display name shown for each managing principal authorization.')
 @minLength(1)
@@ -43,18 +44,19 @@ var registrationAssignmentName = '50f0f9d1-8c11-47a3-8af5-9a87fa5c7af9'
 var delegatedManagedIdentityRoleDefinitionIds = [
   keyVaultSecretsUserRoleDefinitionId
 ]
-var contributorAuthorizations = [for principalId in managingPrincipalObjectIds: {
-  principalId: principalId
-  principalIdDisplayName: managingPrincipalDisplayName
-  roleDefinitionId: contributorRoleDefinitionId
-}]
-var userAccessAdministratorAuthorizations = [for principalId in managingPrincipalObjectIds: {
-  principalId: principalId
-  principalIdDisplayName: managingPrincipalDisplayName
-  roleDefinitionId: userAccessAdministratorRoleDefinitionId
-  delegatedRoleDefinitionIds: delegatedManagedIdentityRoleDefinitionIds
-}]
-var authorizations = concat(contributorAuthorizations, userAccessAdministratorAuthorizations)
+var authorizations = [
+  {
+    principalId: managingPrincipalObjectId
+    principalIdDisplayName: managingPrincipalDisplayName
+    roleDefinitionId: contributorRoleDefinitionId
+  }
+  {
+    principalId: managingPrincipalObjectId
+    principalIdDisplayName: managingPrincipalDisplayName
+    roleDefinitionId: userAccessAdministratorRoleDefinitionId
+    delegatedRoleDefinitionIds: delegatedManagedIdentityRoleDefinitionIds
+  }
+]
 
 resource registrationDefinition 'Microsoft.ManagedServices/registrationDefinitions@2022-10-01' = {
   name: registrationDefinitionName

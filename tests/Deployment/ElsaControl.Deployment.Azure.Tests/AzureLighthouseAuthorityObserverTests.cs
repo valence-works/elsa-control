@@ -45,6 +45,20 @@ public sealed class AzureLighthouseAuthorityObserverTests
         Assert.Empty(process.Calls);
     }
 
+    [Fact]
+    public async Task Observation_rejects_the_expected_definition_under_a_different_assignment_name()
+    {
+        var process = new FakeCommandProcess
+        {
+            RegistrationAssignmentId = $"/subscriptions/{SubscriptionId}/providers/Microsoft.ManagedServices/registrationAssignments/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        };
+
+        var result = await Observer(process).ObserveAsync(Request());
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("azure.lighthouse.registration-not-found", result.Code);
+    }
+
     [Theory]
     [InlineData("subscription")]
     [InlineData("tenant")]
@@ -164,6 +178,7 @@ public sealed class AzureLighthouseAuthorityObserverTests
         public string AccountSubscriptionId { get; init; } = SubscriptionId;
         public string AccountTenantId { get; init; } = CustomerTenantId;
         public string AccountClientId { get; init; } = ClientId;
+        public string RegistrationAssignmentId { get; init; } = AzureLighthouseOfferIdentity.RegistrationAssignmentId(SubscriptionId);
         public string? AccountSubscriptionRequested { get; private set; }
         public IReadOnlyList<AuthorizationSpec> Authorizations { get; init; } = [Contributor(), UserAccessAdministrator(AzureProviderAuthorityRoleDefinitionIds.KeyVaultSecretsUser)];
 
@@ -203,11 +218,15 @@ public sealed class AzureLighthouseAuthorityObserverTests
             identity = "MSIClient-" + AccountClientId
         });
 
-        private static string AssignmentsJson() => JsonSerializer.Serialize(new
+        private string AssignmentsJson() => JsonSerializer.Serialize(new
         {
             value = new[]
             {
-                new { properties = new { registrationDefinitionId = AzureLighthouseOfferIdentity.RegistrationDefinitionId(SubscriptionId) } }
+                new
+                {
+                    id = RegistrationAssignmentId,
+                    properties = new { registrationDefinitionId = AzureLighthouseOfferIdentity.RegistrationDefinitionId(SubscriptionId) }
+                }
             }
         });
 

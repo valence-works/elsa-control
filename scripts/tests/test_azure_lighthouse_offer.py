@@ -63,10 +63,11 @@ class AzureLighthouseOfferTests(unittest.TestCase):
     def test_ids_are_parameters_or_reviewed_role_constants(self):
         parameters = self.template["parameters"]
         self.assertEqual("string", parameters["managingTenantId"]["type"])
-        self.assertEqual("array", parameters["managingPrincipalObjectIds"]["type"])
-        self.assertEqual(1, parameters["managingPrincipalObjectIds"]["minLength"])
+        self.assertEqual("string", parameters["managingPrincipalObjectId"]["type"])
+        self.assertEqual(36, parameters["managingPrincipalObjectId"]["minLength"])
+        self.assertEqual(36, parameters["managingPrincipalObjectId"]["maxLength"])
         self.assertNotIn("defaultValue", parameters["managingTenantId"])
-        self.assertNotIn("defaultValue", parameters["managingPrincipalObjectIds"])
+        self.assertNotIn("defaultValue", parameters["managingPrincipalObjectId"])
         for role_id in (CONTRIBUTOR, USER_ACCESS_ADMINISTRATOR, KEY_VAULT_SECRETS_USER):
             self.assertIn(role_id, self.source)
 
@@ -76,7 +77,8 @@ class AzureLighthouseOfferTests(unittest.TestCase):
         self.assertIn(f"var registrationAssignmentName = '{REGISTRATION_ASSIGNMENT_NAME}'", self.source)
         self.assertNotIn("guid(subscription().id, managingTenantId", self.source)
         self.assertIn("delegatedRoleDefinitionIds: delegatedManagedIdentityRoleDefinitionIds", self.source)
-        self.assertIn("var authorizations = concat(contributorAuthorizations, userAccessAdministratorAuthorizations)", self.source)
+        self.assertIn("var authorizations = [", self.source)
+        self.assertNotIn("managingPrincipalObjectIds", self.source)
         self.assertIn(KEY_VAULT_SECRETS_USER, self.source)
         # These are documented preflight/direct-grant alternatives, never v1
         # Lighthouse authorizations. The compiled template must not emit them.

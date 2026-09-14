@@ -10,6 +10,7 @@
   "Deployment__AzureProvider__Runner__Enabled": "true",
   "Deployment__AzureProvider__Runner__DisposableProofMode": "false",
   "Deployment__AzureProvider__Runner__AzureCliClientId": "${ProvisionerClientId}",
+  "Deployment__AzureProvider__Runner__LighthouseManagingTenantId": "${LighthouseManagingTenantId}",
   "Deployment__AzureProvider__Runner__SqlBootstrapObjectId": "${ProvisionerPrincipalId}",
   "Deployment__AzureProvider__Runner__SqlBootstrapLogin": "${ProvisionerIdentityName}",
   "Deployment__AzureProvider__Runner__SqlBootstrapIp": "${SqlBootstrapIp}",

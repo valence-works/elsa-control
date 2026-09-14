@@ -7,7 +7,7 @@ the Valence managing tenant can operate Azure Resource Manager resources there.
 It is a concierge/design-partner artifact for Preview. It is not a Marketplace
 listing, a self-serve onboarding button, or a Logic Apps replacement.
 
-The artifact grants the same principal(s):
+The artifact grants one reviewed managing principal:
 
 | Authorization | Built-in role ID | Scope | Boundary |
 | --- | --- | --- | --- |
@@ -78,7 +78,7 @@ az deployment sub what-if \
   --name elsa-control-lighthouse-v1 \
   --template-file infra/azure-lighthouse/v1/main.bicep \
   --parameters managingTenantId=<managing-tenant-id> \
-               managingPrincipalObjectIds='["<managing-principal-object-id>"]'
+               managingPrincipalObjectId=<managing-principal-object-id>
 
 az deployment sub create \
   --subscription <customer-subscription-id> \
@@ -86,13 +86,15 @@ az deployment sub create \
   --name elsa-control-lighthouse-v1 \
   --template-file infra/azure-lighthouse/v1/main.bicep \
   --parameters managingTenantId=<managing-tenant-id> \
-               managingPrincipalObjectIds='["<managing-principal-object-id>"]'
+               managingPrincipalObjectId=<managing-principal-object-id>
 ```
 
-For multiple principals, provide a JSON array of object IDs. Prefer a
-security group or service principal/managed identity over individual users;
-the object ID must come from the managing tenant. Keep the deployment output
-and subscription ID in the private operational record, not in source control.
+The v1 contract accepts exactly one principal so the bind record and verifier
+can prove the complete authorization set. Prefer a security group or service
+principal/managed identity over an individual user; the object ID must come
+from the managing tenant. A future multi-principal offer requires a new
+versioned record and verifier contract. Keep the deployment output and
+subscription ID in the private operational record, not in source control.
 
 The customer remains the Azure subscription owner and Azure bill payer. **An
 Azure bill is not an Elsa fee.** Any Elsa commercial entitlement, fee,
