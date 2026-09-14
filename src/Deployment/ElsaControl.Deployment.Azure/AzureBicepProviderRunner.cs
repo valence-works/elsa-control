@@ -1144,12 +1144,93 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         if (!health.Succeeded || ClassifyRuntimeHealth(health.Value?.Value) != RuntimeHealthReport.Healthy)
             return Uncertain(command, AzureProviderOperationPhase.TrafficPromoted, "azure.promotion.health-uncertain", "Candidate external health could not be confirmed.", command.Resources);
 
+        var deactivationFailure = await DeactivateNonTrafficRevisionsAsync(command, cancellationToken);
+        if (deactivationFailure is not null)
+            return deactivationFailure;
+
         return Completed(
             command,
             AzureProviderOperationPhase.TrafficPromoted,
             command.Resources with { StableTrafficRevisionName = command.Resources.WorkloadRevisionName },
             health: AzureProviderHealth.Healthy,
             endpoint: endpoint);
+    }
+
+    private async Task<AzureProviderRunnerResult?> DeactivateNonTrafficRevisionsAsync(
+        AzureProviderRunnerCommand command,
+        CancellationToken cancellationToken)
+    {
+        var candidate = command.Resources.WorkloadRevisionName!;
+        var active = await ListActiveRevisionsAsync(command, cancellationToken);
+        if (!HasValidActiveRevisionInventory(command, active, candidate))
+        {
+            return Uncertain(command, AzureProviderOperationPhase.TrafficPromoted,
+                "azure.promotion.deactivation-uncertain", "Inactive revision cleanup could not be confirmed.", command.Resources);
+        }
+
+        var nonTrafficRevisions = active.Value!.Value
+            .Where(x => !string.Equals(x, candidate, StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        foreach (var revision in nonTrafficRevisions)
+        {
+            EnsureMutationAuthority(command);
+            var deactivated = await ExecuteAzAsync<AzureCommandNoOutput>(command,
+                ["containerapp", "revision", "deactivate", "--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command),
+                    "--name", AppName(command), "--revision", revision, "--output", "none", "--only-show-errors"],
+                static _ => AzureCommandNoOutput.Instance,
+                cancellationToken);
+            if (!deactivated.Succeeded)
+            {
+                return Uncertain(command, AzureProviderOperationPhase.TrafficPromoted,
+                    "azure.promotion.deactivation-uncertain", "Inactive revision cleanup could not be confirmed.", command.Resources);
+            }
+        }
+
+        return nonTrafficRevisions.Length == 0 || await WaitForOnlyActiveRevisionAsync(command, candidate, cancellationToken)
+            ? null
+            : Uncertain(command, AzureProviderOperationPhase.TrafficPromoted,
+                "azure.promotion.deactivation-uncertain", "Inactive revision cleanup could not be confirmed.", command.Resources);
+    }
+
+    private Task<AzureCommandProcessResult<SafeValue<IReadOnlyList<string>>>> ListActiveRevisionsAsync(
+        AzureProviderRunnerCommand command,
+        CancellationToken cancellationToken) =>
+        // Azure CLI omits inactive revisions unless --all is supplied.
+        ExecuteAzAsync(command,
+            ["containerapp", "revision", "list", "--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command),
+                "--name", AppName(command), "--query", "[].name", "--output", "json", "--only-show-errors"],
+            ParseStringArrayAsync,
+            cancellationToken);
+
+    private bool HasValidActiveRevisionInventory(
+        AzureProviderRunnerCommand command,
+        AzureCommandProcessResult<SafeValue<IReadOnlyList<string>>> active,
+        string candidate)
+    {
+        var revisionPrefix = $"{AppName(command)}--";
+        return active.Succeeded && active.Value is not null &&
+               active.Value.Value.All(x => !string.IsNullOrWhiteSpace(x) && x.StartsWith(revisionPrefix, StringComparison.OrdinalIgnoreCase)) &&
+               active.Value.Value.Any(x => string.Equals(x, candidate, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task<bool> WaitForOnlyActiveRevisionAsync(
+        AzureProviderRunnerCommand command,
+        string candidate,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < _options.ObservationAttempts; attempt++)
+        {
+            var active = await ListActiveRevisionsAsync(command, cancellationToken);
+            if (HasValidActiveRevisionInventory(command, active, candidate) && active.Value!.Value.Count == 1)
+                return true;
+            if (active.Status == AzureCommandProcessStatus.Cancelled || cancellationToken.IsCancellationRequested)
+                return false;
+            if (attempt + 1 < _options.ObservationAttempts)
+                await Task.Delay(_options.ObservationDelay, cancellationToken);
+        }
+
+        return false;
     }
 
     private Task<AzureCommandProcessResult<SafeValue<string>>> ResolveEndpointAsync(
@@ -1191,6 +1272,15 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         var weights = candidate is null || string.Equals(candidate, stable, StringComparison.Ordinal)
             ? $"{stable}=100"
             : $"{stable}=100 {candidate}=0";
+        EnsureMutationAuthority(command);
+        var activated = await ExecuteAzAsync<AzureCommandNoOutput>(command,
+            ["containerapp", "revision", "activate", "--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command),
+                "--name", AppName(command), "--revision", stable, "--output", "none", "--only-show-errors"],
+            static _ => AzureCommandNoOutput.Instance,
+            cancellationToken);
+        if (!activated.Succeeded)
+            return Uncertain(command, AzureProviderOperationPhase.HealthVerified, "azure.rollback.activation-uncertain", "The stable revision could not be reactivated.", command.Resources);
+
         EnsureMutationAuthority(command);
         var restored = await ExecuteAzAsync<AzureCommandNoOutput>(command,
             ["containerapp", "ingress", "traffic", "set", "--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command),

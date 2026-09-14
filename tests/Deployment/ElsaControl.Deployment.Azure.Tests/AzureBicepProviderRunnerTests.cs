@@ -1979,6 +1979,10 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("traffic") && args.Contains("set"));
         process.Success(args => args.Contains("show") && args.Any(x => x.Contains("traffic", StringComparison.Ordinal)), "[{\"revisionName\":\"proof-app--candidate\",\"weight\":100},{\"revisionName\":\"proof-app--stable\",\"weight\":0}]");
         process.Success(args => args.Contains("--fail") && args.Contains("https://proof-app.hash.azurecontainerapps.io/health"), "Healthy");
+        process.Success(IsActiveRevisionList, "[\"proof-app--candidate\",\"proof-app--stable\",\"proof-app--stale\"]");
+        process.Success(args => IsRevisionDeactivation(args, "proof-app--stable"));
+        process.Success(args => IsRevisionDeactivation(args, "proof-app--stale"));
+        process.Success(IsActiveRevisionList, "[\"proof-app--candidate\"]");
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Promotion, PromotionResources()));
 
@@ -1988,6 +1992,10 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         var probe = process.Calls.FindIndex(IsCandidateReadinessProbe);
         var trafficSet = process.Calls.FindIndex(call => call.Contains("traffic") && call.Contains("set"));
         Assert.True(probe >= 0 && probe < trafficSet, "the candidate readiness probe must precede the traffic shift");
+        var externalHealth = process.Calls.FindIndex(call => call.Contains("--fail") && call.Contains("https://proof-app.hash.azurecontainerapps.io/health"));
+        var firstDeactivation = process.Calls.FindIndex(call => call.Contains("deactivate"));
+        Assert.True(externalHealth >= 0 && externalHealth < firstDeactivation, "old revisions must remain active until promoted traffic is healthy");
+        Assert.DoesNotContain(process.Calls, call => IsRevisionDeactivation(call, "proof-app--candidate"));
     }
 
     [Theory]
@@ -2083,6 +2091,52 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
         Assert.Equal("azure.promotion.health-uncertain", result.Code);
         Assert.Equal("proof-app--stable", result.Resources.StableTrafficRevisionName);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("deactivate"));
+    }
+
+    [Fact]
+    public async Task Promotion_is_uncertain_when_an_old_revision_cannot_be_deactivated()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
+        process.Success(args => args.Contains("revision") && args.Contains("show"), HealthyCandidateRevision);
+        process.Success(IsCandidateReadinessProbe, "Healthy");
+        process.Success(args => args.Contains("traffic") && args.Contains("set"));
+        process.Success(args => args.Contains("show") && args.Any(x => x.Contains("traffic", StringComparison.Ordinal)), "[{\"revisionName\":\"proof-app--candidate\",\"weight\":100},{\"revisionName\":\"proof-app--stable\",\"weight\":0}]");
+        process.Success(args => args.Contains("--fail") && args.Contains(WorkloadOrigin + "/health"), "Healthy");
+        process.Success(IsActiveRevisionList, "[\"proof-app--candidate\",\"proof-app--stable\"]");
+        process.Failure(args => IsRevisionDeactivation(args, "proof-app--stable"));
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Promotion, PromotionResources()));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal("azure.promotion.deactivation-uncertain", result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "azure.promotion.deactivation-uncertain");
+        Assert.Equal("proof-app--stable", result.Resources.StableTrafficRevisionName);
+        var externalHealth = process.Calls.FindIndex(call => call.Contains("--fail") && call.Contains(WorkloadOrigin + "/health"));
+        var deactivation = process.Calls.FindIndex(call => call.Contains("deactivate"));
+        Assert.True(externalHealth >= 0 && externalHealth < deactivation, "deactivation must run only after promoted traffic is healthy");
+    }
+
+    [Fact]
+    public async Task Promotion_is_uncertain_when_the_active_revision_inventory_omits_the_candidate()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)), "proof-app.hash.azurecontainerapps.io");
+        process.Success(args => args.Contains("revision") && args.Contains("show"), HealthyCandidateRevision);
+        process.Success(IsCandidateReadinessProbe, "Healthy");
+        process.Success(args => args.Contains("traffic") && args.Contains("set"));
+        process.Success(args => args.Contains("show") && args.Any(x => x.Contains("traffic", StringComparison.Ordinal)), "[{\"revisionName\":\"proof-app--candidate\",\"weight\":100},{\"revisionName\":\"proof-app--stable\",\"weight\":0}]");
+        process.Success(args => args.Contains("--fail") && args.Contains(WorkloadOrigin + "/health"), "Healthy");
+        process.Success(IsActiveRevisionList, "[\"proof-app--stable\"]");
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Promotion, PromotionResources()));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal("azure.promotion.deactivation-uncertain", result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "azure.promotion.deactivation-uncertain");
+        Assert.Equal("proof-app--stable", result.Resources.StableTrafficRevisionName);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("deactivate"));
     }
 
     [Fact]
@@ -2095,12 +2149,14 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("traffic") && args.Contains("set"));
         process.Success(args => args.Contains("show") && args.Any(x => x.Contains("traffic", StringComparison.Ordinal)), "[{\"revisionName\":\"proof-app--candidate\",\"weight\":100},{\"revisionName\":\"proof-app--stable\",\"weight\":0}]");
         process.Success(args => args.Contains("--fail") && args.Contains(WorkloadOrigin + "/health"), "Healthy");
+        process.Success(IsActiveRevisionList, "[\"proof-app--candidate\"]");
 
         await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Promotion, PromotionResources()));
 
+        var externalHealth = Assert.Single(process.Calls, call => call.Contains("--fail") && call.Contains(WorkloadOrigin + "/health"));
         Assert.Equal(
             new[] { "--fail", "--silent", "--show-error", "--retry", "30", "--retry-all-errors", "--retry-delay", "5", "--max-time", "10", WorkloadOrigin + "/health" },
-            process.Calls[^1]);
+            externalHealth);
     }
 
     [Theory]
@@ -2191,6 +2247,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     public async Task Stable_traffic_restore_requires_positive_zero_candidate_absence_proof()
     {
         var process = new FakeCommandProcess();
+        process.Success(args => IsRevisionActivation(args, "proof-app--stable"));
         process.Success(args => args.Contains("traffic") && args.Contains("set") && args.Any(x => x.Contains("proof-app--candidate=0", StringComparison.Ordinal)));
         process.Success(args => args.Contains("show") && args.Any(x => x.Contains("traffic", StringComparison.Ordinal)), "[{\"revisionName\":\"proof-app--stable\",\"weight\":100},{\"revisionName\":\"proof-app--candidate\",\"weight\":0}]");
         var resources = _fixture.FoundationResources with
@@ -2211,12 +2268,16 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
         Assert.True(result.StableTrafficRestored);
         Assert.Equal("proof-app--stable", result.Resources.StableTrafficRevisionName);
+        var activation = process.Calls.FindIndex(call => call.Contains("activate"));
+        var trafficSet = process.Calls.FindIndex(call => call.Contains("traffic") && call.Contains("set"));
+        Assert.True(activation >= 0 && activation < trafficSet, "the prior stable revision must be active before traffic returns to it");
     }
 
     [Fact]
     public async Task Stable_traffic_restore_is_uncertain_when_candidate_zero_entry_is_missing()
     {
         var process = new FakeCommandProcess();
+        process.Success(args => IsRevisionActivation(args, "proof-app--stable"));
         process.Success(args => args.Contains("traffic") && args.Contains("set"));
         process.Success(args => args.Contains("show") && args.Any(x => x.Contains("traffic", StringComparison.Ordinal)), "[{\"revisionName\":\"proof-app--stable\",\"weight\":100}]");
         var resources = _fixture.FoundationResources with
@@ -2237,6 +2298,41 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
         Assert.Equal("azure.rollback.uncertain", result.Code);
     }
+
+    [Fact]
+    public async Task Stable_traffic_restore_is_uncertain_when_the_prior_revision_cannot_be_reactivated()
+    {
+        var process = new FakeCommandProcess();
+        process.Failure(args => IsRevisionActivation(args, "proof-app--stable"));
+        var resources = _fixture.FoundationResources with
+        {
+            RegistryResourceId = _fixture.RegistryId,
+            AcrPullDeploymentId = _fixture.RegistryDeploymentId,
+            AcrPullRoleAssignmentId = _fixture.RegistryRoleAssignmentId,
+            WorkloadResourceId = _fixture.AppId,
+            WorkloadDeploymentId = _fixture.WorkloadDeploymentId,
+            WorkloadRevisionName = "proof-app--candidate"
+        };
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.RestoreStableTraffic, resources) with
+        {
+            StableTrafficRevisionName = "proof-app--stable"
+        });
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal("azure.rollback.activation-uncertain", result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "azure.rollback.activation-uncertain");
+        Assert.DoesNotContain(process.Calls, call => call.Contains("traffic") && call.Contains("set"));
+    }
+
+    private static bool IsActiveRevisionList(string[] args) =>
+        args.Contains("revision") && args.Contains("list") && args.Contains("[].name") && !args.Contains("--all");
+
+    private static bool IsRevisionActivation(string[] args, string revision) =>
+        args.Contains("revision") && args.Contains("activate") && args.Contains(revision);
+
+    private static bool IsRevisionDeactivation(string[] args, string revision) =>
+        args.Contains("revision") && args.Contains("deactivate") && args.Contains(revision);
 
     [Fact]
     public async Task Cleanup_requires_exact_rbac_and_positive_absence_for_every_owned_locator()
