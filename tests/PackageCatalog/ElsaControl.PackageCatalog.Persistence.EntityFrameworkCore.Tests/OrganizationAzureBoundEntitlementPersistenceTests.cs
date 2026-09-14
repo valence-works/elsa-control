@@ -178,7 +178,7 @@ public sealed class OrganizationAzureBoundEntitlementPersistenceTests : IAsyncLi
     }
 
     [Fact]
-    public async Task Revoke_disables_only_the_azure_bound_entitlement_and_keeps_safe_exits()
+    public async Task Revoke_tombstones_the_azure_bound_subscription_and_allows_a_new_checkout_trial()
     {
         await AddBindAsync(OrganizationAzureSubscriptionBindState.Active);
         await MintAsync(expiresAt: Now.AddDays(30));
@@ -194,6 +194,16 @@ public sealed class OrganizationAzureBoundEntitlementPersistenceTests : IAsyncLi
             (await gate.EvaluateAsync(OrganizationId, ElsaInstanceOperationAction.Create, 0)).Code);
         Assert.True((await gate.EvaluateAsync(OrganizationId, ElsaInstanceOperationAction.Stop)).Allowed);
         Assert.True((await gate.EvaluateAsync(OrganizationId, ElsaInstanceOperationAction.Delete)).Allowed);
+        var trial = await _store.StartTrialAsync(OrganizationId, BillingProviderNames.Stripe, Now.AddHours(3));
+        Assert.Equal(BillingEventConsumptionOutcome.Applied, trial.Outcome);
+        Assert.Equal(BillingProviderNames.Stripe, trial.Subscription!.Provider);
+        Assert.Equal(OrganizationSubscriptionState.Trial, trial.Subscription.State);
+        var subscriptions = await _db.OrganizationSubscriptions.AsNoTracking()
+            .Where(x => x.OrganizationId == OrganizationId)
+            .OrderBy(x => x.Provider)
+            .ToListAsync();
+        Assert.Equal(2, subscriptions.Count);
+        Assert.Equal(OrganizationSubscriptionState.Deleted, Assert.Single(subscriptions, x => x.Provider == BillingProviderNames.AzureBound).State);
     }
 
     [Fact]
@@ -284,6 +294,31 @@ public sealed class OrganizationAzureBoundEntitlementPersistenceTests : IAsyncLi
         Assert.Equal(BillingEventConsumptionOutcome.Replayed, replay.Outcome);
         Assert.Equal(prior.Id, replay.Subscription!.Id);
         Assert.Equal(BillingProviderNames.Stripe, replay.Subscription.Provider);
+    }
+
+    [Fact]
+    public async Task First_seen_provider_event_uses_the_matching_historical_provider_after_replacement()
+    {
+        await AddBindAsync(OrganizationAzureSubscriptionBindState.Active);
+        var prior = await AddSubscriptionAsync(BillingProviderNames.Stripe, OrganizationSubscriptionState.Retained);
+        Assert.Equal(OrganizationAzureBoundEntitlementOutcome.Minted, (await MintAsync()).Outcome);
+        _db.ChangeTracker.Clear();
+
+        var applied = await _store.ConsumeAsync(
+            new BillingProviderEvent(
+                OrganizationId,
+                BillingProviderNames.Stripe,
+                "evt-late-stripe-delete",
+                "subscription.deleted",
+                OrganizationSubscriptionState.Deleted,
+                Now.AddMinutes(1),
+                "sha256:" + new string('b', 64)),
+            Now.AddMinutes(2));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Applied, applied.Outcome);
+        Assert.Equal(prior.Id, applied.Subscription!.Id);
+        Assert.Equal(BillingProviderNames.Stripe, applied.Subscription.Provider);
+        Assert.Equal(OrganizationSubscriptionState.Deleted, applied.Subscription.State);
     }
 
     private Task<OrganizationAzureBoundEntitlementResult> MintAsync(

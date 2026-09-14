@@ -221,12 +221,9 @@ public sealed partial class OrganizationBillingStore : IOrganizationAzureBoundEn
                 entitlement,
                 now);
 
-        entitlement.ManagedHostingEnabled = false;
-        entitlement.ManagedHostingExpiresAt = entitlement.ManagedHostingExpiresAt is { } expiresAt && expiresAt < now
-            ? expiresAt
-            : now;
-        entitlement.SyncedAt = now;
-        entitlement.UpdatedAt = now;
+        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Deleted, now, advanceLifecycleVersion: true);
+        subscription.UpdatedAt = now;
+        entitlement = await ProjectEntitlementAsync(subscription, now, cancellationToken);
         auditIdSink(AddAzureBoundEntitlementAudit(
             subscription,
             operatorSubject,

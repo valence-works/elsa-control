@@ -184,9 +184,11 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
 
             var now = receivedAt.ToUniversalTime();
             var occurrence = providerEvent.OccurredAt.ToUniversalTime();
-            var subscription = await dbContext.OrganizationSubscriptions
-                .CurrentForOrganization(providerEvent.OrganizationId)
-                .FirstOrDefaultAsync(cancellationToken);
+            var subscription = await ResolveSubscriptionForIncomingProviderAsync(
+                providerEvent.OrganizationId,
+                providerEvent.Provider,
+                providerEvent.ProviderEventId,
+                cancellationToken);
             var existingSubscription = subscription;
             if (subscription is not null)
             {
@@ -325,6 +327,8 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             var existing = await dbContext.OrganizationSubscriptions.AsNoTracking()
                 .CurrentForOrganization(organizationId)
                 .FirstOrDefaultAsync(cancellationToken);
+            if (existing is not null && await CanReplaceRevokedAzureBoundSubscriptionAsync(existing, cancellationToken))
+                existing = null;
             if (existing is not null)
             {
                 EnsureSameProvider(existing, provider);
@@ -347,6 +351,8 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             var existing = await dbContext.OrganizationSubscriptions
                 .CurrentForOrganization(organizationId)
                 .FirstOrDefaultAsync(cancellationToken);
+            if (existing is not null && await CanReplaceRevokedAzureBoundSubscriptionAsync(existing, cancellationToken))
+                existing = null;
             if (existing is not null)
             {
                 EnsureSameProvider(existing, provider);
@@ -416,6 +422,35 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
 
     private Task<OrganizationEntitlementSnapshot?> CurrentEntitlementAsync(Guid organizationId, CancellationToken cancellationToken) =>
         dbContext.OrganizationEntitlementSnapshots.AsNoTracking().SingleOrDefaultAsync(x => x.OrganizationId == organizationId, cancellationToken);
+
+    private async Task<OrganizationSubscription?> ResolveSubscriptionForIncomingProviderAsync(
+        Guid organizationId,
+        string provider,
+        string providerEventId,
+        CancellationToken cancellationToken)
+    {
+        var current = await dbContext.OrganizationSubscriptions
+            .CurrentForOrganization(organizationId)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (current is null || string.Equals(current.Provider, provider, StringComparison.Ordinal))
+            return current;
+
+        return await dbContext.OrganizationSubscriptions
+            .LatestForOrganizationProvider(organizationId, provider, providerEventId)
+            .FirstOrDefaultAsync(cancellationToken) ?? current;
+    }
+
+    private async Task<bool> CanReplaceRevokedAzureBoundSubscriptionAsync(
+        OrganizationSubscription subscription,
+        CancellationToken cancellationToken)
+    {
+        if (!string.Equals(subscription.Provider, BillingProviderNames.AzureBound, StringComparison.Ordinal) ||
+            subscription.State is not (OrganizationSubscriptionState.Retained or OrganizationSubscriptionState.Deleted))
+            return false;
+
+        var entitlement = await CurrentEntitlementAsync(subscription.OrganizationId, cancellationToken);
+        return entitlement is not { ManagedHostingEnabled: true };
+    }
 
     private void AddBillingAudit(Guid organizationId, Guid eventId, string summary, DateTimeOffset createdAt) =>
         dbContext.OrganizationAuditRecords.Add(new OrganizationAuditRecord

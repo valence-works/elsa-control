@@ -86,6 +86,10 @@ public sealed class AdminOrganizationAzureBoundEntitlementApiTests :
             (await db.OrganizationSubscriptions.AsNoTracking()
                 .SingleAsync(x => x.OrganizationId == _organizationId)).Provider);
         Assert.Equal(
+            OrganizationSubscriptionState.Deleted,
+            (await db.OrganizationSubscriptions.AsNoTracking()
+                .SingleAsync(x => x.OrganizationId == _organizationId)).State);
+        Assert.Equal(
             2,
             await db.OrganizationAuditRecords.CountAsync(x =>
                 x.OrganizationId == _organizationId && x.TargetType == "azure-bound-entitlement"));

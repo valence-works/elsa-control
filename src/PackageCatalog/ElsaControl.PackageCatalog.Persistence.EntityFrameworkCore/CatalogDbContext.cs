@@ -443,7 +443,10 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
                 if (!OrganizationSubscriptionLifecycle.CanTransition(originalState, subscription.State) &&
                     !(originalState == OrganizationSubscriptionState.Suspended &&
                       subscription.State == OrganizationSubscriptionState.Deleted &&
-                      subscription.EarlyDeletionRequestedAt is not null))
+                      subscription.EarlyDeletionRequestedAt is not null) &&
+                    !(originalState == OrganizationSubscriptionState.Active &&
+                      subscription.State == OrganizationSubscriptionState.Deleted &&
+                      string.Equals(subscription.Provider, BillingProviderNames.AzureBound, StringComparison.Ordinal)))
                     throw new InvalidOperationException("Subscription state transition is not allowed.");
                 var originalLifecycleVersion = entry.Property<int>(nameof(OrganizationSubscription.LifecycleVersion)).OriginalValue;
                 var lifecycleAdvanced = subscription.LifecycleVersion == originalLifecycleVersion + 1;
