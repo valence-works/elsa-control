@@ -461,15 +461,17 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         CancellationToken cancellationToken)
     {
         var candidate = await dbContext.OrganizationSubscriptions
-            .LatestForOrganizationProvider(organizationId, provider, providerEventId)
+            .Where(x =>
+                x.OrganizationId == organizationId &&
+                x.Provider == provider &&
+                (providerCustomerReference is null || x.ProviderCustomerReference == providerCustomerReference) &&
+                (providerSubscriptionReference is null || x.ProviderSubscriptionReference == providerSubscriptionReference))
+            .OrderByDescending(x => x.LastProviderEventId == providerEventId)
+            .ThenByDescending(x => x.UpdatedAt)
+            .ThenByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
             .FirstOrDefaultAsync(cancellationToken);
         if (candidate is null)
-            return null;
-        if (providerCustomerReference is not null &&
-            !string.Equals(candidate.ProviderCustomerReference, providerCustomerReference, StringComparison.Ordinal))
-            return null;
-        if (providerSubscriptionReference is not null &&
-            !string.Equals(candidate.ProviderSubscriptionReference, providerSubscriptionReference, StringComparison.Ordinal))
             return null;
 
         return candidate;
