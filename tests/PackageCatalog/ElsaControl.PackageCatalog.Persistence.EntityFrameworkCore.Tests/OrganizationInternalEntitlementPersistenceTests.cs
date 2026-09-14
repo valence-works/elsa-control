@@ -243,7 +243,9 @@ public sealed class OrganizationInternalEntitlementPersistenceTests : IAsyncLife
     [Theory]
     [InlineData("internal")]
     [InlineData("INTERNAL")]
-    public async Task Provider_pipelines_cannot_claim_the_reserved_internal_provider(string provider)
+    [InlineData("azure-bound")]
+    [InlineData("AZURE-BOUND")]
+    public async Task Provider_pipelines_cannot_claim_an_operator_managed_provider(string provider)
     {
         await Assert.ThrowsAsync<ArgumentException>(() => _store.StartTrialAsync(OrganizationId, provider, Now));
         await Assert.ThrowsAsync<ArgumentException>(() =>

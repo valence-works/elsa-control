@@ -212,20 +212,52 @@ public sealed class OrganizationBillingLifecycleTests
         Assert.All(provider.Requests, request => Assert.Equal(subscription.Id, request.SubscriptionId));
     }
 
-    [Fact]
-    public async Task Internal_grant_deletion_cleanup_is_confirmed_without_any_provider_call()
+    [Theory]
+    [InlineData(BillingProviderNames.Internal)]
+    [InlineData(BillingProviderNames.AzureBound)]
+    public async Task Operator_managed_entitlement_cleanup_is_confirmed_without_any_provider_call(string providerName)
     {
         await using var fixture = await LifecycleFixture.CreateAsync();
-        var granted = await fixture.Store.GrantInternalEntitlementAsync(
-            new(fixture.OrganizationId, new("Internal dogfood grant", 2, Start.AddDays(30)), "operator"),
-            Start);
-        Assert.Equal(OrganizationInternalEntitlementOutcome.Granted, granted.Outcome);
+        if (providerName == BillingProviderNames.Internal)
+        {
+            var granted = await fixture.Store.GrantInternalEntitlementAsync(
+                new(fixture.OrganizationId, new("Internal dogfood grant", 2, Start.AddDays(30)), "operator"),
+                Start);
+            Assert.Equal(OrganizationInternalEntitlementOutcome.Granted, granted.Outcome);
+        }
+        else
+        {
+            fixture.Db.OrganizationAzureSubscriptionBinds.Add(new OrganizationAzureSubscriptionBind
+            {
+                OrganizationId = fixture.OrganizationId,
+                CustomerTenantId = Guid.NewGuid().ToString("D"),
+                SubscriptionId = Guid.NewGuid().ToString("D"),
+                ManagingTenantId = Guid.NewGuid().ToString("D"),
+                ManagingPrincipalObjectId = Guid.NewGuid().ToString("D"),
+                ManagingPrincipalClientId = Guid.NewGuid().ToString("D"),
+                RegistrationDefinitionId = "/providers/Microsoft.ManagedServices/registrationDefinitions/" + Guid.NewGuid().ToString("D"),
+                State = OrganizationAzureSubscriptionBindState.Active,
+                CreatedAt = Start,
+                UpdatedAt = Start
+            });
+            await fixture.Db.SaveChangesAsync();
+            var minted = await fixture.Store.MintAzureBoundEntitlementAsync(
+                new(fixture.OrganizationId, new("Guided Azure design partner", 1, Start.AddDays(30)), "operator"),
+                Start);
+            Assert.Equal(OrganizationAzureBoundEntitlementOutcome.Minted, minted.Outcome);
+        }
 
         await fixture.Store.RequestDeletionAsync(fixture.OrganizationId, Start.AddDays(1));
         Assert.Equal(OrganizationSubscriptionState.Suspended, await fixture.StateAsync(fixture.OrganizationId));
 
-        // A registered Stripe provider is present, but the queued cleanup is for
-        // the "internal" provider, so it must never be dispatched to it.
+        if (providerName == BillingProviderNames.AzureBound)
+        {
+            var entitlement = await fixture.Db.OrganizationEntitlementSnapshots.SingleAsync();
+            Assert.False(entitlement.ManagedHostingEnabled);
+        }
+
+        // A registered Stripe provider is present, but operator-owned cleanup
+        // must never be dispatched to it.
         var provider = new SequencedCleanupProvider(OrganizationBillingCleanupOutcome.ConfirmedAbsent);
         var worker = new OrganizationBillingLifecycleWorker(fixture.Store, new TestTimeProvider(Start.AddDays(1)), provider);
 

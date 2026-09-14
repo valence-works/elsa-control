@@ -47,6 +47,26 @@ public sealed class EfCoreElsaInstanceCommercialGate(CatalogDbContext db, TimePr
             OrganizationSubscriptionState.Deleted)
             return Deny(ElsaInstanceCommercialOperation.LifecycleConstrained, "The organization subscription does not permit managed-instance changes.");
 
+        var provider = entitlement.SubscriptionId is { } subscriptionId
+            ? await db.OrganizationSubscriptions.AsNoTracking()
+                .Where(x => x.OrganizationId == organizationId && x.Id == subscriptionId)
+                .Select(x => x.Provider)
+                .SingleOrDefaultAsync(cancellationToken)
+            : null;
+        if (string.Equals(provider, BillingProviderNames.AzureBound, StringComparison.Ordinal))
+        {
+            var hasActiveBind = await db.OrganizationAzureSubscriptionBinds.AsNoTracking()
+                .AnyAsync(x =>
+                    x.OrganizationId == organizationId &&
+                    x.State == OrganizationAzureSubscriptionBindState.Active &&
+                    x.SubscriptionId.Trim() != "",
+                    cancellationToken);
+            if (!hasActiveBind)
+                return Deny(
+                    ElsaInstanceCommercialOperation.BindingRequired,
+                    "An active Azure subscription bind is required for this organization.");
+        }
+
         if (action == ElsaInstanceOperationAction.Create &&
             activeInstanceCount is { } count && count >= entitlement.MaxInstances)
             return Deny(ElsaInstanceCommercialOperation.InstanceLimitReached, "The organization has reached its managed-instance limit.");

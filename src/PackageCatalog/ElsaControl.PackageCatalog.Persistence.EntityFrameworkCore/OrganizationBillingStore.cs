@@ -60,7 +60,11 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                 {
                     EnsureSameEvent(existingEvent, providerEvent);
                     var replaySubscription = await dbContext.OrganizationSubscriptions.AsNoTracking()
-                        .SingleOrDefaultAsync(x => x.OrganizationId == existingEvent.OrganizationId, cancellationToken);
+                        .LatestForOrganizationProvider(
+                            existingEvent.OrganizationId,
+                            existingEvent.Provider,
+                            existingEvent.ProviderEventId)
+                        .FirstOrDefaultAsync(cancellationToken);
                     var replayEntitlement = await dbContext.OrganizationEntitlementSnapshots.AsNoTracking()
                         .SingleOrDefaultAsync(x => x.OrganizationId == existingEvent.OrganizationId, cancellationToken);
                     return new(BillingEventConsumptionOutcome.Replayed, replaySubscription, replayEntitlement, existingEvent);
@@ -87,7 +91,8 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                 AddBillingAudit(providerEvent.OrganizationId, inbox.Id, "A correlated unsupported billing provider event was recorded.", now);
                 await dbContext.SaveChangesAsync(cancellationToken);
                 var subscription = await dbContext.OrganizationSubscriptions.AsNoTracking()
-                    .SingleOrDefaultAsync(x => x.OrganizationId == providerEvent.OrganizationId, cancellationToken);
+                    .CurrentForOrganization(providerEvent.OrganizationId)
+                    .FirstOrDefaultAsync(cancellationToken);
                 var entitlement = await dbContext.OrganizationEntitlementSnapshots.AsNoTracking()
                     .SingleOrDefaultAsync(x => x.OrganizationId == providerEvent.OrganizationId, cancellationToken);
                 return new BillingEventConsumptionResult(BillingEventConsumptionOutcome.RecordedUnknown, subscription, entitlement, inbox, inbox.RejectionCode);
@@ -102,7 +107,11 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             {
                 EnsureSameEvent(existing, providerEvent);
                 var replaySubscription = await dbContext.OrganizationSubscriptions.AsNoTracking()
-                    .SingleOrDefaultAsync(x => x.OrganizationId == existing.OrganizationId, cancellationToken);
+                    .LatestForOrganizationProvider(
+                        existing.OrganizationId,
+                        existing.Provider,
+                        existing.ProviderEventId)
+                    .FirstOrDefaultAsync(cancellationToken);
                 var replayEntitlement = await dbContext.OrganizationEntitlementSnapshots.AsNoTracking()
                     .SingleOrDefaultAsync(x => x.OrganizationId == existing.OrganizationId, cancellationToken);
                 return new(BillingEventConsumptionOutcome.Replayed, replaySubscription, replayEntitlement, existing);
@@ -135,7 +144,11 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             {
                 EnsureSameEvent(existing, providerEvent);
                 var replaySubscription = await dbContext.OrganizationSubscriptions.AsNoTracking()
-                    .SingleOrDefaultAsync(x => x.OrganizationId == existing.OrganizationId, cancellationToken);
+                    .LatestForOrganizationProvider(
+                        existing.OrganizationId,
+                        existing.Provider,
+                        existing.ProviderEventId)
+                    .FirstOrDefaultAsync(cancellationToken);
                 var replayEntitlement = await dbContext.OrganizationEntitlementSnapshots.AsNoTracking()
                     .SingleOrDefaultAsync(x => x.OrganizationId == existing.OrganizationId, cancellationToken);
                 return new(BillingEventConsumptionOutcome.Replayed, replaySubscription, replayEntitlement, existing);
@@ -159,7 +172,11 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             {
                 EnsureSameEvent(existingEvent, providerEvent);
                 var replaySubscription = await dbContext.OrganizationSubscriptions.AsNoTracking()
-                    .SingleOrDefaultAsync(x => x.OrganizationId == existingEvent.OrganizationId, cancellationToken);
+                    .LatestForOrganizationProvider(
+                        existingEvent.OrganizationId,
+                        existingEvent.Provider,
+                        existingEvent.ProviderEventId)
+                    .FirstOrDefaultAsync(cancellationToken);
                 var replayEntitlement = await dbContext.OrganizationEntitlementSnapshots.AsNoTracking()
                     .SingleOrDefaultAsync(x => x.OrganizationId == existingEvent.OrganizationId, cancellationToken);
                 return new(BillingEventConsumptionOutcome.Replayed, replaySubscription, replayEntitlement, existingEvent);
@@ -168,7 +185,8 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             var now = receivedAt.ToUniversalTime();
             var occurrence = providerEvent.OccurredAt.ToUniversalTime();
             var subscription = await dbContext.OrganizationSubscriptions
-                .SingleOrDefaultAsync(x => x.OrganizationId == providerEvent.OrganizationId, cancellationToken);
+                .CurrentForOrganization(providerEvent.OrganizationId)
+                .FirstOrDefaultAsync(cancellationToken);
             var existingSubscription = subscription;
             if (subscription is not null)
             {
@@ -305,7 +323,8 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         {
             dbContext.ChangeTracker.Clear();
             var existing = await dbContext.OrganizationSubscriptions.AsNoTracking()
-                .SingleOrDefaultAsync(x => x.OrganizationId == organizationId, cancellationToken);
+                .CurrentForOrganization(organizationId)
+                .FirstOrDefaultAsync(cancellationToken);
             if (existing is not null)
             {
                 EnsureSameProvider(existing, provider);
@@ -325,7 +344,9 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         CancellationToken cancellationToken) =>
         dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
         {
-            var existing = await dbContext.OrganizationSubscriptions.SingleOrDefaultAsync(x => x.OrganizationId == organizationId, cancellationToken);
+            var existing = await dbContext.OrganizationSubscriptions
+                .CurrentForOrganization(organizationId)
+                .FirstOrDefaultAsync(cancellationToken);
             if (existing is not null)
             {
                 EnsureSameProvider(existing, provider);
@@ -349,7 +370,9 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         }, cancellationToken);
 
     public Task<OrganizationSubscription?> GetSubscriptionAsync(Guid organizationId, CancellationToken cancellationToken = default) =>
-        dbContext.OrganizationSubscriptions.AsNoTracking().SingleOrDefaultAsync(x => x.OrganizationId == organizationId, cancellationToken);
+        dbContext.OrganizationSubscriptions.AsNoTracking()
+            .CurrentForOrganization(organizationId)
+            .FirstOrDefaultAsync(cancellationToken);
 
     private async Task<OrganizationEntitlementSnapshot> ProjectEntitlementAsync(
         OrganizationSubscription subscription,
@@ -375,6 +398,14 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         if (string.Equals(subscription.Provider, BillingProviderNames.Stripe, StringComparison.Ordinal) &&
             subscription.State is OrganizationSubscriptionState.Trial or OrganizationSubscriptionState.Active)
             entitlement.ManagedHostingEnabled = true;
+        else if (string.Equals(subscription.Provider, BillingProviderNames.AzureBound, StringComparison.Ordinal) &&
+                 subscription.State != OrganizationSubscriptionState.Active)
+        {
+            entitlement.ManagedHostingEnabled = false;
+            entitlement.ManagedHostingExpiresAt = entitlement.ManagedHostingExpiresAt is { } expiresAt && expiresAt < now
+                ? expiresAt
+                : now;
+        }
 
         entitlement.SubscriptionState = subscription.State;
         entitlement.SubscriptionId = subscription.Id;
@@ -504,11 +535,12 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             throw new ArgumentException($"{name} must be a stable safe code.", name);
     }
 
-    // The internal provider is written only by the operator grant path.
+    // Operator-owned providers are written only by their dedicated entitlement paths.
     private static void RequireBillingProvider(string provider, string name)
     {
-        if (string.Equals(provider, BillingProviderNames.Internal, StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException($"{name} is reserved for operator-granted internal entitlements.", name);
+        if (string.Equals(provider, BillingProviderNames.Internal, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(provider, BillingProviderNames.AzureBound, StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException($"{name} is reserved for operator-managed entitlements.", name);
     }
 
     private static void RequireSafeToken(string? value, string name)

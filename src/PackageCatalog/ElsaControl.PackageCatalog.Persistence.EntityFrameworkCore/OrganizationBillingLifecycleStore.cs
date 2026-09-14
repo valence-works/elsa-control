@@ -221,7 +221,8 @@ public sealed partial class OrganizationBillingStore
             {
                 verificationEvidence = LifecycleOperationEvidence.Empty;
                 var subscription = await dbContext.OrganizationSubscriptions
-                    .SingleOrDefaultAsync(x => x.OrganizationId == organizationId, cancellationToken);
+                    .CurrentForOrganization(organizationId)
+                    .FirstOrDefaultAsync(cancellationToken);
                 if (subscription is null)
                     return null;
 
@@ -407,12 +408,19 @@ public sealed partial class OrganizationBillingStore
                         .SingleOrDefaultAsync(x => x.OrganizationId == completion.OrganizationId && x.Id == completion.SubscriptionId, cancellationToken);
                     if (subscription is not null && subscription.State != OrganizationSubscriptionState.Deleted)
                     {
+                        var hasReplacement = await dbContext.OrganizationSubscriptions.AsNoTracking().AnyAsync(x =>
+                            x.OrganizationId == completion.OrganizationId &&
+                            x.Id != completion.SubscriptionId &&
+                            x.State != OrganizationSubscriptionState.Retained &&
+                            x.State != OrganizationSubscriptionState.Deleted,
+                            cancellationToken);
                         OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Deleted, completedAt, advanceLifecycleVersion: true);
                         subscription.ProviderCustomerReference = null;
                         subscription.ProviderSubscriptionReference = null;
                         subscription.LastProviderEventId = null;
                         subscription.UpdatedAt = completedAt;
-                        await ProjectEntitlementAsync(subscription, completedAt, cancellationToken);
+                        if (!hasReplacement)
+                            await ProjectEntitlementAsync(subscription, completedAt, cancellationToken);
                         AddLifecycleAudit(subscription, OrganizationAuditAction.BillingCleanupCompleted, "Provider-neutral billing cleanup was confirmed and the subscription was tombstoned.", completedAt);
                         deleted = true;
                     }

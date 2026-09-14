@@ -33,7 +33,8 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
             return new(OrganizationInternalEntitlementOutcome.OrganizationNotFound);
 
         var subscription = await dbContext.OrganizationSubscriptions.AsNoTracking()
-            .SingleOrDefaultAsync(x => x.OrganizationId == organizationId, cancellationToken);
+            .CurrentForOrganization(organizationId)
+            .FirstOrDefaultAsync(cancellationToken);
         var entitlement = await CurrentEntitlementAsync(organizationId, cancellationToken);
         return new(OrganizationInternalEntitlementOutcome.Current, InternalStatus(organizationId, subscription, entitlement, now));
     }
@@ -189,7 +190,8 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
     {
         var exists = await dbContext.Organizations.AsNoTracking().AnyAsync(x => x.Id == organizationId, cancellationToken);
         var subscription = await dbContext.OrganizationSubscriptions
-            .SingleOrDefaultAsync(x => x.OrganizationId == organizationId, cancellationToken);
+            .CurrentForOrganization(organizationId)
+            .FirstOrDefaultAsync(cancellationToken);
         var entitlement = await dbContext.OrganizationEntitlementSnapshots
             .SingleOrDefaultAsync(x => x.OrganizationId == organizationId, cancellationToken);
         return (exists, subscription, entitlement);
