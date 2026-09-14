@@ -460,22 +460,31 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         string? providerSubscriptionReference,
         CancellationToken cancellationToken)
     {
-        var candidate = await dbContext.OrganizationSubscriptions
+        var candidates = dbContext.OrganizationSubscriptions
             .Where(x =>
                 x.OrganizationId == organizationId &&
                 x.Provider == provider &&
-                (x.State == OrganizationSubscriptionState.Retained || x.State == OrganizationSubscriptionState.Deleted) &&
-                (providerCustomerReference is null || x.ProviderCustomerReference == providerCustomerReference) &&
-                (providerSubscriptionReference is null || x.ProviderSubscriptionReference == providerSubscriptionReference))
+                (x.State == OrganizationSubscriptionState.Retained || x.State == OrganizationSubscriptionState.Deleted))
             .OrderByDescending(x => x.LastProviderEventId == providerEventId)
             .ThenByDescending(x => x.UpdatedAt)
             .ThenByDescending(x => x.CreatedAt)
-            .ThenByDescending(x => x.Id)
-            .FirstOrDefaultAsync(cancellationToken);
-        if (candidate is null)
+            .ThenByDescending(x => x.Id);
+        if (providerSubscriptionReference is not null)
+        {
+            return await candidates
+                .Where(x => x.ProviderSubscriptionReference == providerSubscriptionReference &&
+                            (providerCustomerReference is null || x.ProviderCustomerReference == providerCustomerReference))
+                .FirstOrDefaultAsync(cancellationToken);
+        }
+
+        var customerMatches = await candidates
+            .Where(x => x.ProviderCustomerReference == providerCustomerReference)
+            .Take(2)
+            .ToListAsync(cancellationToken);
+        if (customerMatches.Count != 1)
             return null;
 
-        return candidate;
+        return customerMatches[0];
     }
 
     private async Task<bool> CanReplaceRevokedAzureBoundSubscriptionAsync(
