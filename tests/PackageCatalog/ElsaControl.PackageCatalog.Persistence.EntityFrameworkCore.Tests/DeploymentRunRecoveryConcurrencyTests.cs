@@ -2,7 +2,10 @@ using ElsaControl.Deployment.Core.Cockpit;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using System.Data.Common;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 
@@ -30,6 +33,38 @@ public sealed class DeploymentRunRecoveryConcurrencyTests
             await using var verify = new CatalogDbContext(database.Options);
             var run = await verify.DeploymentRuns.SingleAsync(x => x.Id == database.RunId);
             Assert.Equal(WorkspaceDeploymentRunStatus.RecoveryRequired, run.Status);
+            Assert.Equal(1, await verify.DeploymentRunHistoryEvents.CountAsync(x =>
+                x.RunId == database.RunId && x.Status == WorkspaceDeploymentRunStatus.RecoveryRequired));
+        }
+        finally
+        {
+            DeleteDatabase(database.Path);
+        }
+    }
+
+    [Fact]
+    public async Task Lost_commit_acknowledgement_stale_run_recovery_preserves_one_history_event_and_result()
+    {
+        var database = await CreateDatabaseAsync();
+
+        try
+        {
+            var acknowledgement = new LostCommitAcknowledgementInterceptor();
+            await using var lostConnection = new SqliteConnection($"Data Source={database.Path};Default Timeout=30");
+            await lostConnection.OpenAsync();
+            var lostOptions = new DbContextOptionsBuilder<CatalogDbContext>()
+                .UseRetryingSqlite(
+                    lostConnection,
+                    isTransient: exception => exception is LostCommitAcknowledgementException)
+                .AddInterceptors(acknowledgement)
+                .Options;
+            await using var lostContext = new CatalogDbContext(lostOptions);
+            var recovered = await new DeploymentWorkspaceStore(lostContext)
+                .MarkStaleRunningRunsRecoveryRequiredAsync(Now.AddMinutes(10), TimeSpan.FromMinutes(5));
+
+            Assert.Equal(1, recovered);
+            Assert.Equal(1, acknowledgement.Committed);
+            await using var verify = new CatalogDbContext(database.Options);
             Assert.Equal(1, await verify.DeploymentRunHistoryEvents.CountAsync(x =>
                 x.RunId == database.RunId && x.Status == WorkspaceDeploymentRunStatus.RecoveryRequired));
         }
@@ -261,4 +296,20 @@ public sealed class DeploymentRunRecoveryConcurrencyTests
         DbContextOptions<CatalogDbContext> Options,
         Guid WorkspaceId,
         Guid RunId);
+
+    private sealed class LostCommitAcknowledgementException : Exception;
+
+    private sealed class LostCommitAcknowledgementInterceptor : DbTransactionInterceptor
+    {
+        public int Committed { get; private set; }
+
+        public override Task TransactionCommittedAsync(
+            DbTransaction transaction,
+            TransactionEndEventData eventData,
+            CancellationToken cancellationToken = default)
+        {
+            Committed++;
+            throw new LostCommitAcknowledgementException();
+        }
+    }
 }

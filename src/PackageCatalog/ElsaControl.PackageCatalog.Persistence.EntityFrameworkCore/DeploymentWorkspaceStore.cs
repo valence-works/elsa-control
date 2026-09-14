@@ -750,38 +750,59 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
         CancellationToken cancellationToken = default)
     {
         var leaseExpiresAt = now.Add(request.LeaseDuration);
-        return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Unspecified, async () =>
-        {
-            var updated = await dbContext.DeploymentCommands
-                .Where(x => x.WorkspaceId == workspaceId
-                    && x.Id == commandId
-                    && x.EngineId == request.EngineId
-                    && x.Status == DeploymentCommandStatus.Pending
-                    && (x.AvailableAt == null || x.AvailableAt <= now)
-                    && (x.ExpiresAt == null || x.ExpiresAt > now))
-                .ExecuteUpdateAsync(
-                    setters => setters
-                        .SetProperty(x => x.Status, DeploymentCommandStatus.Claimed)
-                        .SetProperty(x => x.WorkerId, request.WorkerId)
-                        .SetProperty(x => x.LeaseToken, leaseToken)
-                        .SetProperty(x => x.ClaimedAt, now)
-                        .SetProperty(x => x.HeartbeatAt, now)
-                        .SetProperty(x => x.LeaseExpiresAt, leaseExpiresAt)
-                        .SetProperty(x => x.AttemptNumber, x => x.AttemptNumber + 1)
-                        .SetProperty(x => x.UpdatedAt, now),
-                    cancellationToken);
-            if (updated == 0)
-                await ThrowClaimConflictAsync(workspaceId, commandId, request.EngineId, now, cancellationToken);
+        return await dbContext.ExecuteInTransactionAsync(
+            IsolationLevel.Unspecified,
+            async () =>
+            {
+                var updated = await dbContext.DeploymentCommands
+                    .Where(x => x.WorkspaceId == workspaceId
+                        && x.Id == commandId
+                        && x.EngineId == request.EngineId
+                        && x.Status == DeploymentCommandStatus.Pending
+                        && (x.AvailableAt == null || x.AvailableAt <= now)
+                        && (x.ExpiresAt == null || x.ExpiresAt > now))
+                    .ExecuteUpdateAsync(
+                        setters => setters
+                            .SetProperty(x => x.Status, DeploymentCommandStatus.Claimed)
+                            .SetProperty(x => x.WorkerId, request.WorkerId)
+                            .SetProperty(x => x.LeaseToken, leaseToken)
+                            .SetProperty(x => x.ClaimedAt, now)
+                            .SetProperty(x => x.HeartbeatAt, now)
+                            .SetProperty(x => x.LeaseExpiresAt, leaseExpiresAt)
+                            .SetProperty(x => x.AttemptNumber, x => x.AttemptNumber + 1)
+                            .SetProperty(x => x.UpdatedAt, now),
+                        cancellationToken);
+                if (updated == 0)
+                    await ThrowClaimConflictAsync(workspaceId, commandId, request.EngineId, now, cancellationToken);
 
-            DetachTrackedCommand(commandId);
-            var command = await LoadCommandForUpdateAsync(workspaceId, commandId, cancellationToken);
+                DetachTrackedCommand(commandId);
+                var command = await LoadCommandForUpdateAsync(workspaceId, commandId, cancellationToken);
 
-            await TouchCommandRunHeartbeatAsync(command, request.WorkerId, now, cancellationToken);
+                await TouchCommandRunHeartbeatAsync(command, request.WorkerId, now, cancellationToken);
 
-            await AddCommandAndRunEventAsync(command, DeploymentCommandStatus.Claimed, "Deployment command claimed by runtime worker.", now, cancellationToken);
-            await dbContext.SaveChangesAsync(cancellationToken);
-            return ToDeploymentCommand(command);
-        }, cancellationToken);
+                await AddCommandAndRunEventAsync(command, DeploymentCommandStatus.Claimed, "Deployment command claimed by runtime worker.", now, cancellationToken);
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return ToDeploymentCommand(command);
+            },
+            async (claimed, verificationCancellationToken) =>
+            {
+                var persisted = await dbContext.DeploymentCommands
+                    .AsNoTracking()
+                    .AnyAsync(x => x.WorkspaceId == workspaceId
+                        && x.Id == commandId
+                        && x.EngineId == request.EngineId
+                        && x.Status == DeploymentCommandStatus.Claimed
+                        && x.WorkerId == request.WorkerId
+                        && x.LeaseToken == leaseToken
+                        && x.ClaimedAt == now
+                        && x.HeartbeatAt == now
+                        && x.LeaseExpiresAt == leaseExpiresAt
+                        && x.AttemptNumber == claimed.AttemptNumber
+                        && x.UpdatedAt == now,
+                        verificationCancellationToken);
+                return persisted;
+            },
+            cancellationToken);
     }
 
     public async Task<DeploymentCommand> HeartbeatCommandAsync(
@@ -894,29 +915,45 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
         {
             // Each command moves to recovery together with its run. The unit re-reads the command,
             // so a retried attempt, or a command that completed after the scan, is not overwritten.
-            var marked = await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
-            {
-                var command = await dbContext.DeploymentCommands
-                    .SingleOrDefaultAsync(x => x.Id == commandId
-                        && (x.Status == DeploymentCommandStatus.Claimed || x.Status == DeploymentCommandStatus.Running)
-                        && (x.HeartbeatAt ?? x.ClaimedAt ?? x.CreatedAt) < staleBefore, cancellationToken);
-                if (command is null)
-                    return false;
+            var marked = await dbContext.ExecuteInTransactionAsync(
+                IsolationLevel.Serializable,
+                async () =>
+                {
+                    var command = await dbContext.DeploymentCommands
+                        .SingleOrDefaultAsync(x => x.Id == commandId
+                            && (x.Status == DeploymentCommandStatus.Claimed || x.Status == DeploymentCommandStatus.Running)
+                            && (x.HeartbeatAt ?? x.ClaimedAt ?? x.CreatedAt) < staleBefore, cancellationToken);
+                    if (command is null)
+                        return false;
 
-                command.Status = DeploymentCommandStatus.RecoveryRequired;
-                command.UpdatedAt = now;
-                command.CompletedAt = now;
-                await AddCommandAndRunEventAsync(command, DeploymentCommandStatus.RecoveryRequired, "Runtime command requires recovery after stale heartbeat.", now, cancellationToken);
-                await UpdateRunStatusInTransactionAsync(
-                    command.WorkspaceId,
-                    command.RunId,
-                    WorkspaceDeploymentRunStatus.RecoveryRequired,
-                    "Deployment command requires recovery after stale runtime heartbeat.",
-                    now,
-                    cancellationToken: cancellationToken);
-                await dbContext.SaveChangesAsync(cancellationToken);
-                return true;
-            }, cancellationToken);
+                    command.Status = DeploymentCommandStatus.RecoveryRequired;
+                    command.UpdatedAt = now;
+                    command.CompletedAt = now;
+                    await AddCommandAndRunEventAsync(command, DeploymentCommandStatus.RecoveryRequired, "Runtime command requires recovery after stale heartbeat.", now, cancellationToken);
+                    await UpdateRunStatusInTransactionAsync(
+                        command.WorkspaceId,
+                        command.RunId,
+                        WorkspaceDeploymentRunStatus.RecoveryRequired,
+                        "Deployment command requires recovery after stale runtime heartbeat.",
+                        now,
+                        cancellationToken: cancellationToken);
+                    await dbContext.SaveChangesAsync(cancellationToken);
+                    return true;
+                },
+                async (committed, verificationCancellationToken) =>
+                {
+                    if (!committed)
+                        return true;
+
+                    return await dbContext.DeploymentCommands
+                        .AsNoTracking()
+                        .AnyAsync(x => x.Id == commandId
+                            && x.Status == DeploymentCommandStatus.RecoveryRequired
+                            && x.UpdatedAt == now
+                            && x.CompletedAt == now,
+                            verificationCancellationToken);
+                },
+                cancellationToken);
             if (marked)
                 recovered++;
         }
@@ -1105,6 +1142,13 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
         dbContext.ExecuteInTransactionAsync(
             IsolationLevel.Serializable,
             () => UpdateRunStatusInTransactionAsync(workspaceId, runId, status, message, now, failureMessage, cancellationToken),
+            async (result, verificationCancellationToken) =>
+            {
+                var persisted = await dbContext.DeploymentRuns
+                    .AsNoTracking()
+                    .SingleOrDefaultAsync(x => x.WorkspaceId == workspaceId && x.Id == runId, verificationCancellationToken);
+                return persisted is not null && ToWorkspaceDeploymentRun(persisted) == result;
+            },
             cancellationToken);
 
     /// <summary>
@@ -1213,50 +1257,69 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
 
         // The candidate ids are only a pre-read: every write below repeats the staleness
         // predicate, so a retried attempt re-decides each run from current state.
-        return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
-        {
-            var markedCount = 0;
-            const string recoveryReason = "Worker heartbeat became stale.";
-
-            foreach (var runId in staleRunIds)
+        const string recoveryReason = "Worker heartbeat became stale.";
+        var markedRunIds = new List<Guid>();
+        return await dbContext.ExecuteInTransactionAsync(
+            IsolationLevel.Serializable,
+            async () =>
             {
-                var updated = await dbContext.DeploymentRuns
-                    .Where(x => x.Id == runId
-                        && x.Status == WorkspaceDeploymentRunStatus.Running
-                        && (x.WorkerHeartbeatAt ?? x.StartedAt ?? x.QueuedAt) < staleBefore)
-                    .ExecuteUpdateAsync(setters => setters
-                        .SetProperty(x => x.Status, WorkspaceDeploymentRunStatus.RecoveryRequired)
-                        .SetProperty(x => x.CompletedAt, (DateTimeOffset?)null)
-                        .SetProperty(x => x.RecoveryReason, recoveryReason), cancellationToken);
-                if (updated == 0)
-                    continue;
+                var markedCount = 0;
+                markedRunIds.Clear();
 
-                DetachTrackedRun(runId);
-                var run = await dbContext.DeploymentRuns
-                    .Include(x => x.Environment)
-                    .SingleAsync(x => x.Id == runId, cancellationToken);
-                await dbContext.DeploymentRunHistoryEvents.AddAsync(new DeploymentRunHistoryEventEntity
+                foreach (var runId in staleRunIds)
                 {
-                    Id = Guid.NewGuid(),
-                    WorkspaceId = run.WorkspaceId,
-                    RunId = run.Id,
-                    Status = WorkspaceDeploymentRunStatus.RecoveryRequired,
-                    Message = "Deployment run requires recovery after stale worker heartbeat.",
-                    CreatedAt = now
-                }, cancellationToken);
+                    var updated = await dbContext.DeploymentRuns
+                        .Where(x => x.Id == runId
+                            && x.Status == WorkspaceDeploymentRunStatus.Running
+                            && (x.WorkerHeartbeatAt ?? x.StartedAt ?? x.QueuedAt) < staleBefore)
+                        .ExecuteUpdateAsync(setters => setters
+                            .SetProperty(x => x.Status, WorkspaceDeploymentRunStatus.RecoveryRequired)
+                            .SetProperty(x => x.CompletedAt, (DateTimeOffset?)null)
+                            .SetProperty(x => x.RecoveryReason, recoveryReason), cancellationToken);
+                    if (updated == 0)
+                        continue;
 
-                await ProjectManagedRecoveryRequiredAsync(run, now, cancellationToken);
-                if (run.Environment is not null)
-                {
-                    run.Environment.UpdatedAt = now;
-                    run.Environment.DeploymentStatus = DeploymentStatus.Blocked;
+                    DetachTrackedRun(runId);
+                    var run = await dbContext.DeploymentRuns
+                        .Include(x => x.Environment)
+                        .SingleAsync(x => x.Id == runId, cancellationToken);
+                    await dbContext.DeploymentRunHistoryEvents.AddAsync(new DeploymentRunHistoryEventEntity
+                    {
+                        Id = Guid.NewGuid(),
+                        WorkspaceId = run.WorkspaceId,
+                        RunId = run.Id,
+                        Status = WorkspaceDeploymentRunStatus.RecoveryRequired,
+                        Message = "Deployment run requires recovery after stale worker heartbeat.",
+                        CreatedAt = now
+                    }, cancellationToken);
+
+                    await ProjectManagedRecoveryRequiredAsync(run, now, cancellationToken);
+                    if (run.Environment is not null)
+                    {
+                        run.Environment.UpdatedAt = now;
+                        run.Environment.DeploymentStatus = DeploymentStatus.Blocked;
+                    }
+                    markedCount++;
+                    markedRunIds.Add(runId);
                 }
-                markedCount++;
-            }
 
-            await dbContext.SaveChangesAsync(cancellationToken);
-            return markedCount;
-        }, cancellationToken);
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return markedCount;
+            },
+            async (markedCount, verificationCancellationToken) =>
+            {
+                if (markedCount == 0)
+                    return true;
+
+                var persisted = await dbContext.DeploymentRuns
+                    .AsNoTracking()
+                    .Where(x => markedRunIds.Contains(x.Id)
+                        && x.Status == WorkspaceDeploymentRunStatus.RecoveryRequired
+                        && x.RecoveryReason == recoveryReason)
+                    .CountAsync(verificationCancellationToken);
+                return persisted == markedCount;
+            },
+            cancellationToken);
     }
 
     private async Task ProjectManagedRecoveryRequiredAsync(

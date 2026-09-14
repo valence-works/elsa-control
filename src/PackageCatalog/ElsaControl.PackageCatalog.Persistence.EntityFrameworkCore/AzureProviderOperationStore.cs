@@ -189,6 +189,24 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                     nowUtc);
                 await db.SaveChangesAsync(cancellationToken);
                 return ToModel(providerOperation);
+            }, async (result, verificationCancellationToken) =>
+            {
+                if (result is null)
+                    return true;
+
+                var nowUtc = now.ToUniversalTime();
+                return await db.AzureProviderOperations.AsNoTracking().AnyAsync(
+                    x => x.Id == result.Id
+                        && x.WorkspaceId == request.WorkspaceId
+                        && x.Status == AzureProviderOperationStatus.Running
+                        && x.WorkerId == request.WorkerId
+                        && x.LeaseTokenHash == Hash(request.LeaseToken)
+                        && x.LeaseExpiresAt == result.LeaseExpiresAt
+                        && x.HeartbeatAt == nowUtc
+                        && x.AttemptNumber == result.AttemptNumber
+                        && x.Version == result.Version
+                        && x.UpdatedAt == nowUtc,
+                    verificationCancellationToken);
             }, cancellationToken);
         }
         catch (DbUpdateConcurrencyException)
@@ -824,6 +842,29 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                 now);
             await db.SaveChangesAsync(cancellationToken);
             return ToModel(entity);
+        }, async (result, verificationCancellationToken) =>
+        {
+            if (result is null)
+                return true;
+
+            var persisted = await db.AzureProviderOperations.AsNoTracking()
+                .SingleOrDefaultAsync(
+                    x => x.WorkspaceId == workspaceId
+                        && x.Id == operationId
+                        && x.Status == result.Status
+                        && x.Version == result.Version
+                        && x.UpdatedAt == now
+                        && x.CompletedAt == result.CompletedAt,
+                    verificationCancellationToken);
+            if (persisted is null)
+                return false;
+
+            return await db.AzureProviderOperationTransitions.AsNoTracking()
+                .AnyAsync(
+                    x => x.OperationId == operationId
+                        && x.Sequence == result.Version
+                        && x.Code == "azure.plan.unrestorable",
+                    verificationCancellationToken);
         }, cancellationToken);
     }
 
@@ -885,6 +926,31 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
             AddTransition(entity, decision.Code, decision.Summary, now);
             await db.SaveChangesAsync(cancellationToken);
             return new AzureProviderOperationAuthorizationResult(ToModel(entity), decision);
+        }, async (result, verificationCancellationToken) =>
+        {
+            if (result is null || result.Decision.Allowed)
+                return true;
+
+            var completionFingerprint = Hash($"{AzureProviderOperationStatus.EntitlementHeld}|{result.Decision.Code}");
+            var persisted = await db.AzureProviderOperations.AsNoTracking()
+                .SingleOrDefaultAsync(
+                    x => x.WorkspaceId == workspaceId
+                        && x.Id == operationId
+                        && x.Status == AzureProviderOperationStatus.EntitlementHeld
+                        && x.Version == result.Operation.Version
+                        && x.UpdatedAt == now
+                        && x.CompletionLeaseTokenHash == Hash(leaseToken)
+                        && x.CompletionFingerprint == completionFingerprint,
+                    verificationCancellationToken);
+            if (persisted is null)
+                return false;
+
+            return await db.AzureProviderOperationTransitions.AsNoTracking()
+                .AnyAsync(
+                    x => x.OperationId == operationId
+                        && x.Sequence == result.Operation.Version
+                        && x.Code == result.Decision.Code,
+                    verificationCancellationToken);
         }, cancellationToken);
     }
 
@@ -1079,11 +1145,14 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
     public async Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
     {
         db.ChangeTracker.Clear();
+        var candidateSnapshot = new List<(Guid Id, long Version)>();
         return await db.ExecuteInTransactionAsync(IsolationLevel.Unspecified, async () =>
         {
             var candidates = await db.AzureProviderOperations.AsNoTracking()
                 .Where(x => x.Status == AzureProviderOperationStatus.Running && x.LeaseExpiresAt != null && x.LeaseExpiresAt <= now)
                 .ToListAsync(cancellationToken);
+            candidateSnapshot.Clear();
+            candidateSnapshot.AddRange(candidates.Select(x => (x.Id, x.Version)));
             var recovered = 0;
             foreach (var candidate in candidates)
             {
@@ -1102,6 +1171,20 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
             }
             await db.SaveChangesAsync(cancellationToken);
             return recovered;
+        }, async (recovered, verificationCancellationToken) =>
+        {
+            if (recovered == 0)
+                return true;
+
+            var ids = candidateSnapshot.Select(x => x.Id).ToList();
+            var persisted = await db.AzureProviderOperations.AsNoTracking()
+                .Where(x => ids.Contains(x.Id)
+                    && x.Status == AzureProviderOperationStatus.RecoveryRequired
+                    && x.UpdatedAt == now)
+                .Select(x => new { x.Id, x.Version })
+                .ToListAsync(verificationCancellationToken);
+            return persisted.Count(x => candidateSnapshot.Any(candidate =>
+                candidate.Id == x.Id && candidate.Version == x.Version - 1)) == recovered;
         }, cancellationToken);
     }
 
