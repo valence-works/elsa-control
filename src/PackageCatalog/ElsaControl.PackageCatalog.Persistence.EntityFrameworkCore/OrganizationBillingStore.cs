@@ -460,18 +460,29 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         string? providerSubscriptionReference,
         CancellationToken cancellationToken)
     {
-        var matches = await dbContext.OrganizationSubscriptions
+        var matches = dbContext.OrganizationSubscriptions
             .Where(x =>
                 x.OrganizationId == organizationId &&
                 x.Provider == provider &&
                 (x.State == OrganizationSubscriptionState.Retained || x.State == OrganizationSubscriptionState.Deleted) &&
                 x.ProviderCustomerReference == providerCustomerReference &&
-                x.ProviderSubscriptionReference == providerSubscriptionReference)
-            .OrderByDescending(x => x.LastProviderEventId == providerEventId)
+                x.ProviderSubscriptionReference == providerSubscriptionReference);
+        var eventMatches = await matches
+            .Where(x => x.LastProviderEventId == providerEventId)
             .ThenByDescending(x => x.UpdatedAt)
             .ThenByDescending(x => x.CreatedAt)
-            .ThenByDescending(x => x.Id);
+            .ThenByDescending(x => x.Id)
+            .Take(2)
+            .ToListAsync(cancellationToken);
+        if (eventMatches.Count == 1)
+            return eventMatches[0];
+        if (eventMatches.Count > 1)
+            return null;
+
         var correlatedMatches = await matches
+            .OrderByDescending(x => x.UpdatedAt)
+            .ThenByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
             .Take(2)
             .ToListAsync(cancellationToken);
         return correlatedMatches.Count == 1 ? correlatedMatches[0] : null;
