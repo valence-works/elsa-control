@@ -1,5 +1,6 @@
 using System.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 
@@ -51,6 +52,31 @@ internal static class CatalogDbContextTransactionExtensions
     }
 
     /// <summary>
+    /// Runs <paramref name="unitOfWork"/> inside a transaction and uses
+    /// <paramref name="verifySucceeded"/> to distinguish a committed transaction from a rolled-back
+    /// attempt when the commit acknowledgement is lost.
+    /// </summary>
+    /// <remarks>
+    /// The verifier runs only after a transient failure and outside the failed attempt's transaction.
+    /// It must query durable state using an operation-specific identity. Returning <see langword="true"/>
+    /// returns the result produced by the committed attempt without executing the unit again.
+    /// </remarks>
+    public static Task ExecuteInTransactionAsync(
+        this CatalogDbContext dbContext,
+        IsolationLevel isolationLevel,
+        Func<Task> unitOfWork,
+        Func<CancellationToken, Task<bool>> verifySucceeded,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(unitOfWork);
+        return dbContext.ExecuteInTransactionAsync(isolationLevel, async () =>
+        {
+            await unitOfWork();
+            return true;
+        }, (_, attemptCancellationToken) => verifySucceeded(attemptCancellationToken), cancellationToken);
+    }
+
+    /// <summary>
     /// Runs <paramref name="unitOfWork"/> inside a transaction at <paramref name="isolationLevel"/>, under
     /// the catalog's execution strategy, which re-runs the whole unit on a transient failure. Each attempt
     /// clears the change tracker before opening its own transaction, so it starts from a clean slate and
@@ -84,6 +110,41 @@ internal static class CatalogDbContextTransactionExtensions
         Func<Task<TResult>> unitOfWork,
         CancellationToken cancellationToken)
     {
+        return await ExecuteInTransactionCoreAsync(
+            dbContext,
+            isolationLevel, unitOfWork, verifySucceeded: null, cancellationToken);
+    }
+
+    /// <summary>
+    /// Runs <paramref name="unitOfWork"/> inside a transaction and uses
+    /// <paramref name="verifySucceeded"/> to distinguish a committed transaction from a rolled-back
+    /// attempt when the commit acknowledgement is lost.
+    /// </summary>
+    /// <remarks>
+    /// The verifier runs only after a transient failure and outside the failed attempt's transaction.
+    /// It must query durable state using an operation-specific identity. Returning <see langword="true"/>
+    /// returns the result produced by the committed attempt without executing the unit again.
+    /// </remarks>
+    public static async Task<TResult> ExecuteInTransactionAsync<TResult>(
+        this CatalogDbContext dbContext,
+        IsolationLevel isolationLevel,
+        Func<Task<TResult>> unitOfWork,
+        Func<TResult, CancellationToken, Task<bool>> verifySucceeded,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(verifySucceeded);
+        return await ExecuteInTransactionCoreAsync(
+            dbContext,
+            isolationLevel, unitOfWork, verifySucceeded, cancellationToken);
+    }
+
+    private static async Task<TResult> ExecuteInTransactionCoreAsync<TResult>(
+        CatalogDbContext dbContext,
+        IsolationLevel isolationLevel,
+        Func<Task<TResult>> unitOfWork,
+        Func<TResult, CancellationToken, Task<bool>>? verifySucceeded,
+        CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(dbContext);
         ArgumentNullException.ThrowIfNull(unitOfWork);
         cancellationToken.ThrowIfCancellationRequested();
@@ -95,18 +156,35 @@ internal static class CatalogDbContextTransactionExtensions
 
         try
         {
+            var executionState = new TransactionExecutionState<TResult>(
+                dbContext, isolationLevel, unitOfWork, verifySucceeded);
             return await dbContext.Database.CreateExecutionStrategy().ExecuteAsync(
-                (dbContext, isolationLevel, unitOfWork),
+                executionState,
                 static async (_, state, attemptCancellationToken) =>
                 {
-                    state.dbContext.ChangeTracker.Clear();
-                    await using var transaction = await state.dbContext.Database.BeginTransactionAsync(
-                        state.isolationLevel, attemptCancellationToken);
-                    var result = await state.unitOfWork();
+                    state.DbContext.ChangeTracker.Clear();
+                    state.HasResult = false;
+                    await using var transaction = await state.DbContext.Database.BeginTransactionAsync(
+                        state.IsolationLevel, attemptCancellationToken);
+                    var result = await state.UnitOfWork();
+                    state.Result = result;
+                    state.HasResult = true;
                     await transaction.CommitAsync(attemptCancellationToken);
                     return result;
                 },
-                verifySucceeded: null,
+                verifySucceeded is null
+                    ? null
+                    : static async (_, state, attemptCancellationToken) =>
+                    {
+                        state.DbContext.ChangeTracker.Clear();
+                        if (!state.HasResult)
+                            return new ExecutionResult<TResult>(successful: false, result: default!);
+
+                        if (!await state.VerifySucceeded!(state.Result!, attemptCancellationToken))
+                            return new ExecutionResult<TResult>(successful: false, result: default!);
+
+                        return new ExecutionResult<TResult>(successful: true, state.Result!);
+                    },
                 cancellationToken);
         }
         catch
@@ -114,5 +192,19 @@ internal static class CatalogDbContextTransactionExtensions
             dbContext.ChangeTracker.Clear();
             throw;
         }
+    }
+
+    private sealed class TransactionExecutionState<TResult>(
+        CatalogDbContext dbContext,
+        IsolationLevel isolationLevel,
+        Func<Task<TResult>> unitOfWork,
+        Func<TResult, CancellationToken, Task<bool>>? verifySucceeded)
+    {
+        public CatalogDbContext DbContext { get; } = dbContext;
+        public IsolationLevel IsolationLevel { get; } = isolationLevel;
+        public Func<Task<TResult>> UnitOfWork { get; } = unitOfWork;
+        public Func<TResult, CancellationToken, Task<bool>>? VerifySucceeded { get; } = verifySucceeded;
+        public bool HasResult { get; set; }
+        public TResult? Result { get; set; }
     }
 }
