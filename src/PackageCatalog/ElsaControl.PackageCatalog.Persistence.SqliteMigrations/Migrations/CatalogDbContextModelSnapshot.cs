@@ -240,6 +240,89 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.ToTable("OrganizationAuditRecords");
                 });
 
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.OrganizationAzureSubscriptionBind", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid?>("CreatedByAccountId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CustomerTenantId")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LastPreflightCode")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ManagingPrincipalClientId")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ManagingPrincipalObjectId")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ManagingTenantId")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("OrganizationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RegistrationDefinitionFingerprint")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RegistrationDefinitionId")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SubscriptionId")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("UnbindReason")
+                        .HasMaxLength(512)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("VerifiedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId", "CreatedAt");
+
+                    b.HasIndex(new[] { "OrganizationId" }, "IX_OrganizationAzureSubscriptionBinds_OneActive")
+                        .IsUnique()
+                        .HasFilter("State = 'Active'");
+
+                    b.HasIndex(new[] { "OrganizationId" }, "IX_OrganizationAzureSubscriptionBinds_OneInFlight")
+                        .IsUnique()
+                        .HasFilter("State IN ('PendingConsent', 'Verifying')");
+
+                    b.ToTable("OrganizationAzureSubscriptionBinds");
+                });
+
             modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.OrganizationBillingCleanup", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1197,7 +1280,6 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.ToTable("ActionConfirmations");
                 });
 
-
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.AzureProviderAssignmentRebindEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1240,7 +1322,7 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                     b.HasIndex("WorkspaceId", "AssignmentId", "OccurredAt");
 
-                    b.ToTable("AzureProviderAssignmentRebinds", t =>
+                    b.ToTable("AzureProviderAssignmentRebinds", null, t =>
                         {
                             t.HasTrigger("TR_AzureProviderAssignmentRebinds_AppendOnly_Delete");
 
@@ -1545,24 +1627,6 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.HasIndex("Status", "LeaseExpiresAt", "UpdatedAt", "Id");
 
                     b.ToTable("AzureProviderOperations");
-                });
-
-
-            modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.AzureProviderAssignmentRebindEntity", b =>
-                {
-                    b.HasOne("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.AzureProviderResourceAssignmentEntity", "Assignment")
-                        .WithMany("Rebinds")
-                        .HasForeignKey("AssignmentId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Workspace", null)
-                        .WithMany()
-                        .HasForeignKey("WorkspaceId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("Assignment");
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.AzureProviderOperationTransitionEntity", b =>
@@ -5400,6 +5464,17 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Navigation("Organization");
                 });
 
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.OrganizationAzureSubscriptionBind", b =>
+                {
+                    b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Organization", "Organization")
+                        .WithMany("AzureSubscriptionBinds")
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Organization");
+                });
+
             modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.OrganizationBillingCleanup", b =>
                 {
                     b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Organization", "Organization")
@@ -5631,6 +5706,23 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .HasForeignKey("WorkspaceId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+                });
+
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.AzureProviderAssignmentRebindEntity", b =>
+                {
+                    b.HasOne("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.AzureProviderResourceAssignmentEntity", "Assignment")
+                        .WithMany("Rebinds")
+                        .HasForeignKey("AssignmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Workspace", null)
+                        .WithMany()
+                        .HasForeignKey("WorkspaceId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Assignment");
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.AzureProviderOperationEntity", b =>
@@ -6397,6 +6489,8 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
             modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.Organization", b =>
                 {
                     b.Navigation("AuditRecords");
+
+                    b.Navigation("AzureSubscriptionBinds");
 
                     b.Navigation("BillingCleanups");
 

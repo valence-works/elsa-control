@@ -45,6 +45,7 @@ import { OrganizationBillingPage } from "@/features/billing/OrganizationBillingP
 import { ConnectEnginePage } from "@/features/deployments/ConnectEnginePage";
 import { EngineProvisioningPage } from "@/features/engine-provisioning/EngineProvisioningPage";
 import { AdminOrganizationsPage } from "@/features/organizations/AdminOrganizationsPage";
+import { AzureSubscriptionBindingPage } from "@/features/azure-binding/AzureSubscriptionBindingPage";
 
 function PlaceholderPage({ title }: { title: string }) {
   return (
@@ -132,6 +133,7 @@ export const router = createBrowserRouter([
         children: [
           { path: "overview", element: <OverviewPage /> },
           { path: "billing", element: <OrganizationBillingPage /> },
+          { path: "azure/bind", element: <AzureSubscriptionBindingPage /> },
           { path: "organizations", element: <AdminOrganizationsPage /> },
           { path: "engines/connect", element: <ConnectEnginePage /> },
           { path: "engines/provision", element: <EngineProvisioningPage /> },

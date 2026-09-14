@@ -39,6 +39,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     public DbSet<BillingProviderEventInboxEntry> BillingProviderEvents => Set<BillingProviderEventInboxEntry>();
     public DbSet<OrganizationBillingLifecycleNotice> OrganizationBillingLifecycleNotices => Set<OrganizationBillingLifecycleNotice>();
     public DbSet<OrganizationBillingCleanup> OrganizationBillingCleanups => Set<OrganizationBillingCleanup>();
+    public DbSet<OrganizationAzureSubscriptionBind> OrganizationAzureSubscriptionBinds => Set<OrganizationAzureSubscriptionBind>();
     public DbSet<Workspace> Workspaces => Set<Workspace>();
     public DbSet<WorkspaceMembership> WorkspaceMemberships => Set<WorkspaceMembership>();
     public DbSet<WorkspaceEntitlementSnapshot> WorkspaceEntitlementSnapshots => Set<WorkspaceEntitlementSnapshot>();
@@ -127,6 +128,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         modelBuilder.ApplyConfiguration(new Models.BillingProviderEventInboxEntryConfiguration());
         modelBuilder.ApplyConfiguration(new Models.OrganizationBillingLifecycleNoticeConfiguration());
         modelBuilder.ApplyConfiguration(new Models.OrganizationBillingCleanupConfiguration());
+        modelBuilder.ApplyConfiguration(new Models.OrganizationAzureSubscriptionBindConfiguration());
         modelBuilder.ApplyConfiguration(new Models.WorkspaceConfiguration());
         modelBuilder.ApplyConfiguration(new Models.WorkspaceMembershipConfiguration());
         modelBuilder.ApplyConfiguration(new Models.WorkspaceEntitlementSnapshotConfiguration());

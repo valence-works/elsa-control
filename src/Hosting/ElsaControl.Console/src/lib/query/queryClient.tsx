@@ -72,6 +72,7 @@ export const queryKeys = {
   managedElsaInstanceHealth: (workspaceId: string, instanceId: string) => ["managed-elsa", workspaceId, "instances", instanceId, "health"] as const,
   managedElsaInstanceAudit: (workspaceId: string, instanceId: string) => ["managed-elsa", workspaceId, "instances", instanceId, "audit"] as const,
   organizationBilling: (organizationId: string) => ["organization-billing", organizationId] as const,
+  azureSubscriptionBinding: (organizationId: string) => ["azure-subscription-binding", organizationId] as const,
   weaverConfiguration: (workspaceId: string) => ["weaver", workspaceId, "configuration"] as const,
   weaverSession: (workspaceId: string, sessionId: string) => ["weaver", workspaceId, "sessions", sessionId] as const
 };
