@@ -53,6 +53,7 @@ if ! docker start "$container_id" >/dev/null 2>&1; then
   fail "container failed to start"
 fi
 
+healthy=false
 deadline=$((SECONDS + 60))
 while ((SECONDS < deadline)); do
   state=""
@@ -65,8 +66,8 @@ while ((SECONDS < deadline)); do
       response=""
       if response="$(docker exec "$container_id" curl --fail --silent --max-time 2 http://127.0.0.1:8080/health 2>/dev/null)" &&
         [[ "$response" =~ \"status\"[[:space:]]*:[[:space:]]*\"ok\" ]]; then
-        echo "API provider image smoke check passed."
-        exit 0
+        healthy=true
+        break
       fi
       ;;
     created|restarting)
@@ -82,4 +83,22 @@ while ((SECONDS < deadline)); do
   sleep 1
 done
 
-fail "container did not return a healthy /health response within 60 seconds"
+[[ "$healthy" == true ]] || fail "container did not return a healthy /health response within 60 seconds"
+
+# Hosts stop the image by sending SIGTERM to its entrypoint process. The API must run its graceful shutdown and exit 0
+# before the stop timeout, not be killed (137) or die from the signal (143).
+docker stop --time 30 "$container_id" >/dev/null 2>&1 || fail "container could not be stopped"
+exit_code=""
+if ! exit_code="$(docker inspect --format '{{.State.ExitCode}}' "$container_id" 2>/dev/null)"; then
+  fail "container exit code could not be inspected"
+fi
+[[ "$exit_code" == 0 ]] || fail "container did not exit 0 after SIGTERM"
+# The log is only searched for the host's shutdown marker; container output is never emitted.
+container_log=""
+if ! container_log="$(docker logs "$container_id" 2>&1)"; then
+  fail "container log could not be read"
+fi
+[[ "$container_log" == *"Application is shutting down..."* ]] || fail "container did not log the graceful shutdown sequence"
+unset container_log
+
+echo "API provider image smoke check passed."
