@@ -14,6 +14,40 @@ public static class AzureProviderDeleteRecoverySupport
         AzureProviderOperation? operation,
         AzureProviderResourceAssignment? assignment)
     {
+        if (!IsBoundGroupOnly(operation, assignment) ||
+            operation!.Endpoint is not null ||
+            operation.Phase != AzureProviderOperationPhase.CleanupVerified ||
+            operation.AttemptedStep is not null ||
+            operation.Status is not (AzureProviderOperationStatus.Running or AzureProviderOperationStatus.RecoveryRequired) ||
+            assignment!.State is not (AzureProviderAssignmentState.Deleted or AzureProviderAssignmentState.Unknown))
+            return false;
+
+        return true;
+    }
+
+    /// <summary>
+    /// Identifies the narrow terminal-cleanup boundary that may be claimed for one fresh
+    /// provider delete attempt. Both durable inventories must already be reduced to the
+    /// retained resource-group name; the runner must still prove remote absence.
+    /// </summary>
+    public static bool IsTerminalCleanupRetryEligible(
+        AzureProviderOperation? operation,
+        AzureProviderResourceAssignment? assignment)
+    {
+        if (!IsBoundGroupOnly(operation, assignment) ||
+            operation!.Phase != AzureProviderOperationPhase.CleanupSubmitted ||
+            operation.AttemptedStep != AzureProviderRunnerStep.Cleanup ||
+            operation.Status is not (AzureProviderOperationStatus.Failed or AzureProviderOperationStatus.Cancelled) ||
+            assignment!.State == AzureProviderAssignmentState.Deleted)
+            return false;
+
+        return true;
+    }
+
+    private static bool IsBoundGroupOnly(
+        AzureProviderOperation? operation,
+        AzureProviderResourceAssignment? assignment)
+    {
         if (operation is null || assignment is null || operation.PersistedMetadataInvalid ||
             operation.Id == Guid.Empty || assignment.Id == Guid.Empty ||
             operation.WorkspaceId == Guid.Empty || assignment.WorkspaceId == Guid.Empty ||
@@ -30,13 +64,8 @@ public static class AzureProviderDeleteRecoverySupport
             operation.Action != AzureProviderOperationAction.Delete ||
             operation.LifecycleAction != ElsaInstanceOperationAction.Delete ||
             !string.Equals(operation.TargetKey, assignment.WorkloadName, StringComparison.Ordinal) ||
-            operation.Phase != AzureProviderOperationPhase.CleanupVerified ||
-            operation.AttemptedStep is not null ||
-            operation.Status is not (AzureProviderOperationStatus.Running or AzureProviderOperationStatus.RecoveryRequired) ||
             !IsGroupOnly(assignment.Resources, assignment.ResourceGroupName) ||
-            !IsGroupOnly(operation.Resources, assignment.ResourceGroupName) ||
-            operation.Endpoint is not null ||
-            assignment.State is not (AzureProviderAssignmentState.Deleted or AzureProviderAssignmentState.Unknown))
+            !IsGroupOnly(operation.Resources, assignment.ResourceGroupName))
             return false;
 
         return true;
