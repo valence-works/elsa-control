@@ -70,6 +70,13 @@ public static class BillingProviderNames
     public const string Stripe = "stripe";
 
     /// <summary>
+    /// Reserved for operator-minted entitlements backed by an active customer
+    /// Azure subscription bind. It is not a payment provider and must never be
+    /// accepted by checkout or webhook ingestion.
+    /// </summary>
+    public const string AzureBound = "azure-bound";
+
+    /// <summary>
     /// Reserved for operator-granted internal entitlements. It is not a payment
     /// provider: provider checkout and webhook ingestion refuse this value so a
     /// provider pipeline can never create or advance an internal grant.

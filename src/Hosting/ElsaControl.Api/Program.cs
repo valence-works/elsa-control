@@ -271,6 +271,9 @@ builder.Services.AddScoped<IOrganizationBillingLifecycleStore>(services =>
 builder.Services.AddScoped<IOrganizationInternalEntitlementStore>(services =>
     services.GetRequiredService<OrganizationBillingStore>());
 builder.Services.AddScoped<OrganizationInternalEntitlementService>();
+builder.Services.AddScoped<IOrganizationAzureBoundEntitlementStore>(services =>
+    services.GetRequiredService<OrganizationBillingStore>());
+builder.Services.AddScoped<OrganizationAzureBoundEntitlementService>();
 builder.Services.AddScoped<OrganizationBillingLifecycleWorker>(services =>
     new OrganizationBillingLifecycleWorker(
         services.GetRequiredService<IOrganizationBillingLifecycleStore>(),
@@ -677,6 +680,7 @@ app.MapAdminValidationEndpoints();
 app.MapAdminWorkspaceEntitlementEndpoints();
 app.MapAdminOrganizationEndpoints();
 app.MapAdminOrganizationInternalEntitlementEndpoints();
+app.MapAdminOrganizationAzureBoundEntitlementEndpoints();
 app.MapAdminReleaseCatalogEndpoints();
 app.MapConsoleLogStreaming();
 if (adminConsoleAssetsExist)

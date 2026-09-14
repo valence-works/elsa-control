@@ -430,7 +430,9 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
                 (subscription.LastProviderEventId is null ||
                  string.CompareOrdinal(subscription.LastProviderEventId, originalEventId) < 0))
                 throw new InvalidOperationException("Subscription event ordering cursor changed at the same timestamp.");
-            if (currentOccurrence > originalOccurrence && string.IsNullOrWhiteSpace(subscription.LastProviderEventId))
+            if (subscription.State != OrganizationSubscriptionState.Deleted &&
+                currentOccurrence > originalOccurrence &&
+                string.IsNullOrWhiteSpace(subscription.LastProviderEventId))
                 throw new InvalidOperationException("A newer subscription event requires an event identity.");
 
             var cursorAdvanced = currentOccurrence > originalOccurrence ||
@@ -443,7 +445,11 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
                 if (!OrganizationSubscriptionLifecycle.CanTransition(originalState, subscription.State) &&
                     !(originalState == OrganizationSubscriptionState.Suspended &&
                       subscription.State == OrganizationSubscriptionState.Deleted &&
-                      subscription.EarlyDeletionRequestedAt is not null))
+                      subscription.EarlyDeletionRequestedAt is not null) &&
+                    !(originalState == OrganizationSubscriptionState.Active &&
+                      subscription.State == OrganizationSubscriptionState.Deleted &&
+                      subscription.EarlyDeletionRequestedAt is not null &&
+                      string.Equals(subscription.Provider, BillingProviderNames.AzureBound, StringComparison.Ordinal)))
                     throw new InvalidOperationException("Subscription state transition is not allowed.");
                 var originalLifecycleVersion = entry.Property<int>(nameof(OrganizationSubscription.LifecycleVersion)).OriginalValue;
                 var lifecycleAdvanced = subscription.LifecycleVersion == originalLifecycleVersion + 1;

@@ -332,7 +332,11 @@ public static class OrganizationSubscriptionLifecycle
         CanTransition(subscription.State, next) ||
         subscription.State == OrganizationSubscriptionState.Suspended &&
         next == OrganizationSubscriptionState.Deleted &&
-        subscription.EarlyDeletionRequestedAt is not null;
+        subscription.EarlyDeletionRequestedAt is not null ||
+        subscription.State == OrganizationSubscriptionState.Active &&
+        next == OrganizationSubscriptionState.Deleted &&
+        subscription.EarlyDeletionRequestedAt is not null &&
+        string.Equals(subscription.Provider, BillingProviderNames.AzureBound, StringComparison.Ordinal);
 
     public static OrganizationSubscription CreateTrial(Guid organizationId, string provider, DateTimeOffset startedAt)
     {
