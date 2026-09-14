@@ -1,3 +1,4 @@
+using System.Data.Common;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Core.Approvals;
 using ElsaControl.PackageCatalog.Core.Packages;
@@ -5,6 +6,7 @@ using ElsaControl.PackageCatalog.Core.Sync;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 
@@ -218,18 +220,19 @@ public sealed class CatalogLostCommitPersistenceTests
             trialEndsAt = Assert.IsType<OrganizationSubscription>(started.Subscription).TrialEndsAt;
         }
 
-        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var acknowledgement = new ConcurrentAuditLostCommitAcknowledgementInterceptor(connection, organizationId);
         await using (var db = new CatalogDbContext(LostAckOptions(connection, acknowledgement)))
         {
             var advances = await new OrganizationBillingStore(db).AdvanceDueAsync(trialEndsAt);
             var advance = Assert.Single(advances);
             Assert.Equal(OrganizationSubscriptionState.PastDue, advance.CurrentState);
+            Assert.True(advance.NoticeCreated);
         }
 
         await using var verify = new CatalogDbContext(PlainOptions(connection));
         Assert.Equal(OrganizationSubscriptionState.PastDue, (await verify.OrganizationSubscriptions.SingleAsync(x => x.OrganizationId == organizationId)).State);
         Assert.Single(await verify.OrganizationBillingLifecycleNotices.ToListAsync());
-        Assert.Equal(3, await verify.OrganizationAuditRecords.CountAsync());
+        Assert.Equal(4, await verify.OrganizationAuditRecords.CountAsync());
     }
 
     [Fact]
@@ -248,12 +251,14 @@ public sealed class CatalogLostCommitPersistenceTests
         }
 
         var requestedAt = Start.AddDays(1);
-        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var acknowledgement = new ConcurrentAuditLostCommitAcknowledgementInterceptor(connection, organizationId);
         await using (var db = new CatalogDbContext(LostAckOptions(connection, acknowledgement)))
         {
             var result = await new OrganizationBillingStore(db).RequestDeletionAsync(organizationId, requestedAt);
             Assert.NotNull(result);
             Assert.Equal(OrganizationSubscriptionState.Suspended, result!.CurrentState);
+            Assert.True(result.NoticeCreated);
+            Assert.True(result.CleanupQueued);
         }
 
         await using var verify = new CatalogDbContext(PlainOptions(connection));
@@ -308,7 +313,7 @@ public sealed class CatalogLostCommitPersistenceTests
             organizationId = organization.Id;
         }
 
-        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var acknowledgement = new ConcurrentAuditLostCommitAcknowledgementInterceptor(connection, organizationId);
         await using (var db = new CatalogDbContext(LostAckOptions(connection, acknowledgement)))
         {
             var result = await new OrganizationBillingStore(db).CompleteCleanupAsync(new(
@@ -320,7 +325,7 @@ public sealed class CatalogLostCommitPersistenceTests
         await using var verify = new CatalogDbContext(PlainOptions(connection));
         Assert.Equal(OrganizationBillingCleanupState.Confirmed, (await verify.OrganizationBillingCleanups.SingleAsync()).State);
         Assert.Equal(OrganizationSubscriptionState.Deleted, (await verify.OrganizationSubscriptions.SingleAsync(x => x.OrganizationId == organizationId)).State);
-        Assert.Equal(7, await verify.OrganizationAuditRecords.CountAsync());
+        Assert.Equal(8, await verify.OrganizationAuditRecords.CountAsync());
     }
 
     [Fact]
@@ -388,11 +393,42 @@ public sealed class CatalogLostCommitPersistenceTests
     private static DbContextOptions<CatalogDbContext> PlainOptions(SqliteConnection connection) =>
         new DbContextOptionsBuilder<CatalogDbContext>().UseRetryingSqlite(connection).Options;
 
-    private static DbContextOptions<CatalogDbContext> LostAckOptions(SqliteConnection connection, LostCommitAcknowledgementInterceptor acknowledgement) =>
+    private static DbContextOptions<CatalogDbContext> LostAckOptions(SqliteConnection connection, DbTransactionInterceptor acknowledgement) =>
         new DbContextOptionsBuilder<CatalogDbContext>()
             .UseRetryingSqlite(connection, isTransient: exception => exception is LostCommitAcknowledgementException)
             .AddInterceptors(acknowledgement)
             .Options;
 
     private static SqliteConnection NewConnection() => new("Data Source=:memory:");
+
+    private sealed class ConcurrentAuditLostCommitAcknowledgementInterceptor(
+        SqliteConnection connection,
+        Guid organizationId) : DbTransactionInterceptor
+    {
+        private int _remainingFailures = 1;
+
+        public override async Task TransactionCommittedAsync(
+            DbTransaction transaction,
+            TransactionEndEventData eventData,
+            CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Decrement(ref _remainingFailures) >= 0)
+            {
+                await using var db = new CatalogDbContext(PlainOptions(connection));
+                db.OrganizationAuditRecords.Add(new OrganizationAuditRecord
+                {
+                    OrganizationId = organizationId,
+                    Action = OrganizationAuditAction.BillingCleanupRequested,
+                    TargetType = "subscription",
+                    TargetId = organizationId.ToString("D"),
+                    Summary = "Concurrent lifecycle audit.",
+                    CreatedAt = Start
+                });
+                await db.SaveChangesAsync(cancellationToken);
+                throw new LostCommitAcknowledgementException();
+            }
+
+            await base.TransactionCommittedAsync(transaction, eventData, cancellationToken);
+        }
+    }
 }
