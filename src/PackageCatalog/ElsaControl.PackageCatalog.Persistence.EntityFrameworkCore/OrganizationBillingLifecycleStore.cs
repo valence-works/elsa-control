@@ -98,27 +98,17 @@ public sealed partial class OrganizationBillingStore
         CancellationToken cancellationToken,
         int attempt)
     {
-        var verificationSubscriptionExists = false;
-        var verificationState = OrganizationSubscriptionState.Deleted;
-        var verificationLifecycleVersion = 0;
         var verificationEvidence = LifecycleOperationEvidence.Empty;
 
         try
         {
             return await dbContext.ExecuteInTransactionAsync<OrganizationBillingLifecycleAdvance?>(IsolationLevel.Serializable, async () =>
             {
+                verificationEvidence = LifecycleOperationEvidence.Empty;
                 var subscription = await dbContext.OrganizationSubscriptions
                     .SingleOrDefaultAsync(x => x.OrganizationId == organizationId && x.Id == subscriptionId, cancellationToken);
                 if (subscription is null || subscription.State == OrganizationSubscriptionState.Deleted)
-                {
-                    verificationSubscriptionExists = subscription is not null;
-                    if (subscription is not null)
-                    {
-                        verificationState = subscription.State;
-                        verificationLifecycleVersion = subscription.LifecycleVersion;
-                    }
                     return null;
-                }
 
                 var previous = subscription.State;
                 var transitionAt = now;
@@ -190,36 +180,22 @@ public sealed partial class OrganizationBillingStore
                 }
 
                 if (!changed && !noticeCreated && !cleanupQueued)
-                {
-                    verificationSubscriptionExists = true;
-                    verificationState = subscription.State;
-                    verificationLifecycleVersion = subscription.LifecycleVersion;
                     return null;
-                }
 
-                verificationSubscriptionExists = true;
-                verificationState = subscription.State;
-                verificationLifecycleVersion = subscription.LifecycleVersion;
                 verificationEvidence = CaptureLifecycleOperationEvidence(organizationId, subscription.Id);
+                if (!verificationEvidence.HasImmutableMarker)
+                    throw new InvalidOperationException("Billing lifecycle advance did not stage durable verification evidence.");
                 await dbContext.SaveChangesAsync(cancellationToken);
                 return new OrganizationBillingLifecycleAdvance(organizationId, subscription.Id, previous, subscription.State, transitionAt, noticeCreated, cleanupQueued);
             },
-                async (result, verificationCancellationToken) =>
-                {
-                    if (!verificationSubscriptionExists)
-                        return !await dbContext.OrganizationSubscriptions.AsNoTracking().AnyAsync(x => x.Id == subscriptionId, verificationCancellationToken);
-
-                    var subscription = await dbContext.OrganizationSubscriptions.AsNoTracking()
-                        .SingleOrDefaultAsync(x => x.OrganizationId == organizationId && x.Id == subscriptionId, verificationCancellationToken);
-                    if (subscription is null || subscription.State != verificationState || subscription.LifecycleVersion != verificationLifecycleVersion)
-                        return false;
-
-                    return await VerifyLifecycleOperationEvidenceAsync(
+                (_, verificationCancellationToken) =>
+                    !verificationEvidence.HasImmutableMarker
+                        ? Task.FromResult(true)
+                        : VerifyLifecycleOperationEvidenceAsync(
                         organizationId,
                         subscriptionId,
                         verificationEvidence,
-                        verificationCancellationToken);
-                },
+                        verificationCancellationToken),
                 cancellationToken);
         }
         catch (Exception exception) when (attempt < 2 && IsRetryableLifecycleConflict(exception))
@@ -236,35 +212,26 @@ public sealed partial class OrganizationBillingStore
         CancellationToken cancellationToken,
         int attempt)
     {
-        var verificationSubscriptionExists = false;
-        var verificationState = OrganizationSubscriptionState.Deleted;
-        var verificationLifecycleVersion = 0;
-        DateTimeOffset? verificationEarlyDeletionRequestedAt = null;
         var verificationEvidence = LifecycleOperationEvidence.Empty;
+        var verificationSubscriptionId = Guid.Empty;
 
         try
         {
             return await dbContext.ExecuteInTransactionAsync<OrganizationBillingLifecycleAdvance?>(IsolationLevel.Serializable, async () =>
             {
+                verificationEvidence = LifecycleOperationEvidence.Empty;
                 var subscription = await dbContext.OrganizationSubscriptions
                     .SingleOrDefaultAsync(x => x.OrganizationId == organizationId, cancellationToken);
                 if (subscription is null)
-                {
-                    verificationSubscriptionExists = false;
                     return null;
-                }
 
                 var previous = subscription.State;
                 var changed = false;
                 if (subscription.State == OrganizationSubscriptionState.Deleted)
-                {
-                    verificationSubscriptionExists = true;
-                    verificationState = subscription.State;
-                    verificationLifecycleVersion = subscription.LifecycleVersion;
-                    verificationEarlyDeletionRequestedAt = subscription.EarlyDeletionRequestedAt;
                     return new(organizationId, subscription.Id, previous, subscription.State, subscription.DeletedAt ?? requestedAt, false, false);
-                }
 
+                verificationSubscriptionId = subscription.Id;
+                var earlyDeletionRequested = subscription.EarlyDeletionRequestedAt is null;
                 subscription.EarlyDeletionRequestedAt ??= requestedAt;
                 if (subscription.State is not OrganizationSubscriptionState.Suspended and
                     not OrganizationSubscriptionState.Retained)
@@ -273,7 +240,6 @@ public sealed partial class OrganizationBillingStore
                     changed = true;
                 }
 
-                subscription.UpdatedAt = requestedAt;
                 if (changed)
                     await ProjectEntitlementAsync(subscription, requestedAt, cancellationToken);
                 var noticeCreated = NoticeFor(subscription.State) is { } noticeKind && await AddNoticeAsync(subscription, noticeKind, requestedAt, cancellationToken);
@@ -285,32 +251,28 @@ public sealed partial class OrganizationBillingStore
                 var cleanupQueued = await EnsureCleanupAsync(subscription, requestedAt, early: true, cancellationToken);
                 if (cleanupQueued || changed)
                     AddLifecycleAudit(subscription, OrganizationAuditAction.BillingCleanupRequested, "Provider-neutral billing cleanup was queued.", requestedAt);
-                verificationSubscriptionExists = true;
-                verificationState = subscription.State;
-                verificationLifecycleVersion = subscription.LifecycleVersion;
-                verificationEarlyDeletionRequestedAt = subscription.EarlyDeletionRequestedAt;
+                if (earlyDeletionRequested && !changed && !noticeCreated && !cleanupQueued)
+                    AddLifecycleAudit(subscription, OrganizationAuditAction.BillingCleanupRequested, "Customer requested early deletion.", requestedAt);
+
+                var wrote = earlyDeletionRequested || changed || noticeCreated || cleanupQueued;
+                if (!wrote)
+                    return new(organizationId, subscription.Id, previous, subscription.State, requestedAt, false, false);
+
+                subscription.UpdatedAt = requestedAt;
                 verificationEvidence = CaptureLifecycleOperationEvidence(organizationId, subscription.Id);
+                if (!verificationEvidence.HasImmutableMarker)
+                    throw new InvalidOperationException("Billing deletion request did not stage durable verification evidence.");
                 await dbContext.SaveChangesAsync(cancellationToken);
                 return new OrganizationBillingLifecycleAdvance(organizationId, subscription.Id, previous, subscription.State, requestedAt, noticeCreated, cleanupQueued);
             },
-                async (result, verificationCancellationToken) =>
-                {
-                    if (!verificationSubscriptionExists)
-                        return !await dbContext.OrganizationSubscriptions.AsNoTracking().AnyAsync(x => x.OrganizationId == organizationId, verificationCancellationToken);
-
-                    var subscription = await dbContext.OrganizationSubscriptions.AsNoTracking()
-                        .SingleOrDefaultAsync(x => x.OrganizationId == organizationId, verificationCancellationToken);
-                    if (subscription is null || subscription.State != verificationState ||
-                        subscription.LifecycleVersion != verificationLifecycleVersion ||
-                        subscription.EarlyDeletionRequestedAt != verificationEarlyDeletionRequestedAt)
-                        return false;
-
-                    return await VerifyLifecycleOperationEvidenceAsync(
+                (_, verificationCancellationToken) =>
+                    !verificationEvidence.HasImmutableMarker
+                        ? Task.FromResult(true)
+                        : VerifyLifecycleOperationEvidenceAsync(
                         organizationId,
-                        subscription.Id,
+                        verificationSubscriptionId,
                         verificationEvidence,
-                        verificationCancellationToken);
-                },
+                        verificationCancellationToken),
                 cancellationToken);
         }
         catch (Exception exception) when (attempt < 2 && IsRetryableLifecycleConflict(exception))
@@ -405,8 +367,12 @@ public sealed partial class OrganizationBillingStore
         string? verificationFailureCode = null;
         var verificationSubscriptionDeleted = false;
         var verificationAuditIds = Array.Empty<Guid>();
+        var verificationWrote = false;
+        var retryAuditId = Guid.NewGuid();
         return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
         {
+            verificationWrote = false;
+            verificationAuditIds = [];
             var cleanup = await dbContext.OrganizationBillingCleanups
                 .SingleOrDefaultAsync(x => x.Id == completion.CleanupId &&
                                            x.OrganizationId == completion.OrganizationId &&
@@ -426,6 +392,7 @@ public sealed partial class OrganizationBillingStore
                 return new(cleanup.State, false, cleanup.LastFailureCode);
             }
 
+            verificationWrote = true;
             cleanup.LeaseOwner = null;
             cleanup.LeaseToken = null;
             cleanup.LeaseExpiresAt = null;
@@ -461,6 +428,16 @@ public sealed partial class OrganizationBillingStore
                     cleanup.NotBeforeAt = completedAt.Add(CleanupRetryDelay);
                     cleanup.CompletedAt = null;
                     cleanup.LastFailureCode = SafeFailureCode(completion.FailureCode);
+                    dbContext.OrganizationAuditRecords.Add(new OrganizationAuditRecord
+                    {
+                        Id = retryAuditId,
+                        OrganizationId = completion.OrganizationId,
+                        Action = OrganizationAuditAction.BillingCleanupRequested,
+                        TargetType = "subscription",
+                        TargetId = completion.SubscriptionId.ToString("D"),
+                        Summary = "Provider-neutral billing cleanup retry was scheduled.",
+                        CreatedAt = completedAt
+                    });
                     break;
             }
 
@@ -474,8 +451,26 @@ public sealed partial class OrganizationBillingStore
             await dbContext.SaveChangesAsync(cancellationToken);
             return new OrganizationBillingCleanupResult(cleanup.State, deleted, cleanup.LastFailureCode);
         },
-            async (result, verificationCancellationToken) =>
+            async (_, verificationCancellationToken) =>
             {
+                if (!verificationWrote)
+                    return true;
+
+                if (verificationAuditIds.Length > 0)
+                {
+                    foreach (var auditId in verificationAuditIds)
+                    {
+                        if (!await dbContext.OrganizationAuditRecords.AsNoTracking().AnyAsync(x =>
+                                x.Id == auditId && x.OrganizationId == completion.OrganizationId,
+                                verificationCancellationToken))
+                            return false;
+                    }
+
+                    return true;
+                }
+
+                // A confirmed cleanup for an already-deleted subscription creates no new audit.
+                // Confirmed is terminal, so this exact cleanup row is durable operation evidence.
                 var cleanup = await dbContext.OrganizationBillingCleanups.AsNoTracking()
                     .SingleOrDefaultAsync(x => x.Id == completion.CleanupId &&
                                                x.OrganizationId == completion.OrganizationId &&
@@ -495,14 +490,6 @@ public sealed partial class OrganizationBillingStore
                         x.State == OrganizationSubscriptionState.Deleted,
                         verificationCancellationToken))
                     return false;
-
-                foreach (var auditId in verificationAuditIds)
-                {
-                    if (!await dbContext.OrganizationAuditRecords.AsNoTracking().AnyAsync(x =>
-                            x.Id == auditId && x.OrganizationId == completion.OrganizationId,
-                            verificationCancellationToken))
-                        return false;
-                }
 
                 return true;
             },
@@ -558,10 +545,10 @@ public sealed partial class OrganizationBillingStore
                 .Select(x => x.Entity.Id)
                 .ToArray(),
             dbContext.ChangeTracker.Entries<OrganizationBillingCleanup>()
-                .Where(x => (x.State is EntityState.Added or EntityState.Modified) &&
+                .Where(x => x.State == EntityState.Added &&
                             x.Entity.OrganizationId == organizationId &&
                             x.Entity.SubscriptionId == subscriptionId)
-                .Select(x => (LifecycleCleanupEvidence?)new LifecycleCleanupEvidence(x.Entity.Id, x.Entity.State, x.Entity.NotBeforeAt))
+                .Select(x => (Guid?)x.Entity.Id)
                 .SingleOrDefault(),
             CaptureAddedAuditIds(organizationId));
 
@@ -587,13 +574,11 @@ public sealed partial class OrganizationBillingStore
                 return false;
         }
 
-        if (evidence.Cleanup is { } cleanup &&
+        if (evidence.CleanupId is { } cleanupId &&
             !await dbContext.OrganizationBillingCleanups.AsNoTracking().AnyAsync(x =>
-                x.Id == cleanup.Id &&
+                x.Id == cleanupId &&
                 x.OrganizationId == organizationId &&
-                x.SubscriptionId == subscriptionId &&
-                x.State == cleanup.State &&
-                x.NotBeforeAt == cleanup.NotBeforeAt,
+                x.SubscriptionId == subscriptionId,
                 cancellationToken))
             return false;
 
@@ -610,16 +595,13 @@ public sealed partial class OrganizationBillingStore
 
     private readonly record struct LifecycleOperationEvidence(
         Guid[] NoticeIds,
-        LifecycleCleanupEvidence? Cleanup,
+        Guid? CleanupId,
         Guid[] AuditIds)
     {
         public static LifecycleOperationEvidence Empty => new([], null, []);
-    }
 
-    private readonly record struct LifecycleCleanupEvidence(
-        Guid Id,
-        OrganizationBillingCleanupState State,
-        DateTimeOffset NotBeforeAt);
+        public bool HasImmutableMarker => NoticeIds.Length > 0 || CleanupId is not null || AuditIds.Length > 0;
+    }
 
     private async Task<bool> EnsureCleanupAsync(OrganizationSubscription subscription, DateTimeOffset now, bool early, CancellationToken cancellationToken)
     {

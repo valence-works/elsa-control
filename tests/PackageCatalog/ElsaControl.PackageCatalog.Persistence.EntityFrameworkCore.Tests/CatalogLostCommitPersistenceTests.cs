@@ -329,6 +329,45 @@ public sealed class CatalogLostCommitPersistenceTests
     }
 
     [Fact]
+    public async Task Retrying_cleanup_returns_the_committed_failure_after_a_lost_acknowledgement_and_concurrent_audit()
+    {
+        await using var connection = NewConnection();
+        await connection.OpenAsync();
+        Guid organizationId;
+        int auditCount;
+        OrganizationBillingCleanupWorkItem work;
+        await using (var setup = await CreateDatabaseAsync(connection))
+        {
+            var organization = new Organization { Name = "Acme" };
+            setup.Organizations.Add(organization);
+            await setup.SaveChangesAsync();
+            await new OrganizationBillingStore(setup).StartTrialAsync(organization.Id, "stripe", Start);
+            await new OrganizationBillingStore(setup).RequestDeletionAsync(organization.Id, Start.AddDays(1));
+            work = Assert.IsType<OrganizationBillingCleanupWorkItem>(await new OrganizationBillingStore(setup)
+                .TryClaimCleanupAsync("worker", Start.AddDays(1)));
+            organizationId = organization.Id;
+            auditCount = await setup.OrganizationAuditRecords.CountAsync();
+        }
+
+        var acknowledgement = new ConcurrentAuditLostCommitAcknowledgementInterceptor(connection, organizationId);
+        await using (var db = new CatalogDbContext(LostAckOptions(connection, acknowledgement)))
+        {
+            var result = await new OrganizationBillingStore(db).CompleteCleanupAsync(new(
+                work.Id, work.OrganizationId, work.SubscriptionId, work.LeaseToken,
+                OrganizationBillingCleanupOutcome.RetryableFailure, Start.AddDays(1).AddMinutes(1), "provider.timeout"));
+            Assert.Equal(OrganizationBillingCleanupState.Queued, result.State);
+            Assert.False(result.SubscriptionDeleted);
+            Assert.Equal("provider.timeout", result.FailureCode);
+        }
+
+        await using var verify = new CatalogDbContext(PlainOptions(connection));
+        var cleanup = await verify.OrganizationBillingCleanups.SingleAsync();
+        Assert.Equal(OrganizationBillingCleanupState.Queued, cleanup.State);
+        Assert.Equal("provider.timeout", cleanup.LastFailureCode);
+        Assert.Equal(auditCount + 2, await verify.OrganizationAuditRecords.CountAsync());
+    }
+
+    [Fact]
     public async Task Granting_internal_entitlement_returns_granted_without_a_duplicate_audit_after_a_lost_acknowledgement()
     {
         await using var connection = NewConnection();
