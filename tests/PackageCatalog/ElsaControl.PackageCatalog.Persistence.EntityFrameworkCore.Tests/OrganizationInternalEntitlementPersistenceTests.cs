@@ -196,7 +196,8 @@ public sealed class OrganizationInternalEntitlementPersistenceTests : IAsyncLife
         var after = await ReadAsync();
         Assert.Equal(Json(before), Json(after));
         var entitlement = Assert.Single(after.Entitlements);
-        Assert.False(entitlement.ManagedHostingEnabled);
+        Assert.True(entitlement.ManagedHostingEnabled);
+        Assert.Equal(int.MaxValue, entitlement.MaxInstances);
         Assert.Null(entitlement.ManagedHostingExpiresAt);
         Assert.Equal(BillingProviderNames.Stripe, Assert.Single(after.Subscriptions).Provider);
     }

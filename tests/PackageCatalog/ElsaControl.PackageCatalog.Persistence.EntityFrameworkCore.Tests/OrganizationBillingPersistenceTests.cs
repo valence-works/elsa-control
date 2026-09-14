@@ -1,3 +1,5 @@
+using ElsaControl.Deployment.Abstractions.Instances;
+using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using Microsoft.Data.Sqlite;
@@ -13,7 +15,7 @@ public sealed class OrganizationBillingPersistenceTests
     private static readonly Guid OrganizationId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
 
     [Fact]
-    public async Task Trial_projection_preserves_existing_capability_fields()
+    public async Task Stripe_trial_projection_enables_managed_hosting_and_preserves_other_capability_fields()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -30,7 +32,7 @@ public sealed class OrganizationBillingPersistenceTests
             MaxVersionsPerPackage = 7,
             MaxSyncsPerDay = 12,
             PrivateFeedsEnabled = true,
-            ManagedHostingEnabled = true,
+            ManagedHostingEnabled = false,
             DeploymentTargetsEnabled = true,
             SubscriptionState = OrganizationSubscriptionState.Active,
             CreatedAt = Now,
@@ -50,6 +52,37 @@ public sealed class OrganizationBillingPersistenceTests
         Assert.True(entitlement.ManagedHostingEnabled);
         Assert.True(entitlement.DeploymentTargetsEnabled);
         Assert.Equal(OrganizationSubscriptionState.Trial, entitlement.SubscriptionState);
+        Assert.Equal(BillingProviderNames.Stripe, result.Subscription!.Provider);
+        Assert.NotEqual(BillingProviderNames.Internal, result.Subscription.Provider);
+    }
+
+    [Fact]
+    public async Task Stripe_active_projection_enables_managed_hosting_and_allows_create()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        await db.SaveChangesAsync();
+
+        var result = await new OrganizationBillingStore(db).ConsumeAsync(
+            Event("evt-active-managed-hosting", OrganizationSubscriptionState.Active, Now.AddMinutes(1)),
+            Now.AddMinutes(2));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Applied, result.Outcome);
+        Assert.Equal(BillingProviderNames.Stripe, result.Subscription!.Provider);
+        Assert.NotEqual(BillingProviderNames.Internal, result.Subscription.Provider);
+        Assert.True(result.Entitlement!.ManagedHostingEnabled);
+        Assert.Equal(OrganizationSubscriptionState.Active, result.Entitlement.SubscriptionState);
+
+        var decision = await new EfCoreElsaInstanceCommercialGate(db).EvaluateAsync(
+            OrganizationId,
+            ElsaInstanceOperationAction.Create,
+            activeInstanceCount: 0);
+
+        Assert.True(decision.Allowed);
+        Assert.Equal("commercial.allowed", decision.Code);
     }
 
     [Fact]
