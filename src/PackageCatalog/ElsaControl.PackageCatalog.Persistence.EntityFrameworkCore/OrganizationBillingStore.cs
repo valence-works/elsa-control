@@ -440,7 +440,7 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         string? providerSubscriptionReference,
         CancellationToken cancellationToken)
     {
-        if (providerCustomerReference is null && providerSubscriptionReference is null)
+        if (providerCustomerReference is null || providerSubscriptionReference is null)
             return Task.FromResult<OrganizationSubscription?>(null);
 
         return FindHistoricalSubscriptionCoreAsync(
@@ -469,24 +469,12 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             .ThenByDescending(x => x.UpdatedAt)
             .ThenByDescending(x => x.CreatedAt)
             .ThenByDescending(x => x.Id);
-        if (providerSubscriptionReference is not null)
-        {
-            var subscriptionMatches = await candidates
-                .Where(x => x.ProviderSubscriptionReference == providerSubscriptionReference &&
-                            (providerCustomerReference is null || x.ProviderCustomerReference == providerCustomerReference))
-                .Take(2)
-                .ToListAsync(cancellationToken);
-            return subscriptionMatches.Count == 1 ? subscriptionMatches[0] : null;
-        }
-
-        var customerMatches = await candidates
-            .Where(x => x.ProviderCustomerReference == providerCustomerReference)
+        var matches = await candidates
+            .Where(x => x.ProviderCustomerReference == providerCustomerReference &&
+                        x.ProviderSubscriptionReference == providerSubscriptionReference)
             .Take(2)
             .ToListAsync(cancellationToken);
-        if (customerMatches.Count != 1)
-            return null;
-
-        return customerMatches[0];
+        return matches.Count == 1 ? matches[0] : null;
     }
 
     private async Task<bool> CanReplaceRevokedAzureBoundSubscriptionAsync(
