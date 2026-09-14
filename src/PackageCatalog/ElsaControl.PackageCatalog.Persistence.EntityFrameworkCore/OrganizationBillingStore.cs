@@ -460,21 +460,21 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         string? providerSubscriptionReference,
         CancellationToken cancellationToken)
     {
-        var candidates = dbContext.OrganizationSubscriptions
+        var matches = await dbContext.OrganizationSubscriptions
             .Where(x =>
                 x.OrganizationId == organizationId &&
                 x.Provider == provider &&
-                (x.State == OrganizationSubscriptionState.Retained || x.State == OrganizationSubscriptionState.Deleted))
+                (x.State == OrganizationSubscriptionState.Retained || x.State == OrganizationSubscriptionState.Deleted) &&
+                x.ProviderCustomerReference == providerCustomerReference &&
+                x.ProviderSubscriptionReference == providerSubscriptionReference)
             .OrderByDescending(x => x.LastProviderEventId == providerEventId)
             .ThenByDescending(x => x.UpdatedAt)
             .ThenByDescending(x => x.CreatedAt)
             .ThenByDescending(x => x.Id);
-        var matches = await candidates
-            .Where(x => x.ProviderCustomerReference == providerCustomerReference &&
-                        x.ProviderSubscriptionReference == providerSubscriptionReference)
+        var correlatedMatches = await matches
             .Take(2)
             .ToListAsync(cancellationToken);
-        return matches.Count == 1 ? matches[0] : null;
+        return correlatedMatches.Count == 1 ? correlatedMatches[0] : null;
     }
 
     private async Task<bool> CanReplaceRevokedAzureBoundSubscriptionAsync(
