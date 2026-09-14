@@ -221,6 +221,7 @@ public sealed partial class OrganizationBillingStore : IOrganizationAzureBoundEn
                 entitlement,
                 now);
 
+        subscription.EarlyDeletionRequestedAt ??= now;
         OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Deleted, now, advanceLifecycleVersion: true);
         subscription.UpdatedAt = now;
         entitlement = await ProjectEntitlementAsync(subscription, now, cancellationToken);

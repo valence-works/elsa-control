@@ -446,6 +446,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
                       subscription.EarlyDeletionRequestedAt is not null) &&
                     !(originalState == OrganizationSubscriptionState.Active &&
                       subscription.State == OrganizationSubscriptionState.Deleted &&
+                      subscription.EarlyDeletionRequestedAt is not null &&
                       string.Equals(subscription.Provider, BillingProviderNames.AzureBound, StringComparison.Ordinal)))
                     throw new InvalidOperationException("Subscription state transition is not allowed.");
                 var originalLifecycleVersion = entry.Property<int>(nameof(OrganizationSubscription.LifecycleVersion)).OriginalValue;

@@ -203,7 +203,9 @@ public sealed class OrganizationAzureBoundEntitlementPersistenceTests : IAsyncLi
             .OrderBy(x => x.Provider)
             .ToListAsync();
         Assert.Equal(2, subscriptions.Count);
-        Assert.Equal(OrganizationSubscriptionState.Deleted, Assert.Single(subscriptions, x => x.Provider == BillingProviderNames.AzureBound).State);
+        var priorAzureBound = Assert.Single(subscriptions, x => x.Provider == BillingProviderNames.AzureBound);
+        Assert.Equal(OrganizationSubscriptionState.Deleted, priorAzureBound.State);
+        Assert.Equal(Now.AddHours(1), priorAzureBound.EarlyDeletionRequestedAt);
     }
 
     [Fact]
