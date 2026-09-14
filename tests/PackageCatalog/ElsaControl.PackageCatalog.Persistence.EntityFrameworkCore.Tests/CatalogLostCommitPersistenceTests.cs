@@ -123,13 +123,24 @@ public sealed class CatalogLostCommitPersistenceTests
     {
         await using var connection = NewConnection();
         await connection.OpenAsync();
+        Guid runId;
         await using (var setup = await CreateDatabaseAsync(connection))
         {
-            setup.SyncRuns.Add(new SyncRun { Status = SyncRunStatus.Running, StartedAt = Start.AddHours(-1) });
+            var run = new SyncRun { Status = SyncRunStatus.Running, StartedAt = Start.AddHours(-1) };
+            setup.SyncRuns.Add(run);
             await setup.SaveChangesAsync();
+            runId = run.Id;
         }
 
-        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = new CatalogDbContext(PlainOptions(connection));
+            Assert.Equal(1, await followUp.SyncRuns.Where(x => x.Id == runId)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(x => x.Status, SyncRunStatus.Completed)
+                    .SetProperty(x => x.CompletedAt, Start.AddMinutes(2))
+                    .SetProperty(x => x.Error, (string?)null), cancellationToken));
+        });
         await using (var db = new CatalogDbContext(LostAckOptions(connection, acknowledgement)))
         {
             var result = await new SyncRunStore(db).ReconcileInterruptedRunsAsync(Start, Start.AddMinutes(1), "recovered");
@@ -137,7 +148,10 @@ public sealed class CatalogLostCommitPersistenceTests
         }
 
         await using var verify = new CatalogDbContext(PlainOptions(connection));
-        Assert.Equal(1, await verify.SyncRuns.CountAsync(x => x.Status == SyncRunStatus.Failed && x.Error == "recovered"));
+        Assert.Equal(1, acknowledgement.Committed);
+        Assert.Equal(1, await verify.SyncRuns.CountAsync(x =>
+            x.Id == runId && x.Status == SyncRunStatus.Completed && x.CompletedAt == Start.AddMinutes(2) && x.Error == null));
+        Assert.Equal(1, await verify.SyncRunReconciliationEvents.CountAsync());
     }
 
     [Fact]

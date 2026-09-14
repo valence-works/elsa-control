@@ -1,5 +1,6 @@
 using ElsaControl.PackageCatalog.Core.Packages;
 using ElsaControl.PackageCatalog.Core.Sync;
+using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.EntityFrameworkCore;
 using System.Data;
 
@@ -50,37 +51,52 @@ public sealed class SyncRunStore(CatalogDbContext dbContext) : ISyncRunStore
     public async Task<int> ReconcileInterruptedRunsAsync(DateTimeOffset processStartedAt, DateTimeOffset completedAt, string message, CancellationToken cancellationToken = default)
     {
         List<Guid> reconciledRunIds = [];
+        var reconciliationEventId = Guid.NewGuid();
+        var processStartedAtUtc = processStartedAt.ToUniversalTime();
+        var completedAtUtc = completedAt.ToUniversalTime();
         return await dbContext.ExecuteInTransactionAsync(
             IsolationLevel.Serializable,
             async () =>
             {
                 reconciledRunIds = await dbContext.SyncRuns
-                    .Where(x => x.Status == SyncRunStatus.Running && x.StartedAt < processStartedAt)
+                    .Where(x => x.Status == SyncRunStatus.Running && x.StartedAt < processStartedAtUtc)
                     .Select(x => x.Id)
                     .ToListAsync(cancellationToken);
-                return reconciledRunIds.Count == 0
-                    ? 0
-                    : await dbContext.SyncRuns
-                        .Where(x => reconciledRunIds.Contains(x.Id))
-                        .ExecuteUpdateAsync(setters => setters
-                            .SetProperty(x => x.Status, SyncRunStatus.Failed)
-                            .SetProperty(x => x.CompletedAt, completedAt)
-                            .SetProperty(x => x.Error, message), cancellationToken);
+                if (reconciledRunIds.Count == 0)
+                    return 0;
+
+                var reconciledCount = await dbContext.SyncRuns
+                    .Where(x => reconciledRunIds.Contains(x.Id) &&
+                                x.Status == SyncRunStatus.Running &&
+                                x.StartedAt < processStartedAtUtc)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(x => x.Status, SyncRunStatus.Failed)
+                        .SetProperty(x => x.CompletedAt, completedAtUtc)
+                        .SetProperty(x => x.Error, message), cancellationToken);
+                if (reconciledCount == 0)
+                    return 0;
+
+                await dbContext.SyncRunReconciliationEvents.AddAsync(new SyncRunReconciliationEventEntity
+                {
+                    Id = reconciliationEventId,
+                    ReconciledCount = reconciledCount,
+                    ProcessStartedAt = processStartedAtUtc,
+                    CompletedAt = completedAtUtc
+                }, cancellationToken);
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return reconciledCount;
             },
             async (result, verificationCancellationToken) =>
             {
-                if (reconciledRunIds.Count == 0)
+                if (result == 0)
                     return true;
 
-                var persisted = await dbContext.SyncRuns.AsNoTracking()
-                    .Where(x => reconciledRunIds.Contains(x.Id))
-                    .Select(x => new { x.Id, x.Status, x.CompletedAt, x.Error })
-                    .ToDictionaryAsync(x => x.Id, verificationCancellationToken);
-                return reconciledRunIds.All(id =>
-                    persisted.TryGetValue(id, out var run) &&
-                    run.Status == SyncRunStatus.Failed &&
-                    run.CompletedAt == completedAt &&
-                    run.Error == message);
+                return await dbContext.SyncRunReconciliationEvents.AsNoTracking().AnyAsync(x =>
+                    x.Id == reconciliationEventId &&
+                    x.ReconciledCount == result &&
+                    x.ProcessStartedAt == processStartedAtUtc &&
+                    x.CompletedAt == completedAtUtc,
+                    verificationCancellationToken);
             },
             cancellationToken);
     }

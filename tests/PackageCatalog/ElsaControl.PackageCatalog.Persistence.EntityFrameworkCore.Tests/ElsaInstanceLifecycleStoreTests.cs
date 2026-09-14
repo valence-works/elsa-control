@@ -1062,7 +1062,15 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             await setup.SaveChangesAsync();
         }
 
-        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = CreateMigratedContext(connection);
+            Assert.Equal(1, await followUp.ElsaInstanceOperations
+                .Where(x => x.Id == operationId)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(x => x.State, ElsaInstanceOperationState.Running)
+                    .SetProperty(x => x.UpdatedAt, Now.AddMinutes(2)), cancellationToken));
+        });
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
             .UseRetryingSqlite(connection,
                 sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
@@ -1079,7 +1087,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal("run.reservation.conflict", result.FailureCode);
         Assert.Equal(1, acknowledgement.Committed);
         var operation = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == operationId);
-        Assert.Equal(ElsaInstanceOperationState.Failed, operation.State);
+        Assert.Equal(ElsaInstanceOperationState.Running, operation.State);
         Assert.Equal(1, await db.DeploymentRuns.CountAsync(x => x.EnvironmentId == environmentId));
         Assert.Equal(1, await db.ElsaInstanceAuditEvents.CountAsync(x =>
             x.OperationId == operationId && x.EventType == "lifecycle.failed"));
@@ -1822,7 +1830,15 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var entitlement = await setup.OrganizationEntitlementSnapshots.SingleAsync(x => x.OrganizationId == workspace.OrganizationId);
         entitlement.SubscriptionState = OrganizationSubscriptionState.Constrained;
         await setup.SaveChangesAsync();
-        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = CreateMigratedContext(connection);
+            Assert.Equal(1, await followUp.ElsaInstanceOperations
+                .Where(x => x.Id == accepted.Operation.Id)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(x => x.State, ElsaInstanceOperationState.RecoveryRequired)
+                    .SetProperty(x => x.UpdatedAt, Now.AddMinutes(2)), cancellationToken));
+        });
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
             .UseRetryingSqlite(connection,
                 sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
@@ -1839,7 +1855,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(ElsaInstanceCommercialOperation.LifecycleConstrained, decision.Code);
         Assert.Equal(1, acknowledgement.Committed);
         await using var verify = new CatalogDbContext(options);
-        Assert.Equal(ElsaInstanceOperationState.EntitlementHeld,
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired,
             (await verify.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id)).State);
         Assert.Equal(1, await verify.ElsaInstanceAuditEvents.CountAsync(x =>
             x.OperationId == accepted.Operation.Id && x.EventType == "lifecycle.entitlement-held"));

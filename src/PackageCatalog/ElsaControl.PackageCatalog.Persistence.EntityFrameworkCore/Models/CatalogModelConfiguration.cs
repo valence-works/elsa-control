@@ -132,6 +132,18 @@ internal sealed class SyncRunItemConfiguration : IEntityTypeConfiguration<SyncRu
     }
 }
 
+internal sealed class SyncRunReconciliationEventConfiguration : IEntityTypeConfiguration<SyncRunReconciliationEventEntity>
+{
+    public void Configure(EntityTypeBuilder<SyncRunReconciliationEventEntity> builder)
+    {
+        builder.HasKey(x => x.Id);
+        builder.Property(x => x.ProcessStartedAt)
+            .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        builder.Property(x => x.CompletedAt)
+            .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+    }
+}
+
 internal sealed class AccountConfiguration : IEntityTypeConfiguration<Account>
 {
     public void Configure(EntityTypeBuilder<Account> builder)

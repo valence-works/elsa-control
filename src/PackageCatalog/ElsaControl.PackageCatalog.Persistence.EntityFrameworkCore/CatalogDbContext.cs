@@ -28,6 +28,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     public DbSet<ApprovalRecord> ApprovalRecords => Set<ApprovalRecord>();
     public DbSet<SyncRun> SyncRuns => Set<SyncRun>();
     public DbSet<SyncRunItem> SyncRunItems => Set<SyncRunItem>();
+    internal DbSet<Models.SyncRunReconciliationEventEntity> SyncRunReconciliationEvents => Set<Models.SyncRunReconciliationEventEntity>();
     public DbSet<Account> Accounts => Set<Account>();
     public DbSet<ExternalIdentity> ExternalIdentities => Set<ExternalIdentity>();
     public DbSet<Organization> Organizations => Set<Organization>();
@@ -117,6 +118,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         modelBuilder.ApplyConfiguration(new Models.ApprovalRecordConfiguration());
         modelBuilder.ApplyConfiguration(new Models.SyncRunConfiguration());
         modelBuilder.ApplyConfiguration(new Models.SyncRunItemConfiguration());
+        modelBuilder.ApplyConfiguration(new Models.SyncRunReconciliationEventConfiguration());
         modelBuilder.ApplyConfiguration(new Models.AccountConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ExternalIdentityConfiguration());
         modelBuilder.ApplyConfiguration(new Models.OrganizationConfiguration());

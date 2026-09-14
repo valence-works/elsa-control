@@ -1931,8 +1931,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         dbContext.ChangeTracker.Clear();
         var authorizationNoWrite = false;
         var authorizationEventType = string.Empty;
-        var authorizationExpectedState = ElsaInstanceOperationState.Accepted;
-        string? authorizationExpectedFailureCode = null;
+        string? authorizationDiagnosticCode = null;
+        var authorizationAuditId = Guid.NewGuid();
         var authorizedAtUtc = authorizedAt.ToUniversalTime();
         return await dbContext.ExecuteInTransactionAsync(
             IsolationLevel.Serializable,
@@ -1940,6 +1940,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         {
             authorizationNoWrite = false;
             authorizationEventType = string.Empty;
+            authorizationDiagnosticCode = null;
             var operation = await dbContext.ElsaInstanceOperations.SingleOrDefaultAsync(
                 x => x.Id == operationId && x.WorkspaceId == workspaceId && x.InstanceId == instanceId,
                 cancellationToken);
@@ -1967,16 +1968,16 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     operation.FailureCode = decision.Code;
                     operation.FailureSummary = decision.Summary;
                     operation.UpdatedAt = authorizedAtUtc;
-                    authorizationExpectedState = ElsaInstanceOperationState.EntitlementHeld;
-                    authorizationExpectedFailureCode = decision.Code;
                     authorizationEventType = "lifecycle.entitlement-held";
+                    authorizationDiagnosticCode = decision.Code;
                     var run = operation.DeploymentRunId is { } runId
                         ? await dbContext.DeploymentRuns.SingleOrDefaultAsync(x => x.Id == runId, cancellationToken)
                         : null;
-                    await dbContext.ElsaInstanceAuditEvents.AddAsync(
-                        await CreateAuditEventAsync(instance, operation, instance.ObservedLifecycle, authorizedAt,
+                    var audit = await CreateAuditEventAsync(instance, operation, instance.ObservedLifecycle, authorizedAt,
                             cancellationToken, eventType: "lifecycle.entitlement-held", deploymentRunId: run?.Id,
-                            diagnosticCode: decision.Code, summary: decision.Summary), cancellationToken);
+                            diagnosticCode: decision.Code, summary: decision.Summary);
+                    audit.Id = authorizationAuditId;
+                    await dbContext.ElsaInstanceAuditEvents.AddAsync(audit, cancellationToken);
                     await dbContext.SaveChangesAsync(cancellationToken);
                 }
                 else
@@ -1993,16 +1994,16 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 operation.FailureCode = null;
                 operation.FailureSummary = null;
                 operation.UpdatedAt = authorizedAtUtc;
-                authorizationExpectedState = ElsaInstanceOperationState.Queued;
-                authorizationExpectedFailureCode = null;
                 authorizationEventType = "lifecycle.entitlement-resumed";
+                authorizationDiagnosticCode = "instance.entitlement-restored";
                 var run = operation.DeploymentRunId is { } runId
                     ? await dbContext.DeploymentRuns.SingleOrDefaultAsync(x => x.Id == runId, cancellationToken)
                     : null;
-                await dbContext.ElsaInstanceAuditEvents.AddAsync(
-                    await CreateAuditEventAsync(instance, operation, instance.ObservedLifecycle, authorizedAt,
+                var audit = await CreateAuditEventAsync(instance, operation, instance.ObservedLifecycle, authorizedAt,
                         cancellationToken, eventType: "lifecycle.entitlement-resumed", deploymentRunId: run?.Id,
-                        diagnosticCode: "instance.entitlement-restored", summary: "Provider submission entitlement was restored."), cancellationToken);
+                        diagnosticCode: authorizationDiagnosticCode, summary: "Provider submission entitlement was restored.");
+                audit.Id = authorizationAuditId;
+                await dbContext.ElsaInstanceAuditEvents.AddAsync(audit, cancellationToken);
                 await dbContext.SaveChangesAsync(cancellationToken);
             }
             else
@@ -2016,18 +2017,14 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             {
                 if (authorizationNoWrite)
                     return true;
-                var operation = await dbContext.ElsaInstanceOperations.AsNoTracking()
-                    .SingleOrDefaultAsync(x => x.Id == operationId && x.WorkspaceId == workspaceId &&
-                                               x.InstanceId == instanceId,
-                        verificationCancellationToken);
-                if (operation is null || operation.State != authorizationExpectedState ||
-                    operation.FailureCode != authorizationExpectedFailureCode || operation.UpdatedAt != authorizedAtUtc)
-                    return false;
-                var diagnosticCode = authorizationEventType == "lifecycle.entitlement-resumed"
-                    ? "instance.entitlement-restored" : authorizationExpectedFailureCode;
                 return await dbContext.ElsaInstanceAuditEvents.AsNoTracking().AnyAsync(x =>
-                    x.OperationId == operationId && x.EventType == authorizationEventType &&
-                    x.DiagnosticCode == diagnosticCode && x.OccurredAt == authorizedAtUtc,
+                    x.Id == authorizationAuditId &&
+                    x.WorkspaceId == workspaceId &&
+                    x.InstanceId == instanceId &&
+                    x.OperationId == operationId &&
+                    x.EventType == authorizationEventType &&
+                    x.DiagnosticCode == authorizationDiagnosticCode &&
+                    x.OccurredAt == authorizedAtUtc,
                     verificationCancellationToken);
             },
             cancellationToken);
@@ -3030,7 +3027,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         ElsaInstanceOperationEntity operation,
         ElsaInstanceEntity instance,
         DateTimeOffset occurredAt,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Guid? auditId = null)
     {
         var priorObservedLifecycle = instance.ObservedLifecycle;
         operation.State = ElsaInstanceOperationState.Failed;
@@ -3042,15 +3040,15 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         operation.LeaseExpiresAt = null;
         operation.HeartbeatAt = null;
         operation.UpdatedAt = occurredAt.ToUniversalTime();
-        await dbContext.ElsaInstanceAuditEvents.AddAsync(
-            await CreateAuditEventAsync(
+        var audit = await CreateAuditEventAsync(
                 instance,
                 operation,
                 priorObservedLifecycle,
                 occurredAt,
                 cancellationToken,
-                eventType: "lifecycle.failed"),
-            cancellationToken);
+                eventType: "lifecycle.failed");
+        audit.Id = auditId ?? audit.Id;
+        await dbContext.ElsaInstanceAuditEvents.AddAsync(audit, cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         return new ElsaInstanceLifecycleWorkerResult(
             ElsaInstanceLifecycleWorkerOutcome.Conflict,
@@ -3083,6 +3081,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         var reservationNoWrite = false;
         var reservationConflictCommitted = false;
         var committedAt = commit.CommittedAt.ToUniversalTime();
+        var reservationAuditId = Guid.NewGuid();
         return dbContext.ExecuteInTransactionAsync(
             IsolationLevel.Serializable,
             async () =>
@@ -3123,7 +3122,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 throw Conflict("Lifecycle work item is no longer available.");
 
             var conflict = await CompleteReservationConflictAsync(
-                operation, instance, committedAt, cancellationToken);
+                operation, instance, committedAt, cancellationToken, reservationAuditId);
             reservationConflictCommitted = true;
             return conflict;
         },
@@ -3133,17 +3132,12 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     return true;
                 if (!reservationConflictCommitted)
                     return false;
-                var operation = await dbContext.ElsaInstanceOperations.AsNoTracking()
-                    .SingleOrDefaultAsync(x => x.Id == commit.OperationId && x.InstanceId == commit.InstanceId,
-                        verificationCancellationToken);
-                if (operation is null || operation.State != ElsaInstanceOperationState.Failed ||
-                    operation.FailureCode != "run.reservation.conflict" || operation.CompletedAt != committedAt ||
-                    operation.UpdatedAt != committedAt || operation.WorkerId is not null ||
-                    operation.LeaseTokenHash is not null || operation.LeaseExpiresAt is not null ||
-                    operation.HeartbeatAt is not null)
-                    return false;
                 return await dbContext.ElsaInstanceAuditEvents.AsNoTracking().AnyAsync(x =>
-                    x.OperationId == commit.OperationId && x.EventType == "lifecycle.failed" &&
+                    x.Id == reservationAuditId &&
+                    x.WorkspaceId == commit.WorkspaceId &&
+                    x.InstanceId == commit.InstanceId &&
+                    x.OperationId == commit.OperationId &&
+                    x.EventType == "lifecycle.failed" &&
                     x.OccurredAt == committedAt,
                     verificationCancellationToken);
             },

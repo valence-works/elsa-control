@@ -28,6 +28,7 @@ internal static class CatalogTableTriggers
         ["ElsaInstances"] = ["TR_ElsaInstances_NoDelete"],
         ["ManagedElsaHandoffAuditEvents"] = ["TR_ManagedElsaHandoffAuditEvents_AppendOnly"],
         ["ManagedElsaHandoffReplayConsumptions"] = ["TR_ManagedElsaHandoffReplayConsumptions_AppendOnly"],
+        ["SyncRunReconciliationEvents"] = ["TR_SyncRunReconciliationEvents_AppendOnly"],
     };
 
     private static readonly IReadOnlyDictionary<string, string[]> Sqlite = new Dictionary<string, string[]>(StringComparer.Ordinal)
@@ -47,6 +48,7 @@ internal static class CatalogTableTriggers
         ["ElsaInstances"] = ["TR_ElsaInstances_NoDelete"],
         ["ManagedElsaHandoffAuditEvents"] = ["TR_ManagedElsaHandoffAuditEvents_AppendOnly_Delete", "TR_ManagedElsaHandoffAuditEvents_AppendOnly_Update"],
         ["ManagedElsaHandoffReplayConsumptions"] = ["TR_ManagedElsaHandoffReplayConsumptions_AppendOnly_Update"],
+        ["SyncRunReconciliationEvents"] = ["TR_SyncRunReconciliationEvents_AppendOnly_Delete", "TR_SyncRunReconciliationEvents_AppendOnly_Update"],
     };
 
     public static void Declare(ModelBuilder modelBuilder, string? providerName)
