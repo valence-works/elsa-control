@@ -1,5 +1,6 @@
 using ElsaControl.PackageCatalog.Core.Packages;
 using ElsaControl.PackageCatalog.Core.Sync;
+using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.EntityFrameworkCore;
 using System.Data;
 
@@ -47,15 +48,58 @@ public sealed class SyncRunStore(CatalogDbContext dbContext) : ISyncRunStore
         return versions.ToHashSet();
     }
 
-    public Task<int> ReconcileInterruptedRunsAsync(DateTimeOffset processStartedAt, DateTimeOffset completedAt, string message, CancellationToken cancellationToken = default) =>
-        dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, () =>
-            dbContext.SyncRuns
-                .Where(x => x.Status == SyncRunStatus.Running && x.StartedAt < processStartedAt)
-                .ExecuteUpdateAsync(setters => setters
-                    .SetProperty(x => x.Status, SyncRunStatus.Failed)
-                    .SetProperty(x => x.CompletedAt, completedAt)
-                    .SetProperty(x => x.Error, message), cancellationToken),
+    public async Task<int> ReconcileInterruptedRunsAsync(DateTimeOffset processStartedAt, DateTimeOffset completedAt, string message, CancellationToken cancellationToken = default)
+    {
+        List<Guid> reconciledRunIds = [];
+        var reconciliationEventId = Guid.NewGuid();
+        var processStartedAtUtc = processStartedAt.ToUniversalTime();
+        var completedAtUtc = completedAt.ToUniversalTime();
+        return await dbContext.ExecuteInTransactionAsync(
+            IsolationLevel.Serializable,
+            async () =>
+            {
+                reconciledRunIds = await dbContext.SyncRuns
+                    .Where(x => x.Status == SyncRunStatus.Running && x.StartedAt < processStartedAtUtc)
+                    .Select(x => x.Id)
+                    .ToListAsync(cancellationToken);
+                if (reconciledRunIds.Count == 0)
+                    return 0;
+
+                var reconciledCount = await dbContext.SyncRuns
+                    .Where(x => reconciledRunIds.Contains(x.Id) &&
+                                x.Status == SyncRunStatus.Running &&
+                                x.StartedAt < processStartedAtUtc)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(x => x.Status, SyncRunStatus.Failed)
+                        .SetProperty(x => x.CompletedAt, completedAtUtc)
+                        .SetProperty(x => x.Error, message), cancellationToken);
+                if (reconciledCount == 0)
+                    return 0;
+
+                await dbContext.SyncRunReconciliationEvents.AddAsync(new SyncRunReconciliationEventEntity
+                {
+                    Id = reconciliationEventId,
+                    ReconciledCount = reconciledCount,
+                    ProcessStartedAt = processStartedAtUtc,
+                    CompletedAt = completedAtUtc
+                }, cancellationToken);
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return reconciledCount;
+            },
+            async (result, verificationCancellationToken) =>
+            {
+                if (result == 0)
+                    return true;
+
+                return await dbContext.SyncRunReconciliationEvents.AsNoTracking().AnyAsync(x =>
+                    x.Id == reconciliationEventId &&
+                    x.ReconciledCount == result &&
+                    x.ProcessStartedAt == processStartedAtUtc &&
+                    x.CompletedAt == completedAtUtc,
+                    verificationCancellationToken);
+            },
             cancellationToken);
+    }
 
     public async Task<IReadOnlyDictionary<Guid, SyncRunListMetadata>> GetListMetadataAsync(IReadOnlyCollection<Guid> runIds, CancellationToken cancellationToken = default)
     {
@@ -161,9 +205,10 @@ public sealed class SyncRunStore(CatalogDbContext dbContext) : ISyncRunStore
     public async Task<SyncRunCleanupResult> DeleteBeforeAsync(DateTimeOffset completedBefore, IReadOnlyCollection<SyncRunStatus> terminalStatuses, CancellationToken cancellationToken = default)
     {
         var terminalStatusValues = terminalStatuses.ToArray();
+        List<Guid> deletedRunIds = [];
         return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
         {
-            var deletedRunIds = await EligibleRuns(completedBefore, terminalStatusValues)
+            deletedRunIds = await EligibleRuns(completedBefore, terminalStatusValues)
                 .Select(x => x.Id)
                 .ToListAsync(cancellationToken);
             var excludedRunCount = await CountProtectedRunsAsync(completedBefore, terminalStatusValues, cancellationToken);
@@ -177,7 +222,16 @@ public sealed class SyncRunStore(CatalogDbContext dbContext) : ISyncRunStore
                 await EligibleRuns(completedBefore, terminalStatusValues).ExecuteDeleteAsync(cancellationToken);
 
             return new SyncRunCleanupResult(deletedRunIds.Count, deletedItemCount, excludedRunCount, 0, completedBefore, deletedRunIds);
-        }, cancellationToken);
+        },
+            async (result, verificationCancellationToken) =>
+            {
+                if (deletedRunIds.Count == 0)
+                    return true;
+
+                return !await dbContext.SyncRuns.AsNoTracking().AnyAsync(x => deletedRunIds.Contains(x.Id), verificationCancellationToken) &&
+                    !await dbContext.SyncRunItems.AsNoTracking().AnyAsync(x => deletedRunIds.Contains(x.SyncRunId), verificationCancellationToken);
+            },
+            cancellationToken);
     }
 
     public async Task AddAsync(SyncRun run, CancellationToken cancellationToken = default) =>

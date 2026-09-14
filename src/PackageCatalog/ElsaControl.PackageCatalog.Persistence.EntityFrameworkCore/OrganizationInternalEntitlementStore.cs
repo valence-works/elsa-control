@@ -46,7 +46,23 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
         ArgumentNullException.ThrowIfNull(grant);
         now = RequireUtc(now, nameof(now));
         OrganizationInternalEntitlementPolicy.EnsureValid(grant.Terms, now);
-        return InternalEntitlementCoreAsync(() => GrantInternalEntitlementTransactionAsync(grant, now, cancellationToken), cancellationToken);
+        var auditId = Guid.Empty;
+        return InternalEntitlementCoreAsync(
+            () => GrantInternalEntitlementTransactionAsync(grant, now, cancellationToken, id => auditId = id),
+            async (result, verificationCancellationToken) =>
+            {
+                if (result.Outcome is not (OrganizationInternalEntitlementOutcome.Granted or OrganizationInternalEntitlementOutcome.Regranted))
+                    return true;
+
+                return auditId != Guid.Empty &&
+                    await dbContext.OrganizationAuditRecords.AsNoTracking().AnyAsync(x =>
+                        x.Id == auditId &&
+                        x.OrganizationId == grant.OrganizationId &&
+                        x.Action == OrganizationAuditAction.EntitlementChanged &&
+                        x.TargetType == InternalEntitlementTargetType,
+                        verificationCancellationToken);
+            },
+            cancellationToken);
     }
 
     public Task<OrganizationInternalEntitlementResult> RevokeInternalEntitlementAsync(
@@ -56,11 +72,28 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
         CancellationToken cancellationToken = default)
     {
         now = RequireUtc(now, nameof(now));
-        return InternalEntitlementCoreAsync(() => RevokeInternalEntitlementTransactionAsync(organizationId, operatorSubject, now, cancellationToken), cancellationToken);
+        var auditId = Guid.Empty;
+        return InternalEntitlementCoreAsync(
+            () => RevokeInternalEntitlementTransactionAsync(organizationId, operatorSubject, now, cancellationToken, id => auditId = id),
+            async (result, verificationCancellationToken) =>
+            {
+                if (result.Outcome != OrganizationInternalEntitlementOutcome.Revoked)
+                    return true;
+
+                return auditId != Guid.Empty &&
+                    await dbContext.OrganizationAuditRecords.AsNoTracking().AnyAsync(x =>
+                        x.Id == auditId &&
+                        x.OrganizationId == organizationId &&
+                        x.Action == OrganizationAuditAction.EntitlementChanged &&
+                        x.TargetType == InternalEntitlementTargetType,
+                        verificationCancellationToken);
+            },
+            cancellationToken);
     }
 
     private async Task<OrganizationInternalEntitlementResult> InternalEntitlementCoreAsync(
         Func<Task<OrganizationInternalEntitlementResult>> transaction,
+        Func<OrganizationInternalEntitlementResult, CancellationToken, Task<bool>> verifySucceeded,
         CancellationToken cancellationToken,
         int attempt = 0)
     {
@@ -68,21 +101,22 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
         {
             // Every attempt decides from committed rows only: the helper clears the change
             // tracker and opens a new serializable transaction for each strategy attempt.
-            return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, transaction, cancellationToken);
+            return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, transaction, verifySucceeded, cancellationToken);
         }
         catch (Exception exception) when (attempt < 2 && IsRetryableConflict(exception))
         {
             // A concurrent grant or provider checkout committed first. Re-run the
             // whole decision so it observes that commit (re-grant or refusal).
             await Task.Delay(TimeSpan.FromMilliseconds(20 * (attempt + 1)), cancellationToken);
-            return await InternalEntitlementCoreAsync(transaction, cancellationToken, attempt + 1);
+            return await InternalEntitlementCoreAsync(transaction, verifySucceeded, cancellationToken, attempt + 1);
         }
     }
 
     private async Task<OrganizationInternalEntitlementResult> GrantInternalEntitlementTransactionAsync(
         OrganizationInternalEntitlementGrant grant,
         DateTimeOffset now,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<Guid> auditIdSink)
     {
         var (exists, subscription, entitlement) = await LoadInternalEntitlementAsync(grant.OrganizationId, cancellationToken);
         OrganizationInternalEntitlementOutcome? refusal =
@@ -110,13 +144,13 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
         entitlement.MaxInstances = grant.Terms.MaxInstances;
         entitlement.ManagedHostingExpiresAt = grant.Terms.ExpiresAt.ToUniversalTime();
         var verb = outcome == OrganizationInternalEntitlementOutcome.Granted ? "granted" : "re-granted";
-        AddInternalEntitlementAudit(
+        auditIdSink(AddInternalEntitlementAudit(
             subscription,
             grant.OperatorSubject,
             string.Create(
                 CultureInfo.InvariantCulture,
                 $"Internal managed-hosting entitlement {verb} (max instances {grant.Terms.MaxInstances}, expires {entitlement.ManagedHostingExpiresAt.Value.UtcDateTime:O}). Reason: {grant.Terms.Reason.Trim()}"),
-            now);
+            now));
         await dbContext.SaveChangesAsync(cancellationToken);
         return new(outcome, InternalStatus(grant.OrganizationId, subscription, entitlement, now));
     }
@@ -125,7 +159,8 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
         Guid organizationId,
         string? operatorSubject,
         DateTimeOffset now,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<Guid> auditIdSink)
     {
         var (exists, subscription, entitlement) = await LoadInternalEntitlementAsync(organizationId, cancellationToken);
         OrganizationInternalEntitlementOutcome? refusal =
@@ -143,7 +178,7 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
         entitlement.ManagedHostingExpiresAt = entitlement.ManagedHostingExpiresAt is { } expiresAt && expiresAt < now ? expiresAt : now;
         entitlement.SyncedAt = now;
         entitlement.UpdatedAt = now;
-        AddInternalEntitlementAudit(subscription!, operatorSubject, "Internal managed-hosting entitlement revoked.", now);
+        auditIdSink(AddInternalEntitlementAudit(subscription!, operatorSubject, "Internal managed-hosting entitlement revoked.", now));
         await dbContext.SaveChangesAsync(cancellationToken);
         return new(OrganizationInternalEntitlementOutcome.Revoked, InternalStatus(organizationId, subscription, entitlement, now));
     }
@@ -198,12 +233,13 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
         return new(organizationId, state, entitlement?.MaxInstances, entitlement?.ManagedHostingExpiresAt, entitlement?.UpdatedAt);
     }
 
-    private void AddInternalEntitlementAudit(
+    private Guid AddInternalEntitlementAudit(
         OrganizationSubscription subscription,
         string? operatorSubject,
         string summary,
-        DateTimeOffset createdAt) =>
-        dbContext.OrganizationAuditRecords.Add(new OrganizationAuditRecord
+        DateTimeOffset createdAt)
+    {
+        var audit = new OrganizationAuditRecord
         {
             OrganizationId = subscription.OrganizationId,
             OperatorSubject = OrganizationInternalEntitlementPolicy.FingerprintOperatorSubject(operatorSubject),
@@ -212,5 +248,8 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
             TargetId = subscription.Id.ToString("D"),
             Summary = summary,
             CreatedAt = createdAt
-        });
+        };
+        dbContext.OrganizationAuditRecords.Add(audit);
+        return audit.Id;
+    }
 }

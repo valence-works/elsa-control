@@ -23,9 +23,13 @@ public sealed class OrganizationAzureSubscriptionBindStore(CatalogDbContext dbCo
 
     public async Task<OrganizationAzureSubscriptionBindResult> CreatePendingAsync(
         OrganizationAzureSubscriptionBind bind,
-        CancellationToken cancellationToken = default) =>
-        await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+        CancellationToken cancellationToken = default)
+    {
+        var verificationCreated = false;
+        var auditId = Guid.NewGuid();
+        return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
         {
+            verificationCreated = false;
             if (!await dbContext.Organizations.AsNoTracking().AnyAsync(x => x.Id == bind.OrganizationId, cancellationToken))
                 return OrganizationAzureSubscriptionBindResult.Denied(OrganizationAzureSubscriptionBindFailure.OrganizationNotFound);
 
@@ -53,7 +57,6 @@ public sealed class OrganizationAzureSubscriptionBindStore(CatalogDbContext dbCo
             try
             {
                 await dbContext.SaveChangesAsync(cancellationToken);
-                return OrganizationAzureSubscriptionBindResult.Success(bind);
             }
             catch (DbUpdateException)
             {
@@ -61,13 +64,44 @@ public sealed class OrganizationAzureSubscriptionBindStore(CatalogDbContext dbCo
                 dbContext.Entry(bind).State = EntityState.Detached;
                 return OrganizationAzureSubscriptionBindResult.Denied(OrganizationAzureSubscriptionBindFailure.BindInFlight);
             }
-        }, cancellationToken);
+
+            dbContext.OrganizationAuditRecords.Add(new OrganizationAuditRecord
+            {
+                Id = auditId,
+                OrganizationId = bind.OrganizationId,
+                ActorAccountId = bind.CreatedByAccountId,
+                Action = OrganizationAuditAction.AzureSubscriptionBindChanged,
+                TargetType = "azure-subscription-bind",
+                TargetId = bind.Id.ToString("D"),
+                Summary = "Azure subscription bind was created pending consent.",
+                CreatedAt = bind.CreatedAt
+            });
+            await dbContext.SaveChangesAsync(cancellationToken);
+            verificationCreated = true;
+            return OrganizationAzureSubscriptionBindResult.Success(bind);
+        },
+            (_, verificationCancellationToken) =>
+                !verificationCreated
+                    ? Task.FromResult(true)
+                    : dbContext.OrganizationAuditRecords.AsNoTracking().AnyAsync(x =>
+                        x.Id == auditId &&
+                        x.OrganizationId == bind.OrganizationId &&
+                        x.Action == OrganizationAuditAction.AzureSubscriptionBindChanged &&
+                        x.TargetType == "azure-subscription-bind" &&
+                        x.TargetId == bind.Id.ToString("D"),
+                        verificationCancellationToken),
+            cancellationToken);
+    }
 
     public async Task<OrganizationAzureSubscriptionBindResult> TransitionAsync(
         OrganizationAzureSubscriptionBindTransition transition,
-        CancellationToken cancellationToken = default) =>
-        await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+        CancellationToken cancellationToken = default)
+    {
+        var verificationTransitioned = false;
+        var auditId = Guid.NewGuid();
+        return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
         {
+            verificationTransitioned = false;
             var bind = await dbContext.OrganizationAzureSubscriptionBinds
                 .SingleOrDefaultAsync(x => x.OrganizationId == transition.OrganizationId && x.Id == transition.BindId, cancellationToken);
             if (bind is null)
@@ -87,7 +121,30 @@ public sealed class OrganizationAzureSubscriptionBindStore(CatalogDbContext dbCo
                 bind.RegistrationDefinitionFingerprint = transition.RegistrationDefinitionFingerprint;
             if (transition.NewState == OrganizationAzureSubscriptionBindState.Unbound)
                 bind.UnbindReason = transition.UnbindReason;
+            dbContext.OrganizationAuditRecords.Add(new OrganizationAuditRecord
+            {
+                Id = auditId,
+                OrganizationId = transition.OrganizationId,
+                Action = OrganizationAuditAction.AzureSubscriptionBindChanged,
+                TargetType = "azure-subscription-bind",
+                TargetId = transition.BindId.ToString("D"),
+                Summary = $"Azure subscription bind transitioned from {transition.ExpectedState} to {transition.NewState}.",
+                CreatedAt = transition.ChangedAt.ToUniversalTime()
+            });
             await dbContext.SaveChangesAsync(cancellationToken);
+            verificationTransitioned = true;
             return OrganizationAzureSubscriptionBindResult.Success(bind);
-        }, cancellationToken);
+        },
+            (_, verificationCancellationToken) =>
+                !verificationTransitioned
+                    ? Task.FromResult(true)
+                    : dbContext.OrganizationAuditRecords.AsNoTracking().AnyAsync(x =>
+                        x.Id == auditId &&
+                        x.OrganizationId == transition.OrganizationId &&
+                        x.Action == OrganizationAuditAction.AzureSubscriptionBindChanged &&
+                        x.TargetType == "azure-subscription-bind" &&
+                        x.TargetId == transition.BindId.ToString("D"),
+                        verificationCancellationToken),
+            cancellationToken);
+    }
 }

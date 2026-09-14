@@ -92,6 +92,7 @@ public sealed class CatalogDbContextTransactionExtensionsTests : IAsyncLifetime
         await using var db = CreateContext(isTransient: exception => exception is TransientTestException);
         var attempts = 0;
         var trackedAtAttemptStart = new List<int>();
+        var verifications = 0;
 
         var committed = await db.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
         {
@@ -109,6 +110,10 @@ public sealed class CatalogDbContextTransactionExtensionsTests : IAsyncLifetime
             }
 
             return organization.Name;
+        }, (_, _) =>
+        {
+            verifications++;
+            return Task.FromResult(false);
         }, CancellationToken.None);
 
         Assert.Equal("Attempt 2", committed);
@@ -116,6 +121,39 @@ public sealed class CatalogDbContextTransactionExtensionsTests : IAsyncLifetime
         Assert.Equal(["Attempt 2"], await PersistedOrganizationNamesAsync());
         Assert.Equal(2, _transactions.Started.Count);
         Assert.Equal(1, _transactions.Committed);
+        Assert.Equal(0, verifications);
+    }
+
+    [Fact]
+    public async Task Lost_commit_acknowledgement_returns_the_committed_result_without_rerunning_the_unit()
+    {
+        var acknowledgement = new LostCommitAcknowledgementInterceptor(int.MaxValue);
+        await using var db = CreateContext(
+            isTransient: exception => exception is LostCommitAcknowledgementException,
+            acknowledgement);
+        var attempts = 0;
+        var verifications = 0;
+
+        var result = await db.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+        {
+            attempts++;
+            db.Organizations.Add(new Organization { Name = "Committed once" });
+            await db.SaveChangesAsync();
+            return "committed result";
+        }, async (committedResult, cancellationToken) =>
+        {
+            verifications++;
+            Assert.Equal("committed result", committedResult);
+            return await db.Organizations
+                .AsNoTracking()
+                .AnyAsync(x => x.Name == "Committed once", cancellationToken);
+        }, CancellationToken.None);
+
+        Assert.Equal("committed result", result);
+        Assert.Equal(1, attempts);
+        Assert.Equal(1, verifications);
+        Assert.Equal(1, acknowledgement.Committed);
+        Assert.Equal(["Committed once"], await PersistedOrganizationNamesAsync());
     }
 
     [Fact]
@@ -203,11 +241,18 @@ public sealed class CatalogDbContextTransactionExtensionsTests : IAsyncLifetime
         Assert.Empty(_transactions.Started);
     }
 
-    private CatalogDbContext CreateContext(Func<Exception, bool>? isTransient = null) =>
-        new(new DbContextOptionsBuilder<CatalogDbContext>()
+    private CatalogDbContext CreateContext(
+        Func<Exception, bool>? isTransient = null,
+        IInterceptor? interceptor = null)
+    {
+        var options = new DbContextOptionsBuilder<CatalogDbContext>()
             .UseRetryingSqlite(_connection, isTransient: isTransient)
-            .AddInterceptors(_transactions)
-            .Options);
+            .AddInterceptors(_transactions);
+        if (interceptor is not null)
+            options.AddInterceptors(interceptor);
+
+        return new CatalogDbContext(options.Options);
+    }
 
     private async Task<string[]> PersistedOrganizationNamesAsync()
     {

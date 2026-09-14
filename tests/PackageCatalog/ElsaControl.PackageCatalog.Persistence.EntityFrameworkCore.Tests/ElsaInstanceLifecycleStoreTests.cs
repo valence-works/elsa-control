@@ -1015,6 +1015,85 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
+    public async Task A_lost_acknowledgement_after_reservation_race_fallback_returns_the_committed_conflict()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        ElsaInstanceLifecycleResolutionCommit commit;
+        Guid operationId;
+        Guid environmentId;
+
+        await using (var setup = CreateMigratedContext(connection))
+        {
+            await setup.Database.MigrateAsync();
+            var workspace = await CreateWorkspaceAsync(setup, "Lost reservation acknowledgement workspace");
+            var accepted = await new ElsaInstanceLifecycleService(CreateStore(setup), new FixedTimeProvider(Now))
+                .CreateAsync(new ElsaInstanceCreateRequest(
+                    workspace.OrganizationId, workspace.Id, "Worker Elsa", "lost-reservation-elsa", WorkerIntent(),
+                    "lost-reservation-create"));
+            var target = await AddManagedEnvironmentAsync(setup, workspace, accepted.Instance.Id);
+            var claimed = await new EfCoreElsaInstanceLifecycleStore(
+                    setup,
+                    new StaticResolutionInputSource(accepted.Instance, target),
+                    new FixedTimeProvider(Now))
+                .TryClaimNextAsync("worker-one", Now)
+                ?? throw new InvalidOperationException("Expected a claimed work item.");
+            commit = CreateResolutionCommit(
+                claimed, SuccessfulResolution(workspace.Id, accepted.Instance.Id), Now.AddSeconds(1));
+            operationId = accepted.Operation.Id;
+            environmentId = target.EnvironmentId;
+            setup.DeploymentRuns.Add(new DeploymentRunEntity
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = workspace.Id,
+                ElsaInstanceId = accepted.Instance.Id,
+                ApplicationId = target.ApplicationId,
+                EnvironmentId = target.EnvironmentId,
+                EngineId = Guid.NewGuid(),
+                SourceRevisionId = Guid.NewGuid(),
+                Status = WorkspaceDeploymentRunStatus.Queued,
+                ValidationOutcome = DeploymentValidationOutcome.Passed,
+                ConfirmationId = Guid.NewGuid(),
+                ActorAccountId = Guid.NewGuid(),
+                QueuedAt = Now,
+                CreatedAt = Now,
+                AttemptNumber = 1
+            });
+            await setup.SaveChangesAsync();
+        }
+
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = CreateMigratedContext(connection);
+            Assert.Equal(1, await followUp.ElsaInstanceOperations
+                .Where(x => x.Id == operationId)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(x => x.State, ElsaInstanceOperationState.Running)
+                    .SetProperty(x => x.UpdatedAt, Now.AddMinutes(2)), cancellationToken));
+        });
+        var options = new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(connection,
+                sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
+                isTransient: exception => exception is LostCommitAcknowledgementException)
+            .AddInterceptors(acknowledgement)
+            .Options;
+        await using var db = new CatalogDbContext(options);
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+
+        var result = await store.ResolveReservationRaceAsync(commit, CancellationToken.None);
+
+        Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Conflict, result.Outcome);
+        Assert.Equal("run.reservation.conflict", result.FailureCode);
+        Assert.Equal(1, acknowledgement.Committed);
+        var operation = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == operationId);
+        Assert.Equal(ElsaInstanceOperationState.Running, operation.State);
+        Assert.Equal(1, await db.DeploymentRuns.CountAsync(x => x.EnvironmentId == environmentId));
+        Assert.Equal(1, await db.ElsaInstanceAuditEvents.CountAsync(x =>
+            x.OperationId == operationId && x.EventType == "lifecycle.failed"));
+    }
+
+    [Fact]
     public async Task Finalization_uses_store_clock_when_caller_supplies_a_backdated_timestamp()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -1142,7 +1221,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
-    public async Task A_lost_acknowledgement_after_a_successful_claim_commit_returns_no_work_and_does_not_double_claim()
+    public async Task A_lost_acknowledgement_after_a_successful_claim_commit_returns_the_committed_work_item()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -1165,13 +1244,12 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             db, new StaticResolutionInputSource(accepted.Instance, target), new FixedTimeProvider(Now));
 
         // The claim's commit below succeeds durably, but the acknowledgement interceptor simulates the
-        // caller never learning that: it throws once, after the commit, as a transient failure the
-        // execution strategy retries. The retried attempt must find no reclaimable work rather than
-        // claim the same operation a second time.
+        // caller never learning that: it throws once, after the commit. The verifier returns the
+        // original committed work item without running a second claim transaction.
         var item = await store.TryClaimNextAsync("worker-one", Now);
 
-        Assert.Null(item);
-        Assert.Equal(2, acknowledgement.Committed);
+        Assert.NotNull(item);
+        Assert.Equal(1, acknowledgement.Committed);
         await using var verify = new CatalogDbContext(options);
         var operation = await verify.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
         Assert.Equal("worker-one", operation.WorkerId);
@@ -1516,7 +1594,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
-    public async Task A_lost_acknowledgement_after_a_successful_deletion_claim_commit_returns_no_work_and_does_not_double_claim()
+    public async Task A_lost_acknowledgement_after_a_successful_deletion_claim_commit_returns_the_committed_work_item()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -1540,11 +1618,11 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var store = new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
 
         // As with TryClaimNextAsync: the commit below succeeds durably, but the acknowledgement is lost
-        // and the execution strategy retries the whole unit. The retry must find no reclaimable work.
+        // The verifier returns the committed work item without running a second claim transaction.
         var item = await store.TryClaimNextDeletionAsync("worker-one", Now);
 
-        Assert.Null(item);
-        Assert.Equal(2, acknowledgement.Committed);
+        Assert.NotNull(item);
+        Assert.Equal(1, acknowledgement.Committed);
         await using var verify = new CatalogDbContext(options);
         var operation = await verify.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == deletion.Operation.Id);
         Assert.Equal("worker-one", operation.WorkerId);
@@ -1561,6 +1639,59 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(1, await verifyAfter.ElsaInstanceOperations.CountAsync(x => x.Id == deletion.Operation.Id));
         Assert.Equal("worker-two",
             (await verifyAfter.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == deletion.Operation.Id)).WorkerId);
+    }
+
+    [Fact]
+    public async Task A_lost_acknowledgement_returns_the_recovery_result_after_a_later_operation_change()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var setup = CreateMigratedContext(connection);
+        await setup.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(setup, "Lost deletion recovery acknowledgement workspace");
+        var setupService = new ElsaInstanceLifecycleService(CreateStore(setup), new FixedTimeProvider(Now));
+        var created = await setupService.CreateAsync(new ElsaInstanceCreateRequest(
+            workspace.OrganizationId, workspace.Id, "Recovery Elsa", "lost-ack-recovery-elsa", WorkerIntent(), "lost-ack-recovery-create"));
+        var deletion = await setupService.DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+            setup, workspace.Id, created.Instance.Id, created.Instance.Version, "lost-ack-recovery-delete"));
+        await CompleteOperationAsync(setup, created.Operation.Id);
+        var claimStore = new EfCoreElsaInstanceLifecycleStore(setup, EmptyResolutionInputSource.Instance,
+            new FixedTimeProvider(Now));
+        var claim = await claimStore.TryClaimNextDeletionAsync("worker-one", Now);
+        Assert.NotNull(claim);
+
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = CreateMigratedContext(connection);
+            Assert.Equal(1, await followUp.ElsaInstanceOperations
+                .Where(x => x.Id == deletion.Operation.Id)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(x => x.State, ElsaInstanceOperationState.Running)
+                    .SetProperty(x => x.UpdatedAt, Now.AddMinutes(2)), cancellationToken));
+        });
+        var options = new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(connection,
+                sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
+                isTransient: exception => exception is LostCommitAcknowledgementException)
+            .AddInterceptors(acknowledgement)
+            .Options;
+        await using var db = new CatalogDbContext(options);
+        var store = new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+        var failure = new ElsaInstanceDeletionFailure(workspace.Id, created.Instance.Id, deletion.Operation.Id,
+            claim!.Outbox.Id, claim.Instance.Version, claim.Operation.AttemptNumber, claim.CorrelatedRunId,
+            "worker-one", claim.LeaseToken, claim.LeaseVersion, new string('a', 64),
+            "deletion.provider.unavailable", Now.AddMinutes(1));
+
+        var recovered = await store.RequireDeletionRecoveryAsync(failure);
+
+        Assert.Equal(ElsaInstanceDeletionOutcome.RecoveryRequired, recovered.Outcome);
+        Assert.False(recovered.Replayed);
+        Assert.Equal(1, acknowledgement.Committed);
+        await using var verify = new CatalogDbContext(options);
+        var operation = await verify.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == deletion.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Running, operation.State);
+        Assert.Equal(1, await verify.ElsaInstanceAuditEvents.CountAsync(x =>
+            x.OperationId == deletion.Operation.Id && x.EventType == "lifecycle.deletion-recovery-required"));
     }
 
     [Fact]
@@ -1686,6 +1817,48 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         currentOperation = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
         Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, currentOperation.State);
         Assert.Equal(runId, currentOperation.DeploymentRunId);
+    }
+
+    [Fact]
+    public async Task A_lost_acknowledgement_after_entitlement_hold_commit_returns_the_committed_decision()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var setup = CreateMigratedContext(connection);
+        await setup.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(setup, "Lost entitlement hold acknowledgement");
+        var entitlement = await setup.OrganizationEntitlementSnapshots.SingleAsync(x => x.OrganizationId == workspace.OrganizationId);
+        entitlement.SubscriptionState = OrganizationSubscriptionState.Constrained;
+        await setup.SaveChangesAsync();
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = CreateMigratedContext(connection);
+            Assert.Equal(1, await followUp.ElsaInstanceOperations
+                .Where(x => x.Id == accepted.Operation.Id)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(x => x.State, ElsaInstanceOperationState.RecoveryRequired)
+                    .SetProperty(x => x.UpdatedAt, Now.AddMinutes(2)), cancellationToken));
+        });
+        var options = new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(connection,
+                sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
+                isTransient: exception => exception is LostCommitAcknowledgementException)
+            .AddInterceptors(acknowledgement)
+            .Options;
+        await using var db = new CatalogDbContext(options);
+        var store = new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+
+        var decision = await store.AuthorizeProviderSubmissionAsync(
+            workspace.Id, accepted.Instance.Id, accepted.Operation.Id, Now.AddMinutes(1));
+
+        Assert.False(decision.Allowed);
+        Assert.Equal(ElsaInstanceCommercialOperation.LifecycleConstrained, decision.Code);
+        Assert.Equal(1, acknowledgement.Committed);
+        await using var verify = new CatalogDbContext(options);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired,
+            (await verify.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id)).State);
+        Assert.Equal(1, await verify.ElsaInstanceAuditEvents.CountAsync(x =>
+            x.OperationId == accepted.Operation.Id && x.EventType == "lifecycle.entitlement-held"));
     }
 
     [Fact]
@@ -2847,35 +3020,6 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     {
         public override DateTimeOffset GetUtcNow() => now;
     }
-
-    /// <summary>
-    /// Simulates a claim commit that succeeds durably but whose acknowledgement to the caller is lost:
-    /// it throws once, right after the transaction commits, an exception the test's execution strategy
-    /// classifies as transient so the whole unit is retried.
-    /// </summary>
-    private sealed class LostCommitAcknowledgementInterceptor(int failures = 1) : DbTransactionInterceptor
-    {
-        private int _failed;
-
-        public int Committed { get; private set; }
-
-        public override Task TransactionCommittedAsync(
-            DbTransaction transaction,
-            TransactionEndEventData eventData,
-            CancellationToken cancellationToken = default)
-        {
-            Committed++;
-            if (_failed < failures)
-            {
-                _failed++;
-                throw new LostCommitAcknowledgementException();
-            }
-
-            return base.TransactionCommittedAsync(transaction, eventData, cancellationToken);
-        }
-    }
-
-    private sealed class LostCommitAcknowledgementException : Exception;
 
     private static CatalogDbContext CreateMigratedContext(SqliteConnection connection)
     {

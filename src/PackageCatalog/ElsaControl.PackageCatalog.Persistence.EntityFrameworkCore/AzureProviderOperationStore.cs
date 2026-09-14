@@ -189,6 +189,29 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                     nowUtc);
                 await db.SaveChangesAsync(cancellationToken);
                 return ToModel(providerOperation);
+            }, async (result, verificationCancellationToken) =>
+            {
+                if (result is null)
+                    return true;
+
+                var nowUtc = now.ToUniversalTime();
+                return await db.AzureProviderOperations.AsNoTracking().AnyAsync(
+                    x => x.Id == result.Id
+                        && x.WorkspaceId == request.WorkspaceId
+                        && x.Status == AzureProviderOperationStatus.Running
+                        && x.WorkerId == request.WorkerId
+                        && x.LeaseTokenHash == Hash(request.LeaseToken)
+                        && x.LeaseExpiresAt == result.LeaseExpiresAt
+                        && x.HeartbeatAt == nowUtc
+                        && x.AttemptNumber == result.AttemptNumber
+                        && x.Version == result.Version
+                        && x.UpdatedAt == nowUtc,
+                    verificationCancellationToken)
+                    && await db.AzureProviderOperationTransitions.AsNoTracking().AnyAsync(
+                        x => x.OperationId == result.Id
+                            && x.Sequence == result.Version
+                            && x.Code == "operation.delete-recovery.claimed",
+                        verificationCancellationToken);
             }, cancellationToken);
         }
         catch (DbUpdateConcurrencyException)
@@ -824,6 +847,17 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                 now);
             await db.SaveChangesAsync(cancellationToken);
             return ToModel(entity);
+        }, async (result, verificationCancellationToken) =>
+        {
+            if (result is null)
+                return true;
+
+            return await db.AzureProviderOperationTransitions.AsNoTracking()
+                .AnyAsync(
+                    x => x.OperationId == operationId
+                        && x.Sequence == result.Version
+                        && x.Code == "azure.plan.unrestorable",
+                    verificationCancellationToken);
         }, cancellationToken);
     }
 
@@ -885,6 +919,17 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
             AddTransition(entity, decision.Code, decision.Summary, now);
             await db.SaveChangesAsync(cancellationToken);
             return new AzureProviderOperationAuthorizationResult(ToModel(entity), decision);
+        }, async (result, verificationCancellationToken) =>
+        {
+            if (result is null || result.Decision.Allowed)
+                return true;
+
+            return await db.AzureProviderOperationTransitions.AsNoTracking()
+                .AnyAsync(
+                    x => x.OperationId == operationId
+                        && x.Sequence == result.Operation.Version
+                        && x.Code == result.Decision.Code,
+                    verificationCancellationToken);
         }, cancellationToken);
     }
 
@@ -1079,11 +1124,13 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
     public async Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
     {
         db.ChangeTracker.Clear();
+        var recoveredSnapshot = new List<(Guid Id, long Sequence)>();
         return await db.ExecuteInTransactionAsync(IsolationLevel.Unspecified, async () =>
         {
             var candidates = await db.AzureProviderOperations.AsNoTracking()
                 .Where(x => x.Status == AzureProviderOperationStatus.Running && x.LeaseExpiresAt != null && x.LeaseExpiresAt <= now)
                 .ToListAsync(cancellationToken);
+            recoveredSnapshot.Clear();
             var recovered = 0;
             foreach (var candidate in candidates)
             {
@@ -1099,9 +1146,26 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                 candidate.Status = AzureProviderOperationStatus.RecoveryRequired;
                 candidate.Version++;
                 AddTransition(candidate, "operation.recovery.required", "The operation lease expired before completion.", now);
+                recoveredSnapshot.Add((candidate.Id, candidate.Version));
             }
             await db.SaveChangesAsync(cancellationToken);
             return recovered;
+        }, async (recovered, verificationCancellationToken) =>
+        {
+            if (recovered == 0)
+                return true;
+
+            var ids = recoveredSnapshot.Select(x => x.Id).ToList();
+            var persisted = await db.AzureProviderOperationTransitions.AsNoTracking()
+                .Where(x => ids.Contains(x.OperationId)
+                    && x.Code == "operation.recovery.required")
+                .Select(x => new { x.OperationId, x.Sequence })
+                .ToListAsync(verificationCancellationToken);
+            var persistedTransitions = persisted
+                .Select(x => (x.OperationId, x.Sequence))
+                .ToHashSet();
+            return recoveredSnapshot.Count == recovered &&
+                recoveredSnapshot.All(candidate => persistedTransitions.Contains((candidate.Id, candidate.Sequence)));
         }, cancellationToken);
     }
 

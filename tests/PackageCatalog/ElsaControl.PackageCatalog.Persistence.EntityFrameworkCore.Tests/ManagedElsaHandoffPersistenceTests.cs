@@ -405,6 +405,102 @@ public sealed class ManagedElsaHandoffPersistenceTests
         Assert.Empty(await db.ElsaInstanceIdentityBindings.ToListAsync());
     }
 
+    [Fact]
+    public async Task Binding_identity_returns_created_when_a_later_rotation_changes_the_projection()
+    {
+        await using var connection = NewConnection();
+        await connection.OpenAsync();
+        Guid organizationId;
+        Guid workspaceId;
+        Guid instanceId;
+        await using (var setup = CreateContext(connection))
+        {
+            await setup.Database.MigrateAsync();
+            var instance = await SeedInstanceAsync(setup);
+            organizationId = instance.OrganizationId;
+            workspaceId = instance.WorkspaceId;
+            instanceId = instance.Id;
+        }
+
+        var changedAt = DateTimeOffset.UtcNow;
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = CreateContext(connection);
+            var instance = await followUp.ElsaInstances.SingleAsync(x => x.Id == instanceId, cancellationToken);
+            instance.CurrentDeploymentEndpointUri = "https://rotated.example.test";
+            await followUp.SaveChangesAsync(cancellationToken);
+            var rotated = await new EfCoreManagedElsaInstanceIdentityStore(followUp).BindAsync(
+                organizationId,
+                workspaceId,
+                instanceId,
+                "https://rotated.example.test",
+                1,
+                changedAt.AddMinutes(1),
+                cancellationToken);
+            Assert.Equal(ManagedElsaInstanceIdentityBindingWriteOutcome.Rotated, rotated.Outcome);
+        });
+        await using (var db = new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(connection,
+                sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
+                isTransient: exception => exception is LostCommitAcknowledgementException)
+            .AddInterceptors(acknowledgement)
+            .Options))
+        {
+            var result = await new EfCoreManagedElsaInstanceIdentityStore(db).BindAsync(
+                organizationId, workspaceId, instanceId, "https://managed.example.test", null, changedAt);
+            Assert.Equal(ManagedElsaInstanceIdentityBindingWriteOutcome.Created, result.Outcome);
+            Assert.Equal(1, result.Identity?.BindingVersion);
+        }
+
+        await using var verify = CreateContext(connection);
+        var persisted = await verify.ElsaInstanceIdentityBindings.SingleAsync();
+        Assert.Equal(2, persisted.BindingVersion);
+        Assert.Equal("https://rotated.example.test", persisted.VerifiedEndpointOrigin);
+        Assert.Equal(2, await verify.ElsaInstanceAuditEvents.CountAsync(x =>
+            x.InstanceId == instanceId && x.EventType == "identity.binding.changed"));
+    }
+
+    [Fact]
+    public async Task Rotating_identity_returns_rotated_after_a_lost_commit_acknowledgement()
+    {
+        await using var connection = NewConnection();
+        await connection.OpenAsync();
+        Guid organizationId;
+        Guid workspaceId;
+        Guid instanceId;
+        await using (var setup = CreateContext(connection))
+        {
+            await setup.Database.MigrateAsync();
+            var instance = await SeedInstanceAsync(setup);
+            organizationId = instance.OrganizationId;
+            workspaceId = instance.WorkspaceId;
+            instanceId = instance.Id;
+            var store = new EfCoreManagedElsaInstanceIdentityStore(setup);
+            await store.BindAsync(organizationId, workspaceId, instanceId, "https://managed.example.test", null, DateTimeOffset.UtcNow);
+            setup.ChangeTracker.Clear();
+            instance = await setup.ElsaInstances.SingleAsync(x => x.Id == instanceId);
+            instance.CurrentDeploymentEndpointUri = "https://rotated.example.test";
+            await setup.SaveChangesAsync();
+        }
+
+        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        await using (var db = new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(connection,
+                sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
+                isTransient: exception => exception is LostCommitAcknowledgementException)
+            .AddInterceptors(acknowledgement)
+            .Options))
+        {
+            var result = await new EfCoreManagedElsaInstanceIdentityStore(db).BindAsync(
+                organizationId, workspaceId, instanceId, "https://rotated.example.test", 1, DateTimeOffset.UtcNow.AddMinutes(1));
+            Assert.Equal(ManagedElsaInstanceIdentityBindingWriteOutcome.Rotated, result.Outcome);
+            Assert.Equal(2, result.Identity?.BindingVersion);
+        }
+
+        await using var verify = CreateContext(connection);
+        Assert.Equal(2, (await verify.ElsaInstanceIdentityBindings.SingleAsync()).BindingVersion);
+    }
+
     private sealed class FixedTimeProvider(DateTimeOffset utcNow) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => utcNow;

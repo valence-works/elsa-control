@@ -16,6 +16,8 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 /// </summary>
 public sealed class EfCoreManagedElsaInstanceIdentityStore(CatalogDbContext dbContext) : IManagedElsaInstanceIdentityStore
 {
+    private const string IdentityBindingChangedEventType = "identity.binding.changed";
+
     public async Task<ManagedElsaInstanceScope?> FindScopeAsync(
         Guid organizationId,
         Guid instanceId,
@@ -175,6 +177,9 @@ public sealed class EfCoreManagedElsaInstanceIdentityStore(CatalogDbContext dbCo
             return Conflict();
 
         dbContext.ChangeTracker.Clear();
+        var verificationBindingVersion = 0;
+        var verificationChangedAt = changedAt;
+        var verificationAuditId = Guid.NewGuid();
         try
         {
             return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
@@ -242,9 +247,45 @@ public sealed class EfCoreManagedElsaInstanceIdentityStore(CatalogDbContext dbCo
                     return Conflict();
                 }
 
+                verificationBindingVersion = binding.BindingVersion;
+                verificationChangedAt = binding.ChangedAt;
+                var sequence = checked((await dbContext.ElsaInstanceAuditEvents
+                    .Where(x => x.InstanceId == instanceId)
+                    .Select(x => (long?)x.Sequence)
+                    .MaxAsync(cancellationToken) ?? 0) + 1);
+                await dbContext.ElsaInstanceAuditEvents.AddAsync(new ElsaInstanceAuditEventEntity
+                {
+                    Id = verificationAuditId,
+                    OrganizationId = organizationId,
+                    WorkspaceId = workspaceId,
+                    InstanceId = instanceId,
+                    Sequence = sequence,
+                    EventType = IdentityBindingChangedEventType,
+                    PriorState = expectedBindingVersion?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    NewState = binding.BindingVersion.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    DiagnosticCode = IdentityBindingChangedEventType,
+                    Summary = IdentityBindingChangedEventType,
+                    OccurredAt = binding.ChangedAt
+                }, cancellationToken);
                 await dbContext.SaveChangesAsync(cancellationToken);
                 return new ManagedElsaInstanceIdentityBindingWriteResult(outcome, Map(entity, binding));
-            }, cancellationToken);
+            },
+                async (result, verificationCancellationToken) =>
+                {
+                    if (!result.Succeeded)
+                        return true;
+
+                    return await dbContext.ElsaInstanceAuditEvents.AsNoTracking().AnyAsync(x =>
+                        x.Id == verificationAuditId &&
+                        x.OrganizationId == organizationId &&
+                        x.WorkspaceId == workspaceId &&
+                        x.InstanceId == instanceId &&
+                        x.EventType == IdentityBindingChangedEventType &&
+                        x.NewState == verificationBindingVersion.ToString(System.Globalization.CultureInfo.InvariantCulture) &&
+                        x.OccurredAt == verificationChangedAt,
+                        verificationCancellationToken);
+                },
+                cancellationToken);
         }
         catch (DbUpdateConcurrencyException)
         {

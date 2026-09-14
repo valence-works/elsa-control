@@ -53,8 +53,14 @@ public sealed class ApprovalStore(CatalogDbContext dbContext) : IApprovalStore
             .ToList();
     }
 
-    public Task<VersionApprovalUpdateResult> TryUpdateVersionApprovalAsync(PackageVersion packageVersion, PackageApprovalStatus status, ApprovalRecord approvalRecord, CancellationToken cancellationToken = default) =>
-        dbContext.ExecuteInTransactionAsync(IsolationLevel.Unspecified, async () =>
+    public Task<VersionApprovalUpdateResult> TryUpdateVersionApprovalAsync(PackageVersion packageVersion, PackageApprovalStatus status, ApprovalRecord approvalRecord, CancellationToken cancellationToken = default)
+    {
+        if (approvalRecord.Id == Guid.Empty)
+            approvalRecord.Id = Guid.NewGuid();
+
+        return dbContext.ExecuteInTransactionAsync(
+            IsolationLevel.Unspecified,
+            async () =>
         {
             var updated = await dbContext.PackageVersions
                 .Where(x =>
@@ -73,7 +79,23 @@ public sealed class ApprovalStore(CatalogDbContext dbContext) : IApprovalStore
             await dbContext.ApprovalRecords.AddAsync(approvalRecord, cancellationToken);
             await dbContext.SaveChangesAsync(cancellationToken);
             return VersionApprovalUpdateResult.Updated;
-        }, cancellationToken);
+        },
+            async (result, verificationCancellationToken) =>
+            {
+                if (result != VersionApprovalUpdateResult.Updated)
+                    return true;
+
+                return await dbContext.ApprovalRecords.AsNoTracking().AnyAsync(x =>
+                        x.Id == approvalRecord.Id &&
+                        x.TargetType == approvalRecord.TargetType &&
+                        x.TargetId == approvalRecord.TargetId &&
+                        x.Status == approvalRecord.Status &&
+                        x.Actor == approvalRecord.Actor &&
+                        x.Reason == approvalRecord.Reason,
+                        verificationCancellationToken);
+            },
+            cancellationToken);
+    }
 
     public async Task AddApprovalRecordAsync(ApprovalRecord record, CancellationToken cancellationToken = default) =>
         await dbContext.ApprovalRecords.AddAsync(record, cancellationToken);

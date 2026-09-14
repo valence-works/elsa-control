@@ -6,6 +6,8 @@ using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using System.Data.Common;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 
@@ -525,6 +527,50 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
     }
 
     [Fact]
+    public async Task Lost_commit_acknowledgement_denied_authorization_returns_original_result_without_duplicate_transition()
+    {
+        var now = DateTimeOffset.UtcNow;
+        AzureProviderOperation operation;
+        AzureProviderOperation claimed;
+        var organizationId = Guid.NewGuid();
+        var instanceId = Guid.NewGuid();
+        using (var setupDb = CreateContext())
+        {
+            var setupStore = new AzureProviderOperationStore(setupDb);
+            var assignment = await Assignment(setupStore, organizationId, instanceId, now);
+            operation = await setupStore.CreateOrGetAsync(Request() with
+            {
+                TargetKey = "lost-ack-authorize",
+                IdempotencyKey = "lost-ack-authorize",
+                OrganizationId = organizationId,
+                InstanceId = instanceId,
+                LifecycleAction = ElsaInstanceOperationAction.Reconcile,
+                ProviderAssignmentId = assignment.Id
+            }, now);
+            claimed = Assert.IsType<AzureProviderOperation>(await setupStore.ClaimAsync(
+                _workspaceId, operation.Id, "worker", "lease", TimeSpan.FromMinutes(1), now));
+        }
+
+        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        using var lostDb = CreateContext(acknowledgement);
+        var authorization = await new AzureProviderOperationStore(lostDb).AuthorizeAsync(
+            _workspaceId,
+            operation.Id,
+            "lease",
+            new DenyingCommercialGate(),
+            now,
+            claimed.Version);
+
+        Assert.False(authorization?.Decision.Allowed);
+        Assert.Equal(AzureProviderOperationStatus.EntitlementHeld, authorization?.Operation.Status);
+        Assert.Equal(1, acknowledgement.Committed);
+        using var verifyDb = CreateContext();
+        var transitions = await new AzureProviderOperationStore(verifyDb)
+            .ListTransitionsAsync(_workspaceId, operation.Id);
+        Assert.Single(transitions, x => x.Code == ElsaInstanceCommercialOperation.LifecycleConstrained);
+    }
+
+    [Fact]
     public async Task Bound_safe_exit_supersedes_held_provider_operation_before_new_operation_executes()
     {
         var now = DateTimeOffset.UtcNow;
@@ -675,6 +721,35 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
         var transitions = await store.ListTransitionsAsync(_workspaceId, operation.Id);
         Assert.Contains(transitions, x => x.Code == "operation.recovery.required");
         Assert.Contains(transitions, x => x.Code == "operation.recovery.claimed");
+    }
+
+    [Fact]
+    public async Task Lost_commit_acknowledgement_recover_stale_returns_original_count_without_duplicate_transition()
+    {
+        var now = DateTimeOffset.UtcNow;
+        AzureProviderOperation operation;
+        using (var setupDb = CreateContext())
+        {
+            var setupStore = new AzureProviderOperationStore(setupDb);
+            operation = await setupStore.CreateOrGetAsync(Request() with
+            {
+                TargetKey = "lost-ack-recovery",
+                IdempotencyKey = "lost-ack-recovery"
+            }, now);
+            Assert.NotNull(await setupStore.ClaimAsync(
+                _workspaceId, operation.Id, "worker", "lease", TimeSpan.FromMinutes(1), now));
+        }
+
+        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        using var lostDb = CreateContext(acknowledgement);
+        var recovered = await new AzureProviderOperationStore(lostDb).RecoverStaleAsync(now.AddMinutes(2));
+
+        Assert.Equal(1, recovered);
+        Assert.Equal(1, acknowledgement.Committed);
+        using var verifyDb = CreateContext();
+        var transitions = await new AzureProviderOperationStore(verifyDb)
+            .ListTransitionsAsync(_workspaceId, operation.Id);
+        Assert.Single(transitions, x => x.Code == "operation.recovery.required");
     }
 
     [Fact]
@@ -837,6 +912,65 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
         Assert.Equal("The persisted provider plan cannot be restored.", transition.Message);
         Assert.Empty(await store.ListRunnableAsync(now, 10));
         Assert.Null(await store.MarkUnrestorableAsync(_workspaceId, operation.Id, now, operation.Version));
+    }
+
+    [Fact]
+    public async Task Lost_commit_acknowledgement_unrestorable_plan_returns_original_result_without_duplicate_transition()
+    {
+        var now = DateTimeOffset.UtcNow;
+        AzureProviderOperation operation;
+        using (var setupDb = CreateContext())
+        {
+            operation = await new AzureProviderOperationStore(setupDb).CreateOrGetAsync(Request() with
+            {
+                TargetKey = "lost-ack-unrestorable",
+                IdempotencyKey = "lost-ack-unrestorable"
+            }, now);
+        }
+
+        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        using var lostDb = CreateContext(acknowledgement);
+        var failed = await new AzureProviderOperationStore(lostDb)
+            .MarkUnrestorableAsync(_workspaceId, operation.Id, now, operation.Version);
+
+        Assert.Equal(AzureProviderOperationStatus.Failed, failed?.Status);
+        Assert.Equal(1, acknowledgement.Committed);
+        using var verifyDb = CreateContext();
+        var transitions = await new AzureProviderOperationStore(verifyDb)
+            .ListTransitionsAsync(_workspaceId, operation.Id);
+        Assert.Single(transitions, x => x.Code == "azure.plan.unrestorable");
+    }
+
+    [Fact]
+    public async Task Lost_commit_acknowledgement_unrestorable_recovery_plan_returns_original_result_without_duplicate_transition()
+    {
+        var now = DateTimeOffset.UtcNow;
+        AzureProviderOperation operation;
+        using (var setupDb = CreateContext())
+        {
+            var setupStore = new AzureProviderOperationStore(setupDb);
+            operation = await setupStore.CreateOrGetAsync(Request() with
+            {
+                TargetKey = "lost-ack-unrestorable-recovery",
+                IdempotencyKey = "lost-ack-unrestorable-recovery"
+            }, now);
+            Assert.NotNull(await setupStore.ClaimAsync(
+                _workspaceId, operation.Id, "worker", "lease", TimeSpan.FromMinutes(1), now));
+            Assert.Equal(1, await setupStore.RecoverStaleAsync(now.AddMinutes(2)));
+            operation = Assert.IsType<AzureProviderOperation>(await setupStore.GetAsync(_workspaceId, operation.Id));
+        }
+
+        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        using var lostDb = CreateContext(acknowledgement);
+        var blocked = await new AzureProviderOperationStore(lostDb)
+            .MarkUnrestorableAsync(_workspaceId, operation.Id, now.AddMinutes(2));
+
+        Assert.Equal(AzureProviderOperationStatus.RecoveryRequired, blocked?.Status);
+        Assert.Equal(1, acknowledgement.Committed);
+        using var verifyDb = CreateContext();
+        var transitions = await new AzureProviderOperationStore(verifyDb)
+            .ListTransitionsAsync(_workspaceId, operation.Id);
+        Assert.Single(transitions, x => x.Code == "azure.plan.unrestorable");
     }
 
     [Fact]
@@ -1208,6 +1342,14 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
     }
 
     private CatalogDbContext CreateContext() => new(new DbContextOptionsBuilder<CatalogDbContext>().UseRetryingSqlite(_connection).Options);
+
+    private CatalogDbContext CreateContext(LostCommitAcknowledgementInterceptor acknowledgement) =>
+        new(new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(
+                _connection,
+                isTransient: exception => exception is LostCommitAcknowledgementException)
+            .AddInterceptors(acknowledgement)
+            .Options);
 
     private async Task<AzureProviderResourceAssignment> Assignment(
         AzureProviderOperationStore store,

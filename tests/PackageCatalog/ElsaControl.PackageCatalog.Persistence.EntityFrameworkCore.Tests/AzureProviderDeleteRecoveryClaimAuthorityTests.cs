@@ -131,6 +131,37 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [PosixFact]
+    public async Task Lost_commit_acknowledgement_delete_recovery_claim_returns_original_result_without_duplicate_transition()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        await using var fixture = await SeedDeleteRecoveryClaimAsync(db);
+
+        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var lostOptions = new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(
+                connection,
+                sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
+                isTransient: exception => exception is LostCommitAcknowledgementException)
+            .AddInterceptors(acknowledgement)
+            .Options;
+        await using var lostDb = new CatalogDbContext(lostOptions);
+        var lostStore = (IAzureProviderDeleteRecoveryStore)new AzureProviderOperationStore(lostDb);
+        var claimed = await lostStore.ClaimDeleteRecoveryAsync(
+            fixture.Request, TimeSpan.FromMinutes(5), fixture.Now);
+
+        Assert.NotNull(claimed);
+        Assert.Equal(AzureProviderOperationStatus.Running, claimed!.Status);
+        Assert.Equal(1, acknowledgement.Committed);
+        db.ChangeTracker.Clear();
+        Assert.Equal(1, await db.AzureProviderOperationTransitions.AsNoTracking()
+            .CountAsync(x => x.OperationId == fixture.ProviderOperationId &&
+                             x.Code == "operation.delete-recovery.claimed"));
+    }
+
+    [PosixFact]
     public async Task Concurrent_delete_recovery_claims_mutate_one_provider_operation()
     {
         var databasePath = Path.Combine(Path.GetTempPath(), $"elsa-control-delete-claim-{Guid.NewGuid():N}.db");

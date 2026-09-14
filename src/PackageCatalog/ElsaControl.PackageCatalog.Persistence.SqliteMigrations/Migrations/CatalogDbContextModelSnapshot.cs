@@ -4644,6 +4644,31 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.ToTable("StructuredDesiredStateRecords");
                 });
 
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.SyncRunReconciliationEventEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CompletedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("ProcessStartedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("ReconciledCount")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("SyncRunReconciliationEvents", t =>
+                        {
+                            t.HasTrigger("TR_SyncRunReconciliationEvents_AppendOnly_Delete");
+
+                            t.HasTrigger("TR_SyncRunReconciliationEvents_AppendOnly_Update");
+                        });
+                });
+
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.WeaverMessageEntity", b =>
                 {
                     b.Property<Guid>("Id")

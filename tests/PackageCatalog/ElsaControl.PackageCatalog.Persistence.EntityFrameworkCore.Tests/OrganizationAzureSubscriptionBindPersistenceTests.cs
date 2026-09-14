@@ -1,7 +1,9 @@
+using System.Data.Common;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 
@@ -186,6 +188,55 @@ public sealed class OrganizationAzureSubscriptionBindPersistenceTests : IAsyncLi
         Assert.Equal(OrganizationAzureSubscriptionBindState.Verifying, (await store.GetAsync(OrganizationId, bindId))!.State);
     }
 
+    [Fact]
+    public async Task Lost_commit_acknowledgement_after_create_returns_the_committed_bind()
+    {
+        var bind = CreateBind("cccccccc-cccc-cccc-cccc-cccccccccccc", OrganizationAzureSubscriptionBindState.PendingConsent);
+        var acknowledgement = new FollowUpBindTransitionLostCommitInterceptor(
+            bind.Id, OrganizationAzureSubscriptionBindState.Verifying, Now.AddMinutes(1));
+        await using var db = new CatalogDbContext(LostAckOptions(acknowledgement));
+
+        var result = await new OrganizationAzureSubscriptionBindStore(db).CreatePendingAsync(bind);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(bind.Id, result.Bind!.Id);
+        Assert.Equal(1, acknowledgement.Committed);
+        _db.ChangeTracker.Clear();
+        Assert.Equal(bind.Id, (await _db.OrganizationAzureSubscriptionBinds.SingleAsync()).Id);
+        Assert.Equal(OrganizationAzureSubscriptionBindState.Verifying,
+            (await _db.OrganizationAzureSubscriptionBinds.SingleAsync()).State);
+        Assert.Single(await _db.OrganizationAuditRecords.Where(x =>
+            x.Action == OrganizationAuditAction.AzureSubscriptionBindChanged).ToListAsync());
+    }
+
+    [Fact]
+    public async Task Lost_commit_acknowledgement_after_transition_returns_the_committed_bind()
+    {
+        var created = await new OrganizationAzureSubscriptionBindStore(_db)
+            .CreatePendingAsync(CreateBind("cccccccc-cccc-cccc-cccc-cccccccccccc", OrganizationAzureSubscriptionBindState.PendingConsent));
+        Assert.True(created.Succeeded);
+        _db.ChangeTracker.Clear();
+        var acknowledgement = new FollowUpBindTransitionLostCommitInterceptor(
+            created.Bind!.Id, OrganizationAzureSubscriptionBindState.Active, Now.AddMinutes(2));
+        await using var db = new CatalogDbContext(LostAckOptions(acknowledgement));
+
+        var result = await new OrganizationAzureSubscriptionBindStore(db).TransitionAsync(new(
+            OrganizationId,
+            created.Bind.Id,
+            OrganizationAzureSubscriptionBindState.PendingConsent,
+            OrganizationAzureSubscriptionBindState.Verifying,
+            Now.AddMinutes(1)));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(OrganizationAzureSubscriptionBindState.Verifying, result.Bind!.State);
+        Assert.Equal(1, acknowledgement.Committed);
+        _db.ChangeTracker.Clear();
+        Assert.Equal(OrganizationAzureSubscriptionBindState.Active,
+            (await _db.OrganizationAzureSubscriptionBinds.SingleAsync()).State);
+        Assert.Equal(2, await _db.OrganizationAuditRecords.CountAsync(x =>
+            x.Action == OrganizationAuditAction.AzureSubscriptionBindChanged));
+    }
+
     private static OrganizationAzureSubscriptionBind CreateBind(
         string subscriptionId,
         OrganizationAzureSubscriptionBindState state) =>
@@ -203,6 +254,50 @@ public sealed class OrganizationAzureSubscriptionBindPersistenceTests : IAsyncLi
             CreatedAt = Now,
             UpdatedAt = Now
         };
+
+    private DbContextOptions<CatalogDbContext> LostAckOptions(DbTransactionInterceptor acknowledgement) =>
+        new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(
+                _connection,
+                sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
+                isTransient: exception => exception is LostCommitAcknowledgementException)
+            .AddInterceptors(acknowledgement)
+            .Options;
+
+    private sealed class FollowUpBindTransitionLostCommitInterceptor(
+        Guid bindId,
+        OrganizationAzureSubscriptionBindState nextState,
+        DateTimeOffset changedAt) : DbTransactionInterceptor
+    {
+        private int _remainingFailures = 1;
+        private int _committed;
+
+        public int Committed => Volatile.Read(ref _committed);
+
+        public override async Task TransactionCommittedAsync(
+            DbTransaction transaction,
+            TransactionEndEventData eventData,
+            CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _committed);
+            if (Interlocked.Decrement(ref _remainingFailures) >= 0)
+            {
+                await using var command = eventData.Context!.Database.GetDbConnection().CreateCommand();
+                command.CommandText = """
+                    UPDATE OrganizationAzureSubscriptionBinds
+                    SET State = $state, UpdatedAt = $updatedAt
+                    WHERE Id = $id
+                    """;
+                command.Parameters.Add(new SqliteParameter("$state", nextState.ToString()));
+                command.Parameters.Add(new SqliteParameter("$updatedAt", changedAt.UtcTicks));
+                command.Parameters.Add(new SqliteParameter("$id", bindId));
+                Assert.Equal(1, await command.ExecuteNonQueryAsync(cancellationToken));
+                throw new LostCommitAcknowledgementException();
+            }
+
+            await base.TransactionCommittedAsync(transaction, eventData, cancellationToken);
+        }
+    }
 
     public async Task DisposeAsync()
     {

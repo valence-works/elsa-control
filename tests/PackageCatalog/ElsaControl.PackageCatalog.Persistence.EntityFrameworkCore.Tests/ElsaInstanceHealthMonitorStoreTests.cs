@@ -1,9 +1,11 @@
+using System.Data.Common;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 
@@ -122,6 +124,43 @@ public sealed class ElsaInstanceHealthMonitorStoreTests : IAsyncDisposable
         Assert.All(audit, x => Assert.Equal(((Guid?)null, (Guid?)null, x.DiagnosticCode, Now),
             (x.OperationId, x.ActorAccountId, x.Summary, x.OccurredAt)));
         Assert.Equal(3, recovered);
+    }
+
+    [Fact]
+    public async Task A_lost_acknowledgement_returns_the_committed_version_after_a_later_health_transition()
+    {
+        var instance = AddInstance();
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = CreateContext();
+            var followUpStore = new EfCoreElsaInstanceLifecycleStore(
+                followUp, new UnavailableElsaInstanceLifecycleResolutionInputSource(), new FixedTimeProvider(Now));
+            Assert.Equal(3, await followUpStore.CommitHealthTransitionAsync(
+                Transition(instance.Id, 2, ElsaInstanceHealth.Unreachable, ElsaInstanceHealth.Healthy,
+                    "azure.health.healthy"), cancellationToken));
+        });
+        var options = new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(_connection,
+                sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
+                isTransient: exception => exception is LostCommitAcknowledgementException)
+            .AddInterceptors(acknowledgement)
+            .Options;
+        await using var db = new CatalogDbContext(options);
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, new UnavailableElsaInstanceLifecycleResolutionInputSource(), new FixedTimeProvider(Now));
+
+        var version = await store.CommitHealthTransitionAsync(
+            Transition(instance.Id, 1, ElsaInstanceHealth.Healthy, ElsaInstanceHealth.Unreachable,
+                "azure.health.timed-out"));
+
+        Assert.Equal(2, version);
+        Assert.Equal(1, acknowledgement.Committed);
+        await using var verify = CreateContext();
+        var persisted = await verify.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == instance.Id);
+        Assert.Equal(3, persisted.Version);
+        Assert.Equal(ElsaInstanceHealth.Healthy, persisted.Health);
+        Assert.Equal(2, await verify.ElsaInstanceAuditEvents.AsNoTracking()
+            .CountAsync(x => x.InstanceId == instance.Id && x.EventType == "lifecycle.health-changed"));
     }
 
     [Theory]

@@ -3,7 +3,10 @@ using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.Deployment.Artifacts;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using System.Data.Common;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 
@@ -227,6 +230,40 @@ public sealed class DeploymentCommandPersistenceTests : IDisposable
 
         Assert.Equal(DeploymentCommandStatus.Claimed, claimed.Status);
         await Assert.ThrowsAsync<InvalidOperationException>(duplicate);
+    }
+
+    [Fact]
+    public async Task Lost_commit_acknowledgement_claim_returns_original_result_after_a_later_heartbeat()
+    {
+        var topology = await SeedTopologyAsync();
+        var run = await QueueRunAsync(topology);
+        var command = (await _store.PollPendingCommandsAsync(_workspaceId, topology.Engine.Id, 10, run.QueuedAt)).Single();
+        var now = run.QueuedAt.AddMinutes(1);
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = CreateSharedContext();
+            await new DeploymentWorkspaceStore(followUp).HeartbeatCommandAsync(
+                _workspaceId,
+                command.Id,
+                new DeploymentCommandHeartbeatRequest("lease-lost-ack", "worker-lost-ack"),
+                now.AddMinutes(1),
+                cancellationToken);
+        });
+
+        await using var lostDb = CreateLostAcknowledgementContext(acknowledgement);
+        var claimed = await new DeploymentWorkspaceStore(lostDb).ClaimCommandAsync(
+            _workspaceId,
+            command.Id,
+            new ClaimDeploymentCommandRequest(topology.Engine.Id, "worker-lost-ack", TimeSpan.FromMinutes(5)),
+            "lease-lost-ack",
+            now);
+
+        Assert.Equal(DeploymentCommandStatus.Claimed, claimed.Status);
+        Assert.Equal(1, acknowledgement.Committed);
+        _db.ChangeTracker.Clear();
+        Assert.Equal(2, await _db.DeploymentCommandEvents.CountAsync(x =>
+            x.CommandId == command.Id && x.Status == DeploymentCommandStatus.Claimed));
+        Assert.Equal(now.AddMinutes(1), (await _db.DeploymentCommands.SingleAsync(x => x.Id == command.Id)).HeartbeatAt);
     }
 
     [Fact]
@@ -463,6 +500,57 @@ public sealed class DeploymentCommandPersistenceTests : IDisposable
         Assert.Equal(1, recovered);
         Assert.Equal(WorkspaceDeploymentRunStatus.RecoveryRequired, recoveredRun!.Status);
         Assert.Equal(DeploymentCommandStatus.RecoveryRequired, recoveredCommand!.Status);
+    }
+
+    [Fact]
+    public async Task Lost_commit_acknowledgement_stale_command_recovery_preserves_one_event_and_result()
+    {
+        var topology = await SeedTopologyAsync();
+        var run = await QueueRunAsync(topology);
+        var command = (await _store.PollPendingCommandsAsync(_workspaceId, topology.Engine.Id, 10, run.QueuedAt)).Single();
+        var claimedAt = run.QueuedAt.AddSeconds(1);
+        await _store.ClaimCommandAsync(
+            _workspaceId,
+            command.Id,
+            new ClaimDeploymentCommandRequest(topology.Engine.Id, "worker-stale", TimeSpan.FromMinutes(5)),
+            "lease-stale",
+            claimedAt);
+        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+
+        await using var lostDb = CreateLostAcknowledgementContext(acknowledgement);
+        var recovered = await new DeploymentWorkspaceStore(lostDb)
+            .MarkStaleCommandsRecoveryRequiredAsync(claimedAt.AddMinutes(20), TimeSpan.FromMinutes(10));
+
+        Assert.Equal(1, recovered);
+        Assert.Equal(1, acknowledgement.Committed);
+        _db.ChangeTracker.Clear();
+        Assert.Equal(1, await _db.DeploymentCommandEvents.CountAsync(x =>
+            x.CommandId == command.Id && x.Status == DeploymentCommandStatus.RecoveryRequired));
+        Assert.Equal(2, await _db.DeploymentRunHistoryEvents.CountAsync(x =>
+            x.RunId == run.Id && x.Status == WorkspaceDeploymentRunStatus.RecoveryRequired));
+    }
+
+    [Fact]
+    public async Task Lost_commit_acknowledgement_run_status_returns_original_result_without_duplicate_history()
+    {
+        var topology = await SeedTopologyAsync();
+        var run = await QueueRunAsync(topology);
+        var now = run.QueuedAt.AddMinutes(1);
+        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+
+        await using var lostDb = CreateLostAcknowledgementContext(acknowledgement);
+        var updated = await new DeploymentWorkspaceStore(lostDb).UpdateRunStatusAsync(
+            _workspaceId,
+            run.Id,
+            WorkspaceDeploymentRunStatus.Succeeded,
+            "Deployment completed after a lost acknowledgement.",
+            now);
+
+        Assert.Equal(WorkspaceDeploymentRunStatus.Succeeded, updated.Status);
+        Assert.Equal(1, acknowledgement.Committed);
+        _db.ChangeTracker.Clear();
+        Assert.Equal(1, await _db.DeploymentRunHistoryEvents.CountAsync(x =>
+            x.RunId == run.Id && x.Status == WorkspaceDeploymentRunStatus.Succeeded));
     }
 
     [Fact]
@@ -741,6 +829,22 @@ public sealed class DeploymentCommandPersistenceTests : IDisposable
             .Options;
         return new CatalogDbContext(options);
     }
+
+    private CatalogDbContext CreateLostAcknowledgementContext(DbTransactionInterceptor acknowledgement)
+    {
+        var options = new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(
+                (SqliteConnection)_db.Database.GetDbConnection(),
+                isTransient: exception => exception is LostCommitAcknowledgementException)
+            .AddInterceptors(acknowledgement)
+            .Options;
+        return new CatalogDbContext(options);
+    }
+
+    private CatalogDbContext CreateSharedContext() =>
+        new(new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite((SqliteConnection)_db.Database.GetDbConnection())
+            .Options);
 
     private sealed record DeploymentTopology(
         WorkspaceDeploymentApplication Application,
