@@ -34,7 +34,9 @@ counts, as in the flow below.
 
 Before it exits, the probe waits (up to 45 seconds) for a started API to record its own exit code, because
 Container Instances terminates the remaining containers of a group when one exits; otherwise the API wrapper
-would report 143 regardless of how the API stopped. `run-phase.sh` never deletes the group; cleanup is a separate operator step that must
+would report 143 regardless of how the API stopped. On `/rehearsal/stop-api` the wrapper sends SIGTERM to the
+`dotnet` process itself (not to a subshell around it), so the recorded code is the API's own graceful-shutdown
+exit code (#376). `run-phase.sh` never deletes the group; cleanup is a separate operator step that must
 verify the exact group is absent. A passing result also requires the group state
 `Succeeded` and both containers terminal at exit code zero.
 

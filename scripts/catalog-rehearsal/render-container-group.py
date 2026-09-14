@@ -154,14 +154,17 @@ def main() -> int:
         env("ManagedLifecycleTelemetry__AzureMonitor__Enabled", "false"),
     ]
     # The API waits for the probe's start barrier, runs the exact image entrypoint, and records its exit code so a
-    # crashed API never leaves the probe waiting out its full health timeout. API output is discarded.
+    # crashed API never leaves the probe waiting out its full health timeout. API output is discarded. The API is
+    # backgrounded as a simple command so $! is the dotnet process: backgrounding `cd /app && dotnet ...` would make
+    # $! a subshell, and stopping that subshell reports 143 while the API itself never sees SIGTERM.
     api_command = [
         "/bin/bash",
         "-c",
         "deadline=$(( $(date +%s) + 900 )); "
         "while [ ! -e /rehearsal/start-api ] && [ ! -e /rehearsal/stop-api ] && [ $(date +%s) -lt $deadline ]; do sleep 1; done; "
         "[ -e /rehearsal/start-api ] || exit 124; "
-        "cd /app && dotnet /app/ElsaControl.Api.dll >/dev/null 2>&1 & api_pid=$!; "
+        "cd /app || exit 1; "
+        "dotnet /app/ElsaControl.Api.dll >/dev/null 2>&1 & api_pid=$!; "
         "stop_api() { if kill -0 $api_pid 2>/dev/null; then kill -TERM $api_pid 2>/dev/null || true; "
         "for n in $(seq 1 15); do kill -0 $api_pid 2>/dev/null || return 0; sleep 1; done; "
         "kill -KILL $api_pid 2>/dev/null || true; fi; }; "

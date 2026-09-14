@@ -31,9 +31,16 @@ case "$1" in
     printf '%s\\n' "${FAKE_ID:?}" ;;
   start) ;;
   inspect)
-    printf '%s\\n' "${FAKE_STATE:-running}"
+    case "$3" in
+      *ExitCode*) printf '%s\\n' "${FAKE_EXIT_CODE:-0}" ;;
+      *) printf '%s\\n' "${FAKE_STATE:-running}" ;;
+    esac
     echo 'untrusted raw container detail' >&2 ;;
   exec) printf '%s\\n' '{"status":"ok"}' ;;
+  stop) printf '%s\\n' "$4" ;;
+  logs)
+    echo 'untrusted raw container detail'
+    printf '%s\\n' "${FAKE_SHUTDOWN_LOG-Application is shutting down...}" ;;
   rm) exit "${FAKE_CLEANUP_EXIT:-0}" ;;
   *) exit 91 ;;
 esac
@@ -55,9 +62,10 @@ esac
                          "DataProtection__KeysPath=/tmp/elsa-image-smoke-keys",
                          "--env Authentication__ApiKey", "docker exec",
                          "curl --fail --silent --max-time 2", "deadline=$((SECONDS + 60))",
+                         'docker stop --time 30 "$container_id"', "Application is shutting down...",
                          'docker rm --force "$container_id"'):
             self.assertIn(required, source)
-        for forbidden in ("--publish", "--volume", "docker logs"):
+        for forbidden in ("--publish", "--volume"):
             self.assertNotIn(forbidden, source)
 
     def test_success_keeps_key_out_of_arguments_and_cleans_exact_container(self) -> None:
@@ -69,6 +77,29 @@ esac
         self.assertIn("--env Authentication__ApiKey api-image:test", calls[0])
         self.assertNotRegex(calls[0], r"Authentication__ApiKey=")
         self.assertEqual(f"rm --force {CONTAINER_ID}", calls[-1])
+
+    def test_success_requires_a_graceful_stop_without_emitting_container_output(self) -> None:
+        result = self.run_smoke()
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertNotIn("untrusted raw container detail", result.stdout + result.stderr)
+        calls = self.log.read_text().splitlines()
+        self.assertEqual([f"stop --time 30 {CONTAINER_ID}", f"inspect --format {{{{.State.ExitCode}}}} {CONTAINER_ID}",
+                          f"logs {CONTAINER_ID}"], calls[-4:-1])
+
+    def test_signal_death_or_missing_shutdown_log_fails_and_still_cleans(self) -> None:
+        cases = {
+            "killed by SIGTERM": ({"FAKE_EXIT_CODE": "143"}, "did not exit 0 after SIGTERM"),
+            "killed at stop timeout": ({"FAKE_EXIT_CODE": "137"}, "did not exit 0 after SIGTERM"),
+            "no shutdown sequence": ({"FAKE_SHUTDOWN_LOG": ""}, "did not log the graceful shutdown sequence"),
+        }
+        for name, (overrides, message) in cases.items():
+            with self.subTest(case=name):
+                self.log.unlink(missing_ok=True)
+                result = self.run_smoke(**overrides)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn(message, result.stderr)
+                self.assertNotIn("untrusted raw container detail", result.stdout + result.stderr)
+                self.assertEqual(f"rm --force {CONTAINER_ID}", self.log.read_text().splitlines()[-1])
 
     def test_crash_fails_without_emitting_container_output_and_still_cleans(self) -> None:
         result = self.run_smoke(FAKE_STATE="exited")

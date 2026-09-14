@@ -136,6 +136,36 @@ class RendererTests(HarnessCase):
                 self.assertEqual(2, code)
                 self.assertIsNone(spec)
 
+    def test_api_wrapper_signals_the_api_process_and_records_its_graceful_exit(self) -> None:
+        # Runs the rendered wrapper against a fake `dotnet` that exits 0 only through its SIGTERM handler. The
+        # wrapper must signal the API process itself: signalling a subshell around it reports 143 and orphans it.
+        _, spec = self.render()
+        assert spec is not None
+        command = next(c["properties"]["command"] for c in spec["properties"]["containers"] if c["name"] == "api")
+        barrier, app, bin_dir = (self.temp / name for name in ("rehearsal", "app", "bin"))
+        for directory in (barrier, app, bin_dir):
+            directory.mkdir()
+        pid_file, stopped_file = self.temp / "api.pid", self.temp / "api.stopped"
+        fake_dotnet = bin_dir / "dotnet"
+        fake_dotnet.write_text(f"""#!/usr/bin/env bash
+trap 'printf graceful > {str(stopped_file)!r}; exit 0' TERM
+printf '%s' "$$" > {str(pid_file)!r}
+while :; do sleep 0.1; done
+""")
+        fake_dotnet.chmod(0o755)
+        self.addCleanup(lambda: pid_file.exists() and subprocess.run(["kill", "-KILL", pid_file.read_text()], capture_output=True, check=False))
+        script = command[2].replace("/app", str(app)).replace("/rehearsal", str(barrier))
+        wrapper = subprocess.Popen([*command[:2], script], env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"})
+        self.addCleanup(lambda: wrapper.poll() is None and wrapper.kill())
+        (barrier / "start-api").touch()
+        deadline = time.monotonic() + 30
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        (barrier / "stop-api").touch()
+        self.assertEqual(0, wrapper.wait(timeout=30))
+        self.assertEqual("0", (barrier / "api-exited").read_text())
+        self.assertEqual("graceful", stopped_file.read_text())
+
 
 class ParserAndGateTests(HarnessCase):
     def write(self, name: str, payload: object, raw: str | None = None) -> Path:
