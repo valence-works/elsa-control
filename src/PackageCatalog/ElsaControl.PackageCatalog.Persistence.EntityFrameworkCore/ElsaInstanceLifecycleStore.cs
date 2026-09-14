@@ -3065,7 +3065,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             FailureSummary: "Lifecycle target already has active work.");
     }
 
-    private async Task<ElsaInstanceLifecycleWorkerResult> ResolveReservationRaceAsync(
+    internal async Task<ElsaInstanceLifecycleWorkerResult> ResolveReservationRaceAsync(
         ElsaInstanceLifecycleResolutionCommit commit,
         CancellationToken cancellationToken)
     {

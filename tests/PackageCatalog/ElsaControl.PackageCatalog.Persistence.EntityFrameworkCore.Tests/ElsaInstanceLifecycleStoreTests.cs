@@ -1015,6 +1015,77 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
+    public async Task A_lost_acknowledgement_after_reservation_race_fallback_returns_the_committed_conflict()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        ElsaInstanceLifecycleResolutionCommit commit;
+        Guid operationId;
+        Guid environmentId;
+
+        await using (var setup = CreateMigratedContext(connection))
+        {
+            await setup.Database.MigrateAsync();
+            var workspace = await CreateWorkspaceAsync(setup, "Lost reservation acknowledgement workspace");
+            var accepted = await new ElsaInstanceLifecycleService(CreateStore(setup), new FixedTimeProvider(Now))
+                .CreateAsync(new ElsaInstanceCreateRequest(
+                    workspace.OrganizationId, workspace.Id, "Worker Elsa", "lost-reservation-elsa", WorkerIntent(),
+                    "lost-reservation-create"));
+            var target = await AddManagedEnvironmentAsync(setup, workspace, accepted.Instance.Id);
+            var claimed = await new EfCoreElsaInstanceLifecycleStore(
+                    setup,
+                    new StaticResolutionInputSource(accepted.Instance, target),
+                    new FixedTimeProvider(Now))
+                .TryClaimNextAsync("worker-one", Now)
+                ?? throw new InvalidOperationException("Expected a claimed work item.");
+            commit = CreateResolutionCommit(
+                claimed, SuccessfulResolution(workspace.Id, accepted.Instance.Id), Now.AddSeconds(1));
+            operationId = accepted.Operation.Id;
+            environmentId = target.EnvironmentId;
+            setup.DeploymentRuns.Add(new DeploymentRunEntity
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = workspace.Id,
+                ElsaInstanceId = accepted.Instance.Id,
+                ApplicationId = target.ApplicationId,
+                EnvironmentId = target.EnvironmentId,
+                EngineId = Guid.NewGuid(),
+                SourceRevisionId = Guid.NewGuid(),
+                Status = WorkspaceDeploymentRunStatus.Queued,
+                ValidationOutcome = DeploymentValidationOutcome.Passed,
+                ConfirmationId = Guid.NewGuid(),
+                ActorAccountId = Guid.NewGuid(),
+                QueuedAt = Now,
+                CreatedAt = Now,
+                AttemptNumber = 1
+            });
+            await setup.SaveChangesAsync();
+        }
+
+        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var options = new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(connection,
+                sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
+                isTransient: exception => exception is LostCommitAcknowledgementException)
+            .AddInterceptors(acknowledgement)
+            .Options;
+        await using var db = new CatalogDbContext(options);
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+
+        var result = await store.ResolveReservationRaceAsync(commit, CancellationToken.None);
+
+        Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Conflict, result.Outcome);
+        Assert.Equal("run.reservation.conflict", result.FailureCode);
+        Assert.Equal(1, acknowledgement.Committed);
+        var operation = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == operationId);
+        Assert.Equal(ElsaInstanceOperationState.Failed, operation.State);
+        Assert.Equal(1, await db.DeploymentRuns.CountAsync(x => x.EnvironmentId == environmentId));
+        Assert.Equal(1, await db.ElsaInstanceAuditEvents.CountAsync(x =>
+            x.OperationId == operationId && x.EventType == "lifecycle.failed"));
+    }
+
+    [Fact]
     public async Task Finalization_uses_store_clock_when_caller_supplies_a_backdated_timestamp()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
