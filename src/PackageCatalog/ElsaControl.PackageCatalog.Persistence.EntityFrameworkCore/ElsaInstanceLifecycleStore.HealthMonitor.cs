@@ -1,5 +1,7 @@
 using System.Data;
 using System.Data.Common;
+using System.Security.Cryptography;
+using System.Text;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
@@ -50,9 +52,13 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
         ArgumentNullException.ThrowIfNull(transition);
         transition.Validate();
         dbContext.ChangeTracker.Clear();
+        var observedAt = transition.ObservedAt.ToUniversalTime();
+        var transitionFingerprint = HealthTransitionFingerprint(transition, observedAt);
         try
         {
-            return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+            return await dbContext.ExecuteInTransactionAsync(
+                IsolationLevel.Serializable,
+                async () =>
             {
                 // Re-read inside the transaction: the instance must still be in the evaluated set,
                 // at the version and health the probe streak was gathered against. The version is
@@ -67,7 +73,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
 
                 var priorHealth = instance.Health;
                 instance.Health = transition.Health;
-                instance.UpdatedAt = transition.ObservedAt.ToUniversalTime();
+                instance.UpdatedAt = observedAt;
                 await dbContext.ElsaInstanceAuditEvents.AddAsync(new ElsaInstanceAuditEventEntity
                 {
                     Id = Guid.NewGuid(),
@@ -80,11 +86,32 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                     NewState = transition.Health.ToString(),
                     DesiredStateRevisionId = instance.DesiredStateRevisionId,
                     DiagnosticCode = transition.DiagnosticCode,
-                    OccurredAt = transition.ObservedAt.ToUniversalTime()
+                    RequestKeyHash = transitionFingerprint,
+                    OccurredAt = observedAt
                 }, cancellationToken);
                 await dbContext.SaveChangesAsync(cancellationToken);
                 return instance.Version;
-            }, cancellationToken);
+            },
+                async (version, verificationCancellationToken) =>
+                {
+                    if (version != transition.ExpectedVersion + 1)
+                        return false;
+                    var persisted = await dbContext.ElsaInstances.AsNoTracking()
+                        .SingleOrDefaultAsync(x => x.WorkspaceId == transition.WorkspaceId &&
+                                                   x.Id == transition.InstanceId,
+                            verificationCancellationToken);
+                    if (persisted is null || persisted.Version != version || persisted.Health != transition.Health ||
+                        persisted.UpdatedAt != observedAt)
+                        return false;
+                    return await dbContext.ElsaInstanceAuditEvents.AsNoTracking().AnyAsync(x =>
+                        x.InstanceId == transition.InstanceId && x.EventType == HealthChangedEventType &&
+                        x.PriorState == transition.ExpectedHealth.ToString() &&
+                        x.NewState == transition.Health.ToString() &&
+                        x.DiagnosticCode == transition.DiagnosticCode &&
+                        x.RequestKeyHash == transitionFingerprint && x.OccurredAt == observedAt,
+                        verificationCancellationToken);
+                },
+                cancellationToken);
         }
         catch (ElsaInstanceLifecycleConflictException)
         {
@@ -97,6 +124,18 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
             throw Conflict("Instance health conflicted with a concurrent change.", ElsaInstanceLifecycleConflictReason.VersionConflict);
         }
     }
+
+    private static string HealthTransitionFingerprint(
+        ElsaInstanceHealthTransition transition, DateTimeOffset observedAt) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join(
+            '\u001f',
+            transition.WorkspaceId,
+            transition.InstanceId,
+            transition.ExpectedVersion,
+            transition.ExpectedHealth,
+            transition.Health,
+            transition.DiagnosticCode ?? string.Empty,
+            observedAt.Ticks))));
 
     /// <summary>
     /// The monitor's evaluated state set: a live managed instance, desired Running and observed

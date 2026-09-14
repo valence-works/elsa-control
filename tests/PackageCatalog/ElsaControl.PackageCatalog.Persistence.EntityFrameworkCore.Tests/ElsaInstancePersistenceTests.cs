@@ -1,3 +1,4 @@
+using System.Data.Common;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Cockpit;
 using ElsaControl.Deployment.Core.Instances;
@@ -7,6 +8,7 @@ using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 
@@ -1538,6 +1540,109 @@ public sealed class ElsaInstancePersistenceTests
     }
 
     [Fact]
+    public async Task A_lost_acknowledgement_after_due_migration_claim_commit_returns_the_committed_claim()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var setup = CreateMigratedContext(connection);
+        await setup.Database.MigrateAsync();
+        var workspace = new Workspace { Name = "Lost migration claim acknowledgement workspace" };
+        setup.Workspaces.Add(workspace);
+        await setup.SaveChangesAsync();
+        var instance = NewInstance(workspace.OrganizationId, workspace.Id);
+        setup.ElsaInstances.Add(instance);
+        await setup.SaveChangesAsync();
+        var now = DateTimeOffset.UtcNow;
+        var migration = NewMigration(workspace, instance, "RetainingSource");
+        migration.CutoverAt = now.AddDays(-31);
+        migration.SourceRetainUntil = now.AddDays(-1);
+        migration.CreatedAt = now.AddDays(-32);
+        migration.UpdatedAt = now.AddMinutes(-2);
+        setup.ElsaInstanceOperations.Add(NewMigrationOperation(workspace, instance, migration));
+        setup.ElsaInstanceMigrations.Add(migration);
+        await setup.SaveChangesAsync();
+
+        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var options = new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(connection,
+                sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
+                isTransient: exception => exception is LostCommitAcknowledgementException)
+            .AddInterceptors(acknowledgement)
+            .Options;
+        await using var db = new CatalogDbContext(options);
+        var store = new EfCoreElsaInstanceMigrationStore(db);
+
+        var claim = await store.TryClaimDueAsync(now, TimeSpan.FromMinutes(5));
+
+        Assert.NotNull(claim);
+        Assert.Equal(1, acknowledgement.Committed);
+        Assert.Equal(1, claim!.AttemptNumber);
+        await using var verify = new CatalogDbContext(options);
+        var persisted = await verify.ElsaInstanceMigrations.AsNoTracking().SingleAsync(x => x.MigrationId == migration.MigrationId);
+        Assert.Equal(claim.ClaimToken, persisted.SourceReleaseClaimToken);
+        Assert.Equal(claim.ClaimedUntil, persisted.SourceReleaseClaimedUntil);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_lost_acknowledgement_after_migration_completion_commit_returns_the_committed_result(bool confirmed)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var setup = CreateMigratedContext(connection);
+        await setup.Database.MigrateAsync();
+        var workspace = new Workspace { Name = "Lost migration completion acknowledgement workspace" };
+        setup.Workspaces.Add(workspace);
+        await setup.SaveChangesAsync();
+        var instance = NewInstance(workspace.OrganizationId, workspace.Id);
+        setup.ElsaInstances.Add(instance);
+        await setup.SaveChangesAsync();
+        var now = DateTimeOffset.UtcNow;
+        var migration = NewMigration(workspace, instance, "RetainingSource");
+        migration.CutoverAt = now.AddDays(-31);
+        migration.SourceRetainUntil = now.AddDays(-1);
+        migration.CreatedAt = now.AddDays(-32);
+        migration.UpdatedAt = now.AddMinutes(-2);
+        setup.ElsaInstanceOperations.Add(NewMigrationOperation(workspace, instance, migration));
+        setup.ElsaInstanceMigrations.Add(migration);
+        await setup.SaveChangesAsync();
+        var claimStore = new EfCoreElsaInstanceMigrationStore(setup);
+        var claim = await claimStore.TryClaimDueAsync(now, TimeSpan.FromMinutes(5));
+        Assert.NotNull(claim);
+
+        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var options = new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(connection,
+                sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
+                isTransient: exception => exception is LostCommitAcknowledgementException)
+            .AddInterceptors(acknowledgement)
+            .Options;
+        await using var db = new CatalogDbContext(options);
+        var store = new EfCoreElsaInstanceMigrationStore(db);
+        var result = confirmed
+            ? new ElsaInstanceSourceReleaseResult(ElsaInstanceSourceReleaseOutcome.Confirmed,
+                "migration.source-release.confirmed", "provider-operation-1",
+                "https://evidence.example/migrations/release-1", "sha256:" + new string('e', 64))
+            : new ElsaInstanceSourceReleaseResult(ElsaInstanceSourceReleaseOutcome.RetryableFailure,
+                "migration.source-release.retryable");
+
+        var completed = await store.CompleteAsync(claim!, result, now.AddMinutes(1));
+
+        Assert.Equal(confirmed ? ElsaInstanceMigrationWriteOutcome.Applied : ElsaInstanceMigrationWriteOutcome.Conflict,
+            completed.Outcome);
+        Assert.Equal(1, acknowledgement.Committed);
+        await using var verify = new CatalogDbContext(options);
+        var persisted = await verify.ElsaInstanceMigrations.AsNoTracking().SingleAsync(x => x.MigrationId == migration.MigrationId);
+        Assert.Equal(confirmed ? "Released" : "RetiringSource", persisted.Phase);
+        Assert.Equal(confirmed ? ElsaInstanceOperationState.Succeeded : ElsaInstanceOperationState.Running,
+            (await verify.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == migration.OperationId)).State);
+        Assert.Equal(1, await verify.ElsaInstanceAuditEvents.CountAsync(x =>
+            x.MigrationId == migration.MigrationId &&
+            x.EventType == (confirmed ? "MigrationSourceReleased" : "MigrationSourceReleaseAttempted")));
+    }
+
+    [Fact]
     public async Task Migration_upgrade_preserves_a_legacy_retained_source_under_an_active_reservation()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -1637,6 +1742,30 @@ public sealed class ElsaInstancePersistenceTests
     {
         public override DateTimeOffset GetUtcNow() => now;
     }
+
+    private sealed class LostCommitAcknowledgementInterceptor(int failures = 1) : DbTransactionInterceptor
+    {
+        private int _failed;
+
+        public int Committed { get; private set; }
+
+        public override Task TransactionCommittedAsync(
+            DbTransaction transaction,
+            TransactionEndEventData eventData,
+            CancellationToken cancellationToken = default)
+        {
+            Committed++;
+            if (_failed < failures)
+            {
+                _failed++;
+                throw new LostCommitAcknowledgementException();
+            }
+
+            return base.TransactionCommittedAsync(transaction, eventData, cancellationToken);
+        }
+    }
+
+    private sealed class LostCommitAcknowledgementException : Exception;
 
     private sealed class AllowMigrationAuthorizer : IElsaInstanceMigrationAuthorizer
     {

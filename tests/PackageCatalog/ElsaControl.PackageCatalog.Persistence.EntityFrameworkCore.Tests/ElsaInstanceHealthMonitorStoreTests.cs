@@ -1,9 +1,11 @@
+using System.Data.Common;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 
@@ -122,6 +124,34 @@ public sealed class ElsaInstanceHealthMonitorStoreTests : IAsyncDisposable
         Assert.All(audit, x => Assert.Equal(((Guid?)null, (Guid?)null, x.DiagnosticCode, Now),
             (x.OperationId, x.ActorAccountId, x.Summary, x.OccurredAt)));
         Assert.Equal(3, recovered);
+    }
+
+    [Fact]
+    public async Task A_lost_acknowledgement_after_a_health_transition_commit_returns_the_committed_version()
+    {
+        var instance = AddInstance();
+        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var options = new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(_connection,
+                sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
+                isTransient: exception => exception is LostCommitAcknowledgementException)
+            .AddInterceptors(acknowledgement)
+            .Options;
+        await using var db = new CatalogDbContext(options);
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, new UnavailableElsaInstanceLifecycleResolutionInputSource(), new FixedTimeProvider(Now));
+
+        var version = await store.CommitHealthTransitionAsync(
+            Transition(instance.Id, 1, ElsaInstanceHealth.Healthy, ElsaInstanceHealth.Unreachable,
+                "azure.health.timed-out"));
+
+        Assert.Equal(2, version);
+        Assert.Equal(1, acknowledgement.Committed);
+        await using var verify = CreateContext();
+        Assert.Equal(2, await verify.ElsaInstances.AsNoTracking().Where(x => x.Id == instance.Id)
+            .Select(x => x.Version).SingleAsync());
+        Assert.Single(await verify.ElsaInstanceAuditEvents.AsNoTracking()
+            .Where(x => x.InstanceId == instance.Id && x.EventType == "lifecycle.health-changed").ToListAsync());
     }
 
     [Theory]
@@ -288,6 +318,30 @@ public sealed class ElsaInstanceHealthMonitorStoreTests : IAsyncDisposable
     {
         public override DateTimeOffset GetUtcNow() => now;
     }
+
+    private sealed class LostCommitAcknowledgementInterceptor(int failures = 1) : DbTransactionInterceptor
+    {
+        private int _failed;
+
+        public int Committed { get; private set; }
+
+        public override Task TransactionCommittedAsync(
+            DbTransaction transaction,
+            TransactionEndEventData eventData,
+            CancellationToken cancellationToken = default)
+        {
+            Committed++;
+            if (_failed < failures)
+            {
+                _failed++;
+                throw new LostCommitAcknowledgementException();
+            }
+
+            return base.TransactionCommittedAsync(transaction, eventData, cancellationToken);
+        }
+    }
+
+    private sealed class LostCommitAcknowledgementException : Exception;
 
     private sealed class FixedProbe(ElsaInstanceHealthProbeResult result) : IElsaInstanceProviderHealthProbePort
     {
