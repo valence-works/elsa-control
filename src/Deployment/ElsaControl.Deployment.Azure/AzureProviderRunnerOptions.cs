@@ -120,6 +120,8 @@ public sealed record AzureProviderRunnerOptions
     public string AzureCliPath { get; init; } = "";
     /// <summary>Required user-assigned managed identity client ID used by Azure CLI login.</summary>
     public string? AzureCliClientId { get; init; }
+    /// <summary>Managing-tenant ID used to derive and verify the Lighthouse registration identity.</summary>
+    public string? LighthouseManagingTenantId { get; init; }
     /// <summary>Absolute sqlcmd executable bound into provider authority.</summary>
     public string SqlCmdPath { get; init; } = "";
     /// <summary>Absolute curl executable used for the post-promotion health probe.</summary>

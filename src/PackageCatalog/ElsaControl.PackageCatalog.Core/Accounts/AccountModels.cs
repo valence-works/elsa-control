@@ -63,6 +63,7 @@ public sealed class Organization
     public List<BillingProviderEventInboxEntry> BillingProviderEvents { get; set; } = [];
     public List<OrganizationBillingLifecycleNotice> BillingLifecycleNotices { get; set; } = [];
     public List<OrganizationBillingCleanup> BillingCleanups { get; set; } = [];
+    public List<OrganizationAzureSubscriptionBind> AzureSubscriptionBinds { get; set; } = [];
 }
 
 /// <summary>

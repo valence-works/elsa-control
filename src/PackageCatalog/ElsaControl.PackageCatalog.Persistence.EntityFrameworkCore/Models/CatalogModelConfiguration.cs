@@ -186,6 +186,7 @@ internal sealed class OrganizationConfiguration : IEntityTypeConfiguration<Organ
         builder.HasMany(x => x.Memberships).WithOne(x => x.Organization).HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Cascade);
         builder.HasMany(x => x.EntitlementSnapshots).WithOne(x => x.Organization).HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Cascade);
         builder.HasMany(x => x.AuditRecords).WithOne(x => x.Organization).HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Cascade);
+        builder.HasMany(x => x.AzureSubscriptionBinds).WithOne(x => x.Organization).HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Cascade);
         builder.HasOne(x => x.IdentityBinding).WithOne(x => x.Organization).HasForeignKey<OrganizationIdentityBinding>(x => x.OrganizationId).OnDelete(DeleteBehavior.Cascade);
     }
 }
@@ -282,6 +283,37 @@ internal sealed class OrganizationSubscriptionConfiguration : IEntityTypeConfigu
             .IsUnique()
             .HasFilter("ProviderSubscriptionReference IS NOT NULL");
         builder.HasOne(x => x.Organization).WithMany(x => x.Subscriptions).HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Cascade);
+    }
+}
+
+internal sealed class OrganizationAzureSubscriptionBindConfiguration : IEntityTypeConfiguration<OrganizationAzureSubscriptionBind>
+{
+    public void Configure(EntityTypeBuilder<OrganizationAzureSubscriptionBind> builder)
+    {
+        builder.HasKey(x => x.Id);
+        builder.Property(x => x.CustomerTenantId).HasMaxLength(36).IsRequired();
+        builder.Property(x => x.SubscriptionId).HasMaxLength(36).IsRequired();
+        builder.Property(x => x.ManagingTenantId).HasMaxLength(36).IsRequired();
+        builder.Property(x => x.ManagingPrincipalObjectId).HasMaxLength(36).IsRequired();
+        builder.Property(x => x.ManagingPrincipalClientId).HasMaxLength(36).IsRequired();
+        builder.Property(x => x.RegistrationDefinitionId).HasMaxLength(2048).IsRequired();
+        builder.Property(x => x.RegistrationDefinitionFingerprint).HasMaxLength(256);
+        builder.Property(x => x.State).HasConversion<string>().HasMaxLength(32).IsRequired();
+        builder.Property(x => x.LastPreflightCode).HasMaxLength(128);
+        builder.Property(x => x.UnbindReason).HasMaxLength(512);
+        builder.Property(x => x.VerifiedAt).HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null, value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
+        builder.Property(x => x.CreatedAt).HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        builder.Property(x => x.UpdatedAt).HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        builder.HasIndex(x => new { x.OrganizationId, x.CreatedAt });
+        // A bind may have historical Degraded/Unbound rows, but there can only be one
+        // current Active row and one PendingConsent/Verifying draft per organization.
+        builder.HasIndex(x => x.OrganizationId, "IX_OrganizationAzureSubscriptionBinds_OneActive")
+            .IsUnique()
+            .HasFilter("State = 'Active'");
+        builder.HasIndex(x => x.OrganizationId, "IX_OrganizationAzureSubscriptionBinds_OneInFlight")
+            .IsUnique()
+            .HasFilter("State IN ('PendingConsent', 'Verifying')");
+        builder.HasOne(x => x.Organization).WithMany(x => x.AzureSubscriptionBinds).HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Cascade);
     }
 }
 

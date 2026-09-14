@@ -39,6 +39,7 @@ jobs:
           python3 scripts/tests/test_azure_production_templates.py
           python3 scripts/tests/test_api_infrastructure.py
           python3 scripts/tests/test_customer_subscription_bootstrap.py
+          python3 scripts/tests/test_azure_lighthouse_offer.py
           python3 scripts/tests/test_managed_telemetry_infrastructure.py
           python3 scripts/tests/test_control_deploy_identity_infrastructure.py
           python3 scripts/tests/test_control_worker_composition.py
@@ -77,6 +78,7 @@ jobs:
           az bicep build --file infra/azure-workload-proof/recovery-target.bicep --stdout >/dev/null
           az bicep build --file infra/azure-workload-proof/recovery-database.bicep --stdout >/dev/null
           az bicep build --file infra/azure-workload-proof/acr-pull-role.bicep --stdout >/dev/null
+          az bicep build --file infra/azure-lighthouse/v1/main.bicep --stdout >/dev/null
 
   api-image:
     name: Build and smoke-test API provider image

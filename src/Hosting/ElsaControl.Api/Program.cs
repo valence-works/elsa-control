@@ -5,6 +5,7 @@ using ConsoleLogStreaming.AspNetCore.DependencyInjection;
 using ConsoleLogStreaming.Core.DependencyInjection;
 using Microsoft.AspNetCore.DataProtection;
 using ElsaControl.Deployment.Artifacts;
+using ElsaControl.Deployment.Abstractions.Azure;
 using ElsaControl.Deployment.Core.Cockpit;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Provisioning;
@@ -261,6 +262,8 @@ builder.Services.AddCatalogDbContext(builder.Configuration, options =>
         options.AddInterceptors(catalogSqlManagedIdentityInterceptor);
 });
 builder.Services.AddScoped<OrganizationBillingStore>();
+builder.Services.AddScoped<IOrganizationAzureSubscriptionBindStore, OrganizationAzureSubscriptionBindStore>();
+builder.Services.AddScoped<OrganizationAzureSubscriptionBindService>();
 builder.Services.AddScoped<IOrganizationBillingStore>(services =>
     services.GetRequiredService<OrganizationBillingStore>());
 builder.Services.AddScoped<IOrganizationBillingLifecycleStore>(services =>
@@ -323,11 +326,19 @@ builder.Services.AddScoped<ElsaInstanceLifecycleWorker>();
 builder.Services.AddScoped<ElsaInstanceDeletionWorker>();
 var azureProviderRunnerAuthority = AzureProviderRunnerComposition.AddRunner(
     builder.Services, builder.Configuration);
+builder.Services.AddSingleton<IOptions<AzureProviderRunnerOptions>>(_ =>
+    Options.Create(azureProviderRunnerAuthority?.Options ??
+                   builder.Configuration.GetSection(AzureProviderRunnerOptions.ConfigurationSection).Get<AzureProviderRunnerOptions>() ??
+                   new AzureProviderRunnerOptions()));
 if (azureProviderRunnerAuthority is { } authority)
 {
     builder.Services.AddSingleton<IAzureProviderAuthorityPreflight>(_ =>
         new AzureProviderAuthorityPreflight(authority.Options, authority.Scope));
+    builder.Services.AddSingleton<IAzureLighthouseAuthorityObserver>(_ =>
+        new AzureLighthouseAuthorityObserver(authority.Options));
 }
+else
+    builder.Services.AddSingleton<IAzureLighthouseAuthorityObserver, UnconfiguredAzureLighthouseAuthorityObserver>();
 var azureInstanceLifecycleEnabled = AzureInstanceLifecycleComposition.AddProviderPorts(
     builder.Services, builder.Configuration, azureProviderRunnerAuthority);
 if (azureInstanceLifecycleEnabled)
@@ -643,6 +654,7 @@ app.MapCompatibilityEndpoints();
 app.MapWorkspaceMeEndpoints();
 app.MapOrganizationWorkspaceEndpoints();
 app.MapOrganizationBillingEndpoints();
+app.MapOrganizationAzureSubscriptionBindEndpoints();
 app.MapWorkspaceSourceEndpoints();
 app.MapWorkspacePackageEndpoints();
 app.MapWorkspaceReleaseCatalogEndpoints();
