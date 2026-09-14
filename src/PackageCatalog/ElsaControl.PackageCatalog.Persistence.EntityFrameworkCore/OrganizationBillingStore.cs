@@ -466,20 +466,17 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                 x.Provider == provider &&
                 (x.State == OrganizationSubscriptionState.Retained || x.State == OrganizationSubscriptionState.Deleted) &&
                 x.ProviderCustomerReference == providerCustomerReference &&
-                x.ProviderSubscriptionReference == providerSubscriptionReference);
-        var eventMatches = await matches
+                x.ProviderSubscriptionReference == providerSubscriptionReference)
+            .OrderByDescending(x => x.UpdatedAt)
+            .ThenByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id);
+        var eventMatch = await matches
             .Where(x => x.LastProviderEventId == providerEventId)
-            .Take(2)
-            .ToListAsync(cancellationToken);
-        if (eventMatches.Count == 1)
-            return eventMatches[0];
-        if (eventMatches.Count > 1)
-            return null;
+            .FirstOrDefaultAsync(cancellationToken);
+        if (eventMatch is not null)
+            return eventMatch;
 
-        var correlatedMatches = await matches
-            .Take(2)
-            .ToListAsync(cancellationToken);
-        return correlatedMatches.Count == 1 ? correlatedMatches[0] : null;
+        return await matches.FirstOrDefaultAsync(cancellationToken);
     }
 
     private async Task<bool> CanReplaceRevokedAzureBoundSubscriptionAsync(
@@ -492,7 +489,8 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             return false;
 
         var entitlement = await CurrentEntitlementAsync(subscription.OrganizationId, cancellationToken);
-        return entitlement is not { ManagedHostingEnabled: true };
+        return entitlement is { ManagedHostingEnabled: false, SubscriptionId: not null } &&
+               entitlement.SubscriptionId == subscription.Id;
     }
 
     private void AddBillingAudit(Guid organizationId, Guid eventId, string summary, DateTimeOffset createdAt) =>
