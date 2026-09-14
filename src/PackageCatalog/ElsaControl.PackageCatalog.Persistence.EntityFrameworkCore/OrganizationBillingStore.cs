@@ -445,7 +445,7 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         CancellationToken cancellationToken)
     {
         if (!string.Equals(subscription.Provider, BillingProviderNames.AzureBound, StringComparison.Ordinal) ||
-            subscription.State is not (OrganizationSubscriptionState.Retained or OrganizationSubscriptionState.Deleted))
+            subscription.State != OrganizationSubscriptionState.Deleted)
             return false;
 
         var entitlement = await CurrentEntitlementAsync(subscription.OrganizationId, cancellationToken);
