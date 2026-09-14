@@ -13,6 +13,15 @@ public sealed class AzureLighthouseAuthorityObserverTests
     private const string ClientId = "55555555-5555-5555-5555-555555555555";
 
     [Fact]
+    public void Versioned_offer_link_is_pinned_to_an_immutable_commit()
+    {
+        Assert.DoesNotContain("/tree/main/", AzureLighthouseOfferIdentity.ArtifactUrl, StringComparison.Ordinal);
+        Assert.Matches(
+            @"^https://github\.com/valence-works/elsa-control/tree/[0-9a-f]{40}/infra/azure-lighthouse/v1$",
+            AzureLighthouseOfferIdentity.ArtifactUrl);
+    }
+
+    [Fact]
     public async Task Observation_uses_the_exact_subscription_tenant_client_and_fixed_registration_identity()
     {
         var process = new FakeCommandProcess();

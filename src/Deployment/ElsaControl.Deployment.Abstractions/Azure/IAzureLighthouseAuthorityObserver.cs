@@ -42,7 +42,7 @@ public static class AzureProviderAuthorityRoleDefinitionIds
 public static class AzureLighthouseOfferIdentity
 {
     public const string Version = "v1";
-    public const string ArtifactUrl = "https://github.com/valence-works/elsa-control/tree/main/infra/azure-lighthouse/v1";
+    public const string ArtifactUrl = "https://github.com/valence-works/elsa-control/tree/068ce50bce0d89837638f4db1e2773a3beab0537/infra/azure-lighthouse/v1";
     public const string ArtifactLabel = "Azure Lighthouse ARM artifact v1";
     public const string RegistrationDefinitionName = "9f8cf4c0-1f7a-4c7b-9c7b-e5f26a2d8bd9";
     public const string RegistrationAssignmentName = "50f0f9d1-8c11-47a3-8af5-9a87fa5c7af9";

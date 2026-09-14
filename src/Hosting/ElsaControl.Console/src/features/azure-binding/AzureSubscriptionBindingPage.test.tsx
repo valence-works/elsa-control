@@ -35,7 +35,7 @@ vi.mock("@/features/azure-binding/azureBindingApi", () => ({
 
 const offer = {
   version: "v1",
-  artifactUrl: "https://github.com/valence-works/elsa-control/tree/immutable-head/infra/azure-lighthouse/v1",
+  artifactUrl: "https://github.com/valence-works/elsa-control/tree/068ce50bce0d89837638f4db1e2773a3beab0537/infra/azure-lighthouse/v1",
   artifactLabel: "Azure Lighthouse ARM artifact v1"
 };
 
