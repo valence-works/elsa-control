@@ -260,7 +260,11 @@ public sealed class OrganizationAzureBoundEntitlementPersistenceTests : IAsyncLi
     public async Task Historical_provider_event_replay_does_not_return_the_replacement_provider()
     {
         await AddBindAsync(OrganizationAzureSubscriptionBindState.Active);
-        var prior = await AddSubscriptionAsync(BillingProviderNames.Stripe, OrganizationSubscriptionState.Retained);
+        var prior = await AddSubscriptionAsync(
+            BillingProviderNames.Stripe,
+            OrganizationSubscriptionState.Retained,
+            providerCustomerReference: "cus-historical",
+            providerSubscriptionReference: "sub-historical");
         const string eventId = "evt-historical-stripe";
         const string eventHash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         prior.LastProviderEventId = eventId;
@@ -314,7 +318,9 @@ public sealed class OrganizationAzureBoundEntitlementPersistenceTests : IAsyncLi
                 "subscription.deleted",
                 OrganizationSubscriptionState.Deleted,
                 Now.AddMinutes(1),
-                "sha256:" + new string('b', 64)),
+                "sha256:" + new string('b', 64),
+                "cus-historical",
+                "sub-historical"),
             Now.AddMinutes(2));
 
         Assert.Equal(BillingEventConsumptionOutcome.Applied, applied.Outcome);
@@ -353,10 +359,14 @@ public sealed class OrganizationAzureBoundEntitlementPersistenceTests : IAsyncLi
 
     private async Task<OrganizationSubscription> AddSubscriptionAsync(
         string provider,
-        OrganizationSubscriptionState state)
+        OrganizationSubscriptionState state,
+        string? providerCustomerReference = null,
+        string? providerSubscriptionReference = null)
     {
         var subscription = OrganizationSubscriptionLifecycle.CreateTrial(OrganizationId, provider, Now.AddDays(-30));
         subscription.State = state;
+        subscription.ProviderCustomerReference = providerCustomerReference;
+        subscription.ProviderSubscriptionReference = providerSubscriptionReference;
         subscription.UpdatedAt = Now.AddDays(-1);
         _db.OrganizationSubscriptions.Add(subscription);
         _db.OrganizationEntitlementSnapshots.Add(new OrganizationEntitlementSnapshot

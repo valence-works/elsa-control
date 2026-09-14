@@ -194,6 +194,8 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                     providerEvent.OrganizationId,
                     providerEvent.Provider,
                     providerEvent.ProviderEventId,
+                    providerEvent.ProviderCustomerReference,
+                    providerEvent.ProviderSubscriptionReference,
                     cancellationToken) ?? subscription;
             }
             var existingSubscription = subscription;
@@ -434,10 +436,44 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         Guid organizationId,
         string provider,
         string providerEventId,
-        CancellationToken cancellationToken) =>
-        dbContext.OrganizationSubscriptions
+        string? providerCustomerReference,
+        string? providerSubscriptionReference,
+        CancellationToken cancellationToken)
+    {
+        if (providerCustomerReference is null && providerSubscriptionReference is null)
+            return Task.FromResult<OrganizationSubscription?>(null);
+
+        return FindHistoricalSubscriptionCoreAsync(
+            organizationId,
+            provider,
+            providerEventId,
+            providerCustomerReference,
+            providerSubscriptionReference,
+            cancellationToken);
+    }
+
+    private async Task<OrganizationSubscription?> FindHistoricalSubscriptionCoreAsync(
+        Guid organizationId,
+        string provider,
+        string providerEventId,
+        string? providerCustomerReference,
+        string? providerSubscriptionReference,
+        CancellationToken cancellationToken)
+    {
+        var candidate = await dbContext.OrganizationSubscriptions
             .LatestForOrganizationProvider(organizationId, provider, providerEventId)
             .FirstOrDefaultAsync(cancellationToken);
+        if (candidate is null)
+            return null;
+        if (providerCustomerReference is not null &&
+            !string.Equals(candidate.ProviderCustomerReference, providerCustomerReference, StringComparison.Ordinal))
+            return null;
+        if (providerSubscriptionReference is not null &&
+            !string.Equals(candidate.ProviderSubscriptionReference, providerSubscriptionReference, StringComparison.Ordinal))
+            return null;
+
+        return candidate;
+    }
 
     private async Task<bool> CanReplaceRevokedAzureBoundSubscriptionAsync(
         OrganizationSubscription subscription,
