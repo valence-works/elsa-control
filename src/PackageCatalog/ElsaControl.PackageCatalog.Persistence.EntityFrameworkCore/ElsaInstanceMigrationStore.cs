@@ -252,13 +252,11 @@ public sealed class EfCoreElsaInstanceMigrationStore(CatalogDbContext dbContext)
         var completionNoWrite = false;
         var completionCommitted = false;
         Guid completedMigrationId = Guid.Empty;
-        var completedAttemptNumber = 0;
         var completedUpdatedAt = default(DateTimeOffset);
-        var completionOutcome = result.Outcome;
-        var completionDiagnosticCode = result.DiagnosticCode;
-        var completionProviderCorrelationId = result.ProviderCorrelationId;
-        var completionEvidenceReference = result.EvidenceReference;
-        var completionEvidenceDigest = result.EvidenceDigest;
+        var completionAuditId = Guid.NewGuid();
+        var completionEventType = result.Outcome == ElsaInstanceSourceReleaseOutcome.Confirmed
+            ? "MigrationSourceReleased"
+            : "MigrationSourceReleaseAttempted";
         return await dbContext.ExecuteInTransactionAsync(
             IsolationLevel.Serializable,
             async () =>
@@ -292,12 +290,11 @@ public sealed class EfCoreElsaInstanceMigrationStore(CatalogDbContext dbContext)
             {
                 entity.UpdatedAt = now > entity.UpdatedAt ? now : entity.UpdatedAt.AddTicks(1);
                 completedMigrationId = entity.MigrationId;
-                completedAttemptNumber = entity.SourceReleaseAttemptCount;
                 completedUpdatedAt = entity.UpdatedAt;
                 var attempted = Map(entity);
                 await AddAuditAsync(attempted, new(attempted.Id, attempted.OperationId,
                     "MigrationSourceReleaseAttempted", attempted.Phase.ToString(), attempted.Phase.ToString(),
-                    Guid.Empty, attempted.LastRequestHash, attempted.UpdatedAt), cancellationToken);
+                    Guid.Empty, attempted.LastRequestHash, attempted.UpdatedAt), cancellationToken, completionAuditId);
                 await dbContext.SaveChangesAsync(cancellationToken);
                 completionCommitted = true;
                 return Result(ElsaInstanceMigrationWriteOutcome.Conflict, Map(entity), result.DiagnosticCode);
@@ -312,11 +309,10 @@ public sealed class EfCoreElsaInstanceMigrationStore(CatalogDbContext dbContext)
             operation.CompletedAt = released.UpdatedAt;
             operation.UpdatedAt = released.UpdatedAt;
             completedMigrationId = entity.MigrationId;
-            completedAttemptNumber = entity.SourceReleaseAttemptCount;
             completedUpdatedAt = released.UpdatedAt;
             await AddAuditAsync(released, new(released.Id, released.OperationId, "MigrationSourceReleased",
                 ElsaInstanceMigrationPhase.RetiringSource.ToString(), released.Phase.ToString(), Guid.Empty,
-                released.LastRequestHash, released.UpdatedAt), cancellationToken);
+                released.LastRequestHash, released.UpdatedAt), cancellationToken, completionAuditId);
             await dbContext.SaveChangesAsync(cancellationToken);
             completionCommitted = true;
             return Result(ElsaInstanceMigrationWriteOutcome.Applied, released, "migration.source-released");
@@ -327,42 +323,13 @@ public sealed class EfCoreElsaInstanceMigrationStore(CatalogDbContext dbContext)
                     return true;
                 if (!completionCommitted || completedMigrationId == Guid.Empty)
                     return false;
-                var entity = await dbContext.ElsaInstanceMigrations.AsNoTracking()
-                    .SingleOrDefaultAsync(x => x.MigrationId == completedMigrationId &&
-                                               x.WorkspaceId == claim.Migration.WorkspaceId,
-                        verificationCancellationToken);
-                if (entity is null || entity.SourceReleaseClaimToken is not null ||
-                    entity.SourceReleaseClaimedUntil is not null ||
-                    entity.SourceReleaseAttemptCount != completedAttemptNumber ||
-                    entity.UpdatedAt != completedUpdatedAt ||
-                    entity.SourceReleaseDiagnosticCode != completionDiagnosticCode ||
-                    entity.SourceReleaseProviderCorrelationId != completionProviderCorrelationId ||
-                    entity.SourceReleaseEvidenceReference != completionEvidenceReference ||
-                    entity.SourceReleaseEvidenceDigest != completionEvidenceDigest)
-                    return false;
-                if (completionOutcome == ElsaInstanceSourceReleaseOutcome.Confirmed)
-                {
-                    if (entity.Phase != nameof(ElsaInstanceMigrationPhase.Released) || entity.SourceReleasedAt is null)
-                        return false;
-                    var operation = await dbContext.ElsaInstanceOperations.AsNoTracking()
-                        .SingleOrDefaultAsync(x => x.Id == claim.Migration.OperationId &&
-                                                   x.InstanceId == claim.Migration.InstanceId,
-                            verificationCancellationToken);
-                    if (operation is null || operation.State != ElsaInstanceOperationState.Succeeded ||
-                        operation.CompletedAt != completedUpdatedAt || operation.UpdatedAt != completedUpdatedAt)
-                        return false;
-                    return await dbContext.ElsaInstanceAuditEvents.AsNoTracking().AnyAsync(x =>
-                        x.MigrationId == completedMigrationId && x.OperationId == claim.Migration.OperationId &&
-                        x.EventType == "MigrationSourceReleased" && x.OccurredAt == completedUpdatedAt,
-                        verificationCancellationToken);
-                }
-
-                return entity.Phase == nameof(ElsaInstanceMigrationPhase.RetiringSource) &&
-                    entity.SourceReleasedAt is null &&
-                    await dbContext.ElsaInstanceAuditEvents.AsNoTracking().AnyAsync(x =>
-                        x.MigrationId == completedMigrationId && x.OperationId == claim.Migration.OperationId &&
-                        x.EventType == "MigrationSourceReleaseAttempted" && x.OccurredAt == completedUpdatedAt,
-                        verificationCancellationToken);
+                return await dbContext.ElsaInstanceAuditEvents.AsNoTracking().AnyAsync(x =>
+                    x.Id == completionAuditId &&
+                    x.MigrationId == completedMigrationId &&
+                    x.OperationId == claim.Migration.OperationId &&
+                    x.EventType == completionEventType &&
+                    x.OccurredAt == completedUpdatedAt,
+                    verificationCancellationToken);
             },
             cancellationToken);
     }
@@ -417,13 +384,16 @@ public sealed class EfCoreElsaInstanceMigrationStore(CatalogDbContext dbContext)
     }
 
     private async Task AddAuditAsync(
-        ElsaInstanceMigration migration, ElsaInstanceMigrationAudit audit, CancellationToken cancellationToken)
+        ElsaInstanceMigration migration,
+        ElsaInstanceMigrationAudit audit,
+        CancellationToken cancellationToken,
+        Guid? auditId = null)
     {
         var sequence = (await dbContext.ElsaInstanceAuditEvents.Where(x => x.InstanceId == migration.InstanceId)
             .MaxAsync(x => (long?)x.Sequence, cancellationToken) ?? 0) + 1;
         dbContext.ElsaInstanceAuditEvents.Add(new ElsaInstanceAuditEventEntity
         {
-            Id = Guid.NewGuid(),
+            Id = auditId ?? Guid.NewGuid(),
             OrganizationId = migration.OrganizationId,
             WorkspaceId = migration.WorkspaceId,
             InstanceId = migration.InstanceId,

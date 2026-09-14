@@ -1639,6 +1639,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         failure.Validate();
         var recoveryOperationId = failure.OperationId;
         var recoveryAt = failure.FailedAt.ToUniversalTime();
+        var recoveryAuditId = Guid.NewGuid();
         return await dbContext.ExecuteInTransactionAsync(
             IsolationLevel.Serializable,
             async () =>
@@ -1668,25 +1669,19 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             operation.DeletionEvidenceFingerprint = failure.EvidenceFingerprint;
             operation.DeletionDiagnosticCode = failure.DiagnosticCode;
             operation.UpdatedAt = recoveryAt;
-            await dbContext.ElsaInstanceAuditEvents.AddAsync(await CreateAuditEventAsync(instance, operation,
+            var audit = await CreateAuditEventAsync(instance, operation,
                 instance.ObservedLifecycle, failure.FailedAt, cancellationToken, "lifecycle.deletion-recovery-required",
-                failure.ExpectedRunId, diagnosticCode: failure.DiagnosticCode), cancellationToken);
+                failure.ExpectedRunId, diagnosticCode: failure.DiagnosticCode);
+            audit.Id = recoveryAuditId;
+            await dbContext.ElsaInstanceAuditEvents.AddAsync(audit, cancellationToken);
             await dbContext.SaveChangesAsync(cancellationToken);
             return DeletionResult(operation, instance, false);
         },
             async (_, verificationCancellationToken) =>
             {
-                var operation = await dbContext.ElsaInstanceOperations.AsNoTracking()
-                    .SingleOrDefaultAsync(x => x.Id == recoveryOperationId, verificationCancellationToken);
-                if (operation is null || operation.State != ElsaInstanceOperationState.RecoveryRequired ||
-                    operation.FailureCode != failure.DiagnosticCode || operation.DeletionDiagnosticCode != failure.DiagnosticCode ||
-                    operation.DeletionEvidenceFingerprint != failure.EvidenceFingerprint ||
-                    operation.WorkerId is not null || operation.LeaseTokenHash is not null ||
-                    operation.LeaseExpiresAt is not null || operation.HeartbeatAt is not null ||
-                    operation.UpdatedAt != recoveryAt)
-                    return false;
                 return await dbContext.ElsaInstanceAuditEvents.AsNoTracking().AnyAsync(x =>
-                    x.OperationId == recoveryOperationId && x.EventType == "lifecycle.deletion-recovery-required" &&
+                    x.Id == recoveryAuditId && x.OperationId == recoveryOperationId &&
+                    x.EventType == "lifecycle.deletion-recovery-required" &&
                     x.DiagnosticCode == failure.DiagnosticCode && x.OccurredAt == recoveryAt,
                     verificationCancellationToken);
             },

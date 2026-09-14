@@ -15,7 +15,7 @@ public sealed class CatalogLostCommitPersistenceTests
     private static readonly DateTimeOffset Start = new(2026, 9, 1, 0, 0, 0, TimeSpan.Zero);
 
     [Fact]
-    public async Task Updating_external_identity_seen_returns_without_replaying_the_write()
+    public async Task Updating_external_identity_seen_does_not_overwrite_a_newer_login_after_a_lost_acknowledgement()
     {
         await using var connection = NewConnection();
         await connection.OpenAsync();
@@ -29,13 +29,20 @@ public sealed class CatalogLostCommitPersistenceTests
             identityId = identity.Id;
         }
 
-        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = new CatalogDbContext(PlainOptions(connection));
+            await new AccountWorkspaceStore(followUp).UpdateExternalIdentitySeenAsync(
+                identityId, "Newer", "newer@example.com", cancellationToken);
+        });
         await using (var db = new CatalogDbContext(LostAckOptions(connection, acknowledgement)))
-            await new AccountWorkspaceStore(db).UpdateExternalIdentitySeenAsync(identityId, "Updated", "updated@example.com");
+            await new AccountWorkspaceStore(db).UpdateExternalIdentitySeenAsync(identityId, "Original attempt", "attempt@example.com");
 
         await using var verify = new CatalogDbContext(PlainOptions(connection));
         Assert.Equal(1, await verify.ExternalIdentities.CountAsync());
-        Assert.Equal(1, await verify.Accounts.CountAsync(x => x.DisplayName == "Updated" && x.Email == "updated@example.com"));
+        Assert.Equal(1, acknowledgement.Committed);
+        Assert.Equal(1, await verify.Accounts.CountAsync(x => x.DisplayName == "Newer" && x.Email == "newer@example.com"));
+        Assert.Equal(1, await verify.ExternalIdentities.CountAsync(x => x.DisplayName == "Newer" && x.Email == "newer@example.com"));
     }
 
     [Fact]
@@ -160,7 +167,7 @@ public sealed class CatalogLostCommitPersistenceTests
     }
 
     [Fact]
-    public async Task Updating_version_approval_returns_updated_without_duplicate_approval_audit_after_a_lost_acknowledgement()
+    public async Task Updating_version_approval_returns_updated_when_a_later_approval_changes_the_projection()
     {
         await using var connection = NewConnection();
         await connection.OpenAsync();
@@ -190,7 +197,21 @@ public sealed class CatalogLostCommitPersistenceTests
             Status = PackageApprovalStatus.Approved,
             Actor = "operator"
         };
-        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = new CatalogDbContext(PlainOptions(connection));
+            var laterVersion = await followUp.PackageVersions.SingleAsync(x => x.Id == versionId, cancellationToken);
+            var laterApproval = new ApprovalRecord
+            {
+                TargetType = ApprovalTargetType.PackageVersion,
+                TargetId = versionId,
+                Status = PackageApprovalStatus.Rejected,
+                Actor = "later-operator"
+            };
+            Assert.Equal(VersionApprovalUpdateResult.Updated,
+                await new ApprovalStore(followUp).TryUpdateVersionApprovalAsync(
+                    laterVersion, PackageApprovalStatus.Rejected, laterApproval, cancellationToken));
+        });
         await using (var db = new CatalogDbContext(LostAckOptions(connection, acknowledgement)))
         {
             var version = await db.PackageVersions.SingleAsync(x => x.Id == versionId);
@@ -199,8 +220,9 @@ public sealed class CatalogLostCommitPersistenceTests
         }
 
         await using var verify = new CatalogDbContext(PlainOptions(connection));
-        Assert.Equal(1, await verify.ApprovalRecords.CountAsync());
-        Assert.Equal(PackageApprovalStatus.Approved, (await verify.PackageVersions.SingleAsync(x => x.Id == versionId)).ApprovalStatus);
+        Assert.Equal(1, acknowledgement.Committed);
+        Assert.Equal(2, await verify.ApprovalRecords.CountAsync());
+        Assert.Equal(PackageApprovalStatus.Rejected, (await verify.PackageVersions.SingleAsync(x => x.Id == versionId)).ApprovalStatus);
     }
 
     [Fact]
@@ -296,6 +318,41 @@ public sealed class CatalogLostCommitPersistenceTests
     }
 
     [Fact]
+    public async Task Empty_cleanup_claim_stays_empty_when_work_is_enqueued_after_its_commit()
+    {
+        await using var connection = NewConnection();
+        await connection.OpenAsync();
+        Guid organizationId;
+        await using (var setup = await CreateDatabaseAsync(connection))
+        {
+            var organization = new Organization { Name = "Acme" };
+            setup.Organizations.Add(organization);
+            await setup.SaveChangesAsync();
+            await new OrganizationBillingStore(setup).StartTrialAsync(organization.Id, "stripe", Start);
+            organizationId = organization.Id;
+        }
+
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = new CatalogDbContext(PlainOptions(connection));
+            Assert.NotNull(await new OrganizationBillingStore(followUp)
+                .RequestDeletionAsync(organizationId, Start, cancellationToken));
+        });
+        await using (var db = new CatalogDbContext(LostAckOptions(connection, acknowledgement)))
+        {
+            var work = await new OrganizationBillingStore(db)
+                .TryClaimCleanupAsync("worker", Start.AddDays(1));
+            Assert.Null(work);
+        }
+
+        await using var verify = new CatalogDbContext(PlainOptions(connection));
+        Assert.Equal(1, acknowledgement.Committed);
+        Assert.Single(await verify.OrganizationBillingCleanups.ToListAsync());
+        Assert.Equal(OrganizationBillingCleanupState.Queued,
+            (await verify.OrganizationBillingCleanups.SingleAsync()).State);
+    }
+
+    [Fact]
     public async Task Completing_cleanup_returns_the_original_result_after_a_lost_acknowledgement()
     {
         await using var connection = NewConnection();
@@ -368,7 +425,7 @@ public sealed class CatalogLostCommitPersistenceTests
     }
 
     [Fact]
-    public async Task Granting_internal_entitlement_returns_granted_without_a_duplicate_audit_after_a_lost_acknowledgement()
+    public async Task Granting_internal_entitlement_returns_granted_when_a_later_revoke_changes_the_projection()
     {
         await using var connection = NewConnection();
         await connection.OpenAsync();
@@ -381,7 +438,13 @@ public sealed class CatalogLostCommitPersistenceTests
             organizationId = organization.Id;
         }
 
-        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = new CatalogDbContext(PlainOptions(connection));
+            var revoked = await new OrganizationBillingStore(followUp)
+                .RevokeInternalEntitlementAsync(organizationId, "later-operator", Start.AddMinutes(1), cancellationToken);
+            Assert.Equal(OrganizationInternalEntitlementOutcome.Revoked, revoked.Outcome);
+        });
         await using (var db = new CatalogDbContext(LostAckOptions(connection, acknowledgement)))
         {
             var result = await new OrganizationBillingStore(db).GrantInternalEntitlementAsync(
@@ -390,12 +453,13 @@ public sealed class CatalogLostCommitPersistenceTests
         }
 
         await using var verify = new CatalogDbContext(PlainOptions(connection));
-        Assert.True((await verify.OrganizationEntitlementSnapshots.SingleAsync()).ManagedHostingEnabled);
-        Assert.Single(await verify.OrganizationAuditRecords.ToListAsync());
+        Assert.Equal(1, acknowledgement.Committed);
+        Assert.False((await verify.OrganizationEntitlementSnapshots.SingleAsync()).ManagedHostingEnabled);
+        Assert.Equal(2, await verify.OrganizationAuditRecords.CountAsync());
     }
 
     [Fact]
-    public async Task Revoking_internal_entitlement_returns_revoked_without_a_duplicate_audit_after_a_lost_acknowledgement()
+    public async Task Revoking_internal_entitlement_returns_revoked_when_a_later_grant_changes_the_projection()
     {
         await using var connection = NewConnection();
         await connection.OpenAsync();
@@ -410,7 +474,15 @@ public sealed class CatalogLostCommitPersistenceTests
                 new(organizationId, new("Dogfood", 2, Start.AddDays(30)), "operator"), Start);
         }
 
-        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = new CatalogDbContext(PlainOptions(connection));
+            var granted = await new OrganizationBillingStore(followUp).GrantInternalEntitlementAsync(
+                new(organizationId, new("Dogfood later", 3, Start.AddDays(60)), "later-operator"),
+                Start.AddDays(1),
+                cancellationToken);
+            Assert.Equal(OrganizationInternalEntitlementOutcome.Regranted, granted.Outcome);
+        });
         await using (var db = new CatalogDbContext(LostAckOptions(connection, acknowledgement)))
         {
             var result = await new OrganizationBillingStore(db).RevokeInternalEntitlementAsync(organizationId, "operator", Start.AddDays(1));
@@ -418,8 +490,10 @@ public sealed class CatalogLostCommitPersistenceTests
         }
 
         await using var verify = new CatalogDbContext(PlainOptions(connection));
-        Assert.False((await verify.OrganizationEntitlementSnapshots.SingleAsync()).ManagedHostingEnabled);
-        Assert.Equal(2, await verify.OrganizationAuditRecords.CountAsync());
+        Assert.Equal(1, acknowledgement.Committed);
+        Assert.True((await verify.OrganizationEntitlementSnapshots.SingleAsync()).ManagedHostingEnabled);
+        Assert.Equal(3, (await verify.OrganizationEntitlementSnapshots.SingleAsync()).MaxInstances);
+        Assert.Equal(3, await verify.OrganizationAuditRecords.CountAsync());
     }
 
     private static async Task<CatalogDbContext> CreateDatabaseAsync(SqliteConnection connection)

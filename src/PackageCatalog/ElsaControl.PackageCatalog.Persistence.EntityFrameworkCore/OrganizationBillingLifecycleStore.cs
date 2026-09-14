@@ -336,10 +336,7 @@ public sealed partial class OrganizationBillingStore
             async (result, verificationCancellationToken) =>
             {
                 if (!verificationClaimed)
-                    return !await dbContext.OrganizationBillingCleanups.AsNoTracking().AnyAsync(x =>
-                        (x.State == OrganizationBillingCleanupState.Queued && x.NotBeforeAt <= now) ||
-                        (x.State == OrganizationBillingCleanupState.InProgress && x.LeaseExpiresAt <= now),
-                        verificationCancellationToken);
+                    return true;
 
                 return await dbContext.OrganizationBillingCleanups.AsNoTracking().AnyAsync(x =>
                     x.Id == verificationCleanupId &&

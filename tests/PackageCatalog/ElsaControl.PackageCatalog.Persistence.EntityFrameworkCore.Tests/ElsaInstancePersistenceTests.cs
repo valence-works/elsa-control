@@ -1586,7 +1586,7 @@ public sealed class ElsaInstancePersistenceTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task A_lost_acknowledgement_after_migration_completion_commit_returns_the_committed_result(bool confirmed)
+    public async Task A_lost_acknowledgement_returns_the_migration_completion_after_a_later_projection_change(bool confirmed)
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -1611,7 +1611,14 @@ public sealed class ElsaInstancePersistenceTests
         var claim = await claimStore.TryClaimDueAsync(now, TimeSpan.FromMinutes(5));
         Assert.NotNull(claim);
 
-        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = CreateMigratedContext(connection);
+            Assert.Equal(1, await followUp.ElsaInstanceMigrations
+                .Where(x => x.MigrationId == migration.MigrationId)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(x => x.UpdatedAt, now.AddMinutes(2)), cancellationToken));
+        });
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
             .UseRetryingSqlite(connection,
                 sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
@@ -1635,6 +1642,7 @@ public sealed class ElsaInstancePersistenceTests
         await using var verify = new CatalogDbContext(options);
         var persisted = await verify.ElsaInstanceMigrations.AsNoTracking().SingleAsync(x => x.MigrationId == migration.MigrationId);
         Assert.Equal(confirmed ? "Released" : "RetiringSource", persisted.Phase);
+        Assert.Equal(now.AddMinutes(2), persisted.UpdatedAt);
         Assert.Equal(confirmed ? ElsaInstanceOperationState.Succeeded : ElsaInstanceOperationState.Running,
             (await verify.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == migration.OperationId)).State);
         Assert.Equal(1, await verify.ElsaInstanceAuditEvents.CountAsync(x =>

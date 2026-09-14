@@ -85,16 +85,7 @@ public sealed class ApprovalStore(CatalogDbContext dbContext) : IApprovalStore
                 if (result != VersionApprovalUpdateResult.Updated)
                     return true;
 
-                return await dbContext.PackageVersions.AsNoTracking().AnyAsync(x =>
-                        x.Id == packageVersion.Id &&
-                        x.ApprovalStatus == status &&
-                        x.ValidationStatus == packageVersion.ValidationStatus &&
-                        x.IsListed == packageVersion.IsListed &&
-                        x.SuspiciousChangeDetected == packageVersion.SuspiciousChangeDetected &&
-                        x.ManifestHash == packageVersion.ManifestHash &&
-                        x.SuspiciousManifestHash == packageVersion.SuspiciousManifestHash,
-                        verificationCancellationToken) &&
-                    await dbContext.ApprovalRecords.AsNoTracking().AnyAsync(x =>
+                return await dbContext.ApprovalRecords.AsNoTracking().AnyAsync(x =>
                         x.Id == approvalRecord.Id &&
                         x.TargetType == approvalRecord.TargetType &&
                         x.TargetId == approvalRecord.TargetId &&

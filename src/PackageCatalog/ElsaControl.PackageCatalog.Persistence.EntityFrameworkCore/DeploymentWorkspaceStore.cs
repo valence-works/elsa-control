@@ -750,6 +750,7 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
         CancellationToken cancellationToken = default)
     {
         var leaseExpiresAt = now.Add(request.LeaseDuration);
+        var claimEventId = Guid.NewGuid();
         return await dbContext.ExecuteInTransactionAsync(
             IsolationLevel.Unspecified,
             async () =>
@@ -780,27 +781,21 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
 
                 await TouchCommandRunHeartbeatAsync(command, request.WorkerId, now, cancellationToken);
 
-                await AddCommandAndRunEventAsync(command, DeploymentCommandStatus.Claimed, "Deployment command claimed by runtime worker.", now, cancellationToken);
+                await AddCommandAndRunEventAsync(command, DeploymentCommandStatus.Claimed,
+                    "Deployment command claimed by runtime worker.", now, cancellationToken, claimEventId);
                 await dbContext.SaveChangesAsync(cancellationToken);
                 return ToDeploymentCommand(command);
             },
             async (claimed, verificationCancellationToken) =>
             {
-                var persisted = await dbContext.DeploymentCommands
-                    .AsNoTracking()
-                    .AnyAsync(x => x.WorkspaceId == workspaceId
-                        && x.Id == commandId
-                        && x.EngineId == request.EngineId
-                        && x.Status == DeploymentCommandStatus.Claimed
-                        && x.WorkerId == request.WorkerId
-                        && x.LeaseToken == leaseToken
-                        && x.ClaimedAt == now
-                        && x.HeartbeatAt == now
-                        && x.LeaseExpiresAt == leaseExpiresAt
-                        && x.AttemptNumber == claimed.AttemptNumber
-                        && x.UpdatedAt == now,
-                        verificationCancellationToken);
-                return persisted;
+                return await dbContext.DeploymentCommandEvents.AsNoTracking().AnyAsync(x =>
+                    x.Id == claimEventId &&
+                    x.WorkspaceId == workspaceId &&
+                    x.CommandId == commandId &&
+                    x.RunId == claimed.RunId &&
+                    x.Status == DeploymentCommandStatus.Claimed &&
+                    x.CreatedAt == now,
+                    verificationCancellationToken);
             },
             cancellationToken);
     }
@@ -3228,9 +3223,10 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
         DeploymentCommandStatus commandStatus,
         string message,
         DateTimeOffset now,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Guid? commandEventId = null)
     {
-        await AddCommandEventAsync(command, commandStatus, message, now, cancellationToken);
+        await AddCommandEventAsync(command, commandStatus, message, now, cancellationToken, commandEventId);
         await dbContext.DeploymentRunHistoryEvents.AddAsync(new DeploymentRunHistoryEventEntity
         {
             Id = Guid.NewGuid(),
@@ -3247,11 +3243,12 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
         DeploymentCommandStatus commandStatus,
         string message,
         DateTimeOffset now,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Guid? eventId = null)
     {
         await dbContext.DeploymentCommandEvents.AddAsync(new DeploymentCommandEventEntity
         {
-            Id = Guid.NewGuid(),
+            Id = eventId ?? Guid.NewGuid(),
             WorkspaceId = command.WorkspaceId,
             CommandId = command.Id,
             RunId = command.RunId,

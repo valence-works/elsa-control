@@ -233,13 +233,22 @@ public sealed class DeploymentCommandPersistenceTests : IDisposable
     }
 
     [Fact]
-    public async Task Lost_commit_acknowledgement_claim_returns_original_result_without_duplicate_event()
+    public async Task Lost_commit_acknowledgement_claim_returns_original_result_after_a_later_heartbeat()
     {
         var topology = await SeedTopologyAsync();
         var run = await QueueRunAsync(topology);
         var command = (await _store.PollPendingCommandsAsync(_workspaceId, topology.Engine.Id, 10, run.QueuedAt)).Single();
         var now = run.QueuedAt.AddMinutes(1);
-        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = CreateSharedContext();
+            await new DeploymentWorkspaceStore(followUp).HeartbeatCommandAsync(
+                _workspaceId,
+                command.Id,
+                new DeploymentCommandHeartbeatRequest("lease-lost-ack", "worker-lost-ack"),
+                now.AddMinutes(1),
+                cancellationToken);
+        });
 
         await using var lostDb = CreateLostAcknowledgementContext(acknowledgement);
         var claimed = await new DeploymentWorkspaceStore(lostDb).ClaimCommandAsync(
@@ -252,8 +261,9 @@ public sealed class DeploymentCommandPersistenceTests : IDisposable
         Assert.Equal(DeploymentCommandStatus.Claimed, claimed.Status);
         Assert.Equal(1, acknowledgement.Committed);
         _db.ChangeTracker.Clear();
-        Assert.Equal(1, await _db.DeploymentCommandEvents.CountAsync(x =>
+        Assert.Equal(2, await _db.DeploymentCommandEvents.CountAsync(x =>
             x.CommandId == command.Id && x.Status == DeploymentCommandStatus.Claimed));
+        Assert.Equal(now.AddMinutes(1), (await _db.DeploymentCommands.SingleAsync(x => x.Id == command.Id)).HeartbeatAt);
     }
 
     [Fact]
@@ -820,7 +830,7 @@ public sealed class DeploymentCommandPersistenceTests : IDisposable
         return new CatalogDbContext(options);
     }
 
-    private CatalogDbContext CreateLostAcknowledgementContext(LostCommitAcknowledgementInterceptor acknowledgement)
+    private CatalogDbContext CreateLostAcknowledgementContext(DbTransactionInterceptor acknowledgement)
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
             .UseRetryingSqlite(
@@ -830,6 +840,11 @@ public sealed class DeploymentCommandPersistenceTests : IDisposable
             .Options;
         return new CatalogDbContext(options);
     }
+
+    private CatalogDbContext CreateSharedContext() =>
+        new(new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite((SqliteConnection)_db.Database.GetDbConnection())
+            .Options);
 
     private sealed record DeploymentTopology(
         WorkspaceDeploymentApplication Application,

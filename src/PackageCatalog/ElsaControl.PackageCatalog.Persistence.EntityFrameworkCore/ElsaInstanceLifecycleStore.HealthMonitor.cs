@@ -54,6 +54,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
         dbContext.ChangeTracker.Clear();
         var observedAt = transition.ObservedAt.ToUniversalTime();
         var transitionFingerprint = HealthTransitionFingerprint(transition, observedAt);
+        var auditId = Guid.NewGuid();
         try
         {
             return await dbContext.ExecuteInTransactionAsync(
@@ -76,7 +77,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                 instance.UpdatedAt = observedAt;
                 await dbContext.ElsaInstanceAuditEvents.AddAsync(new ElsaInstanceAuditEventEntity
                 {
-                    Id = Guid.NewGuid(),
+                    Id = auditId,
                     OrganizationId = instance.OrganizationId,
                     WorkspaceId = instance.WorkspaceId,
                     InstanceId = instance.Id,
@@ -96,14 +97,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                 {
                     if (version != transition.ExpectedVersion + 1)
                         return false;
-                    var persisted = await dbContext.ElsaInstances.AsNoTracking()
-                        .SingleOrDefaultAsync(x => x.WorkspaceId == transition.WorkspaceId &&
-                                                   x.Id == transition.InstanceId,
-                            verificationCancellationToken);
-                    if (persisted is null || persisted.Version != version || persisted.Health != transition.Health ||
-                        persisted.UpdatedAt != observedAt)
-                        return false;
                     return await dbContext.ElsaInstanceAuditEvents.AsNoTracking().AnyAsync(x =>
+                        x.Id == auditId && x.WorkspaceId == transition.WorkspaceId &&
                         x.InstanceId == transition.InstanceId && x.EventType == HealthChangedEventType &&
                         x.PriorState == transition.ExpectedHealth.ToString() &&
                         x.NewState == transition.Health.ToString() &&

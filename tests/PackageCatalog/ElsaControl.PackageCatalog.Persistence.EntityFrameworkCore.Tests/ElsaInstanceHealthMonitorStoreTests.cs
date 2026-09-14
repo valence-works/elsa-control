@@ -127,10 +127,18 @@ public sealed class ElsaInstanceHealthMonitorStoreTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task A_lost_acknowledgement_after_a_health_transition_commit_returns_the_committed_version()
+    public async Task A_lost_acknowledgement_returns_the_committed_version_after_a_later_health_transition()
     {
         var instance = AddInstance();
-        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = CreateContext();
+            var followUpStore = new EfCoreElsaInstanceLifecycleStore(
+                followUp, new UnavailableElsaInstanceLifecycleResolutionInputSource(), new FixedTimeProvider(Now));
+            Assert.Equal(3, await followUpStore.CommitHealthTransitionAsync(
+                Transition(instance.Id, 2, ElsaInstanceHealth.Unreachable, ElsaInstanceHealth.Healthy,
+                    "azure.health.healthy"), cancellationToken));
+        });
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
             .UseRetryingSqlite(_connection,
                 sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
@@ -148,10 +156,11 @@ public sealed class ElsaInstanceHealthMonitorStoreTests : IAsyncDisposable
         Assert.Equal(2, version);
         Assert.Equal(1, acknowledgement.Committed);
         await using var verify = CreateContext();
-        Assert.Equal(2, await verify.ElsaInstances.AsNoTracking().Where(x => x.Id == instance.Id)
-            .Select(x => x.Version).SingleAsync());
-        Assert.Single(await verify.ElsaInstanceAuditEvents.AsNoTracking()
-            .Where(x => x.InstanceId == instance.Id && x.EventType == "lifecycle.health-changed").ToListAsync());
+        var persisted = await verify.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == instance.Id);
+        Assert.Equal(3, persisted.Version);
+        Assert.Equal(ElsaInstanceHealth.Healthy, persisted.Health);
+        Assert.Equal(2, await verify.ElsaInstanceAuditEvents.AsNoTracking()
+            .CountAsync(x => x.InstanceId == instance.Id && x.EventType == "lifecycle.health-changed"));
     }
 
     [Theory]

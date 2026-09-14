@@ -72,12 +72,15 @@ public sealed class SyncRunStore(CatalogDbContext dbContext) : ISyncRunStore
                 if (reconciledRunIds.Count == 0)
                     return true;
 
-                return await dbContext.SyncRuns.AsNoTracking().CountAsync(x =>
-                    reconciledRunIds.Contains(x.Id) &&
-                    x.Status == SyncRunStatus.Failed &&
-                    x.CompletedAt == completedAt &&
-                    x.Error == message,
-                    verificationCancellationToken) == reconciledRunIds.Count;
+                var persisted = await dbContext.SyncRuns.AsNoTracking()
+                    .Where(x => reconciledRunIds.Contains(x.Id))
+                    .Select(x => new { x.Id, x.Status, x.CompletedAt, x.Error })
+                    .ToDictionaryAsync(x => x.Id, verificationCancellationToken);
+                return reconciledRunIds.All(id =>
+                    persisted.TryGetValue(id, out var run) &&
+                    run.Status == SyncRunStatus.Failed &&
+                    run.CompletedAt == completedAt &&
+                    run.Error == message);
             },
             cancellationToken);
     }

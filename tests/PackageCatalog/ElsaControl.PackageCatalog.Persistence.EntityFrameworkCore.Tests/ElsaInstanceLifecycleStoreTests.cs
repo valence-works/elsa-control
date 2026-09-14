@@ -1634,7 +1634,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
-    public async Task A_lost_acknowledgement_after_deletion_recovery_commit_returns_the_committed_result()
+    public async Task A_lost_acknowledgement_returns_the_recovery_result_after_a_later_operation_change()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -1652,7 +1652,15 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var claim = await claimStore.TryClaimNextDeletionAsync("worker-one", Now);
         Assert.NotNull(claim);
 
-        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var acknowledgement = new FollowUpLostCommitAcknowledgementInterceptor(async (_, cancellationToken) =>
+        {
+            await using var followUp = CreateMigratedContext(connection);
+            Assert.Equal(1, await followUp.ElsaInstanceOperations
+                .Where(x => x.Id == deletion.Operation.Id)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(x => x.State, ElsaInstanceOperationState.Running)
+                    .SetProperty(x => x.UpdatedAt, Now.AddMinutes(2)), cancellationToken));
+        });
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
             .UseRetryingSqlite(connection,
                 sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly),
@@ -1673,7 +1681,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(1, acknowledgement.Committed);
         await using var verify = new CatalogDbContext(options);
         var operation = await verify.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == deletion.Operation.Id);
-        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, operation.State);
+        Assert.Equal(ElsaInstanceOperationState.Running, operation.State);
         Assert.Equal(1, await verify.ElsaInstanceAuditEvents.CountAsync(x =>
             x.OperationId == deletion.Operation.Id && x.EventType == "lifecycle.deletion-recovery-required"));
     }

@@ -1124,14 +1124,13 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
     public async Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
     {
         db.ChangeTracker.Clear();
-        var candidateSnapshot = new List<(Guid Id, long Version)>();
+        var recoveredSnapshot = new List<(Guid Id, long Sequence)>();
         return await db.ExecuteInTransactionAsync(IsolationLevel.Unspecified, async () =>
         {
             var candidates = await db.AzureProviderOperations.AsNoTracking()
                 .Where(x => x.Status == AzureProviderOperationStatus.Running && x.LeaseExpiresAt != null && x.LeaseExpiresAt <= now)
                 .ToListAsync(cancellationToken);
-            candidateSnapshot.Clear();
-            candidateSnapshot.AddRange(candidates.Select(x => (x.Id, x.Version)));
+            recoveredSnapshot.Clear();
             var recovered = 0;
             foreach (var candidate in candidates)
             {
@@ -1147,6 +1146,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                 candidate.Status = AzureProviderOperationStatus.RecoveryRequired;
                 candidate.Version++;
                 AddTransition(candidate, "operation.recovery.required", "The operation lease expired before completion.", now);
+                recoveredSnapshot.Add((candidate.Id, candidate.Version));
             }
             await db.SaveChangesAsync(cancellationToken);
             return recovered;
@@ -1155,14 +1155,17 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
             if (recovered == 0)
                 return true;
 
-            var ids = candidateSnapshot.Select(x => x.Id).ToList();
+            var ids = recoveredSnapshot.Select(x => x.Id).ToList();
             var persisted = await db.AzureProviderOperationTransitions.AsNoTracking()
                 .Where(x => ids.Contains(x.OperationId)
                     && x.Code == "operation.recovery.required")
                 .Select(x => new { x.OperationId, x.Sequence })
                 .ToListAsync(verificationCancellationToken);
-            return persisted.Count(x => candidateSnapshot.Any(candidate =>
-                candidate.Id == x.OperationId && candidate.Version == x.Sequence - 1)) == recovered;
+            var persistedTransitions = persisted
+                .Select(x => (x.OperationId, x.Sequence))
+                .ToHashSet();
+            return recoveredSnapshot.Count == recovered &&
+                recoveredSnapshot.All(candidate => persistedTransitions.Contains((candidate.Id, candidate.Sequence)));
         }, cancellationToken);
     }
 

@@ -54,14 +54,7 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
                 if (result.Outcome is not (OrganizationInternalEntitlementOutcome.Granted or OrganizationInternalEntitlementOutcome.Regranted))
                     return true;
 
-                var entitlement = await dbContext.OrganizationEntitlementSnapshots.AsNoTracking()
-                    .SingleOrDefaultAsync(x => x.OrganizationId == grant.OrganizationId, verificationCancellationToken);
-                return entitlement is not null &&
-                    entitlement.ManagedHostingEnabled &&
-                    entitlement.MaxInstances == grant.Terms.MaxInstances &&
-                    entitlement.ManagedHostingExpiresAt == grant.Terms.ExpiresAt.ToUniversalTime() &&
-                    entitlement.UpdatedAt == now &&
-                    auditId != Guid.Empty &&
+                return auditId != Guid.Empty &&
                     await dbContext.OrganizationAuditRecords.AsNoTracking().AnyAsync(x =>
                         x.Id == auditId &&
                         x.OrganizationId == grant.OrganizationId &&
@@ -87,13 +80,7 @@ public sealed partial class OrganizationBillingStore : IOrganizationInternalEnti
                 if (result.Outcome != OrganizationInternalEntitlementOutcome.Revoked)
                     return true;
 
-                var entitlement = await dbContext.OrganizationEntitlementSnapshots.AsNoTracking()
-                    .SingleOrDefaultAsync(x => x.OrganizationId == organizationId, verificationCancellationToken);
-                return entitlement is not null &&
-                    !entitlement.ManagedHostingEnabled &&
-                    entitlement.ManagedHostingExpiresAt <= now &&
-                    entitlement.UpdatedAt == now &&
-                    auditId != Guid.Empty &&
+                return auditId != Guid.Empty &&
                     await dbContext.OrganizationAuditRecords.AsNoTracking().AnyAsync(x =>
                         x.Id == auditId &&
                         x.OrganizationId == organizationId &&

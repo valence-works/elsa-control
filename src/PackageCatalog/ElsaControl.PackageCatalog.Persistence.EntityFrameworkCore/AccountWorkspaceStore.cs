@@ -182,23 +182,31 @@ public sealed class AccountWorkspaceStore(CatalogDbContext dbContext) : IAccount
         var identityUpdated = false;
         var accountUpdated = false;
         await dbContext.ExecuteInTransactionAsync(
-            IsolationLevel.Unspecified,
+            IsolationLevel.Serializable,
             async () =>
         {
-            identityUpdated = await dbContext.ExternalIdentities
-                .Where(x => x.Id == externalIdentityId)
-                .ExecuteUpdateAsync(updates => updates
-                    .SetProperty(x => x.DisplayName, displayName)
-                    .SetProperty(x => x.Email, email)
-                    .SetProperty(x => x.LastSeenAt, now)
-                    .SetProperty(x => x.UpdatedAt, now), cancellationToken) > 0;
+            identityUpdated = false;
+            accountUpdated = false;
+            var identity = await dbContext.ExternalIdentities
+                .Include(x => x.Account)
+                .SingleOrDefaultAsync(x => x.Id == externalIdentityId, cancellationToken);
+            if (identity is null || identity.LastSeenAt >= now)
+                return;
 
-            accountUpdated = await dbContext.Accounts
-                .Where(x => x.ExternalIdentities.Any(identity => identity.Id == externalIdentityId))
-                .ExecuteUpdateAsync(updates => updates
-                    .SetProperty(x => x.DisplayName, displayName)
-                    .SetProperty(x => x.Email, email)
-                    .SetProperty(x => x.UpdatedAt, now), cancellationToken) > 0;
+            identity.DisplayName = displayName;
+            identity.Email = email;
+            identity.LastSeenAt = now;
+            identity.UpdatedAt = now;
+            identityUpdated = true;
+            if (identity.Account is { } account && account.UpdatedAt < now)
+            {
+                account.DisplayName = displayName;
+                account.Email = email;
+                account.UpdatedAt = now;
+                accountUpdated = true;
+            }
+
+            await dbContext.SaveChangesAsync(cancellationToken);
         },
             async verificationCancellationToken =>
             {
@@ -208,14 +216,12 @@ public sealed class AccountWorkspaceStore(CatalogDbContext dbContext) : IAccount
                 if (identity is null)
                     return !identityUpdated;
                 if (!identityUpdated)
+                    return true;
+
+                if (identity.LastSeenAt < now || identity.UpdatedAt < now)
                     return false;
 
-                if (identity.DisplayName != displayName || identity.Email != email ||
-                    identity.LastSeenAt != now || identity.UpdatedAt != now)
-                    return false;
-
-                return !accountUpdated || identity.Account is { DisplayName: var accountDisplayName, Email: var accountEmail, UpdatedAt: var accountUpdatedAt } &&
-                    accountDisplayName == displayName && accountEmail == email && accountUpdatedAt == now;
+                return !accountUpdated || identity.Account is { UpdatedAt: var accountUpdatedAt } && accountUpdatedAt >= now;
             },
             cancellationToken);
     }
