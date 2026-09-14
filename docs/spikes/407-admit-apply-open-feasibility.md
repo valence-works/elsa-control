@@ -199,9 +199,11 @@ snapshots.
 | `SubscriptionId` | billing subscription link |
 | timestamps | `SyncedAt`, `CreatedAt`, `UpdatedAt` |
 
-Trial vs paid is **`SubscriptionState`**, not a second capability schema. Billing
-projection writes only `SubscriptionState` / `SubscriptionId` and preserves
-capability and limit fields.
+Trial vs paid is **`SubscriptionState`**, not a second capability schema. Stripe
+projection also enables `ManagedHostingEnabled` for `Trial` and `Active`; it
+preserves every other capability and limit field. The separate `internal`
+provider remains the only projection path that owns the managed-instance cap
+and entitlement expiry.
 
 Commercial gate for create/update requires `ManagedHostingEnabled`, unexpired
 `ManagedHostingExpiresAt`, a projected `SubscriptionState`, and denies

@@ -234,7 +234,6 @@ public sealed class AdminOrganizationInternalEntitlementApiTests :
         Assert.Equal("internal-entitlement.commercial-subscription", await ProblemCodeAsync(delete));
         Assert.Equal(new AdminInternalEntitlementResponse(_organizationId, OrganizationInternalEntitlementState.CommercialSubscription, null, null, null), status);
         Assert.Equal(before, await ReadBillingStateAsync());
-        await AssertCreateAndUpdateDeniedAsync(ElsaInstanceCommercialOperation.EntitlementRequired);
     }
 
     private string Url(Guid? organizationId = null) =>

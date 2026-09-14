@@ -196,7 +196,8 @@ public sealed class OrganizationInternalEntitlementPersistenceTests : IAsyncLife
         var after = await ReadAsync();
         Assert.Equal(Json(before), Json(after));
         var entitlement = Assert.Single(after.Entitlements);
-        Assert.False(entitlement.ManagedHostingEnabled);
+        Assert.True(entitlement.ManagedHostingEnabled);
+        Assert.Equal(int.MaxValue, entitlement.MaxInstances);
         Assert.Null(entitlement.ManagedHostingExpiresAt);
         Assert.Equal(BillingProviderNames.Stripe, Assert.Single(after.Subscriptions).Provider);
     }
@@ -381,10 +382,12 @@ public sealed class OrganizationInternalEntitlementPersistenceTests : IAsyncLife
         var entitlement = Assert.Single(persisted.Entitlements);
         if (subscription.Provider == BillingProviderNames.Stripe)
         {
-            // Checkout won: the grant must be refused, never layered over it.
+            // Checkout won: Stripe enables managed hosting, while the internal
+            // grant must be refused and never layer its cap or expiry over it.
             Assert.Null(checkout.Error);
             Assert.Equal(OrganizationInternalEntitlementOutcome.CommercialSubscriptionExists, grant.Value!.Outcome);
-            Assert.False(entitlement.ManagedHostingEnabled);
+            Assert.True(entitlement.ManagedHostingEnabled);
+            Assert.Equal(int.MaxValue, entitlement.MaxInstances);
             Assert.Null(entitlement.ManagedHostingExpiresAt);
             Assert.DoesNotContain(persisted.Audits, x => x.TargetType == "internal-entitlement");
         }

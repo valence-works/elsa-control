@@ -368,9 +368,14 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             dbContext.OrganizationEntitlementSnapshots.Add(entitlement);
         }
 
-        // Billing lifecycle is orthogonal to the existing product capability
-        // policy. Preserve every capability and limit field while recording
-        // the latest provider-neutral lifecycle projection.
+        // Stripe Trial and Active are the commercial source of truth for the
+        // managed-hosting capability. Other lifecycle states and providers do
+        // not own the flag here, so existing capabilities and limits remain
+        // untouched (including the separate internal grant path).
+        if (string.Equals(subscription.Provider, BillingProviderNames.Stripe, StringComparison.Ordinal) &&
+            subscription.State is OrganizationSubscriptionState.Trial or OrganizationSubscriptionState.Active)
+            entitlement.ManagedHostingEnabled = true;
+
         entitlement.SubscriptionState = subscription.State;
         entitlement.SubscriptionId = subscription.Id;
         entitlement.SyncedAt = now;
