@@ -118,6 +118,19 @@ public sealed class OrganizationAzureSubscriptionBindServiceTests
     }
 
     [Fact]
+    public async Task Relink_reports_an_invalid_request_before_subscription_change_policy()
+    {
+        var store = new FakeBindStore { Binds = [Bind(OrganizationAzureSubscriptionBindState.Unbound)] };
+
+        var result = await CreateService(store).RelinkAsync(
+            OrganizationId,
+            Request(subscriptionId: "not-a-guid"),
+            AccountId);
+
+        Assert.Equal(OrganizationAzureSubscriptionBindFailure.InvalidRequest, result.Failure);
+    }
+
+    [Fact]
     public async Task Verify_promotes_to_active_and_persists_observation_code_and_fingerprint()
     {
         var bind = Bind(OrganizationAzureSubscriptionBindState.PendingConsent);
@@ -156,6 +169,58 @@ public sealed class OrganizationAzureSubscriptionBindServiceTests
         Assert.Equal("azure.lighthouse.rbac-insufficient", bind.LastPreflightCode);
         Assert.Null(bind.VerifiedAt);
         Assert.Equal("recorded-fingerprint", bind.RegistrationDefinitionFingerprint);
+    }
+
+    [Fact]
+    public async Task Verify_rejects_a_current_inflight_lease_without_running_an_observer()
+    {
+        var bind = Bind(OrganizationAzureSubscriptionBindState.Verifying);
+        var store = new FakeBindStore { Binds = [bind] };
+        var observer = new FakeAuthorityObserver();
+
+        var result = await CreateService(store, observer).VerifyAsync(OrganizationId, bind.Id);
+
+        Assert.Equal(OrganizationAzureSubscriptionBindFailure.BindInFlight, result.Failure);
+        Assert.Equal(0, observer.CallCount);
+        Assert.Empty(store.Transitions);
+    }
+
+    [Fact]
+    public async Task Verify_does_not_reclaim_a_slow_observation_within_the_governed_worst_case()
+    {
+        var bind = Bind(OrganizationAzureSubscriptionBindState.PendingConsent);
+        var store = new FakeBindStore { Binds = [bind] };
+        var observer = new BlockingAuthorityObserver();
+        var timeProvider = new MutableTimeProvider(Now);
+        var service = new OrganizationAzureSubscriptionBindService(store, observer, timeProvider);
+
+        var firstVerification = service.VerifyAsync(OrganizationId, bind.Id);
+        Assert.Equal(1, observer.CallCount);
+        timeProvider.Advance(TimeSpan.FromHours(4));
+
+        var concurrentVerification = await service.VerifyAsync(OrganizationId, bind.Id);
+
+        Assert.Equal(OrganizationAzureSubscriptionBindFailure.BindInFlight, concurrentVerification.Failure);
+        Assert.Equal(1, observer.CallCount);
+        observer.Complete();
+        Assert.True((await firstVerification).Succeeded);
+    }
+
+    [Fact]
+    public async Task Verify_reclaims_a_stale_inflight_lease_with_compare_and_set()
+    {
+        var bind = Bind(OrganizationAzureSubscriptionBindState.Verifying);
+        bind.UpdatedAt = Now.AddHours(-4).AddMinutes(-16);
+        var store = new FakeBindStore { Binds = [bind] };
+
+        var result = await CreateService(store).VerifyAsync(OrganizationId, bind.Id);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(OrganizationAzureSubscriptionBindState.Active, bind.State);
+        Assert.Equal(OrganizationAzureSubscriptionBindState.Verifying, store.Transitions[0].ExpectedState);
+        Assert.Equal(OrganizationAzureSubscriptionBindState.Verifying, store.Transitions[0].NewState);
+        Assert.Equal(Now.AddHours(-4).AddMinutes(-16), store.Transitions[0].ExpectedUpdatedAt);
+        Assert.Equal(Now, store.Transitions[1].ExpectedUpdatedAt);
     }
 
     [Fact]
@@ -242,21 +307,48 @@ public sealed class OrganizationAzureSubscriptionBindServiceTests
         public override DateTimeOffset GetUtcNow() => utcNow;
     }
 
+    private sealed class MutableTimeProvider(DateTimeOffset utcNow) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => utcNow;
+
+        public void Advance(TimeSpan duration) => utcNow += duration;
+    }
+
     private sealed class FakeAuthorityObserver : IAzureLighthouseAuthorityObserver
     {
         public AzureLighthouseAuthorityObservationResult Result { get; init; } = new(true, "ok", "ok", "observed-fingerprint");
         public bool ThrowCancellation { get; init; }
+        public int CallCount { get; private set; }
         public AzureLighthouseAuthorityObservationRequest? LastRequest { get; private set; }
 
         public Task<AzureLighthouseAuthorityObservationResult> ObserveAsync(
             AzureLighthouseAuthorityObservationRequest request,
             CancellationToken cancellationToken = default)
         {
+            CallCount++;
             LastRequest = request;
             if (ThrowCancellation)
                 throw new OperationCanceledException(cancellationToken);
             return Task.FromResult(Result);
         }
+    }
+
+    private sealed class BlockingAuthorityObserver : IAzureLighthouseAuthorityObserver
+    {
+        private readonly TaskCompletionSource<AzureLighthouseAuthorityObservationResult> _completion =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public int CallCount { get; private set; }
+
+        public Task<AzureLighthouseAuthorityObservationResult> ObserveAsync(
+            AzureLighthouseAuthorityObservationRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            return _completion.Task;
+        }
+
+        public void Complete() => _completion.SetResult(new(true, "ok", "ok", "observed-fingerprint"));
     }
 
     private sealed class FakeBindStore : IOrganizationAzureSubscriptionBindStore
@@ -282,7 +374,9 @@ public sealed class OrganizationAzureSubscriptionBindServiceTests
             var bind = Binds.SingleOrDefault(candidate => candidate.OrganizationId == transition.OrganizationId && candidate.Id == transition.BindId);
             if (bind is null)
                 return Task.FromResult(OrganizationAzureSubscriptionBindResult.Denied(OrganizationAzureSubscriptionBindFailure.BindNotFound));
-            if (bind.State != transition.ExpectedState || !OrganizationAzureSubscriptionBindLifecycle.CanTransition(bind.State, transition.NewState))
+            if (bind.State != transition.ExpectedState ||
+                (transition.ExpectedUpdatedAt.HasValue && bind.UpdatedAt != transition.ExpectedUpdatedAt.Value) ||
+                !OrganizationAzureSubscriptionBindLifecycle.CanTransition(bind.State, transition.NewState))
                 return Task.FromResult(OrganizationAzureSubscriptionBindResult.Denied(OrganizationAzureSubscriptionBindFailure.InvalidState));
             bind.State = transition.NewState;
             bind.UpdatedAt = transition.ChangedAt;

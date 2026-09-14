@@ -3,6 +3,7 @@
   "parameters": {
     "ProvisionerClientId": "ada5e428-c5d8-4daf-b7f9-9f2c79d23815",
     "ProvisionerPrincipalId": "f9e35dbd-06a3-42ab-a0ce-04fc01a6cde6",
+    "LighthouseManagingTenantId": "f35bcd45-7991-4e24-84f1-e964394501ad",
     "ProvisionerIdentityName": "mi-elsa-cloud-provisioner-prod-weu",
     "SqlBootstrapIp": "9.160.165.252",
     "RuntimeAdminUsername": "elsa-runtime-admin",

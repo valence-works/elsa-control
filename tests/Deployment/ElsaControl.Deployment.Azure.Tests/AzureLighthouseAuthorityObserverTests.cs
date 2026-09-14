@@ -13,6 +13,15 @@ public sealed class AzureLighthouseAuthorityObserverTests
     private const string ClientId = "55555555-5555-5555-5555-555555555555";
 
     [Fact]
+    public void Versioned_offer_link_is_pinned_to_an_immutable_commit()
+    {
+        Assert.DoesNotContain("/tree/main/", AzureLighthouseOfferIdentity.ArtifactUrl, StringComparison.Ordinal);
+        Assert.Matches(
+            @"^https://github\.com/valence-works/elsa-control/tree/[0-9a-f]{40}/infra/azure-lighthouse/v1$",
+            AzureLighthouseOfferIdentity.ArtifactUrl);
+    }
+
+    [Fact]
     public async Task Observation_uses_the_exact_subscription_tenant_client_and_fixed_registration_identity()
     {
         var process = new FakeCommandProcess();
@@ -43,6 +52,20 @@ public sealed class AzureLighthouseAuthorityObserverTests
         Assert.False(result.Succeeded);
         Assert.Equal("azure.lighthouse.registration-mismatch", result.Code);
         Assert.Empty(process.Calls);
+    }
+
+    [Fact]
+    public async Task Observation_rejects_the_expected_definition_under_a_different_assignment_name()
+    {
+        var process = new FakeCommandProcess
+        {
+            RegistrationAssignmentId = $"/subscriptions/{SubscriptionId}/providers/Microsoft.ManagedServices/registrationAssignments/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        };
+
+        var result = await Observer(process).ObserveAsync(Request());
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("azure.lighthouse.registration-not-found", result.Code);
     }
 
     [Theory]
@@ -164,6 +187,7 @@ public sealed class AzureLighthouseAuthorityObserverTests
         public string AccountSubscriptionId { get; init; } = SubscriptionId;
         public string AccountTenantId { get; init; } = CustomerTenantId;
         public string AccountClientId { get; init; } = ClientId;
+        public string RegistrationAssignmentId { get; init; } = AzureLighthouseOfferIdentity.RegistrationAssignmentId(SubscriptionId);
         public string? AccountSubscriptionRequested { get; private set; }
         public IReadOnlyList<AuthorizationSpec> Authorizations { get; init; } = [Contributor(), UserAccessAdministrator(AzureProviderAuthorityRoleDefinitionIds.KeyVaultSecretsUser)];
 
@@ -203,11 +227,15 @@ public sealed class AzureLighthouseAuthorityObserverTests
             identity = "MSIClient-" + AccountClientId
         });
 
-        private static string AssignmentsJson() => JsonSerializer.Serialize(new
+        private string AssignmentsJson() => JsonSerializer.Serialize(new
         {
             value = new[]
             {
-                new { properties = new { registrationDefinitionId = AzureLighthouseOfferIdentity.RegistrationDefinitionId(SubscriptionId) } }
+                new
+                {
+                    id = RegistrationAssignmentId,
+                    properties = new { registrationDefinitionId = AzureLighthouseOfferIdentity.RegistrationDefinitionId(SubscriptionId) }
+                }
             }
         });
 

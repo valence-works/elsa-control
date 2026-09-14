@@ -190,7 +190,7 @@ public static class OrganizationAzureSubscriptionBindEndpoints
                 AzureLighthouseOfferResponse.Default,
                 AzureBindingReadinessResponse.NotEvaluated);
             return result.Bind!.State == OrganizationAzureSubscriptionBindState.PendingConsent
-                ? Results.Created($"/api/organizations/{organizationId}/azure-subscription-bind/{result.Bind.Id}", response)
+                ? Results.Created($"/api/organizations/{organizationId}/azure-subscription-bind", response)
                 : Results.Ok(response);
         }
 

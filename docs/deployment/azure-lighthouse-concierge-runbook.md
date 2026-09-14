@@ -38,7 +38,7 @@ v1 Lighthouse authorizations.
 1. Confirm the partner's Entra tenant ID (`tid`), the exact target subscription
    ID, subscription display name, and an Owner contact. Do not infer any of
    these from the CLI default context.
-2. Confirm the managing-tenant principal object ID(s) from the Valence private
+2. Confirm the single managing-tenant principal object ID from the Valence private
    operational record. An object ID is not a client ID; no credential, secret,
    token, or private key belongs in the template or parameter file.
 3. Record the artifact version (`azure-lighthouse/v1`) and reviewed template
@@ -62,7 +62,7 @@ az deployment sub what-if \
   --name elsa-control-lighthouse-v1 \
   --template-file infra/azure-lighthouse/v1/main.bicep \
   --parameters managingTenantId=<managing-tenant-id> \
-               managingPrincipalObjectIds='["<managing-principal-object-id>"]'
+               managingPrincipalObjectId=<managing-principal-object-id>
 ```
 
 The expected what-if contains only one
@@ -162,7 +162,7 @@ The concierge record should contain:
 
 - partner organization and Entra tenant ID;
 - exact customer subscription ID/display name and Owner contact;
-- managing principal object ID(s), artifact version, and template fingerprint;
+- managing principal object ID, artifact version, and template fingerprint;
 - what-if reviewed by and timestamp;
 - registration definition/assignment IDs and deployment timestamp;
 - verification code and timestamp, or the stable failure code;

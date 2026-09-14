@@ -3,7 +3,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AzureSubscriptionBindingPage } from "@/features/azure-binding/AzureSubscriptionBindingPage";
+import { AzureSubscriptionBindingPage, AzureSubscriptionBindingSurface } from "@/features/azure-binding/AzureSubscriptionBindingPage";
 import {
   createAzureSubscriptionBind,
   getAzureSubscriptionBinding,
@@ -16,7 +16,7 @@ const workspaceState = vi.hoisted(() => ({
     id: "org-1",
     name: "Northstar",
     role: "Owner"
-  }
+  } as { id: string; name: string; role: string } | null
 }));
 
 vi.mock("@/app/WorkspaceContextProvider", () => ({
@@ -34,9 +34,9 @@ vi.mock("@/features/azure-binding/azureBindingApi", () => ({
 }));
 
 const offer = {
-  version: "2026.09.1",
-  artifactUrl: "https://github.com/valence-works/elsa-control/tree/main/infra/azure-lighthouse/v1",
-  artifactLabel: "Azure Lighthouse ARM artifact v2026.09.1"
+  version: "v1",
+  artifactUrl: "https://github.com/valence-works/elsa-control/tree/068ce50bce0d89837638f4db1e2773a3beab0537/infra/azure-lighthouse/v1",
+  artifactLabel: "Azure Lighthouse ARM artifact v1"
 };
 
 function binding(state: AzureSubscriptionBind["state"], code: string | null = null): AzureSubscriptionBind {
@@ -59,7 +59,7 @@ function binding(state: AzureSubscriptionBind["state"], code: string | null = nu
 
 function view(state: AzureSubscriptionBind["state"], code: string | null = null): AzureSubscriptionBindingView {
   return {
-    bind: state === "PendingConsent" ? null : binding(state, code),
+    bind: binding(state, code),
     offer,
     readiness: {
       entitlement: "Not evaluated",
@@ -79,9 +79,14 @@ function renderPage() {
   );
 }
 
+function withoutBind(): AzureSubscriptionBindingView {
+  return { ...view("PendingConsent"), bind: null };
+}
+
 describe("AzureSubscriptionBindingPage", () => {
   beforeEach(() => {
-    vi.mocked(getAzureSubscriptionBinding).mockResolvedValue(view("PendingConsent"));
+    workspaceState.organization = { id: "org-1", name: "Northstar", role: "Owner" };
+    vi.mocked(getAzureSubscriptionBinding).mockResolvedValue(withoutBind());
     vi.mocked(createAzureSubscriptionBind).mockResolvedValue(view("Verifying"));
     vi.mocked(verifyAzureSubscriptionBind).mockResolvedValue(view("Active"));
   });
@@ -97,7 +102,7 @@ describe("AzureSubscriptionBindingPage", () => {
 
     expect(await screen.findByRole("heading", { name: "Bind a customer Azure subscription" })).toBeInTheDocument();
     expect(screen.getByText(/guided onboarding for design partners/i)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Azure Lighthouse ARM artifact v2026\.09\.1/i })).toHaveAttribute("href", offer.artifactUrl);
+    expect(screen.getByRole("link", { name: /Azure Lighthouse ARM artifact v1/i })).toHaveAttribute("href", offer.artifactUrl);
     expect(screen.getAllByText(/Contributor/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/Role Based Access Control Administrator/i)).toBeInTheDocument();
     expect(screen.getByText(/User Access Administrator/i)).toBeInTheDocument();
@@ -132,6 +137,45 @@ describe("AzureSubscriptionBindingPage", () => {
     expect(await screen.findByText(/Preflight code: AZURE_RBAC_ROLE_MISSING/i)).toBeInTheDocument();
     expect(screen.getByText(/does not have Active status/i)).toBeInTheDocument();
     expect(screen.queryByText(/subscription is bound/i)).not.toBeInTheDocument();
+  });
+
+  it("resumes a persisted PendingConsent bind at verification after refresh", async () => {
+    vi.mocked(getAzureSubscriptionBinding).mockResolvedValue(view("PendingConsent"));
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "Verify the Lighthouse delegation" })).toBeInTheDocument();
+    expect(screen.getByText("v1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Verify delegation" })).toBeEnabled();
+  });
+
+  it("shows the empty organization state without waiting on a disabled query", () => {
+    workspaceState.organization = null;
+    renderPage();
+
+    expect(screen.getByText("No organization selected")).toBeInTheDocument();
+  });
+
+  it("clears draft identifiers and consent when the selected organization has no bind", async () => {
+    const queryClient = new QueryClient();
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <AzureSubscriptionBindingSurface organizationId="org-1" organizationName="Northstar" initialView={view("Degraded")} />
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <AzureSubscriptionBindingSurface organizationId="org-2" organizationName="Fabrikam" initialView={withoutBind()} />
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    expect(await screen.findByRole("textbox", { name: "Azure subscription ID" })).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "Customer tenant ID" })).toHaveValue("");
+    expect(screen.getByRole("checkbox", { name: /I understand Valence will operate/i })).not.toBeChecked();
   });
 
   it("lands on Active without implying entitlement or create-instance readiness", async () => {

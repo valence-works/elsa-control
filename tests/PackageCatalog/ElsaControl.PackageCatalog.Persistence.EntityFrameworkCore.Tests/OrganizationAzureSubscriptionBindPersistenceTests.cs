@@ -122,6 +122,70 @@ public sealed class OrganizationAzureSubscriptionBindPersistenceTests : IAsyncLi
         Assert.True((await store.CreatePendingAsync(CreateBind("dddddddd-dddd-dddd-dddd-dddddddddddd", OrganizationAzureSubscriptionBindState.PendingConsent))).Succeeded);
     }
 
+    [Fact]
+    public async Task Store_detaches_a_failed_insert_before_the_same_context_is_reused()
+    {
+        await _db.Database.ExecuteSqlRawAsync("""
+            CREATE TRIGGER RejectSpecificAzureBind
+            BEFORE INSERT ON OrganizationAzureSubscriptionBinds
+            WHEN NEW.SubscriptionId = 'ffffffff-ffff-ffff-ffff-ffffffffffff'
+            BEGIN
+                SELECT RAISE(ABORT, 'forced bind conflict');
+            END;
+            """);
+        var store = new OrganizationAzureSubscriptionBindStore(_db);
+
+        var rejected = await store.CreatePendingAsync(CreateBind(
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+            OrganizationAzureSubscriptionBindState.PendingConsent));
+
+        Assert.Equal(OrganizationAzureSubscriptionBindFailure.BindInFlight, rejected.Failure);
+        Assert.False(_db.ChangeTracker.HasChanges());
+        await _db.Database.ExecuteSqlRawAsync("DROP TRIGGER RejectSpecificAzureBind");
+        var accepted = await store.CreatePendingAsync(CreateBind(
+            "dddddddd-dddd-dddd-dddd-dddddddddddd",
+            OrganizationAzureSubscriptionBindState.PendingConsent));
+        Assert.True(accepted.Succeeded);
+    }
+
+    [Fact]
+    public async Task Store_rejects_completion_from_a_superseded_verification_lease()
+    {
+        var store = new OrganizationAzureSubscriptionBindStore(_db);
+        var created = await store.CreatePendingAsync(CreateBind(
+            "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            OrganizationAzureSubscriptionBindState.PendingConsent));
+        var bindId = created.Bind!.Id;
+        var firstLease = await store.TransitionAsync(new(
+            OrganizationId,
+            bindId,
+            OrganizationAzureSubscriptionBindState.PendingConsent,
+            OrganizationAzureSubscriptionBindState.Verifying,
+            Now.AddMinutes(1),
+            ExpectedUpdatedAt: Now));
+        Assert.True(firstLease.Succeeded);
+        var replacementLease = await store.TransitionAsync(new(
+            OrganizationId,
+            bindId,
+            OrganizationAzureSubscriptionBindState.Verifying,
+            OrganizationAzureSubscriptionBindState.Verifying,
+            Now.AddMinutes(2),
+            ExpectedUpdatedAt: Now.AddMinutes(1)));
+        Assert.True(replacementLease.Succeeded);
+
+        var staleCompletion = await store.TransitionAsync(new(
+            OrganizationId,
+            bindId,
+            OrganizationAzureSubscriptionBindState.Verifying,
+            OrganizationAzureSubscriptionBindState.Active,
+            Now.AddMinutes(3),
+            ExpectedUpdatedAt: Now.AddMinutes(1),
+            VerifiedAt: Now.AddMinutes(3)));
+
+        Assert.Equal(OrganizationAzureSubscriptionBindFailure.InvalidState, staleCompletion.Failure);
+        Assert.Equal(OrganizationAzureSubscriptionBindState.Verifying, (await store.GetAsync(OrganizationId, bindId))!.State);
+    }
+
     private static OrganizationAzureSubscriptionBind CreateBind(
         string subscriptionId,
         OrganizationAzureSubscriptionBindState state) =>

@@ -84,7 +84,10 @@ public sealed class AzureLighthouseAuthorityObserver : IAzureLighthouseAuthority
             cancellationToken.ThrowIfCancellationRequested();
             if (!assignments.Succeeded)
                 return Failed("azure.lighthouse.registration-observation-failed", "The Lighthouse registration assignment could not be observed.");
-            if (!assignments.Value!.RegistrationDefinitionIds.Contains(request.RegistrationDefinitionId, StringComparer.OrdinalIgnoreCase))
+            var expectedAssignmentId = AzureLighthouseOfferIdentity.RegistrationAssignmentId(subscriptionId);
+            if (!assignments.Value!.Assignments.Any(x =>
+                    string.Equals(x.AssignmentId, expectedAssignmentId, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(x.RegistrationDefinitionId, request.RegistrationDefinitionId, StringComparison.OrdinalIgnoreCase)))
                 return Failed("azure.lighthouse.registration-not-found", "The requested Lighthouse registration is not assigned to the customer subscription.");
 
             var definition = await _process.ExecuteAsync(
@@ -159,16 +162,19 @@ public sealed class AzureLighthouseAuthorityObserver : IAzureLighthouseAuthority
         if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("value", out var values) || values.ValueKind != JsonValueKind.Array)
             throw new FormatException("The Lighthouse registration assignment observation is invalid.");
 
-        var ids = new List<string>();
+        var assignments = new List<SafeRegistrationAssignment>();
         foreach (var item in values.EnumerateArray())
         {
-            if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty("properties", out var properties) ||
+            if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty("id", out var assignmentId) ||
+                assignmentId.ValueKind != JsonValueKind.String ||
+                !IsRegistrationAssignmentPath(assignmentId.GetString(), subscriptionId) ||
+                !item.TryGetProperty("properties", out var properties) ||
                 properties.ValueKind != JsonValueKind.Object || !properties.TryGetProperty("registrationDefinitionId", out var id) ||
                 id.ValueKind != JsonValueKind.String || !IsRegistrationDefinitionPath(id.GetString(), subscriptionId))
                 throw new FormatException("The Lighthouse registration assignment observation is invalid.");
-            ids.Add(id.GetString()!);
+            assignments.Add(new(assignmentId.GetString()!, id.GetString()!));
         }
-        return new(ids);
+        return new(assignments);
     }
 
     private static SafeRegistrationDefinition ParseRegistrationDefinition(ReadOnlyMemory<char> output)
@@ -216,7 +222,13 @@ public sealed class AzureLighthouseAuthorityObserver : IAzureLighthouseAuthority
         return new(managedByTenantId, normalized, Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))));
     }
 
-    private static bool IsRegistrationDefinitionPath(string? value, string? subscriptionId = null)
+    private static bool IsRegistrationDefinitionPath(string? value, string? subscriptionId = null) =>
+        IsRegistrationResourcePath(value, subscriptionId, "registrationDefinitions");
+
+    private static bool IsRegistrationAssignmentPath(string? value, string subscriptionId) =>
+        IsRegistrationResourcePath(value, subscriptionId, "registrationAssignments");
+
+    private static bool IsRegistrationResourcePath(string? value, string? subscriptionId, string resourceType)
     {
         if (value is null || value.Any(char.IsWhiteSpace) || value.Any(char.IsControl) ||
             value.Contains('?', StringComparison.Ordinal) || value.Contains('#', StringComparison.Ordinal))
@@ -229,7 +241,7 @@ public sealed class AzureLighthouseAuthorityObserver : IAzureLighthouseAuthority
                (subscriptionId is null || string.Equals(observedSubscription, subscriptionId, StringComparison.Ordinal)) &&
                string.Equals(segments[2], "providers", StringComparison.OrdinalIgnoreCase) &&
                string.Equals(segments[3], "Microsoft.ManagedServices", StringComparison.OrdinalIgnoreCase) &&
-               string.Equals(segments[4], "registrationDefinitions", StringComparison.OrdinalIgnoreCase) &&
+               string.Equals(segments[4], resourceType, StringComparison.OrdinalIgnoreCase) &&
                TryNormalizeGuid(segments[5], out _);
     }
 
@@ -260,10 +272,12 @@ public sealed class AzureLighthouseAuthorityObserver : IAzureLighthouseAuthority
         public string ClientId { get; } = clientId;
     }
 
-    private sealed class SafeRegistrationAssignments(IReadOnlyList<string> ids) : AzureCommandSafeOutput
+    private sealed class SafeRegistrationAssignments(IReadOnlyList<SafeRegistrationAssignment> assignments) : AzureCommandSafeOutput
     {
-        public IReadOnlyList<string> RegistrationDefinitionIds { get; } = ids;
+        public IReadOnlyList<SafeRegistrationAssignment> Assignments { get; } = assignments;
     }
+
+    private sealed record SafeRegistrationAssignment(string AssignmentId, string RegistrationDefinitionId);
 
     private sealed class SafeRegistrationDefinition(string managedByTenantId, IReadOnlyList<SafeAuthorization> authorizations, string fingerprint) : AzureCommandSafeOutput
     {
