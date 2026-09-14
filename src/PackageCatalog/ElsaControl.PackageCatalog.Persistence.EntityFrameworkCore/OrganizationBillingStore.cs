@@ -184,11 +184,18 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
 
             var now = receivedAt.ToUniversalTime();
             var occurrence = providerEvent.OccurredAt.ToUniversalTime();
-            var subscription = await ResolveSubscriptionForIncomingProviderAsync(
-                providerEvent.OrganizationId,
-                providerEvent.Provider,
-                providerEvent.ProviderEventId,
-                cancellationToken);
+            var subscription = await dbContext.OrganizationSubscriptions
+                .CurrentForOrganization(providerEvent.OrganizationId)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (subscription is not null &&
+                !string.Equals(subscription.Provider, providerEvent.Provider, StringComparison.Ordinal))
+            {
+                subscription = await FindHistoricalSubscriptionForIncomingProviderAsync(
+                    providerEvent.OrganizationId,
+                    providerEvent.Provider,
+                    providerEvent.ProviderEventId,
+                    cancellationToken) ?? subscription;
+            }
             var existingSubscription = subscription;
             if (subscription is not null)
             {
@@ -423,22 +430,14 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
     private Task<OrganizationEntitlementSnapshot?> CurrentEntitlementAsync(Guid organizationId, CancellationToken cancellationToken) =>
         dbContext.OrganizationEntitlementSnapshots.AsNoTracking().SingleOrDefaultAsync(x => x.OrganizationId == organizationId, cancellationToken);
 
-    private async Task<OrganizationSubscription?> ResolveSubscriptionForIncomingProviderAsync(
+    private Task<OrganizationSubscription?> FindHistoricalSubscriptionForIncomingProviderAsync(
         Guid organizationId,
         string provider,
         string providerEventId,
-        CancellationToken cancellationToken)
-    {
-        var current = await dbContext.OrganizationSubscriptions
-            .CurrentForOrganization(organizationId)
-            .FirstOrDefaultAsync(cancellationToken);
-        if (current is null || string.Equals(current.Provider, provider, StringComparison.Ordinal))
-            return current;
-
-        return await dbContext.OrganizationSubscriptions
+        CancellationToken cancellationToken) =>
+        dbContext.OrganizationSubscriptions
             .LatestForOrganizationProvider(organizationId, provider, providerEventId)
-            .FirstOrDefaultAsync(cancellationToken) ?? current;
-    }
+            .FirstOrDefaultAsync(cancellationToken);
 
     private async Task<bool> CanReplaceRevokedAzureBoundSubscriptionAsync(
         OrganizationSubscription subscription,
