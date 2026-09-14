@@ -1187,7 +1187,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             }
         }
 
-        return nonTrafficRevisions.Length == 0 || await WaitForOnlyActiveRevisionAsync(command, candidate, cancellationToken)
+        return await WaitForOnlyActiveRevisionAsync(command, candidate, cancellationToken)
             ? null
             : Uncertain(command, AzureProviderOperationPhase.TrafficPromoted,
                 "azure.promotion.deactivation-uncertain", "Inactive revision cleanup could not be confirmed.", command.Resources);
@@ -1265,8 +1265,9 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         AzureProviderRunnerCommand command,
         CancellationToken cancellationToken)
     {
-        var stable = command.StableTrafficRevisionName;
-        if (string.IsNullOrWhiteSpace(stable))
+        var stable = command.Resources.StableTrafficRevisionName;
+        if (string.IsNullOrWhiteSpace(stable) ||
+            !string.Equals(command.StableTrafficRevisionName, stable, StringComparison.Ordinal))
             return Uncertain(command, AzureProviderOperationPhase.HealthVerified, "azure.rollback.stable-missing", "No previously verified stable traffic revision is available.");
         var candidate = command.Resources.WorkloadRevisionName;
         var weights = candidate is null || string.Equals(candidate, stable, StringComparison.Ordinal)
@@ -1702,7 +1703,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
 
         var names = await ExecuteAzAsync(command,
             ["containerapp", "revision", "list", "--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command),
-                "--name", AppName(command), "--query", "[].name", "--output", "json", "--only-show-errors"],
+                "--name", AppName(command), "--all", "--query", "[].name", "--output", "json", "--only-show-errors"],
             ParseStringArrayAsync,
             cancellationToken);
         if (!names.Succeeded || names.Value is null)

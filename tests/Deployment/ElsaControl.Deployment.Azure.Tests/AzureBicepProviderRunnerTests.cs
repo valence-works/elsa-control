@@ -1950,7 +1950,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("revision") && args.Contains("show"), "{\"active\":true,\"health\":\"Healthy\"}");
         process.Success(args => args.Contains("resource") && args.Contains("list"), "1");
         process.Success(args => args.Contains("resource") && args.Contains("show"), invalidSuffix);
-        process.Success(args => args.Contains("revision") && args.Contains("list"), "[\"proof-app--" + invalidSuffix + "\"]");
+        process.Success(IsAllRevisionList, "[\"proof-app--" + invalidSuffix + "\"]");
         process.Success(args => args.Contains("deployment") && args.Contains("create"), WorkloadOutputs());
         process.Success(args => args.Contains("sql") && args.Contains("server") && args.Contains("list"), "1");
         process.Success(args => args.Contains("ad-admin") && args.Contains("list"), "[{\"login\":\"proof-bootstrap\",\"sid\":\"11111111-1111-1111-1111-111111111111\"}]");
@@ -1967,6 +1967,36 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
 
         Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
         Assert.Equal($"proof-app--{_fixture.Plan.Fingerprint[..24]}", result.Resources.WorkloadRevisionName);
+    }
+
+    [Fact]
+    public async Task Workload_does_not_reuse_an_inactive_historical_revision_suffix()
+    {
+        var process = new FakeCommandProcess();
+        var baseSuffix = _fixture.Plan.Fingerprint[..24];
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "1");
+        process.Success(args => args.Contains("containerapp") && args.Contains("show") && args.Any(x => x.Contains("traffic", StringComparison.Ordinal)), "[{\"revisionName\":\"proof-app--stable\",\"weight\":100}]");
+        process.Success(args => args.Contains("revision") && args.Contains("show"), "{\"active\":true,\"health\":\"Healthy\"}");
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "1");
+        process.Success(args => args.Contains("resource") && args.Contains("show"), "different-suffix");
+        process.Success(IsAllRevisionList, $"[\"proof-app--{baseSuffix}\"]");
+        process.Success(args => args.Contains("deployment") && args.Contains("create"), WorkloadOutputs());
+        process.Success(args => args.Contains("sql") && args.Contains("server") && args.Contains("list"), "1");
+        process.Success(args => args.Contains("ad-admin") && args.Contains("list"), "[{\"login\":\"proof-bootstrap\",\"sid\":\"11111111-1111-1111-1111-111111111111\"}]");
+        process.Success(args => args.Contains("ad-only-auth") && args.Contains("enable"));
+
+        var resources = _fixture.FoundationResources with
+        {
+            RegistryResourceId = _fixture.RegistryId,
+            AcrPullDeploymentId = _fixture.RegistryDeploymentId,
+            AcrPullRoleAssignmentId = _fixture.RegistryRoleAssignmentId
+        };
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Workload, resources));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
+        Assert.Equal($"proof-app--{baseSuffix}-r1", result.Resources.WorkloadRevisionName);
+        Assert.Contains(process.Calls, IsAllRevisionList);
     }
 
     [Fact]
@@ -2150,6 +2180,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("show") && args.Any(x => x.Contains("traffic", StringComparison.Ordinal)), "[{\"revisionName\":\"proof-app--candidate\",\"weight\":100},{\"revisionName\":\"proof-app--stable\",\"weight\":0}]");
         process.Success(args => args.Contains("--fail") && args.Contains(WorkloadOrigin + "/health"), "Healthy");
         process.Success(IsActiveRevisionList, "[\"proof-app--candidate\"]");
+        process.Success(IsActiveRevisionList, "[\"proof-app--candidate\"]");
 
         await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Promotion, PromotionResources()));
 
@@ -2250,15 +2281,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => IsRevisionActivation(args, "proof-app--stable"));
         process.Success(args => args.Contains("traffic") && args.Contains("set") && args.Any(x => x.Contains("proof-app--candidate=0", StringComparison.Ordinal)));
         process.Success(args => args.Contains("show") && args.Any(x => x.Contains("traffic", StringComparison.Ordinal)), "[{\"revisionName\":\"proof-app--stable\",\"weight\":100},{\"revisionName\":\"proof-app--candidate\",\"weight\":0}]");
-        var resources = _fixture.FoundationResources with
-        {
-            RegistryResourceId = _fixture.RegistryId,
-            AcrPullDeploymentId = _fixture.RegistryDeploymentId,
-            AcrPullRoleAssignmentId = _fixture.RegistryRoleAssignmentId,
-            WorkloadResourceId = _fixture.AppId,
-            WorkloadDeploymentId = _fixture.WorkloadDeploymentId,
-            WorkloadRevisionName = "proof-app--candidate"
-        };
+        var resources = PromotionResources();
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.RestoreStableTraffic, resources) with
         {
@@ -2280,15 +2303,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => IsRevisionActivation(args, "proof-app--stable"));
         process.Success(args => args.Contains("traffic") && args.Contains("set"));
         process.Success(args => args.Contains("show") && args.Any(x => x.Contains("traffic", StringComparison.Ordinal)), "[{\"revisionName\":\"proof-app--stable\",\"weight\":100}]");
-        var resources = _fixture.FoundationResources with
-        {
-            RegistryResourceId = _fixture.RegistryId,
-            AcrPullDeploymentId = _fixture.RegistryDeploymentId,
-            AcrPullRoleAssignmentId = _fixture.RegistryRoleAssignmentId,
-            WorkloadResourceId = _fixture.AppId,
-            WorkloadDeploymentId = _fixture.WorkloadDeploymentId,
-            WorkloadRevisionName = "proof-app--candidate"
-        };
+        var resources = PromotionResources();
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.RestoreStableTraffic, resources) with
         {
@@ -2304,15 +2319,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     {
         var process = new FakeCommandProcess();
         process.Failure(args => IsRevisionActivation(args, "proof-app--stable"));
-        var resources = _fixture.FoundationResources with
-        {
-            RegistryResourceId = _fixture.RegistryId,
-            AcrPullDeploymentId = _fixture.RegistryDeploymentId,
-            AcrPullRoleAssignmentId = _fixture.RegistryRoleAssignmentId,
-            WorkloadResourceId = _fixture.AppId,
-            WorkloadDeploymentId = _fixture.WorkloadDeploymentId,
-            WorkloadRevisionName = "proof-app--candidate"
-        };
+        var resources = PromotionResources();
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.RestoreStableTraffic, resources) with
         {
@@ -2325,8 +2332,28 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         Assert.DoesNotContain(process.Calls, call => call.Contains("traffic") && call.Contains("set"));
     }
 
+    [Fact]
+    public async Task Stable_traffic_restore_rejects_a_revision_not_bound_to_persisted_resources()
+    {
+        var process = new FakeCommandProcess();
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(
+            AzureProviderRunnerStep.RestoreStableTraffic,
+            PromotionResources()) with
+        {
+            StableTrafficRevisionName = "proof-app--other"
+        });
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal("azure.rollback.stable-missing", result.Code);
+        Assert.Empty(process.Calls);
+    }
+
     private static bool IsActiveRevisionList(string[] args) =>
         args.Contains("revision") && args.Contains("list") && args.Contains("[].name") && !args.Contains("--all");
+
+    private static bool IsAllRevisionList(string[] args) =>
+        args.Contains("revision") && args.Contains("list") && args.Contains("[].name") && args.Contains("--all");
 
     private static bool IsRevisionActivation(string[] args, string revision) =>
         args.Contains("revision") && args.Contains("activate") && args.Contains(revision);
