@@ -471,10 +471,12 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             .ThenByDescending(x => x.Id);
         if (providerSubscriptionReference is not null)
         {
-            return await candidates
+            var subscriptionMatches = await candidates
                 .Where(x => x.ProviderSubscriptionReference == providerSubscriptionReference &&
                             (providerCustomerReference is null || x.ProviderCustomerReference == providerCustomerReference))
-                .FirstOrDefaultAsync(cancellationToken);
+                .Take(2)
+                .ToListAsync(cancellationToken);
+            return subscriptionMatches.Count == 1 ? subscriptionMatches[0] : null;
         }
 
         var customerMatches = await candidates
