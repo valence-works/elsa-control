@@ -127,7 +127,7 @@ public sealed class CatalogDbContextTransactionExtensionsTests : IAsyncLifetime
     [Fact]
     public async Task Lost_commit_acknowledgement_returns_the_committed_result_without_rerunning_the_unit()
     {
-        var acknowledgement = new LostCommitAcknowledgementInterceptor();
+        var acknowledgement = new LostCommitAcknowledgementInterceptor(int.MaxValue);
         await using var db = CreateContext(
             isTransient: exception => exception is LostCommitAcknowledgementException,
             acknowledgement);
@@ -261,22 +261,6 @@ public sealed class CatalogDbContextTransactionExtensionsTests : IAsyncLifetime
     }
 
     private sealed class TransientTestException : Exception;
-
-    private sealed class LostCommitAcknowledgementException : Exception;
-
-    private sealed class LostCommitAcknowledgementInterceptor : DbTransactionInterceptor
-    {
-        public int Committed { get; private set; }
-
-        public override Task TransactionCommittedAsync(
-            DbTransaction transaction,
-            TransactionEndEventData eventData,
-            CancellationToken cancellationToken = default)
-        {
-            Committed++;
-            throw new LostCommitAcknowledgementException();
-        }
-    }
 
     private sealed class TransactionRecorder : DbTransactionInterceptor
     {

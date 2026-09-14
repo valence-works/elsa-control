@@ -1386,22 +1386,6 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
                 "The organization subscription does not permit managed-instance changes."));
     }
 
-    private sealed class LostCommitAcknowledgementException : Exception;
-
-    private sealed class LostCommitAcknowledgementInterceptor : DbTransactionInterceptor
-    {
-        public int Committed { get; private set; }
-
-        public override Task TransactionCommittedAsync(
-            DbTransaction transaction,
-            TransactionEndEventData eventData,
-            CancellationToken cancellationToken = default)
-        {
-            Committed++;
-            throw new LostCommitAcknowledgementException();
-        }
-    }
-
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;

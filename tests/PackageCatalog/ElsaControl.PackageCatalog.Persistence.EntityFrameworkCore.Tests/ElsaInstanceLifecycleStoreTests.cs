@@ -2926,35 +2926,6 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         public override DateTimeOffset GetUtcNow() => now;
     }
 
-    /// <summary>
-    /// Simulates a claim commit that succeeds durably but whose acknowledgement to the caller is lost:
-    /// it throws once, right after the transaction commits, an exception the test's execution strategy
-    /// classifies as transient so the whole unit is retried.
-    /// </summary>
-    private sealed class LostCommitAcknowledgementInterceptor(int failures = 1) : DbTransactionInterceptor
-    {
-        private int _failed;
-
-        public int Committed { get; private set; }
-
-        public override Task TransactionCommittedAsync(
-            DbTransaction transaction,
-            TransactionEndEventData eventData,
-            CancellationToken cancellationToken = default)
-        {
-            Committed++;
-            if (_failed < failures)
-            {
-                _failed++;
-                throw new LostCommitAcknowledgementException();
-            }
-
-            return base.TransactionCommittedAsync(transaction, eventData, cancellationToken);
-        }
-    }
-
-    private sealed class LostCommitAcknowledgementException : Exception;
-
     private static CatalogDbContext CreateMigratedContext(SqliteConnection connection)
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()

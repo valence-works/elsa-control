@@ -1138,18 +1138,24 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
         string message,
         DateTimeOffset now,
         string? failureMessage = null,
-        CancellationToken cancellationToken = default) =>
-        dbContext.ExecuteInTransactionAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var historyEventId = Guid.NewGuid();
+        return dbContext.ExecuteInTransactionAsync(
             IsolationLevel.Serializable,
-            () => UpdateRunStatusInTransactionAsync(workspaceId, runId, status, message, now, failureMessage, cancellationToken),
-            async (result, verificationCancellationToken) =>
-            {
-                var persisted = await dbContext.DeploymentRuns
-                    .AsNoTracking()
-                    .SingleOrDefaultAsync(x => x.WorkspaceId == workspaceId && x.Id == runId, verificationCancellationToken);
-                return persisted is not null && ToWorkspaceDeploymentRun(persisted) == result;
-            },
+            () => UpdateRunStatusInTransactionAsync(
+                workspaceId, runId, status, message, now, failureMessage, cancellationToken, historyEventId),
+            (_, verificationCancellationToken) => dbContext.DeploymentRunHistoryEvents
+                .AsNoTracking()
+                .AnyAsync(x => x.Id == historyEventId
+                    && x.WorkspaceId == workspaceId
+                    && x.RunId == runId
+                    && x.Status == status
+                    && x.Message == message
+                    && x.CreatedAt == now,
+                    verificationCancellationToken),
             cancellationToken);
+    }
 
     /// <summary>
     /// Applies a run status inside the caller's serializable catalog transaction.
@@ -1161,7 +1167,8 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
         string message,
         DateTimeOffset now,
         string? failureMessage = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Guid? historyEventId = null)
     {
         // Persist any correlated command mutation inside this transaction before
         // detaching a previously tracked run for the set-based terminal CAS. EF
@@ -1228,7 +1235,7 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
 
         await dbContext.DeploymentRunHistoryEvents.AddAsync(new DeploymentRunHistoryEventEntity
         {
-            Id = Guid.NewGuid(),
+            Id = historyEventId ?? Guid.NewGuid(),
             WorkspaceId = workspaceId,
             RunId = run.Id,
             Status = status,
@@ -1259,6 +1266,7 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
         // predicate, so a retried attempt re-decides each run from current state.
         const string recoveryReason = "Worker heartbeat became stale.";
         var markedRunIds = new List<Guid>();
+        var historyEventIds = staleRunIds.ToDictionary(x => x, _ => Guid.NewGuid());
         return await dbContext.ExecuteInTransactionAsync(
             IsolationLevel.Serializable,
             async () =>
@@ -1285,7 +1293,7 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
                         .SingleAsync(x => x.Id == runId, cancellationToken);
                     await dbContext.DeploymentRunHistoryEvents.AddAsync(new DeploymentRunHistoryEventEntity
                     {
-                        Id = Guid.NewGuid(),
+                        Id = historyEventIds[run.Id],
                         WorkspaceId = run.WorkspaceId,
                         RunId = run.Id,
                         Status = WorkspaceDeploymentRunStatus.RecoveryRequired,
@@ -1311,11 +1319,13 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
                 if (markedCount == 0)
                     return true;
 
-                var persisted = await dbContext.DeploymentRuns
+                var markedHistoryEventIds = markedRunIds.Select(x => historyEventIds[x]).ToList();
+                var persisted = await dbContext.DeploymentRunHistoryEvents
                     .AsNoTracking()
-                    .Where(x => markedRunIds.Contains(x.Id)
+                    .Where(x => markedHistoryEventIds.Contains(x.Id)
                         && x.Status == WorkspaceDeploymentRunStatus.RecoveryRequired
-                        && x.RecoveryReason == recoveryReason)
+                        && x.Message == "Deployment run requires recovery after stale worker heartbeat."
+                        && x.CreatedAt == now)
                     .CountAsync(verificationCancellationToken);
                 return persisted == markedCount;
             },

@@ -1743,30 +1743,6 @@ public sealed class ElsaInstancePersistenceTests
         public override DateTimeOffset GetUtcNow() => now;
     }
 
-    private sealed class LostCommitAcknowledgementInterceptor(int failures = 1) : DbTransactionInterceptor
-    {
-        private int _failed;
-
-        public int Committed { get; private set; }
-
-        public override Task TransactionCommittedAsync(
-            DbTransaction transaction,
-            TransactionEndEventData eventData,
-            CancellationToken cancellationToken = default)
-        {
-            Committed++;
-            if (_failed < failures)
-            {
-                _failed++;
-                throw new LostCommitAcknowledgementException();
-            }
-
-            return base.TransactionCommittedAsync(transaction, eventData, cancellationToken);
-        }
-    }
-
-    private sealed class LostCommitAcknowledgementException : Exception;
-
     private sealed class AllowMigrationAuthorizer : IElsaInstanceMigrationAuthorizer
     {
         public Task RequireExecutionAsync(Guid workspaceId, Guid accountId, CancellationToken cancellationToken = default) =>

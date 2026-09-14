@@ -297,19 +297,4 @@ public sealed class DeploymentRunRecoveryConcurrencyTests
         Guid WorkspaceId,
         Guid RunId);
 
-    private sealed class LostCommitAcknowledgementException : Exception;
-
-    private sealed class LostCommitAcknowledgementInterceptor : DbTransactionInterceptor
-    {
-        public int Committed { get; private set; }
-
-        public override Task TransactionCommittedAsync(
-            DbTransaction transaction,
-            TransactionEndEventData eventData,
-            CancellationToken cancellationToken = default)
-        {
-            Committed++;
-            throw new LostCommitAcknowledgementException();
-        }
-    }
 }

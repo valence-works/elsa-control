@@ -206,7 +206,12 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                         && x.AttemptNumber == result.AttemptNumber
                         && x.Version == result.Version
                         && x.UpdatedAt == nowUtc,
-                    verificationCancellationToken);
+                    verificationCancellationToken)
+                    && await db.AzureProviderOperationTransitions.AsNoTracking().AnyAsync(
+                        x => x.OperationId == result.Id
+                            && x.Sequence == result.Version
+                            && x.Code == "operation.delete-recovery.claimed",
+                        verificationCancellationToken);
             }, cancellationToken);
         }
         catch (DbUpdateConcurrencyException)
@@ -847,18 +852,6 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
             if (result is null)
                 return true;
 
-            var persisted = await db.AzureProviderOperations.AsNoTracking()
-                .SingleOrDefaultAsync(
-                    x => x.WorkspaceId == workspaceId
-                        && x.Id == operationId
-                        && x.Status == result.Status
-                        && x.Version == result.Version
-                        && x.UpdatedAt == now
-                        && x.CompletedAt == result.CompletedAt,
-                    verificationCancellationToken);
-            if (persisted is null)
-                return false;
-
             return await db.AzureProviderOperationTransitions.AsNoTracking()
                 .AnyAsync(
                     x => x.OperationId == operationId
@@ -930,20 +923,6 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
         {
             if (result is null || result.Decision.Allowed)
                 return true;
-
-            var completionFingerprint = Hash($"{AzureProviderOperationStatus.EntitlementHeld}|{result.Decision.Code}");
-            var persisted = await db.AzureProviderOperations.AsNoTracking()
-                .SingleOrDefaultAsync(
-                    x => x.WorkspaceId == workspaceId
-                        && x.Id == operationId
-                        && x.Status == AzureProviderOperationStatus.EntitlementHeld
-                        && x.Version == result.Operation.Version
-                        && x.UpdatedAt == now
-                        && x.CompletionLeaseTokenHash == Hash(leaseToken)
-                        && x.CompletionFingerprint == completionFingerprint,
-                    verificationCancellationToken);
-            if (persisted is null)
-                return false;
 
             return await db.AzureProviderOperationTransitions.AsNoTracking()
                 .AnyAsync(
@@ -1177,14 +1156,13 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                 return true;
 
             var ids = candidateSnapshot.Select(x => x.Id).ToList();
-            var persisted = await db.AzureProviderOperations.AsNoTracking()
-                .Where(x => ids.Contains(x.Id)
-                    && x.Status == AzureProviderOperationStatus.RecoveryRequired
-                    && x.UpdatedAt == now)
-                .Select(x => new { x.Id, x.Version })
+            var persisted = await db.AzureProviderOperationTransitions.AsNoTracking()
+                .Where(x => ids.Contains(x.OperationId)
+                    && x.Code == "operation.recovery.required")
+                .Select(x => new { x.OperationId, x.Sequence })
                 .ToListAsync(verificationCancellationToken);
             return persisted.Count(x => candidateSnapshot.Any(candidate =>
-                candidate.Id == x.Id && candidate.Version == x.Version - 1)) == recovered;
+                candidate.Id == x.OperationId && candidate.Version == x.Sequence - 1)) == recovered;
         }, cancellationToken);
     }
 

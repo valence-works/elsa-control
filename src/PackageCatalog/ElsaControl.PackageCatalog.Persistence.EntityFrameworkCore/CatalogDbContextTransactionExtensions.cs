@@ -69,6 +69,7 @@ internal static class CatalogDbContextTransactionExtensions
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(unitOfWork);
+        ArgumentNullException.ThrowIfNull(verifySucceeded);
         return dbContext.ExecuteInTransactionAsync(isolationLevel, async () =>
         {
             await unitOfWork();
