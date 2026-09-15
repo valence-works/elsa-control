@@ -1,12 +1,49 @@
 # Elsa Cloud BFF authentication contract
 
 The hosted Elsa Cloud frontend may use a server-side Lovable/Cloud BFF to call
-Elsa Control. The BFF performs the
+Elsa Control. The Entra bridge performs the
 [OAuth 2.0 authorization-code flow with PKCE](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)
 against the same configured identity provider as Control, requests the dedicated
 `ElsaCloud.Dashboard` delegated scope, and keeps the resulting Control access
 token on the server. Browser code never receives or stores that access token;
 the BFF forwards it to Control as `Authorization: Bearer ...`.
+
+For Hosted accounts, the BFF can instead forward the already authenticated Elsa
+Cloud user's Supabase access JWT. Control independently verifies its issuer,
+audience, signature against the issuer's OIDC/JWKS discovery, and lifetime. It
+maps the immutable issuer and user ID to the Control account and restricts this
+bearer to the same Cloud endpoint allowlist. Google, Microsoft, and email Cloud
+accounts therefore share one Hosted sign-in. No Entra delegation is needed to
+create a Hosted workspace.
+
+Configure this only for the Elsa Cloud project's OIDC issuer, whose signing
+keys must be asymmetric and published as JWKS:
+
+```text
+Authentication__CloudAccount__Enabled=true
+Authentication__CloudAccount__Issuer=https://<project-ref>.supabase.co/auth/v1
+Authentication__CloudAccount__Audience=authenticated
+```
+
+Deploy Control with this validation enabled before changing the Cloud BFF to
+forward Supabase user tokens. Keep the existing Entra scheme for operator login
+and Azure-specific customer integrations. Neither a browser-supplied user ID
+nor a privileged service key substitutes for the validated user JWT.
+For the current Hosted site, set the optional `cloudaccountissuer_value` input of
+`infra/api/api-website.module.bicep` to
+`https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1`. Verify its JWKS contains
+asymmetric public keys before enabling it. After Control has been deployed,
+publish the Cloud BFF and site together, then exercise Google, email confirmation,
+and Microsoft sign-in through checkout on the deployed origins. Check that each
+account sees only its own workspace, and that an admin route rejects a Cloud JWT.
+
+The current production API is released through `.github/workflows/azure-api-deploy.yml`.
+Set its production environment variable `CLOUD_ACCOUNT_ISSUER` to that exact
+issuer before dispatching a deployment from `main`. The workflow verifies the
+project issuer and sets the three `Authentication__CloudAccount__*` app settings
+in every mutating deploy mode. If the variable is empty, it disables the Cloud
+scheme; the Bicep module parameter alone does not configure the current
+production deploy path.
 
 ## Required configuration and claims
 
@@ -36,7 +73,7 @@ scope from another client, is rejected.
 
 ## BFF allowlist
 
-Validated BFF tokens are accepted only on these customer endpoints:
+Validated Entra BFF and Cloud account tokens are accepted only on these customer endpoints:
 
 ```text
 POST /api/cloud/bootstrap
@@ -48,8 +85,8 @@ POST /api/workspaces/{workspaceId}/instances
 POST /api/managed-elsa/handoff/issue
 ```
 
-Every other customer endpoint and every `/api/admin/...` endpoint rejects a
-BFF token. Admin routes continue to require the existing admin API key or
+Every other customer endpoint and every `/api/admin/...` endpoint rejects these
+Cloud tokens. Admin routes continue to require the existing admin API key or
 Control administrator authorization. The allowlist does not change normal
 customer cookies or non-BFF Control bearer tokens. No CORS policy is added for
 the BFF; deployment networking and browser-facing origin policy remain
@@ -79,8 +116,9 @@ authentication failure.
 
 ## Security notes
 
-- The BFF must use authorization-code + PKCE, keep refresh/access tokens in a
-  server-side protected store, and avoid forwarding tokens to the browser.
+- The Entra bridge must use authorization-code + PKCE and keep its delegated
+  refresh/access tokens in a server-side protected store. The Hosted bridge
+  forwards only a verified Cloud user session JWT to Control.
 - The BFF OAuth client credential, when the provider requires one, is not a
   Control Admin API key and must be limited to the delegated dashboard scope.
 - Use HTTPS for the BFF and Control in deployed environments; do not log

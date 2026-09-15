@@ -6,11 +6,14 @@ using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Api.Authentication;
 
-public sealed class ControlIdentityReader(IOptions<ControlIdentityOptions> options) :
+public sealed class ControlIdentityReader(
+    IOptions<ControlIdentityOptions> options,
+    IOptions<CloudAccountIdentityOptions> cloudAccountOptions) :
     IWorkspaceIdentityReader,
     IAuthenticatedControlSessionReader
 {
     private readonly ControlIdentityOptions _options = options.Value;
+    private readonly CloudAccountIdentityOptions _cloudAccountOptions = cloudAccountOptions.Value;
 
     public static bool HasBearerToken(HttpContext context)
     {
@@ -34,24 +37,29 @@ public sealed class ControlIdentityReader(IOptions<ControlIdentityOptions> optio
 
     public async ValueTask<TrustedWorkspaceIdentity?> ReadAsync(HttpContext context)
     {
-        var result = await context.AuthenticateAsync(ControlIdentityDefaults.Scheme);
+        var result = await context.AuthenticateAsync(CloudAccountIdentityDefaults.SelectorScheme);
         var user = result.Succeeded
             ? result.Principal
             : HasBearerToken(context) ? null : context.User;
-        return ControlClaimsIdentityMapper.ToTrustedWorkspaceIdentity(user, _options);
+        return MapIdentity(user);
     }
 
     public async ValueTask<AuthenticatedControlSession?> ReadAsync(HttpContext context, CancellationToken cancellationToken = default)
     {
-        var result = await context.AuthenticateAsync(ControlIdentityDefaults.Scheme);
+        var result = await context.AuthenticateAsync(CloudAccountIdentityDefaults.SelectorScheme);
         if (!result.Succeeded || result.Principal is null)
             return null;
 
-        var identity = ControlClaimsIdentityMapper.ToTrustedWorkspaceIdentity(result.Principal, _options);
+        var identity = MapIdentity(result.Principal);
         return identity is not null && TryReadBearerExpiry(result.Principal, out var expiresAt)
             ? new AuthenticatedControlSession(identity, expiresAt)
             : null;
     }
+
+    private TrustedWorkspaceIdentity? MapIdentity(ClaimsPrincipal? user) =>
+        CloudAccountTokenSelector.IsValidatedCloudAccount(user, _cloudAccountOptions)
+            ? ControlClaimsIdentityMapper.ToCloudTrustedWorkspaceIdentity(user!)
+            : ControlClaimsIdentityMapper.ToTrustedWorkspaceIdentity(user, _options);
 
     internal static bool TryReadBearerExpiry(ClaimsPrincipal principal, out DateTimeOffset expiresAt)
     {
@@ -77,6 +85,13 @@ public sealed class ControlIdentityReader(IOptions<ControlIdentityOptions> optio
 
 internal static class ControlClaimsIdentityMapper
 {
+    public static TrustedWorkspaceIdentity ToCloudTrustedWorkspaceIdentity(ClaimsPrincipal user) =>
+        new(
+            user.FindFirst("iss")!.Value,
+            user.FindFirst("sub")!.Value,
+            user.FindFirst("name")?.Value,
+            user.FindFirst("email")?.Value);
+
     public static TrustedWorkspaceIdentity? ToTrustedWorkspaceIdentity(ClaimsPrincipal? user, ControlIdentityOptions options)
     {
         if (user?.Identity is not { IsAuthenticated: true })

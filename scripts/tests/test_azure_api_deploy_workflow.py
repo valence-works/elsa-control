@@ -157,6 +157,7 @@ esac
                 current_deployment_mode: str,
                 runtime_readback: str,
                 candidate_build_number: str = "96",
+                cloud_account_issuer: str = "",
             ) -> subprocess.CompletedProcess[str]:
                 call_log.unlink(missing_ok=True)
                 environment = os.environ.copy()
@@ -173,6 +174,7 @@ esac
                         "VALIDATED_CANDIDATE_BUILD_NUMBER": candidate_build_number,
                         "CURRENT_DEPLOYMENT_MODE": current_deployment_mode,
                         "RUNTIME_READBACK": runtime_readback,
+                        "CLOUD_ACCOUNT_ISSUER": cloud_account_issuer,
                     }
                 )
                 return subprocess.run(
@@ -194,6 +196,17 @@ esac
             # The promoted app keeps the candidate's build number, not the promotion run number.
             self.assertIn("Application__BuildNumber=96", classic_calls)
             self.assertNotIn("Application__BuildNumber=1786839398", classic_calls)
+            self.assertIn("Authentication__CloudAccount__Enabled=false", classic_calls)
+
+            with_cloud_account = run_promotion(
+                "classic", f"DOCKER|{candidate_image}",
+                cloud_account_issuer="https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1",
+            )
+            self.assertEqual(0, with_cloud_account.returncode, with_cloud_account.stderr)
+            cloud_calls = call_log.read_text()
+            self.assertIn("Authentication__CloudAccount__Enabled=true", cloud_calls)
+            self.assertIn("Authentication__CloudAccount__Issuer=https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1", cloud_calls)
+            self.assertIn("Authentication__CloudAccount__Audience=authenticated", cloud_calls)
 
             for invalid_build_number in ("", "abc", "0", "0123", "1" * 21):
                 with self.subTest(candidate_build_number=invalid_build_number):
