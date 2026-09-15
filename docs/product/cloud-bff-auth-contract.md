@@ -37,6 +37,14 @@ publish the Cloud BFF and site together, then exercise Google, email confirmatio
 and Microsoft sign-in through checkout on the deployed origins. Check that each
 account sees only its own workspace, and that an admin route rejects a Cloud JWT.
 
+The current production API is released through `.github/workflows/azure-api-deploy.yml`.
+Set its production environment variable `CLOUD_ACCOUNT_ISSUER` to that exact
+issuer before dispatching a deployment from `main`. The workflow verifies the
+project issuer and sets the three `Authentication__CloudAccount__*` app settings
+in every mutating deploy mode. If the variable is empty, it disables the Cloud
+scheme; the Bicep module parameter alone does not configure the current
+production deploy path.
+
 ## Required configuration and claims
 
 Enable the bridge only when the BFF is deployed and its identity-provider

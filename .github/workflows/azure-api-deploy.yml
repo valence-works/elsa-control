@@ -54,6 +54,7 @@ jobs:
       AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
       AZURE_WEBAPP_NAME: ${{ vars.AZURE_WEBAPP_NAME }}
       AZURE_CONTAINER_REGISTRY_ENDPOINT: ${{ vars.AZURE_CONTAINER_REGISTRY_ENDPOINT }}
+      CLOUD_ACCOUNT_ISSUER: ${{ vars.CLOUD_ACCOUNT_ISSUER }}
       CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
       EXPECTED_CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
       DOTNET_NOLOGO: true
@@ -91,6 +92,12 @@ jobs:
               exit 1
               ;;
           esac
+
+          if [ -n "${CLOUD_ACCOUNT_ISSUER:-}" ] &&
+             [ "$CLOUD_ACCOUNT_ISSUER" != "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1" ]; then
+            echo "::error::The Cloud account issuer must match the Elsa Cloud project's verified OIDC issuer."
+            exit 1
+          fi
 
           required=(
             AZURE_CLIENT_ID
@@ -672,17 +679,26 @@ jobs:
           if [ "$DEPLOY_MODE" != "promote" ]; then
             application_build_number="$GITHUB_RUN_NUMBER"
           fi
+          cloud_account_enabled=false
+          if [ -n "${CLOUD_ACCOUNT_ISSUER:-}" ]; then
+            cloud_account_enabled=true
+          fi
+          cloud_account_settings=(
+            "Authentication__CloudAccount__Enabled=$cloud_account_enabled"
+            "Authentication__CloudAccount__Issuer=${CLOUD_ACCOUNT_ISSUER:-}"
+            "Authentication__CloudAccount__Audience=authenticated"
+          )
           if [ "$DEPLOY_MODE" = "infra" ]; then
             az webapp config appsettings set \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_WEBAPP_NAME" \
-              --settings Application__BuildNumber="$application_build_number" \
+              --settings Application__BuildNumber="$application_build_number" "${cloud_account_settings[@]}" \
               --output none
           else
             az webapp config appsettings set \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_WEBAPP_NAME" \
-              --settings AZURE_TOKEN_CREDENTIALS=prod Application__BuildNumber="$application_build_number" \
+              --settings AZURE_TOKEN_CREDENTIALS=prod Application__BuildNumber="$application_build_number" "${cloud_account_settings[@]}" \
               --output none
           fi
 
