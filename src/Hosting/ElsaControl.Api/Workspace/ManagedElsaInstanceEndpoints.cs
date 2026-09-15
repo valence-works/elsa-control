@@ -66,7 +66,7 @@ public static class ManagedElsaInstanceEndpoints
                     identityByInstanceId.GetValueOrDefault(instance.Id)));
             return Results.Ok(new ManagedElsaInstanceListResponse(items, currentPage, currentPageSize, pageResult.TotalCount,
                 offset + currentPageSize < pageResult.TotalCount));
-        }).RequireWorkspaceAccess();
+        }).RequireWorkspaceAccess().AllowCloudBff();
 
         group.MapGet("/onboarding-options", async (
             Guid workspaceId,
@@ -128,7 +128,7 @@ public static class ManagedElsaInstanceEndpoints
                 .ThenBy(x => x.TopologyId, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
             return Results.Ok(new ManagedElsaInstanceOnboardingOptionsResponse(releases, InitialLaunchProfile, previewReleases));
-        }).RequireWorkspaceAccess()
+        }).RequireWorkspaceAccess().AllowCloudBff()
             .AddEndpointFilter<EngineProvisioningRequiredFilter>();
 
         group.MapPost("", async (
@@ -188,7 +188,7 @@ public static class ManagedElsaInstanceEndpoints
             {
                 return Problem("instance.shape-invalid", "The instance request is invalid.", StatusCodes.Status422UnprocessableEntity);
             }
-        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource)
+        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff()
             .AddEndpointFilter<EngineProvisioningRequiredFilter>();
 
         group.MapGet("/{instanceId:guid}", async (

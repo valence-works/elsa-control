@@ -107,6 +107,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(allowIntegerValues: false));
 });
 builder.Services.Configure<ControlIdentityOptions>(builder.Configuration.GetSection(ControlIdentityDefaults.ConfigurationSection));
+builder.Services.Configure<CloudBffOptions>(builder.Configuration.GetSection(CloudBffOptions.ConfigurationSection));
 builder.Services.Configure<ManagedElsaHandoffOptions>(builder.Configuration.GetSection(ManagedElsaHandoffDefaults.ConfigurationSection));
 var configuredControlIdentity = builder.Configuration.GetSection(ControlIdentityDefaults.ConfigurationSection).Get<ControlIdentityOptions>() ?? new ControlIdentityOptions();
 var authentication = builder.Services.AddAuthentication(options =>
@@ -254,6 +255,7 @@ builder.Services.AddScoped<ManagedElsaHandoffIssuer>();
 builder.Services.AddScoped<ManagedElsaHandoffRedeemer>();
 builder.Services.AddScoped<ManagedElsaHandoffService>();
 builder.Services.AddHostedService<ManagedElsaHandoffConfigurationValidator>();
+builder.Services.AddHostedService<CloudBffConfigurationValidator>();
 builder.Services.AddSingleton<IWorkspacePermissionContribution, ManagedElsaInstancePermissionContribution>();
 var catalogSqlManagedIdentityInterceptor =
     CatalogSqlManagedIdentityConnectionInterceptor.TryCreate(builder.Configuration);
@@ -586,8 +588,10 @@ if (!app.Environment.IsEnvironment("Testing"))
 }
 
 app.UseExceptionHandler();
+app.UseRouting();
 app.UseCors();
 app.UseAuthentication();
+app.UseCloudBffAuthorization();
 // Must run after authentication so Control can issue a handoff JWT, and before the
 // /admin exact-path middleware + SPA fallback so GET /admin/runtimes?instanceId&state&codeChallenge
 // auto-posts to the runtime callback instead of leaving the browser on Sign in.
