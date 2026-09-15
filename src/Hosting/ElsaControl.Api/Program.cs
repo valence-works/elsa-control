@@ -588,8 +588,8 @@ if (!app.Environment.IsEnvironment("Testing"))
 }
 
 app.UseExceptionHandler();
-app.UseCors();
 app.UseRouting();
+app.UseCors();
 app.UseAuthentication();
 app.UseCloudBffAuthorization();
 // Must run after authentication so Control can issue a handoff JWT, and before the
