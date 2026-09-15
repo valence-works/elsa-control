@@ -108,14 +108,23 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 });
 builder.Services.Configure<ControlIdentityOptions>(builder.Configuration.GetSection(ControlIdentityDefaults.ConfigurationSection));
 builder.Services.Configure<CloudBffOptions>(builder.Configuration.GetSection(CloudBffOptions.ConfigurationSection));
+builder.Services.Configure<CloudAccountIdentityOptions>(builder.Configuration.GetSection(CloudAccountIdentityDefaults.ConfigurationSection));
 builder.Services.Configure<ManagedElsaHandoffOptions>(builder.Configuration.GetSection(ManagedElsaHandoffDefaults.ConfigurationSection));
 var configuredControlIdentity = builder.Configuration.GetSection(ControlIdentityDefaults.ConfigurationSection).Get<ControlIdentityOptions>() ?? new ControlIdentityOptions();
 var authentication = builder.Services.AddAuthentication(options =>
     {
-        options.DefaultAuthenticateScheme = ControlIdentityDefaults.Scheme;
-        options.DefaultChallengeScheme = ControlIdentityDefaults.Scheme;
+        options.DefaultAuthenticateScheme = CloudAccountIdentityDefaults.SelectorScheme;
+        options.DefaultChallengeScheme = CloudAccountIdentityDefaults.SelectorScheme;
+    })
+    .AddPolicyScheme(CloudAccountIdentityDefaults.SelectorScheme, null, options =>
+    {
+        options.ForwardDefaultSelector = context => CloudAccountTokenSelector.Matches(
+                context, context.RequestServices.GetRequiredService<IOptions<CloudAccountIdentityOptions>>().Value)
+            ? CloudAccountIdentityDefaults.Scheme
+            : ControlIdentityDefaults.Scheme;
     })
     .AddJwtBearer(ControlIdentityDefaults.Scheme)
+    .AddJwtBearer(CloudAccountIdentityDefaults.Scheme)
     .AddScheme<AuthenticationSchemeOptions, ApiKeyAuthenticationHandler>(ApiKeyAuthenticationDefaults.Scheme, _ => { })
     .AddScheme<AuthenticationSchemeOptions, BuilderClientApiKeyAuthenticationHandler>(BuilderClientApiKeyAuthenticationDefaults.Scheme, _ => { })
     .AddCookie(CustomerAuthenticationDefaults.CookieScheme, options =>
@@ -176,6 +185,40 @@ builder.Services.AddOptions<JwtBearerOptions>(ControlIdentityDefaults.Scheme)
         };
         if (controlIdentity.IsEntraMultiTenant)
             EntraMultiTenantIdentity.ConfigureIssuerValidation(options.TokenValidationParameters);
+    });
+builder.Services.AddOptions<JwtBearerOptions>(CloudAccountIdentityDefaults.Scheme)
+    .Configure<IOptions<CloudAccountIdentityOptions>>((options, cloudAccountOptions) =>
+    {
+        var cloud = cloudAccountOptions.Value;
+        options.MapInboundClaims = false;
+        options.RequireHttpsMetadata = true;
+        if (!string.IsNullOrWhiteSpace(cloud.Issuer) && string.IsNullOrWhiteSpace(cloud.TestSigningKey))
+            options.MetadataAddress = $"{cloud.Issuer.TrimEnd('/')}/.well-known/openid-configuration";
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = cloud.Issuer,
+            ValidateAudience = true,
+            ValidAudience = cloud.Audience,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = string.IsNullOrWhiteSpace(cloud.TestSigningKey)
+                ? null
+                : new SymmetricSecurityKey(Encoding.UTF8.GetBytes(cloud.TestSigningKey)),
+            ValidAlgorithms = string.IsNullOrWhiteSpace(cloud.TestSigningKey)
+                ? [SecurityAlgorithms.EcdsaSha256, SecurityAlgorithms.RsaSha256]
+                : [SecurityAlgorithms.HmacSha256],
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.FromMinutes(1)
+        };
+        options.Events = new JwtBearerEvents
+        {
+            OnTokenValidated = context =>
+            {
+                if (!CloudAccountTokenSelector.IsValidatedCloudAccount(context.Principal, cloud))
+                    context.Fail("A signed Elsa Cloud user session is required.");
+                return Task.CompletedTask;
+            }
+        };
     });
 // The public Runtime Builder API is called from browsers on other origins (the Elsa Hub
 // configurator), so those origins must be allow-listed. Everything else on this host is
@@ -256,6 +299,7 @@ builder.Services.AddScoped<ManagedElsaHandoffRedeemer>();
 builder.Services.AddScoped<ManagedElsaHandoffService>();
 builder.Services.AddHostedService<ManagedElsaHandoffConfigurationValidator>();
 builder.Services.AddHostedService<CloudBffConfigurationValidator>();
+builder.Services.AddHostedService<CloudAccountIdentityConfigurationValidator>();
 builder.Services.AddSingleton<IWorkspacePermissionContribution, ManagedElsaInstancePermissionContribution>();
 var catalogSqlManagedIdentityInterceptor =
     CatalogSqlManagedIdentityConnectionInterceptor.TryCreate(builder.Configuration);

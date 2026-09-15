@@ -22,6 +22,9 @@ param entratenantid_value string
 
 param entraclientid_value string
 
+@description('Optional Elsa Cloud Supabase OIDC issuer. An empty value keeps Cloud account JWT admission disabled. Set only after confirming this issuer publishes asymmetric signing keys.')
+param cloudaccountissuer_value string = ''
+
 @secure()
 param entraclientsecret_value string
 
@@ -156,6 +159,18 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
         {
           name: 'Authentication__ControlIdentity__RequireHttpsMetadata'
           value: 'true'
+        }
+        {
+          name: 'Authentication__CloudAccount__Enabled'
+          value: empty(cloudaccountissuer_value) ? 'false' : 'true'
+        }
+        {
+          name: 'Authentication__CloudAccount__Issuer'
+          value: cloudaccountissuer_value
+        }
+        {
+          name: 'Authentication__CloudAccount__Audience'
+          value: 'authenticated'
         }
         {
           name: 'Authentication__ControlIdentity__Claims__DisplayName__0'

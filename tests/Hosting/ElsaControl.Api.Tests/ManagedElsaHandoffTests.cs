@@ -161,7 +161,7 @@ public sealed class ManagedElsaHandoffTests
         var reader = new ControlIdentityReader(Options.Create(new ControlIdentityOptions
         {
             Issuer = ControlApiTestApplication.TestControlIdentityIssuer
-        }));
+        }), Options.Create(new CloudAccountIdentityOptions()));
 
         Assert.Null(await reader.ReadAsync(context));
     }

@@ -147,11 +147,14 @@ public static class CloudBffEndpointConventionExtensions
 
 public sealed class CloudBffAuthorizationMiddleware(
     RequestDelegate next,
-    IOptions<CloudBffOptions> options)
+    IOptions<CloudBffOptions> options,
+    IOptions<CloudAccountIdentityOptions> cloudAccountOptions)
 {
     public async Task InvokeAsync(HttpContext context)
     {
-        var decision = CloudBffAuthorization.Classify(context.User, options.Value);
+        var decision = CloudAccountTokenSelector.IsValidatedCloudAccount(context.User, cloudAccountOptions.Value)
+            ? CloudBffTokenDecision.Valid
+            : CloudBffAuthorization.Classify(context.User, options.Value);
         if (decision == CloudBffTokenDecision.NotBff)
         {
             await next(context);
