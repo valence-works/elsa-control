@@ -49,7 +49,7 @@ public static class ManagedElsaHandoffEndpoints
                     result.RedirectUri.OriginalString,
                     result.IssuedAt,
                     result.ExpiresAt));
-        });
+        }).AllowCloudBff();
 
         group.MapPost("/redeem", async (
             HttpContext context,
