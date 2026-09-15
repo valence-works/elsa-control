@@ -659,7 +659,7 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                     b.HasIndex("OrganizationId")
                         .IsUnique()
-                        .HasFilter("State NOT IN ('Retained', 'Deleted')");
+                        .HasFilter("[State] IN ('Trial', 'Active', 'PastDue', 'Constrained', 'Suspended')");
 
                     b.HasIndex("Provider", "ProviderCustomerReference")
                         .IsUnique()

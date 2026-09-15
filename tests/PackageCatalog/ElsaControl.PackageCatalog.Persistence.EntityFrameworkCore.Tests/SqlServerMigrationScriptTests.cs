@@ -61,6 +61,38 @@ public sealed class SqlServerMigrationScriptTests
         Assert.DoesNotMatch(@"\bNOT\s+IN\b", activeIndexSql);
     }
 
+    [Theory]
+    [InlineData(
+        "20260914093651_AddSyncRunReconciliationEvents",
+        "20260914101631_AllowHistoricalOrganizationSubscriptions")]
+    [InlineData(
+        "20260914101631_AllowHistoricalOrganizationSubscriptions",
+        "20260915011628_RepairHistoricalOrganizationSubscriptionIndex")]
+    public void Organization_subscription_index_migrations_converge_from_a_missing_index(
+        string fromMigration,
+        string toMigration)
+    {
+        var options = new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseSqlServer(
+                @"Server=(localdb)\MSSQLLocalDB;Initial Catalog=ElsaControlMigrationScriptTests;Integrated Security=True;Encrypt=False",
+                sqlServer => sqlServer.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqlServerMigrationsAssembly))
+            .Options;
+        using var db = new CatalogDbContext(options);
+
+        var script = db.GetService<IMigrator>().GenerateScript(
+            fromMigration: fromMigration,
+            toMigration: toMigration);
+
+        Assert.Matches(@"IF\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+sys\.indexes", script);
+        Assert.Matches(@"IF\s+NOT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+sys\.indexes", script);
+        Assert.DoesNotMatch(@"\bNOT\s+IN\b", script);
+        Assert.DoesNotMatch(@"\[?State\]?\s*<>", script);
+        Assert.Contains(
+            "[State] IN ('Trial', 'Active', 'PastDue', 'Constrained', 'Suspended')",
+            script,
+            StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Azure_provider_assignment_migration_persists_assignment_identity_and_references()
     {

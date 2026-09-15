@@ -5,7 +5,7 @@
 namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
 {
     /// <inheritdoc />
-    public partial class AllowHistoricalOrganizationSubscriptions : Migration
+    public partial class RepairHistoricalOrganizationSubscriptionIndex : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
@@ -32,15 +32,7 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.DropIndex(
-                name: "IX_OrganizationSubscriptions_OrganizationId",
-                table: "OrganizationSubscriptions");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_OrganizationSubscriptions_OrganizationId",
-                table: "OrganizationSubscriptions",
-                column: "OrganizationId",
-                unique: true);
+            // The corrected preceding migration already has the same model state.
         }
     }
 }
