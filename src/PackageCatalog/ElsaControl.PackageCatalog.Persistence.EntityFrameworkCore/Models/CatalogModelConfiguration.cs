@@ -288,7 +288,7 @@ internal sealed class OrganizationSubscriptionConfiguration : IEntityTypeConfigu
         builder.Property(x => x.UpdatedAt).HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
         builder.HasIndex(x => x.OrganizationId)
             .IsUnique()
-            .HasFilter("State NOT IN ('Retained', 'Deleted')");
+            .HasFilter("[State] IN ('Trial', 'Active', 'PastDue', 'Constrained', 'Suspended')");
         builder.HasAlternateKey(x => new { x.OrganizationId, x.Id });
         builder.HasIndex(x => new { x.Provider, x.ProviderCustomerReference })
             .IsUnique()

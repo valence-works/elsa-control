@@ -19,7 +19,7 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                 table: "OrganizationSubscriptions",
                 column: "OrganizationId",
                 unique: true,
-                filter: "State NOT IN ('Retained', 'Deleted')");
+                filter: "[State] IN ('Trial', 'Active', 'PastDue', 'Constrained', 'Suspended')");
         }
 
         /// <inheritdoc />

@@ -12,8 +12,8 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
 {
     [DbContext(typeof(CatalogDbContext))]
-    [Migration("20260914101631_AllowHistoricalOrganizationSubscriptions")]
-    partial class AllowHistoricalOrganizationSubscriptions
+    [Migration("20260915011628_RepairHistoricalOrganizationSubscriptionIndex")]
+    partial class RepairHistoricalOrganizationSubscriptionIndex
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
