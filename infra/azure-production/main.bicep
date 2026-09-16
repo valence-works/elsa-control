@@ -259,7 +259,8 @@ module containerEnvironment 'modules/container-apps-environment.bicep' = {
 // verifies as the workload endpoint and Control binds the instance's handoff callback to. The environment exists
 // from the foundation phase, so the origin is known before the app is created.
 var workloadAppName = '${workloadName}-app'
-var managedHandoffCallbackUri = managedHandoffEnabled ? toLower('https://${workloadAppName}.${containerEnvironment.outputs.defaultDomain}/managed-elsa/handoff/callback') : ''
+var workloadPublicBaseUrl = toLower('https://${workloadAppName}.${containerEnvironment.outputs.defaultDomain}')
+var managedHandoffCallbackUri = managedHandoffEnabled ? '${workloadPublicBaseUrl}/managed-elsa/handoff/callback' : ''
 
 module workload 'modules/container-app.bicep' = if (deployWorkload) {
   name: 'container-app'
@@ -272,6 +273,7 @@ module workload 'modules/container-app.bicep' = if (deployWorkload) {
     registryResourceGroupName: registryResourceGroupName
     imageRepository: imageRepository
     imageDigest: imageDigest
+    publicBaseUrl: workloadPublicBaseUrl
     workloadIdentityId: workloadIdentity.outputs.id
     sqlConnectionSecretUri: vault.outputs.sqlConnectionSecretUri
     signingKeySecretUri: vault.outputs.signingKeySecretUri

@@ -29,6 +29,10 @@ param imageRepository string
 @maxLength(64)
 param imageDigest string
 
+@description('Public HTTPS origin used by Elsa HTTP activities to build workflow endpoint URLs.')
+@minLength(8)
+param publicBaseUrl string
+
 @description('User-assigned identity resource ID used for ACR pull and Key Vault reads.')
 param workloadIdentityId string
 
@@ -231,6 +235,10 @@ var nuplaneFeedEnvironment = [
   }
 ]
 var featureEnvironment = [
+  {
+    name: 'CShells__Shells__Default__Features__Http__HttpActivityOptions__BaseUrl'
+    value: publicBaseUrl
+  }
   {
     name: 'CShells__Shells__Default__Features__SqliteWorkflowPersistence'
     value: 'false'
