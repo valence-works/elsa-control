@@ -54,6 +54,21 @@ public static class OrganizationBillingEndpoints
             return ToHttpResult(result);
         });
 
+        group.MapPost("/prepare-hosted-trial", async (
+            Guid organizationId,
+            HttpContext context,
+            IWorkspaceIdentityReader identityReader,
+            OrganizationBillingApiService billing,
+            CancellationToken cancellationToken) =>
+        {
+            var identity = await identityReader.ReadAsync(context);
+            if (identity is null)
+                return WorkspaceIdentityHttpContextExtensions.UnauthorizedWorkspaceIdentity();
+
+            var result = await billing.PrepareHostedTrialAsync(identity, organizationId, cancellationToken);
+            return ToHostedTrialPreparationHttpResult(result);
+        }).AllowCloudBff();
+
         group.MapPost("/portal", async (
             Guid organizationId,
             HttpContext context,
@@ -172,6 +187,21 @@ public static class OrganizationBillingEndpoints
             return Results.Forbid();
         if (result.CustomerNotReady)
             return Results.Conflict(new { code = "billing.customer-not-ready" });
+        if (result.SubscriptionTerminal)
+            return Results.Conflict(new { code = "billing.subscription-terminal" });
+        if (result.ProviderUnavailable)
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        return Results.BadRequest(new { code = "billing.invalid" });
+    }
+
+    private static IResult ToHostedTrialPreparationHttpResult(HostedTrialPreparationApiResult result)
+    {
+        if (result.Succeeded)
+            return Results.Ok(new HostedTrialPreparationResponse(result.TrialEndsAt!.Value));
+        if (result.Failure is OrganizationWorkspaceFailure.OrganizationNotAllowed)
+            return Results.NotFound(new { code = "organization.not-found" });
+        if (result.Failure is OrganizationWorkspaceFailure.OrganizationRoleNotAllowed)
+            return Results.Forbid();
         if (result.SubscriptionTerminal)
             return Results.Conflict(new { code = "billing.subscription-terminal" });
         if (result.ProviderUnavailable)

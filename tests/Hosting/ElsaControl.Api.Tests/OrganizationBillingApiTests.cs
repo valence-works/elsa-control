@@ -58,6 +58,73 @@ public sealed class OrganizationBillingApiTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Hosted_trial_preparation_starts_an_idempotent_control_plane_trial()
+    {
+        await _app.SeedAsync(_ => Task.CompletedTask);
+        var owner = _app.CreateControlIdentityClient(subject: "hosted-trial-owner");
+        var organizationId = (await owner.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces"))!.Organizations.Single().Id;
+
+        var first = await owner.PostControlJsonAsync($"/api/organizations/{organizationId}/billing/prepare-hosted-trial", new { });
+        var firstBody = await first.Content.ReadControlJsonAsync<HostedTrialPreparationResponse>();
+        var second = await owner.PostControlJsonAsync($"/api/organizations/{organizationId}/billing/prepare-hosted-trial", new { });
+        var secondBody = await second.Content.ReadControlJsonAsync<HostedTrialPreparationResponse>();
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        Assert.NotNull(firstBody);
+        Assert.Equal(firstBody, secondBody);
+        await using var scope = _app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Single(await db.OrganizationSubscriptions.Where(x => x.OrganizationId == organizationId).ToListAsync());
+        Assert.Equal(OrganizationSubscriptionState.Trial,
+            (await db.OrganizationSubscriptions.SingleAsync(x => x.OrganizationId == organizationId)).State);
+    }
+
+    [Fact]
+    public async Task Hosted_trial_preparation_requires_billing_management_and_preserves_terminal_state()
+    {
+        await _app.SeedAsync(_ => Task.CompletedTask);
+        var owner = _app.CreateControlIdentityClient(subject: "hosted-trial-access-owner");
+        var organizationId = (await owner.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces"))!.Organizations.Single().Id;
+        await AddMemberAsync(organizationId, "hosted-trial-access-member");
+        var member = _app.CreateControlIdentityClient(subject: "hosted-trial-access-member");
+
+        var forbidden = await member.PostControlJsonAsync($"/api/organizations/{organizationId}/billing/prepare-hosted-trial", new { });
+
+        Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+
+        await using (var scope = _app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            var store = new OrganizationBillingStore(db);
+            await store.GrantInternalEntitlementAsync(
+                new(organizationId, new("Internal entitlement", 2, DateTimeOffset.UtcNow.AddDays(30)), "operator"),
+                DateTimeOffset.UtcNow);
+        }
+
+        var terminal = await owner.PostControlJsonAsync($"/api/organizations/{organizationId}/billing/prepare-hosted-trial", new { });
+
+        Assert.Equal(HttpStatusCode.Conflict, terminal.StatusCode);
+        Assert.Contains("billing.subscription-terminal", await terminal.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Hosted_trial_preparation_fails_before_persistence_when_provider_is_not_stripe()
+    {
+        await _app.SeedAsync(_ => Task.CompletedTask);
+        var owner = _app.CreateControlIdentityClient(subject: "hosted-trial-provider-owner");
+        var organizationId = (await owner.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces"))!.Organizations.Single().Id;
+        _provider.Provider = "fake";
+
+        var response = await owner.PostControlJsonAsync($"/api/organizations/{organizationId}/billing/prepare-hosted-trial", new { });
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        await using var scope = _app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Empty(await db.OrganizationSubscriptions.Where(x => x.OrganizationId == organizationId).ToListAsync());
+    }
+
+    [Fact]
     public async Task Checkout_rejects_a_tombstoned_subscription_before_calling_provider()
     {
         await _app.SeedAsync(_ => Task.CompletedTask);
