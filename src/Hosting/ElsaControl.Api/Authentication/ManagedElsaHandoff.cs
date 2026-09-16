@@ -48,6 +48,7 @@ public sealed class ManagedElsaHandoffOptions
     public TimeSpan TokenLifetime { get; init; } = ManagedElsaHandoffDefaults.DefaultLifetime;
     public TimeSpan RuntimeSessionMaximumLifetime { get; init; } =
         ManagedElsaHandoffDefaults.DefaultRuntimeSessionMaximumLifetime;
+    public string? CloudContinuationUrl { get; init; }
     public string? ActiveKeyId { get; init; }
     public string? ActivePrivateKeyPem { get; init; }
     public Dictionary<string, string> PreviousPublicKeys { get; init; } = new(StringComparer.Ordinal);
