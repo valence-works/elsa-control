@@ -73,6 +73,7 @@ public sealed class CloudBffAuthorizationTests
             "GET /api/me/workspaces",
             "GET /api/workspaces/{workspaceId:guid}/instances/",
             "GET /api/workspaces/{workspaceId:guid}/instances/onboarding-options",
+            "PATCH /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}",
             "POST /api/cloud/bootstrap",
             "POST /api/managed-elsa/handoff/issue",
             "POST /api/organizations/{organizationId:guid}/billing/prepare-hosted-trial",
