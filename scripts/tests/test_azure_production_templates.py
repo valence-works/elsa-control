@@ -93,6 +93,20 @@ class AzureProductionTemplateTests(unittest.TestCase):
             {name: parameters[name]["value"] for name in ("workloadMinReplicas", "workloadMaxReplicas", "workloadCpu", "workloadMemory")},
         )
 
+    def test_http_activity_base_url_uses_the_workload_public_origin(self) -> None:
+        main = MAIN.read_text()
+        app = APP.read_text()
+        public_origin = "toLower('https://${workloadAppName}.${containerEnvironment.outputs.defaultDomain}')"
+
+        self.assertIn(f"var workloadPublicBaseUrl = {public_origin}", main)
+        self.assertIn("publicBaseUrl: workloadPublicBaseUrl", main)
+        self.assertRegex(app, r"(?m)^param\s+publicBaseUrl\s+string$")
+        self.assertRegex(
+            app,
+            r"name: 'CShells__Shells__Default__Features__Http__HttpActivityOptions__BaseUrl'\s+value: publicBaseUrl",
+        )
+        self.assertNotIn("https://localhost:7392", app)
+
     def test_managed_handoff_is_required_typed_data_and_derives_its_callback(self) -> None:
         main = MAIN.read_text()
         app = APP.read_text()
@@ -104,10 +118,7 @@ class AzureProductionTemplateTests(unittest.TestCase):
         self.assertRegex(main, r"(?m)^param\s+managedHandoffRuntimePermissions\s+array\s*=\s*\[\]$")
         # The callback is never a caller input: it is the external app origin on the environment's default domain.
         self.assertNotRegex(main, r"(?m)^param\s+managedHandoffCallbackUri\b")
-        self.assertIn(
-            "toLower('https://${workloadAppName}.${containerEnvironment.outputs.defaultDomain}/managed-elsa/handoff/callback')",
-            main,
-        )
+        self.assertIn("'${workloadPublicBaseUrl}/managed-elsa/handoff/callback'", main)
         self.assertIn("name: workloadAppName", main)
         self.assertIn("managedHandoffCallbackUri: managedHandoffCallbackUri", main)
         self.assertIn("output managedHandoffCallbackUri string = deployWorkload ? managedHandoffCallbackUri : ''", main)
