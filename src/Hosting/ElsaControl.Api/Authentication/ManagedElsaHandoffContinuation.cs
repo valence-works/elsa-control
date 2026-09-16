@@ -78,7 +78,9 @@ public static class ManagedElsaHandoffContinuation
         if (session is null)
         {
             context.Response.Headers.CacheControl = "no-store";
-            context.Response.Redirect(LoginRedirect(context), permanent: false);
+            context.Response.Redirect(
+                CloudContinuationRedirect(options.Value.CloudContinuationUrl, request) ?? LoginRedirect(context),
+                permanent: false);
             return;
         }
 
@@ -128,6 +130,26 @@ public static class ManagedElsaHandoffContinuation
     {
         var returnUrl = context.Request.PathBase.Add(context.Request.Path) + context.Request.QueryString;
         return $"{LoginPath}?returnUrl={Uri.EscapeDataString(returnUrl.ToString())}";
+    }
+
+    internal static string? CloudContinuationRedirect(
+        string? configuredUrl,
+        ManagedElsaHandoffContinuationRequest request)
+    {
+        if (!Uri.TryCreate(configuredUrl, UriKind.Absolute, out var continuation) ||
+            continuation.Scheme != Uri.UriSchemeHttps ||
+            !string.IsNullOrEmpty(continuation.UserInfo) ||
+            !string.IsNullOrEmpty(continuation.Query) ||
+            !string.IsNullOrEmpty(continuation.Fragment))
+            return null;
+
+        var query = QueryString.Create([
+            new KeyValuePair<string, string?>("handoff", "1"),
+            new KeyValuePair<string, string?>("instanceId", request.InstanceId.ToString("D")),
+            new KeyValuePair<string, string?>("state", request.State),
+            new KeyValuePair<string, string?>("codeChallenge", request.CodeChallenge)
+        ]);
+        return continuation.GetLeftPart(UriPartial.Path) + query;
     }
 
     internal static string RenderAutoSubmitForm(Uri callbackUri, string token, string state)

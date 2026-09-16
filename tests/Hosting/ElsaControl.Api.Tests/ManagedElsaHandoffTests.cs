@@ -388,6 +388,39 @@ public sealed class ManagedElsaHandoffTests
     }
 
     [Fact]
+    public void Cloud_continuation_redirect_preserves_only_the_runtime_handoff_values()
+    {
+        var instanceId = Guid.NewGuid();
+        const string state = "state-value-that-is-long-enough";
+        var challenge = ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier);
+
+        var redirect = ManagedElsaHandoffContinuation.CloudContinuationRedirect(
+            "https://elsacloud.app/dashboard",
+            new ManagedElsaHandoffContinuationRequest(instanceId, state, challenge));
+
+        Assert.Equal(
+            $"https://elsacloud.app/dashboard?handoff=1&instanceId={instanceId:D}&state={state}&codeChallenge={challenge}",
+            redirect);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("http://elsacloud.app/dashboard")]
+    [InlineData("https://user@elsacloud.app/dashboard")]
+    [InlineData("https://elsacloud.app/dashboard?unexpected=1")]
+    [InlineData("https://elsacloud.app/dashboard#fragment")]
+    public void Cloud_continuation_redirect_rejects_unsafe_configuration(string? configuredUrl)
+    {
+        var request = new ManagedElsaHandoffContinuationRequest(
+            Guid.NewGuid(),
+            "state-value-that-is-long-enough",
+            ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier));
+
+        Assert.Null(ManagedElsaHandoffContinuation.CloudContinuationRedirect(configuredUrl, request));
+    }
+
+    [Fact]
     public async Task CamelCase_continuation_get_issues_and_auto_posts_to_the_bound_callback()
     {
         var setup = await SeedManagedInstanceAsync(
@@ -428,6 +461,29 @@ public sealed class ManagedElsaHandoffTests
         Assert.Equal(setup.OrganizationId, session.OrganizationId);
         Assert.Equal(setup.InstanceId, session.InstanceId);
         Assert.Contains(ManagedElsaHandoffDefaults.RuntimeSessionScope, session.Scopes);
+    }
+
+    [Fact]
+    public async Task Unauthenticated_continuation_returns_to_the_configured_cloud_dashboard()
+    {
+        var setup = await SeedManagedInstanceAsync(
+            ElsaDesiredLifecycle.Running,
+            ElsaObservedLifecycle.Ready,
+            ElsaInstanceHealth.Healthy,
+            bind: true,
+            cloudContinuationUrl: "https://elsacloud.app/dashboard");
+        await using var app = setup.App;
+        var challenge = ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier);
+        const string state = "state-value-that-is-long-enough";
+
+        using var response = await app.CreateClient(new() { AllowAutoRedirect = false })
+            .GetAsync(ContinuationPath(setup.InstanceId, state, challenge));
+
+        Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
+        Assert.Equal(
+            $"https://elsacloud.app/dashboard?handoff=1&instanceId={setup.InstanceId:D}&state={state}&codeChallenge={challenge}",
+            response.Headers.Location?.OriginalString);
+        Assert.Contains("no-store", response.Headers.CacheControl?.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -1059,12 +1115,16 @@ public sealed class ManagedElsaHandoffTests
         ElsaDesiredLifecycle desiredLifecycle,
         ElsaObservedLifecycle observedLifecycle,
         ElsaInstanceHealth health,
-        bool bind)
+        bool bind,
+        string? cloudContinuationUrl = null)
     {
-        var app = new ControlApiTestApplication(new Dictionary<string, string?>
+        var configuration = new Dictionary<string, string?>
         {
             [$"{ManagedElsaHandoffDefaults.ConfigurationSection}:Enabled"] = "true"
-        });
+        };
+        if (cloudContinuationUrl is not null)
+            configuration[$"{ManagedElsaHandoffDefaults.ConfigurationSection}:CloudContinuationUrl"] = cloudContinuationUrl;
+        var app = new ControlApiTestApplication(configuration);
         await app.SeedAsync(_ => Task.CompletedTask);
         var subject = $"managed-health-{Guid.NewGuid():N}";
         var client = app.CreateControlIdentityClient(subject);
