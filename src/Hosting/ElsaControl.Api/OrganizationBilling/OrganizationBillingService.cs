@@ -44,11 +44,56 @@ public sealed class OrganizationBillingApiService(
         if (!access.Succeeded)
             return OrganizationBillingApiResult.Denied(access.Failure!.Value);
 
-        if (!IsStripeProvider)
-            return OrganizationBillingApiResult.Unavailable();
-
         if (!_stripeOptions.IsCheckoutConfigured)
             return OrganizationBillingApiResult.Unavailable();
+
+        var trial = await StartHostedTrialAsync(organizationId, cancellationToken);
+        if (trial.ProviderUnavailable)
+            return OrganizationBillingApiResult.Unavailable();
+        if (trial.Terminal)
+            return OrganizationBillingApiResult.Terminal();
+
+        try
+        {
+            var session = await provider.CreateCheckoutSessionAsync(
+                new BillingCheckoutSessionRequest(
+                    organizationId,
+                    _stripeOptions.DefaultPriceId!,
+                    _stripeOptions.CheckoutSuccessUrl!,
+                    _stripeOptions.CheckoutCancelUrl!,
+                    trial.Subscription!.TrialEndsAt,
+                    trial.Subscription.ProviderCustomerReference),
+                cancellationToken);
+            return OrganizationBillingApiResult.Success(session);
+        }
+        catch (BillingProviderUnavailableException)
+        {
+            return OrganizationBillingApiResult.Unavailable();
+        }
+    }
+
+    public async Task<HostedTrialPreparationApiResult> PrepareHostedTrialAsync(
+        TrustedWorkspaceIdentity identity,
+        Guid organizationId,
+        CancellationToken cancellationToken)
+    {
+        var access = await accounts.GetOrganizationAccessAsync(identity, organizationId, OrganizationOperation.ManageBilling, cancellationToken);
+        if (!access.Succeeded)
+            return HostedTrialPreparationApiResult.Denied(access.Failure!.Value);
+
+        var trial = await StartHostedTrialAsync(organizationId, cancellationToken);
+        if (trial.ProviderUnavailable)
+            return HostedTrialPreparationApiResult.Unavailable();
+        if (trial.Terminal)
+            return HostedTrialPreparationApiResult.Terminal();
+
+        return HostedTrialPreparationApiResult.Success(trial.Subscription!.TrialEndsAt);
+    }
+
+    private async Task<HostedTrialState> StartHostedTrialAsync(Guid organizationId, CancellationToken cancellationToken)
+    {
+        if (!IsStripeProvider)
+            return HostedTrialState.Unavailable();
 
         BillingEventConsumptionResult trial;
         try
@@ -60,34 +105,18 @@ public sealed class OrganizationBillingApiService(
             // The organization's subscription belongs to another provider (for
             // example, an operator-granted internal entitlement); it is terminal
             // to a checkout that only ever creates or resumes a Stripe trial.
-            return OrganizationBillingApiResult.Terminal();
+            return HostedTrialState.TerminalState();
         }
 
         var subscription = trial.Subscription ?? await billing.GetSubscriptionAsync(organizationId, cancellationToken);
         if (subscription is null)
-            return OrganizationBillingApiResult.Unavailable();
+            return HostedTrialState.Unavailable();
         if (subscription.State != OrganizationSubscriptionState.Trial ||
             subscription.EarlyDeletionRequestedAt is not null ||
             !string.IsNullOrWhiteSpace(subscription.ProviderSubscriptionReference))
-            return OrganizationBillingApiResult.Terminal();
+            return HostedTrialState.TerminalState();
 
-        try
-        {
-            var session = await provider.CreateCheckoutSessionAsync(
-                new BillingCheckoutSessionRequest(
-                    organizationId,
-                    _stripeOptions.DefaultPriceId!,
-                    _stripeOptions.CheckoutSuccessUrl!,
-                    _stripeOptions.CheckoutCancelUrl!,
-                    subscription.TrialEndsAt,
-                    subscription.ProviderCustomerReference),
-                cancellationToken);
-            return OrganizationBillingApiResult.Success(session);
-        }
-        catch (BillingProviderUnavailableException)
-        {
-            return OrganizationBillingApiResult.Unavailable();
-        }
+        return HostedTrialState.Ready(subscription);
     }
 
     public async Task<OrganizationBillingApiResult> CreatePortalAsync(
@@ -157,6 +186,32 @@ public sealed record OrganizationBillingApiResult(
     public static OrganizationBillingApiResult Unavailable() => new(null, null, true, false, false);
     public static OrganizationBillingApiResult CustomerUnavailable() => new(null, null, false, true, false);
     public static OrganizationBillingApiResult Terminal() => new(null, null, false, false, true);
+}
+
+public sealed record HostedTrialPreparationApiResult(
+    DateTimeOffset? TrialEndsAt,
+    OrganizationWorkspaceFailure? Failure,
+    bool ProviderUnavailable,
+    bool SubscriptionTerminal)
+{
+    public bool Succeeded => TrialEndsAt is not null && Failure is null && !ProviderUnavailable && !SubscriptionTerminal;
+
+    public static HostedTrialPreparationApiResult Success(DateTimeOffset trialEndsAt) => new(trialEndsAt, null, false, false);
+    public static HostedTrialPreparationApiResult Denied(OrganizationWorkspaceFailure failure) => new(null, failure, false, false);
+    public static HostedTrialPreparationApiResult Unavailable() => new(null, null, true, false);
+    public static HostedTrialPreparationApiResult Terminal() => new(null, null, false, true);
+}
+
+public sealed record HostedTrialPreparationResponse(DateTimeOffset TrialEndsAt);
+
+internal sealed record HostedTrialState(
+    OrganizationSubscription? Subscription,
+    bool ProviderUnavailable,
+    bool Terminal)
+{
+    public static HostedTrialState Ready(OrganizationSubscription subscription) => new(subscription, false, false);
+    public static HostedTrialState Unavailable() => new(null, true, false);
+    public static HostedTrialState TerminalState() => new(null, false, true);
 }
 
 public sealed record OrganizationBillingStatusApiResult(
