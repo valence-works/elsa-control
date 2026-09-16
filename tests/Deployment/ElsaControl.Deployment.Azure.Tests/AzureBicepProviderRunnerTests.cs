@@ -1920,6 +1920,44 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Workload_pins_latest_revision_traffic_while_replacing_an_unhealthy_active_revision()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "1");
+        process.Success(args => args.Contains("containerapp") && args.Contains("show") && args.Any(x => x.Contains("traffic", StringComparison.Ordinal)), "[{\"latestRevision\":true,\"weight\":100}]");
+        process.Success(args => args.Contains("containerapp") && args.Contains("show") && args.Contains("properties.latestRevisionName"), "proof-app--existing");
+        process.Success(args => args.Contains("revision") && args.Contains("show") && args.Contains("proof-app--existing"), "{\"active\":true,\"health\":\"Unhealthy\"}");
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "1");
+        process.Success(args => args.Contains("resource") && args.Contains("show"), "existing");
+        process.Success(IsAllRevisionList, "[\"proof-app--existing\"]");
+        process.Success(args => args.Contains("deployment") && args.Contains("create"), WorkloadOutputs());
+        process.Success(args => args.Contains("sql") && args.Contains("server") && args.Contains("list"), "1");
+        process.Success(args => args.Contains("ad-admin") && args.Contains("list"), "[{\"login\":\"proof-bootstrap\",\"sid\":\"11111111-1111-1111-1111-111111111111\"}]");
+        process.Success(args => args.Contains("ad-only-auth") && args.Contains("enable"));
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Workload, SqlFoundationResources()));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
+        Assert.Equal("proof-app--existing", result.Resources.StableTrafficRevisionName);
+        Assert.Contains(process.Calls, call => call.Contains("deployment") && call.Contains("create") && call.Contains("stableTrafficRevisionName=proof-app--existing"));
+    }
+
+    [Fact]
+    public async Task Workload_is_uncertain_when_latest_revision_traffic_cannot_be_resolved_exactly()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "1");
+        process.Success(args => args.Contains("containerapp") && args.Contains("show") && args.Any(x => x.Contains("traffic", StringComparison.Ordinal)), "[{\"latestRevision\":true,\"weight\":100}]");
+        process.Success(args => args.Contains("containerapp") && args.Contains("show") && args.Contains("properties.latestRevisionName"));
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Workload, SqlFoundationResources()));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal("azure.traffic.observation-uncertain", result.Code);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("deployment") && call.Contains("create"));
+    }
+
+    [Fact]
     public async Task Workload_fails_closed_when_the_sql_server_is_missing_after_deployment()
     {
         var process = new FakeCommandProcess();

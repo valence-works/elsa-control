@@ -1659,20 +1659,46 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             cancellationToken);
         if (!traffic.Succeeded || traffic.Value is null)
             return (null, Uncertain(command, AzureProviderOperationPhase.WorkloadReady, "azure.traffic.observation-uncertain", "Existing workload traffic could not be observed."));
-        var stable = traffic.Value!.Value.SingleOrDefault(x => x.Weight == 100);
-        if (stable is null || traffic.Value.Value.Sum(x => x.Weight) != 100 || string.IsNullOrWhiteSpace(stable.RevisionName))
+        var stableEntries = traffic.Value!.Value.Where(x => x.Weight == 100).ToArray();
+        if (stableEntries.Length != 1 || traffic.Value.Value.Sum(x => x.Weight) != 100)
             return (null, Failed(command, AzureProviderOperationPhase.WorkloadReady, "azure.traffic.ambiguous", "Existing workload traffic has no single 100% revision."));
+
+        var stable = stableEntries[0];
+        string? stableRevision;
+        if (!string.IsNullOrWhiteSpace(stable.RevisionName) && !stable.LatestRevision)
+        {
+            stableRevision = stable.RevisionName;
+        }
+        else if (string.IsNullOrWhiteSpace(stable.RevisionName) && stable.LatestRevision)
+        {
+            var latest = await ExecuteAzAsync(command,
+                ["containerapp", "show", "--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command), "--name", AppName(command),
+                    "--query", "properties.latestRevisionName", "--output", "tsv", "--only-show-errors"],
+                ParseStringAsync,
+                cancellationToken);
+            if (!latest.Succeeded || string.IsNullOrWhiteSpace(latest.Value?.Value))
+                return (null, Uncertain(command, AzureProviderOperationPhase.WorkloadReady, "azure.traffic.observation-uncertain", "The exact revision targeted by existing workload traffic could not be observed."));
+            stableRevision = latest.Value.Value;
+        }
+        else
+        {
+            return (null, Failed(command, AzureProviderOperationPhase.WorkloadReady, "azure.traffic.ambiguous", "Existing workload traffic has an ambiguous 100% target."));
+        }
+
+        if (!stableRevision.StartsWith($"{AppName(command)}--", StringComparison.OrdinalIgnoreCase))
+            return (null, Failed(command, AzureProviderOperationPhase.WorkloadReady, "azure.traffic.ambiguous", "Existing workload traffic targets a revision outside the governed Container App."));
+
         var state = await ExecuteAzAsync(command,
             ["containerapp", "revision", "show", "--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command),
-                "--name", AppName(command), "--revision", stable.RevisionName, "--query", "properties.{active:active,health:healthState}",
+                "--name", AppName(command), "--revision", stableRevision, "--query", "properties.{active:active,health:healthState}",
                 "--output", "json", "--only-show-errors"],
             ParseRevisionStateAsync,
             cancellationToken);
         if (!state.Succeeded || state.Value is null)
             return (null, Uncertain(command, AzureProviderOperationPhase.WorkloadReady, "azure.traffic.observation-uncertain", "Existing stable revision health could not be observed."));
-        return state.Value!.Value.Active && string.Equals(state.Value.Value.Health, "Healthy", StringComparison.OrdinalIgnoreCase)
-            ? (stable.RevisionName, null)
-            : (null, Failed(command, AzureProviderOperationPhase.WorkloadReady, "azure.traffic.unhealthy", "Existing stable traffic is not active and healthy."));
+        return state.Value!.Value.Active
+            ? (stableRevision, null)
+            : (null, Failed(command, AzureProviderOperationPhase.WorkloadReady, "azure.traffic.unhealthy", "Existing stable traffic revision is not active."));
     }
 
     private async Task<(string? Suffix, AzureProviderRunnerResult? Error)> ResolveRevisionSuffixAsync(AzureProviderRunnerCommand command, CancellationToken cancellationToken)
@@ -2788,7 +2814,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     }
     private sealed class DeletedVaultProperties { public string? Location { get; set; } public string? VaultId { get; set; } }
     private sealed class AdminRecord { public string? Login { get; set; } public string? Sid { get; set; } }
-    private sealed class TrafficEntry { public string? RevisionName { get; set; } public int Weight { get; set; } }
+    private sealed class TrafficEntry { public string? RevisionName { get; set; } public bool LatestRevision { get; set; } public int Weight { get; set; } }
     private sealed class RevisionState { public bool Active { get; set; } public string? Health { get; set; } public string? Fqdn { get; set; } }
     private sealed class AzureSecretSeedMetadata
     {
