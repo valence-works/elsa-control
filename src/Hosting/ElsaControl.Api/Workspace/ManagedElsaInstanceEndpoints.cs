@@ -275,7 +275,7 @@ public static class ManagedElsaInstanceEndpoints
             {
                 return Problem("instance.shape-invalid", "The instance request is invalid.", StatusCodes.Status422UnprocessableEntity);
             }
-        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource);
+        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff();
 
         group.MapPost("/{instanceId:guid}/operations", async (
             Guid workspaceId,
