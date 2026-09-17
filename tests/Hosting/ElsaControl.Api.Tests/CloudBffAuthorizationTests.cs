@@ -4,6 +4,7 @@ using System.Security.Claims;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Cloud;
 using ElsaControl.Api.Workspace;
+using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Provisioning;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using Microsoft.AspNetCore.Routing;
@@ -68,7 +69,8 @@ public sealed class CloudBffAuthorizationTests
             .Order(StringComparer.Ordinal)
             .ToArray();
 
-        Assert.Equal([
+        var expected = new[]
+        {
             "GET /api/me/organizations",
             "GET /api/me/workspaces",
             "GET /api/workspaces/{workspaceId:guid}/external-engine-connections/",
@@ -76,6 +78,7 @@ public sealed class CloudBffAuthorizationTests
             "GET /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/pairing",
             "GET /api/workspaces/{workspaceId:guid}/instances/",
             "GET /api/workspaces/{workspaceId:guid}/instances/onboarding-options",
+            "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete-operations/{operationId:guid}",
             "PATCH /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}",
             "POST /api/cloud/bootstrap",
             "POST /api/managed-elsa/handoff/issue",
@@ -84,8 +87,58 @@ public sealed class CloudBffAuthorizationTests
             "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/disconnect",
             "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/repair",
             "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/studio-destination/confirm",
+            "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete",
+            "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete-confirmations",
             "POST /api/workspaces/{workspaceId:guid}/instances/"
-        ], allowed);
+        };
+        Assert.Equal(expected.Order(StringComparer.Ordinal), allowed);
+    }
+
+    [Fact]
+    public async Task Bff_delete_routes_are_narrow_and_generic_lifecycle_routes_remain_denied()
+    {
+        await using var app = CreateBffApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateBffClient(app);
+        var workspaceId = (await client.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces"))!
+            .Workspaces.Single().Id;
+        var instanceId = Guid.NewGuid();
+        var operationId = Guid.NewGuid();
+
+        using var confirmation = await client.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/delete-confirmations",
+            content: null);
+        using var deletionRequest = new HttpRequestMessage(HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/delete")
+        {
+            Content = JsonContent.Create(new ManagedElsaInstanceDeleteRequest(Guid.NewGuid()),
+                options: ControlApiTestApplication.JsonOptions)
+        };
+        deletionRequest.Headers.TryAddWithoutValidation("If-Match", "\"1\"");
+        deletionRequest.Headers.TryAddWithoutValidation("Idempotency-Key", "bff-delete");
+        using var deletion = await client.SendAsync(deletionRequest);
+        using var operation = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/delete-operations/{operationId:D}");
+
+        using var genericMutationRequest = new HttpRequestMessage(HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations")
+        {
+            Content = JsonContent.Create(new ManagedElsaInstanceOperationRequest(ElsaInstanceOperationAction.Start),
+                options: ControlApiTestApplication.JsonOptions)
+        };
+        genericMutationRequest.Headers.TryAddWithoutValidation("If-Match", "\"1\"");
+        genericMutationRequest.Headers.TryAddWithoutValidation("Idempotency-Key", "bff-generic-operation");
+        using var genericMutation = await client.SendAsync(genericMutationRequest);
+        using var genericRead = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations/{operationId:D}");
+
+        Assert.Equal(HttpStatusCode.NotFound, confirmation.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, deletion.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, operation.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, genericMutation.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, genericRead.StatusCode);
+        Assert.Contains("cloud-bff.denied", await genericMutation.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Contains("cloud-bff.denied", await genericRead.Content.ReadAsStringAsync(), StringComparison.Ordinal);
     }
 
     [Fact]

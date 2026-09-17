@@ -277,6 +277,129 @@ public static class ManagedElsaInstanceEndpoints
             }
         }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff();
 
+        // Keep Cloud BFF deletion on a dedicated route. The general operations
+        // contract remains customer-only because it also accepts start, stop,
+        // recovery, and other lifecycle actions.
+        group.MapPost("/{instanceId:guid}/delete-confirmations", async (
+            Guid workspaceId,
+            Guid instanceId,
+            HttpContext context,
+            WorkspacePermissionService permissions,
+            ConfirmationService confirmations,
+            IElsaInstanceLifecycleStore lifecycle,
+            CancellationToken cancellationToken) =>
+        {
+            var access = context.GetWorkspaceAccess();
+            if (!(await permissions.GetEffectivePermissionsAsync(workspaceId, access.AccountId, cancellationToken))
+                .Has(ManagedElsaInstancePermissions.Delete))
+                return Problem("instance.delete-permission-required", "Delete permission is required.", StatusCodes.Status403Forbidden);
+
+            if (await lifecycle.GetInstanceAsync(workspaceId, instanceId, cancellationToken) is null)
+                return Results.NotFound();
+
+            var confirmation = await confirmations.CreateConfirmationAsync(
+                workspaceId,
+                new CreateActionConfirmationRequest(
+                    ConfirmationActionType.DeleteManagedInstance,
+                    instanceId.ToString("D"),
+                    access.AccountId),
+                cancellationToken);
+            return Results.Ok(new ManagedElsaInstanceDeleteConfirmationResponse(
+                confirmation.Id,
+                confirmation.ExpiresAt));
+        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff();
+
+        group.MapPost("/{instanceId:guid}/delete", async (
+            Guid workspaceId,
+            Guid instanceId,
+            ManagedElsaInstanceDeleteRequest request,
+            HttpContext context,
+            IElsaInstanceCommercialGate commercialGate,
+            WorkspacePermissionService permissions,
+            ElsaInstanceLifecycleService lifecycle,
+            IElsaInstanceLifecycleStore lifecycleStore,
+            CancellationToken cancellationToken) =>
+        {
+            var keyResult = ReadIdempotencyKey(context);
+            if (keyResult.State == IdempotencyKeyState.Missing)
+                return Problem("instance.idempotency-key-required", "Idempotency-Key is required for instance deletion.", StatusCodes.Status400BadRequest);
+            if (keyResult.State == IdempotencyKeyState.Invalid)
+                return InvalidIdempotencyKey();
+            var expectedVersion = ReadIfMatch(context.Request);
+            if (expectedVersion is null)
+                return Problem("instance.if-match-required", "A strong If-Match header is required for instance deletion.", StatusCodes.Status428PreconditionRequired);
+            if (request.DeleteConfirmationId == Guid.Empty)
+                return Problem("instance.delete-confirmation-required", "A delete confirmation is required.", StatusCodes.Status400BadRequest);
+
+            var access = context.GetWorkspaceAccess();
+            if (!(await permissions.GetEffectivePermissionsAsync(workspaceId, access.AccountId, cancellationToken))
+                .Has(ManagedElsaInstancePermissions.Delete))
+                return Problem("instance.delete-permission-required", "Delete permission is required.", StatusCodes.Status403Forbidden);
+
+            var instance = await lifecycleStore.GetInstanceAsync(workspaceId, instanceId, cancellationToken);
+            if (instance is null)
+                return Results.NotFound();
+
+            var commercialDecision = await commercialGate.EvaluateAsync(
+                access.OrganizationId, ElsaInstanceOperationAction.Delete, cancellationToken: cancellationToken);
+            if (!commercialDecision.Allowed)
+                return Problem(commercialDecision.Code, commercialDecision.Summary, StatusCodes.Status422UnprocessableEntity);
+
+            try
+            {
+                var accepted = await lifecycle.DeleteAsync(new ElsaInstanceLifecycleRequest(
+                    workspaceId,
+                    instanceId,
+                    expectedVersion.Value,
+                    keyResult.Value!,
+                    DeleteConfirmationId: request.DeleteConfirmationId,
+                    ActorAccountId: access.AccountId), cancellationToken);
+                var operationUrl = $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/delete-operations/{accepted.Operation.Id:D}";
+                context.Response.Headers.ETag = ETag(accepted.Instance.Version);
+                return Results.Accepted(operationUrl, new ManagedElsaInstanceDeleteAcceptedResponse(
+                    accepted.Operation.Id,
+                    accepted.Operation.State,
+                    accepted.Operation.AcceptedAt,
+                    operationUrl));
+            }
+            catch (ElsaInstanceLifecycleConflictException exception)
+            {
+                return Problem(ConflictCode(exception), "The request conflicts with the current instance state.", ConflictStatusCode(exception));
+            }
+            catch (ElsaInstanceDeleteConfirmationException)
+            {
+                return Problem("instance.delete-confirmation-invalid", "The delete confirmation is invalid or unavailable.", StatusCodes.Status409Conflict);
+            }
+            catch (KeyNotFoundException)
+            {
+                return Results.NotFound();
+            }
+            catch (ArgumentException)
+            {
+                return Problem("instance.operation-invalid", "The requested deletion is invalid.", StatusCodes.Status422UnprocessableEntity);
+            }
+        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff();
+
+        group.MapGet("/{instanceId:guid}/delete-operations/{operationId:guid}", async (
+            Guid workspaceId,
+            Guid instanceId,
+            Guid operationId,
+            HttpContext context,
+            IElsaInstanceLifecycleStore lifecycle,
+            IManagedElsaInstanceApiStore queries,
+            CancellationToken cancellationToken) =>
+        {
+            var operation = await queries.GetOperationAsync(workspaceId, instanceId, operationId, cancellationToken);
+            if (operation is null || operation.Action != ElsaInstanceOperationAction.Delete)
+                return Results.NotFound();
+            var instance = await lifecycle.GetInstanceAsync(workspaceId, instanceId, cancellationToken);
+            if (instance is null)
+                return Results.NotFound();
+
+            context.Response.Headers.ETag = ETag(instance.Version);
+            return Results.Ok(ToDeleteOperationResponse(operation));
+        }).RequireWorkspaceAccess().AllowCloudBff();
+
         group.MapPost("/{instanceId:guid}/operations", async (
             Guid workspaceId,
             Guid instanceId,
@@ -650,6 +773,9 @@ public static class ManagedElsaInstanceEndpoints
                 ["instance"] = $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}"
             });
 
+    internal static ManagedElsaInstanceDeleteOperationResponse ToDeleteOperationResponse(ElsaInstanceOperationSummary operation) =>
+        new(operation.Id, operation.State, operation.AcceptedAt, operation.StartedAt, operation.CompletedAt);
+
     internal static ElsaInstanceAuditEventSummary RedactAudit(ElsaInstanceAuditEventSummary audit) =>
         audit with { OperatorSubject = null };
 
@@ -749,6 +875,8 @@ public static class ManagedElsaInstanceEndpoints
 public sealed record ManagedElsaInstanceCreateRequest(string? Name, string? Slug, ElsaInstanceIntent? Intent);
 public sealed record ManagedElsaInstancePatchRequest(ElsaInstanceIntent? Intent = null, string? Name = null, string? Reason = null);
 public sealed record ManagedElsaInstanceOperationRequest(ElsaInstanceOperationAction Action, int? ExpectedVersion = null, string? Reason = null, ElsaInstanceIntent? Intent = null, string? Name = null, Guid? DeleteConfirmationId = null);
+public sealed record ManagedElsaInstanceDeleteConfirmationResponse(Guid ConfirmationId, DateTimeOffset ExpiresAt);
+public sealed record ManagedElsaInstanceDeleteRequest(Guid DeleteConfirmationId);
 public sealed record ManagedElsaInstanceListResponse(IReadOnlyList<ManagedElsaInstanceResponse> Items, int Page, int PageSize, int TotalCount, bool HasMore);
 public sealed record ManagedElsaInstanceOnboardingOptionsResponse(
     IReadOnlyList<ManagedElsaInstanceReleaseOption> Releases,
@@ -777,6 +905,8 @@ public sealed record ManagedElsaInstanceLaunchProfile(
     string NetworkOutcome,
     string DomainOutcome);
 public sealed record ManagedElsaInstanceAcceptedResponse(ManagedElsaInstanceResponse Instance, ManagedElsaInstanceOperationResponse Operation, IReadOnlyDictionary<string, string> Links);
+public sealed record ManagedElsaInstanceDeleteAcceptedResponse(Guid OperationId, ElsaInstanceOperationState State, DateTimeOffset AcceptedAt, string OperationUrl);
+public sealed record ManagedElsaInstanceDeleteOperationResponse(Guid OperationId, ElsaInstanceOperationState State, DateTimeOffset AcceptedAt, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt);
 public sealed record ManagedElsaInstanceOperationResponse(Guid Id, Guid InstanceId, ElsaInstanceOperationAction Action, ElsaInstanceOperationState State, int ExpectedVersion, int AttemptNumber, DateTimeOffset AcceptedAt, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, string? DesiredStateRevisionId, string? ResolvedPlanId, Guid? DeploymentRunId, string? FailureCode, ElsaObservedLifecycle? ReconciledObservedLifecycle, ElsaInstanceHealth? ReconciledHealth, IReadOnlyDictionary<string, string> Links);
 public sealed record ManagedElsaInstanceIdentityBindingResponse(string Audience, string CanonicalCallbackUri, string VerifiedEndpointOrigin, int BindingVersion, DateTimeOffset ChangedAt);
 public sealed record ManagedElsaInstanceRevisionsResponse(IReadOnlyList<ElsaInstanceIntentRevisionSummary> Items);
