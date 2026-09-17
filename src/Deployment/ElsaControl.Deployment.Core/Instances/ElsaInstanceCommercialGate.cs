@@ -4,10 +4,13 @@ namespace ElsaControl.Deployment.Core.Instances;
 
 /// <summary>
 /// Provider-neutral commercial decision used at every managed-instance mutation
-/// boundary. The decision contains only stable, value-free diagnostics.
+/// boundary. The decision contains only stable, safe diagnostics.
 /// </summary>
 public sealed record ElsaInstanceCommercialGateDecision(bool Allowed, string Code, string Summary)
 {
+    public int? CurrentInstanceCount { get; init; }
+    public int? MaxInstances { get; init; }
+
     public static ElsaInstanceCommercialGateDecision Allow() =>
         new(true, "commercial.allowed", "The managed-instance operation is entitled.");
 }

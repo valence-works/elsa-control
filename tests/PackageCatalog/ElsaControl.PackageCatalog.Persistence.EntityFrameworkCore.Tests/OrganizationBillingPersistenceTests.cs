@@ -28,6 +28,7 @@ public sealed class OrganizationBillingPersistenceTests
             CanCreateCustomSources = true,
             MaxSources = 17,
             MaxWorkspaces = 4,
+            MaxInstances = 3,
             MaxPackagesIndexed = 1000,
             MaxVersionsPerPackage = 7,
             MaxSyncsPerDay = 12,
@@ -48,6 +49,8 @@ public sealed class OrganizationBillingPersistenceTests
         Assert.True(entitlement.CanCreateCustomSources);
         Assert.Equal(17, entitlement.MaxSources);
         Assert.Equal(4, entitlement.MaxWorkspaces);
+        Assert.Equal(1, entitlement.MaxInstances);
+        Assert.Equal(result.Subscription!.TrialEndsAt, entitlement.ManagedHostingExpiresAt);
         Assert.True(entitlement.PrivateFeedsEnabled);
         Assert.True(entitlement.ManagedHostingEnabled);
         Assert.True(entitlement.DeploymentTargetsEnabled);
@@ -74,6 +77,8 @@ public sealed class OrganizationBillingPersistenceTests
         Assert.Equal(BillingProviderNames.Stripe, result.Subscription!.Provider);
         Assert.NotEqual(BillingProviderNames.Internal, result.Subscription.Provider);
         Assert.True(result.Entitlement!.ManagedHostingEnabled);
+        Assert.Equal(1, result.Entitlement.MaxInstances);
+        Assert.Null(result.Entitlement.ManagedHostingExpiresAt);
         Assert.Equal(OrganizationSubscriptionState.Active, result.Entitlement.SubscriptionState);
 
         var decision = await new EfCoreElsaInstanceCommercialGate(db).EvaluateAsync(
@@ -83,6 +88,14 @@ public sealed class OrganizationBillingPersistenceTests
 
         Assert.True(decision.Allowed);
         Assert.Equal("commercial.allowed", decision.Code);
+
+        var atLimit = await new EfCoreElsaInstanceCommercialGate(db).EvaluateAsync(
+            OrganizationId,
+            ElsaInstanceOperationAction.Create,
+            activeInstanceCount: 1);
+
+        Assert.False(atLimit.Allowed);
+        Assert.Equal(ElsaInstanceCommercialOperation.InstanceLimitReached, atLimit.Code);
     }
 
     [Fact]
@@ -241,6 +254,8 @@ public sealed class OrganizationBillingPersistenceTests
 
         Assert.Equal(BillingEventConsumptionOutcome.Applied, first.Outcome);
         Assert.Equal(BillingEventConsumptionOutcome.Replayed, replay.Outcome);
+        Assert.Equal(1, first.Entitlement!.MaxInstances);
+        Assert.Equal(1, replay.Entitlement!.MaxInstances);
         Assert.Equal(1, await db.BillingProviderEvents.CountAsync());
         Assert.Equal(1, await db.OrganizationAuditRecords.CountAsync());
         Assert.Equal(OrganizationSubscriptionState.Active, (await db.OrganizationSubscriptions.SingleAsync()).State);
@@ -437,7 +452,9 @@ public sealed class OrganizationBillingPersistenceTests
 
         Assert.Equal(BillingEventConsumptionOutcome.IgnoredOutOfOrder, result.Outcome);
         Assert.Equal(OrganizationSubscriptionState.Active, (await db.OrganizationSubscriptions.SingleAsync()).State);
-        Assert.Equal(OrganizationSubscriptionState.Active, (await db.OrganizationEntitlementSnapshots.SingleAsync()).SubscriptionState);
+        var entitlement = await db.OrganizationEntitlementSnapshots.SingleAsync();
+        Assert.Equal(OrganizationSubscriptionState.Active, entitlement.SubscriptionState);
+        Assert.Equal(1, entitlement.MaxInstances);
         Assert.Equal(2, await db.BillingProviderEvents.CountAsync());
         Assert.Equal(2, await db.OrganizationAuditRecords.CountAsync());
         Assert.Contains(await db.OrganizationAuditRecords.ToListAsync(), x => x.Summary.Contains("ignored as out of order", StringComparison.Ordinal));
@@ -852,6 +869,34 @@ public sealed class OrganizationBillingPersistenceTests
         db.ChangeTracker.Clear();
         var restored = await db.BillingProviderEvents.SingleAsync();
         Assert.Equal(OrganizationSubscriptionState.Suspended, restored.State);
+    }
+
+    [Fact]
+    public async Task Stripe_cancellation_keeps_the_one_engine_projection_but_blocks_new_admission()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        await db.SaveChangesAsync();
+
+        var store = new OrganizationBillingStore(db);
+        await store.StartTrialAsync(OrganizationId, BillingProviderNames.Stripe, Now);
+        await store.ConsumeAsync(Event("evt-active", OrganizationSubscriptionState.Active, Now.AddMinutes(1)), Now.AddMinutes(2));
+        var cancelled = await store.ConsumeAsync(
+            Event("evt-cancelled", OrganizationSubscriptionState.Suspended, Now.AddMinutes(3)),
+            Now.AddMinutes(4));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Applied, cancelled.Outcome);
+        Assert.Equal(OrganizationSubscriptionState.Suspended, cancelled.Entitlement!.SubscriptionState);
+        Assert.Equal(1, cancelled.Entitlement.MaxInstances);
+        var decision = await new EfCoreElsaInstanceCommercialGate(db).EvaluateAsync(
+            OrganizationId,
+            ElsaInstanceOperationAction.Create,
+            activeInstanceCount: 0);
+        Assert.False(decision.Allowed);
+        Assert.Equal(ElsaInstanceCommercialOperation.LifecycleConstrained, decision.Code);
     }
 
     private static BillingProviderEvent Event(string id, OrganizationSubscriptionState state, DateTimeOffset occurredAt) =>

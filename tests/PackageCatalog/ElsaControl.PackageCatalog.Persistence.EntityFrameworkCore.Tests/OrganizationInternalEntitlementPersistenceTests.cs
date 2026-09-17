@@ -197,9 +197,10 @@ public sealed class OrganizationInternalEntitlementPersistenceTests : IAsyncLife
         Assert.Equal(Json(before), Json(after));
         var entitlement = Assert.Single(after.Entitlements);
         Assert.True(entitlement.ManagedHostingEnabled);
-        Assert.Equal(int.MaxValue, entitlement.MaxInstances);
-        Assert.Null(entitlement.ManagedHostingExpiresAt);
-        Assert.Equal(BillingProviderNames.Stripe, Assert.Single(after.Subscriptions).Provider);
+        Assert.Equal(1, entitlement.MaxInstances);
+        var subscription = Assert.Single(after.Subscriptions);
+        Assert.Equal(subscription.TrialEndsAt, entitlement.ManagedHostingExpiresAt);
+        Assert.Equal(BillingProviderNames.Stripe, subscription.Provider);
     }
 
     [Fact]
@@ -389,8 +390,8 @@ public sealed class OrganizationInternalEntitlementPersistenceTests : IAsyncLife
             Assert.Null(checkout.Error);
             Assert.Equal(OrganizationInternalEntitlementOutcome.CommercialSubscriptionExists, grant.Value!.Outcome);
             Assert.True(entitlement.ManagedHostingEnabled);
-            Assert.Equal(int.MaxValue, entitlement.MaxInstances);
-            Assert.Null(entitlement.ManagedHostingExpiresAt);
+            Assert.Equal(1, entitlement.MaxInstances);
+            Assert.Equal(subscription.TrialEndsAt, entitlement.ManagedHostingExpiresAt);
             Assert.DoesNotContain(persisted.Audits, x => x.TargetType == "internal-entitlement");
         }
         else

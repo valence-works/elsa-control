@@ -182,7 +182,7 @@ public static class ManagedElsaInstanceEndpoints
             }
             catch (ElsaInstanceLifecycleConflictException exception)
             {
-                return Problem(ConflictCode(exception), "The request conflicts with the current instance state.", ConflictStatusCode(exception));
+                return ConflictProblem(exception);
             }
             catch (ArgumentException)
             {
@@ -712,6 +712,7 @@ public static class ManagedElsaInstanceEndpoints
         ElsaInstanceLifecycleConflictReason.SlugConflict => "instance.slug-conflict",
         ElsaInstanceLifecycleConflictReason.OperationActive => "instance.operation-active",
         ElsaInstanceLifecycleConflictReason.IdempotencyConflict => "instance.idempotency-conflict",
+        ElsaInstanceLifecycleConflictReason.CommercialDenied when exception.CommercialCode == ElsaInstanceCommercialOperation.InstanceLimitReached => "instance_limit_reached",
         ElsaInstanceLifecycleConflictReason.CommercialDenied when exception.CommercialCode is not null => exception.CommercialCode,
         _ => "instance.invalid-state",
     };
@@ -722,6 +723,24 @@ public static class ManagedElsaInstanceEndpoints
             : exception.Reason == ElsaInstanceLifecycleConflictReason.CommercialDenied
                 ? StatusCodes.Status422UnprocessableEntity
                 : StatusCodes.Status409Conflict;
+
+    private static IResult ConflictProblem(ElsaInstanceLifecycleConflictException exception)
+    {
+        var extensions = new Dictionary<string, object?>
+        {
+            ["code"] = ConflictCode(exception)
+        };
+        if (exception.CommercialCode == ElsaInstanceCommercialOperation.InstanceLimitReached)
+        {
+            extensions["currentInstances"] = exception.CurrentInstanceCount;
+            extensions["maxInstances"] = exception.MaxInstances;
+        }
+
+        return Results.Problem(
+            title: "The request conflicts with the current instance state.",
+            statusCode: ConflictStatusCode(exception),
+            extensions: extensions);
+    }
 
     private static IResult Problem(string code, string title, int statusCode) => Results.Problem(title: title, statusCode: statusCode,
         extensions: new Dictionary<string, object?> { ["code"] = code });
