@@ -30,6 +30,9 @@ public static class ExternalEngineEnrollmentProtocol
         return Base64UrlEncode(SHA256.HashData(challengeBytes));
     }
 
+    public static bool IsSha256Digest(string? value) =>
+        TryDecodeBounded(value, 32, 32, out _);
+
     public static byte[] CreateRedemptionPayload(
         Guid challengeId,
         Guid organizationId,

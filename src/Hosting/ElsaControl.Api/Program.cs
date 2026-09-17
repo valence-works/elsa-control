@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.DataProtection;
 using ElsaControl.Deployment.Artifacts;
 using ElsaControl.Deployment.Abstractions.Azure;
 using ElsaControl.Deployment.Core.Cockpit;
+using ElsaControl.Deployment.Core.ExternalConnections;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Provisioning;
 using ElsaControl.Deployment.Core.Workspace;
@@ -287,6 +288,14 @@ builder.Services.AddSingleton<ManagedElsaHandoffKeyRing>(services =>
 });
 builder.Services.AddScoped<EfCoreManagedElsaHandoffStore>();
 builder.Services.AddScoped<IManagedElsaHandoffReplayStore, EfCoreManagedElsaHandoffReplayStore>();
+builder.Services.AddScoped<EfCoreExternalEngineEnrollmentStore>();
+builder.Services.AddScoped<IExternalEngineEnrollmentStore>(services =>
+    services.GetRequiredService<EfCoreExternalEngineEnrollmentStore>());
+builder.Services.AddScoped<IExternalEngineEnrollmentAuditStore>(services =>
+    services.GetRequiredService<EfCoreExternalEngineEnrollmentStore>());
+builder.Services.AddScoped<IExternalEngineConnectorProofNonceStore>(services =>
+    services.GetRequiredService<EfCoreExternalEngineEnrollmentStore>());
+builder.Services.AddScoped<ExternalEngineEnrollmentService>();
 builder.Services.AddScoped<IManagedElsaInstanceCatalog, EfCoreManagedElsaInstanceCatalog>();
 builder.Services.AddScoped<EfCoreManagedElsaInstanceIdentityStore>();
 builder.Services.AddScoped<IManagedElsaInstanceIdentityStore>(services => new ControlHandoffGatedIdentityStore(

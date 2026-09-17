@@ -18,7 +18,11 @@ public sealed class ExternalEngineEnrollmentServiceTests
         var fixture = new Fixture();
 
         var issued = await fixture.Service.IssueAsync(Request());
-        var stored = await fixture.Store.FindChallengeAsync(issued.ChallengeId);
+        var stored = await fixture.Store.FindChallengeAsync(
+            issued.OrganizationId,
+            issued.WorkspaceId,
+            issued.ConnectionId,
+            issued.ChallengeId);
         var serialized = JsonSerializer.Serialize(stored);
 
         Assert.NotNull(stored);
