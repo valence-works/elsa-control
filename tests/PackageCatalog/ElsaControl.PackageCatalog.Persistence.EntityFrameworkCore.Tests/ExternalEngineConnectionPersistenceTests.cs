@@ -15,6 +15,9 @@ public sealed class ExternalEngineConnectionPersistenceTests : IAsyncLifetime
     private const string SqliteMigration = "20260917102139_AddExternalEngineHeartbeat";
     private const string SqliteTriggerRestoreMigration = "20260917102140_RestoreExternalEngineConnectionAuditTriggers";
     private const string SqlServerMigration = "20260917102150_AddExternalEngineHeartbeat";
+    private const string SqliteConfirmationMigration = "20260917115000_ConfirmExternalEngineStudioDestination";
+    private const string SqliteStudioTriggerRestoreMigration = "20260917115013_RestoreExternalEngineStudioDestinationAuditTriggers";
+    private const string SqlServerConfirmationMigration = "20260917115012_ConfirmExternalEngineStudioDestination";
     private static readonly Guid OrganizationId = Guid.Parse("10000000-0000-0000-0000-000000000481");
     private static readonly Guid WorkspaceId = Guid.Parse("20000000-0000-0000-0000-000000000481");
     private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-09-17T09:00:00Z");
@@ -92,7 +95,15 @@ public sealed class ExternalEngineConnectionPersistenceTests : IAsyncLifetime
     {
         await using var db = CreateDbContext();
         var store = new EfCoreExternalEngineConnectionStore(db);
-        var value = Connection(Guid.NewGuid(), "Customer engine");
+        var destination = "https://studio.example.test/";
+        var value = Connection(Guid.NewGuid(), "Customer engine") with
+        {
+            StudioDestinationCandidate = destination,
+            StudioDestinationCandidateId = Guid.NewGuid(),
+            StudioDestination = destination,
+            StudioDestinationConfirmedAt = Now,
+            StudioDestinationConfirmedByAccountId = Guid.NewGuid()
+        };
         var current = (await store.TryCreateAsync(value, "disconnect-engine", "digest")).Connection!;
         current = (await store.TrySetPairingChallengeAsync(current, Guid.NewGuid(), Now.AddMinutes(1)))!;
         current = (await store.TrySetActiveIdentityAsync(current, Guid.NewGuid(), Now.AddMinutes(2)))!;
@@ -103,6 +114,11 @@ public sealed class ExternalEngineConnectionPersistenceTests : IAsyncLifetime
         Assert.Equal(ExternalEngineConnectionStatus.Revoked, disconnected.Status);
         Assert.NotNull(disconnected.RevokedAt);
         Assert.NotNull(disconnected.ActiveIdentityId);
+        Assert.Null(disconnected.StudioDestination);
+        Assert.Null(disconnected.StudioDestinationCandidate);
+        Assert.Null(disconnected.StudioDestinationCandidateId);
+        Assert.Null(disconnected.StudioDestinationConfirmedAt);
+        Assert.Null(disconnected.StudioDestinationConfirmedByAccountId);
         var persisted = await store.FindAsync(OrganizationId, WorkspaceId, value.Id);
         Assert.Equal(ExternalEngineConnectionStatus.Revoked, persisted!.Status);
         var audits = await db.ExternalEngineConnectionAuditEvents.OrderBy(x => x.OccurredAt).ToArrayAsync();
@@ -118,6 +134,32 @@ public sealed class ExternalEngineConnectionPersistenceTests : IAsyncLifetime
 
         db.ExternalEngineConnectionAuditEvents.Remove(audits[0]);
         await Assert.ThrowsAsync<InvalidOperationException>(() => db.SaveChangesAsync());
+    }
+
+    [Fact]
+    public async Task Repair_clears_approved_and_candidate_studio_destinations()
+    {
+        await using var db = CreateDbContext();
+        var store = new EfCoreExternalEngineConnectionStore(db);
+        var destination = "https://studio.example.test/";
+        var value = Connection(Guid.NewGuid(), "Repair engine") with
+        {
+            StudioDestinationCandidate = destination,
+            StudioDestinationCandidateId = Guid.NewGuid(),
+            StudioDestination = destination,
+            StudioDestinationConfirmedAt = Now,
+            StudioDestinationConfirmedByAccountId = Guid.NewGuid()
+        };
+        var current = (await store.TryCreateAsync(value, "repair-engine", "digest")).Connection!;
+
+        var repaired = await store.TryPrepareRepairAsync(current, Now.AddMinutes(1));
+
+        Assert.NotNull(repaired);
+        Assert.Null(repaired.StudioDestination);
+        Assert.Null(repaired.StudioDestinationCandidate);
+        Assert.Null(repaired.StudioDestinationCandidateId);
+        Assert.Null(repaired.StudioDestinationConfirmedAt);
+        Assert.Null(repaired.StudioDestinationConfirmedByAccountId);
     }
 
     [Fact]
@@ -213,6 +255,225 @@ public sealed class ExternalEngineConnectionPersistenceTests : IAsyncLifetime
         var persisted = await store.FindAsync(OrganizationId, WorkspaceId, current.Id);
         Assert.Equal(2, persisted!.LastHeartbeatSequence);
         Assert.Equal(Now.AddMinutes(2).AddSeconds(6), persisted.LastAuthenticatedAt);
+    }
+
+    [Fact]
+    public async Task Changing_the_studio_candidate_invalidates_approval_and_rejects_a_stale_candidate_id()
+    {
+        await using var db = CreateDbContext();
+        var store = new EfCoreExternalEngineConnectionStore(db);
+        var connection = (await store.TryCreateAsync(
+            Connection(Guid.NewGuid(), "Studio candidate engine"), "studio-candidate-engine", "digest")).Connection!;
+        var identityId = Guid.NewGuid();
+        db.ExternalEngineConnectorIdentities.Add(new ExternalEngineConnectorIdentityEntity
+        {
+            Id = identityId,
+            OrganizationId = OrganizationId,
+            WorkspaceId = WorkspaceId,
+            ConnectionId = connection.Id,
+            Audience = ExternalEngineEnrollmentDefaults.AudienceFor(connection.Id),
+            KeyAlgorithm = ExternalEngineEnrollmentDefaults.KeyAlgorithm,
+            KeyVersion = 1,
+            PublicKey = "public-key",
+            PublicKeyThumbprint = "thumbprint",
+            EnrolledAt = Now
+        });
+        await db.SaveChangesAsync();
+        connection = (await store.TrySetActiveIdentityAsync(connection, identityId, Now.AddMinutes(1)))!;
+
+        var first = new ExternalEngineHeartbeatProjection(
+            1,
+            Now.AddMinutes(2),
+            ExternalEngineConnectionStatus.Connected,
+            ExternalEngineRuntimeHealth.Healthy,
+            ExternalEngineConnectorReachability.Reachable,
+            "1",
+            "1.4.0",
+            "valence-runtime",
+            "3.8.1",
+            "server",
+            ExternalEngineReleaseEvidenceLevel.SelfReported,
+            null,
+            "https://studio-one.example.test/",
+            [ExternalEngineHeartbeatService.StatusCapability, ExternalEngineHeartbeatService.StudioCapability]);
+        var appliedFirst = await store.TryApplyHeartbeatAsync(
+            connection, first, identityId, Now.AddMinutes(2), TimeSpan.Zero);
+        Assert.Equal(ExternalEngineHeartbeatStoreStatus.Applied, appliedFirst.Status);
+        var candidateOneId = appliedFirst.Connection!.StudioDestinationCandidateId!.Value;
+        Assert.Equal(first.StudioDestinationCandidate, appliedFirst.Connection.StudioDestinationCandidate);
+        Assert.Null(appliedFirst.Connection.StudioDestination);
+
+        var accountId = Guid.NewGuid();
+        var confirmed = await store.TryConfirmStudioDestinationAsync(
+            appliedFirst.Connection, candidateOneId, accountId, Now.AddMinutes(2).AddSeconds(1));
+        Assert.Equal(first.StudioDestinationCandidate, confirmed!.StudioDestination);
+        Assert.Equal(accountId, confirmed.StudioDestinationConfirmedByAccountId);
+        Assert.Contains("StudioDestinationConfirmed",
+            await db.ExternalEngineConnectionAuditEvents.Select(x => x.Action).ToListAsync());
+
+        var second = first with
+        {
+            Sequence = 2,
+            ObservedAt = first.ObservedAt.AddSeconds(6),
+            StudioDestinationCandidate = "https://studio-two.example.test/"
+        };
+        var appliedSecond = await store.TryApplyHeartbeatAsync(
+            confirmed, second, identityId, Now.AddMinutes(2).AddSeconds(6), TimeSpan.Zero);
+
+        Assert.Equal(ExternalEngineHeartbeatStoreStatus.Applied, appliedSecond.Status);
+        Assert.Equal(second.StudioDestinationCandidate, appliedSecond.Connection!.StudioDestinationCandidate);
+        Assert.NotEqual(candidateOneId, appliedSecond.Connection.StudioDestinationCandidateId);
+        Assert.Null(appliedSecond.Connection.StudioDestination);
+        Assert.Null(appliedSecond.Connection.StudioDestinationConfirmedAt);
+        Assert.Null(appliedSecond.Connection.StudioDestinationConfirmedByAccountId);
+
+        var staleConfirmation = await store.TryConfirmStudioDestinationAsync(
+            appliedSecond.Connection,
+            candidateOneId,
+            accountId,
+            Now.AddMinutes(2).AddSeconds(7));
+        Assert.Null(staleConfirmation);
+
+        var unsupported = await store.TryRecordUnsupportedProtocolAsync(
+            appliedSecond.Connection,
+            sequence: 3,
+            observedAt: Now.AddMinutes(2).AddSeconds(12),
+            identityId,
+            receivedAt: Now.AddMinutes(2).AddSeconds(12),
+            minimumInterval: TimeSpan.FromSeconds(5));
+        Assert.Equal(ExternalEngineHeartbeatStoreStatus.Applied, unsupported.Status);
+        var unsupportedConnection = unsupported.Connection!;
+        Assert.NotNull(unsupportedConnection.StudioDestinationCandidateId);
+        var unsupportedConfirmation = await store.TryConfirmStudioDestinationAsync(
+            unsupportedConnection,
+            unsupportedConnection.StudioDestinationCandidateId.Value,
+            accountId,
+            Now.AddMinutes(2).AddSeconds(13));
+        Assert.Null(unsupportedConfirmation);
+
+        var recoveredProjection = second with
+        {
+            Sequence = 4,
+            ObservedAt = Now.AddMinutes(2).AddSeconds(18)
+        };
+        var recovered = await store.TryApplyHeartbeatAsync(
+            unsupportedConnection,
+            recoveredProjection,
+            identityId,
+            Now.AddMinutes(2).AddSeconds(18),
+            TimeSpan.FromSeconds(5));
+        Assert.Equal(ExternalEngineHeartbeatStoreStatus.Applied, recovered.Status);
+        var currentConfirmation = await store.TryConfirmStudioDestinationAsync(
+            recovered.Connection!,
+            recovered.Connection!.StudioDestinationCandidateId!.Value,
+            accountId,
+            Now.AddMinutes(2).AddSeconds(19));
+        Assert.Equal(second.StudioDestinationCandidate, currentConfirmation!.StudioDestination);
+
+        var identity = await db.ExternalEngineConnectorIdentities.SingleAsync(x => x.Id == identityId);
+        identity.RevokedAt = Now.AddMinutes(2).AddSeconds(20);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        var revokedIdentityConfirmation = await store.TryConfirmStudioDestinationAsync(
+            currentConfirmation,
+            currentConfirmation.StudioDestinationCandidateId!.Value,
+            accountId,
+            Now.AddMinutes(2).AddSeconds(21));
+        Assert.Null(revokedIdentityConfirmation);
+    }
+
+    [Fact]
+    public async Task Unsupported_protocol_consumes_heartbeat_sequence_until_a_newer_supported_heartbeat_recovers()
+    {
+        await using var db = CreateDbContext();
+        var store = new EfCoreExternalEngineConnectionStore(db);
+        var connection = (await store.TryCreateAsync(
+            Connection(Guid.NewGuid(), "Compatibility engine"), "compatibility-engine", "digest")).Connection!;
+        var identityId = Guid.NewGuid();
+        db.ExternalEngineConnectorIdentities.Add(new ExternalEngineConnectorIdentityEntity
+        {
+            Id = identityId,
+            OrganizationId = OrganizationId,
+            WorkspaceId = WorkspaceId,
+            ConnectionId = connection.Id,
+            Audience = ExternalEngineEnrollmentDefaults.AudienceFor(connection.Id),
+            KeyAlgorithm = ExternalEngineEnrollmentDefaults.KeyAlgorithm,
+            KeyVersion = 1,
+            PublicKey = "public-key",
+            PublicKeyThumbprint = "thumbprint",
+            EnrolledAt = Now
+        });
+        await db.SaveChangesAsync();
+        connection = (await store.TrySetActiveIdentityAsync(connection, identityId, Now.AddMinutes(1)))!;
+
+        var unsupported = await store.TryRecordUnsupportedProtocolAsync(
+            connection,
+            sequence: 1,
+            observedAt: Now.AddMinutes(2),
+            identityId,
+            receivedAt: Now.AddMinutes(2),
+            minimumInterval: TimeSpan.FromSeconds(5));
+        Assert.Equal(ExternalEngineHeartbeatStoreStatus.Applied, unsupported.Status);
+        Assert.Equal(1, unsupported.Connection!.LastHeartbeatSequence);
+        Assert.Equal(Now.AddMinutes(2), unsupported.Connection.LastHeartbeatObservedAt);
+        Assert.Equal(ExternalEngineConnectorCompatibilityStatus.UnsupportedProtocol,
+            unsupported.Connection.ConnectorCompatibilityStatus);
+
+        var replay = await store.TryRecordUnsupportedProtocolAsync(
+            unsupported.Connection,
+            sequence: 1,
+            observedAt: Now.AddMinutes(2).AddSeconds(1),
+            identityId,
+            receivedAt: Now.AddMinutes(2).AddSeconds(6),
+            minimumInterval: TimeSpan.FromSeconds(5));
+        Assert.Equal(ExternalEngineHeartbeatStoreStatus.OutOfOrder, replay.Status);
+
+        var sameSequenceSupported = await store.TryApplyHeartbeatAsync(
+            unsupported.Connection,
+            new ExternalEngineHeartbeatProjection(
+                1,
+                Now.AddMinutes(2).AddSeconds(6),
+                ExternalEngineConnectionStatus.Connected,
+                ExternalEngineRuntimeHealth.Healthy,
+                ExternalEngineConnectorReachability.Reachable,
+                "1",
+                "1.4.0",
+                null,
+                null,
+                "server",
+                ExternalEngineReleaseEvidenceLevel.None,
+                null,
+                null,
+                [ExternalEngineHeartbeatService.StatusCapability]),
+            identityId,
+            Now.AddMinutes(2).AddSeconds(6),
+            TimeSpan.FromSeconds(5));
+        Assert.Equal(ExternalEngineHeartbeatStoreStatus.OutOfOrder, sameSequenceSupported.Status);
+
+        var recovered = await store.TryApplyHeartbeatAsync(
+            unsupported.Connection,
+            new ExternalEngineHeartbeatProjection(
+                2,
+                Now.AddMinutes(2).AddSeconds(6),
+                ExternalEngineConnectionStatus.Connected,
+                ExternalEngineRuntimeHealth.Healthy,
+                ExternalEngineConnectorReachability.Reachable,
+                "1",
+                "1.4.0",
+                null,
+                null,
+                "server",
+                ExternalEngineReleaseEvidenceLevel.None,
+                null,
+                null,
+                [ExternalEngineHeartbeatService.StatusCapability]),
+            identityId,
+            Now.AddMinutes(2).AddSeconds(6),
+            TimeSpan.FromSeconds(5));
+        Assert.Equal(ExternalEngineHeartbeatStoreStatus.Applied, recovered.Status);
+        Assert.Equal(ExternalEngineConnectorCompatibilityStatus.Compatible,
+            recovered.Connection!.ConnectorCompatibilityStatus);
+        Assert.Equal(2, recovered.Connection.LastHeartbeatSequence);
     }
 
     [Fact]
@@ -326,21 +587,83 @@ public sealed class ExternalEngineConnectionPersistenceTests : IAsyncLifetime
 
         Assert.Contains(SqliteMigration, sqlite.GetService<IMigrationsAssembly>().Migrations.Keys);
         Assert.Contains(SqliteTriggerRestoreMigration, sqlite.GetService<IMigrationsAssembly>().Migrations.Keys);
+        Assert.Contains(SqliteConfirmationMigration, sqlite.GetService<IMigrationsAssembly>().Migrations.Keys);
+        Assert.Contains(SqliteStudioTriggerRestoreMigration, sqlite.GetService<IMigrationsAssembly>().Migrations.Keys);
         Assert.Contains(SqlServerMigration, sqlServer.GetService<IMigrationsAssembly>().Migrations.Keys);
+        Assert.Contains(SqlServerConfirmationMigration, sqlServer.GetService<IMigrationsAssembly>().Migrations.Keys);
         Assert.False(sqlite.Database.HasPendingModelChanges());
         Assert.False(sqlServer.Database.HasPendingModelChanges());
         var script = sqlServer.GetService<IMigrator>().GenerateScript(
-            toMigration: SqlServerMigration,
+            toMigration: SqlServerConfirmationMigration,
             options: MigrationsSqlGenerationOptions.Idempotent);
         Assert.Contains("ExternalEngineConnections", script, StringComparison.Ordinal);
         Assert.Contains("CustomerOperated", script, StringComparison.Ordinal);
         Assert.Contains("ExternalEngineConnectionAuditEvents", script, StringComparison.Ordinal);
         Assert.Contains("TR_ExternalEngineConnectionAuditEvents_AppendOnly", script, StringComparison.Ordinal);
+        Assert.Contains("StudioDestinationCandidate", script, StringComparison.Ordinal);
+        Assert.Contains("StudioDestinationConfirmedByAccountId", script, StringComparison.Ordinal);
+        Assert.Contains("StudioDestinationConfirmed", script, StringComparison.Ordinal);
         var downScript = sqlServer.GetService<IMigrator>().GenerateScript(
             fromMigration: SqlServerMigration,
             toMigration: "20260917090821_AddExternalEngineConnections");
         Assert.Contains("THROW 51022", downScript, StringComparison.Ordinal);
         Assert.Contains("Cannot roll back external-engine heartbeat migration", downScript, StringComparison.Ordinal);
+        var confirmationDownScript = sqlServer.GetService<IMigrator>().GenerateScript(
+            fromMigration: SqlServerConfirmationMigration,
+            toMigration: SqlServerMigration);
+        Assert.Contains("Cannot roll back external-engine confirmation or compatibility data", confirmationDownScript, StringComparison.Ordinal);
+        Assert.Contains("StudioDestinationConfirmed", confirmationDownScript, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Sqlite_confirmation_downgrade_refuses_append_only_confirmation_history()
+    {
+        await using var db = CreateDbContext();
+        var store = new EfCoreExternalEngineConnectionStore(db);
+        var connection = Connection(Guid.NewGuid(), "Confirmed rollback engine");
+        await store.TryCreateAsync(connection, "confirmed-rollback-engine", "digest");
+        db.ExternalEngineConnectionAuditEvents.Add(new ExternalEngineConnectionAuditEventEntity
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = OrganizationId,
+            WorkspaceId = WorkspaceId,
+            ConnectionId = connection.Id,
+            Action = "StudioDestinationConfirmed",
+            OccurredAt = Now.AddMinutes(1)
+        });
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var failure = await Assert.ThrowsAsync<SqliteException>(() =>
+            db.GetService<IMigrator>().MigrateAsync(SqliteMigration));
+
+        Assert.Contains("Cannot roll back external-engine confirmation or compatibility data", failure.Message,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(SqliteConfirmationMigration, await db.Database.GetAppliedMigrationsAsync());
+        Assert.Equal(2, await ConnectionAuditTriggerCountAsync(db));
+        Assert.Contains("StudioDestinationConfirmed",
+            await db.ExternalEngineConnectionAuditEvents.Select(x => x.Action).ToListAsync());
+    }
+
+    [Fact]
+    public async Task Sqlite_clean_confirmation_downgrade_restores_heartbeat_schema_and_audit_guards()
+    {
+        await using var db = CreateDbContext();
+        var store = new EfCoreExternalEngineConnectionStore(db);
+        var connection = Connection(Guid.NewGuid(), "Clean confirmation rollback engine");
+        await store.TryCreateAsync(connection, "clean-confirmation-rollback-engine", "digest");
+        db.ChangeTracker.Clear();
+
+        await db.GetService<IMigrator>().MigrateAsync(SqliteMigration);
+
+        Assert.Equal(2, await ConnectionAuditTriggerCountAsync(db));
+        await Assert.ThrowsAsync<SqliteException>(() => db.Database.ExecuteSqlRawAsync(
+            "DELETE FROM ExternalEngineConnectionAuditEvents"));
+        var columns = await db.Database.SqlQueryRaw<string>(
+            "SELECT name AS \"Value\" FROM pragma_table_info('ExternalEngineConnections')").ToListAsync();
+        Assert.DoesNotContain("StudioDestinationCandidate", columns);
+        Assert.DoesNotContain("StudioDestinationConfirmedByAccountId", columns);
+        Assert.Contains("StudioDestination", columns);
     }
 
     [Fact]

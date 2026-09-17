@@ -4,6 +4,8 @@ namespace ElsaControl.Api.Workspace;
 
 public sealed record CreateExternalEngineConnectionRequest(string DisplayName);
 
+public sealed record ConfirmExternalEngineStudioDestinationRequest(Guid CandidateId);
+
 public sealed record ExternalEngineConnectionListResponse(IReadOnlyList<ExternalEngineConnectionResponse> Items);
 
 public sealed record ExternalEngineConnectionResponse(
@@ -22,6 +24,12 @@ public sealed record ExternalEngineConnectionResponse(
     string? ObservedRuntimeKind,
     ExternalEngineReleaseEvidenceLevel ReleaseEvidenceLevel,
     string? ReleaseEvidenceReference,
+    ExternalEngineConnectorCompatibilityStatus ConnectorCompatibilityStatus,
+    DateTimeOffset? ConnectorCompatibilityObservedAt,
+    string? StudioDestinationCandidate,
+    Guid? StudioDestinationCandidateId,
+    DateTimeOffset? StudioDestinationConfirmedAt,
+    Guid? StudioDestinationConfirmedByAccountId,
     string? StudioDestination,
     IReadOnlyList<string> Capabilities,
     DateTimeOffset? CapabilitiesObservedAt,

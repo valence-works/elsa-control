@@ -38,6 +38,13 @@ public enum ExternalEngineReleaseEvidenceLevel
     VerifiedManifest
 }
 
+public enum ExternalEngineConnectorCompatibilityStatus
+{
+    Unknown,
+    Compatible,
+    UnsupportedProtocol
+}
+
 public sealed record ExternalEngineConnection(
     Guid Id,
     Guid OrganizationId,
@@ -64,7 +71,13 @@ public sealed record ExternalEngineConnection(
     string? ObservedRuntimeKind = null,
     string? ReleaseEvidenceReference = null,
     long? LastHeartbeatSequence = null,
-    DateTimeOffset? LastHeartbeatObservedAt = null)
+    DateTimeOffset? LastHeartbeatObservedAt = null,
+    string? StudioDestinationCandidate = null,
+    Guid? StudioDestinationCandidateId = null,
+    DateTimeOffset? StudioDestinationConfirmedAt = null,
+    Guid? StudioDestinationConfirmedByAccountId = null,
+    ExternalEngineConnectorCompatibilityStatus ConnectorCompatibilityStatus = ExternalEngineConnectorCompatibilityStatus.Unknown,
+    DateTimeOffset? ConnectorCompatibilityObservedAt = null)
 {
     public const string OwnershipMode = "CustomerOperated";
 }
@@ -138,6 +151,14 @@ public interface IExternalEngineConnectionStore
         DateTimeOffset revokedAt,
         CancellationToken cancellationToken = default);
 
+    Task<ExternalEngineConnection?> TryConfirmStudioDestinationAsync(
+        ExternalEngineConnection expected,
+        Guid candidateId,
+        Guid accountId,
+        DateTimeOffset confirmedAt,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The connection store does not support Studio destination confirmation.");
+
     Task<ExternalEngineHeartbeatStoreResult> TryApplyHeartbeatAsync(
         ExternalEngineConnection expected,
         ExternalEngineHeartbeatProjection projection,
@@ -146,6 +167,16 @@ public interface IExternalEngineConnectionStore
         TimeSpan minimumInterval,
         CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("The connection store does not support authenticated heartbeat persistence.");
+
+    Task<ExternalEngineHeartbeatStoreResult> TryRecordUnsupportedProtocolAsync(
+        ExternalEngineConnection expected,
+        long sequence,
+        DateTimeOffset observedAt,
+        Guid identityId,
+        DateTimeOffset receivedAt,
+        TimeSpan minimumInterval,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The connection store does not support connector compatibility diagnostics.");
 }
 
 public sealed record ExternalEngineComponentObservation(string Id, string ImageDigest);
@@ -180,8 +211,21 @@ public sealed record ExternalEngineHeartbeatProjection(
     string? ObservedRuntimeKind,
     ExternalEngineReleaseEvidenceLevel ReleaseEvidenceLevel,
     string? ReleaseEvidenceReference,
-    string? StudioDestination,
+    string? StudioDestinationCandidate,
     IReadOnlyList<string> Capabilities);
+
+public enum ExternalEngineStudioDestinationConfirmationStatus
+{
+    Confirmed,
+    Conflict
+}
+
+public sealed record ExternalEngineStudioDestinationConfirmationResult(
+    ExternalEngineStudioDestinationConfirmationStatus Status,
+    ExternalEngineConnection? Connection)
+{
+    public bool Confirmed => Status == ExternalEngineStudioDestinationConfirmationStatus.Confirmed;
+}
 
 public enum ExternalEngineHeartbeatStoreStatus
 {
@@ -207,7 +251,8 @@ public enum ExternalEngineHeartbeatStatus
     OutOfOrder,
     RateLimited,
     Revoked,
-    Conflict
+    Conflict,
+    UnsupportedProtocol
 }
 
 public sealed record ExternalEngineHeartbeatResult(

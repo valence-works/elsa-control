@@ -30,6 +30,8 @@ public sealed class ExternalEngineHeartbeatServiceTests
         Assert.Equal("manifest-sha256", result.Connection.ReleaseEvidenceReference);
         Assert.Equal("server", result.Connection.ObservedRuntimeKind);
         Assert.Equal(2, result.Connection.Capabilities.Count);
+        Assert.Equal("https://studio.example.test/elsa/", result.Connection.StudioDestinationCandidate);
+        Assert.NotNull(result.Connection.StudioDestinationCandidateId);
         Assert.Null(result.Connection.StudioDestination);
         Assert.Equal(ExternalEngineHeartbeatFreshness.Fresh,
             ExternalEngineConnectionFreshness.Classify(result.Connection, fixture.Time.GetUtcNow()));
@@ -89,21 +91,49 @@ public sealed class ExternalEngineHeartbeatServiceTests
     }
 
     [Fact]
-    public async Task Unsupported_protocol_and_unknown_capability_change_no_connection_facts()
+    public async Task Unsupported_protocol_is_reported_only_after_proof_verification_and_other_invalid_reports_do_not_change_it()
     {
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         var fixture = await Fixture.CreateAsync(key, []);
+        var unsupportedReport = Report(1) with { ConnectorProtocol = "2" };
+        var invalidProofRequest = fixture.Request(unsupportedReport, key);
+        var invalidProof = invalidProofRequest with
+        {
+            Proof = invalidProofRequest.Proof with { Signature = "invalid" }
+        };
 
-        var unsupported = await fixture.Service.SubmitAsync(
-            fixture.Request(Report(1) with { ConnectorProtocol = "2" }, key));
-        Assert.Equal(ExternalEngineHeartbeatStatus.InvalidReport, unsupported!.Status);
-        Assert.Null(fixture.Store.Connection.LastAuthenticatedAt);
+        var denied = await fixture.Service.SubmitAsync(invalidProof);
+        Assert.Equal(ExternalEngineHeartbeatStatus.ProofDenied, denied!.Status);
+        Assert.Equal(ExternalEngineConnectorCompatibilityStatus.Unknown, fixture.Store.Connection.ConnectorCompatibilityStatus);
+
+        var unsupported = await fixture.Service.SubmitAsync(fixture.Request(unsupportedReport, key));
+        Assert.Equal(ExternalEngineHeartbeatStatus.UnsupportedProtocol, unsupported!.Status);
+        Assert.Equal(ExternalEngineConnectorCompatibilityStatus.UnsupportedProtocol,
+            unsupported.Connection!.ConnectorCompatibilityStatus);
+        Assert.Equal(Now, unsupported.Connection.ConnectorCompatibilityObservedAt);
+        Assert.Null(unsupported.Connection.ConnectorProtocol);
+        Assert.Equal(Now, unsupported.Connection.LastAuthenticatedAt);
+        Assert.Equal(1, unsupported.Connection.LastHeartbeatSequence);
 
         fixture.Time.Advance(TimeSpan.FromSeconds(1));
         var unknown = await fixture.Service.SubmitAsync(
             fixture.Request(Report(2, capabilities: ["engine.delete"]), key));
         Assert.Equal(ExternalEngineHeartbeatStatus.InvalidReport, unknown!.Status);
         Assert.Empty(fixture.Store.Connection.Capabilities);
+        Assert.Equal(ExternalEngineConnectorCompatibilityStatus.UnsupportedProtocol,
+            fixture.Store.Connection.ConnectorCompatibilityStatus);
+
+        var unsupportedReplay = await fixture.Service.SubmitAsync(fixture.Request(unsupportedReport, key));
+        Assert.Equal(ExternalEngineHeartbeatStatus.OutOfOrder, unsupportedReplay!.Status);
+        var sameSequenceRecovery = await fixture.Service.SubmitAsync(fixture.Request(Report(1), key));
+        Assert.Equal(ExternalEngineHeartbeatStatus.OutOfOrder, sameSequenceRecovery!.Status);
+
+        fixture.Time.Advance(TimeSpan.FromSeconds(5));
+        var recovered = await fixture.Service.SubmitAsync(fixture.Request(Report(2), key));
+        Assert.Equal(ExternalEngineHeartbeatStatus.Accepted, recovered!.Status);
+        Assert.Equal(ExternalEngineConnectorCompatibilityStatus.Compatible,
+            recovered.Connection!.ConnectorCompatibilityStatus);
+        Assert.Equal(2, recovered.Connection.LastHeartbeatSequence);
     }
 
     [Fact]
@@ -340,6 +370,12 @@ public sealed class ExternalEngineHeartbeatServiceTests
                 return Task.FromResult(new ExternalEngineHeartbeatStoreResult(ExternalEngineHeartbeatStoreStatus.OutOfOrder, Connection));
             if (Connection.LastAuthenticatedAt is { } last && receivedAt - last < minimumInterval)
                 return Task.FromResult(new ExternalEngineHeartbeatStoreResult(ExternalEngineHeartbeatStoreStatus.RateLimited, Connection, minimumInterval - (receivedAt - last)));
+            var studioCandidate = projection.Capabilities.Contains(
+                    ExternalEngineHeartbeatService.StudioCapability, StringComparer.Ordinal)
+                ? projection.StudioDestinationCandidate
+                : null;
+            var candidateChanged = !string.Equals(
+                Connection.StudioDestinationCandidate, studioCandidate, StringComparison.Ordinal);
             Connection = Connection with
             {
                 Status = projection.Status,
@@ -353,11 +389,53 @@ public sealed class ExternalEngineHeartbeatServiceTests
                 ObservedRuntimeKind = projection.ObservedRuntimeKind,
                 ReleaseEvidenceLevel = projection.ReleaseEvidenceLevel,
                 ReleaseEvidenceReference = projection.ReleaseEvidenceReference,
-                StudioDestination = projection.StudioDestination,
+                StudioDestinationCandidate = studioCandidate,
+                StudioDestinationCandidateId = candidateChanged
+                    ? studioCandidate is null ? null : Guid.NewGuid()
+                    : Connection.StudioDestinationCandidateId,
+                StudioDestination = candidateChanged ? null : Connection.StudioDestination,
+                StudioDestinationConfirmedAt = candidateChanged ? null : Connection.StudioDestinationConfirmedAt,
+                StudioDestinationConfirmedByAccountId = candidateChanged ? null : Connection.StudioDestinationConfirmedByAccountId,
                 Capabilities = projection.Capabilities,
+                ConnectorCompatibilityStatus = ExternalEngineConnectorCompatibilityStatus.Compatible,
+                ConnectorCompatibilityObservedAt = receivedAt,
                 CapabilitiesObservedAt = receivedAt,
                 LastHeartbeatSequence = projection.Sequence,
                 LastHeartbeatObservedAt = projection.ObservedAt,
+                UpdatedAt = receivedAt,
+                Version = Connection.Version + 1
+            };
+            return Task.FromResult(new ExternalEngineHeartbeatStoreResult(ExternalEngineHeartbeatStoreStatus.Applied, Connection));
+        }
+
+        public Task<ExternalEngineHeartbeatStoreResult> TryRecordUnsupportedProtocolAsync(
+            ExternalEngineConnection expected,
+            long sequence,
+            DateTimeOffset observedAt,
+            Guid identityId,
+            DateTimeOffset receivedAt,
+            TimeSpan minimumInterval,
+            CancellationToken cancellationToken = default)
+        {
+            if (expected.Version != Connection.Version)
+                return Task.FromResult(new ExternalEngineHeartbeatStoreResult(ExternalEngineHeartbeatStoreStatus.Concurrent, Connection));
+            if (identityId != Connection.ActiveIdentityId)
+                return Task.FromResult(new ExternalEngineHeartbeatStoreResult(ExternalEngineHeartbeatStoreStatus.ScopeMismatch, Connection));
+            if (Connection.LastHeartbeatSequence is { } lastSequence && sequence <= lastSequence)
+                return Task.FromResult(new ExternalEngineHeartbeatStoreResult(ExternalEngineHeartbeatStoreStatus.OutOfOrder, Connection));
+            if (Connection.LastAuthenticatedAt is { } last && receivedAt - last < minimumInterval)
+                return Task.FromResult(new ExternalEngineHeartbeatStoreResult(
+                    ExternalEngineHeartbeatStoreStatus.RateLimited,
+                    Connection,
+                    minimumInterval - (receivedAt - last)));
+            Connection = Connection with
+            {
+                ConnectorCompatibilityStatus = ExternalEngineConnectorCompatibilityStatus.UnsupportedProtocol,
+                ConnectorCompatibilityObservedAt = receivedAt,
+                ConnectorReachability = ExternalEngineConnectorReachability.Reachable,
+                LastAuthenticatedAt = receivedAt,
+                LastHeartbeatSequence = sequence,
+                LastHeartbeatObservedAt = observedAt,
                 UpdatedAt = receivedAt,
                 Version = Connection.Version + 1
             };

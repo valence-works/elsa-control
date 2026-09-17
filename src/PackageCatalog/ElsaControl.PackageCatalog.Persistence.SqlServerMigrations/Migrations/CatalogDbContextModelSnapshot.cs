@@ -3952,7 +3952,7 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         {
                             t.HasTrigger("TR_ExternalEngineConnectionAuditEvents_AppendOnly");
 
-                            t.HasCheckConstraint("CK_ExternalEngineConnectionAuditEvents_Action", "Action IN ('Created', 'PairingIssued', 'RepairStarted', 'IdentityEnrolled', 'HeartbeatConnected', 'HeartbeatDegraded', 'HeartbeatRecovered', 'Disconnected')");
+                            t.HasCheckConstraint("CK_ExternalEngineConnectionAuditEvents_Action", "Action IN ('Created', 'PairingIssued', 'RepairStarted', 'IdentityEnrolled', 'HeartbeatConnected', 'HeartbeatDegraded', 'HeartbeatRecovered', 'StudioDestinationConfirmed', 'Disconnected')");
                         });
 
                     b.HasAnnotation("SqlServer:UseSqlOutputClause", false);
@@ -3983,6 +3983,16 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
 
                     b.Property<long?>("CapabilitiesObservedAt")
                         .HasColumnType("bigint");
+
+                    b.Property<long?>("ConnectorCompatibilityObservedAt")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("ConnectorCompatibilityStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)")
+                        .HasDefaultValue("Unknown");
 
                     b.Property<string>("ConnectorProtocol")
                         .HasMaxLength(64)
@@ -4073,6 +4083,19 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         .HasMaxLength(2048)
                         .HasColumnType("nvarchar(2048)");
 
+                    b.Property<string>("StudioDestinationCandidate")
+                        .HasMaxLength(2048)
+                        .HasColumnType("nvarchar(2048)");
+
+                    b.Property<Guid?>("StudioDestinationCandidateId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long?>("StudioDestinationConfirmedAt")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid?>("StudioDestinationConfirmedByAccountId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<long>("UpdatedAt")
                         .HasColumnType("bigint");
 
@@ -4093,6 +4116,8 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
 
                     b.ToTable("ExternalEngineConnections", null, t =>
                         {
+                            t.HasCheckConstraint("CK_ExternalEngineConnections_ConnectorCompatibilityStatus", "ConnectorCompatibilityStatus IN ('Unknown', 'Compatible', 'UnsupportedProtocol')");
+
                             t.HasCheckConstraint("CK_ExternalEngineConnections_Evidence", "ReleaseEvidenceLevel IN ('None', 'SelfReported', 'SupportedRelease', 'VerifiedManifest')");
 
                             t.HasCheckConstraint("CK_ExternalEngineConnections_HeartbeatSequence", "LastHeartbeatSequence IS NULL OR LastHeartbeatSequence > 0");
@@ -4106,6 +4131,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                             t.HasCheckConstraint("CK_ExternalEngineConnections_RuntimeHealth", "RuntimeHealth IN ('Unknown', 'Healthy', 'Unhealthy')");
 
                             t.HasCheckConstraint("CK_ExternalEngineConnections_Status", "Status IN ('Pending', 'Connected', 'Degraded', 'Revoked')");
+
+                            t.HasCheckConstraint("CK_ExternalEngineConnections_StudioDestinationApproval", "(StudioDestination IS NULL AND StudioDestinationConfirmedAt IS NULL AND StudioDestinationConfirmedByAccountId IS NULL) OR (StudioDestination IS NOT NULL AND StudioDestination = StudioDestinationCandidate AND StudioDestinationCandidateId IS NOT NULL AND StudioDestinationConfirmedAt IS NOT NULL AND StudioDestinationConfirmedByAccountId IS NOT NULL)");
+
+                            t.HasCheckConstraint("CK_ExternalEngineConnections_StudioDestinationCandidate", "(StudioDestinationCandidate IS NULL AND StudioDestinationCandidateId IS NULL) OR (StudioDestinationCandidate IS NOT NULL AND StudioDestinationCandidateId IS NOT NULL)");
 
                             t.HasCheckConstraint("CK_ExternalEngineConnections_Timestamps", "UpdatedAt >= CreatedAt AND (RevokedAt IS NULL OR RevokedAt >= CreatedAt)");
 

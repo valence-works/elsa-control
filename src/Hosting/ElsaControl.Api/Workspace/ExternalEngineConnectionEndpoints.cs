@@ -104,6 +104,33 @@ public static class ExternalEngineConnectionEndpoints
             return attempt is null ? Results.NotFound() : Results.Ok(ToPairingResponse(attempt));
         }).RequireDeploymentPermission(WorkspaceDeploymentPermissions.ManageSetup).AllowCloudBff();
 
+        group.MapPost("/{connectionId:guid}/studio-destination/confirm", async (
+            Guid workspaceId,
+            Guid connectionId,
+            ConfirmExternalEngineStudioDestinationRequest request,
+            HttpContext context,
+            ExternalEngineConnectionService service,
+            CancellationToken cancellationToken) =>
+        {
+            var access = context.GetWorkspaceAccess();
+            var result = await service.ConfirmStudioDestinationAsync(
+                access.OrganizationId,
+                workspaceId,
+                connectionId,
+                request.CandidateId,
+                access.AccountId,
+                cancellationToken);
+            return result switch
+            {
+                null => Results.NotFound(),
+                { Confirmed: true, Connection: not null } => Results.Ok(ToResponse(result.Connection)),
+                _ => Problem(
+                    "external-engine.studio-destination.conflict",
+                    "The Studio destination changed or is no longer available. Refresh the connection before confirming it.",
+                    StatusCodes.Status409Conflict)
+            };
+        }).RequireDeploymentPermission(WorkspaceDeploymentPermissions.ManageSetup).AllowCloudBff();
+
         group.MapPost("/{connectionId:guid}/disconnect", async (
             Guid workspaceId,
             Guid connectionId,
@@ -190,6 +217,8 @@ public static class ExternalEngineConnectionEndpoints
                         HeartbeatRateLimited(context, result.RetryAfter),
                     { Status: ExternalEngineHeartbeatStatus.Conflict } =>
                         Problem("external-engine.heartbeat.conflict", "The heartbeat raced another connection update; retry with a new proof.", StatusCodes.Status409Conflict),
+                    { Status: ExternalEngineHeartbeatStatus.UnsupportedProtocol } =>
+                        Problem("external-engine.heartbeat.unsupported-protocol", "The connector protocol is not supported. Upgrade the connector to resume heartbeat reporting.", StatusCodes.Status426UpgradeRequired),
                     _ => Problem("external-engine.heartbeat.invalid", "The heartbeat report is invalid or unsupported.", StatusCodes.Status400BadRequest)
                 };
             }
@@ -253,6 +282,12 @@ public static class ExternalEngineConnectionEndpoints
             value.ObservedRuntimeKind,
             value.ReleaseEvidenceLevel,
             value.ReleaseEvidenceReference,
+            value.ConnectorCompatibilityStatus,
+            value.ConnectorCompatibilityObservedAt,
+            value.StudioDestinationCandidate,
+            value.StudioDestinationCandidateId,
+            value.StudioDestinationConfirmedAt,
+            value.StudioDestinationConfirmedByAccountId,
             value.StudioDestination,
             value.Capabilities,
             value.CapabilitiesObservedAt,

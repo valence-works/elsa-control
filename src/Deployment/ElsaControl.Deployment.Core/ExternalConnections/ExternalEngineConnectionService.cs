@@ -30,6 +30,43 @@ public sealed class ExternalEngineConnectionService(
         return connection is null ? null : ExternalEngineConnectionFreshness.Project(connection, timeProvider.GetUtcNow());
     }
 
+    public async Task<ExternalEngineStudioDestinationConfirmationResult?> ConfirmStudioDestinationAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid connectionId,
+        Guid candidateId,
+        Guid accountId,
+        CancellationToken cancellationToken = default)
+    {
+        var current = await connections.FindAsync(organizationId, workspaceId, connectionId, cancellationToken);
+        if (current is null)
+            return null;
+
+        var now = timeProvider.GetUtcNow();
+        if (candidateId == Guid.Empty
+            || accountId == Guid.Empty
+            || current.Status == ExternalEngineConnectionStatus.Revoked
+            || current.ActiveIdentityId is null
+            || current.ConnectorCompatibilityStatus != ExternalEngineConnectorCompatibilityStatus.Compatible
+            || current.StudioDestinationCandidate is null
+            || current.StudioDestinationCandidateId != candidateId
+            || !current.Capabilities.Contains(ExternalEngineHeartbeatService.StudioCapability, StringComparer.Ordinal)
+            || ExternalEngineConnectionFreshness.Classify(current, now) != ExternalEngineHeartbeatFreshness.Fresh)
+            return new(ExternalEngineStudioDestinationConfirmationStatus.Conflict,
+                ExternalEngineConnectionFreshness.Project(current, now));
+
+        var confirmed = await connections.TryConfirmStudioDestinationAsync(
+            current, candidateId, accountId, now, cancellationToken);
+        if (confirmed is not null)
+            return new(ExternalEngineStudioDestinationConfirmationStatus.Confirmed,
+                ExternalEngineConnectionFreshness.Project(confirmed, now));
+
+        var latest = await FindAsync(organizationId, workspaceId, connectionId, cancellationToken);
+        return latest is null
+            ? null
+            : new(ExternalEngineStudioDestinationConfirmationStatus.Conflict, latest);
+    }
+
     public async Task<ExternalEnginePairingAttempt> CreatePairingAsync(
         ExternalEngineConnectionCreateRequest request,
         CancellationToken cancellationToken = default)

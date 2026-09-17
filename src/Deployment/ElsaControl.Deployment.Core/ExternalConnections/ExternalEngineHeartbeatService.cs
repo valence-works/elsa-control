@@ -51,8 +51,36 @@ public sealed class ExternalEngineHeartbeatService(
         if (!IsValidObservation(report, now))
             return new(ExternalEngineHeartbeatStatus.InvalidReport);
 
-        if (!string.Equals(report.ConnectorProtocol, CurrentProtocol, StringComparison.Ordinal)
-            || report.Capabilities.Any(capability => !AllowedCapabilities.Contains(capability)))
+        if (!string.Equals(report.ConnectorProtocol, CurrentProtocol, StringComparison.Ordinal))
+        {
+            var diagnostic = await connections.TryRecordUnsupportedProtocolAsync(
+                connection,
+                report.Sequence,
+                report.ObservedAt,
+                proof.IdentityId,
+                now,
+                MinimumInterval,
+                cancellationToken);
+            return diagnostic.Status switch
+            {
+                ExternalEngineHeartbeatStoreStatus.Applied => new(
+                    ExternalEngineHeartbeatStatus.UnsupportedProtocol,
+                    ExternalEngineConnectionFreshness.Project(diagnostic.Connection!, now)),
+                ExternalEngineHeartbeatStoreStatus.OutOfOrder => new(ExternalEngineHeartbeatStatus.OutOfOrder, diagnostic.Connection),
+                ExternalEngineHeartbeatStoreStatus.RateLimited => new(
+                    ExternalEngineHeartbeatStatus.RateLimited,
+                    diagnostic.Connection,
+                    RetryAfter: diagnostic.RetryAfter),
+                ExternalEngineHeartbeatStoreStatus.Revoked => new(ExternalEngineHeartbeatStatus.Revoked, diagnostic.Connection),
+                ExternalEngineHeartbeatStoreStatus.ScopeMismatch => new(
+                    ExternalEngineHeartbeatStatus.ProofDenied,
+                    diagnostic.Connection,
+                    ExternalEngineConnectorProofFailure.ScopeMismatch),
+                _ => new(ExternalEngineHeartbeatStatus.Conflict, diagnostic.Connection)
+            };
+        }
+
+        if (report.Capabilities.Any(capability => !AllowedCapabilities.Contains(capability)))
             return new(ExternalEngineHeartbeatStatus.InvalidReport, connection);
 
         var acceptedCapabilities = report.Capabilities.Order(StringComparer.Ordinal).ToArray();
@@ -73,7 +101,9 @@ public sealed class ExternalEngineHeartbeatService(
             report.RuntimeKind,
             evidence.Level,
             evidence.Reference,
-            StudioDestination: null,
+            StudioDestinationCandidate: acceptedCapabilities.Contains(StudioCapability, StringComparer.Ordinal)
+                ? report.StudioDestination
+                : null,
             acceptedCapabilities);
 
         for (var attempt = 0; attempt < 2; attempt++)
