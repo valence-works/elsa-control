@@ -1,10 +1,10 @@
 # External engine connector enrollment protocol
 
-**Status:** protocol and domain foundation for [#488](https://github.com/valence-works/elsa-control/issues/488)
+**Status:** protocol, durable enrollment, and connector-proof lifecycle through [#490](https://github.com/valence-works/elsa-control/issues/490)
 
 **Parent:** [#480](https://github.com/valence-works/elsa-control/issues/480)
 
-This document defines the cryptographic and domain contract for pairing one customer-operated Elsa engine connector with one Elsa Control external-engine connection. It does not expose an HTTP route, authorize a runtime command, prove Azure ownership, or grant infrastructure reconciliation authority. Durable storage, replay-resistant request authentication, rotation, and revocation remain the gated follow-up work in #489 and #490.
+This document defines the cryptographic and domain contract for pairing one customer-operated Elsa engine connector with one Elsa Control external-engine connection. It does not expose an HTTP route, authorize a runtime command, prove Azure ownership, or grant infrastructure reconciliation authority. #489 and #490 supply durable enrollment, replay-resistant connector proofs, rotation, revocation, and re-pair recovery; #481 remains the route and authorization gate.
 
 ## Trust boundary
 
@@ -78,16 +78,18 @@ Domain: `elsa-control.external-engine-connector.proof.v1`
 10. issued-at Unix milliseconds
 11. nonce
 
-The domain foundation verifies the signature and exact expected operation/payload binding. It deliberately does not authorize an HTTP route yet. #490 must enforce a short timestamp window and atomically consume each nonce before any proof can authorize a request. The route layer must bind `operation` to its exact method/path semantic and compute the payload digest from the received canonical body; it must never trust caller-provided expected values.
+Proof validation requires exact identity, organization, workspace, connection, audience, operation, payload digest, and key-version matches. `issued-at` is the signed Unix-millisecond value. Future timestamps are rejected; a proof is accepted for at most five minutes. The nonce must contain 32 random bytes and is stored only as a SHA-256 hash. It is consumed atomically after the signature is verified and before an operation may mutate state, so replay has one winner across processes.
+
+The proof validator deliberately does not authorize an HTTP route. The route layer must bind `operation` to its exact method/path semantic and compute the payload digest from the received canonical body; it must never trust caller-provided expected values.
 
 ## Lifecycle
 
 1. **Issue:** validate organization/workspace/connection scope, generate the challenge, store only its hash and safe bindings, return the raw challenge once.
 2. **Redeem:** validate exact purpose/audience, validate P-256 public key, verify the signed redemption message, then atomically consume the challenge and create key version 1.
-3. **Use:** after #490, verify an operation-bound proof, timestamp, nonce, identity state, and key version on every connector request.
-4. **Rotate:** after #490, the current key signs a transition to the new key. The old key has one bounded overlap window that cannot be extended by replay.
-5. **Revoke:** after #490, mark the identity revoked atomically. The next otherwise-valid proof fails.
-6. **Recover:** loss of the private key requires revocation and a fresh pairing challenge. Control never escrows or restores connector private keys.
+3. **Use:** verify an operation-bound proof, timestamp, single-use nonce, identity state, and key version on every connector request.
+4. **Rotate:** operation `external-engine.identity.rotate` is accepted only from the current key. Its payload binds the new public-key thumbprint and overlap duration. The previous key remains valid only while `now < previousKeyValidUntil`; overlap may not exceed five minutes, and another rotation is rejected while overlap is active.
+5. **Revoke:** operation `external-engine.identity.revoke` is accepted only from the current key and marks the identity revoked atomically. Every subsequent proof fails immediately, including one signed before revocation.
+6. **Recover:** a revoked connection may redeem a fresh, scoped pairing challenge issued strictly after revocation with a newly generated key. Any still-live challenge issued before or at the revocation timestamp is rejected. The stable identity is repaired with an incremented key version and no previous-key overlap. Control never escrows or restores connector private keys; loss of an unrevoked private key requires a workspace manager to authorize recovery revocation and start this fresh pairing ceremony. The domain operation trusts that caller authorization; #481 must expose it only through a `ManageSetup` route.
 
 ## Threat analysis
 
@@ -97,12 +99,12 @@ The domain foundation verifies the signature and exact expected operation/payloa
 | Challenge theft before redemption | Short expiry, single use, exact connection scope, secure setup handling. The thief can race the legitimate connector because the challenge is bearer enrollment authority. | UI/API must warn against disclosure; a future pre-bound key ceremony would be a new protocol version. |
 | Replay or concurrent redemption | Store contract requires atomic consume-and-create; the in-memory reference implementation demonstrates one winner. | #489 must prove database concurrency on supported stores. |
 | Cross-organization/workspace/connection redemption | Every signed and stored binding is compared exactly. | #489 persistence and #481 route authorization tests. |
-| Captured challenge after pairing | The challenge is consumed; later messages require the enrolled private key. | #490 timestamp and nonce replay enforcement. |
+| Captured challenge after pairing | The challenge is consumed; later messages require a current or narrowly overlapping enrolled private key. | #481 must preserve these checks at every runtime route. |
 | Connector private-key exfiltration | Control never receives or stores it. | Customer host security; revoke and re-pair on compromise. |
 | Public-key substitution | Redemption signature covers the public-key thumbprint. | Challenge theft before redemption remains as described above. |
-| Proof replay | Operation, payload, timestamp, and nonce are signed. | Not accepted as route authorization until #490 durably consumes nonces and enforces time. |
+| Proof replay | Operation, payload, Unix-millisecond timestamp, and nonce are signed; nonce hashes are consumed durably after signature validation, and the five-minute window rejects stale/future proofs. | #481 route tests must prove each route supplies its own operation and canonical payload digest. |
 | Confused deputy | Purpose, audience, organization, workspace, connection, operation, and payload are signed/bound. | Route layer must supply exact expected operation and digest. |
-| Downgrade | Only protocol v1, P-256/SHA-256, fixed signature encoding, and key version 1 are admitted here. | #490 defines version transition/rotation rules. |
+| Downgrade | Only protocol v1, P-256/SHA-256, fixed signature encoding, the current key, or the immediately previous key strictly inside its overlap are admitted. Rotation and revocation require the current key. | A new algorithm or protocol version requires a separate reviewed transition contract. |
 | Offline connector | No inbound connectivity is required. | #490 documents expiry/reconnect and fresh pairing recovery. |
 | Broader infrastructure privilege | Identity type and audience are external-engine specific and grant no command scope. | #484 separately gates future deployment/control operations. |
 
@@ -110,11 +112,15 @@ The domain foundation verifies the signature and exact expected operation/payloa
 
 Raw challenges, private keys, proof signatures, request nonces, authorization headers, and raw payloads are never audit or diagnostic fields. Safe audit data may include stable IDs, event type, key version, public-key thumbprint, safe reason code, and timestamp. Read models must not expose challenge hashes or public keys unless a later reviewed protocol requires them.
 
+Consumed nonce hashes are retained through their proof-validity window and may then be pruned opportunistically. A proof whose nonce marker is eligible for pruning is already rejected by the signed timestamp window, so cleanup cannot make it replayable.
+
+Schema downgrade is fail closed while any connector identity is revoked. Removing the revocation column in that state would reactivate the stored key under an older verifier; operators must retain the lifecycle schema or deliberately resolve the revoked records before rollback.
+
 The one-time issue result and redemption/proof request types redact challenge, public key, signature, and nonce values from their string representation. This reduces accidental logging risk; callers remain responsible for excluding request bodies from telemetry.
 
 ## Delivery gates
 
 - #488 supplies this reviewed contract, canonical encoders, P-256 verification, hash-only store contract, an in-memory reference implementation, and domain tests. Its connector-signature verifier is a cryptographic primitive, not route authorization.
 - #489 supplies durable EF storage, migrations, atomic redemption, workspace isolation, and safe audit.
-- #490 supplies timestamp/nonce replay defense, bounded rotation, immediate revocation, and offline recovery behavior.
+- #490 supplies timestamp/nonce replay defense, bounded rotation, immediate revocation, durable lifecycle audit, and fresh-pairing recovery without private-key escrow.
 - #481 may expose routes only after the relevant #489/#490 guarantees exist and must use narrow workspace/BFF authorization.
