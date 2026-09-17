@@ -154,6 +154,9 @@ public interface IExternalEngineEnrollmentStore
         CancellationToken cancellationToken = default);
 
     Task<ExternalEngineEnrollmentChallenge?> FindChallengeAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid connectionId,
         Guid challengeId,
         CancellationToken cancellationToken = default);
 
@@ -169,5 +172,67 @@ public interface IExternalEngineEnrollmentStore
         Guid workspaceId,
         Guid connectionId,
         Guid identityId,
+        CancellationToken cancellationToken = default);
+}
+
+public enum ExternalEngineEnrollmentAuditAction
+{
+    ChallengeIssued,
+    RedemptionSucceeded,
+    RedemptionRejected,
+    ProofNonceConsumed
+}
+
+public enum ExternalEngineEnrollmentAuditReason
+{
+    None,
+    InvalidRequest,
+    InvalidProof,
+    Expired,
+    Replay,
+    AlreadyEnrolled
+}
+
+/// <summary>
+/// Safe enrollment audit metadata. Bearer values, signatures, endpoint addresses,
+/// authorization headers, and raw exception text are intentionally absent.
+/// </summary>
+public sealed record ExternalEngineEnrollmentAuditRecord(
+    Guid Id,
+    Guid OrganizationId,
+    Guid WorkspaceId,
+    Guid ConnectionId,
+    Guid? ChallengeId,
+    Guid? IdentityId,
+    ExternalEngineEnrollmentAuditAction Action,
+    ExternalEngineEnrollmentAuditReason Reason,
+    DateTimeOffset OccurredAt);
+
+public interface IExternalEngineEnrollmentAuditStore
+{
+    Task RecordAsync(
+        ExternalEngineEnrollmentAuditRecord audit,
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Hash-only replay marker persisted for the request-proof verifier delivered by #490.
+/// </summary>
+public sealed record ExternalEngineConnectorProofNonce(
+    Guid Id,
+    Guid IdentityId,
+    Guid OrganizationId,
+    Guid WorkspaceId,
+    Guid ConnectionId,
+    int KeyVersion,
+    string NonceHash,
+    DateTimeOffset IssuedAt,
+    DateTimeOffset ExpiresAt,
+    DateTimeOffset ConsumedAt);
+
+public interface IExternalEngineConnectorProofNonceStore
+{
+    Task<bool> TryConsumeAsync(
+        ExternalEngineConnectorProofNonce nonce,
         CancellationToken cancellationToken = default);
 }

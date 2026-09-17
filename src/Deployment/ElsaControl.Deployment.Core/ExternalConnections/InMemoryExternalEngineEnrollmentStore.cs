@@ -29,12 +29,23 @@ public sealed class InMemoryExternalEngineEnrollmentStore : IExternalEngineEnrol
     }
 
     public Task<ExternalEngineEnrollmentChallenge?> FindChallengeAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid connectionId,
         Guid challengeId,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
-            return Task.FromResult(_challenges.GetValueOrDefault(challengeId));
+        {
+            var challenge = _challenges.GetValueOrDefault(challengeId);
+            return Task.FromResult(challenge is not null
+                                   && challenge.OrganizationId == organizationId
+                                   && challenge.WorkspaceId == workspaceId
+                                   && challenge.ConnectionId == connectionId
+                ? challenge
+                : null);
+        }
     }
 
     public Task<ExternalEngineEnrollmentStoreRedeemResult> TryRedeemAsync(

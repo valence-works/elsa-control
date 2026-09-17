@@ -4,7 +4,8 @@ namespace ElsaControl.Deployment.Core.ExternalConnections;
 
 public sealed class ExternalEngineEnrollmentService(
     IExternalEngineEnrollmentStore store,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    IExternalEngineEnrollmentAuditStore? auditStore = null)
 {
     private readonly TimeProvider _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
 
@@ -58,7 +59,7 @@ public sealed class ExternalEngineEnrollmentService(
             || request.ChallengeId == Guid.Empty
             || !string.Equals(request.Purpose, ExternalEngineEnrollmentDefaults.PairingPurpose, StringComparison.Ordinal)
             || !string.Equals(request.Audience, ExternalEngineEnrollmentDefaults.AudienceFor(request.ConnectionId), StringComparison.Ordinal))
-            return ExternalEngineEnrollmentRedeemResult.Denied(ExternalEngineEnrollmentRedeemFailure.InvalidRequest);
+            return await RejectAsync(request, ExternalEngineEnrollmentRedeemFailure.InvalidRequest, cancellationToken);
 
         string challengeHash;
         string publicKeyThumbprint;
@@ -79,15 +80,20 @@ public sealed class ExternalEngineEnrollmentService(
         }
         catch (Exception exception) when (exception is ArgumentException or CryptographicException or FormatException)
         {
-            return ExternalEngineEnrollmentRedeemResult.Denied(ExternalEngineEnrollmentRedeemFailure.InvalidRequest);
+            return await RejectAsync(request, ExternalEngineEnrollmentRedeemFailure.InvalidRequest, cancellationToken);
         }
 
         if (!ExternalEngineEnrollmentProtocol.Verify(request.PublicKey, payload, request.Signature))
-            return ExternalEngineEnrollmentRedeemResult.Denied(ExternalEngineEnrollmentRedeemFailure.InvalidProof);
+            return await RejectAsync(request, ExternalEngineEnrollmentRedeemFailure.InvalidProof, cancellationToken);
 
-        var challenge = await store.FindChallengeAsync(request.ChallengeId, cancellationToken);
+        var challenge = await store.FindChallengeAsync(
+            request.OrganizationId,
+            request.WorkspaceId,
+            request.ConnectionId,
+            request.ChallengeId,
+            cancellationToken);
         if (challenge is null)
-            return ExternalEngineEnrollmentRedeemResult.Denied(ExternalEngineEnrollmentRedeemFailure.InvalidRequest);
+            return await RejectAsync(request, ExternalEngineEnrollmentRedeemFailure.InvalidRequest, cancellationToken);
 
         var now = _timeProvider.GetUtcNow();
         var identity = new ExternalEngineConnectorIdentity(
@@ -164,4 +170,35 @@ public sealed class ExternalEngineEnrollmentService(
 
     private static bool HasValidScope(Guid organizationId, Guid workspaceId, Guid connectionId) =>
         organizationId != Guid.Empty && workspaceId != Guid.Empty && connectionId != Guid.Empty;
+
+    private async Task<ExternalEngineEnrollmentRedeemResult> RejectAsync(
+        ExternalEngineEnrollmentRedeemRequest request,
+        ExternalEngineEnrollmentRedeemFailure failure,
+        CancellationToken cancellationToken)
+    {
+        if (auditStore is not null)
+        {
+            await auditStore.RecordAsync(
+                new ExternalEngineEnrollmentAuditRecord(
+                    Guid.NewGuid(),
+                    request.OrganizationId,
+                    request.WorkspaceId,
+                    request.ConnectionId,
+                    request.ChallengeId == Guid.Empty ? null : request.ChallengeId,
+                    null,
+                    ExternalEngineEnrollmentAuditAction.RedemptionRejected,
+                    failure switch
+                    {
+                        ExternalEngineEnrollmentRedeemFailure.InvalidProof => ExternalEngineEnrollmentAuditReason.InvalidProof,
+                        ExternalEngineEnrollmentRedeemFailure.Expired => ExternalEngineEnrollmentAuditReason.Expired,
+                        ExternalEngineEnrollmentRedeemFailure.Replay => ExternalEngineEnrollmentAuditReason.Replay,
+                        ExternalEngineEnrollmentRedeemFailure.AlreadyEnrolled => ExternalEngineEnrollmentAuditReason.AlreadyEnrolled,
+                        _ => ExternalEngineEnrollmentAuditReason.InvalidRequest
+                    },
+                    _timeProvider.GetUtcNow()),
+                cancellationToken);
+        }
+
+        return ExternalEngineEnrollmentRedeemResult.Denied(failure);
+    }
 }
