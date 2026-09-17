@@ -509,7 +509,9 @@ builder.Services.AddScoped<WorkspacePermissionService>();
 builder.Services.AddScoped<DeploymentValidationService>();
 builder.Services.AddScoped<DeploymentDeployabilityService>();
 builder.Services.AddScoped<DeploymentPromotionService>();
-builder.Services.AddHttpClient<IEngineHealthProbe, HttpEngineHealthProbe>(client => client.Timeout = TimeSpan.FromSeconds(3));
+builder.Services.AddSingleton<EngineEndpointHttpClientPolicy>();
+builder.Services.AddHttpClient<IEngineHealthProbe, HttpEngineHealthProbe>(client => client.Timeout = TimeSpan.FromSeconds(3))
+    .ConfigurePrimaryHttpMessageHandler(services => services.GetRequiredService<EngineEndpointHttpClientPolicy>().CreateHandler());
 builder.Services.AddScoped<EngineHealthService>();
 builder.Services.Configure<EngineVerificationOptions>(builder.Configuration.GetSection("Deployment:EngineVerification"));
 builder.Services.AddScoped<DeploymentRunService>();

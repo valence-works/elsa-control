@@ -138,6 +138,64 @@ public sealed class WorkspaceDeploymentEngineHealthTests
     }
 
     [Fact]
+    public async Task Manual_verification_rejects_cross_workspace_engine_ids()
+    {
+        await using var app = new ControlApiTestApplication(configureServices: services =>
+        {
+            services.RemoveAll<IEngineHealthProbe>();
+            services.AddSingleton<IEngineHealthProbe>(new StubProbe(new EngineHealthProbeResult(
+                false,
+                null,
+                CertificateStatus.Untrusted,
+                CredentialVerificationStatus.Unverified,
+                "Endpoint address is not publicly routable.")));
+        });
+        await app.SeedAsync(_ => Task.CompletedTask);
+        var owner = app.CreateTrustedWorkspaceClient("health-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        var engine = await SeedEngineAsync(app, workspaceId);
+        var otherOwner = app.CreateTrustedWorkspaceClient("other-health-owner");
+        var otherWorkspaceId = await otherOwner.GetDefaultWorkspaceIdAsync();
+
+        var response = await otherOwner.PostAsync(
+            $"/api/workspaces/{otherWorkspaceId}/deployments/engines/{engine.Id}/verify",
+            null);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Manual_verification_persists_and_projects_only_the_safe_probe_diagnostic()
+    {
+        const string safeDiagnostic = "Endpoint address is not publicly routable.";
+        await using var app = new ControlApiTestApplication(configureServices: services =>
+        {
+            services.RemoveAll<IEngineHealthProbe>();
+            services.AddSingleton<IEngineHealthProbe>(new StubProbe(new EngineHealthProbeResult(
+                false,
+                null,
+                CertificateStatus.Untrusted,
+                CredentialVerificationStatus.Unverified,
+                safeDiagnostic)));
+        });
+        await app.SeedAsync(_ => Task.CompletedTask);
+        var owner = app.CreateTrustedWorkspaceClient("safe-diagnostic-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        var engine = await SeedEngineAsync(app, workspaceId);
+
+        var response = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId}/deployments/engines/{engine.Id}/verify",
+            null);
+        var result = await response.Content.ReadControlJsonAsync<EngineHealthResult>();
+        var cockpit = await owner.GetControlJsonAsync<DeploymentCockpit>($"/api/workspaces/{workspaceId}/deployments/cockpit");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(safeDiagnostic, result!.Message);
+        Assert.DoesNotContain(engine.BaseUrl, result.Message, StringComparison.Ordinal);
+        Assert.Single(cockpit!.Engines, x => x.Id == engine.Id.ToString("D") && x.VerificationMessage == safeDiagnostic);
+    }
+
+    [Fact]
     public async Task Heartbeat_rejects_stale_updates()
     {
         await using var app = new ControlApiTestApplication();

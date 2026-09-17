@@ -1,4 +1,6 @@
 using ElsaControl.Deployment.Core.Cockpit;
+using System.Net;
+using System.Security.Authentication;
 
 namespace ElsaControl.Deployment.Core.Workspace;
 
@@ -101,39 +103,105 @@ public sealed class HttpEngineHealthProbe(HttpClient httpClient) : IEngineHealth
         CancellationToken cancellationToken = default)
     {
         if (!Uri.TryCreate(engine.BaseUrl, UriKind.Absolute, out var endpoint))
-            return new EngineHealthProbeResult(false, engine.Version, engine.CertificateStatus, CredentialVerificationStatus.Unverified, "Endpoint URL is not valid.");
+        {
+            return new EngineHealthProbeResult(false, engine.Version, CertificateStatus.Untrusted, CredentialVerificationStatus.Unverified,
+                "Endpoint address is invalid.");
+        }
+
+        if (!EngineEndpointHttpClientPolicy.TryValidateEndpoint(endpoint, out var endpointMessage))
+        {
+            return new EngineHealthProbeResult(false, engine.Version, CertificateStatus.Untrusted, CredentialVerificationStatus.Unverified,
+                endpointMessage);
+        }
 
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, endpoint);
             using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            var version = response.Headers.TryGetValues("X-Elsa-Version", out var versions)
-                ? versions.FirstOrDefault()
-                : engine.Version;
-            var credentialStatus = response.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden
-                ? CredentialVerificationStatus.Unverified
-                : CredentialVerificationStatus.Verified;
+            var version = GetSafeVersion(response, engine.Version);
             var certificateStatus = endpoint.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
                 ? CertificateStatus.Trusted
-                : engine.CertificateStatus;
-            var message = response.IsSuccessStatusCode
-                ? "Endpoint responded successfully."
-                : $"Endpoint responded with HTTP {(int)response.StatusCode}.";
+                : CertificateStatus.Untrusted;
 
-            return new EngineHealthProbeResult(true, version, certificateStatus, credentialStatus, message);
+            return new EngineHealthProbeResult(true, version, certificateStatus, CredentialVerificationStatus.Unverified,
+                DescribeResponse(response.StatusCode));
         }
-        catch (HttpRequestException ex) when (IsCertificateFailure(ex))
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            return new EngineHealthProbeResult(true, engine.Version, CertificateStatus.Untrusted, CredentialVerificationStatus.Unverified, "TLS certificate validation failed.");
+            throw;
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
+        catch (HttpRequestException ex) when (IsEndpointAddressRejected(ex))
         {
-            return new EngineHealthProbeResult(false, engine.Version, engine.CertificateStatus, CredentialVerificationStatus.Unverified, "Endpoint did not respond before verification timed out.");
+            return new EngineHealthProbeResult(false, engine.Version, CertificateStatus.Untrusted, CredentialVerificationStatus.Unverified,
+                "Endpoint address is not publicly routable.");
+        }
+        catch (HttpRequestException ex) when (IsTlsFailure(ex))
+        {
+            return new EngineHealthProbeResult(true, engine.Version, CertificateStatus.Untrusted, CredentialVerificationStatus.Unverified,
+                "The endpoint accepted a connection, but TLS certificate validation failed.");
+        }
+        catch (OperationCanceledException)
+        {
+            return new EngineHealthProbeResult(false, engine.Version, CertificateStatus.Untrusted, CredentialVerificationStatus.Unverified,
+                "Endpoint verification timed out.");
+        }
+        catch (HttpRequestException)
+        {
+            return new EngineHealthProbeResult(false, engine.Version, CertificateStatus.Untrusted, CredentialVerificationStatus.Unverified,
+                "Endpoint did not respond to verification.");
         }
     }
 
-    private static bool IsCertificateFailure(HttpRequestException exception) =>
-        exception.Message.Contains("SSL", StringComparison.OrdinalIgnoreCase)
-        || exception.Message.Contains("certificate", StringComparison.OrdinalIgnoreCase)
-        || exception.InnerException?.Message.Contains("certificate", StringComparison.OrdinalIgnoreCase) == true;
+    private static string GetSafeVersion(HttpResponseMessage response, string? fallback)
+    {
+        if (!response.Headers.TryGetValues("X-Elsa-Version", out var values))
+            return fallback ?? string.Empty;
+
+        var version = values.FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(version) || version.Length > 128
+            || version.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not ('.' or '-' or '+' or '_')))
+            return fallback ?? string.Empty;
+
+        return version;
+    }
+
+    private static string DescribeResponse(HttpStatusCode statusCode)
+    {
+        var status = (int)statusCode;
+        var credentials = "credentials were not sent, so credential status is unverified.";
+        return statusCode switch
+        {
+            HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden =>
+                $"Endpoint requires authentication (HTTP {status}); no credentials were sent.",
+            HttpStatusCode.NotFound =>
+                $"Endpoint path was not found (HTTP {status}); {credentials}",
+            _ when status is >= 300 and < 400 =>
+                $"Endpoint returned a redirect (HTTP {status}); redirects are disabled and {credentials}",
+            _ when status >= 500 =>
+                $"Endpoint returned a server error (HTTP {status}); {credentials}",
+            _ when status is >= 200 and < 300 =>
+                $"Endpoint responded with HTTP {status}; {credentials}",
+            _ =>
+                $"Endpoint responded with HTTP {status}; {credentials}"
+        };
+    }
+
+    private static bool IsTlsFailure(HttpRequestException exception) =>
+        exception.HttpRequestError == HttpRequestError.SecureConnectionError
+        || HasInnerException<AuthenticationException>(exception);
+
+    private static bool IsEndpointAddressRejected(HttpRequestException exception) =>
+        HasInnerException<EngineEndpointHttpClientPolicy.EngineEndpointAddressRejectedException>(exception);
+
+    private static bool HasInnerException<TException>(Exception exception)
+        where TException : Exception
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is TException)
+                return true;
+        }
+
+        return false;
+    }
 }
