@@ -26,6 +26,8 @@ public sealed class ExternalEngineEnrollmentService(
         var challengeHash = ExternalEngineEnrollmentProtocol.Base64UrlEncode(SHA256.HashData(challengeBytes));
         CryptographicOperations.ZeroMemory(challengeBytes);
         var now = _timeProvider.GetUtcNow();
+        if (request.IssuedAfter is { } issuedAfter && now <= issuedAfter.ToUniversalTime())
+            now = issuedAfter.ToUniversalTime().AddTicks(1);
         var audience = ExternalEngineEnrollmentDefaults.AudienceFor(request.ConnectionId);
         var record = new ExternalEngineEnrollmentChallenge(
             Guid.NewGuid(),

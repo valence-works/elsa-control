@@ -25,7 +25,8 @@ public sealed record ExternalEngineEnrollmentIssueRequest(
     Guid OrganizationId,
     Guid WorkspaceId,
     Guid ConnectionId,
-    TimeSpan? Lifetime = null);
+    TimeSpan? Lifetime = null,
+    DateTimeOffset? IssuedAfter = null);
 
 /// <summary>
 /// The only enrollment value that contains the raw challenge. Callers must return it

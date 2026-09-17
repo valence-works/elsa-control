@@ -43,6 +43,22 @@ public sealed class ExternalEngineEnrollmentServiceTests
     }
 
     [Fact]
+    public async Task Recovery_challenge_is_issued_strictly_after_the_revocation_floor()
+    {
+        var fixture = new Fixture();
+
+        var issued = await fixture.Service.IssueAsync(
+            new ExternalEngineEnrollmentIssueRequest(
+                OrganizationId,
+                WorkspaceId,
+                ConnectionId,
+                IssuedAfter: Now));
+
+        Assert.True(issued.IssuedAt > Now);
+        Assert.Equal(Now.AddTicks(1), issued.IssuedAt);
+    }
+
+    [Fact]
     public async Task Connector_can_redeem_once_with_a_p256_proof()
     {
         var fixture = new Fixture();

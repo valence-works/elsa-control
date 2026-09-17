@@ -88,6 +88,19 @@ Illustrative routes (final route naming is an implementation decision):
 - Runtime: redeem a one-time pairing challenge; rotate or revoke its own identity; submit authenticated heartbeat and attested capability/provenance metadata. Runtime identity is scoped to one connection/workspace and cannot select another workspace or engine.
 - Later mutation routes remain separately permissioned and capability checked. A user-owned connection does not authorize Azure management; subscription targeting stays in #434–#436.
 
+### Implemented connection and enrollment surface
+
+Issue #481 implements the first narrow surface under these routes:
+
+- Customer: `GET` and `POST /api/workspaces/{workspaceId}/external-engine-connections`, `GET .../{connectionId}`, `GET .../{connectionId}/pairing`, `POST .../{connectionId}/repair`, and `POST .../{connectionId}/disconnect`.
+- Runtime: `POST /api/runtime/external-engine-connections/{connectionId}/enrollment/redeem`, `POST .../authenticate`, `POST .../identity/rotate`, and `POST .../identity/revoke`.
+
+Every customer route is individually marked for the Cloud BFF and still resolves current workspace membership plus `Read` or `ManageSetup`. The runtime routes have no Cloud BFF marker and accept only the connection-scoped enrollment or connector proof. The standalone authentication proof uses operation `external-engine.identity.authenticate`; its payload digest is SHA-256 over the UTF-8 bytes of `elsa-control.external-engine-connector.authenticate.v1`, encoded as unpadded base64url.
+
+The one-time challenge appears only in the create or repair response, both returned with `Cache-Control: private, no-store`. A retry with the same idempotency key preserves the connection and issues a fresh challenge because Control persists only challenge hashes. List, read, and progress projections never contain a challenge, connector public key, proof, identity pointer, credential, or workflow payload.
+
+Challenge redemption records the connector identity and completes pairing, but it leaves lifecycle status `Pending`. #482 owns authenticated heartbeat, release evidence, capabilities, Studio destination, and the transition to `Connected` or `Degraded`. Disconnect revokes connector proof access immediately and preserves the revoked connection plus value-free append-only audit. Generic deployment command claims still use their existing engine authorization and remain outside this connection's authority until #484 integrates each permitted action.
+
 Before a future direct-probe mode is considered, isolate it behind a reviewed egress service with HTTPS/origin validation, no userinfo/query/fragment, redirect denial or strict same-origin revalidation, connect-time IP checks against loopback/private/link-local/metadata ranges, DNS rebinding protection, timeouts/response limits, audit, and tests. These controls are defense in depth; V1 should use runtime-originated communication and not server-fetch candidate URLs.
 
 ## Child issue proposal and gates
