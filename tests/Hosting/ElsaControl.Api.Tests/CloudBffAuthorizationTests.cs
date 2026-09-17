@@ -120,6 +120,35 @@ public sealed class CloudBffAuthorizationTests
     }
 
     [Fact]
+    public void Version_one_client_gating_accepts_additions_and_rejects_rolled_back_requirements()
+    {
+        var required = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "cloud.bootstrap.v1",
+            "hosted.instances.list.v1"
+        };
+        var current = new CloudCompatibilityResponse(1,
+        [
+            "cloud.bootstrap.v1",
+            "hosted.instances.list.v1"
+        ]);
+        var additiveApi = current with
+        {
+            Capabilities = [.. current.Capabilities, "future.additive-capability.v1"]
+        };
+        var rolledBackApi = current with
+        {
+            Capabilities = ["cloud.bootstrap.v1"]
+        };
+        var unsupportedEnvelope = current with { ContractVersion = 2 };
+
+        Assert.True(SupportsVersionOneClient(current, required));
+        Assert.True(SupportsVersionOneClient(additiveApi, required));
+        Assert.False(SupportsVersionOneClient(rolledBackApi, required));
+        Assert.False(SupportsVersionOneClient(unsupportedEnvelope, required));
+    }
+
+    [Fact]
     public async Task Bff_endpoint_allowlist_is_exact()
     {
         await using var app = CreateBffApplication();
@@ -535,6 +564,11 @@ public sealed class CloudBffAuthorizationTests
         CloudBffAuthorization.Classify(
             new ClaimsPrincipal(new ClaimsIdentity(claims, ControlIdentityDefaults.Scheme)),
             options);
+
+    private static bool SupportsVersionOneClient(
+        CloudCompatibilityResponse response,
+        IReadOnlySet<string> requiredCapabilities) =>
+        response.ContractVersion == 1 && requiredCapabilities.IsSubsetOf(response.Capabilities);
 
     private sealed class TestProvisioningModule : IEngineProvisioningModule
     {
