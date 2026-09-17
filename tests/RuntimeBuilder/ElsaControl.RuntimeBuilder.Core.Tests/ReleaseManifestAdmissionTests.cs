@@ -78,7 +78,7 @@ public sealed class ReleaseManifestAdmissionTests
             persisted.Release.ComponentDeclarations.Packages.Select(package => (package.Id, package.Version)));
         Assert.DoesNotContain(
             admission.Manifest.Topologies.SelectMany(topology => topology.Images),
-            image => image.Capabilities?.Contains(ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV1, StringComparer.Ordinal) == true);
+            image => image.Capabilities?.Contains(ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV2, StringComparer.Ordinal) == true);
     }
 
     [Theory]
@@ -103,13 +103,13 @@ public sealed class ReleaseManifestAdmissionTests
             .Images.Single(image => image.RegistryClass == "paid");
         Assert.Contains(
             selectedImage.Capabilities!,
-            capability => capability == ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV1);
+            capability => capability == ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV2);
 
         var projected = ReleaseManifestPlanProjector.Project(admission, CreatePlan());
         var component = Assert.Single(projected.Topology.Components);
         Assert.Contains(
             component.Capabilities,
-            capability => capability == ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV1);
+            capability => capability == ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV2);
         Assert.Equal(selectedImage.Reference, component.Image.Reference);
         Assert.Equal(selectedImage.IndexDigest, component.Image.Digest);
         Assert.DoesNotContain("artifactReference", JsonSerializer.Serialize(admission));
@@ -1085,8 +1085,8 @@ public sealed class ReleaseManifestAdmissionTests
                 continue;
 
             var capabilities = distributionCapabilities;
-            if (!capabilities.Any(capability => string.Equals(capability?.GetValue<string>(), ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV1, StringComparison.Ordinal)))
-                capabilities.Add(ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV1);
+            if (!capabilities.Any(capability => string.Equals(capability?.GetValue<string>(), ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV2, StringComparison.Ordinal)))
+                capabilities.Add(ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV2);
 
             foreach (var imageNode in distributionObject["images"]!.AsObject().Select(property => property.Value))
             {
@@ -1097,7 +1097,7 @@ public sealed class ReleaseManifestAdmissionTests
                 {
                     new JsonObject
                     {
-                        ["capability"] = ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV1,
+                        ["capability"] = ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV2,
                         ["elsaVersionRange"] = ManagedHandoffVersionRange(releaseLine),
                         ["artifactReference"] = reference,
                         ["artifactDigest"] = digest

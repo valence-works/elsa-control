@@ -2592,7 +2592,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             $"managedHandoffControlBaseUrl={handoff.ControlBaseUrl}",
             $"managedHandoffControlContinuationUrl={handoff.ControlContinuationUrl}",
             $"managedHandoffRuntimeMaximumLifetime={handoff.RuntimeMaximumLifetimeValue}",
-            $"managedHandoffRuntimePermissions={JsonSerializer.Serialize(handoff.RuntimePermissions)}"
+            $"managedHandoffAllowedRuntimePermissions={JsonSerializer.Serialize(handoff.AllowedRuntimePermissions)}"
         ];
     }
 
