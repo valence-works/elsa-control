@@ -303,6 +303,8 @@ public static class ExternalEngineConnectionEndpoints
             ToResponse(value.Connection),
             new ExternalEngineEnrollmentResponse(
                 value.Enrollment.ChallengeId,
+                value.Enrollment.OrganizationId,
+                value.Enrollment.WorkspaceId,
                 value.Enrollment.ConnectionId,
                 value.Enrollment.Purpose,
                 value.Enrollment.Audience,
