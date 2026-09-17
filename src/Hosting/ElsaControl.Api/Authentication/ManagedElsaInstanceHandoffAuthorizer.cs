@@ -40,7 +40,8 @@ public sealed class ManagedElsaInstanceHandoffAuthorizer(
             target.CallbackUri,
             request.CodeChallenge,
             new HashSet<string>([ManagedElsaHandoffDefaults.RuntimeSessionScope], StringComparer.Ordinal),
-            target.BindingVersion);
+            target.BindingVersion,
+            ManagedElsaRuntimePermissionMapping.For(access));
     }
 
     public async ValueTask<bool> IsStillAuthorizedAsync(
@@ -59,6 +60,8 @@ public sealed class ManagedElsaInstanceHandoffAuthorizer(
             return false;
 
         var effective = await permissions.GetEffectivePermissionsAsync(target.WorkspaceId, access.AccountId, cancellationToken);
-        return effective.Has(ManagedElsaInstancePermissions.Open);
+        var currentRuntimePermissions = ManagedElsaRuntimePermissionMapping.For(access);
+        return effective.Has(ManagedElsaInstancePermissions.Open) &&
+               claims.RuntimePermissions.All(currentRuntimePermissions.Contains);
     }
 }

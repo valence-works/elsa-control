@@ -939,7 +939,7 @@ internal static class ProducerReleaseManifestMapper
         List<ReleaseManifestAdmissionFinding> findings)
     {
         var hasManagedHandoff = capabilities.Contains(
-            ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV1,
+            ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV2,
             StringComparer.Ordinal);
         var hasServerRuntime = runtimeKinds.Contains("elsa.server", StringComparer.OrdinalIgnoreCase);
         var hasIntegrations = image.TryGetProperty("integrations", out var integrations);
@@ -978,7 +978,7 @@ internal static class ProducerReleaseManifestMapper
                 continue;
             }
 
-            if (!string.Equals(capability.GetString(), ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV1, StringComparison.Ordinal))
+            if (!string.Equals(capability.GetString(), ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV2, StringComparison.Ordinal))
             {
                 Add(findings, "integration.capability.unsupported", "The runtime integration capability is not supported.", "image.integrations");
                 continue;

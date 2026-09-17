@@ -11,7 +11,7 @@ public sealed record AzureWorkloadTarget(string WorkloadName, string Location);
 /// Deterministic, secret-safe intent consumed by the Azure Bicep lifecycle adapter.
 /// It deliberately describes inputs rather than Azure resource shape.
 /// <see cref="ManagedHandoff"/> is true when this deployment configures the runtime's managed Elsa handoff:
-/// the admitted release declares <c>managed-elsa-handoff-v1</c> and the workload runs as exactly one replica,
+/// the admitted release declares <c>managed-elsa-handoff-v2</c> and the workload runs as exactly one replica,
 /// which the runtime's in-process handoff state and session store require.
 /// </summary>
 public sealed record AzureWorkloadPlan(

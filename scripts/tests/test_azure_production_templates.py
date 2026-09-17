@@ -115,7 +115,7 @@ class AzureProductionTemplateTests(unittest.TestCase):
         for parameter in HANDOFF_STRING_PARAMETERS:
             self.assertRegex(main, rf"(?m)^param\s+{parameter}\s+string\s*=\s*''$")
             self.assertRegex(main, rf"(?m)^\s+{parameter}: {parameter}$")
-        self.assertRegex(main, r"(?m)^param\s+managedHandoffRuntimePermissions\s+array\s*=\s*\[\]$")
+        self.assertRegex(main, r"(?m)^param\s+managedHandoffAllowedRuntimePermissions\s+array\s*=\s*\[\]$")
         # The callback is never a caller input: it is the external app origin on the environment's default domain.
         self.assertNotRegex(main, r"(?m)^param\s+managedHandoffCallbackUri\b")
         self.assertIn("'${workloadPublicBaseUrl}/managed-elsa/handoff/callback'", main)
@@ -139,7 +139,7 @@ class AzureProductionTemplateTests(unittest.TestCase):
             ("ASPNETCORE_FORWARDEDHEADERS_ENABLED", "'true'"),
         ):
             self.assertRegex(app, rf"name: '{name}'\s+value: {re.escape(value)}\n", name)
-        self.assertIn("name: 'ManagedElsa__Handoff__RuntimePermissions__${index}'", app)
+        self.assertIn("name: 'ManagedElsa__Handoff__AllowedRuntimePermissions__${index}'", app)
         self.assertRegex(app, r"disabled: \[\s*\{\s*name: 'ManagedElsa__Handoff__Enabled'\s+value: 'false'")
         self.assertRegex(app, r"enabled: concat\(\[\s*\{\s*name: 'ManagedElsa__Handoff__Enabled'\s+value: 'true'")
         # No 'invalid' entry: an enabled handoff with a missing input or more than one replica fails the deployment.
@@ -149,7 +149,7 @@ class AzureProductionTemplateTests(unittest.TestCase):
         )
         self.assertIn("}[managedHandoffMode]", app)
         self.assertNotRegex(app, r"(?m)^\s+invalid:")
-        for parameter in (*HANDOFF_STRING_PARAMETERS, "managedHandoffCallbackUri", "managedHandoffRuntimePermissions"):
+        for parameter in (*HANDOFF_STRING_PARAMETERS, "managedHandoffCallbackUri", "managedHandoffAllowedRuntimePermissions"):
             self.assertIn(f"!empty({parameter})", app)
         self.assertIn("concat(nuplaneFeedEnvironment, featureEnvironment, managedHandoffEnvironment)", app)
 
@@ -161,7 +161,7 @@ class AzureProductionTemplateTests(unittest.TestCase):
         control = parameters["managedHandoffControlBaseUrl"]["value"]
         self.assertEqual(f"{control}/admin/runtimes", parameters["managedHandoffControlContinuationUrl"]["value"])
         self.assertEqual("08:00:00", parameters["managedHandoffRuntimeMaximumLifetime"]["value"])
-        self.assertEqual(["*"], parameters["managedHandoffRuntimePermissions"]["value"])
+        self.assertEqual(["read:diagnostics:structured-logs"], parameters["managedHandoffAllowedRuntimePermissions"]["value"])
         self.assertNotIn("managedHandoffCallbackUri", parameters)
 
     def test_runtime_admin_identity_is_required_and_secret_safe(self) -> None:
@@ -227,7 +227,7 @@ class AzureProductionTemplateTests(unittest.TestCase):
             if template == MAIN:
                 compiled = json.loads(result.stdout)["parameters"]
                 self.assertEqual({"type": "bool"}, {key: value for key, value in compiled["managedHandoffEnabled"].items() if key != "metadata"})
-                self.assertEqual("array", compiled["managedHandoffRuntimePermissions"]["type"])
+                self.assertEqual("array", compiled["managedHandoffAllowedRuntimePermissions"]["type"])
                 for parameter in HANDOFF_STRING_PARAMETERS:
                     self.assertEqual(("string", ""), (compiled[parameter]["type"], compiled[parameter]["defaultValue"]))
 

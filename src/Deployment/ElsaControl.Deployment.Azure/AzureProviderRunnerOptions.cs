@@ -60,7 +60,7 @@ public sealed record AzureProviderTargetScope(
 }
 
 /// <summary>
-/// Control-owned inputs for the runtime's managed Elsa handoff (<c>managed-elsa-handoff-v1</c>): the Control
+/// Control-owned inputs for the runtime's managed Elsa handoff (<c>managed-elsa-handoff-v2</c>): the Control
 /// origin the runtime redeems codes at, the console route it returns the browser to, the runtime-session ceiling
 /// Control enforces and the runtime grant of a handed-off operator. The host derives them from Control's own
 /// configuration. They are bound into the provider scope fingerprint, so an admitted operation cannot deploy a
@@ -70,7 +70,7 @@ public sealed record AzureManagedHandoffOptions(
     string ControlBaseUrl,
     string ControlContinuationUrl,
     TimeSpan RuntimeMaximumLifetime,
-    IReadOnlyList<string> RuntimePermissions)
+    IReadOnlyList<string> AllowedRuntimePermissions)
 {
     /// <summary>The runtime rejects a longer session ceiling at startup.</summary>
     public static readonly TimeSpan MaximumRuntimeLifetime = TimeSpan.FromHours(8);
@@ -90,11 +90,12 @@ public sealed record AzureManagedHandoffOptions(
         if (RuntimeMaximumLifetime <= TimeSpan.Zero || RuntimeMaximumLifetime > MaximumRuntimeLifetime ||
             RuntimeMaximumLifetime.Ticks % TimeSpan.TicksPerSecond != 0)
             throw new ArgumentOutOfRangeException(nameof(RuntimeMaximumLifetime), "The runtime session ceiling must be whole seconds, positive and at most eight hours.");
-        if (RuntimePermissions is not { Count: > 0 and <= 32 } ||
-            RuntimePermissions.Distinct(StringComparer.Ordinal).Count() != RuntimePermissions.Count ||
-            RuntimePermissions.Any(permission => string.IsNullOrWhiteSpace(permission) || permission.Length > 128 ||
-                                                 permission.Any(character => char.IsControl(character) || char.IsWhiteSpace(character) || character is ',' or '"')))
-            throw new ArgumentException("The runtime grant must be one to 32 distinct, safe permission names.", nameof(RuntimePermissions));
+        if (AllowedRuntimePermissions is not { Count: > 0 and <= 32 } ||
+            AllowedRuntimePermissions.Distinct(StringComparer.Ordinal).Count() != AllowedRuntimePermissions.Count ||
+            AllowedRuntimePermissions.Any(permission => string.IsNullOrWhiteSpace(permission) || permission.Length > 128 ||
+                                                 permission.Any(character => char.IsControl(character) || char.IsWhiteSpace(character) || character is ',' or '"')) ||
+            AllowedRuntimePermissions.Any(permission => !string.Equals(permission, "read:diagnostics:structured-logs", StringComparison.Ordinal)))
+            throw new ArgumentException("The runtime allowlist must contain only supported, distinct permission names.", nameof(AllowedRuntimePermissions));
     }
 
     private static bool TryGetHttpsUri(string? value, out Uri uri)
@@ -207,8 +208,8 @@ public sealed record AzureProviderRunnerOptions
             writer.WriteString("controlBaseUrl", handoff.ControlBaseUrl);
             writer.WriteString("controlContinuationUrl", handoff.ControlContinuationUrl);
             writer.WriteString("runtimeMaximumLifetime", handoff.RuntimeMaximumLifetimeValue);
-            writer.WriteStartArray("runtimePermissions");
-            foreach (var permission in handoff.RuntimePermissions)
+            writer.WriteStartArray("allowedRuntimePermissions");
+            foreach (var permission in handoff.AllowedRuntimePermissions)
                 writer.WriteStringValue(permission);
             writer.WriteEndArray();
             writer.WriteEndObject();

@@ -41,7 +41,7 @@ before capacity existed restores without it and cannot deploy a workload.
 
 The console's Open action lands on the runtime's own `/managed-elsa/handoff/start`, which the
 runtime maps only when its handoff is configured. The translator sets `ManagedHandoff` when the
-selected image declares the exact `managed-elsa-handoff-v1` capability and the workload runs as a
+selected image declares the exact `managed-elsa-handoff-v2` capability and the workload runs as a
 single replica (the runtime keeps handoff state and sessions in process). The flag is part of the plan
 fingerprint (`azure-workload-plan/v3`) and of the persisted operation and its request hash, so a restarted
 worker configures exactly what was admitted. Operations retained before it existed restore with it off.

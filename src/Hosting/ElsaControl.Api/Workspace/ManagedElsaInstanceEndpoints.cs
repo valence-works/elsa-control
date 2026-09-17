@@ -607,7 +607,7 @@ public static class ManagedElsaInstanceEndpoints
             ? candidate
             : null;
         // Open lands on the runtime's own handoff endpoint, which exists only when the provider configured the
-        // current deployment for it (a release declaring managed-elsa-handoff-v1, deployed with Control's inputs).
+        // current deployment for it (a release declaring managed-elsa-handoff-v2, deployed with Control's inputs).
         var handoffConfigured = instance.CurrentDeploymentReference?.ManagedHandoff == true;
         var openable = canOpen && healthy && handoffConfigured && currentIdentity is not null;
         return new ManagedElsaInstanceResponse(instance.OrganizationId, instance.Id, instance.Name, instance.Slug,
