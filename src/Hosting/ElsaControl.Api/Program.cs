@@ -296,6 +296,8 @@ builder.Services.AddScoped<IExternalEngineEnrollmentAuditStore>(services =>
 builder.Services.AddScoped<IExternalEngineConnectorProofNonceStore>(services =>
     services.GetRequiredService<EfCoreExternalEngineEnrollmentStore>());
 builder.Services.AddScoped<ExternalEngineEnrollmentService>();
+builder.Services.AddScoped<IExternalEngineConnectionStore, EfCoreExternalEngineConnectionStore>();
+builder.Services.AddScoped<ExternalEngineConnectionService>();
 builder.Services.AddScoped<IManagedElsaInstanceCatalog, EfCoreManagedElsaInstanceCatalog>();
 builder.Services.AddScoped<EfCoreManagedElsaInstanceIdentityStore>();
 builder.Services.AddScoped<IManagedElsaInstanceIdentityStore>(services => new ControlHandoffGatedIdentityStore(
@@ -725,6 +727,7 @@ app.MapWorkspaceReleaseCatalogEndpoints();
 app.MapWorkspaceBuilderEndpoints();
 app.MapWorkspaceRuntimeConfigurationEndpoints();
 app.MapWorkspaceDeploymentEndpoints();
+app.MapExternalEngineConnectionEndpoints();
 app.MapEngineProvisioningEndpoints();
 app.MapEngineProvisioningWorkflowEndpoints();
 app.MapManagedElsaInstanceEndpoints();

@@ -98,6 +98,9 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     internal DbSet<Models.ExternalEngineConnectorIdentityEntity> ExternalEngineConnectorIdentities => Set<Models.ExternalEngineConnectorIdentityEntity>();
     internal DbSet<Models.ExternalEngineConnectorProofNonceEntity> ExternalEngineConnectorProofNonces => Set<Models.ExternalEngineConnectorProofNonceEntity>();
     internal DbSet<Models.ExternalEngineEnrollmentAuditEventEntity> ExternalEngineEnrollmentAuditEvents => Set<Models.ExternalEngineEnrollmentAuditEventEntity>();
+    internal DbSet<Models.ExternalEngineConnectionEntity> ExternalEngineConnections => Set<Models.ExternalEngineConnectionEntity>();
+    internal DbSet<Models.ExternalEngineConnectionCapabilityEntity> ExternalEngineConnectionCapabilities => Set<Models.ExternalEngineConnectionCapabilityEntity>();
+    internal DbSet<Models.ExternalEngineConnectionAuditEventEntity> ExternalEngineConnectionAuditEvents => Set<Models.ExternalEngineConnectionAuditEventEntity>();
     internal DbSet<Models.GovernedReleaseCatalogEntity> GovernedReleaseCatalog => Set<Models.GovernedReleaseCatalogEntity>();
     internal DbSet<Models.GovernedReleaseCatalogPackageDeclarationEntity> GovernedReleaseCatalogPackageDeclarations => Set<Models.GovernedReleaseCatalogPackageDeclarationEntity>();
     internal DbSet<Models.GovernedReleaseCatalogTopologyEntity> GovernedReleaseCatalogTopologies => Set<Models.GovernedReleaseCatalogTopologyEntity>();
@@ -192,6 +195,9 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         modelBuilder.ApplyConfiguration(new Models.ExternalEngineConnectorIdentityConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ExternalEngineConnectorProofNonceConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ExternalEngineEnrollmentAuditEventConfiguration());
+        modelBuilder.ApplyConfiguration(new Models.ExternalEngineConnectionConfiguration());
+        modelBuilder.ApplyConfiguration(new Models.ExternalEngineConnectionCapabilityConfiguration());
+        modelBuilder.ApplyConfiguration(new Models.ExternalEngineConnectionAuditEventConfiguration());
         modelBuilder.ApplyConfiguration(new Models.GovernedReleaseCatalogConfiguration());
         modelBuilder.ApplyConfiguration(new Models.GovernedReleaseCatalogPackageDeclarationConfiguration());
         modelBuilder.ApplyConfiguration(new Models.GovernedReleaseCatalogTopologyConfiguration());
@@ -272,6 +278,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             EnsureElsaInstanceRecoveryRequestsAreAppendOnly();
             EnsureManagedElsaHandoffRowsAreAppendOnly();
             EnsureExternalEngineEnrollmentAuditIsAppendOnly();
+            EnsureExternalEngineConnectionAuditIsAppendOnly();
             EnsureBillingProviderEventsAreAppendOnly();
             EnsureBillingLifecycleNoticesAreAppendOnly();
             EnsureBillingCleanupsAreNotDeleted();
@@ -710,6 +717,13 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         if (ChangeTracker.Entries<Models.ExternalEngineEnrollmentAuditEventEntity>()
             .Any(x => x.State is EntityState.Modified or EntityState.Deleted))
             throw new InvalidOperationException("External engine enrollment audit events are append-only.");
+    }
+
+    private void EnsureExternalEngineConnectionAuditIsAppendOnly()
+    {
+        if (ChangeTracker.Entries<Models.ExternalEngineConnectionAuditEventEntity>()
+            .Any(x => x.State is EntityState.Modified or EntityState.Deleted))
+            throw new InvalidOperationException("External engine connection audit events are append-only.");
     }
 
     private void ValidateManagedElsaHandoffRows()

@@ -71,14 +71,48 @@ public sealed class CloudBffAuthorizationTests
         Assert.Equal([
             "GET /api/me/organizations",
             "GET /api/me/workspaces",
+            "GET /api/workspaces/{workspaceId:guid}/external-engine-connections/",
+            "GET /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}",
+            "GET /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/pairing",
             "GET /api/workspaces/{workspaceId:guid}/instances/",
             "GET /api/workspaces/{workspaceId:guid}/instances/onboarding-options",
             "PATCH /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}",
             "POST /api/cloud/bootstrap",
             "POST /api/managed-elsa/handoff/issue",
             "POST /api/organizations/{organizationId:guid}/billing/prepare-hosted-trial",
+            "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/",
+            "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/disconnect",
+            "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/repair",
             "POST /api/workspaces/{workspaceId:guid}/instances/"
         ], allowed);
+    }
+
+    [Fact]
+    public async Task Bff_can_pair_through_the_narrow_customer_route_but_cannot_call_runtime_routes()
+    {
+        await using var app = CreateBffApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateBffClient(app);
+        var workspaceId = (await client.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces"))!
+            .Workspaces.Single().Id;
+        using var request = new HttpRequestMessage(HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/external-engine-connections")
+        {
+            Content = JsonContent.Create(new CreateExternalEngineConnectionRequest("Customer engine"),
+                options: ControlApiTestApplication.JsonOptions)
+        };
+        request.Headers.Add("Idempotency-Key", "bff-pairing");
+
+        using var pairing = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Created, pairing.StatusCode);
+        var result = await pairing.Content.ReadControlJsonAsync<ExternalEnginePairingAttemptResponse>();
+        Assert.NotNull(result);
+
+        using var runtime = await client.PostAsJsonAsync(
+            $"/api/runtime/external-engine-connections/{result.Connection.Id:D}/authenticate",
+            new { }, ControlApiTestApplication.JsonOptions);
+        Assert.Equal(HttpStatusCode.Forbidden, runtime.StatusCode);
+        Assert.Contains("cloud-bff.denied", await runtime.Content.ReadAsStringAsync(), StringComparison.Ordinal);
     }
 
     [Theory]
