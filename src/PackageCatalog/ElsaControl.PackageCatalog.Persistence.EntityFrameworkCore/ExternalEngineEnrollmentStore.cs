@@ -99,39 +99,78 @@ public sealed class EfCoreExternalEngineEnrollmentStore(CatalogDbContext dbConte
                     if (failure is not null)
                         return await RejectAsync(expectedChallenge, identity.Id, failure.Value, normalizedRedeemedAt, cancellationToken);
 
-                    if (await dbContext.ExternalEngineConnectorIdentities.AnyAsync(
-                            x => x.OrganizationId == identity.OrganizationId
-                                 && x.WorkspaceId == identity.WorkspaceId
-                                 && x.ConnectionId == identity.ConnectionId,
-                            cancellationToken))
+                    var existingIdentity = await dbContext.ExternalEngineConnectorIdentities.SingleOrDefaultAsync(
+                        x => x.OrganizationId == identity.OrganizationId
+                             && x.WorkspaceId == identity.WorkspaceId
+                             && x.ConnectionId == identity.ConnectionId,
+                        cancellationToken);
+                    if (existingIdentity is not null && existingIdentity.RevokedAt is null)
                         return await RejectAsync(
                             expectedChallenge,
                             identity.Id,
                             ExternalEngineEnrollmentStoreRedeemFailure.AlreadyEnrolled,
                             normalizedRedeemedAt,
                             cancellationToken);
+                    if (existingIdentity?.RevokedAt is { } revokedAt && challenge!.IssuedAt <= revokedAt)
+                        return await RejectAsync(
+                            expectedChallenge,
+                            identity.Id,
+                            ExternalEngineEnrollmentStoreRedeemFailure.PredatesRevocation,
+                            normalizedRedeemedAt,
+                            cancellationToken);
 
                     challenge!.RedeemedAt = normalizedRedeemedAt;
-                    dbContext.ExternalEngineConnectorIdentities.Add(ToEntity(identity));
+                    ExternalEngineConnectorIdentity storedIdentity;
+                    if (existingIdentity is null)
+                    {
+                        dbContext.ExternalEngineConnectorIdentities.Add(ToEntity(identity));
+                        storedIdentity = identity;
+                    }
+                    else
+                    {
+                        existingIdentity.KeyVersion = checked(existingIdentity.KeyVersion + 1);
+                        existingIdentity.PublicKey = identity.PublicKey;
+                        existingIdentity.PublicKeyThumbprint = identity.PublicKeyThumbprint;
+                        existingIdentity.EnrolledAt = normalizedRedeemedAt;
+                        existingIdentity.PreviousKeyVersion = null;
+                        existingIdentity.PreviousPublicKey = null;
+                        existingIdentity.PreviousPublicKeyThumbprint = null;
+                        existingIdentity.PreviousKeyValidUntil = null;
+                        existingIdentity.RotatedAt = null;
+                        existingIdentity.RevokedAt = null;
+                        storedIdentity = ToDomain(existingIdentity);
+                        AddAudit(
+                            identity.OrganizationId,
+                            identity.WorkspaceId,
+                            identity.ConnectionId,
+                            expectedChallenge.Id,
+                            existingIdentity.Id,
+                            ExternalEngineEnrollmentAuditAction.IdentityRepaired,
+                            ExternalEngineEnrollmentAuditReason.None,
+                            normalizedRedeemedAt);
+                    }
                     AddAudit(
-                        identity.OrganizationId,
-                        identity.WorkspaceId,
-                        identity.ConnectionId,
+                        storedIdentity.OrganizationId,
+                        storedIdentity.WorkspaceId,
+                        storedIdentity.ConnectionId,
                         expectedChallenge.Id,
-                        identity.Id,
+                        storedIdentity.Id,
                         ExternalEngineEnrollmentAuditAction.RedemptionSucceeded,
                         ExternalEngineEnrollmentAuditReason.None,
                         normalizedRedeemedAt);
                     await dbContext.SaveChangesAsync(cancellationToken);
-                    return ExternalEngineEnrollmentStoreRedeemResult.Success(identity);
+                    return ExternalEngineEnrollmentStoreRedeemResult.Success(storedIdentity);
                 },
                 async (result, attemptCancellationToken) =>
                     result.Succeeded
                     && await dbContext.ExternalEngineConnectorIdentities.AsNoTracking().AnyAsync(
-                        x => x.OrganizationId == identity.OrganizationId
-                             && x.WorkspaceId == identity.WorkspaceId
-                             && x.ConnectionId == identity.ConnectionId
-                             && x.Id == identity.Id,
+                        x => x.OrganizationId == result.Identity!.OrganizationId
+                             && x.WorkspaceId == result.Identity.WorkspaceId
+                             && x.ConnectionId == result.Identity.ConnectionId
+                             && x.Id == result.Identity.Id
+                             && x.KeyVersion == result.Identity.KeyVersion
+                             && x.PublicKeyThumbprint == result.Identity.PublicKeyThumbprint
+                             && x.RevokedAt == null,
                         attemptCancellationToken),
                 cancellationToken);
         }
@@ -163,6 +202,145 @@ public sealed class EfCoreExternalEngineEnrollmentStore(CatalogDbContext dbConte
         return entity is null ? null : ToDomain(entity);
     }
 
+    public async Task<ExternalEngineConnectorIdentity?> TryRotateIdentityAsync(
+        ExternalEngineConnectorIdentity expectedIdentity,
+        string newPublicKey,
+        string newPublicKeyThumbprint,
+        DateTimeOffset rotatedAt,
+        DateTimeOffset previousKeyValidUntil,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(expectedIdentity);
+        var normalizedRotatedAt = rotatedAt.ToUniversalTime();
+        var normalizedPreviousKeyValidUntil = previousKeyValidUntil.ToUniversalTime();
+        if (normalizedPreviousKeyValidUntil <= normalizedRotatedAt
+            || normalizedPreviousKeyValidUntil - normalizedRotatedAt > ExternalEngineEnrollmentDefaults.MaximumRotationOverlap)
+            throw new ArgumentException("Connector key overlap is invalid.", nameof(previousKeyValidUntil));
+        var candidate = expectedIdentity with
+        {
+            KeyVersion = checked(expectedIdentity.KeyVersion + 1),
+            PublicKey = newPublicKey,
+            PublicKeyThumbprint = newPublicKeyThumbprint,
+            PreviousKeyVersion = expectedIdentity.KeyVersion,
+            PreviousPublicKey = expectedIdentity.PublicKey,
+            PreviousPublicKeyThumbprint = expectedIdentity.PublicKeyThumbprint,
+            PreviousKeyValidUntil = normalizedPreviousKeyValidUntil,
+            RotatedAt = normalizedRotatedAt
+        };
+        ValidateIdentity(candidate);
+
+        try
+        {
+            return await dbContext.ExecuteInTransactionAsync(
+                IsolationLevel.Serializable,
+                async () =>
+                {
+                    var entity = await dbContext.ExternalEngineConnectorIdentities.SingleOrDefaultAsync(
+                        x => x.OrganizationId == expectedIdentity.OrganizationId
+                             && x.WorkspaceId == expectedIdentity.WorkspaceId
+                             && x.ConnectionId == expectedIdentity.ConnectionId
+                             && x.Id == expectedIdentity.Id
+                             && x.PublicKeyThumbprint == expectedIdentity.PublicKeyThumbprint,
+                        cancellationToken);
+                    if (entity is null || entity.RevokedAt is not null
+                        || entity.KeyVersion != expectedIdentity.KeyVersion
+                        || entity.PreviousKeyValidUntil > normalizedRotatedAt)
+                        return null;
+
+                    entity.PreviousKeyVersion = entity.KeyVersion;
+                    entity.PreviousPublicKey = entity.PublicKey;
+                    entity.PreviousPublicKeyThumbprint = entity.PublicKeyThumbprint;
+                    entity.PreviousKeyValidUntil = normalizedPreviousKeyValidUntil;
+                    entity.KeyVersion = checked(entity.KeyVersion + 1);
+                    entity.PublicKey = newPublicKey;
+                    entity.PublicKeyThumbprint = newPublicKeyThumbprint;
+                    entity.RotatedAt = normalizedRotatedAt;
+                    AddAudit(
+                        entity.OrganizationId,
+                        entity.WorkspaceId,
+                        entity.ConnectionId,
+                        null,
+                        entity.Id,
+                        ExternalEngineEnrollmentAuditAction.KeyRotated,
+                        ExternalEngineEnrollmentAuditReason.None,
+                        normalizedRotatedAt);
+                    await dbContext.SaveChangesAsync(cancellationToken);
+                    return ToDomain(entity);
+                },
+                async (result, attemptCancellationToken) =>
+                    result is not null
+                    && await dbContext.ExternalEngineConnectorIdentities.AsNoTracking().AnyAsync(
+                        x => x.OrganizationId == result.OrganizationId
+                             && x.WorkspaceId == result.WorkspaceId
+                             && x.ConnectionId == result.ConnectionId
+                             && x.Id == result.Id
+                             && x.KeyVersion == result.KeyVersion
+                             && x.PublicKeyThumbprint == result.PublicKeyThumbprint,
+                        attemptCancellationToken),
+                cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            dbContext.ChangeTracker.Clear();
+            return null;
+        }
+    }
+
+    public async Task<bool> TryRevokeIdentityAsync(
+        ExternalEngineConnectorIdentity expectedIdentity,
+        DateTimeOffset revokedAt,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(expectedIdentity);
+        var normalizedRevokedAt = revokedAt.ToUniversalTime();
+        try
+        {
+            return await dbContext.ExecuteInTransactionAsync(
+                IsolationLevel.Serializable,
+                async () =>
+                {
+                    var entity = await dbContext.ExternalEngineConnectorIdentities.SingleOrDefaultAsync(
+                        x => x.OrganizationId == expectedIdentity.OrganizationId
+                             && x.WorkspaceId == expectedIdentity.WorkspaceId
+                             && x.ConnectionId == expectedIdentity.ConnectionId
+                             && x.Id == expectedIdentity.Id
+                             && x.PublicKeyThumbprint == expectedIdentity.PublicKeyThumbprint,
+                        cancellationToken);
+                    if (entity is null || entity.RevokedAt is not null || entity.KeyVersion != expectedIdentity.KeyVersion)
+                        return false;
+
+                    entity.RevokedAt = normalizedRevokedAt;
+                    AddAudit(
+                        entity.OrganizationId,
+                        entity.WorkspaceId,
+                        entity.ConnectionId,
+                        null,
+                        entity.Id,
+                        ExternalEngineEnrollmentAuditAction.IdentityRevoked,
+                        ExternalEngineEnrollmentAuditReason.None,
+                        normalizedRevokedAt);
+                    await dbContext.SaveChangesAsync(cancellationToken);
+                    return true;
+                },
+                async (result, attemptCancellationToken) =>
+                    result
+                    && await dbContext.ExternalEngineConnectorIdentities.AsNoTracking().AnyAsync(
+                        x => x.OrganizationId == expectedIdentity.OrganizationId
+                             && x.WorkspaceId == expectedIdentity.WorkspaceId
+                             && x.ConnectionId == expectedIdentity.ConnectionId
+                             && x.Id == expectedIdentity.Id
+                             && x.KeyVersion == expectedIdentity.KeyVersion
+                             && x.RevokedAt == normalizedRevokedAt,
+                        attemptCancellationToken),
+                cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            dbContext.ChangeTracker.Clear();
+            return false;
+        }
+    }
+
     public async Task RecordAsync(
         ExternalEngineEnrollmentAuditRecord audit,
         CancellationToken cancellationToken = default)
@@ -187,6 +365,21 @@ public sealed class EfCoreExternalEngineEnrollmentStore(CatalogDbContext dbConte
             if (!challengeExists)
                 return;
         }
+        else if (audit.Action == ExternalEngineEnrollmentAuditAction.ConnectorProofRejected)
+        {
+            if (audit.OrganizationId == Guid.Empty || audit.WorkspaceId == Guid.Empty
+                || audit.ConnectionId == Guid.Empty || audit.IdentityId is null)
+                return;
+
+            var identityExists = await dbContext.ExternalEngineConnectorIdentities.AsNoTracking().AnyAsync(
+                x => x.OrganizationId == audit.OrganizationId
+                     && x.WorkspaceId == audit.WorkspaceId
+                     && x.ConnectionId == audit.ConnectionId
+                     && x.Id == audit.IdentityId,
+                cancellationToken);
+            if (!identityExists)
+                return;
+        }
 
         dbContext.ExternalEngineEnrollmentAuditEvents.Add(ToEntity(audit));
         await dbContext.SaveChangesAsync(cancellationToken);
@@ -202,41 +395,65 @@ public sealed class EfCoreExternalEngineEnrollmentStore(CatalogDbContext dbConte
         if (nonce.Id == Guid.Empty || nonce.IdentityId == Guid.Empty || nonce.KeyVersion <= 0
             || nonce.IssuedAt >= nonce.ExpiresAt || nonce.ConsumedAt < nonce.IssuedAt || nonce.ConsumedAt >= nonce.ExpiresAt)
             throw new ArgumentException("Proof nonce metadata is invalid.", nameof(nonce));
-        if (!await dbContext.ExternalEngineConnectorIdentities.AsNoTracking().AnyAsync(
-                x => x.OrganizationId == nonce.OrganizationId
-                     && x.WorkspaceId == nonce.WorkspaceId
-                     && x.ConnectionId == nonce.ConnectionId
-                     && x.Id == nonce.IdentityId
-                     && x.KeyVersion == nonce.KeyVersion,
-                cancellationToken))
-            return false;
-        var entity = new ExternalEngineConnectorProofNonceEntity
-        {
-            Id = nonce.Id,
-            IdentityId = nonce.IdentityId,
-            OrganizationId = nonce.OrganizationId,
-            WorkspaceId = nonce.WorkspaceId,
-            ConnectionId = nonce.ConnectionId,
-            KeyVersion = nonce.KeyVersion,
-            NonceHash = nonce.NonceHash,
-            IssuedAt = nonce.IssuedAt.ToUniversalTime(),
-            ExpiresAt = nonce.ExpiresAt.ToUniversalTime(),
-            ConsumedAt = nonce.ConsumedAt.ToUniversalTime()
-        };
-        dbContext.ExternalEngineConnectorProofNonces.Add(entity);
-        AddAudit(
-            nonce.OrganizationId,
-            nonce.WorkspaceId,
-            nonce.ConnectionId,
-            null,
-            nonce.IdentityId,
-            ExternalEngineEnrollmentAuditAction.ProofNonceConsumed,
-            ExternalEngineEnrollmentAuditReason.None,
-            nonce.ConsumedAt);
         try
         {
-            await dbContext.SaveChangesAsync(cancellationToken);
-            return true;
+            return await dbContext.ExecuteInTransactionAsync(
+                IsolationLevel.Serializable,
+                async () =>
+                {
+                    await dbContext.ExternalEngineConnectorProofNonces
+                        .Where(x => x.ExpiresAt <= nonce.ConsumedAt)
+                        .ExecuteDeleteAsync(cancellationToken);
+
+                    var identityAcceptsKey = await dbContext.ExternalEngineConnectorIdentities.AsNoTracking().AnyAsync(
+                        x => x.OrganizationId == nonce.OrganizationId
+                             && x.WorkspaceId == nonce.WorkspaceId
+                             && x.ConnectionId == nonce.ConnectionId
+                             && x.Id == nonce.IdentityId
+                             && x.RevokedAt == null
+                             && (x.KeyVersion == nonce.KeyVersion
+                                 || x.PreviousKeyVersion == nonce.KeyVersion
+                                 && x.PreviousKeyValidUntil > nonce.ConsumedAt),
+                        cancellationToken);
+                    if (!identityAcceptsKey)
+                        return false;
+
+                    dbContext.ExternalEngineConnectorProofNonces.Add(new ExternalEngineConnectorProofNonceEntity
+                    {
+                        Id = nonce.Id,
+                        IdentityId = nonce.IdentityId,
+                        OrganizationId = nonce.OrganizationId,
+                        WorkspaceId = nonce.WorkspaceId,
+                        ConnectionId = nonce.ConnectionId,
+                        KeyVersion = nonce.KeyVersion,
+                        NonceHash = nonce.NonceHash,
+                        IssuedAt = nonce.IssuedAt.ToUniversalTime(),
+                        ExpiresAt = nonce.ExpiresAt.ToUniversalTime(),
+                        ConsumedAt = nonce.ConsumedAt.ToUniversalTime()
+                    });
+                    AddAudit(
+                        nonce.OrganizationId,
+                        nonce.WorkspaceId,
+                        nonce.ConnectionId,
+                        null,
+                        nonce.IdentityId,
+                        ExternalEngineEnrollmentAuditAction.ProofNonceConsumed,
+                        ExternalEngineEnrollmentAuditReason.None,
+                        nonce.ConsumedAt);
+                    await dbContext.SaveChangesAsync(cancellationToken);
+                    return true;
+                },
+                async (result, attemptCancellationToken) =>
+                    result
+                    && await dbContext.ExternalEngineConnectorProofNonces.AsNoTracking().AnyAsync(
+                        x => x.OrganizationId == nonce.OrganizationId
+                             && x.WorkspaceId == nonce.WorkspaceId
+                             && x.ConnectionId == nonce.ConnectionId
+                             && x.IdentityId == nonce.IdentityId
+                             && x.KeyVersion == nonce.KeyVersion
+                             && x.NonceHash == nonce.NonceHash,
+                        attemptCancellationToken),
+                cancellationToken);
         }
         catch (DbUpdateException exception) when (EfCoreDatabaseExceptionPolicy.IsUniqueViolation(exception))
         {
@@ -378,6 +595,24 @@ public sealed class EfCoreExternalEngineEnrollmentStore(CatalogDbContext dbConte
         var expectedThumbprint = ExternalEngineEnrollmentProtocol.PublicKeyThumbprint(identity.PublicKey);
         if (!FixedTimeEquals(expectedThumbprint, identity.PublicKeyThumbprint))
             throw new ArgumentException("Connector public-key thumbprint is invalid.", nameof(identity));
+
+        var hasPreviousKey = identity.PreviousKeyVersion is not null
+                             || identity.PreviousPublicKey is not null
+                             || identity.PreviousPublicKeyThumbprint is not null
+                             || identity.PreviousKeyValidUntil is not null;
+        if (hasPreviousKey
+            && (identity.PreviousKeyVersion is null or <= 0
+                || identity.PreviousKeyVersion >= identity.KeyVersion
+                || identity.PreviousPublicKey is null
+                || identity.PreviousPublicKeyThumbprint is null
+                || identity.PreviousKeyValidUntil is null))
+            throw new ArgumentException("Connector previous-key metadata is invalid.", nameof(identity));
+        if (identity.PreviousPublicKey is not null)
+        {
+            var expectedPreviousThumbprint = ExternalEngineEnrollmentProtocol.PublicKeyThumbprint(identity.PreviousPublicKey);
+            if (!FixedTimeEquals(expectedPreviousThumbprint, identity.PreviousPublicKeyThumbprint!))
+                throw new ArgumentException("Connector previous-key thumbprint is invalid.", nameof(identity));
+        }
     }
 
     private static ExternalEngineEnrollmentChallengeEntity ToEntity(ExternalEngineEnrollmentChallenge challenge) => new()
@@ -417,7 +652,13 @@ public sealed class EfCoreExternalEngineEnrollmentStore(CatalogDbContext dbConte
         KeyVersion = identity.KeyVersion,
         PublicKey = identity.PublicKey,
         PublicKeyThumbprint = identity.PublicKeyThumbprint,
-        EnrolledAt = identity.EnrolledAt.ToUniversalTime()
+        EnrolledAt = identity.EnrolledAt.ToUniversalTime(),
+        PreviousKeyVersion = identity.PreviousKeyVersion,
+        PreviousPublicKey = identity.PreviousPublicKey,
+        PreviousPublicKeyThumbprint = identity.PreviousPublicKeyThumbprint,
+        PreviousKeyValidUntil = identity.PreviousKeyValidUntil?.ToUniversalTime(),
+        RotatedAt = identity.RotatedAt?.ToUniversalTime(),
+        RevokedAt = identity.RevokedAt?.ToUniversalTime()
     };
 
     private static ExternalEngineConnectorIdentity ToDomain(ExternalEngineConnectorIdentityEntity identity) => new(
@@ -430,7 +671,13 @@ public sealed class EfCoreExternalEngineEnrollmentStore(CatalogDbContext dbConte
         identity.KeyVersion,
         identity.PublicKey,
         identity.PublicKeyThumbprint,
-        identity.EnrolledAt);
+        identity.EnrolledAt,
+        identity.PreviousKeyVersion,
+        identity.PreviousPublicKey,
+        identity.PreviousPublicKeyThumbprint,
+        identity.PreviousKeyValidUntil,
+        identity.RotatedAt,
+        identity.RevokedAt);
 
     private static ExternalEngineEnrollmentAuditEventEntity ToEntity(ExternalEngineEnrollmentAuditRecord audit) => new()
     {

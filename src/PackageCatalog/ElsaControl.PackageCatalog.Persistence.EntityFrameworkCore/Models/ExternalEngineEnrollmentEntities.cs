@@ -30,6 +30,12 @@ internal sealed class ExternalEngineConnectorIdentityEntity
     public string PublicKey { get; set; } = "";
     public string PublicKeyThumbprint { get; set; } = "";
     public DateTimeOffset EnrolledAt { get; set; }
+    public int? PreviousKeyVersion { get; set; }
+    public string? PreviousPublicKey { get; set; }
+    public string? PreviousPublicKeyThumbprint { get; set; }
+    public DateTimeOffset? PreviousKeyValidUntil { get; set; }
+    public DateTimeOffset? RotatedAt { get; set; }
+    public DateTimeOffset? RevokedAt { get; set; }
 }
 
 internal sealed class ExternalEngineConnectorProofNonceEntity
@@ -96,16 +102,26 @@ internal sealed class ExternalEngineConnectorIdentityConfiguration : IEntityType
     public void Configure(EntityTypeBuilder<ExternalEngineConnectorIdentityEntity> builder)
     {
         builder.ToTable("ExternalEngineConnectorIdentities", table =>
+        {
             table.HasCheckConstraint(
                 "CK_ExternalEngineConnectorIdentities_KeyVersion",
-                "KeyVersion > 0"));
+                "KeyVersion > 0");
+            table.HasCheckConstraint(
+                "CK_ExternalEngineConnectorIdentities_PreviousKey",
+                "(PreviousKeyVersion IS NULL AND PreviousPublicKey IS NULL AND PreviousPublicKeyThumbprint IS NULL AND PreviousKeyValidUntil IS NULL) OR (PreviousKeyVersion > 0 AND PreviousKeyVersion < KeyVersion AND PreviousPublicKey IS NOT NULL AND PreviousPublicKeyThumbprint IS NOT NULL AND PreviousKeyValidUntil IS NOT NULL)");
+        });
         builder.HasKey(x => x.Id);
         builder.Property(x => x.Audience).HasMaxLength(512).IsRequired();
         builder.Property(x => x.KeyAlgorithm).HasMaxLength(64).IsRequired();
-        builder.Property(x => x.KeyVersion).IsRequired();
+        builder.Property(x => x.KeyVersion).IsRequired().IsConcurrencyToken();
         builder.Property(x => x.PublicKey).HasMaxLength(128).IsRequired();
         builder.Property(x => x.PublicKeyThumbprint).HasMaxLength(64).IsRequired();
         builder.Property(x => x.EnrolledAt).HasUtcTicksConversion();
+        builder.Property(x => x.PreviousPublicKey).HasMaxLength(128);
+        builder.Property(x => x.PreviousPublicKeyThumbprint).HasMaxLength(64);
+        builder.Property(x => x.PreviousKeyValidUntil).HasNullableUtcTicksConversion();
+        builder.Property(x => x.RotatedAt).HasNullableUtcTicksConversion();
+        builder.Property(x => x.RevokedAt).HasNullableUtcTicksConversion().IsConcurrencyToken();
         builder.HasAlternateKey(x => new { x.OrganizationId, x.WorkspaceId, x.ConnectionId, x.Id });
         builder.HasIndex(x => new { x.OrganizationId, x.WorkspaceId, x.ConnectionId }).IsUnique();
         builder.HasIndex(x => new { x.OrganizationId, x.WorkspaceId, x.PublicKeyThumbprint }).IsUnique();
@@ -154,10 +170,10 @@ internal sealed class ExternalEngineEnrollmentAuditEventConfiguration : IEntityT
         {
             table.HasCheckConstraint(
                 "CK_ExternalEngineEnrollmentAuditEvents_Action",
-                "Action IN ('ChallengeIssued', 'RedemptionSucceeded', 'RedemptionRejected', 'ProofNonceConsumed')");
+                "Action IN ('ChallengeIssued', 'RedemptionSucceeded', 'RedemptionRejected', 'ProofNonceConsumed', 'ConnectorProofRejected', 'KeyRotated', 'IdentityRevoked', 'IdentityRepaired')");
             table.HasCheckConstraint(
                 "CK_ExternalEngineEnrollmentAuditEvents_Reason",
-                "Reason IN ('None', 'InvalidRequest', 'InvalidProof', 'Expired', 'Replay', 'AlreadyEnrolled')");
+                "Reason IN ('None', 'InvalidRequest', 'InvalidProof', 'Expired', 'Future', 'Replay', 'AlreadyEnrolled', 'ScopeMismatch', 'KeyVersionMismatch', 'Revoked')");
         });
         builder.HasKey(x => x.Id);
         builder.Property(x => x.Action).HasMaxLength(64).IsRequired();

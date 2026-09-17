@@ -15,6 +15,8 @@ public sealed class ExternalEngineEnrollmentPersistenceTests : IAsyncLifetime
 {
     private const string SqliteMigration = "20260917071227_AddExternalEngineEnrollmentPersistence";
     private const string SqlServerMigration = "20260917071238_AddExternalEngineEnrollmentPersistence";
+    private const string SqliteLifecycleMigration = "20260917075801_AddExternalEngineConnectorIdentityLifecycle";
+    private const string SqlServerLifecycleMigration = "20260917075811_AddExternalEngineConnectorIdentityLifecycle";
     private static readonly Guid OrganizationId = Guid.Parse("10000000-0000-0000-0000-000000000009");
     private static readonly Guid WorkspaceId = Guid.Parse("20000000-0000-0000-0000-000000000009");
     private static readonly Guid ConnectionId = Guid.Parse("30000000-0000-0000-0000-000000000009");
@@ -181,6 +183,30 @@ public sealed class ExternalEngineEnrollmentPersistenceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Consuming_a_proof_prunes_expired_nonce_markers()
+    {
+        await using var db = CreateDbContext();
+        var store = new EfCoreExternalEngineEnrollmentStore(db);
+        var service = new ExternalEngineEnrollmentService(store, new FixedTimeProvider(Now), store, store);
+        using var connectorKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var identity = (await service.RedeemAsync(Redemption(await service.IssueAsync(Request()), connectorKey))).Identity!;
+        var expired = new ExternalEngineConnectorProofNonce(
+            Guid.NewGuid(), identity.Id, OrganizationId, WorkspaceId, ConnectionId, identity.KeyVersion,
+            Digest("expired-proof-nonce"), Now, Now.AddSeconds(2), Now.AddSeconds(1));
+        var current = new ExternalEngineConnectorProofNonce(
+            Guid.NewGuid(), identity.Id, OrganizationId, WorkspaceId, ConnectionId, identity.KeyVersion,
+            Digest("current-proof-nonce"), Now.AddSeconds(2), Now.AddMinutes(2), Now.AddSeconds(3));
+
+        Assert.True(await store.TryConsumeAsync(expired));
+        db.ChangeTracker.Clear();
+        Assert.True(await store.TryConsumeAsync(current));
+        db.ChangeTracker.Clear();
+
+        var persisted = await db.ExternalEngineConnectorProofNonces.SingleAsync();
+        Assert.Equal(current.NonceHash, persisted.NonceHash);
+    }
+
+    [Fact]
     public async Task Audit_events_are_append_only_in_change_tracker_and_database()
     {
         await using var db = CreateDbContext();
@@ -223,6 +249,174 @@ public sealed class ExternalEngineEnrollmentPersistenceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Rotation_revocation_and_fresh_challenge_repair_are_durable()
+    {
+        await using var db = CreateDbContext();
+        var store = new EfCoreExternalEngineEnrollmentStore(db);
+        var service = new ExternalEngineEnrollmentService(store, new FixedTimeProvider(Now), store, store);
+        using var currentKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var nextKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var replacementKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var identity = (await service.RedeemAsync(Redemption(await service.IssueAsync(Request()), currentKey))).Identity!;
+        var overlap = TimeSpan.FromMinutes(2);
+        var nextPublicKey = ExternalEngineEnrollmentProtocol.ExportPublicKey(nextKey);
+        var rotation = SignProof(Proof(
+            identity,
+            ExternalEngineEnrollmentDefaults.RotationOperation,
+            ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap)), currentKey);
+
+        var rotated = await service.RotateConnectorKeyAsync(
+            new ExternalEngineConnectorKeyRotationRequest(rotation, nextPublicKey, overlap));
+        var revocation = SignProof(Proof(
+            rotated.Identity!,
+            ExternalEngineEnrollmentDefaults.RevocationOperation,
+            ExternalEngineEnrollmentProtocol.CreateRevocationPayloadDigest()), nextKey);
+        var revoked = await service.RevokeConnectorAsync(revocation);
+
+        Assert.True(rotated.Succeeded);
+        Assert.True(revoked.Succeeded);
+        db.ChangeTracker.Clear();
+        var persistedRevoked = await db.ExternalEngineConnectorIdentities.SingleAsync();
+        Assert.Equal(2, persistedRevoked.KeyVersion);
+        Assert.Equal(1, persistedRevoked.PreviousKeyVersion);
+        Assert.NotNull(persistedRevoked.RevokedAt);
+
+        var repairService = new ExternalEngineEnrollmentService(
+            store,
+            new FixedTimeProvider(Now.AddSeconds(1)),
+            store,
+            store);
+        var repaired = await repairService.RedeemAsync(
+            Redemption(await repairService.IssueAsync(Request()), replacementKey));
+
+        Assert.True(repaired.Succeeded);
+        Assert.Equal(identity.Id, repaired.Identity!.Id);
+        Assert.Equal(3, repaired.Identity.KeyVersion);
+        Assert.Null(repaired.Identity.PreviousKeyVersion);
+        Assert.Null(repaired.Identity.RevokedAt);
+        db.ChangeTracker.Clear();
+        var actions = await db.ExternalEngineEnrollmentAuditEvents.Select(x => x.Action).ToArrayAsync();
+        Assert.Contains(nameof(ExternalEngineEnrollmentAuditAction.KeyRotated), actions);
+        Assert.Contains(nameof(ExternalEngineEnrollmentAuditAction.IdentityRevoked), actions);
+        Assert.Contains(nameof(ExternalEngineEnrollmentAuditAction.IdentityRepaired), actions);
+    }
+
+    [Fact]
+    public async Task Repair_rejects_a_pairing_challenge_issued_before_revocation()
+    {
+        await using var db = CreateDbContext();
+        var store = new EfCoreExternalEngineEnrollmentStore(db);
+        var time = new AdjustableTimeProvider(Now);
+        var service = new ExternalEngineEnrollmentService(store, time, store, store);
+        using var currentKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var replacementKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var identity = (await service.RedeemAsync(Redemption(await service.IssueAsync(Request()), currentKey))).Identity!;
+        var preRevocationChallenge = await service.IssueAsync(Request());
+        time.Advance(TimeSpan.FromSeconds(1));
+
+        Assert.NotNull(await service.RevokeConnectorForRecoveryAsync(
+            identity.OrganizationId,
+            identity.WorkspaceId,
+            identity.ConnectionId,
+            identity.Id));
+        Assert.Equal(
+            ExternalEngineEnrollmentRedeemFailure.InvalidRequest,
+            (await service.RedeemAsync(Redemption(preRevocationChallenge, replacementKey))).Failure);
+
+        time.Advance(TimeSpan.FromSeconds(1));
+        var repaired = await service.RedeemAsync(Redemption(await service.IssueAsync(Request()), replacementKey));
+        Assert.True(repaired.Succeeded);
+        Assert.Equal(identity.KeyVersion + 1, repaired.Identity!.KeyVersion);
+    }
+
+    [Fact]
+    public async Task Concurrent_rotations_across_contexts_have_one_winner()
+    {
+        ExternalEngineConnectorIdentity identity;
+        using var currentKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        await using (var enrollmentDb = CreateDbContext())
+        {
+            var store = new EfCoreExternalEngineEnrollmentStore(enrollmentDb);
+            var service = new ExternalEngineEnrollmentService(store, new FixedTimeProvider(Now), store, store);
+            identity = (await service.RedeemAsync(Redemption(await service.IssueAsync(Request()), currentKey))).Identity!;
+        }
+
+        using var firstNextKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var secondNextKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var overlap = TimeSpan.FromMinutes(2);
+        var requests = new[] { firstNextKey, secondNextKey }.Select(nextKey =>
+        {
+            var publicKey = ExternalEngineEnrollmentProtocol.ExportPublicKey(nextKey);
+            var proof = SignProof(Proof(
+                identity,
+                ExternalEngineEnrollmentDefaults.RotationOperation,
+                ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(publicKey, overlap)), currentKey);
+            return new ExternalEngineConnectorKeyRotationRequest(proof, publicKey, overlap);
+        }).ToArray();
+
+        var results = await Task.WhenAll(requests.Select(RotateFromNewContextAsync));
+
+        Assert.Single(results, result => result.Succeeded);
+        Assert.Single(results, result => result.Failure is
+            ExternalEngineConnectorProofFailure.InvalidRequest or
+            ExternalEngineConnectorProofFailure.KeyVersionMismatch);
+        await using var verifyDb = CreateDbContext();
+        var persisted = await verifyDb.ExternalEngineConnectorIdentities.SingleAsync();
+        Assert.Equal(2, persisted.KeyVersion);
+        Assert.Equal(1, await verifyDb.ExternalEngineEnrollmentAuditEvents.CountAsync(
+            x => x.Action == nameof(ExternalEngineEnrollmentAuditAction.KeyRotated)));
+    }
+
+    [Fact]
+    public async Task Sqlite_downgrade_preserves_lifecycle_audit_rows_and_append_only_guards()
+    {
+        await using var db = CreateDbContext();
+        var store = new EfCoreExternalEngineEnrollmentStore(db);
+        var service = new ExternalEngineEnrollmentService(store, new FixedTimeProvider(Now), store, store);
+        using var currentKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var nextKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var identity = (await service.RedeemAsync(Redemption(await service.IssueAsync(Request()), currentKey))).Identity!;
+        var overlap = TimeSpan.FromMinutes(2);
+        var nextPublicKey = ExternalEngineEnrollmentProtocol.ExportPublicKey(nextKey);
+        var rotation = SignProof(Proof(
+            identity,
+            ExternalEngineEnrollmentDefaults.RotationOperation,
+            ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap)), currentKey);
+        Assert.True((await service.RotateConnectorKeyAsync(
+            new ExternalEngineConnectorKeyRotationRequest(rotation, nextPublicKey, overlap))).Succeeded);
+
+        db.ChangeTracker.Clear();
+        await db.GetService<IMigrator>().MigrateAsync(SqliteMigration);
+
+        Assert.Equal(1, await db.Database.SqlQueryRaw<int>(
+            "SELECT COUNT(*) AS Value FROM ExternalEngineEnrollmentAuditEvents WHERE Action = 'KeyRotated'").SingleAsync());
+        await Assert.ThrowsAsync<SqliteException>(() => db.Database.ExecuteSqlRawAsync(
+            "DELETE FROM ExternalEngineEnrollmentAuditEvents"));
+    }
+
+    [Fact]
+    public async Task Sqlite_downgrade_fails_closed_while_a_revoked_identity_exists()
+    {
+        await using var db = CreateDbContext();
+        var store = new EfCoreExternalEngineEnrollmentStore(db);
+        var service = new ExternalEngineEnrollmentService(store, new FixedTimeProvider(Now), store, store);
+        using var connectorKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var identity = (await service.RedeemAsync(Redemption(await service.IssueAsync(Request()), connectorKey))).Identity!;
+        Assert.NotNull(await service.RevokeConnectorForRecoveryAsync(
+            identity.OrganizationId,
+            identity.WorkspaceId,
+            identity.ConnectionId,
+            identity.Id));
+
+        db.ChangeTracker.Clear();
+        var failure = await Assert.ThrowsAsync<SqliteException>(
+            () => db.GetService<IMigrator>().MigrateAsync(SqliteMigration));
+
+        Assert.Contains("NoRevokedDowngrade", failure.Message, StringComparison.Ordinal);
+        Assert.Contains(SqliteLifecycleMigration, await db.Database.GetAppliedMigrationsAsync());
+    }
+
+    [Fact]
     public void Model_has_no_raw_bearer_or_private_key_fields()
     {
         using var db = CreateDbContext();
@@ -252,14 +446,23 @@ public sealed class ExternalEngineEnrollmentPersistenceTests : IAsyncLifetime
 
         Assert.Contains(SqliteMigration, sqlite.GetService<IMigrationsAssembly>().Migrations.Keys);
         Assert.Contains(SqlServerMigration, sqlServer.GetService<IMigrationsAssembly>().Migrations.Keys);
+        Assert.Contains(SqliteLifecycleMigration, sqlite.GetService<IMigrationsAssembly>().Migrations.Keys);
+        Assert.Contains(SqlServerLifecycleMigration, sqlServer.GetService<IMigrationsAssembly>().Migrations.Keys);
         Assert.False(sqlite.Database.HasPendingModelChanges());
         Assert.False(sqlServer.Database.HasPendingModelChanges());
         var script = sqlServer.GetService<IMigrator>().GenerateScript(
-            toMigration: SqlServerMigration,
+            toMigration: SqlServerLifecycleMigration,
             options: MigrationsSqlGenerationOptions.Idempotent);
         Assert.Contains("ExternalEngineEnrollmentChallenges", script, StringComparison.Ordinal);
         Assert.Contains("ExternalEngineConnectorIdentities", script, StringComparison.Ordinal);
+        Assert.Contains("PreviousKeyValidUntil", script, StringComparison.Ordinal);
         Assert.Contains("TR_ExternalEngineEnrollmentAuditEvents_AppendOnly", script, StringComparison.Ordinal);
+        var downgradeScript = sqlServer.GetService<IMigrator>().GenerateScript(
+            fromMigration: SqlServerLifecycleMigration,
+            toMigration: SqlServerMigration);
+        Assert.Contains("IdentityRepaired", downgradeScript, StringComparison.Ordinal);
+        Assert.Contains("Revoked", downgradeScript, StringComparison.Ordinal);
+        Assert.Contains("Cannot downgrade connector identity lifecycle while revoked identities exist", downgradeScript, StringComparison.Ordinal);
     }
 
     private async Task<ExternalEngineEnrollmentRedeemResult> RedeemFromNewContextAsync(
@@ -268,6 +471,15 @@ public sealed class ExternalEngineEnrollmentPersistenceTests : IAsyncLifetime
         await using var db = CreateDbContext();
         var store = new EfCoreExternalEngineEnrollmentStore(db);
         return await new ExternalEngineEnrollmentService(store, new FixedTimeProvider(Now), store).RedeemAsync(request);
+    }
+
+    private async Task<ExternalEngineConnectorKeyRotationResult> RotateFromNewContextAsync(
+        ExternalEngineConnectorKeyRotationRequest request)
+    {
+        await using var db = CreateDbContext();
+        var store = new EfCoreExternalEngineEnrollmentStore(db);
+        return await new ExternalEngineEnrollmentService(store, new FixedTimeProvider(Now), store, store)
+            .RotateConnectorKeyAsync(request);
     }
 
     private CatalogDbContext CreateDbContext() =>
@@ -317,11 +529,45 @@ public sealed class ExternalEngineEnrollmentPersistenceTests : IAsyncLifetime
         return unsigned with { Signature = ExternalEngineEnrollmentProtocol.Sign(key, payload) };
     }
 
+    private static ExternalEngineConnectorProof Proof(
+        ExternalEngineConnectorIdentity identity,
+        string operation,
+        string payloadDigest) =>
+        new(
+            identity.Id,
+            identity.OrganizationId,
+            identity.WorkspaceId,
+            identity.ConnectionId,
+            identity.Audience,
+            identity.KeyVersion,
+            operation,
+            payloadDigest,
+            Now,
+            ExternalEngineEnrollmentProtocol.Base64UrlEncode(RandomNumberGenerator.GetBytes(32)),
+            "");
+
+    private static ExternalEngineConnectorProof SignProof(ExternalEngineConnectorProof proof, ECDsa key) =>
+        proof with
+        {
+            Signature = ExternalEngineEnrollmentProtocol.Sign(
+                key,
+                ExternalEngineEnrollmentProtocol.CreateConnectorProofPayload(proof))
+        };
+
     private static string Digest(string value) =>
         ExternalEngineEnrollmentProtocol.Base64UrlEncode(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    private sealed class AdjustableTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        private DateTimeOffset _now = now;
+
+        public override DateTimeOffset GetUtcNow() => _now;
+
+        public void Advance(TimeSpan value) => _now = _now.Add(value);
     }
 }

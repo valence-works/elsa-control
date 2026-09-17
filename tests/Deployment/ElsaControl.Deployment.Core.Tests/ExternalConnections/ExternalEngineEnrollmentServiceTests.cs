@@ -274,6 +274,137 @@ public sealed class ExternalEngineEnrollmentServiceTests
     }
 
     [Fact]
+    public async Task Connector_proof_is_time_bounded_and_single_use()
+    {
+        var fixture = new Fixture();
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var identity = (await fixture.Service.RedeemAsync(Redemption(await fixture.Service.IssueAsync(Request()), key))).Identity!;
+        var valid = SignProof(Proof(identity), key);
+        var stale = SignProof(Proof(identity) with
+        {
+            IssuedAt = Now.Subtract(ExternalEngineEnrollmentDefaults.MaximumProofAge),
+            Nonce = Challenge()
+        }, key);
+        var future = SignProof(Proof(identity) with { IssuedAt = Now.AddSeconds(1), Nonce = Challenge() }, key);
+
+        var first = await fixture.Service.VerifyConnectorProofAsync(valid, valid.Operation, valid.PayloadDigest);
+        var replay = await fixture.Service.VerifyConnectorProofAsync(valid, valid.Operation, valid.PayloadDigest);
+
+        Assert.True(first.Succeeded);
+        Assert.Equal(ExternalEngineConnectorProofFailure.Replay, replay.Failure);
+        Assert.Equal(ExternalEngineConnectorProofFailure.Expired,
+            (await fixture.Service.VerifyConnectorProofAsync(stale, stale.Operation, stale.PayloadDigest)).Failure);
+        Assert.Equal(ExternalEngineConnectorProofFailure.Future,
+            (await fixture.Service.VerifyConnectorProofAsync(future, future.Operation, future.PayloadDigest)).Failure);
+    }
+
+    [Fact]
+    public async Task Rotation_accepts_the_previous_key_only_inside_the_bounded_overlap()
+    {
+        var fixture = new Fixture();
+        using var currentKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var nextKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var laterKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var identity = (await fixture.Service.RedeemAsync(Redemption(await fixture.Service.IssueAsync(Request()), currentKey))).Identity!;
+        var overlap = TimeSpan.FromMinutes(2);
+        var nextPublicKey = ExternalEngineEnrollmentProtocol.ExportPublicKey(nextKey);
+        var rotation = SignProof(Proof(identity) with
+        {
+            Operation = ExternalEngineEnrollmentDefaults.RotationOperation,
+            PayloadDigest = ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap)
+        }, currentKey);
+
+        var rotated = await fixture.Service.RotateConnectorKeyAsync(
+            new ExternalEngineConnectorKeyRotationRequest(rotation, nextPublicKey, overlap));
+
+        Assert.True(rotated.Succeeded);
+        Assert.Equal(2, rotated.Identity!.KeyVersion);
+        Assert.Equal(1, rotated.Identity.PreviousKeyVersion);
+
+        fixture.Time.Advance(overlap.Subtract(TimeSpan.FromMilliseconds(1)));
+        var oldBeforeExpiry = SignProof(Proof(identity) with
+        {
+            IssuedAt = fixture.Time.GetUtcNow(),
+            Nonce = Challenge()
+        }, currentKey);
+        Assert.True((await fixture.Service.VerifyConnectorProofAsync(
+            oldBeforeExpiry, oldBeforeExpiry.Operation, oldBeforeExpiry.PayloadDigest)).Succeeded);
+
+        var laterPublicKey = ExternalEngineEnrollmentProtocol.ExportPublicKey(laterKey);
+        var secondRotation = SignProof(Proof(rotated.Identity) with
+        {
+            IssuedAt = fixture.Time.GetUtcNow(),
+            Nonce = Challenge(),
+            Operation = ExternalEngineEnrollmentDefaults.RotationOperation,
+            PayloadDigest = ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(laterPublicKey, overlap)
+        }, nextKey);
+        Assert.Equal(
+            ExternalEngineConnectorProofFailure.InvalidRequest,
+            (await fixture.Service.RotateConnectorKeyAsync(
+                new ExternalEngineConnectorKeyRotationRequest(secondRotation, laterPublicKey, overlap))).Failure);
+
+        fixture.Time.Advance(TimeSpan.FromMilliseconds(1));
+        var oldAtExpiry = SignProof(Proof(identity) with
+        {
+            IssuedAt = fixture.Time.GetUtcNow(),
+            Nonce = Challenge()
+        }, currentKey);
+        Assert.Equal(
+            ExternalEngineConnectorProofFailure.KeyVersionMismatch,
+            (await fixture.Service.VerifyConnectorProofAsync(
+                oldAtExpiry, oldAtExpiry.Operation, oldAtExpiry.PayloadDigest)).Failure);
+
+        var current = SignProof(Proof(rotated.Identity) with
+        {
+            IssuedAt = fixture.Time.GetUtcNow(),
+            Nonce = Challenge()
+        }, nextKey);
+        Assert.True((await fixture.Service.VerifyConnectorProofAsync(
+            current, current.Operation, current.PayloadDigest)).Succeeded);
+    }
+
+    [Fact]
+    public async Task Revocation_is_immediate_and_recovery_requires_a_fresh_pairing_challenge()
+    {
+        var fixture = new Fixture();
+        using var lostKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var replacementKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var identity = (await fixture.Service.RedeemAsync(Redemption(await fixture.Service.IssueAsync(Request()), lostKey))).Identity!;
+        var preRevocationChallenge = await fixture.Service.IssueAsync(Request());
+        fixture.Time.Advance(TimeSpan.FromSeconds(1));
+        var revoked = await fixture.Service.RevokeConnectorForRecoveryAsync(
+            identity.OrganizationId,
+            identity.WorkspaceId,
+            identity.ConnectionId,
+            identity.Id);
+
+        Assert.NotNull(revoked?.RevokedAt);
+        Assert.Equal(
+            ExternalEngineEnrollmentRedeemFailure.InvalidRequest,
+            (await fixture.Service.RedeemAsync(Redemption(preRevocationChallenge, replacementKey))).Failure);
+        var afterRevocation = SignProof(Proof(identity) with { Nonce = Challenge() }, lostKey);
+        Assert.Equal(
+            ExternalEngineConnectorProofFailure.Revoked,
+            (await fixture.Service.VerifyConnectorProofAsync(
+                afterRevocation, afterRevocation.Operation, afterRevocation.PayloadDigest)).Failure);
+
+        fixture.Time.Advance(TimeSpan.FromSeconds(1));
+        var repaired = await fixture.Service.RedeemAsync(
+            Redemption(await fixture.Service.IssueAsync(Request()), replacementKey));
+
+        Assert.True(repaired.Succeeded);
+        Assert.Equal(identity.Id, repaired.Identity!.Id);
+        Assert.Equal(identity.KeyVersion + 1, repaired.Identity.KeyVersion);
+        Assert.Null(repaired.Identity.RevokedAt);
+        Assert.Null(repaired.Identity.PreviousPublicKey);
+        var oldKeyAfterRepair = SignProof(Proof(identity) with { Nonce = Challenge() }, lostKey);
+        Assert.Equal(
+            ExternalEngineConnectorProofFailure.KeyVersionMismatch,
+            (await fixture.Service.VerifyConnectorProofAsync(
+                oldKeyAfterRepair, oldKeyAfterRepair.Operation, oldKeyAfterRepair.PayloadDigest)).Failure);
+    }
+
+    [Fact]
     public void Canonical_payload_changes_when_any_security_binding_changes()
     {
         var identity = Identity();

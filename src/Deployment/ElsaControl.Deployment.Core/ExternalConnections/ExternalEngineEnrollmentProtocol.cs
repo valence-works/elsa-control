@@ -8,6 +8,8 @@ public static class ExternalEngineEnrollmentProtocol
 {
     public const string RedemptionDomain = "elsa-control.external-engine-enrollment.redeem.v1";
     public const string ConnectorProofDomain = "elsa-control.external-engine-connector.proof.v1";
+    public const string RotationDomain = "elsa-control.external-engine-connector.rotate.v1";
+    public const string RevocationDomain = "elsa-control.external-engine-connector.revoke.v1";
 
     public static string ExportPublicKey(ECDsa key)
     {
@@ -32,6 +34,29 @@ public static class ExternalEngineEnrollmentProtocol
 
     public static bool IsSha256Digest(string? value) =>
         TryDecodeBounded(value, 32, 32, out _);
+
+    public static string HashNonce(string nonce)
+    {
+        if (!TryDecodeBounded(nonce, 16, 64, out var nonceBytes))
+            throw new ArgumentException("Connector proof nonce is invalid.", nameof(nonce));
+
+        return Base64UrlEncode(SHA256.HashData(nonceBytes));
+    }
+
+    public static string CreateRotationPayloadDigest(string newPublicKey, TimeSpan overlap)
+    {
+        if (overlap <= TimeSpan.Zero || overlap > ExternalEngineEnrollmentDefaults.MaximumRotationOverlap)
+            throw new ArgumentOutOfRangeException(nameof(overlap), "Connector key overlap must be between one tick and five minutes.");
+
+        var payload = EncodeCanonical(
+            RotationDomain,
+            PublicKeyThumbprint(newPublicKey),
+            overlap.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        return Base64UrlEncode(SHA256.HashData(payload));
+    }
+
+    public static string CreateRevocationPayloadDigest() =>
+        Base64UrlEncode(SHA256.HashData(EncodeCanonical(RevocationDomain)));
 
     public static byte[] CreateRedemptionPayload(
         Guid challengeId,
