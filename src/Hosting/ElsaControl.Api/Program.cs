@@ -241,12 +241,16 @@ builder.Services.AddRateLimiter(options =>
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
     options.OnRejected = async (context, _) =>
     {
+        var heartbeat = context.HttpContext.Request.Path.StartsWithSegments("/api/runtime/external-engine-connections")
+                        && context.HttpContext.Request.Path.Value?.EndsWith("/heartbeat", StringComparison.OrdinalIgnoreCase) == true;
         await Results.Problem(
                 statusCode: StatusCodes.Status429TooManyRequests,
-                title: "Managed Elsa identity handoff rate limit was exceeded.",
+                title: heartbeat
+                    ? "External engine heartbeat rate limit was exceeded."
+                    : "Managed Elsa identity handoff rate limit was exceeded.",
                 extensions: new Dictionary<string, object?>
                 {
-                    ["code"] = "handoff.rate-limited",
+                    ["code"] = heartbeat ? "external-engine.heartbeat.rate-limited" : "handoff.rate-limited",
                     ["correlationId"] = context.HttpContext.TraceIdentifier
                 })
             .ExecuteAsync(context.HttpContext);
@@ -256,6 +260,15 @@ builder.Services.AddRateLimiter(options =>
         _ => new FixedWindowRateLimiterOptions
         {
             PermitLimit = 20,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+    options.AddPolicy("external-engine-heartbeat", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 120,
             Window = TimeSpan.FromMinutes(1),
             QueueLimit = 0,
             AutoReplenishment = true
@@ -298,6 +311,7 @@ builder.Services.AddScoped<IExternalEngineConnectorProofNonceStore>(services =>
 builder.Services.AddScoped<ExternalEngineEnrollmentService>();
 builder.Services.AddScoped<IExternalEngineConnectionStore, EfCoreExternalEngineConnectionStore>();
 builder.Services.AddScoped<ExternalEngineConnectionService>();
+builder.Services.AddScoped<ExternalEngineHeartbeatService>();
 builder.Services.AddScoped<IManagedElsaInstanceCatalog, EfCoreManagedElsaInstanceCatalog>();
 builder.Services.AddScoped<EfCoreManagedElsaInstanceIdentityStore>();
 builder.Services.AddScoped<IManagedElsaInstanceIdentityStore>(services => new ControlHandoffGatedIdentityStore(

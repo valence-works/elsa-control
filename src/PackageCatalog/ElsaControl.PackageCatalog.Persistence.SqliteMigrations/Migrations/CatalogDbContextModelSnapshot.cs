@@ -3934,7 +3934,7 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                             t.HasTrigger("TR_ExternalEngineConnectionAuditEvents_AppendOnly_Update");
 
-                            t.HasCheckConstraint("CK_ExternalEngineConnectionAuditEvents_Action", "Action IN ('Created', 'PairingIssued', 'RepairStarted', 'IdentityEnrolled', 'Disconnected')");
+                            t.HasCheckConstraint("CK_ExternalEngineConnectionAuditEvents_Action", "Action IN ('Created', 'PairingIssued', 'RepairStarted', 'IdentityEnrolled', 'HeartbeatConnected', 'HeartbeatDegraded', 'HeartbeatRecovered', 'Disconnected')");
                         });
                 });
 
@@ -4001,8 +4001,18 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<Guid?>("LastChallengeId")
                         .HasColumnType("TEXT");
 
+                    b.Property<long?>("LastHeartbeatObservedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("LastHeartbeatSequence")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("ObservedDistribution")
                         .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ObservedRuntimeKind")
+                        .HasMaxLength(64)
                         .HasColumnType("TEXT");
 
                     b.Property<string>("ObservedVersion")
@@ -4020,6 +4030,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<string>("ReleaseEvidenceLevel")
                         .IsRequired()
                         .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ReleaseEvidenceReference")
+                        .HasMaxLength(128)
                         .HasColumnType("TEXT");
 
                     b.Property<long?>("RevokedAt")
@@ -4059,7 +4073,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                     b.ToTable("ExternalEngineConnections", null, t =>
                         {
-                            t.HasCheckConstraint("CK_ExternalEngineConnections_Evidence", "ReleaseEvidenceLevel IN ('None', 'SelfReported', 'VerifiedManifest')");
+                            t.HasCheckConstraint("CK_ExternalEngineConnections_Evidence", "ReleaseEvidenceLevel IN ('None', 'SelfReported', 'SupportedRelease', 'VerifiedManifest')");
+
+                            t.HasCheckConstraint("CK_ExternalEngineConnections_HeartbeatSequence", "LastHeartbeatSequence IS NULL OR LastHeartbeatSequence > 0");
 
                             t.HasCheckConstraint("CK_ExternalEngineConnections_OwnershipMode", "OwnershipMode = 'CustomerOperated'");
 

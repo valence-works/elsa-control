@@ -213,6 +213,86 @@ public sealed class ExternalEngineConnectionApiTests
             $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/authenticate", authentication);
         Assert.Equal(HttpStatusCode.OK, authenticated.StatusCode);
 
+        var heartbeatReport = new ExternalEngineHeartbeatReport(
+            1,
+            DateTimeOffset.UtcNow,
+            ExternalEngineHeartbeatService.CurrentProtocol,
+            "1.4.0",
+            ExternalEngineRuntimeHealth.Healthy,
+            "server",
+            "valence-runtime",
+            "3.8.1",
+            "https://studio.example.test/elsa/",
+            [ExternalEngineHeartbeatService.StatusCapability, ExternalEngineHeartbeatService.StudioCapability],
+            []);
+        var heartbeatProof = Proof(
+            identity,
+            context.Workspaces.Single().OrganizationId,
+            workspaceId,
+            pairing.Connection.Id,
+            pairing.Enrollment.Audience,
+            ExternalEngineHeartbeatService.HeartbeatOperation,
+            ExternalEngineHeartbeatService.CreatePayloadDigest(heartbeatReport),
+            currentKey);
+        using var missingProof = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/heartbeat",
+            new ExternalEngineHeartbeatRequest(null!, heartbeatReport));
+        Assert.Equal(HttpStatusCode.BadRequest, missingProof.StatusCode);
+        using var heartbeat = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/heartbeat",
+            new ExternalEngineHeartbeatRequest(heartbeatProof, heartbeatReport));
+        Assert.Equal(HttpStatusCode.OK, heartbeat.StatusCode);
+        var connected = await heartbeat.Content.ReadControlJsonAsync<ExternalEngineConnectionResponse>();
+        Assert.Equal(ExternalEngineConnectionStatus.Connected, connected!.Status);
+        Assert.Equal(ExternalEngineHeartbeatFreshness.Fresh, connected.HeartbeatFreshness);
+        Assert.Equal(ExternalEngineReleaseEvidenceLevel.SelfReported, connected.ReleaseEvidenceLevel);
+        Assert.Equal(1, connected.LastHeartbeatSequence);
+        Assert.Equal("server", connected.ObservedRuntimeKind);
+        Assert.Null(connected.StudioDestination);
+        Assert.Equal(2, connected.Capabilities.Count);
+        var heartbeatJson = await heartbeat.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(heartbeatProof.Nonce, heartbeatJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(heartbeatProof.Signature, heartbeatJson, StringComparison.Ordinal);
+        using var replayedHeartbeat = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/heartbeat",
+            new ExternalEngineHeartbeatRequest(heartbeatProof, heartbeatReport));
+        Assert.Equal(HttpStatusCode.Unauthorized, replayedHeartbeat.StatusCode);
+
+        var earlyReport = heartbeatReport with { Sequence = 2 };
+        var earlyProof = Proof(
+            identity,
+            context.Workspaces.Single().OrganizationId,
+            workspaceId,
+            pairing.Connection.Id,
+            pairing.Enrollment.Audience,
+            ExternalEngineHeartbeatService.HeartbeatOperation,
+            ExternalEngineHeartbeatService.CreatePayloadDigest(earlyReport),
+            currentKey);
+        using var rateLimited = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/heartbeat",
+            new ExternalEngineHeartbeatRequest(earlyProof, earlyReport));
+        Assert.Equal(HttpStatusCode.TooManyRequests, rateLimited.StatusCode);
+        Assert.Equal("5", rateLimited.Headers.RetryAfter?.ToString());
+        Assert.Contains("retryAfterSeconds", await rateLimited.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        using var consumedRateLimitedProof = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/heartbeat",
+            new ExternalEngineHeartbeatRequest(earlyProof, earlyReport));
+        Assert.Equal(HttpStatusCode.Unauthorized, consumedRateLimitedProof.StatusCode);
+
+        var oldSequenceProof = Proof(
+            identity,
+            context.Workspaces.Single().OrganizationId,
+            workspaceId,
+            pairing.Connection.Id,
+            pairing.Enrollment.Audience,
+            ExternalEngineHeartbeatService.HeartbeatOperation,
+            ExternalEngineHeartbeatService.CreatePayloadDigest(heartbeatReport),
+            currentKey);
+        using var oldSequence = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/heartbeat",
+            new ExternalEngineHeartbeatRequest(oldSequenceProof, heartbeatReport));
+        Assert.Equal(HttpStatusCode.Conflict, oldSequence.StatusCode);
+
         using var nextKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         var nextPublicKey = ExternalEngineEnrollmentProtocol.ExportPublicKey(nextKey);
         var overlap = TimeSpan.FromMinutes(1);
@@ -261,6 +341,21 @@ public sealed class ExternalEngineConnectionApiTests
         using var denied = await owner.PostControlJsonAsync(
             $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/authenticate", deniedProof);
         Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
+
+        var revokedHeartbeatReport = heartbeatReport with { Sequence = 2, ObservedAt = DateTimeOffset.UtcNow };
+        var revokedHeartbeatProof = Proof(
+            rotatedIdentity,
+            context.Workspaces.Single().OrganizationId,
+            workspaceId,
+            pairing.Connection.Id,
+            pairing.Enrollment.Audience,
+            ExternalEngineHeartbeatService.HeartbeatOperation,
+            ExternalEngineHeartbeatService.CreatePayloadDigest(revokedHeartbeatReport),
+            nextKey);
+        using var revokedHeartbeat = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/heartbeat",
+            new ExternalEngineHeartbeatRequest(revokedHeartbeatProof, revokedHeartbeatReport));
+        Assert.Equal(HttpStatusCode.NotFound, revokedHeartbeat.StatusCode);
     }
 
     private static ExternalEngineConnectorProof Proof(

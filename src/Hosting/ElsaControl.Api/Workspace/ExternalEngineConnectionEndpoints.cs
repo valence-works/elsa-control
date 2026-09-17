@@ -163,6 +163,44 @@ public static class ExternalEngineConnectionEndpoints
             };
         });
 
+        group.MapPost("/heartbeat", async (
+            Guid connectionId,
+            ExternalEngineHeartbeatRequest request,
+            HttpContext context,
+            ExternalEngineHeartbeatService service,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                if (request.Proof is null || connectionId != request.Proof.ConnectionId)
+                    return request.Proof is null
+                        ? Problem("external-engine.heartbeat.invalid", "A connector proof is required.", StatusCodes.Status400BadRequest)
+                        : RuntimeDenied();
+                var result = await service.SubmitAsync(request, cancellationToken);
+                return result switch
+                {
+                    null => Results.NotFound(),
+                    { Accepted: true, Connection: not null } => Results.Ok(ToResponse(result.Connection)),
+                    { Status: ExternalEngineHeartbeatStatus.ProofDenied } => RuntimeDenied(),
+                    { Status: ExternalEngineHeartbeatStatus.Revoked } =>
+                        Problem("external-engine.heartbeat.revoked", "The connector identity or connection is revoked.", StatusCodes.Status410Gone),
+                    { Status: ExternalEngineHeartbeatStatus.OutOfOrder } =>
+                        Problem("external-engine.heartbeat.out-of-order", "The heartbeat sequence is not newer than the accepted observation.", StatusCodes.Status409Conflict),
+                    { Status: ExternalEngineHeartbeatStatus.RateLimited } =>
+                        HeartbeatRateLimited(context, result.RetryAfter),
+                    { Status: ExternalEngineHeartbeatStatus.Conflict } =>
+                        Problem("external-engine.heartbeat.conflict", "The heartbeat raced another connection update; retry with a new proof.", StatusCodes.Status409Conflict),
+                    _ => Problem("external-engine.heartbeat.invalid", "The heartbeat report is invalid or unsupported.", StatusCodes.Status400BadRequest)
+                };
+            }
+            catch (ArgumentException exception)
+            {
+                return Problem("external-engine.heartbeat.invalid", exception.Message, StatusCodes.Status400BadRequest);
+            }
+        })
+        .WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(64 * 1024))
+        .RequireRateLimiting("external-engine-heartbeat");
+
         group.MapPost("/identity/rotate", async (
             Guid connectionId,
             ExternalEngineConnectorKeyRotationRequest request,
@@ -212,10 +250,15 @@ public static class ExternalEngineConnectionEndpoints
             value.ConnectorVersion,
             value.ObservedDistribution,
             value.ObservedVersion,
+            value.ObservedRuntimeKind,
             value.ReleaseEvidenceLevel,
+            value.ReleaseEvidenceReference,
             value.StudioDestination,
             value.Capabilities,
             value.CapabilitiesObservedAt,
+            value.LastHeartbeatSequence,
+            value.LastHeartbeatObservedAt,
+            ExternalEngineConnectionFreshness.Classify(value, DateTimeOffset.UtcNow),
             value.CreatedAt,
             value.UpdatedAt,
             value.RevokedAt);
@@ -241,6 +284,20 @@ public static class ExternalEngineConnectionEndpoints
 
     private static IResult RuntimeDenied() =>
         Problem("external-engine.runtime.denied", "The connector proof was not accepted.", StatusCodes.Status401Unauthorized);
+
+    private static IResult HeartbeatRateLimited(HttpContext context, TimeSpan? retryAfter)
+    {
+        var retryAfterSeconds = Math.Max(1, (int)Math.Ceiling((retryAfter ?? ExternalEngineHeartbeatService.MinimumInterval).TotalSeconds));
+        context.Response.Headers.RetryAfter = retryAfterSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return Results.Problem(
+            title: "The heartbeat cadence is too frequent. Sign a fresh proof before retrying.",
+            statusCode: StatusCodes.Status429TooManyRequests,
+            extensions: new Dictionary<string, object?>
+            {
+                ["code"] = "external-engine.heartbeat.rate-limited",
+                ["retryAfterSeconds"] = retryAfterSeconds
+            });
+    }
 
     private static IResult Problem(string code, string title, int status) =>
         Results.Problem(title: title, statusCode: status, extensions: new Dictionary<string, object?> { ["code"] = code });
