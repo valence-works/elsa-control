@@ -20,7 +20,9 @@ public sealed class ExternalEngineConnectionApiTests
         await using var app = new ControlApiTestApplication();
         await app.SeedAsync(_ => Task.CompletedTask);
         using var owner = app.CreateTrustedWorkspaceClient("external-connection-owner");
-        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        var context = await owner.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces");
+        var workspace = Assert.Single(context!.Workspaces);
+        var workspaceId = workspace.Id;
 
         using var first = await CreateAsync(owner, workspaceId, "Customer engine", "pair-engine");
         Assert.Equal(HttpStatusCode.Created, first.StatusCode);
@@ -28,6 +30,9 @@ public sealed class ExternalEngineConnectionApiTests
         var accepted = await first.Content.ReadControlJsonAsync<ExternalEnginePairingAttemptResponse>();
         Assert.NotNull(accepted);
         Assert.False(string.IsNullOrWhiteSpace(accepted.Enrollment.Challenge));
+        Assert.Equal(accepted.Connection.WorkspaceId, accepted.Enrollment.WorkspaceId);
+        Assert.Equal(workspace.OrganizationId, accepted.Enrollment.OrganizationId);
+        Assert.Equal(accepted.Connection.Id, accepted.Enrollment.ConnectionId);
         Assert.Equal(ExternalEngineConnectionStatus.Pending, accepted.Connection.Status);
         Assert.Equal(ExternalEngineConnection.OwnershipMode, accepted.Connection.OwnershipMode);
         Assert.Empty(accepted.Connection.Capabilities);

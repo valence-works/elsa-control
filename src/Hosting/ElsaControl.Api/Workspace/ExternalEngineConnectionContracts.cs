@@ -47,6 +47,8 @@ public sealed record ExternalEnginePairingAttemptResponse(
 
 public sealed record ExternalEngineEnrollmentResponse(
     Guid ChallengeId,
+    Guid OrganizationId,
+    Guid WorkspaceId,
     Guid ConnectionId,
     string Purpose,
     string Audience,
@@ -55,7 +57,7 @@ public sealed record ExternalEngineEnrollmentResponse(
     DateTimeOffset ExpiresAt)
 {
     public override string ToString() =>
-        $"ExternalEngineEnrollmentResponse {{ ChallengeId = {ChallengeId}, ConnectionId = {ConnectionId}, Purpose = {Purpose}, Audience = {Audience}, Challenge = [REDACTED], IssuedAt = {IssuedAt:O}, ExpiresAt = {ExpiresAt:O} }}";
+        $"ExternalEngineEnrollmentResponse {{ ChallengeId = {ChallengeId}, OrganizationId = {OrganizationId}, WorkspaceId = {WorkspaceId}, ConnectionId = {ConnectionId}, Purpose = {Purpose}, Audience = {Audience}, Challenge = [REDACTED], IssuedAt = {IssuedAt:O}, ExpiresAt = {ExpiresAt:O} }}";
 }
 
 public sealed record ExternalEnginePairingProgressResponse(
