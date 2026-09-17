@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Security.Claims;
+using System.Text.Json;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Cloud;
 using ElsaControl.Api.Workspace;
@@ -57,6 +58,97 @@ public sealed class CloudBffAuthorizationTests
     }
 
     [Fact]
+    public async Task Cloud_compatibility_returns_the_exact_static_no_store_contract()
+    {
+        await using var app = CreateBffApplication();
+        using var client = CreateBffClient(app);
+
+        using var response = await client.GetAsync("/api/cloud/compatibility");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.Contains("no-cache", response.Headers.Pragma.ToString(), StringComparison.OrdinalIgnoreCase);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var root = document.RootElement;
+        Assert.Equal(JsonValueKind.Object, root.ValueKind);
+        Assert.Equal(["contractVersion", "capabilities"],
+            root.EnumerateObject().Select(property => property.Name).ToArray());
+        Assert.Equal(1, root.GetProperty("contractVersion").GetInt32());
+        Assert.Equal(
+        [
+            "cloud.bootstrap.v1",
+            "hosted.instances.list.v1",
+            "hosted.instances.create.v1",
+            "hosted.instances.status.v1",
+            "hosted.studio.handoff.issue.v1",
+            "hosted.instances.quota-problem.v1",
+            "hosted.instances.confirmed-delete.v1"
+        ],
+            root.GetProperty("capabilities").EnumerateArray().Select(value => value.GetString()!).ToArray());
+        Assert.DoesNotContain("environment", root.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("customer", root.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("provider", root.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("deployment", root.GetRawText(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Cloud_compatibility_rejects_an_invalid_bff_credential()
+    {
+        await using var app = CreateBffApplication();
+        using var client = CreateBffClient(app, clientId: "unregistered-client");
+
+        using var response = await client.GetAsync("/api/cloud/compatibility");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.Contains("cloud-bff.denied", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Cloud_compatibility_requires_authentication_and_preserves_ordinary_control_bearers()
+    {
+        await using var app = CreateBffApplication();
+        using var anonymous = app.CreateClient();
+        using var ordinaryBearer = app.CreateControlIdentityClient(subject: "ordinary-compatibility-reader");
+
+        using var anonymousResponse = await anonymous.GetAsync("/api/cloud/compatibility");
+        using var ordinaryResponse = await ordinaryBearer.GetAsync("/api/cloud/compatibility");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, anonymousResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, ordinaryResponse.StatusCode);
+        Assert.True(ordinaryResponse.Headers.CacheControl?.NoStore);
+    }
+
+    [Fact]
+    public void Version_one_client_gating_accepts_additions_and_rejects_rolled_back_requirements()
+    {
+        var required = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "cloud.bootstrap.v1",
+            "hosted.instances.list.v1"
+        };
+        var current = new CloudCompatibilityResponse(1,
+        [
+            "cloud.bootstrap.v1",
+            "hosted.instances.list.v1"
+        ]);
+        var additiveApi = current with
+        {
+            Capabilities = [.. current.Capabilities, "future.additive-capability.v1"]
+        };
+        var rolledBackApi = current with
+        {
+            Capabilities = ["cloud.bootstrap.v1"]
+        };
+        var unsupportedEnvelope = current with { ContractVersion = 2 };
+
+        Assert.True(SupportsVersionOneClient(current, required));
+        Assert.True(SupportsVersionOneClient(additiveApi, required));
+        Assert.False(SupportsVersionOneClient(rolledBackApi, required));
+        Assert.False(SupportsVersionOneClient(unsupportedEnvelope, required));
+    }
+
+    [Fact]
     public async Task Bff_endpoint_allowlist_is_exact()
     {
         await using var app = CreateBffApplication();
@@ -75,6 +167,7 @@ public sealed class CloudBffAuthorizationTests
 
         var expected = new[]
         {
+            "GET /api/cloud/compatibility",
             "GET /api/me/organizations",
             "GET /api/me/workspaces",
             "GET /api/workspaces/{workspaceId:guid}/external-engine-connections/",
@@ -471,6 +564,11 @@ public sealed class CloudBffAuthorizationTests
         CloudBffAuthorization.Classify(
             new ClaimsPrincipal(new ClaimsIdentity(claims, ControlIdentityDefaults.Scheme)),
             options);
+
+    private static bool SupportsVersionOneClient(
+        CloudCompatibilityResponse response,
+        IReadOnlySet<string> requiredCapabilities) =>
+        response.ContractVersion == 1 && requiredCapabilities.IsSubsetOf(response.Capabilities);
 
     private sealed class TestProvisioningModule : IEngineProvisioningModule
     {

@@ -73,16 +73,33 @@ scope from another client, is rejected.
 
 ## BFF allowlist
 
+The Cloud BFF reads the static capability envelope at
+[`GET /api/cloud/compatibility`](cloud-compatibility-contract.md). Its versioning,
+capability mappings, and rollout rules are documented separately there.
+
 Validated Entra BFF and Cloud account tokens are accepted only on these customer endpoints:
 
 ```text
+GET  /api/cloud/compatibility
 POST /api/cloud/bootstrap
 GET  /api/me/workspaces
 GET  /api/me/organizations
 GET  /api/workspaces/{workspaceId}/instances
 GET  /api/workspaces/{workspaceId}/instances/onboarding-options
+GET  /api/workspaces/{workspaceId}/instances/{instanceId}/delete-operations/{operationId}
 POST /api/workspaces/{workspaceId}/instances
+PATCH /api/workspaces/{workspaceId}/instances/{instanceId}
+POST /api/workspaces/{workspaceId}/instances/{instanceId}/delete-confirmations
+POST /api/workspaces/{workspaceId}/instances/{instanceId}/delete
+POST /api/organizations/{organizationId}/billing/prepare-hosted-trial
 POST /api/managed-elsa/handoff/issue
+GET  /api/workspaces/{workspaceId}/external-engine-connections
+POST /api/workspaces/{workspaceId}/external-engine-connections
+GET  /api/workspaces/{workspaceId}/external-engine-connections/{connectionId}
+GET  /api/workspaces/{workspaceId}/external-engine-connections/{connectionId}/pairing
+POST /api/workspaces/{workspaceId}/external-engine-connections/{connectionId}/disconnect
+POST /api/workspaces/{workspaceId}/external-engine-connections/{connectionId}/repair
+POST /api/workspaces/{workspaceId}/external-engine-connections/{connectionId}/studio-destination/confirm
 ```
 
 Every other customer endpoint and every `/api/admin/...` endpoint rejects these

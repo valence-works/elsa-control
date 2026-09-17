@@ -730,6 +730,7 @@ app.MapPublicSourceEndpoints();
 app.MapPublicFeatureEndpoints();
 app.MapBuilderEndpoints();
 app.MapCompatibilityEndpoints();
+app.MapCloudCompatibilityEndpoints();
 app.MapCloudBootstrapEndpoints();
 app.MapWorkspaceMeEndpoints();
 app.MapOrganizationWorkspaceEndpoints();
