@@ -23,6 +23,12 @@ internal sealed class ExternalEngineConnectionEntity
     public string ReleaseEvidenceLevel { get; set; } = "";
     public string? ReleaseEvidenceReference { get; set; }
     public string? StudioDestination { get; set; }
+    public string? StudioDestinationCandidate { get; set; }
+    public Guid? StudioDestinationCandidateId { get; set; }
+    public DateTimeOffset? StudioDestinationConfirmedAt { get; set; }
+    public Guid? StudioDestinationConfirmedByAccountId { get; set; }
+    public string ConnectorCompatibilityStatus { get; set; } = "Unknown";
+    public DateTimeOffset? ConnectorCompatibilityObservedAt { get; set; }
     public DateTimeOffset? CapabilitiesObservedAt { get; set; }
     public long? LastHeartbeatSequence { get; set; }
     public DateTimeOffset? LastHeartbeatObservedAt { get; set; }
@@ -67,6 +73,9 @@ internal sealed class ExternalEngineConnectionConfiguration : IEntityTypeConfigu
             table.HasCheckConstraint("CK_ExternalEngineConnections_Reachability", "ConnectorReachability IN ('Unknown', 'Reachable', 'Unreachable')");
             table.HasCheckConstraint("CK_ExternalEngineConnections_Evidence", "ReleaseEvidenceLevel IN ('None', 'SelfReported', 'SupportedRelease', 'VerifiedManifest')");
             table.HasCheckConstraint("CK_ExternalEngineConnections_HeartbeatSequence", "LastHeartbeatSequence IS NULL OR LastHeartbeatSequence > 0");
+            table.HasCheckConstraint("CK_ExternalEngineConnections_StudioDestinationCandidate", "(StudioDestinationCandidate IS NULL AND StudioDestinationCandidateId IS NULL) OR (StudioDestinationCandidate IS NOT NULL AND StudioDestinationCandidateId IS NOT NULL)");
+            table.HasCheckConstraint("CK_ExternalEngineConnections_StudioDestinationApproval", "(StudioDestination IS NULL AND StudioDestinationConfirmedAt IS NULL AND StudioDestinationConfirmedByAccountId IS NULL) OR (StudioDestination IS NOT NULL AND StudioDestination = StudioDestinationCandidate AND StudioDestinationCandidateId IS NOT NULL AND StudioDestinationConfirmedAt IS NOT NULL AND StudioDestinationConfirmedByAccountId IS NOT NULL)");
+            table.HasCheckConstraint("CK_ExternalEngineConnections_ConnectorCompatibilityStatus", "ConnectorCompatibilityStatus IN ('Unknown', 'Compatible', 'UnsupportedProtocol')");
             table.HasCheckConstraint("CK_ExternalEngineConnections_Version", "Version > 0");
             table.HasCheckConstraint("CK_ExternalEngineConnections_Timestamps", "UpdatedAt >= CreatedAt AND (RevokedAt IS NULL OR RevokedAt >= CreatedAt)");
             table.HasCheckConstraint("CK_ExternalEngineConnections_RevokedState", "(Status = 'Revoked' AND RevokedAt IS NOT NULL) OR (Status <> 'Revoked' AND RevokedAt IS NULL)");
@@ -85,11 +94,15 @@ internal sealed class ExternalEngineConnectionConfiguration : IEntityTypeConfigu
         builder.Property(x => x.ReleaseEvidenceLevel).HasMaxLength(32).IsRequired();
         builder.Property(x => x.ReleaseEvidenceReference).HasMaxLength(128);
         builder.Property(x => x.StudioDestination).HasMaxLength(2048);
+        builder.Property(x => x.StudioDestinationCandidate).HasMaxLength(2048);
+        builder.Property(x => x.ConnectorCompatibilityStatus).HasMaxLength(32).HasDefaultValue("Unknown").IsRequired();
         builder.Property(x => x.IdempotencyKey).HasMaxLength(128).IsRequired();
         builder.Property(x => x.CreateRequestDigest).HasMaxLength(64).IsRequired();
         builder.Property(x => x.LastAuthenticatedAt).HasNullableUtcTicksConversion();
         builder.Property(x => x.CapabilitiesObservedAt).HasNullableUtcTicksConversion();
         builder.Property(x => x.LastHeartbeatObservedAt).HasNullableUtcTicksConversion();
+        builder.Property(x => x.StudioDestinationConfirmedAt).HasNullableUtcTicksConversion();
+        builder.Property(x => x.ConnectorCompatibilityObservedAt).HasNullableUtcTicksConversion();
         builder.Property(x => x.CreatedAt).HasUtcTicksConversion();
         builder.Property(x => x.UpdatedAt).HasUtcTicksConversion();
         builder.Property(x => x.RevokedAt).HasNullableUtcTicksConversion();
@@ -125,7 +138,7 @@ internal sealed class ExternalEngineConnectionAuditEventConfiguration : IEntityT
     public void Configure(EntityTypeBuilder<ExternalEngineConnectionAuditEventEntity> builder)
     {
         builder.ToTable("ExternalEngineConnectionAuditEvents", table =>
-            table.HasCheckConstraint("CK_ExternalEngineConnectionAuditEvents_Action", "Action IN ('Created', 'PairingIssued', 'RepairStarted', 'IdentityEnrolled', 'HeartbeatConnected', 'HeartbeatDegraded', 'HeartbeatRecovered', 'Disconnected')"));
+            table.HasCheckConstraint("CK_ExternalEngineConnectionAuditEvents_Action", "Action IN ('Created', 'PairingIssued', 'RepairStarted', 'IdentityEnrolled', 'HeartbeatConnected', 'HeartbeatDegraded', 'HeartbeatRecovered', 'StudioDestinationConfirmed', 'Disconnected')"));
         builder.HasKey(x => x.Id);
         builder.Property(x => x.Action).HasMaxLength(32).IsRequired();
         builder.Property(x => x.OccurredAt).HasUtcTicksConversion();

@@ -104,6 +104,12 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
             entity.ReleaseEvidenceLevel = ExternalEngineReleaseEvidenceLevel.None.ToString();
             entity.ReleaseEvidenceReference = null;
             entity.StudioDestination = null;
+            entity.StudioDestinationCandidate = null;
+            entity.StudioDestinationCandidateId = null;
+            entity.StudioDestinationConfirmedAt = null;
+            entity.StudioDestinationConfirmedByAccountId = null;
+            entity.ConnectorCompatibilityStatus = ExternalEngineConnectorCompatibilityStatus.Unknown.ToString();
+            entity.ConnectorCompatibilityObservedAt = null;
             entity.CapabilitiesObservedAt = null;
             entity.Capabilities.Clear();
         }, cancellationToken);
@@ -117,7 +123,150 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
             entity.Status = ExternalEngineConnectionStatus.Revoked.ToString();
             entity.RevokedAt = revokedAt.ToUniversalTime();
             entity.ConnectorReachability = ExternalEngineConnectorReachability.Unreachable.ToString();
+            entity.StudioDestination = null;
+            entity.StudioDestinationCandidate = null;
+            entity.StudioDestinationCandidateId = null;
+            entity.StudioDestinationConfirmedAt = null;
+            entity.StudioDestinationConfirmedByAccountId = null;
+            entity.ConnectorCompatibilityStatus = ExternalEngineConnectorCompatibilityStatus.Unknown.ToString();
+            entity.ConnectorCompatibilityObservedAt = null;
         }, cancellationToken);
+
+    public async Task<ExternalEngineConnection?> TryConfirmStudioDestinationAsync(
+        ExternalEngineConnection expected,
+        Guid candidateId,
+        Guid accountId,
+        DateTimeOffset confirmedAt,
+        CancellationToken cancellationToken = default) =>
+        await dbContext.ExecuteInTransactionAsync(
+            IsolationLevel.Serializable,
+            () => TryConfirmStudioDestinationCoreAsync(
+                expected, candidateId, accountId, confirmedAt, cancellationToken),
+            async (result, attemptCancellationToken) =>
+                result is null
+                || await dbContext.ExternalEngineConnections.AsNoTracking().AnyAsync(
+                    entity => entity.OrganizationId == expected.OrganizationId
+                              && entity.WorkspaceId == expected.WorkspaceId
+                              && entity.Id == expected.Id
+                              && entity.StudioDestinationCandidateId == candidateId
+                              && entity.StudioDestination == entity.StudioDestinationCandidate
+                              && entity.StudioDestinationConfirmedByAccountId == accountId,
+                    attemptCancellationToken),
+            cancellationToken);
+
+    private async Task<ExternalEngineConnection?> TryConfirmStudioDestinationCoreAsync(
+        ExternalEngineConnection expected,
+        Guid candidateId,
+        Guid accountId,
+        DateTimeOffset confirmedAt,
+        CancellationToken cancellationToken)
+    {
+        var entity = await dbContext.ExternalEngineConnections
+            .Include(x => x.Capabilities)
+            .SingleOrDefaultAsync(
+                x => x.OrganizationId == expected.OrganizationId
+                     && x.WorkspaceId == expected.WorkspaceId
+                     && x.Id == expected.Id,
+                cancellationToken);
+        if (entity is null
+            || entity.Version != expected.Version
+            || entity.Status == ExternalEngineConnectionStatus.Revoked.ToString()
+            || entity.ActiveIdentityId is null
+            || entity.ConnectorCompatibilityStatus != ExternalEngineConnectorCompatibilityStatus.Compatible.ToString()
+            || entity.StudioDestinationCandidate is null
+            || entity.StudioDestinationCandidateId != candidateId
+            || !entity.Capabilities.Any(x => x.Capability == ExternalEngineHeartbeatService.StudioCapability)
+            || entity.LastAuthenticatedAt is null
+            || confirmedAt - entity.LastAuthenticatedAt > ExternalEngineHeartbeatService.FreshnessWindow)
+            return null;
+
+        var activeIdentity = await dbContext.ExternalEngineConnectorIdentities.AsNoTracking().AnyAsync(
+            identity => identity.Id == entity.ActiveIdentityId
+                        && identity.OrganizationId == entity.OrganizationId
+                        && identity.WorkspaceId == entity.WorkspaceId
+                        && identity.ConnectionId == entity.Id
+                        && identity.RevokedAt == null,
+            cancellationToken);
+        if (!activeIdentity)
+            return null;
+
+        entity.StudioDestination = entity.StudioDestinationCandidate;
+        entity.StudioDestinationConfirmedAt = confirmedAt.ToUniversalTime();
+        entity.StudioDestinationConfirmedByAccountId = accountId;
+        entity.UpdatedAt = confirmedAt.ToUniversalTime();
+        entity.Version = checked(entity.Version + 1);
+        AddAudit(entity, "StudioDestinationConfirmed", confirmedAt);
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return ToDomain(entity);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            dbContext.ChangeTracker.Clear();
+            return null;
+        }
+    }
+
+    public async Task<ExternalEngineHeartbeatStoreResult> TryRecordUnsupportedProtocolAsync(
+        ExternalEngineConnection expected,
+        long sequence,
+        DateTimeOffset observedAt,
+        Guid identityId,
+        DateTimeOffset receivedAt,
+        TimeSpan minimumInterval,
+        CancellationToken cancellationToken = default)
+    {
+        var entity = await dbContext.ExternalEngineConnections
+            .Include(x => x.Capabilities)
+            .SingleOrDefaultAsync(
+                x => x.OrganizationId == expected.OrganizationId
+                     && x.WorkspaceId == expected.WorkspaceId
+                     && x.Id == expected.Id,
+                cancellationToken);
+        if (entity is null || entity.ActiveIdentityId != identityId)
+            return new(ExternalEngineHeartbeatStoreStatus.ScopeMismatch, entity is null ? null : ToDomain(entity));
+        if (entity.Status == ExternalEngineConnectionStatus.Revoked.ToString())
+            return new(ExternalEngineHeartbeatStoreStatus.Revoked, ToDomain(entity));
+        if (entity.Version != expected.Version)
+            return new(ExternalEngineHeartbeatStoreStatus.Concurrent, ToDomain(entity));
+        var activeIdentity = await dbContext.ExternalEngineConnectorIdentities.AsNoTracking().AnyAsync(
+            identity => identity.Id == identityId
+                        && identity.OrganizationId == entity.OrganizationId
+                        && identity.WorkspaceId == entity.WorkspaceId
+                        && identity.ConnectionId == entity.Id
+                        && identity.RevokedAt == null,
+            cancellationToken);
+        if (!activeIdentity)
+            return new(ExternalEngineHeartbeatStoreStatus.Revoked, ToDomain(entity));
+        if (entity.LastHeartbeatSequence is { } lastSequence && sequence <= lastSequence)
+            return new(ExternalEngineHeartbeatStoreStatus.OutOfOrder, ToDomain(entity));
+        if (entity.LastAuthenticatedAt is { } lastReceived && receivedAt - lastReceived < minimumInterval)
+            return new(
+                ExternalEngineHeartbeatStoreStatus.RateLimited,
+                ToDomain(entity),
+                minimumInterval - (receivedAt - lastReceived));
+
+        entity.ConnectorCompatibilityStatus = ExternalEngineConnectorCompatibilityStatus.UnsupportedProtocol.ToString();
+        entity.ConnectorCompatibilityObservedAt = receivedAt.ToUniversalTime();
+        entity.LastAuthenticatedAt = receivedAt.ToUniversalTime();
+        entity.LastHeartbeatSequence = sequence;
+        entity.LastHeartbeatObservedAt = observedAt.ToUniversalTime();
+        entity.ConnectorReachability = ExternalEngineConnectorReachability.Reachable.ToString();
+        entity.UpdatedAt = receivedAt.ToUniversalTime();
+        entity.Version = checked(entity.Version + 1);
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            dbContext.ChangeTracker.Clear();
+            return new(ExternalEngineHeartbeatStoreStatus.Concurrent, null);
+        }
+
+        return new(ExternalEngineHeartbeatStoreStatus.Applied, ToDomain(entity));
+    }
 
     public async Task<ExternalEngineHeartbeatStoreResult> TryApplyHeartbeatAsync(
         ExternalEngineConnection expected,
@@ -193,7 +342,20 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
         entity.ObservedRuntimeKind = projection.ObservedRuntimeKind;
         entity.ReleaseEvidenceLevel = projection.ReleaseEvidenceLevel.ToString();
         entity.ReleaseEvidenceReference = projection.ReleaseEvidenceReference;
-        entity.StudioDestination = projection.StudioDestination;
+        entity.ConnectorCompatibilityStatus = ExternalEngineConnectorCompatibilityStatus.Compatible.ToString();
+        entity.ConnectorCompatibilityObservedAt = receivedAt.ToUniversalTime();
+        var studioCandidate = projection.Capabilities.Contains(
+                ExternalEngineHeartbeatService.StudioCapability, StringComparer.Ordinal)
+            ? projection.StudioDestinationCandidate
+            : null;
+        if (!string.Equals(entity.StudioDestinationCandidate, studioCandidate, StringComparison.Ordinal))
+        {
+            entity.StudioDestinationCandidate = studioCandidate;
+            entity.StudioDestinationCandidateId = studioCandidate is null ? null : Guid.NewGuid();
+            entity.StudioDestination = null;
+            entity.StudioDestinationConfirmedAt = null;
+            entity.StudioDestinationConfirmedByAccountId = null;
+        }
         entity.CapabilitiesObservedAt = receivedAt.ToUniversalTime();
         var desiredCapabilities = projection.Capabilities.ToHashSet(StringComparer.Ordinal);
         foreach (var capability in entity.Capabilities.Where(item => !desiredCapabilities.Contains(item.Capability)).ToArray())
@@ -320,6 +482,12 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
             ReleaseEvidenceLevel = value.ReleaseEvidenceLevel.ToString(),
             ReleaseEvidenceReference = value.ReleaseEvidenceReference,
             StudioDestination = value.StudioDestination,
+            StudioDestinationCandidate = value.StudioDestinationCandidate,
+            StudioDestinationCandidateId = value.StudioDestinationCandidateId,
+            StudioDestinationConfirmedAt = value.StudioDestinationConfirmedAt,
+            StudioDestinationConfirmedByAccountId = value.StudioDestinationConfirmedByAccountId,
+            ConnectorCompatibilityStatus = value.ConnectorCompatibilityStatus.ToString(),
+            ConnectorCompatibilityObservedAt = value.ConnectorCompatibilityObservedAt,
             CapabilitiesObservedAt = value.CapabilitiesObservedAt,
             LastHeartbeatSequence = value.LastHeartbeatSequence,
             LastHeartbeatObservedAt = value.LastHeartbeatObservedAt,
@@ -363,5 +531,11 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
             value.ObservedRuntimeKind,
             value.ReleaseEvidenceReference,
             value.LastHeartbeatSequence,
-            value.LastHeartbeatObservedAt);
+            value.LastHeartbeatObservedAt,
+            value.StudioDestinationCandidate,
+            value.StudioDestinationCandidateId,
+            value.StudioDestinationConfirmedAt,
+            value.StudioDestinationConfirmedByAccountId,
+            Enum.Parse<ExternalEngineConnectorCompatibilityStatus>(value.ConnectorCompatibilityStatus),
+            value.ConnectorCompatibilityObservedAt);
 }

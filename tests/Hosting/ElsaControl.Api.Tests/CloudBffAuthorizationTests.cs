@@ -83,6 +83,7 @@ public sealed class CloudBffAuthorizationTests
             "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/",
             "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/disconnect",
             "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/repair",
+            "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/studio-destination/confirm",
             "POST /api/workspaces/{workspaceId:guid}/instances/"
         ], allowed);
     }
