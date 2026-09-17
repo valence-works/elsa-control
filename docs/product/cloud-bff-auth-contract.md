@@ -73,9 +73,14 @@ scope from another client, is rejected.
 
 ## BFF allowlist
 
+The Cloud BFF reads the static capability envelope at
+[`GET /api/cloud/compatibility`](cloud-compatibility-contract.md). Its versioning,
+capability mappings, and rollout rules are documented separately there.
+
 Validated Entra BFF and Cloud account tokens are accepted only on these customer endpoints:
 
 ```text
+GET  /api/cloud/compatibility
 POST /api/cloud/bootstrap
 GET  /api/me/workspaces
 GET  /api/me/organizations
