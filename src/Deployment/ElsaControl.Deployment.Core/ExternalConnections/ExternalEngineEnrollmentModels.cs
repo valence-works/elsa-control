@@ -311,4 +311,10 @@ public interface IExternalEngineConnectorProofNonceStore
     Task<bool> TryConsumeAsync(
         ExternalEngineConnectorProofNonce nonce,
         CancellationToken cancellationToken = default);
+
+    Task<bool> TryConsumeAsync(
+        ExternalEngineConnectorProofNonce nonce,
+        bool recordSuccessfulAudit,
+        CancellationToken cancellationToken = default) =>
+        TryConsumeAsync(nonce, cancellationToken);
 }

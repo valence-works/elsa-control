@@ -22,10 +22,19 @@ public enum ExternalEngineConnectorReachability
     Unreachable
 }
 
+public enum ExternalEngineHeartbeatFreshness
+{
+    Waiting,
+    Fresh,
+    Stale,
+    Revoked
+}
+
 public enum ExternalEngineReleaseEvidenceLevel
 {
     None,
     SelfReported,
+    SupportedRelease,
     VerifiedManifest
 }
 
@@ -51,7 +60,11 @@ public sealed record ExternalEngineConnection(
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
     DateTimeOffset? RevokedAt,
-    int Version)
+    int Version,
+    string? ObservedRuntimeKind = null,
+    string? ReleaseEvidenceReference = null,
+    long? LastHeartbeatSequence = null,
+    DateTimeOffset? LastHeartbeatObservedAt = null)
 {
     public const string OwnershipMode = "CustomerOperated";
 }
@@ -124,6 +137,86 @@ public interface IExternalEngineConnectionStore
         ExternalEngineConnection expected,
         DateTimeOffset revokedAt,
         CancellationToken cancellationToken = default);
+
+    Task<ExternalEngineHeartbeatStoreResult> TryApplyHeartbeatAsync(
+        ExternalEngineConnection expected,
+        ExternalEngineHeartbeatProjection projection,
+        Guid identityId,
+        DateTimeOffset receivedAt,
+        TimeSpan minimumInterval,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The connection store does not support authenticated heartbeat persistence.");
+}
+
+public sealed record ExternalEngineComponentObservation(string Id, string ImageDigest);
+
+public sealed record ExternalEngineHeartbeatReport(
+    long Sequence,
+    DateTimeOffset ObservedAt,
+    string ConnectorProtocol,
+    string ConnectorVersion,
+    ExternalEngineRuntimeHealth RuntimeHealth,
+    string RuntimeKind,
+    string? ObservedDistribution,
+    string? ObservedVersion,
+    string? StudioDestination,
+    IReadOnlyList<string> Capabilities,
+    IReadOnlyList<ExternalEngineComponentObservation> Components);
+
+public sealed record ExternalEngineHeartbeatRequest(
+    ExternalEngineConnectorProof Proof,
+    ExternalEngineHeartbeatReport Report);
+
+public sealed record ExternalEngineHeartbeatProjection(
+    long Sequence,
+    DateTimeOffset ObservedAt,
+    ExternalEngineConnectionStatus Status,
+    ExternalEngineRuntimeHealth RuntimeHealth,
+    ExternalEngineConnectorReachability ConnectorReachability,
+    string ConnectorProtocol,
+    string ConnectorVersion,
+    string? ObservedDistribution,
+    string? ObservedVersion,
+    string? ObservedRuntimeKind,
+    ExternalEngineReleaseEvidenceLevel ReleaseEvidenceLevel,
+    string? ReleaseEvidenceReference,
+    string? StudioDestination,
+    IReadOnlyList<string> Capabilities);
+
+public enum ExternalEngineHeartbeatStoreStatus
+{
+    Applied,
+    Concurrent,
+    OutOfOrder,
+    RateLimited,
+    Revoked,
+    ScopeMismatch
+}
+
+public sealed record ExternalEngineHeartbeatStoreResult(
+    ExternalEngineHeartbeatStoreStatus Status,
+    ExternalEngineConnection? Connection,
+    TimeSpan? RetryAfter = null);
+
+public enum ExternalEngineHeartbeatStatus
+{
+    Accepted,
+    Degraded,
+    InvalidReport,
+    ProofDenied,
+    OutOfOrder,
+    RateLimited,
+    Revoked,
+    Conflict
+}
+
+public sealed record ExternalEngineHeartbeatResult(
+    ExternalEngineHeartbeatStatus Status,
+    ExternalEngineConnection? Connection = null,
+    ExternalEngineConnectorProofFailure? ProofFailure = null,
+    TimeSpan? RetryAfter = null)
+{
+    public bool Accepted => Status is ExternalEngineHeartbeatStatus.Accepted or ExternalEngineHeartbeatStatus.Degraded;
 }
 
 public sealed record ExternalEnginePairingAttempt(

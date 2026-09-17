@@ -385,8 +385,14 @@ public sealed class EfCoreExternalEngineEnrollmentStore(CatalogDbContext dbConte
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
+    public Task<bool> TryConsumeAsync(
+        ExternalEngineConnectorProofNonce nonce,
+        CancellationToken cancellationToken = default) =>
+        TryConsumeAsync(nonce, recordSuccessfulAudit: true, cancellationToken);
+
     public async Task<bool> TryConsumeAsync(
         ExternalEngineConnectorProofNonce nonce,
+        bool recordSuccessfulAudit,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(nonce);
@@ -431,15 +437,16 @@ public sealed class EfCoreExternalEngineEnrollmentStore(CatalogDbContext dbConte
                         ExpiresAt = nonce.ExpiresAt.ToUniversalTime(),
                         ConsumedAt = nonce.ConsumedAt.ToUniversalTime()
                     });
-                    AddAudit(
-                        nonce.OrganizationId,
-                        nonce.WorkspaceId,
-                        nonce.ConnectionId,
-                        null,
-                        nonce.IdentityId,
-                        ExternalEngineEnrollmentAuditAction.ProofNonceConsumed,
-                        ExternalEngineEnrollmentAuditReason.None,
-                        nonce.ConsumedAt);
+                    if (recordSuccessfulAudit)
+                        AddAudit(
+                            nonce.OrganizationId,
+                            nonce.WorkspaceId,
+                            nonce.ConnectionId,
+                            null,
+                            nonce.IdentityId,
+                            ExternalEngineEnrollmentAuditAction.ProofNonceConsumed,
+                            ExternalEngineEnrollmentAuditReason.None,
+                            nonce.ConsumedAt);
                     await dbContext.SaveChangesAsync(cancellationToken);
                     return true;
                 },

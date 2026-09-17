@@ -1,3 +1,4 @@
+using System.Data;
 using ElsaControl.Deployment.Core.ExternalConnections;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.EntityFrameworkCore;
@@ -92,7 +93,19 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
             entity.ActiveIdentityId = null;
             entity.LastChallengeId = null;
             entity.LastAuthenticatedAt = null;
+            entity.LastHeartbeatSequence = null;
+            entity.LastHeartbeatObservedAt = null;
             entity.ConnectorReachability = ExternalEngineConnectorReachability.Unknown.ToString();
+            entity.ConnectorProtocol = null;
+            entity.ConnectorVersion = null;
+            entity.ObservedDistribution = null;
+            entity.ObservedVersion = null;
+            entity.ObservedRuntimeKind = null;
+            entity.ReleaseEvidenceLevel = ExternalEngineReleaseEvidenceLevel.None.ToString();
+            entity.ReleaseEvidenceReference = null;
+            entity.StudioDestination = null;
+            entity.CapabilitiesObservedAt = null;
+            entity.Capabilities.Clear();
         }, cancellationToken);
 
     public Task<ExternalEngineConnection?> TryDisconnectAsync(
@@ -105,6 +118,113 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
             entity.RevokedAt = revokedAt.ToUniversalTime();
             entity.ConnectorReachability = ExternalEngineConnectorReachability.Unreachable.ToString();
         }, cancellationToken);
+
+    public async Task<ExternalEngineHeartbeatStoreResult> TryApplyHeartbeatAsync(
+        ExternalEngineConnection expected,
+        ExternalEngineHeartbeatProjection projection,
+        Guid identityId,
+        DateTimeOffset receivedAt,
+        TimeSpan minimumInterval,
+        CancellationToken cancellationToken = default) =>
+        await dbContext.ExecuteInTransactionAsync(
+            IsolationLevel.Serializable,
+            () => TryApplyHeartbeatCoreAsync(
+                expected, projection, identityId, receivedAt, minimumInterval, cancellationToken),
+            async (result, attemptCancellationToken) =>
+                result.Status != ExternalEngineHeartbeatStoreStatus.Applied
+                || await dbContext.ExternalEngineConnections.AsNoTracking().AnyAsync(
+                    entity => entity.OrganizationId == expected.OrganizationId
+                              && entity.WorkspaceId == expected.WorkspaceId
+                              && entity.Id == expected.Id
+                              && entity.ActiveIdentityId == identityId
+                              && entity.LastHeartbeatSequence == projection.Sequence,
+                    attemptCancellationToken),
+            cancellationToken);
+
+    private async Task<ExternalEngineHeartbeatStoreResult> TryApplyHeartbeatCoreAsync(
+        ExternalEngineConnection expected,
+        ExternalEngineHeartbeatProjection projection,
+        Guid identityId,
+        DateTimeOffset receivedAt,
+        TimeSpan minimumInterval,
+        CancellationToken cancellationToken)
+    {
+        var entity = await dbContext.ExternalEngineConnections
+            .Include(x => x.Capabilities)
+            .SingleOrDefaultAsync(
+                x => x.OrganizationId == expected.OrganizationId
+                     && x.WorkspaceId == expected.WorkspaceId
+                     && x.Id == expected.Id,
+                cancellationToken);
+        if (entity is null || entity.ActiveIdentityId != identityId)
+            return new(ExternalEngineHeartbeatStoreStatus.ScopeMismatch, entity is null ? null : ToDomain(entity));
+        if (entity.Status == ExternalEngineConnectionStatus.Revoked.ToString())
+            return new(ExternalEngineHeartbeatStoreStatus.Revoked, ToDomain(entity));
+        var activeIdentity = await dbContext.ExternalEngineConnectorIdentities.AsNoTracking().AnyAsync(
+            identity => identity.Id == identityId
+                        && identity.OrganizationId == entity.OrganizationId
+                        && identity.WorkspaceId == entity.WorkspaceId
+                        && identity.ConnectionId == entity.Id
+                        && identity.RevokedAt == null,
+            cancellationToken);
+        if (!activeIdentity)
+            return new(ExternalEngineHeartbeatStoreStatus.Revoked, ToDomain(entity));
+        if (entity.Version != expected.Version)
+            return new(ExternalEngineHeartbeatStoreStatus.Concurrent, ToDomain(entity));
+        if (entity.LastHeartbeatSequence is not null && projection.Sequence <= entity.LastHeartbeatSequence)
+            return new(ExternalEngineHeartbeatStoreStatus.OutOfOrder, ToDomain(entity));
+        if (entity.LastAuthenticatedAt is { } lastReceived && receivedAt - lastReceived < minimumInterval)
+            return new(
+                ExternalEngineHeartbeatStoreStatus.RateLimited,
+                ToDomain(entity),
+                minimumInterval - (receivedAt - lastReceived));
+
+        var previousStatus = entity.Status;
+        entity.Status = projection.Status.ToString();
+        entity.RuntimeHealth = projection.RuntimeHealth.ToString();
+        entity.ConnectorReachability = projection.ConnectorReachability.ToString();
+        entity.LastAuthenticatedAt = receivedAt.ToUniversalTime();
+        entity.LastHeartbeatSequence = projection.Sequence;
+        entity.LastHeartbeatObservedAt = projection.ObservedAt.ToUniversalTime();
+        entity.ConnectorProtocol = projection.ConnectorProtocol;
+        entity.ConnectorVersion = projection.ConnectorVersion;
+        entity.ObservedDistribution = projection.ObservedDistribution;
+        entity.ObservedVersion = projection.ObservedVersion;
+        entity.ObservedRuntimeKind = projection.ObservedRuntimeKind;
+        entity.ReleaseEvidenceLevel = projection.ReleaseEvidenceLevel.ToString();
+        entity.ReleaseEvidenceReference = projection.ReleaseEvidenceReference;
+        entity.StudioDestination = projection.StudioDestination;
+        entity.CapabilitiesObservedAt = receivedAt.ToUniversalTime();
+        var desiredCapabilities = projection.Capabilities.ToHashSet(StringComparer.Ordinal);
+        foreach (var capability in entity.Capabilities.Where(item => !desiredCapabilities.Contains(item.Capability)).ToArray())
+            entity.Capabilities.Remove(capability);
+        var existingCapabilities = entity.Capabilities.Select(item => item.Capability).ToHashSet(StringComparer.Ordinal);
+        entity.Capabilities.AddRange(desiredCapabilities.Except(existingCapabilities, StringComparer.Ordinal).Select(capability =>
+            new ExternalEngineConnectionCapabilityEntity { ConnectionId = entity.Id, Capability = capability }));
+        entity.UpdatedAt = receivedAt.ToUniversalTime();
+        entity.Version = checked(entity.Version + 1);
+
+        var action = (previousStatus, entity.Status) switch
+        {
+            (nameof(ExternalEngineConnectionStatus.Degraded), nameof(ExternalEngineConnectionStatus.Connected)) => "HeartbeatRecovered",
+            (_, nameof(ExternalEngineConnectionStatus.Connected)) when previousStatus != nameof(ExternalEngineConnectionStatus.Connected) => "HeartbeatConnected",
+            (_, nameof(ExternalEngineConnectionStatus.Degraded)) when previousStatus != nameof(ExternalEngineConnectionStatus.Degraded) => "HeartbeatDegraded",
+            _ => null
+        };
+        if (action is not null)
+            AddAudit(entity, action, receivedAt);
+
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return new(ExternalEngineHeartbeatStoreStatus.Applied, ToDomain(entity));
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            dbContext.ChangeTracker.Clear();
+            return new(ExternalEngineHeartbeatStoreStatus.Concurrent, null);
+        }
+    }
 
     private async Task<ExternalEngineConnection?> TryUpdateAsync(
         ExternalEngineConnection expected,
@@ -196,9 +316,13 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
             ConnectorVersion = value.ConnectorVersion,
             ObservedDistribution = value.ObservedDistribution,
             ObservedVersion = value.ObservedVersion,
+            ObservedRuntimeKind = value.ObservedRuntimeKind,
             ReleaseEvidenceLevel = value.ReleaseEvidenceLevel.ToString(),
+            ReleaseEvidenceReference = value.ReleaseEvidenceReference,
             StudioDestination = value.StudioDestination,
             CapabilitiesObservedAt = value.CapabilitiesObservedAt,
+            LastHeartbeatSequence = value.LastHeartbeatSequence,
+            LastHeartbeatObservedAt = value.LastHeartbeatObservedAt,
             ActiveIdentityId = value.ActiveIdentityId,
             LastChallengeId = value.LastChallengeId,
             IdempotencyKey = idempotencyKey,
@@ -235,5 +359,9 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
             value.CreatedAt,
             value.UpdatedAt,
             value.RevokedAt,
-            value.Version);
+            value.Version,
+            value.ObservedRuntimeKind,
+            value.ReleaseEvidenceReference,
+            value.LastHeartbeatSequence,
+            value.LastHeartbeatObservedAt);
 }

@@ -12,18 +12,23 @@ public sealed class ExternalEngineConnectionService(
     public const string AuthenticationOperation = "external-engine.identity.authenticate";
     private const string AuthenticationPayload = "elsa-control.external-engine-connector.authenticate.v1";
 
-    public Task<IReadOnlyList<ExternalEngineConnection>> ListAsync(
+    public async Task<IReadOnlyList<ExternalEngineConnection>> ListAsync(
         Guid organizationId,
         Guid workspaceId,
         CancellationToken cancellationToken = default) =>
-        connections.ListAsync(organizationId, workspaceId, cancellationToken);
+        (await connections.ListAsync(organizationId, workspaceId, cancellationToken))
+        .Select(connection => ExternalEngineConnectionFreshness.Project(connection, timeProvider.GetUtcNow()))
+        .ToArray();
 
-    public Task<ExternalEngineConnection?> FindAsync(
+    public async Task<ExternalEngineConnection?> FindAsync(
         Guid organizationId,
         Guid workspaceId,
         Guid connectionId,
-        CancellationToken cancellationToken = default) =>
-        connections.FindAsync(organizationId, workspaceId, connectionId, cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        var connection = await connections.FindAsync(organizationId, workspaceId, connectionId, cancellationToken);
+        return connection is null ? null : ExternalEngineConnectionFreshness.Project(connection, timeProvider.GetUtcNow());
+    }
 
     public async Task<ExternalEnginePairingAttempt> CreatePairingAsync(
         ExternalEngineConnectionCreateRequest request,
@@ -243,13 +248,32 @@ public sealed class ExternalEngineConnectionService(
         string displayName,
         DateTimeOffset now) =>
         new(
-            Guid.NewGuid(), organizationId, workspaceId, displayName,
-            ExternalEngineConnectionStatus.Pending,
-            ExternalEngineRuntimeHealth.Unknown,
-            ExternalEngineConnectorReachability.Unknown,
-            null, null, null, null, null,
-            ExternalEngineReleaseEvidenceLevel.None,
-            null, [], null, null, null, now, now, null, 1);
+            Id: Guid.NewGuid(),
+            OrganizationId: organizationId,
+            WorkspaceId: workspaceId,
+            DisplayName: displayName,
+            Status: ExternalEngineConnectionStatus.Pending,
+            RuntimeHealth: ExternalEngineRuntimeHealth.Unknown,
+            ConnectorReachability: ExternalEngineConnectorReachability.Unknown,
+            LastAuthenticatedAt: null,
+            ConnectorProtocol: null,
+            ConnectorVersion: null,
+            ObservedDistribution: null,
+            ObservedVersion: null,
+            ObservedRuntimeKind: null,
+            ReleaseEvidenceLevel: ExternalEngineReleaseEvidenceLevel.None,
+            ReleaseEvidenceReference: null,
+            StudioDestination: null,
+            Capabilities: [],
+            CapabilitiesObservedAt: null,
+            LastHeartbeatSequence: null,
+            LastHeartbeatObservedAt: null,
+            ActiveIdentityId: null,
+            LastChallengeId: null,
+            CreatedAt: now,
+            UpdatedAt: now,
+            RevokedAt: null,
+            Version: 1);
 
     private static string NormalizeDisplayName(string value)
     {

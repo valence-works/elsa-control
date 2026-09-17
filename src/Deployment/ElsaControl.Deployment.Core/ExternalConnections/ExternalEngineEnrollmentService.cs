@@ -143,6 +143,20 @@ public sealed class ExternalEngineEnrollmentService(
             requireCurrentKey: false,
             cancellationToken);
 
+    public Task<ExternalEngineConnectorProofResult> VerifyConnectorProofAsync(
+        ExternalEngineConnectorProof proof,
+        string expectedOperation,
+        string expectedPayloadDigest,
+        bool recordSuccessfulNonceAudit,
+        CancellationToken cancellationToken = default) =>
+        VerifyConnectorProofCoreAsync(
+            proof,
+            expectedOperation,
+            expectedPayloadDigest,
+            requireCurrentKey: false,
+            cancellationToken,
+            recordSuccessfulNonceAudit);
+
     public async Task<ExternalEngineConnectorKeyRotationResult> RotateConnectorKeyAsync(
         ExternalEngineConnectorKeyRotationRequest request,
         CancellationToken cancellationToken = default)
@@ -272,7 +286,8 @@ public sealed class ExternalEngineEnrollmentService(
         string expectedOperation,
         string expectedPayloadDigest,
         bool requireCurrentKey,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool recordSuccessfulNonceAudit = true)
     {
         ArgumentNullException.ThrowIfNull(proof);
         byte[] payload;
@@ -334,6 +349,7 @@ public sealed class ExternalEngineEnrollmentService(
                 issuedAt,
                 issuedAt.Add(ExternalEngineEnrollmentDefaults.MaximumProofAge),
                 now),
+            recordSuccessfulNonceAudit,
             cancellationToken);
         if (consumed)
             return ExternalEngineConnectorProofResult.Success(identity);
