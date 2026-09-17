@@ -69,7 +69,14 @@ public sealed class EfCoreElsaInstanceCommercialGate(CatalogDbContext db, TimePr
 
         if (action == ElsaInstanceOperationAction.Create &&
             activeInstanceCount is { } count && count >= entitlement.MaxInstances)
-            return Deny(ElsaInstanceCommercialOperation.InstanceLimitReached, "The organization has reached its managed-instance limit.");
+            return new ElsaInstanceCommercialGateDecision(
+                false,
+                ElsaInstanceCommercialOperation.InstanceLimitReached,
+                "The organization has reached its managed-instance limit.")
+            {
+                CurrentInstanceCount = count,
+                MaxInstances = entitlement.MaxInstances
+            };
 
         return ElsaInstanceCommercialGateDecision.Allow();
     }

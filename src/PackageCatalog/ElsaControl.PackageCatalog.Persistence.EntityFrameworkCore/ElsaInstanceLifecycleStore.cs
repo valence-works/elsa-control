@@ -588,7 +588,9 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     throw new ElsaInstanceLifecycleConflictException(
                         commercialDecision.Summary,
                         ElsaInstanceLifecycleConflictReason.CommercialDenied,
-                        commercialDecision.Code);
+                        commercialDecision.Code,
+                        commercialDecision.CurrentInstanceCount,
+                        commercialDecision.MaxInstances);
 
                 var priorObservedLifecycle = storedInstance?.ObservedLifecycle;
                 var instanceEntity = storedInstance ?? ToEntity(instance, outbox.CreatedAt);

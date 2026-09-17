@@ -254,12 +254,26 @@ public sealed class ElsaInstanceLifecycleConflictException : InvalidOperationExc
         string message,
         ElsaInstanceLifecycleConflictReason reason = ElsaInstanceLifecycleConflictReason.InvalidState,
         string? commercialCode = null)
+        : this(message, reason, commercialCode, null, null)
+    {
+    }
+
+    public ElsaInstanceLifecycleConflictException(
+        string message,
+        ElsaInstanceLifecycleConflictReason reason,
+        string? commercialCode,
+        int? currentInstanceCount,
+        int? maxInstances)
         : base(message)
     {
         Reason = reason;
         CommercialCode = commercialCode;
+        CurrentInstanceCount = currentInstanceCount;
+        MaxInstances = maxInstances;
     }
 
     public ElsaInstanceLifecycleConflictReason Reason { get; }
     public string? CommercialCode { get; }
+    public int? CurrentInstanceCount { get; }
+    public int? MaxInstances { get; }
 }

@@ -133,7 +133,11 @@ public sealed class ElsaInstanceCommercialGateTests
         await using (var setup = CreateContext(keeper))
         {
             await setup.Database.EnsureCreatedAsync();
-            await CreateWorkspaceAsync(setup, OrganizationSubscriptionState.Active, managedHostingEnabled: true, maxInstances: 1);
+            var workspace = await CreateWorkspaceAsync(setup, state: null, managedHostingEnabled: false);
+            await new OrganizationBillingStore(setup).StartTrialAsync(
+                workspace.OrganizationId,
+                BillingProviderNames.Stripe,
+                Now);
         }
 
         var workspaceId = await GetWorkspaceIdAsync(keeper);
@@ -147,8 +151,12 @@ public sealed class ElsaInstanceCommercialGateTests
         var conflict = Assert.IsType<ElsaInstanceLifecycleConflictException>(loser.Error);
         Assert.Equal(ElsaInstanceLifecycleConflictReason.CommercialDenied, conflict.Reason);
         Assert.Equal(ElsaInstanceCommercialOperation.InstanceLimitReached, conflict.CommercialCode);
+        Assert.Equal(1, conflict.CurrentInstanceCount);
+        Assert.Equal(1, conflict.MaxInstances);
         await using var verify = CreateContext(keeper);
         Assert.Equal(1, await verify.ElsaInstances.CountAsync(x => x.OrganizationId == organizationId && x.DeletedAt == null));
+        Assert.Equal(1, await verify.ElsaInstanceOperations.CountAsync(x => x.OrganizationId == organizationId));
+        Assert.Equal(1, await verify.ElsaInstanceLifecycleOutbox.CountAsync(x => x.OrganizationId == organizationId));
     }
 
     private static async Task<(ElsaInstanceLifecycleAcceptance? Acceptance, Exception? Error)> CreateConcurrentlyAsync(

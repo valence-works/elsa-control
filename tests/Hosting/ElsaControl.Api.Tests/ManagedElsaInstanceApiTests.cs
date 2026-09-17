@@ -105,6 +105,83 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Stripe_hosted_limit_returns_safe_counts_without_queueing_a_second_provider_operation()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var client = app.CreateTrustedWorkspaceClient("hosted-one-engine-owner");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            var organizationId = await db.Workspaces.Where(x => x.Id == workspaceId)
+                .Select(x => x.OrganizationId)
+                .SingleAsync();
+            await new OrganizationBillingStore(db).StartTrialAsync(
+                organizationId,
+                BillingProviderNames.Stripe,
+                DateTimeOffset.UtcNow);
+        }
+
+        await CreateCanonicalInstanceAsync(client, workspaceId, "hosted-first-engine");
+        using var second = await SendCreateRequestAsync(
+            client,
+            workspaceId,
+            "Second hosted runtime",
+            "hosted-second-engine",
+            Intent(),
+            "create-hosted-second-engine");
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, second.StatusCode);
+        var problem = await second.Content.ReadFromJsonAsync<Dictionary<string, System.Text.Json.JsonElement>>();
+        Assert.NotNull(problem);
+        Assert.Equal("instance_limit_reached", problem["code"].GetString());
+        Assert.Equal(1, problem["currentInstances"].GetInt32());
+        Assert.Equal(1, problem["maxInstances"].GetInt32());
+        Assert.DoesNotContain("stripe", await second.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+
+        await using var verifyScope = app.Services.CreateAsyncScope();
+        var verify = verifyScope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Equal(1, await CountRowsAsync(verify, "ElsaInstances"));
+        Assert.Equal(1, await CountRowsAsync(verify, "ElsaInstanceOperations"));
+        Assert.Equal(1, await CountRowsAsync(verify, "ElsaInstanceLifecycleOutbox"));
+    }
+
+    [Fact]
+    public async Task Expired_Stripe_trial_rejects_create_without_queueing_provider_work()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var client = app.CreateTrustedWorkspaceClient("expired-hosted-trial-owner");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            var organizationId = await db.Workspaces.Where(x => x.Id == workspaceId)
+                .Select(x => x.OrganizationId)
+                .SingleAsync();
+            await new OrganizationBillingStore(db).StartTrialAsync(
+                organizationId,
+                BillingProviderNames.Stripe,
+                DateTimeOffset.UtcNow.AddDays(-15));
+        }
+
+        using var response = await SendCreateRequestAsync(
+            client,
+            workspaceId,
+            "Expired trial runtime",
+            "expired-trial-runtime",
+            Intent(),
+            "create-expired-trial-runtime");
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        Assert.Contains("instance.entitlement-expired", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        await using var verifyScope = app.Services.CreateAsyncScope();
+        var verify = verifyScope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Equal(0, await CountRowsAsync(verify, "ElsaInstances"));
+        Assert.Equal(0, await CountRowsAsync(verify, "ElsaInstanceOperations"));
+        Assert.Equal(0, await CountRowsAsync(verify, "ElsaInstanceLifecycleOutbox"));
+    }
+
+    [Fact]
     public async Task Create_rejects_a_release_outside_the_eligible_catalog()
     {
         var app = await PrepareApplicationAsync([]);

@@ -422,12 +422,17 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         }
 
         // Stripe Trial and Active are the commercial source of truth for the
-        // managed-hosting capability. Other lifecycle states and providers do
-        // not own the flag here, so existing capabilities and limits remain
-        // untouched (including the separate internal grant path).
+        // Hosted Preview capability and its single managed-instance allowance.
+        // Other providers retain their separately administered limits.
         if (string.Equals(subscription.Provider, BillingProviderNames.Stripe, StringComparison.Ordinal) &&
             subscription.State is OrganizationSubscriptionState.Trial or OrganizationSubscriptionState.Active)
+        {
             entitlement.ManagedHostingEnabled = true;
+            entitlement.MaxInstances = 1;
+            entitlement.ManagedHostingExpiresAt = subscription.State == OrganizationSubscriptionState.Trial
+                ? subscription.TrialEndsAt
+                : null;
+        }
         else if (string.Equals(subscription.Provider, BillingProviderNames.AzureBound, StringComparison.Ordinal) &&
                  subscription.State != OrganizationSubscriptionState.Active)
         {

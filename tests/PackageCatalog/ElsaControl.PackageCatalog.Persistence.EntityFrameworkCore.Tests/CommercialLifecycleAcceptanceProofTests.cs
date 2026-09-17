@@ -33,7 +33,7 @@ public sealed class CommercialLifecycleAcceptanceProofTests
         });
         await db.SaveChangesAsync();
         var store = new OrganizationBillingStore(db);
-        var gate = new EfCoreElsaInstanceCommercialGate(db);
+        var gate = new EfCoreElsaInstanceCommercialGate(db, new MutableTimeProvider(Start));
 
         var trial = await store.StartTrialAsync(organization.Id, "stripe", Start);
         Assert.Equal(OrganizationSubscriptionState.Trial, trial.Entitlement!.SubscriptionState);
