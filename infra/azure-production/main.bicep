@@ -138,10 +138,10 @@ param workloadCpu string
 ])
 param workloadMemory string
 
-// The runtime's managed Elsa handoff (release capability managed-elsa-handoff-v1). The provider runner enables
+// The runtime's managed Elsa handoff (release capability managed-elsa-handoff-v2). The provider runner enables
 // it only for a release that declares the capability and supplies the instance identity and Control's own
 // handoff configuration. The callback is never a caller input: it is derived below from the workload origin.
-@description('Enable the runtime managed Elsa handoff. The runner sets it only when the admitted release declares managed-elsa-handoff-v1.')
+@description('Enable the runtime managed Elsa handoff. The runner sets it only when the admitted release declares managed-elsa-handoff-v2.')
 param managedHandoffEnabled bool
 
 @description('Lowercase canonical Elsa instance ID the handoff binds to. Required when the handoff is enabled.')
@@ -164,8 +164,8 @@ param managedHandoffControlContinuationUrl string = ''
 @maxLength(16)
 param managedHandoffRuntimeMaximumLifetime string = ''
 
-@description('Runtime permissions granted to a handed-off Control operator. Required when the handoff is enabled.')
-param managedHandoffRuntimePermissions array = []
+@description('Runtime permissions allowed in a handed-off Control session. Required when the handoff is enabled.')
+param managedHandoffAllowedRuntimePermissions array = []
 
 @description('SHA-256 of the compiled main template. The runbook supplies this so IaC changes produce a new plan and revision identity.')
 @minLength(64)
@@ -184,7 +184,7 @@ param stableTrafficRevisionName string = ''
 param additionalTags object = {}
 
 var effectiveReleaseVersion = empty(releaseVersion) ? elsaVersion : releaseVersion
-var managedHandoffInput = managedHandoffEnabled ? 'v1/${managedHandoffInstanceId}/${managedHandoffAudience}/${managedHandoffControlBaseUrl}/${managedHandoffControlContinuationUrl}/${managedHandoffRuntimeMaximumLifetime}/${join(managedHandoffRuntimePermissions, ',')}' : 'disabled'
+var managedHandoffInput = managedHandoffEnabled ? 'v2/${managedHandoffInstanceId}/${managedHandoffAudience}/${managedHandoffControlBaseUrl}/${managedHandoffControlContinuationUrl}/${managedHandoffRuntimeMaximumLifetime}/${join(managedHandoffAllowedRuntimePermissions, ',')}' : 'disabled'
 var planInput = 'template=${toLower(templateFingerprint)}|name=${workloadName}|location=${location}|image=${imageRepository}@sha256:${toLower(imageDigest)}|elsa=${elsaVersion}|release-line=${releaseLine}|release-version=${effectiveReleaseVersion}|release-feed=${releaseFeedName}/${releaseFeedServiceIndex}|sql-workflow=${sqlWorkflowPackageVersion}|sql-quartz=${sqlQuartzPackageVersion}|topology=combined|capacity=${workloadMinReplicas}/${workloadMaxReplicas}/${workloadCpu}/${workloadMemory}|handoff=${managedHandoffInput}|acr=${registrySubscriptionId}/${registryResourceGroupName}/${registryName}|sql-bootstrap=${sqlBootstrapObjectId}/${sqlBootstrapLogin}|admin=${adminUsername}|secrets=${sqlConnectionSecretName}/${signingKeySecretName}/${adminPasswordSecretName}'
 // Bicep 0.43 has no SHA-256 function. uniqueString is deterministic for the
 // canonical input, including the externally computed compiled-template hash.
@@ -302,7 +302,7 @@ module workload 'modules/container-app.bicep' = if (deployWorkload) {
     managedHandoffControlContinuationUrl: managedHandoffControlContinuationUrl
     managedHandoffCallbackUri: managedHandoffCallbackUri
     managedHandoffRuntimeMaximumLifetime: managedHandoffRuntimeMaximumLifetime
-    managedHandoffRuntimePermissions: managedHandoffRuntimePermissions
+    managedHandoffAllowedRuntimePermissions: managedHandoffAllowedRuntimePermissions
     tags: tags
   }
 }

@@ -2826,7 +2826,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                             Digest = imageDigest
                         },
                         Capabilities = declaresManagedHandoff
-                            ? [.. component.Capabilities, ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV1]
+                            ? [.. component.Capabilities, ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV2]
                             : component.Capabilities
                     }
                 ]

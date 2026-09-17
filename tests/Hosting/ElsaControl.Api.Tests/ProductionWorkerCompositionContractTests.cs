@@ -102,7 +102,7 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
             ["Deployment:AzureProvider:Runner:ManagedHandoff:ControlBaseUrl"] = "https://elsewhere.example.test",
             ["Deployment:AzureProvider:Runner:ManagedHandoff:ControlContinuationUrl"] = "https://elsewhere.example.test/admin/runtimes",
             ["Deployment:AzureProvider:Runner:ManagedHandoff:RuntimeMaximumLifetime"] = "01:00:00",
-            ["Deployment:AzureProvider:Runner:ManagedHandoff:RuntimePermissions:0"] = "read:*"
+            ["Deployment:AzureProvider:Runner:ManagedHandoff:AllowedRuntimePermissions:0"] = "read:diagnostics:structured-logs"
         };
         Assert.True(Configuration(settings).GetSection(ElsaInstancePlanAuthorityOptions.ConfigurationSection)
             .Get<ElsaInstancePlanAuthorityOptions>()!.TryGetOrigin(out var origin));
@@ -114,7 +114,7 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
         Assert.Equal(origin, handoff.ControlBaseUrl);
         Assert.Equal(origin + "/admin/runtimes", handoff.ControlContinuationUrl);
         Assert.Equal(TimeSpan.FromHours(8), handoff.RuntimeMaximumLifetime);
-        Assert.Equal(["*"], handoff.RuntimePermissions);
+        Assert.Equal(["read:diagnostics:structured-logs"], handoff.AllowedRuntimePermissions);
         var withoutHandoff = authority.Options with { ManagedHandoff = null };
         Assert.NotEqual(withoutHandoff.ComputeProviderScopeFingerprint(authority.Scope), authority.ProviderScopeFingerprint);
     }

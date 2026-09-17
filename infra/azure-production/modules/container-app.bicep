@@ -120,7 +120,7 @@ param cpu string
 @description('Consumption memory for the workload container.')
 param memory string
 
-@description('Enable the runtime managed Elsa handoff (managed-elsa-handoff-v1).')
+@description('Enable the runtime managed Elsa handoff (managed-elsa-handoff-v2).')
 param managedHandoffEnabled bool
 
 @description('Lowercase canonical Elsa instance ID the handoff is bound to.')
@@ -141,8 +141,8 @@ param managedHandoffCallbackUri string = ''
 @description('Upper bound of a runtime session (hh:mm:ss).')
 param managedHandoffRuntimeMaximumLifetime string = ''
 
-@description('Runtime permissions granted to a handed-off Control operator.')
-param managedHandoffRuntimePermissions array = []
+@description('Runtime permissions allowed in a handed-off Control session.')
+param managedHandoffAllowedRuntimePermissions array = []
 
 @description('Tags applied to the app.')
 param tags object = {}
@@ -281,10 +281,10 @@ var featureEnvironment = [
 // always-running replica. Enabling it with a missing input, more replicas or scale-to-zero fails the deployment here (no
 // 'invalid' entry below) instead of producing a revision that cannot start or rejects its own callbacks. A
 // disabled handoff is stated explicitly so an image default can never switch it on.
-var managedHandoffInputsComplete = !empty(managedHandoffInstanceId) && !empty(managedHandoffAudience) && !empty(managedHandoffControlBaseUrl) && !empty(managedHandoffControlContinuationUrl) && !empty(managedHandoffCallbackUri) && !empty(managedHandoffRuntimeMaximumLifetime) && !empty(managedHandoffRuntimePermissions)
+var managedHandoffInputsComplete = !empty(managedHandoffInstanceId) && !empty(managedHandoffAudience) && !empty(managedHandoffControlBaseUrl) && !empty(managedHandoffControlContinuationUrl) && !empty(managedHandoffCallbackUri) && !empty(managedHandoffRuntimeMaximumLifetime) && !empty(managedHandoffAllowedRuntimePermissions)
 var managedHandoffMode = !managedHandoffEnabled ? 'disabled' : managedHandoffInputsComplete && minReplicas == 1 && maxReplicas == 1 ? 'enabled' : 'invalid'
-var managedHandoffPermissionEnvironment = [for (permission, index) in managedHandoffRuntimePermissions: {
-  name: 'ManagedElsa__Handoff__RuntimePermissions__${index}'
+var managedHandoffPermissionEnvironment = [for (permission, index) in managedHandoffAllowedRuntimePermissions: {
+  name: 'ManagedElsa__Handoff__AllowedRuntimePermissions__${index}'
   value: permission
 }]
 var managedHandoffEnvironment = {

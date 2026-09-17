@@ -27,7 +27,7 @@ The dedicated-lite database default is the provisioned Standard S0 objective (10
 
 ## Managed Elsa handoff
 
-The console's Open action sends the browser to the workload's `/managed-elsa/handoff/start`. The runtime maps that endpoint only when its `ManagedElsa:Handoff` section is enabled and complete, so the template configures it from typed, non-secret parameters. `managedHandoffEnabled` is required and has no default. The provider runner sets it to true only when the admitted release declares `managed-elsa-handoff-v1` and the workload runs as a single replica (the runtime keeps handoff state and sessions in process); otherwise the app receives `ManagedElsa__Handoff__Enabled=false` explicitly.
+The console's Open action sends the browser to the workload's `/managed-elsa/handoff/start`. The runtime maps that endpoint only when its `ManagedElsa:Handoff` section is enabled and complete, so the template configures it from typed, non-secret parameters. `managedHandoffEnabled` is required and has no default. The provider runner sets it to true only when the admitted release declares `managed-elsa-handoff-v2` and the workload runs as a single replica (the runtime keeps handoff state and sessions in process); otherwise the app receives `ManagedElsa__Handoff__Enabled=false` explicitly.
 
 When enabled, the runner supplies:
 
@@ -38,7 +38,7 @@ When enabled, the runner supplies:
 | `managedHandoffControlBaseUrl` | `ControlBaseUrl` | Control's `ControlPlane:Origin`; the runtime redeems at `/api/managed-elsa/handoff/redeem` |
 | `managedHandoffControlContinuationUrl` | `ControlContinuationUrl` | `ControlPlane:Origin` + `/admin/runtimes`, the console page that completes the handoff |
 | `managedHandoffRuntimeMaximumLifetime` | `RuntimeMaximumLifetime` | Control's `ManagedElsa:Handoff:RuntimeSessionMaximumLifetime` (at most 8 hours) |
-| `managedHandoffRuntimePermissions` | `RuntimePermissions__N` | Control's operator grant |
+| `managedHandoffAllowedRuntimePermissions` | `AllowedRuntimePermissions__N` | Control's operator grant |
 
 `CallbackUri` is not a parameter. The template derives it as `https://<workloadName>-app.<environment default domain>/managed-elsa/handoff/callback`, which is the origin Container Apps serves the external app on and the origin Control binds the instance's handoff callback to; the environment exists from the foundation phase, so no ordering gap arises. The runner rejects a workload deployment whose `managedHandoffCallbackUri` output differs from the callback derived from its `containerAppEndpoint` output. `UpstreamAuthenticationScheme` (`Jwt-or-ApiKey`), `SuccessPath` (`/`) and `StateLifetime` (`00:05:00`) are the runtime's documented values, and `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` lets the runtime observe the HTTPS scheme that Container Apps ingress terminates. An enabled handoff with any empty input, or on more than one replica, fails the deployment instead of producing a revision whose startup validation would reject it or whose replicas would reject each other's callbacks and sessions.
 

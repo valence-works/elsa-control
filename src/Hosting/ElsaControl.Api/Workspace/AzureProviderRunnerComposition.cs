@@ -123,6 +123,6 @@ internal static class AzureProviderRunnerComposition
             origin,
             origin + ManagedElsaHandoffDefaults.ConsoleContinuationPath,
             handoff.RuntimeSessionMaximumLifetime,
-            ManagedElsaHandoffDefaults.RuntimeOperatorPermissions);
+            ManagedElsaHandoffDefaults.AllowedRuntimePermissions);
     }
 }

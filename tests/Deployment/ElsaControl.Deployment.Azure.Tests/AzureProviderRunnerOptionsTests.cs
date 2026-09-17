@@ -173,8 +173,7 @@ public sealed class AzureProviderRunnerOptionsTests : IDisposable
             {
                 ValidHandoff() with { ControlBaseUrl = "https://other.example.test", ControlContinuationUrl = "https://other.example.test/admin/runtimes" },
                 ValidHandoff() with { ControlContinuationUrl = "https://control.example.test/admin/other" },
-                ValidHandoff() with { RuntimeMaximumLifetime = TimeSpan.FromHours(1) },
-                ValidHandoff() with { RuntimePermissions = ["read:*"] }
+                ValidHandoff() with { RuntimeMaximumLifetime = TimeSpan.FromHours(1) }
             },
             changed => Assert.NotEqual(bound, (withoutHandoff with { ManagedHandoff = changed }).ComputeProviderScopeFingerprint(ValidScope())));
     }
@@ -205,7 +204,9 @@ public sealed class AzureProviderRunnerOptionsTests : IDisposable
         Assert.ThrowsAny<ArgumentException>(() =>
             (ValidOptions() with { ManagedHandoff = ValidHandoff() with { RuntimeMaximumLifetime = TimeSpan.FromMilliseconds(1500) } }).Validate());
         Assert.ThrowsAny<ArgumentException>(() =>
-            (ValidOptions() with { ManagedHandoff = ValidHandoff() with { RuntimePermissions = ["*", "*"] } }).Validate());
+            (ValidOptions() with { ManagedHandoff = ValidHandoff() with { AllowedRuntimePermissions = ["*"] } }).Validate());
+        Assert.ThrowsAny<ArgumentException>(() =>
+            (ValidOptions() with { ManagedHandoff = ValidHandoff() with { AllowedRuntimePermissions = ["read:workflows"] } }).Validate());
         Assert.ThrowsAny<ArgumentException>(() => (ValidOptions() with
         {
             ManagedHandoff = ValidHandoff(),
@@ -351,7 +352,7 @@ public sealed class AzureProviderRunnerOptionsTests : IDisposable
     };
 
     private static AzureManagedHandoffOptions ValidHandoff() => new(
-        "https://control.example.test", "https://control.example.test/admin/runtimes", TimeSpan.FromHours(8), ["*"]);
+        "https://control.example.test", "https://control.example.test/admin/runtimes", TimeSpan.FromHours(8), ["read:diagnostics:structured-logs"]);
 
     private static AzureProviderTargetScope ValidScope() => new(
         "11111111-1111-1111-1111-111111111111",

@@ -29,7 +29,7 @@ public static class ReleaseManifestSchema
 /// </summary>
 public static class ReleaseManifestRuntimeIntegrationCapabilities
 {
-    public const string ManagedElsaHandoffV1 = "managed-elsa-handoff-v1";
+    public const string ManagedElsaHandoffV2 = "managed-elsa-handoff-v2";
 }
 
 public sealed record CommercialReleaseManifest(

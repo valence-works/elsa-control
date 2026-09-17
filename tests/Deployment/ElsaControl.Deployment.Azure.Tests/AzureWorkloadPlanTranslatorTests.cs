@@ -321,7 +321,7 @@ public sealed class AzureWorkloadPlanTranslatorTests
         {
             Topology = plan.Topology with
             {
-                Components = [plan.Topology.Components[0] with { Capabilities = ["Managed-Elsa-Handoff-V1", "managed-elsa-handoff-v2"] }]
+                Components = [plan.Topology.Components[0] with { Capabilities = ["Managed-Elsa-Handoff-V1", "managed-elsa-handoff-v1"] }]
             }
         };
 
@@ -789,7 +789,7 @@ public sealed class AzureWorkloadPlanTranslatorTests
                     component with
                     {
                         Capabilities = declared
-                            ? [.. component.Capabilities, ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV1]
+                            ? [.. component.Capabilities, ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV2]
                             : component.Capabilities
                     }
                 ]

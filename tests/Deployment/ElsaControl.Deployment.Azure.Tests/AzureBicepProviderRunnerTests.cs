@@ -42,7 +42,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     private static readonly AzureWorkloadCapacity StandardSmall = GovernedCapacity("standard-small");
     private const string WorkloadHandoffCallback = "https://proof-app.hash.azurecontainerapps.io/managed-elsa/handoff/callback";
     private static readonly AzureManagedHandoffOptions ControlHandoff = new(
-        "https://control.example.test", "https://control.example.test/admin/runtimes", TimeSpan.FromHours(8), ["*"]);
+        "https://control.example.test", "https://control.example.test/admin/runtimes", TimeSpan.FromHours(8), ["read:diagnostics:structured-logs"]);
     private readonly RunnerFixture _fixture = new();
 
     [Theory]
@@ -216,7 +216,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
             "managedHandoffControlBaseUrl=https://control.example.test",
             "managedHandoffControlContinuationUrl=https://control.example.test/admin/runtimes",
             "managedHandoffRuntimeMaximumLifetime=08:00:00",
-            "managedHandoffRuntimePermissions=[\"*\"]"
+            "managedHandoffAllowedRuntimePermissions=[\"read:diagnostics:structured-logs\"]"
         ], deployment.Where(IsHandoffArgument));
         Assert.DoesNotContain(deployment, argument => argument.StartsWith("managedHandoffCallbackUri=", StringComparison.Ordinal));
     }

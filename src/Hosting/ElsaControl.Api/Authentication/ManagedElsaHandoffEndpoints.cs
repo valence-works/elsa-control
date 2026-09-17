@@ -95,7 +95,8 @@ public static class ManagedElsaHandoffEndpoints
                     result.Claims.InstanceId,
                     result.Claims.Scopes.Order(StringComparer.Ordinal).ToArray(),
                     result.Claims.ExpiresAt,
-                    result.Claims.SessionExpiresAt))
+                    result.Claims.SessionExpiresAt,
+                    result.Claims.RuntimePermissions.Order(StringComparer.Ordinal).ToArray()))
             };
         });
 
@@ -177,4 +178,5 @@ public sealed record ManagedElsaHandoffRedeemResponse(
     Guid InstanceId,
     IReadOnlyList<string> Scopes,
     DateTimeOffset ExpiresAt,
-    DateTimeOffset SessionExpiresAt);
+    DateTimeOffset SessionExpiresAt,
+    IReadOnlyList<string> RuntimePermissions);

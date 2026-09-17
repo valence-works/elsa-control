@@ -69,7 +69,38 @@ public sealed class ManagedElsaHandoffTests
         Assert.Equal(authorizer.OrganizationId, session.OrganizationId);
         Assert.Equal(authorizer.InstanceId, session.InstanceId);
         Assert.Contains(ManagedElsaHandoffDefaults.RuntimeSessionScope, session.Scopes);
+        Assert.Equal([ManagedElsaRuntimePermissionMapping.StructuredLogsRead], session.RuntimePermissions);
         Assert.Equal(sessionExpiresAt, session.SessionExpiresAt);
+    }
+
+    [Theory]
+    [InlineData(WorkspaceRole.Owner, OrganizationRole.Member, true)]
+    [InlineData(WorkspaceRole.Reader, OrganizationRole.Owner, true)]
+    [InlineData(WorkspaceRole.Reader, OrganizationRole.Administrator, true)]
+    [InlineData(WorkspaceRole.Reader, OrganizationRole.Member, false)]
+    [InlineData(WorkspaceRole.SourceAdmin, OrganizationRole.Member, false)]
+    public void Runtime_permission_mapping_grants_only_structured_log_read_to_authorized_roles(
+        WorkspaceRole workspaceRole,
+        OrganizationRole organizationRole,
+        bool expected)
+    {
+        var access = new WorkspaceAccess(Guid.NewGuid(), Guid.NewGuid(), workspaceRole, Guid.NewGuid(), organizationRole);
+
+        var permissions = ManagedElsaRuntimePermissionMapping.For(access);
+
+        Assert.Equal(expected, permissions.Contains(ManagedElsaRuntimePermissionMapping.StructuredLogsRead));
+        Assert.All(permissions, permission => Assert.Equal(ManagedElsaRuntimePermissionMapping.StructuredLogsRead, permission));
+    }
+
+    [Theory]
+    [InlineData("*")]
+    [InlineData("read:workflows")]
+    public void Handoff_issuer_rejects_wildcard_and_unknown_runtime_grants(string permission)
+    {
+        using var fixture = CreateFixture();
+        fixture.Authorizer.RuntimePermissions = new HashSet<string>([permission], StringComparer.Ordinal);
+
+        Assert.Throws<InvalidOperationException>(() => fixture.Issue());
     }
 
     [Fact]
@@ -261,6 +292,10 @@ public sealed class ManagedElsaHandoffTests
             handoffRequest);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var issued = (await response.Content.ReadControlJsonAsync<ManagedElsaHandoffIssueResponse>())!;
+        var token = new JwtSecurityTokenHandler().ReadJwtToken(issued.Token);
+        Assert.Equal(ManagedElsaRuntimePermissionMapping.StructuredLogsRead,
+            token.Claims.Single(claim => claim.Type == ManagedElsaHandoffDefaults.RuntimePermissionClaim).Value);
     }
 
     [Theory]
@@ -799,6 +834,20 @@ public sealed class ManagedElsaHandoffTests
         Assert.Equal(
             fixture.Authorizer.BindingVersion.ToString(System.Globalization.CultureInfo.InvariantCulture),
             jwt.Claims.Single(x => x.Type == "binding_version").Value);
+        Assert.Equal(ManagedElsaRuntimePermissionMapping.StructuredLogsRead,
+            jwt.Claims.Single(x => x.Type == ManagedElsaHandoffDefaults.RuntimePermissionClaim).Value);
+    }
+
+    [Theory]
+    [InlineData("*")]
+    [InlineData("read:workflows")]
+    public async Task Handoff_redemption_rejects_wildcard_and_unknown_runtime_grants(string permission)
+    {
+        using var fixture = CreateFixture();
+
+        var result = await fixture.RedeemAsync(fixture.IssueWithRuntimePermissions(permission));
+
+        Assert.Equal(ManagedElsaHandoffRedeemFailure.InvalidToken, result.Failure);
     }
 
     [Fact]
@@ -1306,6 +1355,13 @@ public sealed class ManagedElsaHandoffTests
                     ManagedElsaHandoffDefaults.SessionExpiryClaim,
                     expiresAt.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture))));
 
+        public string IssueWithRuntimePermissions(params string[] permissions) =>
+            RewriteToken(Issue(), claims => claims
+                .Where(claim => claim.Type != ManagedElsaHandoffDefaults.RuntimePermissionClaim)
+                .Concat(permissions.Select(permission => new Claim(
+                    ManagedElsaHandoffDefaults.RuntimePermissionClaim,
+                    permission))));
+
         private string RewriteToken(
             string token,
             Func<IEnumerable<Claim>, IEnumerable<Claim>> rewriteClaims,
@@ -1350,6 +1406,8 @@ public sealed class ManagedElsaHandoffTests
         public string CodeChallenge { get; } = ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier);
         public int BindingVersion { get; set; } = 7;
         public bool IsAuthorized { get; set; } = true;
+        public IReadOnlySet<string> RuntimePermissions { get; set; } = new HashSet<string>(
+            [ManagedElsaRuntimePermissionMapping.StructuredLogsRead], StringComparer.Ordinal);
 
         public ManagedElsaHandoffAuthorization Authorization => new(
             AccountId,
@@ -1359,7 +1417,8 @@ public sealed class ManagedElsaHandoffTests
             RedirectUri,
             CodeChallenge,
             new HashSet<string>([ManagedElsaHandoffDefaults.RuntimeSessionScope], StringComparer.Ordinal),
-            BindingVersion);
+            BindingVersion,
+            RuntimePermissions);
 
         public ValueTask<ManagedElsaHandoffAuthorization?> AuthorizeAsync(
             TrustedWorkspaceIdentity identity,

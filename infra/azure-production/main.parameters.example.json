@@ -71,9 +71,9 @@
     "managedHandoffRuntimeMaximumLifetime": {
       "value": "08:00:00"
     },
-    "managedHandoffRuntimePermissions": {
+    "managedHandoffAllowedRuntimePermissions": {
       "value": [
-        "*"
+        "read:diagnostics:structured-logs"
       ]
     }
   }

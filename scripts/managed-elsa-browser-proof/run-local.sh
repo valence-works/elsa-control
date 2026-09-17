@@ -125,7 +125,7 @@ docker run -d --platform linux/amd64 \
   -e ManagedElsa__Handoff__CallbackUri="$runtime_origin/managed-elsa/handoff/callback" \
   -e ManagedElsa__Handoff__StateLifetime=00:01:00 \
   -e ManagedElsa__Handoff__UpstreamAuthenticationScheme=Jwt-or-ApiKey \
-  -e ManagedElsa__Handoff__RuntimePermissions__0='*' \
+  -e ManagedElsa__Handoff__AllowedRuntimePermissions__0=read:diagnostics:structured-logs \
   "$trusted_runtime_image" >/dev/null
 unset runtime_admin_password runtime_signing_key
 

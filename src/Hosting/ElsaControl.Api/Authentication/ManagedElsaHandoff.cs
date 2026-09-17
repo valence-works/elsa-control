@@ -15,6 +15,7 @@ public static class ManagedElsaHandoffDefaults
 {
     public const string ConfigurationSection = "ManagedElsa:Handoff";
     public const string RuntimeSessionScope = "runtime:session";
+    public const string RuntimePermissionClaim = "runtime_permission";
     public const string TokenType = "elsa-handoff+jwt";
     // This is deliberately distinct from the JWT `exp`, which expires the
     // one-time handoff code. It is the upper bound the runtime must apply to
@@ -32,13 +33,9 @@ public static class ManagedElsaHandoffDefaults
     /// </summary>
     public const string ConsoleContinuationPath = "/admin/runtimes";
 
-    /// <summary>
-    /// Runtime permissions a Control operator holds in a handed-off managed runtime session. The product defines
-    /// no operator-to-runtime role mapping yet, so this is the only documented grant: the runtime image's handoff
-    /// configuration example, equal to its bootstrap administrator role. It is administrator-equivalent inside the
-    /// instance's dedicated runtime; narrow it here once a mapping is defined.
-    /// </summary>
-    public static readonly IReadOnlyList<string> RuntimeOperatorPermissions = ["*"];
+    /// <summary>Permissions the runtime image may receive from an authenticated Control role.</summary>
+    public static IReadOnlyList<string> AllowedRuntimePermissions { get; } =
+        ManagedElsaRuntimePermissionMapping.AllowedPermissions;
 }
 
 public sealed class ManagedElsaHandoffOptions
@@ -119,7 +116,8 @@ public sealed record ManagedElsaHandoffAuthorization(
     Uri RedirectUri,
     string CodeChallenge,
     IReadOnlySet<string> Scopes,
-    int BindingVersion)
+    int BindingVersion,
+    IReadOnlySet<string> RuntimePermissions)
 {
     public ManagedElsaHandoffAuthorization(
         Guid accountId,
@@ -129,7 +127,22 @@ public sealed record ManagedElsaHandoffAuthorization(
         Uri redirectUri,
         string codeChallenge,
         IReadOnlySet<string> scopes)
-        : this(accountId, organizationId, instanceId, audience, redirectUri, codeChallenge, scopes, 1)
+        : this(accountId, organizationId, instanceId, audience, redirectUri, codeChallenge, scopes, 1,
+            new HashSet<string>(StringComparer.Ordinal))
+    {
+    }
+
+    public ManagedElsaHandoffAuthorization(
+        Guid accountId,
+        Guid organizationId,
+        Guid instanceId,
+        string audience,
+        Uri redirectUri,
+        string codeChallenge,
+        IReadOnlySet<string> scopes,
+        int bindingVersion)
+        : this(accountId, organizationId, instanceId, audience, redirectUri, codeChallenge, scopes, bindingVersion,
+            new HashSet<string>(StringComparer.Ordinal))
     {
     }
 }
@@ -286,7 +299,8 @@ public sealed record ManagedElsaHandoffClaims(
     DateTimeOffset IssuedAt,
     DateTimeOffset ExpiresAt,
     int BindingVersion,
-    DateTimeOffset SessionExpiresAt)
+    DateTimeOffset SessionExpiresAt,
+    IReadOnlySet<string> RuntimePermissions)
 {
     public TrustedWorkspaceIdentity ToTrustedWorkspaceIdentity() =>
         new(ControlIssuer, ControlSubject, null, null);
@@ -398,7 +412,8 @@ public sealed class ManagedElsaHandoffIssuer(
             string.IsNullOrWhiteSpace(identity.Issuer) ||
             string.IsNullOrWhiteSpace(identity.Subject) ||
             !request.RequestedScopes.SetEquals([ManagedElsaHandoffDefaults.RuntimeSessionScope]) ||
-            !request.RequestedScopes.All(authorization.Scopes.Contains))
+            !request.RequestedScopes.All(authorization.Scopes.Contains) ||
+            !ManagedElsaRuntimePermissionMapping.IsSupportedSet(authorization.RuntimePermissions))
             throw new InvalidOperationException("The handoff authorization does not match the requested target.");
 
         var now = timeProvider.GetUtcNow();
@@ -426,6 +441,9 @@ public sealed class ManagedElsaHandoffIssuer(
                 sessionExpiresAt.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture)),
             new(JwtRegisteredClaimNames.Jti, jti)
         };
+        claims.AddRange(authorization.RuntimePermissions
+            .Order(StringComparer.Ordinal)
+            .Select(permission => new Claim(ManagedElsaHandoffDefaults.RuntimePermissionClaim, permission)));
         var descriptor = new SecurityTokenDescriptor
         {
             Issuer = _options.Issuer,
@@ -645,7 +663,11 @@ public sealed class ManagedElsaHandoffRedeemer(
         var scopes = RequiredClaim(principal, "scope")
             .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .ToHashSet(StringComparer.Ordinal);
+        var permissionClaims = principal.FindAll(ManagedElsaHandoffDefaults.RuntimePermissionClaim).ToArray();
+        var runtimePermissions = permissionClaims.Select(claim => claim.Value).ToHashSet(StringComparer.Ordinal);
         if (scopes.Count != 1 || !scopes.Contains(ManagedElsaHandoffDefaults.RuntimeSessionScope) ||
+            permissionClaims.Length != runtimePermissions.Count ||
+            !ManagedElsaRuntimePermissionMapping.IsSupportedSet(runtimePermissions) ||
             !ManagedElsaHandoffIssuer.HasExactRedirectBinding(redirectUri, expectedRedirectUri) ||
             !ManagedElsaHandoffIssuer.IsSafeRedirectUri(redirectUri))
             throw new SecurityTokenException("The handoff token is not bound to the requested target.");
@@ -675,7 +697,8 @@ public sealed class ManagedElsaHandoffRedeemer(
             issuedAt,
             expiresAt,
             bindingVersion,
-            sessionExpiresAt);
+            sessionExpiresAt,
+            runtimePermissions);
     }
 
     private async Task<ManagedElsaHandoffRedeemResult> InvalidAsync(
