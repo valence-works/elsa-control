@@ -5,11 +5,15 @@ using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Cloud;
 using ElsaControl.Api.Workspace;
 using ElsaControl.Deployment.Abstractions.Instances;
+using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Provisioning;
+using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
+using ElsaControl.RuntimeBuilder.Abstractions.ReleaseCatalog;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Api.Tests;
@@ -139,6 +143,72 @@ public sealed class CloudBffAuthorizationTests
         Assert.Equal(HttpStatusCode.Forbidden, genericRead.StatusCode);
         Assert.Contains("cloud-bff.denied", await genericMutation.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Contains("cloud-bff.denied", await genericRead.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Bff_owner_can_complete_the_narrow_delete_flow_while_a_reader_is_denied()
+    {
+        await using var app = CreateBffApplication(configureServices: services =>
+        {
+            services.AddSingleton<IEngineProvisioningModule, TestProvisioningModule>();
+            services.RemoveAll<IGovernedReleaseCatalogStore>();
+            services.AddSingleton<IGovernedReleaseCatalogStore>(new StaticReleaseCatalogStore());
+        });
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var owner = CreateBffClient(app);
+        var workspaceId = (await owner.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces"))!
+            .Workspaces.Single().Id;
+        await EnableManagedHostingAsync(app, workspaceId);
+
+        using var createRequest = new HttpRequestMessage(HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances")
+        {
+            Content = JsonContent.Create(
+                new ManagedElsaInstanceCreateRequest("BFF runtime", "bff-delete-runtime", Intent()),
+                options: ControlApiTestApplication.JsonOptions)
+        };
+        createRequest.Headers.Add("Idempotency-Key", "bff-create-delete-runtime");
+        using var create = await owner.SendAsync(createRequest);
+        Assert.Equal(HttpStatusCode.Accepted, create.StatusCode);
+        var created = await create.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+        Assert.NotNull(created);
+
+        const string readerSubject = "bff-delete-reader";
+        await app.AddWorkspaceMemberAsync(workspaceId, readerSubject, WorkspaceRole.Reader);
+        using var reader = CreateBffClient(app, subject: readerSubject);
+        using var readerConfirmation = await reader.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created!.Instance.InstanceId:D}/delete-confirmations",
+            content: null);
+        Assert.Equal(HttpStatusCode.Forbidden, readerConfirmation.StatusCode);
+
+        using var confirmationResponse = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations",
+            content: null);
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+        var confirmation = await confirmationResponse.Content
+            .ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.NotNull(confirmation);
+
+        using var deleteRequest = new HttpRequestMessage(HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete")
+        {
+            Content = JsonContent.Create(
+                new ManagedElsaInstanceDeleteRequest(confirmation!.ConfirmationId),
+                options: ControlApiTestApplication.JsonOptions)
+        };
+        deleteRequest.Headers.TryAddWithoutValidation("If-Match", created.Instance.ETag);
+        deleteRequest.Headers.Add("Idempotency-Key", "bff-delete-runtime");
+        using var deletion = await owner.SendAsync(deleteRequest);
+        Assert.Equal(HttpStatusCode.Accepted, deletion.StatusCode);
+        var accepted = await deletion.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>();
+        Assert.NotNull(accepted);
+
+        using var status = await owner.GetAsync(accepted!.OperationUrl);
+        Assert.Equal(HttpStatusCode.OK, status.StatusCode);
+        var operation = await status.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteOperationResponse>();
+        Assert.NotNull(operation);
+        Assert.Equal(accepted.OperationId, operation!.OperationId);
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, operation.State);
     }
 
     [Fact]
@@ -355,7 +425,8 @@ public sealed class CloudBffAuthorizationTests
         ControlApiTestApplication app,
         string clientId = ClientId,
         string scope = Scope,
-        IReadOnlyDictionary<string, string>? claims = null)
+        IReadOnlyDictionary<string, string>? claims = null,
+        string subject = "bff-user")
     {
         var tokenClaims = new Dictionary<string, string>
         {
@@ -368,8 +439,33 @@ public sealed class CloudBffAuthorizationTests
                 tokenClaims[key] = value;
         }
 
-        return app.CreateControlIdentityClient(subject: "bff-user", claims: tokenClaims);
+        return app.CreateControlIdentityClient(subject: subject, claims: tokenClaims);
     }
+
+    private static async Task EnableManagedHostingAsync(ControlApiTestApplication app, Guid workspaceId)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var organizationId = await db.Workspaces
+            .Where(x => x.Id == workspaceId)
+            .Select(x => x.OrganizationId)
+            .SingleAsync();
+        db.OrganizationEntitlementSnapshots.Add(new OrganizationEntitlementSnapshot
+        {
+            OrganizationId = organizationId,
+            ManagedHostingEnabled = true,
+            MaxSources = 5,
+            MaxWorkspaces = 5,
+            MaxInstances = 1,
+            SubscriptionState = OrganizationSubscriptionState.Active
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private static ElsaInstanceIntent Intent() => new(
+        new ElsaReleaseIntent("valence-runtime", "3.8", channel: "stable"),
+        new ElsaApplicationIntent("combined", "starter", new Dictionary<string, ElsaFeatureOverride>(), "approved"),
+        new ElsaPlacementIntent("managed", "westeurope", "dedicated", "standard-small", "public", "managed"));
 
     private static CloudBffTokenDecision Classify(CloudBffOptions options, params Claim[] claims) =>
         CloudBffAuthorization.Classify(
@@ -380,5 +476,32 @@ public sealed class CloudBffAuthorizationTests
     {
         public string Id => "test";
         public string DisplayName => "Test provider";
+    }
+
+    private sealed class StaticReleaseCatalogStore : IGovernedReleaseCatalogStore
+    {
+        private static readonly GovernedReleaseCatalogEntry Entry = new(
+            "1.0",
+            $"oci://registry.example.test/releases/manifest@sha256:{new string('a', 64)}",
+            $"sha256:{new string('a', 64)}",
+            $"sha256:{new string('b', 64)}",
+            "https://evidence.example.test/signatures/manifest",
+            $"sha256:{new string('c', 64)}",
+            "paid",
+            new GovernedReleaseDistribution(
+                "valence-runtime", "3", "3.8", "3.8.4", "stable", "supported", null,
+                "https://github.com/valence-works/elsa", "0123456789abcdef", "run-1"),
+            new GovernedReleaseTopology("combined", "1.0", ["server"], [], [], [], []),
+            "supported",
+            DateTimeOffset.Parse("2026-09-01T00:00:00Z"));
+
+        public Task<GovernedReleaseCatalogWriteResult> StoreAsync(
+            IReadOnlyList<GovernedReleaseCatalogEntry> entries,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task<IReadOnlyList<GovernedReleaseCatalogEntry>> QueryAsync(
+            GovernedReleaseCatalogQuery query,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<GovernedReleaseCatalogEntry>>([Entry]);
     }
 }
