@@ -64,6 +64,7 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
         Assert.Equal("valenceruntimeimages", authority.Scope.RegistryName);
         Assert.Equal(AzureProviderRegistryAuthorityMode.Narrow, authority.Options.RegistryAuthorityMode);
         Assert.False(authority.Options.DisposableProofMode);
+        Assert.Equal(360, authority.Options.CleanupObservationAttempts);
 
         using var provider = services.BuildServiceProvider();
         var instanceProvider = provider.GetRequiredService<AzureElsaInstanceProviderOptions>();

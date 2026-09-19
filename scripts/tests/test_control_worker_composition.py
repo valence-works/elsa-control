@@ -29,6 +29,7 @@ class CompositionFilesTests(unittest.TestCase):
         self.assertEqual("true", self.workers[renderer.HEALTH_MONITOR_KEY])
         self.assertEqual("true", self.workers["Deployment__AzureProvider__Runner__Enabled"])
         self.assertEqual("false", self.workers["Deployment__AzureProvider__Runner__DisposableProofMode"])
+        self.assertEqual("360", self.workers["Deployment__AzureProvider__Runner__CleanupObservationAttempts"])
         self.assertEqual("westeurope", self.workers["Deployment__AzureProvider__Runner__TargetScope__Location"])
         self.assertEqual("unrestricted", self.workers["RuntimeBuilder__InstancePlans__DefaultEgress"])
 

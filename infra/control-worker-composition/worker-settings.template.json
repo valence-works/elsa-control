@@ -9,6 +9,7 @@
   "Deployment__ElsaInstanceHealthMonitor__Enabled": "true",
   "Deployment__AzureProvider__Runner__Enabled": "true",
   "Deployment__AzureProvider__Runner__DisposableProofMode": "false",
+  "Deployment__AzureProvider__Runner__CleanupObservationAttempts": "360",
   "Deployment__AzureProvider__Runner__AzureCliClientId": "${ProvisionerClientId}",
   "Deployment__AzureProvider__Runner__LighthouseManagingTenantId": "${LighthouseManagingTenantId}",
   "Deployment__AzureProvider__Runner__SqlBootstrapObjectId": "${ProvisionerPrincipalId}",

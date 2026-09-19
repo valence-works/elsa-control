@@ -28,6 +28,10 @@ with the image-owned cosign and trust-root files stood in by digest-matched fixt
 - The Ready-instance health monitor (`Deployment__ElsaInstanceHealthMonitor__Enabled`, #394) is on. It
   may only run with the three workers (renderer and startup validator both refuse it alone); its code
   default is off. See [Instance health monitor](#instance-health-monitor-394).
+- Cleanup observes Azure resource-group absence for up to 30 minutes
+  (`Deployment__AzureProvider__Runner__CleanupObservationAttempts=360` at the five-second observation
+  interval) before entering explicit recovery. Other deployment and health observations retain their
+  existing five-minute budget.
 - Runner identity is the provisioner `mi-elsa-cloud-provisioner-prod-weu` (already attached to the API),
   which is also the SQL bootstrap principal and login. Target scope is the anchor resource group in the
   **Elsa Cloud — Customer Workloads** subscription; sibling per-instance groups derive from it (v1 naming).

@@ -158,6 +158,11 @@ public sealed record AzureProviderRunnerOptions
     public TimeSpan CommandTimeout { get; init; } = TimeSpan.FromMinutes(15);
     public int MaximumOutputCharacters { get; init; } = 1_048_576;
     public int ObservationAttempts { get; init; } = 60;
+    /// <summary>
+    /// Optional cleanup-specific observation budget. Azure resource-group deletion can take
+    /// materially longer than ordinary health and deployment observations.
+    /// </summary>
+    public int? CleanupObservationAttempts { get; init; }
     public TimeSpan ObservationDelay { get; init; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
@@ -290,6 +295,8 @@ public sealed record AzureProviderRunnerOptions
             throw new ArgumentOutOfRangeException(nameof(MaximumOutputCharacters), "The command output cap is outside the governed range.");
         if (ObservationAttempts is < 1 or > 120)
             throw new ArgumentOutOfRangeException(nameof(ObservationAttempts));
+        if (CleanupObservationAttempts is < 1 or > 720)
+            throw new ArgumentOutOfRangeException(nameof(CleanupObservationAttempts));
         if (ObservationDelay < TimeSpan.Zero || ObservationDelay > TimeSpan.FromMinutes(1))
             throw new ArgumentOutOfRangeException(nameof(ObservationDelay));
     }
