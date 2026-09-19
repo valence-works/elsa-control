@@ -148,6 +148,18 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     run.ElsaInstanceId != commit.InstanceId || run.Status != WorkspaceDeploymentRunStatus.RecoveryRequired)
                     throw Conflict("Provider reconciliation target is inconsistent.");
 
+                if (commit.Operation.State == ElsaInstanceOperationState.Succeeded &&
+                    instance.DesiredLifecycle == ElsaDesiredLifecycle.Deleting &&
+                    operation.Action != ElsaInstanceOperationAction.Delete &&
+                    (operation.ReconciledInstanceVersion is not { } predecessorReconciledVersion ||
+                     !await HasExactWaitingDeleteSuccessorAsync(
+                         instance,
+                         operation,
+                         predecessorReconciledVersion,
+                         checked(predecessorReconciledVersion + 2),
+                         cancellationToken)))
+                    throw Conflict("Provider reconciliation target changed concurrently.");
+
                 var priorObservedLifecycle = instance.ObservedLifecycle;
                 ApplyAggregate(instance, commit.Instance);
                 if (commit.Operation.State == ElsaInstanceOperationState.Succeeded &&
@@ -2241,12 +2253,34 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             try
             {
                 target.Validate();
+                var desiredLifecycle = (ElsaDesiredLifecycle)instance.DesiredLifecycle;
+                if (desiredLifecycle == ElsaDesiredLifecycle.Deleting &&
+                    operation.Action != ElsaInstanceOperationAction.Delete)
+                {
+                    if (!recoveries.TryGetValue(operation.Id, out var predecessorRecovery) ||
+                        operation.ReconciledInstanceVersion is not { } predecessorReconciledVersion ||
+                        predecessorRecovery.ObservedInstanceVersion != predecessorReconciledVersion ||
+                        !await HasExactWaitingDeleteSuccessorAsync(
+                            instance,
+                            operation,
+                            predecessorReconciledVersion,
+                            checked(predecessorReconciledVersion + 2),
+                            cancellationToken))
+                    {
+                        pending.Add(new(operation.WorkspaceId, operation.Id) { HandoffInvalid = true });
+                        continue;
+                    }
+
+                    desiredLifecycle = operation.Action == ElsaInstanceOperationAction.Stop
+                        ? ElsaDesiredLifecycle.Stopped
+                        : ElsaDesiredLifecycle.Running;
+                }
                 var candidate = new ElsaInstanceProviderSubmission(
                     operation.WorkspaceId,
                     instanceId,
                     operation.Id,
                     operation.AttemptNumber,
-                    (ElsaDesiredLifecycle)instance.DesiredLifecycle,
+                    desiredLifecycle,
                     resolvedPlan,
                     target,
                     instance.RegionCode,
@@ -2461,6 +2495,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         // would either accept stale evidence or reject the legitimate resume.
         var observedLifecycleAttemptNumber = existingOperation.AttemptNumber;
         var observedInstanceVersion = existingInstance.Version;
+        var recoveryObservedInstanceVersion = observedInstanceVersion;
         var hasAzureRecoveryObservation = isRecoveryResume &&
             existingOperation.Action != ElsaInstanceOperationAction.Delete &&
             await RequiresAzureRecoveryObservationAsync(existingInstance, existingOperation, cancellationToken);
@@ -2484,11 +2519,27 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 existingOperation.ReconciliationRetryEvidenceReference,
                 existingOperation.ReconciliationRetryEvidenceDigest,
                 cancellationToken);
-            var observationVersionIsThePriorReconciliationRead = observation is not null &&
-                observation.ObservedInstanceVersion == observedInstanceVersion - 1 &&
-                existingOperation.ReconciledInstanceVersion == observedInstanceVersion;
-            if (!observationVersionIsThePriorReconciliationRead)
+            if (observation is null || existingOperation.ReconciledInstanceVersion is not { } reconciledInstanceVersion ||
+                observation.ObservedInstanceVersion != reconciledInstanceVersion - 1)
                 throw Conflict("Provider reconciliation retry observation is stale.");
+
+            var instanceIsAtReconciledVersion = observedInstanceVersion == reconciledInstanceVersion;
+            var exactWaitingDeleteSuccessor = !instanceIsAtReconciledVersion &&
+                await HasExactWaitingDeleteSuccessorAsync(
+                    existingInstance,
+                    existingOperation,
+                    reconciledInstanceVersion,
+                    checked(reconciledInstanceVersion + 1),
+                    cancellationToken);
+            if (!instanceIsAtReconciledVersion && !exactWaitingDeleteSuccessor)
+                throw Conflict("Provider reconciliation retry observation is stale.");
+
+            // A confirmed Delete may be accepted while the provider predecessor is
+            // awaiting recovery. That successor advances the aggregate version once,
+            // but it does not invalidate the predecessor's provider observation. Bind
+            // recovery to the reconciled predecessor version and keep the current
+            // aggregate/LastOperationId owned by the waiting Delete.
+            recoveryObservedInstanceVersion = reconciledInstanceVersion;
         }
 
         // Outbox rows are immutable and unique per operation. Recovery resumes the
@@ -2522,7 +2573,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 RecoveryObservationReference = hasAzureRecoveryObservation ? existingOperation.ReconciliationRetryEvidenceReference : null,
                 RecoveryObservationDigest = hasAzureRecoveryObservation ? existingOperation.ReconciliationRetryEvidenceDigest : null,
                 ObservedLifecycleAttemptNumber = hasAzureRecoveryObservation ? observedLifecycleAttemptNumber : null,
-                ObservedInstanceVersion = hasAzureRecoveryObservation ? observedInstanceVersion : null,
+                ObservedInstanceVersion = hasAzureRecoveryObservation ? recoveryObservedInstanceVersion : null,
                 AzureDeleteRecoveryAuthority = deleteAuthority?.Serialize(),
                 AcceptedAt = requestedAt.ToUniversalTime(),
                 CreatedAt = requestedAt.ToUniversalTime()
@@ -2582,6 +2633,32 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             recovery is null ? MapOperation(existingOperation) : MapOperation(existingOperation, recovery),
             MapOutbox(existingOutbox),
             Replayed: false);
+    }
+
+    private async Task<bool> HasExactWaitingDeleteSuccessorAsync(
+        ElsaInstanceEntity instance,
+        ElsaInstanceOperationEntity recoveredOperation,
+        int reconciledInstanceVersion,
+        int expectedCurrentInstanceVersion,
+        CancellationToken cancellationToken)
+    {
+        if (instance.DesiredLifecycle != ElsaDesiredLifecycle.Deleting ||
+            instance.Version != expectedCurrentInstanceVersion ||
+            recoveredOperation.ReconciledAt is not { } reconciledAt ||
+            !Guid.TryParseExact(instance.LastOperationId, "D", out var successorOperationId) ||
+            successorOperationId == recoveredOperation.Id)
+            return false;
+
+        return await dbContext.ElsaInstanceOperations.AsNoTracking().AnyAsync(x =>
+            x.Id == successorOperationId &&
+            x.OrganizationId == recoveredOperation.OrganizationId &&
+            x.WorkspaceId == recoveredOperation.WorkspaceId &&
+            x.InstanceId == instance.Id &&
+            x.Action == ElsaInstanceOperationAction.Delete &&
+            x.State == ElsaInstanceOperationState.WaitingForPriorOperation &&
+            x.ExpectedVersion == reconciledInstanceVersion &&
+            x.AcceptedAt >= reconciledAt,
+            cancellationToken);
     }
 
     private async Task<AzureProviderDeleteRecoveryAuthority?> CaptureAzureDeleteRecoveryAuthorityAsync(
