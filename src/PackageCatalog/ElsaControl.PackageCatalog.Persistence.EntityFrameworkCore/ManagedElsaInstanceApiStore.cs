@@ -1,3 +1,4 @@
+using System.Data;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Workspace;
@@ -12,8 +13,24 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 /// does not return serialized plans, desired-state JSON, command payloads, or any
 /// provider-owned identifiers.
 /// </summary>
-public sealed class EfCoreManagedElsaInstanceApiStore(CatalogDbContext dbContext) : IManagedElsaInstanceApiStore
+public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiStore
 {
+    private readonly CatalogDbContext dbContext;
+    private readonly Func<CancellationToken, Task>? beforeTopologyRevalidation;
+
+    public EfCoreManagedElsaInstanceApiStore(CatalogDbContext dbContext)
+        : this(dbContext, null)
+    {
+    }
+
+    internal EfCoreManagedElsaInstanceApiStore(
+        CatalogDbContext dbContext,
+        Func<CancellationToken, Task>? beforeTopologyRevalidation)
+    {
+        this.dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
+        this.beforeTopologyRevalidation = beforeTopologyRevalidation;
+    }
+
     public async Task<ElsaInstancePage> ListInstancesAsync(
         Guid workspaceId,
         int page,
@@ -92,6 +109,147 @@ public sealed class EfCoreManagedElsaInstanceApiStore(CatalogDbContext dbContext
             operation.ReconciledObservedLifecycle,
             operation.ReconciledHealth);
     }
+
+    public async Task<ElsaInstanceLifecycleTopologySnapshot?> GetLifecycleTopologyAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        CancellationToken cancellationToken = default)
+    {
+        if (workspaceId == Guid.Empty || instanceId == Guid.Empty)
+            return null;
+
+        var snapshot = await ReadLifecycleTopologyAsync(workspaceId, instanceId, cancellationToken);
+        if (snapshot is null)
+            return null;
+
+        if (beforeTopologyRevalidation is not null)
+            await beforeTopologyRevalidation(cancellationToken);
+
+        var revalidated = await ReadLifecycleTopologyAsync(workspaceId, instanceId, cancellationToken);
+        if (revalidated is null || !SameLifecycleTopology(snapshot, revalidated))
+            throw new ElsaInstanceLifecycleTopologyChangedException();
+
+        return snapshot;
+    }
+
+    private Task<ElsaInstanceLifecycleTopologySnapshot?> ReadLifecycleTopologyAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        CancellationToken cancellationToken) =>
+        dbContext.ExecuteInTransactionAsync(
+            IsolationLevel.Serializable,
+            async () =>
+            {
+                var instance = await dbContext.ElsaInstances
+                    .AsNoTracking()
+                    .Where(x => x.WorkspaceId == workspaceId && x.Id == instanceId)
+                    .Select(x => new
+                    {
+                        x.Id,
+                        x.Version,
+                        x.DesiredLifecycle,
+                        x.ObservedLifecycle,
+                        x.LastOperationId
+                    })
+                    .SingleOrDefaultAsync(cancellationToken);
+                if (instance is null)
+                    return null;
+
+                var nonterminalStates = new[]
+                {
+                    ElsaInstanceOperationState.Accepted,
+                    ElsaInstanceOperationState.WaitingForPriorOperation,
+                    ElsaInstanceOperationState.Queued,
+                    ElsaInstanceOperationState.EntitlementHeld,
+                    ElsaInstanceOperationState.Running,
+                    ElsaInstanceOperationState.RecoveryRequired
+                };
+                var operations = await dbContext.ElsaInstanceOperations
+                    .AsNoTracking()
+                    .Where(x => x.WorkspaceId == workspaceId &&
+                                x.InstanceId == instanceId &&
+                                nonterminalStates.Contains(x.State))
+                    .OrderBy(x => x.AcceptedAt)
+                    .ThenBy(x => x.CreatedAt)
+                    .ThenBy(x => x.Id)
+                    .Select(x => new
+                    {
+                        x.Id,
+                        x.Action,
+                        x.State,
+                        x.ExpectedVersion,
+                        x.AttemptNumber,
+                        x.AcceptedAt,
+                        x.StartedAt,
+                        x.CompletedAt,
+                        x.DeploymentRunId,
+                        x.FailureCode,
+                        x.DeletionDiagnosticCode,
+                        x.ReconciliationDiagnosticCode
+                    })
+                    .ToListAsync(cancellationToken);
+                var operationIds = operations.Select(x => x.Id).ToList();
+                var outboxes = operationIds.Count == 0
+                    ? []
+                    : await dbContext.ElsaInstanceLifecycleOutbox
+                        .AsNoTracking()
+                        .Where(x => x.WorkspaceId == workspaceId &&
+                                    x.InstanceId == instanceId &&
+                                    operationIds.Contains(x.OperationId))
+                        .Select(x => new
+                        {
+                            x.Id,
+                            x.OperationId,
+                            x.CreatedAt,
+                            x.QuarantinedAt,
+                            x.QuarantineCode
+                        })
+                        .ToListAsync(cancellationToken);
+                var outboxesByOperation = outboxes.ToDictionary(x => x.OperationId);
+                var operationSnapshots = operations.Select(operation =>
+                {
+                    var hasOutbox = outboxesByOperation.TryGetValue(operation.Id, out var outbox);
+                    return new ElsaInstanceLifecycleTopologyOperation(
+                        operation.Id,
+                        operation.Action,
+                        operation.State,
+                        operation.ExpectedVersion,
+                        operation.AttemptNumber,
+                        operation.AcceptedAt,
+                        operation.StartedAt,
+                        operation.CompletedAt,
+                        operation.DeploymentRunId,
+                        operation.FailureCode,
+                        operation.DeletionDiagnosticCode,
+                        operation.ReconciliationDiagnosticCode,
+                        hasOutbox
+                            ? new ElsaInstanceLifecycleTopologyOutbox(
+                                outbox!.Id,
+                                outbox.CreatedAt,
+                                outbox.QuarantinedAt,
+                                outbox.QuarantineCode)
+                            : null);
+                }).ToList();
+
+                return new ElsaInstanceLifecycleTopologySnapshot(
+                    instance.Id,
+                    instance.Version,
+                    instance.DesiredLifecycle,
+                    instance.ObservedLifecycle,
+                    Guid.TryParse(instance.LastOperationId, out var lastOperationId) ? lastOperationId : null,
+                    operationSnapshots);
+            },
+            cancellationToken);
+
+    private static bool SameLifecycleTopology(
+        ElsaInstanceLifecycleTopologySnapshot snapshot,
+        ElsaInstanceLifecycleTopologySnapshot revalidated) =>
+        snapshot.InstanceId == revalidated.InstanceId &&
+        snapshot.InstanceVersion == revalidated.InstanceVersion &&
+        snapshot.DesiredLifecycle == revalidated.DesiredLifecycle &&
+        snapshot.ObservedLifecycle == revalidated.ObservedLifecycle &&
+        snapshot.LastOperationId == revalidated.LastOperationId &&
+        snapshot.Operations.SequenceEqual(revalidated.Operations);
 
     public async Task<IReadOnlyList<ElsaInstanceIntentRevisionSummary>> ListRevisionsAsync(
         Guid workspaceId,

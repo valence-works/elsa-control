@@ -57,6 +57,31 @@ public static class AdminManagedElsaRecoveryEndpoints
             return Results.Ok(ManagedElsaInstanceEndpoints.ToOperationResponse(workspaceId, instanceId, summary));
         });
 
+        group.MapGet("/topology", async (
+            Guid workspaceId,
+            Guid instanceId,
+            HttpContext context,
+            IManagedElsaInstanceApiStore queries,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                var topology = await queries.GetLifecycleTopologyAsync(workspaceId, instanceId, cancellationToken);
+                if (topology is null)
+                    return Results.NotFound();
+
+                context.Response.Headers.ETag = $"\"{topology.InstanceVersion}\"";
+                return Results.Ok(topology);
+            }
+            catch (ElsaInstanceLifecycleTopologyChangedException)
+            {
+                return ManagedElsaInstanceEndpoints.Problem(
+                    "instance.topology-changed",
+                    "The lifecycle topology changed while it was being read. Retry discovery.",
+                    StatusCodes.Status409Conflict);
+            }
+        });
+
         group.MapGet("/{operationId:guid}", async (
             Guid workspaceId,
             Guid instanceId,
