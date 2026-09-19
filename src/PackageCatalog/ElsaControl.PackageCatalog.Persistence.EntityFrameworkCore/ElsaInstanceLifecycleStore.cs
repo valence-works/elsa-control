@@ -118,6 +118,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                         : throw Conflict("Provider reconciliation result is incomplete.");
                 }
                 if (current?.State == ElsaInstanceOperationState.RecoveryRequired &&
+                    commit.Operation.State == ElsaInstanceOperationState.RecoveryRequired &&
                     string.Equals(current.ReconciliationEvidenceFingerprint, commit.EvidenceFingerprint, StringComparison.Ordinal))
                 {
                     var replayOperation = await dbContext.ElsaInstanceOperations.AsNoTracking()
@@ -152,12 +153,18 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     instance.DesiredLifecycle == ElsaDesiredLifecycle.Deleting &&
                     operation.Action != ElsaInstanceOperationAction.Delete &&
                     (operation.ReconciledInstanceVersion is not { } predecessorReconciledVersion ||
-                     !await HasExactWaitingDeleteSuccessorAsync(
-                         instance,
-                         operation,
-                         predecessorReconciledVersion,
-                         checked(predecessorReconciledVersion + 2),
-                         cancellationToken)))
+                     (!await HasExactWaitingDeleteSuccessorAsync(
+                          instance,
+                          operation,
+                          predecessorReconciledVersion,
+                          checked(predecessorReconciledVersion + 1),
+                          cancellationToken) &&
+                      !await HasExactWaitingDeleteSuccessorAsync(
+                          instance,
+                          operation,
+                          predecessorReconciledVersion,
+                          checked(predecessorReconciledVersion + 2),
+                          cancellationToken))))
                     throw Conflict("Provider reconciliation target changed concurrently.");
 
                 var priorObservedLifecycle = instance.ObservedLifecycle;
