@@ -14,6 +14,11 @@ public enum ElsaInstanceCleanupObservationKind
     InProgress
 }
 
+public static class ElsaInstanceDeletionDiagnosticCodes
+{
+    public const string PredecessorRecoverySuperseded = "deletion.predecessor-recovery-superseded";
+}
+
 public sealed record ElsaInstanceCleanupEvidence
 {
     public ElsaInstanceCleanupEvidence(string reference, string digest)

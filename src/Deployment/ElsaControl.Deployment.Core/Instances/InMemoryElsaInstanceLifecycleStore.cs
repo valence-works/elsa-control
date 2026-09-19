@@ -827,20 +827,56 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 if (!_operations.TryGetValue(outbox.OperationId, out var operation) ||
                     !_instances.TryGetValue(outbox.InstanceId, out var instance))
                     continue;
-                var uncertainRun = _deploymentRuns.Values.Any(x => x.InstanceId == instance.Id &&
-                    x.Run.Status is WorkspaceDeploymentRunStatus.Queued or WorkspaceDeploymentRunStatus.Running or
-                        WorkspaceDeploymentRunStatus.RecoveryRequired);
-                if (uncertainRun)
-                    continue;
                 if (operation.State == ElsaInstanceOperationState.WaitingForPriorOperation)
                 {
-                    var priorBlocking = _operations.Values.Any(x => x.Id != operation.Id &&
-                        x.InstanceId == instance.Id && ElsaInstanceOperationGuard.IsBlocking(x.State));
-                    if (priorBlocking)
-                        continue;
+                    var priorBlocking = _operations.Values.Where(x => x.Id != operation.Id &&
+                        x.InstanceId == instance.Id && ElsaInstanceOperationGuard.IsBlocking(x.State)).ToArray();
+                    var uncertainRuns = _deploymentRuns.Values.Where(x => x.InstanceId == instance.Id &&
+                        x.Run.Status is WorkspaceDeploymentRunStatus.Queued or WorkspaceDeploymentRunStatus.Running or
+                            WorkspaceDeploymentRunStatus.RecoveryRequired).ToArray();
+                    if (priorBlocking.Length != 0 || uncertainRuns.Length != 0)
+                    {
+                        if (priorBlocking is not [{ State: ElsaInstanceOperationState.RecoveryRequired } predecessor] ||
+                            predecessor.Action == ElsaInstanceOperationAction.Delete ||
+                            uncertainRuns is not [{ Run.Status: WorkspaceDeploymentRunStatus.RecoveryRequired } predecessorRun] ||
+                            predecessorRun.Operation.Id != predecessor.Id ||
+                            instance.Intent.DesiredLifecycle != ElsaDesiredLifecycle.Deleting ||
+                            instance.LastOperationId is not { } lastOperationId ||
+                            !string.Equals(lastOperationId.Value, operation.Id.ToString("D"), StringComparison.OrdinalIgnoreCase) ||
+                            operation.ExpectedVersion + 1 != instance.Version ||
+                            predecessor.AcceptedAt > operation.AcceptedAt ||
+                            (_claims.TryGetValue(predecessor.Id, out var predecessorClaim) && predecessorClaim.ExpiresAt > now))
+                            continue;
+
+                        var cancelled = predecessor.TransitionTo(ElsaInstanceOperationState.Cancelled);
+                        _operations[predecessor.Id] = cancelled;
+                        _claims.Remove(predecessor.Id);
+                        _failures[predecessor.Id] = new ElsaInstanceLifecycleRecordedFailure(
+                            predecessor.Id,
+                            ElsaInstanceDeletionDiagnosticCodes.PredecessorRecoverySuperseded,
+                            "The recovery-required predecessor was superseded by confirmed deletion cleanup.",
+                            now);
+                        _deploymentRuns[predecessorRun.Run.Id] = predecessorRun with
+                        {
+                            Operation = cancelled,
+                            Run = predecessorRun.Run with
+                            {
+                                Status = WorkspaceDeploymentRunStatus.Cancelled,
+                                CompletedAt = now,
+                                RecoveryReason = ElsaInstanceDeletionDiagnosticCodes.PredecessorRecoverySuperseded,
+                                FailureMessage = null,
+                                WorkerId = null,
+                                WorkerHeartbeatAt = null
+                            }
+                        };
+                    }
                     operation = operation.TransitionTo(ElsaInstanceOperationState.Accepted);
                     _operations[operation.Id] = operation;
                 }
+                else if (_deploymentRuns.Values.Any(x => x.InstanceId == instance.Id &&
+                             x.Run.Status is WorkspaceDeploymentRunStatus.Queued or WorkspaceDeploymentRunStatus.Running or
+                                 WorkspaceDeploymentRunStatus.RecoveryRequired))
+                    continue;
                 if (operation.State is not (ElsaInstanceOperationState.Accepted or ElsaInstanceOperationState.Queued or ElsaInstanceOperationState.Running))
                     continue;
 

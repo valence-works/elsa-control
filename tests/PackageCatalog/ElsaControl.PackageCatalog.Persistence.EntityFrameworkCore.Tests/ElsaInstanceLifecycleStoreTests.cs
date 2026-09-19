@@ -1728,6 +1728,88 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
+    public async Task Confirmed_delete_supersedes_one_dormant_recovery_predecessor_and_proves_absence()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted, claimedRun, deletion) = await QueueRecoveryBlockedDeleteAsync(
+            db, "Delete supersedes recovery workspace", "delete-after-recovery-required");
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+
+        var confirmedAbsent = new ElsaInstanceCleanupObservation(
+            ElsaInstanceCleanupObservationKind.ConfirmedAbsent,
+            deletion.Operation.Id,
+            deletion.Operation.AttemptNumber,
+            "deletion.provider-confirmed-absent");
+        var result = await new ElsaInstanceDeletionWorker(
+                new EfCoreElsaInstanceLifecycleStore(
+                    db, EmptyResolutionInputSource.Instance,
+                    new FixedTimeProvider(Now.AddMinutes(12))),
+                new QueueCleanupPort(confirmedAbsent),
+                new FixedTimeProvider(Now.AddMinutes(12)))
+            .ProcessAvailableAsync("deletion-worker");
+
+        Assert.Equal(1, result.ProviderInvocations);
+        Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Deleted, Assert.Single(result.Results).Outcome);
+        var predecessor = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Cancelled, predecessor.State);
+        Assert.Equal(ElsaInstanceDeletionDiagnosticCodes.PredecessorRecoverySuperseded, predecessor.FailureCode);
+        Assert.Equal(Now.AddMinutes(12), predecessor.CompletedAt);
+        var run = await db.DeploymentRuns.AsNoTracking().SingleAsync(x => x.Id == claimedRun.Id);
+        Assert.Equal(WorkspaceDeploymentRunStatus.Cancelled, run.Status);
+        Assert.Equal(ElsaInstanceDeletionDiagnosticCodes.PredecessorRecoverySuperseded, run.RecoveryReason);
+        Assert.Equal(Now.AddMinutes(12), run.CompletedAt);
+        var deleteOperation = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == deletion.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Succeeded, deleteOperation.State);
+        var tombstone = await db.ElsaInstances.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Instance.Id);
+        Assert.Equal(ElsaObservedLifecycle.Deleted, tombstone.ObservedLifecycle);
+        Assert.Equal(1, await db.ElsaInstanceAuditEvents.CountAsync(x =>
+            x.OperationId == accepted.Operation.Id &&
+            x.EventType == "lifecycle.recovery-superseded-by-delete" &&
+            x.DiagnosticCode == ElsaInstanceDeletionDiagnosticCodes.PredecessorRecoverySuperseded));
+        Assert.Equal(1, await db.DeploymentRunHistoryEvents.CountAsync(x =>
+            x.RunId == claimedRun.Id &&
+            x.Status == WorkspaceDeploymentRunStatus.Cancelled &&
+            x.CreatedAt == Now.AddMinutes(12)));
+        Assert.Empty(await CreateStore(db).ListPendingProviderOperationsAsync(10));
+    }
+
+    [Fact]
+    public async Task Delete_does_not_supersede_recovery_when_the_aggregate_advanced_after_acceptance()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (_, accepted, claimedRun, deletion) = await QueueRecoveryBlockedDeleteAsync(
+            db, "Drifted delete supersession workspace", "drifted-delete-after-recovery");
+        var instance = await db.ElsaInstances.SingleAsync(x => x.Id == accepted.Instance.Id);
+        instance.Version = checked(instance.Version + 1);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var claim = await CreateStore(db).TryClaimNextDeletionAsync(
+            "deletion-worker", Now.AddMinutes(12));
+
+        Assert.Null(claim);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired,
+            (await db.ElsaInstanceOperations.AsNoTracking()
+                .SingleAsync(x => x.Id == accepted.Operation.Id)).State);
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation,
+            (await db.ElsaInstanceOperations.AsNoTracking()
+                .SingleAsync(x => x.Id == deletion.Operation.Id)).State);
+        Assert.Equal(WorkspaceDeploymentRunStatus.RecoveryRequired,
+            (await db.DeploymentRuns.AsNoTracking().SingleAsync(x => x.Id == claimedRun.Id)).Status);
+        Assert.Equal(0, await db.ElsaInstanceAuditEvents.CountAsync(x =>
+            x.EventType == "lifecycle.recovery-superseded-by-delete"));
+    }
+
+    [Fact]
     public async Task Queued_managed_run_reconstructs_a_safe_provider_submission_after_restart()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -2624,6 +2706,32 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             new FixedTimeProvider(Now)).ProcessAvailableAsync("resolver-worker");
         Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Queued, Assert.Single(result.Results).Outcome);
         return (workspace, accepted);
+    }
+
+    private static async Task<(
+        Workspace Workspace,
+        ElsaInstanceLifecycleAcceptance Accepted,
+        WorkspaceDeploymentRun ClaimedRun,
+        ElsaInstanceLifecycleAcceptance Deletion)> QueueRecoveryBlockedDeleteAsync(
+        CatalogDbContext db,
+        string workspaceName,
+        string deleteIdempotencyKey)
+    {
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, workspaceName);
+        var workspaceStore = new DeploymentWorkspaceStore(db);
+        var claimedRun = Assert.IsType<WorkspaceDeploymentRun>(
+            await workspaceStore.ClaimNextQueuedRunAsync("stale-deployment-worker", Now));
+        Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
+            Now.AddMinutes(10), TimeSpan.FromMinutes(5)));
+        db.ChangeTracker.Clear();
+        var current = Assert.IsType<ElsaInstance>(await CreateStore(db)
+            .GetInstanceAsync(workspace.Id, accepted.Instance.Id));
+        var deletion = await new ElsaInstanceLifecycleService(
+                CreateStore(db), new FixedTimeProvider(Now.AddMinutes(11)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, current.Version,
+                deleteIdempotencyKey, Now.AddMinutes(11)));
+        return (workspace, accepted, claimedRun, deletion);
     }
 
     private static async Task CompleteOperationAsync(CatalogDbContext db, Guid operationId)
