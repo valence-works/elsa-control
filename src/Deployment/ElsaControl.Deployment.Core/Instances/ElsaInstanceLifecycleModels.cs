@@ -164,7 +164,8 @@ public sealed record ElsaInstanceLifecycleRequest(
     string IdempotencyKey,
     string? Reason = null,
     Guid? DeleteConfirmationId = null,
-    Guid? ActorAccountId = null)
+    Guid? ActorAccountId = null,
+    Guid? ExpectedOperationId = null)
 {
     public int IfMatchVersion => ExpectedVersion;
 }

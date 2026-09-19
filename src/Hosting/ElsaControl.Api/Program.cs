@@ -757,6 +757,7 @@ app.MapAdminPackageEndpoints();
 app.MapAdminApprovalEndpoints();
 app.MapAdminValidationEndpoints();
 app.MapAdminWorkspaceEntitlementEndpoints();
+app.MapAdminManagedElsaRecoveryEndpoints();
 app.MapAdminOrganizationEndpoints();
 app.MapAdminOrganizationInternalEntitlementEndpoints();
 app.MapAdminOrganizationAzureBoundEntitlementEndpoints();
