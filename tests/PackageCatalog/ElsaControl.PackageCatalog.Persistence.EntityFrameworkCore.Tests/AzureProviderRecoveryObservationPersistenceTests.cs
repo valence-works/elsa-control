@@ -1073,6 +1073,129 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
         Assert.Equal(deleteOperationId, deletion.Operation.Id);
     }
 
+    [Fact]
+    public async Task Waiting_delete_supersedes_the_exact_azure_recovery_chain_and_submits_fresh_cleanup()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+
+        var fixture = await SeedProviderObservationAsync(db, ElsaInstanceOperationAction.Create);
+        await AddLifecycleRunAsync(db, fixture);
+        var lifecycleStore = new EfCoreElsaInstanceLifecycleStore(
+            db,
+            EmptyResolutionInputSource.Instance,
+            new FixedTimeProvider(fixture.Observation.ObservedAt.AddMinutes(1)),
+            recoveryObservationStore: fixture.OperationStore);
+        var target = Assert.IsType<ElsaInstanceProviderReconciliationTarget>(
+            await lifecycleStore.GetTargetAsync(fixture.Workspace.Id, fixture.LifecycleOperationId));
+        var observation = fixture.Observation with { ObservedInstanceVersion = target.Instance.Version };
+        var observationStore = (IAzureProviderRecoveryObservationStore)fixture.OperationStore;
+        var receipt = await observationStore.CreateOrGetAsync(observation);
+        var reconciled = await lifecycleStore.CommitAsync(new(
+            fixture.Workspace.Id,
+            fixture.InstanceId,
+            fixture.LifecycleOperationId,
+            target.Instance.Version,
+            target.Operation.AttemptNumber,
+            target.ReconciliationVersion,
+            new string('7', 64),
+            target.Instance,
+            target.Operation,
+            ElsaInstanceProviderReconciliationService.RetrySafeCode,
+            true,
+            receipt.Reference,
+            receipt.Digest,
+            observation.ObservedAt.AddMinutes(1)));
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, reconciled.Outcome);
+
+        var deleteOperationId = Guid.NewGuid();
+        var acceptedAt = observation.ObservedAt.AddMinutes(2);
+        var instance = await db.ElsaInstances.SingleAsync(x => x.Id == fixture.InstanceId);
+        var predecessor = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == fixture.LifecycleOperationId);
+        var runId = Assert.IsType<Guid>(predecessor.DeploymentRunId);
+        Assert.Equal(instance.Version, predecessor.ReconciledInstanceVersion);
+        Assert.NotNull(predecessor.ReconciledAt);
+        var seededProviderOperation = await db.AzureProviderOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == fixture.Operation.Id);
+        Assert.NotNull(seededProviderOperation.CompletionLeaseTokenHash);
+        Assert.NotNull(seededProviderOperation.CompletionFingerprint);
+        Assert.NotNull(seededProviderOperation.HeartbeatAt);
+        instance.DesiredLifecycle = ElsaDesiredLifecycle.Deleting;
+        instance.Version = checked(instance.Version + 1);
+        instance.LastOperationId = deleteOperationId.ToString("D");
+        instance.UpdatedAt = acceptedAt;
+        db.ElsaInstanceOperations.Add(new()
+        {
+            Id = deleteOperationId,
+            OrganizationId = fixture.Workspace.OrganizationId,
+            WorkspaceId = fixture.Workspace.Id,
+            InstanceId = fixture.InstanceId,
+            Action = ElsaInstanceOperationAction.Delete,
+            IdempotencyScope = $"instance/{fixture.InstanceId:D}/Delete",
+            IdempotencyKey = "waiting-delete-supersedes-azure-recovery",
+            RequestHash = new string('a', 64),
+            ExpectedVersion = instance.Version - 1,
+            State = ElsaInstanceOperationState.WaitingForPriorOperation,
+            AttemptNumber = 1,
+            AcceptedAt = acceptedAt,
+            CreatedAt = acceptedAt,
+            UpdatedAt = acceptedAt
+        });
+        db.ElsaInstanceLifecycleOutbox.Add(new()
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = fixture.Workspace.OrganizationId,
+            WorkspaceId = fixture.Workspace.Id,
+            InstanceId = fixture.InstanceId,
+            OperationId = deleteOperationId,
+            Action = ElsaInstanceOperationAction.Delete,
+            RequestHash = new string('a', 64),
+            CreatedAt = acceptedAt
+        });
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var deletion = Assert.IsType<ElsaInstanceDeletionWorkItem>(await lifecycleStore.TryClaimNextDeletionAsync(
+            "azure-recovery-delete-worker", acceptedAt.AddMinutes(1)));
+        Assert.Equal(deleteOperationId, deletion.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Cancelled,
+            (await db.ElsaInstanceOperations.AsNoTracking()
+                .SingleAsync(x => x.Id == fixture.LifecycleOperationId)).State);
+        Assert.Equal(WorkspaceDeploymentRunStatus.Cancelled,
+            (await db.DeploymentRuns.AsNoTracking().SingleAsync(x => x.Id == runId)).Status);
+        var cancelledProviderOperation = await db.AzureProviderOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == fixture.Operation.Id);
+        Assert.Equal(AzureProviderOperationStatus.Cancelled, cancelledProviderOperation.Status);
+        Assert.Equal(fixture.Operation.Version + 1, cancelledProviderOperation.Version);
+        Assert.Null(cancelledProviderOperation.CompletionLeaseTokenHash);
+        Assert.Null(cancelledProviderOperation.CompletionFingerprint);
+        Assert.Equal(1, await db.AzureProviderOperationTransitions.AsNoTracking().CountAsync(x =>
+            x.OperationId == fixture.Operation.Id &&
+            x.Sequence == cancelledProviderOperation.Version &&
+            x.Status == AzureProviderOperationStatus.Cancelled &&
+            x.Code == ElsaInstanceDeletionDiagnosticCodes.PredecessorRecoverySuperseded));
+
+        var cleanup = await CreateProvider(fixture).CleanupAsync(new(
+            deletion.Instance.WorkspaceId,
+            deletion.Instance.Id,
+            deletion.Operation.Id,
+            deletion.Operation.AttemptNumber,
+            deletion.Instance.CurrentDeploymentReference,
+            deletion.Instance.PlacementAssignmentReference,
+            deletion.Instance.ElsaTenantReference));
+
+        Assert.Equal(ElsaInstanceCleanupObservationKind.InProgress, cleanup.Kind);
+        Assert.Equal("deletion.provider-cleanup-pending", cleanup.DiagnosticCode);
+        var deleteProviderOperation = await db.AzureProviderOperations.AsNoTracking()
+            .SingleAsync(x => x.InstanceId == fixture.InstanceId && x.Action == AzureProviderOperationAction.Delete);
+        Assert.Equal(AzureProviderOperationStatus.Accepted, deleteProviderOperation.Status);
+        Assert.Equal(ElsaInstanceOperationAction.Delete, deleteProviderOperation.LifecycleAction);
+        Assert.Equal(fixture.Assignment.Id, deleteProviderOperation.ProviderAssignmentId);
+        Assert.Equal($"elsa-instance-operation:{deleteOperationId:D}:delete", deleteProviderOperation.IdempotencyKey);
+    }
+
     private static async Task<AzureProviderRecoveryObservationBinding> AcceptRecoveryAsync(
         CatalogDbContext db,
         ObservationFixture fixture,

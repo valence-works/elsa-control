@@ -1416,6 +1416,31 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     .FirstOrDefaultAsync(cancellationToken);
                 if (candidate is null)
                 {
+                    var waitingCandidates = await dbContext.ElsaInstanceLifecycleOutbox
+                        .AsNoTracking()
+                        .Where(x => x.Action == ElsaInstanceOperationAction.Delete && x.Operation != null &&
+                                    x.QuarantinedAt == null &&
+                                    x.Operation.State == ElsaInstanceOperationState.WaitingForPriorOperation &&
+                                    (x.Operation.WorkerId == null || x.Operation.LeaseExpiresAt == null ||
+                                     x.Operation.LeaseExpiresAt <= nowUtc))
+                        .OrderBy(x => x.CreatedAt).ThenBy(x => x.Id)
+                        .Take(128)
+                        .ToListAsync(cancellationToken);
+                    foreach (var waitingCandidate in waitingCandidates)
+                    {
+                        if (!await TrySupersedeRecoveryRequiredPredecessorAsync(
+                                waitingCandidate, nowUtc, cancellationToken))
+                            continue;
+                        // Persist the predecessor cancellation before promoting the successor.
+                        // The filtered unique index permits only one active lifecycle operation
+                        // per instance, while the surrounding transaction keeps both writes atomic.
+                        await dbContext.SaveChangesAsync(cancellationToken);
+                        candidate = waitingCandidate;
+                        break;
+                    }
+                }
+                if (candidate is null)
+                {
                     claimNoWrite = true;
                     return null;
                 }
@@ -3645,6 +3670,207 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 CreatedAt = timestamp
             }, cancellationToken);
         }
+    }
+
+    private async Task<bool> TrySupersedeRecoveryRequiredPredecessorAsync(
+        ElsaInstanceLifecycleOutboxEntity deleteOutbox,
+        DateTimeOffset supersededAt,
+        CancellationToken cancellationToken)
+    {
+        var deleteOperation = await dbContext.ElsaInstanceOperations.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == deleteOutbox.OperationId &&
+                                       x.WorkspaceId == deleteOutbox.WorkspaceId &&
+                                       x.InstanceId == deleteOutbox.InstanceId,
+                cancellationToken);
+        var instance = await dbContext.ElsaInstances.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == deleteOutbox.InstanceId &&
+                                       x.WorkspaceId == deleteOutbox.WorkspaceId,
+                cancellationToken);
+        if (deleteOperation is null || instance is null ||
+            deleteOperation.Action != ElsaInstanceOperationAction.Delete ||
+            deleteOperation.State != ElsaInstanceOperationState.WaitingForPriorOperation ||
+            instance.DesiredLifecycle != ElsaDesiredLifecycle.Deleting ||
+            !string.Equals(instance.LastOperationId, deleteOperation.Id.ToString("D"), StringComparison.OrdinalIgnoreCase) ||
+            deleteOperation.ExpectedVersion + 1 != instance.Version)
+            return false;
+
+        var blockers = await dbContext.ElsaInstanceOperations.AsNoTracking()
+            .Where(x => x.Id != deleteOperation.Id &&
+                        x.WorkspaceId == deleteOperation.WorkspaceId &&
+                        x.InstanceId == deleteOperation.InstanceId &&
+                        (x.State == ElsaInstanceOperationState.Accepted ||
+                         x.State == ElsaInstanceOperationState.WaitingForPriorOperation ||
+                         x.State == ElsaInstanceOperationState.Queued ||
+                         x.State == ElsaInstanceOperationState.EntitlementHeld ||
+                         x.State == ElsaInstanceOperationState.Running ||
+                         x.State == ElsaInstanceOperationState.RecoveryRequired))
+            .ToListAsync(cancellationToken);
+        if (blockers is not [{ State: ElsaInstanceOperationState.RecoveryRequired } predecessor] ||
+            predecessor.Action == ElsaInstanceOperationAction.Delete ||
+            predecessor.DeploymentRunId is not { } runId ||
+            predecessor.AcceptedAt > deleteOperation.AcceptedAt ||
+            predecessor.WorkerId is not null || predecessor.LeaseTokenHash is not null ||
+            predecessor.LeaseExpiresAt is not null || predecessor.HeartbeatAt is not null)
+            return false;
+
+        var activeRuns = await dbContext.DeploymentRuns.AsNoTracking()
+            .Where(x => x.WorkspaceId == deleteOperation.WorkspaceId &&
+                        x.ElsaInstanceId == deleteOperation.InstanceId &&
+                        (x.Status == WorkspaceDeploymentRunStatus.Queued ||
+                         x.Status == WorkspaceDeploymentRunStatus.Running ||
+                         x.Status == WorkspaceDeploymentRunStatus.RecoveryRequired))
+            .ToListAsync(cancellationToken);
+        if (activeRuns is not [{ Status: WorkspaceDeploymentRunStatus.RecoveryRequired } activeRun] ||
+            activeRun.Id != runId)
+            return false;
+
+        AzureProviderOperationEntity? azureOperation = null;
+        var hasAzureProvenance = await dbContext.AzureProviderResourceAssignments.AsNoTracking()
+                .AnyAsync(x => x.WorkspaceId == deleteOperation.WorkspaceId &&
+                               x.InstanceId == deleteOperation.InstanceId, cancellationToken) ||
+            await dbContext.AzureProviderOperations.AsNoTracking()
+                .AnyAsync(x => x.WorkspaceId == deleteOperation.WorkspaceId &&
+                               x.InstanceId == deleteOperation.InstanceId, cancellationToken);
+        if (hasAzureProvenance)
+        {
+            if (!Guid.TryParseExact(instance.PlacementAssignmentId, "D", out var assignmentId))
+                return false;
+            var assignment = await dbContext.AzureProviderResourceAssignments.AsNoTracking()
+                .SingleOrDefaultAsync(x => x.Id == assignmentId &&
+                                           x.OrganizationId == deleteOperation.OrganizationId &&
+                                           x.WorkspaceId == deleteOperation.WorkspaceId &&
+                                           x.InstanceId == deleteOperation.InstanceId,
+                    cancellationToken);
+            if (assignment is null || assignment.LastOperationId is not { } providerOperationId)
+                return false;
+            var activeProviderOperations = await dbContext.AzureProviderOperations.AsNoTracking()
+                .Where(x => x.WorkspaceId == deleteOperation.WorkspaceId &&
+                            x.TargetKey == assignment.WorkloadName &&
+                            (x.Status == AzureProviderOperationStatus.Accepted ||
+                             x.Status == AzureProviderOperationStatus.Queued ||
+                             x.Status == AzureProviderOperationStatus.EntitlementHeld ||
+                             x.Status == AzureProviderOperationStatus.Running ||
+                             x.Status == AzureProviderOperationStatus.RecoveryRequired))
+                .ToListAsync(cancellationToken);
+            if (activeProviderOperations is not
+                [{ Status: AzureProviderOperationStatus.RecoveryRequired } providerOperation] ||
+                providerOperation.Id != providerOperationId ||
+                providerOperation.OrganizationId != deleteOperation.OrganizationId ||
+                providerOperation.InstanceId != deleteOperation.InstanceId ||
+                providerOperation.ProviderAssignmentId != assignment.Id ||
+                providerOperation.Action != AzureProviderOperationAction.Reconcile ||
+                providerOperation.LifecycleAction != predecessor.Action ||
+                !string.Equals(providerOperation.IdempotencyKey,
+                    $"elsa-instance-operation:{predecessor.Id:D}", StringComparison.Ordinal) ||
+                // RecoveryRequired finalization retains its completion proof and last
+                // heartbeat. The lack of a worker and live lease is the dormant boundary.
+                providerOperation.WorkerId is not null || providerOperation.LeaseTokenHash is not null ||
+                providerOperation.LeaseExpiresAt is not null)
+                return false;
+
+            azureOperation = await dbContext.AzureProviderOperations
+                .SingleOrDefaultAsync(x => x.Id == providerOperation.Id &&
+                                           x.WorkspaceId == deleteOperation.WorkspaceId &&
+                                           x.OrganizationId == deleteOperation.OrganizationId &&
+                                           x.InstanceId == deleteOperation.InstanceId &&
+                                           x.ProviderAssignmentId == assignment.Id &&
+                                           x.Status == AzureProviderOperationStatus.RecoveryRequired &&
+                                           x.Action == AzureProviderOperationAction.Reconcile &&
+                                           x.LifecycleAction == predecessor.Action &&
+                                           x.IdempotencyKey == $"elsa-instance-operation:{predecessor.Id:D}" &&
+                                           x.WorkerId == null && x.LeaseTokenHash == null &&
+                                           x.LeaseExpiresAt == null,
+                    cancellationToken);
+            if (azureOperation is null)
+                return false;
+        }
+
+        var trackedPredecessor = await dbContext.ElsaInstanceOperations
+            .SingleOrDefaultAsync(x => x.Id == predecessor.Id &&
+                                       x.WorkspaceId == deleteOperation.WorkspaceId &&
+                                       x.InstanceId == deleteOperation.InstanceId &&
+                                       x.State == ElsaInstanceOperationState.RecoveryRequired &&
+                                       x.Action != ElsaInstanceOperationAction.Delete &&
+                                       x.DeploymentRunId == runId &&
+                                       x.WorkerId == null && x.LeaseTokenHash == null &&
+                                       x.LeaseExpiresAt == null && x.HeartbeatAt == null,
+                cancellationToken);
+        var trackedRun = await dbContext.DeploymentRuns.Include(x => x.Environment)
+            .SingleOrDefaultAsync(x => x.Id == runId &&
+                                       x.WorkspaceId == deleteOperation.WorkspaceId &&
+                                       x.ElsaInstanceId == deleteOperation.InstanceId &&
+                                       x.Status == WorkspaceDeploymentRunStatus.RecoveryRequired,
+                cancellationToken);
+        if (trackedPredecessor is null || trackedRun is null)
+            return false;
+
+        trackedPredecessor.State = ElsaInstanceOperationState.Cancelled;
+        trackedPredecessor.FailureCode = ElsaInstanceDeletionDiagnosticCodes.PredecessorRecoverySuperseded;
+        trackedPredecessor.FailureSummary = null;
+        trackedPredecessor.CompletedAt = supersededAt;
+        trackedPredecessor.WorkerId = null;
+        trackedPredecessor.LeaseTokenHash = null;
+        trackedPredecessor.LeaseExpiresAt = null;
+        trackedPredecessor.HeartbeatAt = null;
+        trackedPredecessor.UpdatedAt = supersededAt;
+
+        trackedRun.Status = WorkspaceDeploymentRunStatus.Cancelled;
+        trackedRun.CompletedAt = supersededAt;
+        trackedRun.RecoveryReason = ElsaInstanceDeletionDiagnosticCodes.PredecessorRecoverySuperseded;
+        trackedRun.FailureMessage = null;
+        trackedRun.WorkerId = null;
+        trackedRun.WorkerHeartbeatAt = null;
+        if (trackedRun.Environment is not null)
+        {
+            trackedRun.Environment.UpdatedAt = supersededAt;
+            trackedRun.Environment.DeploymentStatus = DeploymentStatus.Blocked;
+        }
+        await dbContext.DeploymentRunHistoryEvents.AddAsync(new()
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = trackedRun.WorkspaceId,
+            RunId = trackedRun.Id,
+            Status = WorkspaceDeploymentRunStatus.Cancelled,
+            Message = "Deployment run was superseded by confirmed instance deletion cleanup.",
+            CreatedAt = supersededAt
+        }, cancellationToken);
+        if (azureOperation is not null)
+        {
+            azureOperation.Status = AzureProviderOperationStatus.Cancelled;
+            azureOperation.CompletedAt = supersededAt;
+            azureOperation.UpdatedAt = supersededAt;
+            azureOperation.Version = checked(azureOperation.Version + 1);
+            azureOperation.WorkerId = null;
+            azureOperation.LeaseTokenHash = null;
+            azureOperation.CompletionLeaseTokenHash = null;
+            azureOperation.CompletionFingerprint = null;
+            azureOperation.LeaseExpiresAt = null;
+            azureOperation.HeartbeatAt = null;
+            await dbContext.AzureProviderOperationTransitions.AddAsync(new()
+            {
+                Id = Guid.NewGuid(),
+                OperationId = azureOperation.Id,
+                Sequence = azureOperation.Version,
+                Status = azureOperation.Status,
+                Phase = azureOperation.Phase,
+                Code = ElsaInstanceDeletionDiagnosticCodes.PredecessorRecoverySuperseded,
+                Message = "The Azure provider operation was superseded by confirmed instance deletion cleanup.",
+                OccurredAt = supersededAt
+            }, cancellationToken);
+        }
+        var trackedInstance = await LoadTrackedInstanceAsync(deleteOperation.InstanceId, cancellationToken)
+            ?? throw Conflict("Deletion instance no longer exists.");
+        await dbContext.ElsaInstanceAuditEvents.AddAsync(await CreateAuditEventAsync(
+            trackedInstance,
+            trackedPredecessor,
+            trackedInstance.ObservedLifecycle,
+            supersededAt,
+            cancellationToken,
+            eventType: "lifecycle.recovery-superseded-by-delete",
+            deploymentRunId: trackedRun.Id,
+            diagnosticCode: ElsaInstanceDeletionDiagnosticCodes.PredecessorRecoverySuperseded,
+            summary: "Recovery-required lifecycle work was superseded by confirmed deletion cleanup."), cancellationToken);
+        return true;
     }
 
     private static ElsaInstanceOperation MapOperation(
