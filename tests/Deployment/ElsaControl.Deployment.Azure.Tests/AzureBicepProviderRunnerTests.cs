@@ -1223,6 +1223,29 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Cleanup_waits_for_delayed_group_absence_without_submitting_another_delete()
+    {
+        using var fixture = new RunnerFixture(observationAttempts: 1, cleanupObservationAttempts: 3);
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "[]");
+        process.Success(args => args.Contains("group") && args.Contains("delete"));
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "false");
+        process.Success(args => args.Contains("list-deleted"), "[]");
+        process.Success(args => args.Contains("list-deleted"), "[]");
+
+        var result = await fixture.Runner(process).RunAsync(
+            fixture.Command(AzureProviderRunnerStep.Cleanup, new(ResourceGroupName: "proof-rg")));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
+        Assert.Equal(1, process.Calls.Count(call => call.Contains("group") && call.Contains("delete")));
+        Assert.Equal(4, process.Calls.Count(call => call.Contains("group") && call.Contains("exists")));
+    }
+
+    [Fact]
     public async Task Cleanup_refuses_a_vault_user_assignment_without_a_proven_workload_principal()
     {
         var process = new FakeCommandProcess();
@@ -2842,7 +2865,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         private readonly string _root = Path.Combine(Path.GetTempPath(), $"elsa-runner-{Guid.NewGuid():N}");
         private readonly string _tool;
 
-        public RunnerFixture(int observationAttempts = 1)
+        public RunnerFixture(int observationAttempts = 1, int? cleanupObservationAttempts = null)
         {
             Directory.CreateDirectory(_root);
             File.WriteAllText(Path.Combine(_root, "main.bicep"), "targetScope = 'resourceGroup'");
@@ -2862,6 +2885,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
                 SqlBootstrapIp = "203.0.113.10",
                 RuntimeAdminUsername = "runtime-admin",
                 ObservationAttempts = observationAttempts,
+                CleanupObservationAttempts = cleanupObservationAttempts,
                 ObservationDelay = TimeSpan.Zero
             };
         }

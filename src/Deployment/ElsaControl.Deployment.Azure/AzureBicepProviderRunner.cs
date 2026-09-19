@@ -1998,7 +1998,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
 
     private async Task<bool> ResourceGroupAbsentAsync(AzureProviderRunnerCommand command, CancellationToken cancellationToken)
     {
-        for (var attempt = 0; attempt < _options.ObservationAttempts; attempt++)
+        var observationAttempts = _options.CleanupObservationAttempts ?? _options.ObservationAttempts;
+        for (var attempt = 0; attempt < observationAttempts; attempt++)
         {
             var exists = await ExecuteAzAsync(command,
                 ["group", "exists", "--subscription", _scope.SubscriptionId, "--name", ResourceGroupName(command), "--output", "tsv", "--only-show-errors"],
@@ -2006,7 +2007,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 cancellationToken);
             if (exists.Succeeded && exists.Value?.Value == false)
                 return true;
-            if (attempt + 1 < _options.ObservationAttempts)
+            if (attempt + 1 < observationAttempts)
                 await Task.Delay(_options.ObservationDelay, cancellationToken);
         }
         return false;

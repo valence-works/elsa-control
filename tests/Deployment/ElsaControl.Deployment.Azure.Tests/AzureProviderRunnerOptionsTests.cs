@@ -22,8 +22,18 @@ public sealed class AzureProviderRunnerOptionsTests : IDisposable
     public void Validates_explicit_governed_runner_options()
     {
         ValidOptions().Validate();
+        (ValidOptions() with { CleanupObservationAttempts = 720 }).Validate();
         (ValidOptions() with { TemplateRoot = _templateRoot + Path.DirectorySeparatorChar }).Validate();
         (ValidOptions() with { SqlBootstrapLogin = "operator_example.test#EXT#@tenant.onmicrosoft.com" }).Validate();
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(721)]
+    public void Rejects_cleanup_observation_budgets_outside_the_governed_range(int attempts)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            (ValidOptions() with { CleanupObservationAttempts = attempts }).Validate());
     }
 
     [Fact]
