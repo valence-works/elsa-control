@@ -763,7 +763,7 @@ public static class ManagedElsaInstanceEndpoints
         };
     }
 
-    private static ManagedElsaInstanceOperationResponse ToOperationResponse(Guid workspaceId, Guid instanceId, ElsaInstanceOperationSummary operation) =>
+    internal static ManagedElsaInstanceOperationResponse ToOperationResponse(Guid workspaceId, Guid instanceId, ElsaInstanceOperationSummary operation) =>
         new(operation.Id, instanceId, operation.Action, operation.State, operation.ExpectedVersion, operation.AttemptNumber,
             operation.AcceptedAt, operation.StartedAt, operation.CompletedAt, operation.DesiredStateRevisionId,
             operation.ResolvedPlanId, operation.DeploymentRunId, operation.FailureCode, operation.ReconciledObservedLifecycle,
@@ -789,7 +789,7 @@ public static class ManagedElsaInstanceEndpoints
             !canOpen ? "Not authorized to open this instance." : !healthy ? "This instance is not currently available." : !openable ? "The current instance binding is unavailable." : null);
     }
 
-    private static IdempotencyKeyReadResult ReadIdempotencyKey(HttpContext context)
+    internal static IdempotencyKeyReadResult ReadIdempotencyKey(HttpContext context)
     {
         var values = context.Request.Headers["Idempotency-Key"];
         if (values.Count == 0 || values.Count == 1 && string.IsNullOrWhiteSpace(values[0]))
@@ -816,7 +816,7 @@ public static class ManagedElsaInstanceEndpoints
                (request.Action == ElsaInstanceOperationAction.Delete || request.DeleteConfirmationId is null);
     }
 
-    private static int? ReadIfMatch(HttpRequest request)
+    internal static int? ReadIfMatch(HttpRequest request)
     {
         var values = request.Headers.IfMatch;
         if (values.Count != 1)
@@ -843,7 +843,7 @@ public static class ManagedElsaInstanceEndpoints
         _ => "instance.invalid-state",
     };
 
-    private static int ConflictStatusCode(ElsaInstanceLifecycleConflictException exception) =>
+    internal static int ConflictStatusCode(ElsaInstanceLifecycleConflictException exception) =>
         exception.Reason == ElsaInstanceLifecycleConflictReason.VersionConflict
             ? StatusCodes.Status412PreconditionFailed
             : exception.Reason == ElsaInstanceLifecycleConflictReason.CommercialDenied
@@ -868,7 +868,7 @@ public static class ManagedElsaInstanceEndpoints
             extensions: extensions);
     }
 
-    private static IResult Problem(string code, string title, int statusCode) => Results.Problem(title: title, statusCode: statusCode,
+    internal static IResult Problem(string code, string title, int statusCode) => Results.Problem(title: title, statusCode: statusCode,
         extensions: new Dictionary<string, object?> { ["code"] = code });
 }
 

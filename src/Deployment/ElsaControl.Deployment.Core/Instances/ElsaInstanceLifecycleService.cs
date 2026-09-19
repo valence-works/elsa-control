@@ -142,7 +142,8 @@ public sealed class ElsaInstanceLifecycleService(
         CancellationToken cancellationToken = default) =>
         AcceptAsync(request.WorkspaceId, request.InstanceId, ElsaInstanceOperationAction.Recover,
             request.ExpectedVersion, request.IdempotencyKey, null, null, request.Reason, cancellationToken,
-            actorAccountId: request.ActorAccountId);
+            actorAccountId: request.ActorAccountId,
+            expectedOperationId: request.ExpectedOperationId);
 
     public Task<ElsaInstanceLifecycleAcceptance> DeleteAsync(
         ElsaInstanceLifecycleRequest request,
@@ -200,13 +201,16 @@ public sealed class ElsaInstanceLifecycleService(
         bool minorApproved = false,
         bool migrationAuthorized = false,
         Guid? confirmationId = null,
-        Guid? actorAccountId = null)
+        Guid? actorAccountId = null,
+        Guid? expectedOperationId = null)
     {
         ValidateWorkspace(workspaceId);
         if (instanceId == Guid.Empty)
             throw new ArgumentException("Instance ID is required.", nameof(instanceId));
         if (expectedVersion < 1)
             throw new ArgumentOutOfRangeException(nameof(expectedVersion), "Expected version must be positive.");
+        if (expectedOperationId == Guid.Empty)
+            throw new ArgumentException("Expected operation ID cannot be empty.", nameof(expectedOperationId));
         ValidateActor(actorAccountId);
         reason = NormalizeReason(reason);
         if (requestedName is not null)
@@ -235,6 +239,9 @@ public sealed class ElsaInstanceLifecycleService(
             if (existingOperation.InstanceId != instanceId ||
                 (existingOperation.Action != action && action != ElsaInstanceOperationAction.Recover))
                 throw new ElsaInstanceLifecycleConflictException("Idempotency key was already used for a different request.", ElsaInstanceLifecycleConflictReason.IdempotencyConflict);
+            if (action == ElsaInstanceOperationAction.Recover && expectedOperationId is { } replayOperationId &&
+                existingOperation.Id != replayOperationId)
+                throw new ElsaInstanceLifecycleConflictException("Recovery is bound to a different operation.", ElsaInstanceLifecycleConflictReason.InvalidState);
 
             var existingRequestHash = action == ElsaInstanceOperationAction.Recover
                 ? existingOperation.RecoveryRequestHash ?? existingOperation.RequestHash
@@ -277,6 +284,9 @@ public sealed class ElsaInstanceLifecycleService(
             reason,
             confirmationId);
         var activeOperation = await store.GetActiveOperationAsync(workspaceId, instanceId, cancellationToken);
+        if (action == ElsaInstanceOperationAction.Recover && expectedOperationId is { } operationId &&
+            (activeOperation is null || activeOperation.Id != operationId))
+            throw new ElsaInstanceLifecycleConflictException("Recovery is bound to a different operation.", ElsaInstanceLifecycleConflictReason.InvalidState);
         var effectiveIntent = EffectiveRequestedIntent(action, instance, requestedIntent);
         var transition = RequestTransition(
             instance,

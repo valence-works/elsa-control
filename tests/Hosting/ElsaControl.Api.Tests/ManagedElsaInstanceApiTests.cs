@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
+using ElsaControl.Api.Admin.Workspaces;
+using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Workspace;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
@@ -800,6 +802,149 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Contains("instance.operation-active", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Admin_api_key_can_recover_exact_operation_and_replay_exact_request()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var customer = app.CreateTrustedWorkspaceClient("admin-recovery-owner");
+        var workspaceId = await customer.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(customer, workspaceId, "admin-recovery-runtime");
+        await MarkOperationRecoveryRequiredAsync(app, created.Operation.Id);
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        var path = $"/api/admin/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations/{created.Operation.Id:D}/recover";
+        var request = new AdminManagedElsaRecoveryRequest("operator recovery");
+
+        using var first = await SendAdminRecoveryAsync(admin, path, created.Instance.ETag, "admin-recovery-key", request);
+        var firstText = await first.Content.ReadAsStringAsync();
+        Assert.True(first.StatusCode == HttpStatusCode.Accepted, firstText);
+        var firstBody = (await first.Content.ReadControlJsonAsync<AdminManagedElsaRecoveryResponse>())!;
+        Assert.Equal(created.Operation.Id, firstBody.OperationId);
+        Assert.Equal(ElsaInstanceOperationState.Queued, firstBody.State);
+        Assert.Equal(2, firstBody.AttemptNumber);
+        Assert.False(firstBody.Replayed);
+        Assert.Equal(path[..path.LastIndexOf("/recover", StringComparison.Ordinal)], firstBody.OperationUrl);
+
+        var rowCounts = await ReadLifecycleRowCountsAsync(app);
+        using var replay = await SendAdminRecoveryAsync(admin, path, created.Instance.ETag, "admin-recovery-key", request);
+        Assert.Equal(HttpStatusCode.Accepted, replay.StatusCode);
+        var replayBody = (await replay.Content.ReadControlJsonAsync<AdminManagedElsaRecoveryResponse>())!;
+        Assert.Equal(firstBody.OperationId, replayBody.OperationId);
+        Assert.Equal(firstBody.AttemptNumber, replayBody.AttemptNumber);
+        Assert.True(replayBody.Replayed);
+        Assert.Equal(rowCounts, await ReadLifecycleRowCountsAsync(app));
+
+        using var status = await admin.GetAsync(firstBody.OperationUrl);
+        Assert.Equal(HttpStatusCode.OK, status.StatusCode);
+        var statusBody = (await status.Content.ReadControlJsonAsync<ManagedElsaInstanceOperationResponse>())!;
+        Assert.Equal(created.Operation.Id, statusBody.Id);
+        Assert.Equal(ElsaInstanceOperationState.Queued, statusBody.State);
+    }
+
+    [Fact]
+    public async Task Admin_recovery_requires_exact_operation_and_preserves_the_active_operation()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var customer = app.CreateTrustedWorkspaceClient("admin-recovery-operation-binding");
+        var workspaceId = await customer.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(customer, workspaceId, "admin-recovery-operation-binding-runtime");
+        await MarkOperationRecoveryRequiredAsync(app, created.Operation.Id);
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        var path = $"/api/admin/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations/{Guid.NewGuid():D}/recover";
+        using var response = await SendAdminRecoveryAsync(
+            admin,
+            path,
+            created.Instance.ETag,
+            "admin-recovery-wrong-operation",
+            new AdminManagedElsaRecoveryRequest("wrong operation"));
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Contains("instance.invalid-state", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(1, await CountOperationsAsync(app));
+        await AssertOperationStateAsync(app, created.Operation.Id, ElsaInstanceOperationState.RecoveryRequired);
+    }
+
+    [Fact]
+    public async Task Admin_recovery_is_scoped_to_the_exact_workspace_and_instance()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var customer = app.CreateTrustedWorkspaceClient("admin-recovery-scope");
+        var workspaceId = await customer.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(customer, workspaceId, "admin-recovery-scope-runtime");
+        await MarkOperationRecoveryRequiredAsync(app, created.Operation.Id);
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        var request = new AdminManagedElsaRecoveryRequest("scope check");
+        var wrongWorkspacePath = $"/api/admin/workspaces/{Guid.NewGuid():D}/instances/{created.Instance.InstanceId:D}/operations/{created.Operation.Id:D}/recover";
+        using var wrongWorkspace = await SendAdminRecoveryAsync(admin, wrongWorkspacePath, created.Instance.ETag, "wrong-workspace", request);
+        Assert.Equal(HttpStatusCode.NotFound, wrongWorkspace.StatusCode);
+
+        var wrongInstancePath = $"/api/admin/workspaces/{workspaceId:D}/instances/{Guid.NewGuid():D}/operations/{created.Operation.Id:D}/recover";
+        using var wrongInstance = await SendAdminRecoveryAsync(admin, wrongInstancePath, created.Instance.ETag, "wrong-instance", request);
+        Assert.Equal(HttpStatusCode.NotFound, wrongInstance.StatusCode);
+        await AssertOperationStateAsync(app, created.Operation.Id, ElsaInstanceOperationState.RecoveryRequired);
+    }
+
+    [Fact]
+    public async Task Admin_recovery_rejects_an_operation_that_is_not_recovery_required()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var customer = app.CreateTrustedWorkspaceClient("admin-recovery-state");
+        var workspaceId = await customer.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(customer, workspaceId, "admin-recovery-state-runtime");
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        var path = $"/api/admin/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations/{created.Operation.Id:D}/recover";
+        using var response = await SendAdminRecoveryAsync(
+            admin,
+            path,
+            created.Instance.ETag,
+            "not-recovery-required",
+            new AdminManagedElsaRecoveryRequest("invalid state"));
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Contains("instance.invalid-state", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        await AssertOperationStateAsync(app, created.Operation.Id, ElsaInstanceOperationState.Accepted);
+    }
+
+    [Fact]
+    public async Task Admin_recovery_requires_operator_authentication_and_strong_preconditions()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var workspaceId = Guid.NewGuid();
+        var instanceId = Guid.NewGuid();
+        var operationId = Guid.NewGuid();
+        var path = $"/api/admin/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations/{operationId:D}/recover";
+        var body = new AdminManagedElsaRecoveryRequest("precondition check");
+
+        using var anonymous = app.CreateClient();
+        using var unauthenticated = await SendAdminRecoveryAsync(anonymous, path, "\"1\"", "anonymous-key", body);
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticated.StatusCode);
+
+        using var customer = app.CreateControlIdentityClient();
+        using var customerResponse = await SendAdminRecoveryAsync(customer, path, "\"1\"", "customer-key", body);
+        Assert.Equal(HttpStatusCode.Unauthorized, customerResponse.StatusCode);
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        using var missingIfMatch = await SendAdminRecoveryAsync(admin, path, null, "missing-if-match", body);
+        Assert.Equal((HttpStatusCode)428, missingIfMatch.StatusCode);
+        Assert.Contains("instance.if-match-required", await missingIfMatch.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var missingIdempotency = await SendAdminRecoveryAsync(admin, path, "\"1\"", null, body);
+        Assert.Equal(HttpStatusCode.BadRequest, missingIdempotency.StatusCode);
+        Assert.Contains("instance.idempotency-key-required", await missingIdempotency.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(ElsaInstanceOperationAction.Start)]
     [InlineData(ElsaInstanceOperationAction.Retry)]
@@ -1560,6 +1705,39 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
             $"UPDATE ElsaInstanceOperations SET State = {ElsaInstanceOperationState.Succeeded.ToString()}, CompletedAt = {completedAtTicks} WHERE Id = {operationId}");
     }
 
+    private static async Task MarkOperationRecoveryRequiredAsync(ControlApiTestApplication app, Guid operationId)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstanceOperations
+            SET State = {ElsaInstanceOperationState.RecoveryRequired.ToString()},
+                CompletedAt = NULL,
+                FailureCode = {ElsaInstanceProviderReconciliationService.RetrySafeCode},
+                ReconciliationRetryEvidenceReference = {"https://provider.example.test/recovery-evidence"},
+                ReconciliationRetryEvidenceDigest = {"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+            WHERE Id = {operationId}
+            """);
+    }
+
+    private static async Task AssertOperationStateAsync(
+        ControlApiTestApplication app,
+        Guid operationId,
+        ElsaInstanceOperationState expectedState)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        await db.Database.OpenConnectionAsync();
+        await using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = "SELECT CAST(State AS TEXT) FROM ElsaInstanceOperations WHERE Id = @operationId";
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = "@operationId";
+        parameter.Value = operationId;
+        command.Parameters.Add(parameter);
+        var stateText = Convert.ToString(await command.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Equal(expectedState, Enum.Parse<ElsaInstanceOperationState>(stateText!));
+    }
+
     private static async Task<int> CountOperationsAsync(ControlApiTestApplication app)
     {
         await using var scope = app.Services.CreateAsyncScope();
@@ -1568,6 +1746,17 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         await using var command = db.Database.GetDbConnection().CreateCommand();
         command.CommandText = "SELECT COUNT(*) FROM ElsaInstanceOperations";
         return Convert.ToInt32(await command.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static async Task<(int Operations, int Outbox, int Audit)> ReadLifecycleRowCountsAsync(
+        ControlApiTestApplication app)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        return (
+            await CountRowsAsync(db, "ElsaInstanceOperations"),
+            await CountRowsAsync(db, "ElsaInstanceLifecycleOutbox"),
+            await CountRowsAsync(db, "ElsaInstanceAuditEvents"));
     }
 
     private static async Task<int> CountRowsAsync(CatalogDbContext db, string table)
@@ -1626,6 +1815,24 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         };
         request.Headers.Add("Idempotency-Key", idempotencyKey);
         request.Headers.TryAddWithoutValidation("If-Match", etag);
+        return client.SendAsync(request);
+    }
+
+    private static Task<HttpResponseMessage> SendAdminRecoveryAsync(
+        HttpClient client,
+        string path,
+        string? etag,
+        string? idempotencyKey,
+        AdminManagedElsaRecoveryRequest body)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, path)
+        {
+            Content = JsonContent.Create(body, options: ControlApiTestApplication.JsonOptions)
+        };
+        if (etag is not null)
+            request.Headers.TryAddWithoutValidation("If-Match", etag);
+        if (idempotencyKey is not null)
+            request.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey);
         return client.SendAsync(request);
     }
 
