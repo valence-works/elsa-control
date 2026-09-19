@@ -196,7 +196,8 @@ public sealed class ElsaInstanceProviderReconciliationService(
         if (observation.ObservedLifecycle == ElsaObservedLifecycle.Ready)
         {
             if (observation.HealthGate == ElsaInstanceProviderHealthGate.Passed &&
-                instance.DesiredLifecycle == ElsaDesiredLifecycle.Running)
+                (instance.DesiredLifecycle == ElsaDesiredLifecycle.Running ||
+                 IsWaitingDeletePredecessor(instance, operation, ElsaDesiredLifecycle.Running)))
                 return (Project(instance, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy,
                         observation.CurrentDeploymentReference, observation.HasCurrentDeploymentProjection),
                     operation.TransitionTo(ElsaInstanceOperationState.Succeeded), ConvergedCode, now);
@@ -210,7 +211,8 @@ public sealed class ElsaInstanceProviderReconciliationService(
         }
 
         if (observation.ObservedLifecycle == ElsaObservedLifecycle.Stopped &&
-            instance.DesiredLifecycle == ElsaDesiredLifecycle.Stopped)
+            (instance.DesiredLifecycle == ElsaDesiredLifecycle.Stopped ||
+             IsWaitingDeletePredecessor(instance, operation, ElsaDesiredLifecycle.Stopped)))
             return (Project(instance, ElsaObservedLifecycle.Stopped, ElsaInstanceHealth.Unknown),
                 operation.TransitionTo(ElsaInstanceOperationState.Succeeded), ConvergedCode, now);
 
@@ -228,6 +230,25 @@ public sealed class ElsaInstanceProviderReconciliationService(
 
         return (Project(instance, ElsaObservedLifecycle.Unknown, ElsaInstanceHealth.Unknown),
             operation, InProgressCode, now);
+    }
+
+    private static bool IsWaitingDeletePredecessor(
+        ElsaInstance instance,
+        ElsaInstanceOperation operation,
+        ElsaDesiredLifecycle predecessorDesiredLifecycle)
+    {
+        if (instance.DesiredLifecycle != ElsaDesiredLifecycle.Deleting ||
+            instance.LastOperationId is not { } lastOperationId ||
+            string.Equals(lastOperationId.Value, operation.Id.ToString("D"), StringComparison.Ordinal))
+            return false;
+
+        return predecessorDesiredLifecycle switch
+        {
+            ElsaDesiredLifecycle.Stopped => operation.Action == ElsaInstanceOperationAction.Stop,
+            ElsaDesiredLifecycle.Running => operation.Action is not (
+                ElsaInstanceOperationAction.Stop or ElsaInstanceOperationAction.Delete),
+            _ => false
+        };
     }
 
     private static ElsaInstance Project(

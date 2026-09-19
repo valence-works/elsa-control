@@ -874,6 +874,46 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Admin_can_recover_failed_create_while_delete_waits_for_that_operation()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var customer = app.CreateTrustedWorkspaceClient("admin-recovery-waiting-delete-owner");
+        var workspaceId = await customer.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(customer, workspaceId, "admin-recovery-waiting-delete-runtime");
+        await MarkOperationRecoveryRequiredAsync(app, created.Operation.Id);
+
+        using var confirmationResponse = await customer.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+
+        using var deletion = await SendDeleteAsync(customer, workspaceId, created.Instance.InstanceId,
+            created.Instance.ETag, "admin-recovery-waiting-delete", confirmation!.ConfirmationId);
+        var deletionText = await deletion.Content.ReadAsStringAsync();
+        Assert.True(deletion.StatusCode == HttpStatusCode.Accepted, deletionText);
+        var deletionBody = (await deletion.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>())!;
+        await AssertOperationStateAsync(app, deletionBody.OperationId, ElsaInstanceOperationState.WaitingForPriorOperation);
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        var currentPath = $"/api/admin/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations/current";
+        using var current = await admin.GetAsync(currentPath);
+        Assert.Equal(HttpStatusCode.OK, current.StatusCode);
+        var currentBody = (await current.Content.ReadControlJsonAsync<ManagedElsaInstanceOperationResponse>())!;
+        Assert.Equal(created.Operation.Id, currentBody.Id);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, currentBody.State);
+
+        var recoveryPath = $"/api/admin/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations/{created.Operation.Id:D}/recover";
+        using var recovery = await SendAdminRecoveryAsync(admin, recoveryPath, current.Headers.ETag!.Tag,
+            "admin-recovery-waiting-delete-resume", new("operator recovery with waiting delete"));
+        var recoveryText = await recovery.Content.ReadAsStringAsync();
+        Assert.True(recovery.StatusCode == HttpStatusCode.Accepted, recoveryText);
+        await AssertOperationStateAsync(app, created.Operation.Id, ElsaInstanceOperationState.Queued);
+        await AssertOperationStateAsync(app, deletionBody.OperationId, ElsaInstanceOperationState.WaitingForPriorOperation);
+    }
+
+    [Fact]
     public async Task Admin_recovery_requires_exact_operation_and_preserves_the_active_operation()
     {
         var app = await PrepareApplicationAsync([]);
