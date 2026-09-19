@@ -803,6 +803,36 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Admin_api_key_can_discover_the_exact_active_operation()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var customer = app.CreateTrustedWorkspaceClient("admin-recovery-discovery-owner");
+        var workspaceId = await customer.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(customer, workspaceId, "admin-recovery-discovery-runtime");
+        await MarkOperationRecoveryRequiredAsync(app, created.Operation.Id);
+        var path = $"/api/admin/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations/current";
+
+        using var anonymous = app.CreateClient();
+        using var unauthenticated = await anonymous.GetAsync(path);
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticated.StatusCode);
+
+        using var customerIdentity = app.CreateControlIdentityClient();
+        using var customerResponse = await customerIdentity.GetAsync(path);
+        Assert.Equal(HttpStatusCode.Unauthorized, customerResponse.StatusCode);
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        using var response = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(created.Instance.ETag, response.Headers.ETag?.Tag);
+        var body = (await response.Content.ReadControlJsonAsync<ManagedElsaInstanceOperationResponse>())!;
+        Assert.Equal(created.Operation.Id, body.Id);
+        Assert.Equal(ElsaInstanceOperationAction.Create, body.Action);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, body.State);
+    }
+
+    [Fact]
     public async Task Admin_api_key_can_recover_exact_operation_and_replay_exact_request()
     {
         var app = await PrepareApplicationAsync([]);

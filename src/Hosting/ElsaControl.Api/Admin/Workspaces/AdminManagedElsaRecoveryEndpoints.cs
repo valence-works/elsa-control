@@ -18,6 +18,45 @@ public static class AdminManagedElsaRecoveryEndpoints
             .RequireAuthorization(AdminAuthorization.Policy)
             .WithTags("Admin Managed Elsa");
 
+        group.MapGet("/current", async (
+            Guid workspaceId,
+            Guid instanceId,
+            HttpContext context,
+            IElsaInstanceLifecycleStore lifecycle,
+            IManagedElsaInstanceApiStore queries,
+            CancellationToken cancellationToken) =>
+        {
+            var instance = await lifecycle.GetInstanceAsync(workspaceId, instanceId, cancellationToken);
+            if (instance is null)
+                return Results.NotFound();
+
+            var operation = await lifecycle.GetActiveOperationAsync(workspaceId, instanceId, cancellationToken);
+            if (operation is null)
+                return Results.NoContent();
+
+            var summary = await queries.GetOperationAsync(workspaceId, instanceId, operation.Id, cancellationToken);
+            if (summary is null)
+                return Results.NotFound();
+
+            // These stores intentionally expose separate read models. Revalidate
+            // the mutation precondition and operation identity before returning a
+            // pair that an operator can safely use for recovery.
+            var currentInstance = await lifecycle.GetInstanceAsync(workspaceId, instanceId, cancellationToken);
+            var currentOperation = await lifecycle.GetActiveOperationAsync(workspaceId, instanceId, cancellationToken);
+            if (currentInstance is null || currentOperation is null ||
+                currentInstance.Version != instance.Version ||
+                currentOperation.Id != operation.Id ||
+                currentOperation.State != summary.State ||
+                currentOperation.AttemptNumber != summary.AttemptNumber)
+                return ManagedElsaInstanceEndpoints.Problem(
+                    "instance.operation-changed",
+                    "The active operation changed while it was being read. Retry discovery.",
+                    StatusCodes.Status409Conflict);
+
+            context.Response.Headers.ETag = $"\"{currentInstance.Version}\"";
+            return Results.Ok(ManagedElsaInstanceEndpoints.ToOperationResponse(workspaceId, instanceId, summary));
+        });
+
         group.MapGet("/{operationId:guid}", async (
             Guid workspaceId,
             Guid instanceId,
