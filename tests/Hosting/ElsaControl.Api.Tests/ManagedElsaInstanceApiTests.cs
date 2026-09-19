@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Security.Claims;
 using ElsaControl.Api.Admin.Workspaces;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Workspace;
@@ -911,6 +912,154 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.True(recovery.StatusCode == HttpStatusCode.Accepted, recoveryText);
         await AssertOperationStateAsync(app, created.Operation.Id, ElsaInstanceOperationState.Queued);
         await AssertOperationStateAsync(app, deletionBody.OperationId, ElsaInstanceOperationState.WaitingForPriorOperation);
+    }
+
+    [Fact]
+    public async Task Admin_topology_exposes_safe_complete_nonterminal_operation_graph()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var customer = app.CreateTrustedWorkspaceClient("admin-topology-owner");
+        var workspaceId = await customer.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(customer, workspaceId, "admin-topology-runtime");
+        await MarkOperationRecoveryRequiredAsync(app, created.Operation.Id);
+
+        using var confirmationResponse = await customer.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+
+        using var deletion = await SendDeleteAsync(customer, workspaceId, created.Instance.InstanceId,
+            created.Instance.ETag, "admin-topology-delete", confirmation!.ConfirmationId);
+        var deletionText = await deletion.Content.ReadAsStringAsync();
+        Assert.True(deletion.StatusCode == HttpStatusCode.Accepted, deletionText);
+        var deletionBody = (await deletion.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>())!;
+
+        const string privateWorker = "private-worker-secret";
+        const string privateLeaseHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            var quarantinedAt = DateTimeOffset.UtcNow.UtcTicks;
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE ElsaInstanceOperations
+                SET WorkerId = {privateWorker}, LeaseTokenHash = {privateLeaseHash}
+                WHERE Id = {created.Operation.Id}
+                """);
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE ElsaInstanceLifecycleOutbox
+                SET QuarantinedAt = {quarantinedAt}, QuarantineCode = {"outbox.invalid"}
+                WHERE OperationId = {deletionBody.OperationId}
+                """);
+        }
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        var path = $"/api/admin/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations/topology";
+        using var response = await admin.GetAsync(path);
+        var responseText = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var topology = System.Text.Json.JsonSerializer.Deserialize<ElsaInstanceLifecycleTopologySnapshot>(
+            responseText, ControlApiTestApplication.JsonOptions)!;
+        Assert.Equal($"\"{topology.InstanceVersion}\"", response.Headers.ETag?.Tag);
+        Assert.Equal(created.Instance.InstanceId, topology.InstanceId);
+        Assert.Equal(ElsaDesiredLifecycle.Deleting, topology.DesiredLifecycle);
+        Assert.Equal(deletionBody.OperationId, topology.LastOperationId);
+        Assert.Collection(topology.Operations,
+            create =>
+            {
+                Assert.Equal(created.Operation.Id, create.Id);
+                Assert.Equal(ElsaInstanceOperationAction.Create, create.Action);
+                Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, create.State);
+                Assert.NotNull(create.Outbox);
+                Assert.Null(create.Outbox!.QuarantinedAt);
+            },
+            delete =>
+            {
+                Assert.Equal(deletionBody.OperationId, delete.Id);
+                Assert.Equal(ElsaInstanceOperationAction.Delete, delete.Action);
+                Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, delete.State);
+                Assert.NotNull(delete.Outbox);
+                Assert.NotNull(delete.Outbox!.QuarantinedAt);
+                Assert.Equal("outbox.invalid", delete.Outbox.QuarantineCode);
+            });
+        Assert.DoesNotContain(privateWorker, responseText, StringComparison.Ordinal);
+        Assert.DoesNotContain(privateLeaseHash, responseText, StringComparison.Ordinal);
+        Assert.DoesNotContain("requestHash", responseText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("lease", responseText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("worker", responseText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("evidence", responseText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("providerPayload", responseText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("providerResponse", responseText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Admin_topology_requires_operator_authentication_and_exact_scope()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var customer = app.CreateTrustedWorkspaceClient("admin-topology-scope-owner");
+        var workspaceId = await customer.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(customer, workspaceId, "admin-topology-scope-runtime");
+        var path = $"/api/admin/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations/topology";
+
+        using var anonymous = app.CreateClient();
+        using var anonymousResponse = await anonymous.GetAsync(path);
+        Assert.Equal(HttpStatusCode.Unauthorized, anonymousResponse.StatusCode);
+
+        using var customerIdentity = app.CreateControlIdentityClient();
+        using var customerResponse = await customerIdentity.GetAsync(path);
+        Assert.Equal(HttpStatusCode.Unauthorized, customerResponse.StatusCode);
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        using var controlAdmin = app.CreateClient();
+        app.AddControlSessionCookie(controlAdmin, new Claim("roles", AdminAuthorization.ControlAdminRole));
+        using var controlAdminResponse = await controlAdmin.GetAsync(path);
+        using var wrongWorkspace = await admin.GetAsync(
+            $"/api/admin/workspaces/{Guid.NewGuid():D}/instances/{created.Instance.InstanceId:D}/operations/topology");
+        using var wrongInstance = await admin.GetAsync(
+            $"/api/admin/workspaces/{workspaceId:D}/instances/{Guid.NewGuid():D}/operations/topology");
+        Assert.Equal(HttpStatusCode.OK, controlAdminResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, wrongWorkspace.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, wrongInstance.StatusCode);
+    }
+
+    [Fact]
+    public async Task Admin_topology_returns_safe_conflict_when_revalidation_detects_drift()
+    {
+        await using var app = await CreateTopologyTestApplicationAsync<TopologyChangedStore>();
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+
+        using var response = await admin.GetAsync(
+            $"/api/admin/workspaces/{Guid.NewGuid():D}/instances/{Guid.NewGuid():D}/operations/topology");
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        var responseText = await response.Content.ReadAsStringAsync();
+        Assert.Contains("instance.topology-changed", responseText, StringComparison.Ordinal);
+        Assert.DoesNotContain(nameof(ElsaInstanceLifecycleTopologyChangedException), responseText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Admin_topology_represents_missing_outbox_authority_explicitly()
+    {
+        await using var app = await CreateTopologyTestApplicationAsync<MissingOutboxTopologyStore>();
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        var workspaceId = Guid.NewGuid();
+        var instanceId = Guid.NewGuid();
+
+        using var response = await admin.GetAsync(
+            $"/api/admin/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations/topology");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var topology = await response.Content.ReadControlJsonAsync<ElsaInstanceLifecycleTopologySnapshot>();
+        var operation = Assert.Single(topology!.Operations);
+        Assert.Equal(instanceId, topology.InstanceId);
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, operation.State);
+        Assert.Null(operation.Outbox);
     }
 
     [Fact]
@@ -1926,6 +2075,18 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         return client.SendAsync(request);
     }
 
+    private static async Task<ControlApiTestApplication> CreateTopologyTestApplicationAsync<TStore>()
+        where TStore : class, IManagedElsaInstanceApiStore
+    {
+        var app = new ControlApiTestApplication(configureServices: services =>
+        {
+            services.RemoveAll<IManagedElsaInstanceApiStore>();
+            services.AddScoped<IManagedElsaInstanceApiStore, TStore>();
+        });
+        await app.SeedAsync(_ => Task.CompletedTask);
+        return app;
+    }
+
     private static async Task<ActionConfirmation> CreateConfirmationAsync(
         HttpClient client,
         Guid workspaceId,
@@ -1951,5 +2112,74 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
 
         public Task<IReadOnlyList<ManagedElsaInstanceSummary>> ListAsync(Guid workspaceId, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<ManagedElsaInstanceSummary>>(_instances);
+    }
+
+    private abstract class TopologyStoreStub : IManagedElsaInstanceApiStore
+    {
+        public abstract Task<ElsaInstanceLifecycleTopologySnapshot?> GetLifecycleTopologyAsync(
+            Guid workspaceId,
+            Guid instanceId,
+            CancellationToken cancellationToken = default);
+
+        public Task<ElsaInstancePage> ListInstancesAsync(Guid workspaceId, int page, int pageSize, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<bool> SlugExistsAsync(Guid workspaceId, string slug, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<ElsaInstanceOperationSummary?> GetOperationAsync(Guid workspaceId, Guid instanceId, Guid operationId, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyList<ElsaInstanceIntentRevisionSummary>> ListRevisionsAsync(Guid workspaceId, Guid instanceId, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<ElsaInstanceResolvedPlanSummary?> GetResolvedPlanAsync(Guid workspaceId, Guid instanceId, string planId, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyList<ElsaInstanceDeploymentSummary>> ListDeploymentsAsync(Guid workspaceId, Guid instanceId, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyList<ElsaInstanceAuditEventSummary>> ListAuditAsync(Guid workspaceId, Guid instanceId, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class TopologyChangedStore : TopologyStoreStub
+    {
+        public override Task<ElsaInstanceLifecycleTopologySnapshot?> GetLifecycleTopologyAsync(
+            Guid workspaceId,
+            Guid instanceId,
+            CancellationToken cancellationToken = default) =>
+            throw new ElsaInstanceLifecycleTopologyChangedException();
+    }
+
+    private sealed class MissingOutboxTopologyStore : TopologyStoreStub
+    {
+        public override Task<ElsaInstanceLifecycleTopologySnapshot?> GetLifecycleTopologyAsync(
+            Guid workspaceId,
+            Guid instanceId,
+            CancellationToken cancellationToken = default)
+        {
+            var operationId = Guid.NewGuid();
+            return Task.FromResult<ElsaInstanceLifecycleTopologySnapshot?>(new(
+                instanceId,
+                3,
+                ElsaDesiredLifecycle.Deleting,
+                ElsaObservedLifecycle.Deleting,
+                operationId,
+                [new(
+                    operationId,
+                    ElsaInstanceOperationAction.Delete,
+                    ElsaInstanceOperationState.WaitingForPriorOperation,
+                    2,
+                    1,
+                    DateTimeOffset.UtcNow,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null)]));
+        }
     }
 }

@@ -236,6 +236,41 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
+    public async Task Lifecycle_topology_read_rejects_operation_drift_between_serializable_snapshots()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Topology drift workspace");
+        var created = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                workspace.OrganizationId,
+                workspace.Id,
+                "Topology drift Elsa",
+                "topology-drift-elsa",
+                CreateIntent(),
+                "topology-drift-create"));
+        db.ChangeTracker.Clear();
+        var revalidationHookCalls = 0;
+        var store = new EfCoreManagedElsaInstanceApiStore(db, async cancellationToken =>
+        {
+            revalidationHookCalls++;
+            var nextAttempt = created.Operation.AttemptNumber + 1;
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE ElsaInstanceOperations
+                SET AttemptNumber = {nextAttempt}
+                WHERE Id = {created.Operation.Id}
+                """, cancellationToken);
+        });
+
+        await Assert.ThrowsAsync<ElsaInstanceLifecycleTopologyChangedException>(() =>
+            store.GetLifecycleTopologyAsync(workspace.Id, created.Instance.Id));
+
+        Assert.Equal(1, revalidationHookCalls);
+    }
+
+    [Fact]
     public async Task Create_commits_instance_revision_operation_and_outbox_and_replays_exactly()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

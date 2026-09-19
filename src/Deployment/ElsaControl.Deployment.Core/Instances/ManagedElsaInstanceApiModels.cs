@@ -28,6 +28,11 @@ public interface IManagedElsaInstanceApiStore
         Guid operationId,
         CancellationToken cancellationToken = default);
 
+    Task<ElsaInstanceLifecycleTopologySnapshot?> GetLifecycleTopologyAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<ElsaInstanceIntentRevisionSummary>> ListRevisionsAsync(
         Guid workspaceId,
         Guid instanceId,
@@ -68,6 +73,48 @@ public sealed record ElsaInstanceOperationSummary(
     string? FailureCode,
     ElsaObservedLifecycle? ReconciledObservedLifecycle,
     ElsaInstanceHealth? ReconciledHealth);
+
+/// <summary>
+/// Safe operator projection of one instance's unfinished lifecycle topology.
+/// It deliberately excludes request hashes, worker and lease data, recovery
+/// evidence, provider payloads, and other credential-bearing values.
+/// </summary>
+public sealed record ElsaInstanceLifecycleTopologySnapshot(
+    Guid InstanceId,
+    int InstanceVersion,
+    ElsaDesiredLifecycle DesiredLifecycle,
+    ElsaObservedLifecycle ObservedLifecycle,
+    Guid? LastOperationId,
+    IReadOnlyList<ElsaInstanceLifecycleTopologyOperation> Operations);
+
+public sealed record ElsaInstanceLifecycleTopologyOperation(
+    Guid Id,
+    ElsaInstanceOperationAction Action,
+    ElsaInstanceOperationState State,
+    int ExpectedVersion,
+    int AttemptNumber,
+    DateTimeOffset AcceptedAt,
+    DateTimeOffset? StartedAt,
+    DateTimeOffset? CompletedAt,
+    Guid? DeploymentRunId,
+    string? FailureCode,
+    string? DeletionDiagnosticCode,
+    string? ReconciliationDiagnosticCode,
+    ElsaInstanceLifecycleTopologyOutbox? Outbox);
+
+public sealed record ElsaInstanceLifecycleTopologyOutbox(
+    Guid Id,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset? QuarantinedAt,
+    string? QuarantineCode);
+
+public sealed class ElsaInstanceLifecycleTopologyChangedException : Exception
+{
+    public ElsaInstanceLifecycleTopologyChangedException()
+        : base("The managed instance lifecycle topology changed while it was being read.")
+    {
+    }
+}
 
 public sealed record ElsaInstanceIntentRevisionSummary(
     Guid Id,
