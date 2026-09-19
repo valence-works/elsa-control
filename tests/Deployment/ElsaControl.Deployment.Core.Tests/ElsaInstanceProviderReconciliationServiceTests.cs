@@ -183,6 +183,49 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
     }
 
     [Fact]
+    public async Task Confirmed_deleted_observation_releases_a_predecessor_for_a_waiting_delete_without_tombstoning()
+    {
+        var (store, accepted, authority) = await RecoveryTargetWithAuthorityAsync();
+        var confirmationId = Guid.NewGuid();
+        var actorAccountId = Guid.NewGuid();
+        authority.Add(new ActionConfirmation(
+            confirmationId,
+            WorkspaceId,
+            ConfirmationActionType.DeleteManagedInstance,
+            accepted.Instance.Id.ToString("D"),
+            actorAccountId,
+            Now,
+            Now.AddMinutes(5),
+            null));
+        var deletion = await new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now))
+            .DeleteAsync(new(
+                WorkspaceId,
+                accepted.Instance.Id,
+                accepted.Instance.Version,
+                "delete-behind-recovery-required-create",
+                DeleteConfirmationId: confirmationId,
+                ActorAccountId: actorAccountId));
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+
+        var observation = new ElsaInstanceProviderObservation(
+            ElsaInstanceProviderObservationKind.Confirmed,
+            ElsaObservedLifecycle.Deleted,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "observation-predecessor-absent");
+
+        var result = await Service(store, new RecordingPort(observation))
+            .ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.Converged, result.Outcome);
+        Assert.Equal(ElsaInstanceOperationState.Succeeded, result.Projection.OperationState);
+        Assert.Equal(ElsaObservedLifecycle.Unknown, result.Projection.ObservedLifecycle);
+        var current = store.Instances.Single();
+        Assert.Equal(ElsaDesiredLifecycle.Deleting, current.DesiredLifecycle);
+        Assert.Equal(new ElsaLastOperationId(deletion.Operation.Id), current.LastOperationId);
+        Assert.Null(current.DeletedAt);
+    }
+
+    [Fact]
     public async Task Later_positive_evidence_can_converge_after_an_unknown_observation()
     {
         var (store, accepted) = await RecoveryTargetAsync();
@@ -350,6 +393,16 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
     private static async Task<(InMemoryElsaInstanceLifecycleStore Store, ElsaInstanceLifecycleAcceptance Accepted)> RecoveryTargetAsync(
         ElsaDesiredLifecycle desiredLifecycle = ElsaDesiredLifecycle.Running)
     {
+        var (store, accepted, _) = await RecoveryTargetWithAuthorityAsync(desiredLifecycle);
+        return (store, accepted);
+    }
+
+    private static async Task<(
+        InMemoryElsaInstanceLifecycleStore Store,
+        ElsaInstanceLifecycleAcceptance Accepted,
+        InMemoryElsaInstanceDeleteConfirmationAuthority Authority)> RecoveryTargetWithAuthorityAsync(
+        ElsaDesiredLifecycle desiredLifecycle = ElsaDesiredLifecycle.Running)
+    {
         var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
         var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
         var lifecycle = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
@@ -393,7 +446,7 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
                 ActorAccountId: actorAccountId));
             store.MarkRecoveryRequired(accepted.Operation.Id);
         }
-        return (store, accepted);
+        return (store, accepted, authority);
     }
 
     private static async Task<(ElsaInstanceProviderReconciliationResult? Result, Exception? Error)> CaptureAsync(

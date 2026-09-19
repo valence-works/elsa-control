@@ -988,6 +988,91 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
         Assert.Equal(deleteOperationId, deletion.Operation.Id);
     }
 
+    [Fact]
+    public async Task Confirmed_provider_absence_releases_an_unrecovered_predecessor_for_its_exact_waiting_delete()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+
+        var fixture = await SeedProviderObservationAsync(db, ElsaInstanceOperationAction.Create);
+        await AddLifecycleRunAsync(db, fixture);
+        var lifecycleStore = new EfCoreElsaInstanceLifecycleStore(
+            db,
+            EmptyResolutionInputSource.Instance,
+            new FixedTimeProvider(fixture.Observation.ObservedAt.AddMinutes(1)),
+            recoveryObservationStore: fixture.OperationStore);
+        var uncertain = await new ElsaInstanceProviderReconciliationService(
+                lifecycleStore,
+                new FixedObservationPort(ElsaInstanceProviderObservationKind.Confirmed,
+                    ElsaObservedLifecycle.Deleted, ElsaInstanceProviderHealthGate.Unknown),
+                new FixedTimeProvider(fixture.Observation.ObservedAt.AddMinutes(1)))
+            .ReconcileAsync(fixture.Workspace.Id, fixture.LifecycleOperationId);
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, uncertain.Outcome);
+
+        var predecessor = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == fixture.LifecycleOperationId);
+        var reconciledInstanceVersion = Assert.IsType<int>(predecessor.ReconciledInstanceVersion);
+        var deleteOperationId = Guid.NewGuid();
+        var acceptedAt = fixture.Observation.ObservedAt.AddMinutes(2);
+        var instance = await db.ElsaInstances.SingleAsync(x => x.Id == fixture.InstanceId);
+        Assert.Equal(reconciledInstanceVersion, instance.Version);
+        instance.DesiredLifecycle = ElsaDesiredLifecycle.Deleting;
+        instance.Version = checked(instance.Version + 1);
+        instance.LastOperationId = deleteOperationId.ToString("D");
+        instance.UpdatedAt = acceptedAt;
+        db.ElsaInstanceOperations.Add(new()
+        {
+            Id = deleteOperationId,
+            OrganizationId = fixture.Workspace.OrganizationId,
+            WorkspaceId = fixture.Workspace.Id,
+            InstanceId = fixture.InstanceId,
+            Action = ElsaInstanceOperationAction.Delete,
+            IdempotencyScope = $"instance/{fixture.InstanceId:D}/Delete",
+            IdempotencyKey = "waiting-delete-after-provider-absence",
+            RequestHash = new string('a', 64),
+            ExpectedVersion = reconciledInstanceVersion,
+            State = ElsaInstanceOperationState.WaitingForPriorOperation,
+            AttemptNumber = 1,
+            AcceptedAt = acceptedAt,
+            CreatedAt = acceptedAt,
+            UpdatedAt = acceptedAt
+        });
+        db.ElsaInstanceLifecycleOutbox.Add(new()
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = fixture.Workspace.OrganizationId,
+            WorkspaceId = fixture.Workspace.Id,
+            InstanceId = fixture.InstanceId,
+            OperationId = deleteOperationId,
+            Action = ElsaInstanceOperationAction.Delete,
+            RequestHash = new string('a', 64),
+            CreatedAt = acceptedAt
+        });
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var reconciled = await new ElsaInstanceProviderReconciliationService(
+                lifecycleStore,
+                new FixedObservationPort(ElsaInstanceProviderObservationKind.Confirmed,
+                    ElsaObservedLifecycle.Deleted, ElsaInstanceProviderHealthGate.Unknown),
+                new FixedTimeProvider(acceptedAt.AddMinutes(1)))
+            .ReconcileAsync(fixture.Workspace.Id, fixture.LifecycleOperationId);
+
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.Converged, reconciled.Outcome);
+        Assert.False(reconciled.Replayed);
+        Assert.Equal(ElsaInstanceOperationState.Succeeded, reconciled.Projection.OperationState);
+        Assert.Equal(ElsaObservedLifecycle.Unknown, reconciled.Projection.ObservedLifecycle);
+        var afterReconciliation = Assert.IsType<ElsaInstance>(
+            await lifecycleStore.GetInstanceAsync(fixture.Workspace.Id, fixture.InstanceId));
+        Assert.Equal(ElsaDesiredLifecycle.Deleting, afterReconciliation.DesiredLifecycle);
+        Assert.Equal(new ElsaLastOperationId(deleteOperationId), afterReconciliation.LastOperationId);
+        Assert.Null(afterReconciliation.DeletedAt);
+        var deletion = Assert.IsType<ElsaInstanceDeletionWorkItem>(await lifecycleStore.TryClaimNextDeletionAsync(
+            "provider-absence-delete-worker", acceptedAt.AddMinutes(2)));
+        Assert.Equal(deleteOperationId, deletion.Operation.Id);
+    }
+
     private static async Task<AzureProviderRecoveryObservationBinding> AcceptRecoveryAsync(
         CatalogDbContext db,
         ObservationFixture fixture,
@@ -1137,6 +1222,26 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
                 request.OperationId,
                 request.AttemptNumber,
                 "provider-recovery-completed"));
+        }
+    }
+
+    private sealed class FixedObservationPort(
+        ElsaInstanceProviderObservationKind kind,
+        ElsaObservedLifecycle observedLifecycle,
+        ElsaInstanceProviderHealthGate healthGate) : IElsaInstanceProviderReconciliationPort
+    {
+        public Task<ElsaInstanceProviderObservation> ObserveAsync(
+            ElsaInstanceProviderReconciliationRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(new ElsaInstanceProviderObservation(
+                kind,
+                observedLifecycle,
+                healthGate,
+                request.OperationId,
+                request.AttemptNumber,
+                $"fixed-{kind}-{observedLifecycle}"));
         }
     }
 

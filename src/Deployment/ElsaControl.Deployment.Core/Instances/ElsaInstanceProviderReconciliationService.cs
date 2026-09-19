@@ -216,13 +216,20 @@ public sealed class ElsaInstanceProviderReconciliationService(
             return (Project(instance, ElsaObservedLifecycle.Stopped, ElsaInstanceHealth.Unknown),
                 operation.TransitionTo(ElsaInstanceOperationState.Succeeded), ConvergedCode, now);
 
-        // Read-only reconciliation cannot establish the cleanup proof required to
-        // tombstone an instance. Even a provider's "deleted" observation remains
-        // unknown until the dedicated cleanup boundary supplies correlated,
-        // immutable positive absence evidence.
+        // A confirmed provider absence can complete an unfinished predecessor when
+        // a confirmed Delete is already waiting behind it. This only releases the
+        // predecessor's execution reservation; the dedicated cleanup boundary still
+        // owns the correlated absence proof and instance tombstone.
         if (observation.ObservedLifecycle == ElsaObservedLifecycle.Deleted)
+        {
+            if (IsWaitingDeletePredecessor(instance, operation, ElsaDesiredLifecycle.Running) ||
+                IsWaitingDeletePredecessor(instance, operation, ElsaDesiredLifecycle.Stopped))
+                return (Project(instance, ElsaObservedLifecycle.Unknown, ElsaInstanceHealth.Unknown),
+                    operation.TransitionTo(ElsaInstanceOperationState.Succeeded), ConvergedCode, now);
+
             return (Project(instance, ElsaObservedLifecycle.Unknown, ElsaInstanceHealth.Unknown),
                 operation, InProgressCode, now);
+        }
 
         if (observation.ObservedLifecycle == ElsaObservedLifecycle.Failed)
             return (Project(instance, ElsaObservedLifecycle.Failed, ElsaInstanceHealth.Unreachable),
