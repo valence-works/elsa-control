@@ -587,10 +587,20 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 if (activeOperation is not null)
                 {
                     var isDeleteSuccessor = operation.Action == ElsaInstanceOperationAction.Delete &&
-                        operation.State == ElsaInstanceOperationState.WaitingForPriorOperation &&
+                        operation.State is (ElsaInstanceOperationState.Accepted or ElsaInstanceOperationState.WaitingForPriorOperation) &&
                         activeOperation.Action != ElsaInstanceOperationAction.Delete;
                     if (!isDeleteSuccessor)
                         throw Conflict("An instance operation is already active.", ElsaInstanceLifecycleConflictReason.OperationActive);
+
+                    // The lifecycle service normally marks this successor while
+                    // it has the preflight active-operation read. The store is the
+                    // authoritative boundary, however, and a concurrent recovery
+                    // transition can make that read stale before this transaction
+                    // rechecks the durable predecessor. Normalize the safe Delete
+                    // successor here instead of rejecting a confirmed customer
+                    // delete after its state-machine transition was already valid.
+                    if (operation.State == ElsaInstanceOperationState.Accepted)
+                        operation = operation.TransitionTo(ElsaInstanceOperationState.WaitingForPriorOperation);
                 }
 
                 var activeInstanceCount = operation.Action == ElsaInstanceOperationAction.Create
