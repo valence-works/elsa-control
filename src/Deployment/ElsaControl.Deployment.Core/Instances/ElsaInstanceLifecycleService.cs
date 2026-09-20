@@ -145,15 +145,23 @@ public sealed class ElsaInstanceLifecycleService(
             actorAccountId: request.ActorAccountId,
             expectedOperationId: request.ExpectedOperationId);
 
+    public Task<ElsaInstanceLifecycleAcceptance> RecoverDeleteAsync(
+        ElsaInstanceLifecycleRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateDeleteRequest(request);
+        return AcceptAsync(request.WorkspaceId, request.InstanceId, ElsaInstanceOperationAction.Recover,
+            request.ExpectedVersion, request.IdempotencyKey, null, null, request.Reason, cancellationToken,
+            confirmationId: request.DeleteConfirmationId,
+            actorAccountId: request.ActorAccountId,
+            expectedOperationId: request.ExpectedOperationId);
+    }
+
     public Task<ElsaInstanceLifecycleAcceptance> DeleteAsync(
         ElsaInstanceLifecycleRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        if (request.DeleteConfirmationId is null || request.DeleteConfirmationId == Guid.Empty)
-            throw new ArgumentException("Delete confirmation ID is required.", nameof(request.DeleteConfirmationId));
-        if (request.ActorAccountId is null || request.ActorAccountId == Guid.Empty)
-            throw new ArgumentException("Actor account ID is required for deletion.", nameof(request.ActorAccountId));
+        ValidateDeleteRequest(request);
         return AcceptAsync(request.WorkspaceId, request.InstanceId, ElsaInstanceOperationAction.Delete,
             request.ExpectedVersion, request.IdempotencyKey, null, null, request.Reason, cancellationToken,
             confirmationId: request.DeleteConfirmationId, actorAccountId: request.ActorAccountId);
@@ -273,7 +281,7 @@ public sealed class ElsaInstanceLifecycleService(
             if (requestedName is not null && !string.Equals(replayTransition.Instance.Name, requestedName, StringComparison.Ordinal))
                 replayTransition = new ElsaInstanceTransitionResult(replayTransition.Instance.Rename(requestedName), replayTransition.Operation);
             return await CommitAsync(instance, replayTransition,
-                AcceptanceContext(action, confirmationId, actorAccountId, reason), cancellationToken);
+                AcceptanceContext(confirmationId, actorAccountId, reason), cancellationToken);
         }
 
         var requestHash = ComputeRequestHash(
@@ -302,7 +310,7 @@ public sealed class ElsaInstanceLifecycleService(
         if (requestedName is not null && !string.Equals(transition.Instance.Name, requestedName, StringComparison.Ordinal))
             transition = new ElsaInstanceTransitionResult(transition.Instance.Rename(requestedName), transition.Operation);
         return await CommitAsync(instance, transition,
-            AcceptanceContext(action, confirmationId, actorAccountId, reason), cancellationToken);
+            AcceptanceContext(confirmationId, actorAccountId, reason), cancellationToken);
     }
 
     private static ElsaInstanceTransitionResult RequestTransition(
@@ -366,14 +374,22 @@ public sealed class ElsaInstanceLifecycleService(
     }
 
     private static ElsaInstanceAcceptanceContext AcceptanceContext(
-        ElsaInstanceOperationAction action,
         Guid? confirmationId,
         Guid? actorAccountId,
         string? reason) =>
         new(actorAccountId, reason,
-            action == ElsaInstanceOperationAction.Delete && confirmationId is not null && actorAccountId is not null
+            confirmationId is not null && actorAccountId is not null
                 ? new ElsaInstanceDeleteConfirmationRequirement(confirmationId.Value, actorAccountId.Value)
                 : null);
+
+    private static void ValidateDeleteRequest(ElsaInstanceLifecycleRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.DeleteConfirmationId is null || request.DeleteConfirmationId == Guid.Empty)
+            throw new ArgumentException("Delete confirmation ID is required.", nameof(request.DeleteConfirmationId));
+        if (request.ActorAccountId is null || request.ActorAccountId == Guid.Empty)
+            throw new ArgumentException("Actor account ID is required for deletion.", nameof(request.ActorAccountId));
+    }
 
     private static void ValidateActor(Guid? actorAccountId)
     {

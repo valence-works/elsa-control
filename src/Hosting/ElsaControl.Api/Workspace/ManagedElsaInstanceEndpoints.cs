@@ -354,13 +354,33 @@ public static class ManagedElsaInstanceEndpoints
 
             try
             {
-                var accepted = await lifecycle.DeleteAsync(new ElsaInstanceLifecycleRequest(
+                var activeOperation = await lifecycleStore.GetActiveOperationAsync(
+                    workspaceId, instanceId, cancellationToken);
+                var deleteRecovery = activeOperation is
+                {
+                    Action: ElsaInstanceOperationAction.Delete,
+                    State: ElsaInstanceOperationState.RecoveryRequired
+                } && !string.Equals(activeOperation.IdempotencyKey, keyResult.Value, StringComparison.Ordinal)
+                    ? activeOperation
+                    : await lifecycleStore.FindOperationByKeyAsync(
+                        workspaceId,
+                        keyResult.Value!,
+                        instanceId,
+                        ElsaInstanceOperationAction.Recover,
+                        cancellationToken: cancellationToken);
+                if (deleteRecovery?.Action != ElsaInstanceOperationAction.Delete)
+                    deleteRecovery = null;
+                var lifecycleRequest = new ElsaInstanceLifecycleRequest(
                     workspaceId,
                     instanceId,
                     expectedVersion.Value,
                     keyResult.Value!,
                     DeleteConfirmationId: request.DeleteConfirmationId,
-                    ActorAccountId: access.AccountId), cancellationToken);
+                    ActorAccountId: access.AccountId,
+                    ExpectedOperationId: deleteRecovery?.Id);
+                var accepted = deleteRecovery is not null
+                    ? await lifecycle.RecoverDeleteAsync(lifecycleRequest, cancellationToken)
+                    : await lifecycle.DeleteAsync(lifecycleRequest, cancellationToken);
                 var operationUrl = $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/delete-operations/{accepted.Operation.Id:D}";
                 context.Response.Headers.ETag = ETag(accepted.Instance.Version);
                 return Results.Accepted(operationUrl, new ManagedElsaInstanceDeleteAcceptedResponse(

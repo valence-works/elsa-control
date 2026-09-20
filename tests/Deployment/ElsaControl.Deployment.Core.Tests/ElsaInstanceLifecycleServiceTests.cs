@@ -563,6 +563,65 @@ public sealed class ElsaInstanceLifecycleServiceTests
     }
 
     [Fact]
+    public async Task Customer_recover_delete_requires_and_consumes_a_fresh_confirmation()
+    {
+        var recoveryConfirmationId = Guid.NewGuid();
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var created = await service.CreateAsync(new ElsaInstanceCreateRequest(
+            OrganizationId, WorkspaceId, "Claims", "claims-prod", Intent(), "create-1"));
+        var progressing = created.Operation;
+        foreach (var state in new[]
+                 {
+                     ElsaInstanceOperationState.Queued,
+                     ElsaInstanceOperationState.Running,
+                     ElsaInstanceOperationState.Succeeded
+                 })
+        {
+            progressing = progressing.TransitionTo(state);
+            await store.CommitAcceptedAsync(
+                created.Instance,
+                created.Instance,
+                progressing,
+                new ElsaInstanceLifecycleOutboxMessage(
+                    Guid.NewGuid(),
+                    WorkspaceId,
+                    created.Instance.Id,
+                    created.Operation.Id,
+                    created.Operation.Action,
+                    created.Operation.RequestHash,
+                    Now.AddMinutes(store.Outbox.Count)));
+        }
+
+        AddDeleteConfirmation(authority, created.Instance);
+        var deletion = await service.DeleteAsync(new ElsaInstanceLifecycleRequest(
+            WorkspaceId, created.Instance.Id, store.Instances.Single().Version, "delete-1",
+            DeleteConfirmationId: DeleteConfirmationId, ActorAccountId: ActorAccountId));
+        store.MarkRecoveryRequired(deletion.Operation.Id);
+        AddDeleteConfirmation(authority, created.Instance, recoveryConfirmationId);
+        var recoveryRequest = new ElsaInstanceLifecycleRequest(
+            WorkspaceId,
+            created.Instance.Id,
+            store.Instances.Single().Version,
+            "recover-delete-customer-1",
+            DeleteConfirmationId: recoveryConfirmationId,
+            ActorAccountId: ActorAccountId,
+            ExpectedOperationId: deletion.Operation.Id);
+
+        var recovered = await service.RecoverDeleteAsync(recoveryRequest);
+        var replay = await service.RecoverDeleteAsync(recoveryRequest);
+
+        Assert.Equal(deletion.Operation.Id, recovered.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Queued, recovered.Operation.State);
+        Assert.Equal(2, recovered.Operation.AttemptNumber);
+        Assert.False(recovered.Replayed);
+        Assert.True(replay.Replayed);
+        Assert.Equal(recovered.Operation.Id, replay.Operation.Id);
+        Assert.NotNull(authority.Get(recoveryConfirmationId)!.UsedAt);
+    }
+
+    [Fact]
     public async Task Active_reservation_is_selected_before_a_waiting_delete_successor()
     {
         var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();

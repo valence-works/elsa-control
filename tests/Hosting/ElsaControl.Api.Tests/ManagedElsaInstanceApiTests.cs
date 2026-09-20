@@ -1354,6 +1354,92 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Dedicated_delete_resumes_recovery_required_delete_with_fresh_confirmation()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var client = app.CreateTrustedWorkspaceClient("managed-instance-delete-recovery-owner");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(client, workspaceId, "delete-recovery-runtime");
+        await MarkOperationSucceededAsync(app, created.Operation.Id);
+
+        using var firstConfirmationResponse = await client.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations",
+            content: null);
+        var firstConfirmation = await firstConfirmationResponse.Content
+            .ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, firstConfirmationResponse.StatusCode);
+
+        using var firstDelete = await SendDeleteAsync(
+            client,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "delete-recovery-first",
+            firstConfirmation!.ConfirmationId);
+        var firstDeleteBody = await firstDelete.Content
+            .ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>();
+        Assert.Equal(HttpStatusCode.Accepted, firstDelete.StatusCode);
+        Assert.NotNull(firstDeleteBody);
+        await MarkOperationRecoveryRequiredAsync(app, firstDeleteBody!.OperationId);
+        var acceptedEtag = firstDelete.Headers.ETag?.ToString() ?? throw new InvalidOperationException("Delete acceptance ETag is missing.");
+
+        using var originalReplay = await SendDeleteAsync(
+            client,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "delete-recovery-first",
+            firstConfirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.Accepted, originalReplay.StatusCode);
+
+        using var reusedConfirmation = await SendDeleteAsync(
+            client,
+            workspaceId,
+            created.Instance.InstanceId,
+            acceptedEtag,
+            "delete-recovery-reused-confirmation",
+            firstConfirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.Conflict, reusedConfirmation.StatusCode);
+
+        using var recoveryConfirmationResponse = await client.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations",
+            content: null);
+        var recoveryConfirmation = await recoveryConfirmationResponse.Content
+            .ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, recoveryConfirmationResponse.StatusCode);
+        var operationCount = await CountOperationsAsync(app);
+
+        using var recovered = await SendDeleteAsync(
+            client,
+            workspaceId,
+            created.Instance.InstanceId,
+            acceptedEtag,
+            "delete-recovery-resume",
+            recoveryConfirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.Accepted, recovered.StatusCode);
+        var recoveredBody = await recovered.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>();
+        await MarkOperationSucceededAsync(app, recoveredBody!.OperationId);
+
+        using var replay = await SendDeleteAsync(
+            client,
+            workspaceId,
+            created.Instance.InstanceId,
+            acceptedEtag,
+            "delete-recovery-resume",
+            recoveryConfirmation.ConfirmationId);
+
+        Assert.Equal(HttpStatusCode.Accepted, replay.StatusCode);
+        var replayBody = await replay.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>();
+        Assert.Equal(firstDeleteBody.OperationId, recoveredBody!.OperationId);
+        Assert.Equal(ElsaInstanceOperationState.Queued, recoveredBody.State);
+        Assert.Equal(recoveredBody.OperationId, replayBody!.OperationId);
+        Assert.Equal(operationCount, await CountOperationsAsync(app));
+        Assert.Equal(2, await ReadOperationAttemptAsync(app, recoveredBody.OperationId));
+        Assert.True(await IsConfirmationUsedAsync(app, recoveryConfirmation.ConfirmationId));
+    }
+
+    [Fact]
     public async Task Dedicated_delete_contract_enforces_permission_confirmation_target_and_current_etag()
     {
         var app = await PrepareApplicationAsync([]);
@@ -2005,6 +2091,34 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         command.Parameters.Add(parameter);
         var stateText = Convert.ToString(await command.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture);
         Assert.Equal(expectedState, Enum.Parse<ElsaInstanceOperationState>(stateText!));
+    }
+
+    private static async Task<int> ReadOperationAttemptAsync(ControlApiTestApplication app, Guid operationId)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        await db.Database.OpenConnectionAsync();
+        await using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = "SELECT AttemptNumber FROM ElsaInstanceOperations WHERE Id = @id";
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = "@id";
+        parameter.Value = operationId;
+        command.Parameters.Add(parameter);
+        return Convert.ToInt32(await command.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static async Task<bool> IsConfirmationUsedAsync(ControlApiTestApplication app, Guid confirmationId)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        await db.Database.OpenConnectionAsync();
+        await using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = "SELECT UsedAt FROM ActionConfirmations WHERE Id = @id";
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = "@id";
+        parameter.Value = confirmationId;
+        command.Parameters.Add(parameter);
+        return await command.ExecuteScalarAsync() is not (null or DBNull);
     }
 
     private static async Task<int> CountOperationsAsync(ControlApiTestApplication app)

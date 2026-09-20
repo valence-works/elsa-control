@@ -491,6 +491,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                         existingInstance,
                         existingOutbox,
                         outbox.CreatedAt,
+                        context,
                         cancellationToken);
                 }
 
@@ -2482,6 +2483,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         ElsaInstanceEntity? existingInstance,
         ElsaInstanceLifecycleOutboxEntity? existingOutbox,
         DateTimeOffset requestedAt,
+        ElsaInstanceAcceptanceContext? context,
         CancellationToken cancellationToken)
     {
         if (existingInstance is null || existingOutbox is null)
@@ -2504,6 +2506,14 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 return Replay(existingInstance, existingOperation, existingOutbox, recovery);
             }
         }
+
+        if (requestedOperation.RecoveryIdempotencyKey is not null && context?.DeleteConfirmation is not null)
+            await ValidateAndStageDeleteConfirmationAsync(
+                context.DeleteConfirmation,
+                requestedInstance,
+                requestedOperation,
+                requestedAt,
+                cancellationToken);
 
         if (existingOperation.State == requestedOperation.State &&
             existingOperation.AttemptNumber == requestedOperation.AttemptNumber)
