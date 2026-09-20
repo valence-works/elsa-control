@@ -1815,6 +1815,108 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
+    public async Task Confirmed_delete_is_accepted_for_a_retained_create_with_deleting_projection()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Retained create delete workspace");
+        var service = new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now));
+        var created = await service.CreateAsync(new ElsaInstanceCreateRequest(
+            workspace.OrganizationId, workspace.Id, "Retained Create", "retained-create-delete",
+            WorkerIntent(), "retained-create-delete-create"));
+
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstanceOperations
+            SET State = {ElsaInstanceOperationState.RecoveryRequired.ToString()},
+                CompletedAt = NULL,
+                FailureCode = {"provider.reconciliation.required"}
+            WHERE Id = {created.Operation.Id};
+            UPDATE ElsaInstances
+            SET DesiredLifecycle = {ElsaDesiredLifecycle.Deleting.ToString()},
+                ObservedLifecycle = {ElsaObservedLifecycle.Deleting.ToString()},
+                Health = {ElsaInstanceHealth.Unknown.ToString()},
+                Version = 4
+            WHERE Id = {created.Instance.Id}
+            """);
+        db.ChangeTracker.Clear();
+
+        var current = await CreateStore(db).GetInstanceAsync(workspace.Id, created.Instance.Id);
+        var deletion = await service.DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+            db, workspace.Id, created.Instance.Id, current!.Version, "retained-create-delete-delete"));
+
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+        Assert.Equal(ElsaDesiredLifecycle.Deleting, deletion.Instance.Intent.DesiredLifecycle);
+        Assert.Equal(5, deletion.Instance.Version);
+        Assert.Equal(2, await db.ElsaInstanceOperations.CountAsync());
+        Assert.Equal(2, await db.ElsaInstanceLifecycleOutbox.CountAsync());
+        Assert.Contains(await db.ElsaInstanceLifecycleOutbox
+            .AsNoTracking()
+            .Select(x => x.OperationId)
+            .ToListAsync(), id => id == deletion.Operation.Id);
+    }
+
+    [Fact]
+    public async Task Acceptance_store_normalizes_a_delete_successor_when_preflight_missed_recovery()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Delete successor race workspace");
+        var service = new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now));
+        var created = await service.CreateAsync(new ElsaInstanceCreateRequest(
+            workspace.OrganizationId, workspace.Id, "Delete successor", "delete-successor-race",
+            WorkerIntent(), "delete-successor-race-create"));
+
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstanceOperations
+            SET State = {ElsaInstanceOperationState.RecoveryRequired.ToString()},
+                CompletedAt = NULL,
+                FailureCode = {"provider.reconciliation.required"}
+            WHERE Id = {created.Operation.Id};
+            UPDATE ElsaInstances
+            SET DesiredLifecycle = {ElsaDesiredLifecycle.Running.ToString()},
+                ObservedLifecycle = {ElsaObservedLifecycle.Unknown.ToString()},
+                Health = {ElsaInstanceHealth.Unknown.ToString()},
+                Version = 4
+            WHERE Id = {created.Instance.Id}
+            """);
+        db.ChangeTracker.Clear();
+
+        var current = await CreateStore(db).GetInstanceAsync(workspace.Id, created.Instance.Id);
+        var request = await CreateConfirmedDeleteRequestAsync(
+            db, workspace.Id, created.Instance.Id, current!.Version, "delete-successor-race-delete", DateTimeOffset.UtcNow);
+        var transition = ElsaInstanceStateMachine.Request(
+            current,
+            ElsaInstanceOperationAction.Delete,
+            activeOperation: null,
+            expectedVersion: current.Version,
+            idempotencyKey: request.IdempotencyKey,
+            requestHash: RequestHash("delete-successor-race-envelope"),
+            idempotencyScope: $"instance/{current.Id:D}/operations");
+
+        var accepted = await CreateStore(db).CommitAcceptedWithContextAsync(
+            current,
+            transition.Instance,
+            transition.Operation,
+            NewOutbox(transition),
+            new ElsaInstanceAcceptanceContext(
+                request.ActorAccountId,
+                null,
+                new ElsaInstanceDeleteConfirmationRequirement(
+                    request.DeleteConfirmationId!.Value,
+                    request.ActorAccountId!.Value)));
+
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, accepted.Operation.State);
+        Assert.Equal(ElsaDesiredLifecycle.Deleting, accepted.Instance.Intent.DesiredLifecycle);
+        Assert.Equal(5, accepted.Instance.Version);
+        Assert.Equal(2, await db.ElsaInstanceOperations.CountAsync());
+        Assert.Equal(2, await db.ElsaInstanceLifecycleOutbox.CountAsync());
+    }
+
+    [Fact]
     public async Task Delete_does_not_supersede_recovery_when_the_aggregate_advanced_after_acceptance()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
