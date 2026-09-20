@@ -1582,6 +1582,56 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public void Canonical_projection_shows_provisioning_for_an_accepted_create_with_unknown_storage()
+    {
+        var instanceId = Guid.NewGuid();
+        var instance = ElsaInstance.Hydrate(instanceId, Guid.NewGuid(), Guid.NewGuid(), "Claims runtime", "claims-runtime",
+            Intent(), ElsaObservedLifecycle.Unknown, ElsaInstanceHealth.Unknown, 4,
+            lastOperationId: new ElsaLastOperationId(Guid.NewGuid()));
+        var operation = new ElsaInstanceOperationSummary(
+            Guid.NewGuid(), instanceId, ElsaInstanceOperationAction.Create, ElsaInstanceOperationState.RecoveryRequired,
+            1, 1, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null, null, null, null, null, null, null);
+
+        var response = ManagedElsaInstanceEndpoints.ToResponse(instance, canOpen: true, instance.WorkspaceId, activeOperation: operation);
+
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, response.ObservedLifecycle);
+        Assert.Equal(ElsaInstanceHealth.Unknown, response.Health);
+        Assert.False(response.CanOpen);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.ProvisioningUnavailableReason, response.UnavailableReason);
+    }
+
+    [Fact]
+    public void Canonical_projection_keeps_stale_ready_health_separate_from_lifecycle()
+    {
+        var instanceId = Guid.NewGuid();
+        var instance = ElsaInstance.Hydrate(instanceId, Guid.NewGuid(), Guid.NewGuid(), "Claims runtime", "claims-runtime",
+            Intent(), ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Unknown, 2);
+
+        var response = ManagedElsaInstanceEndpoints.ToResponse(instance, canOpen: true, instance.WorkspaceId);
+
+        Assert.Equal(ElsaObservedLifecycle.Ready, response.ObservedLifecycle);
+        Assert.Equal(ElsaInstanceHealth.Unknown, response.Health);
+        Assert.False(response.CanOpen);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.GenericUnavailableReason, response.UnavailableReason);
+    }
+
+    [Fact]
+    public void Canonical_projection_explains_genuine_unknown_and_keeps_refresh_recovery()
+    {
+        var instanceId = Guid.NewGuid();
+        var instance = ElsaInstance.Hydrate(instanceId, Guid.NewGuid(), Guid.NewGuid(), "Claims runtime", "claims-runtime",
+            Intent(), ElsaObservedLifecycle.Unknown, ElsaInstanceHealth.Unknown, 2);
+
+        var response = ManagedElsaInstanceEndpoints.ToResponse(instance, canOpen: true, instance.WorkspaceId);
+
+        Assert.Equal(ElsaObservedLifecycle.Unknown, response.ObservedLifecycle);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.UnknownUnavailableReason, response.UnavailableReason);
+        Assert.Contains("Refresh", response.UnavailableReason, StringComparison.Ordinal);
+        Assert.Contains("recover", response.UnavailableReason, StringComparison.OrdinalIgnoreCase);
+        Assert.False(response.CanOpen);
+    }
+
+    [Fact]
     public void Canonical_projection_hides_binding_unless_instance_is_running_ready_and_healthy()
     {
         var instanceId = Guid.NewGuid();
@@ -2128,6 +2178,12 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
             throw new NotSupportedException();
 
         public Task<ElsaInstanceOperationSummary?> GetOperationAsync(Guid workspaceId, Guid instanceId, Guid operationId, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyDictionary<Guid, ElsaInstanceOperationSummary>> GetActiveOperationsAsync(
+            Guid workspaceId,
+            IReadOnlyCollection<Guid> instanceIds,
+            CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<ElsaInstanceIntentRevisionSummary>> ListRevisionsAsync(Guid workspaceId, Guid instanceId, CancellationToken cancellationToken = default) =>

@@ -206,7 +206,11 @@ public sealed class ElsaInstanceProviderReconciliationService(
                 return (Project(instance, ElsaObservedLifecycle.Degraded, ElsaInstanceHealth.Degraded),
                     operation.TransitionTo(ElsaInstanceOperationState.Failed), HealthFailedCode, now);
 
-            return (Project(instance, ElsaObservedLifecycle.Unknown, ElsaInstanceHealth.Unknown),
+            // A Ready report without a health gate is verifying, not complete.
+            // Keep a known in-progress phase (or stale Ready) instead of collapsing
+            // both lifecycle and health into Unknown.
+            return (Project(instance, ManagedElsaInstanceCustomerProjection.ProjectVerifiedInProgress(instance.ObservedLifecycle),
+                    ElsaInstanceHealth.Unknown),
                 operation, HealthUnknownCode, now);
         }
 
@@ -234,6 +238,14 @@ public sealed class ElsaInstanceProviderReconciliationService(
         if (observation.ObservedLifecycle == ElsaObservedLifecycle.Failed)
             return (Project(instance, ElsaObservedLifecycle.Failed, ElsaInstanceHealth.Unreachable),
                 operation.TransitionTo(ElsaInstanceOperationState.Failed), FailedCode, now);
+
+        if (ManagedElsaInstanceCustomerProjection.IsKnownInProgress(observation.ObservedLifecycle))
+            return (Project(instance, observation.ObservedLifecycle, ElsaInstanceHealth.Unknown),
+                operation, InProgressCode, now);
+
+        if (ManagedElsaInstanceCustomerProjection.IsKnownInProgress(instance.ObservedLifecycle))
+            return (Project(instance, instance.ObservedLifecycle, instance.Health),
+                operation, InProgressCode, now);
 
         return (Project(instance, ElsaObservedLifecycle.Unknown, ElsaInstanceHealth.Unknown),
             operation, InProgressCode, now);

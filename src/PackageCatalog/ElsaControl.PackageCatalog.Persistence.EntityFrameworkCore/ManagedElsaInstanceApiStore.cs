@@ -15,6 +15,16 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 /// </summary>
 public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiStore
 {
+    private static readonly ElsaInstanceOperationState[] BlockingOperationStates =
+    [
+        ElsaInstanceOperationState.Accepted,
+        ElsaInstanceOperationState.WaitingForPriorOperation,
+        ElsaInstanceOperationState.Queued,
+        ElsaInstanceOperationState.EntitlementHeld,
+        ElsaInstanceOperationState.Running,
+        ElsaInstanceOperationState.RecoveryRequired
+    ];
+
     private readonly CatalogDbContext dbContext;
     private readonly Func<CancellationToken, Task>? beforeTopologyRevalidation;
 
@@ -57,10 +67,16 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
             .Skip((int)offset)
             .Take(pageSize)
             .ToListAsync(cancellationToken);
-        var items = entities
+        var mapped = entities
             .Select(TryMapInstance)
             .Where(x => x is not null)
             .Select(x => x!)
+            .ToList();
+        var activeOperations = await GetActiveOperationsAsync(
+            workspaceId, mapped.Select(x => x.Id).ToArray(), cancellationToken);
+        var items = mapped
+            .Select(instance => ManagedElsaInstanceCustomerProjection.Apply(
+                instance, activeOperations.GetValueOrDefault(instance.Id)))
             .ToList();
         return new ElsaInstancePage(items, totalCount);
     }
@@ -92,22 +108,41 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
             .SingleOrDefaultAsync(x => x.WorkspaceId == workspaceId &&
                                        x.InstanceId == instanceId &&
                                        x.Id == operationId, cancellationToken);
-        return operation is null || operation.InstanceId is null ? null : new ElsaInstanceOperationSummary(
-            operation.Id,
-            operation.InstanceId.Value,
-            operation.Action,
-            operation.State,
-            operation.ExpectedVersion,
-            operation.AttemptNumber,
-            operation.AcceptedAt,
-            operation.StartedAt,
-            operation.CompletedAt,
-            operation.DesiredStateRevisionId,
-            operation.ResolvedPlanId,
-            operation.DeploymentRunId,
-            operation.FailureCode,
-            operation.ReconciledObservedLifecycle,
-            operation.ReconciledHealth);
+        return operation is null || operation.InstanceId is null ? null : MapOperation(operation);
+    }
+
+    public async Task<IReadOnlyDictionary<Guid, ElsaInstanceOperationSummary>> GetActiveOperationsAsync(
+        Guid workspaceId,
+        IReadOnlyCollection<Guid> instanceIds,
+        CancellationToken cancellationToken = default)
+    {
+        if (workspaceId == Guid.Empty || instanceIds.Count == 0)
+            return new Dictionary<Guid, ElsaInstanceOperationSummary>();
+
+        var ids = instanceIds.Where(id => id != Guid.Empty).Distinct().ToArray();
+        if (ids.Length == 0)
+            return new Dictionary<Guid, ElsaInstanceOperationSummary>();
+
+        var operations = await dbContext.ElsaInstanceOperations
+            .AsNoTracking()
+            .Where(x => x.WorkspaceId == workspaceId &&
+                        x.InstanceId != null &&
+                        ids.Contains(x.InstanceId.Value) &&
+                        BlockingOperationStates.Contains(x.State))
+            .OrderByDescending(x => x.AcceptedAt)
+            .ThenByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
+            .ToListAsync(cancellationToken);
+
+        var latest = new Dictionary<Guid, ElsaInstanceOperationSummary>();
+        foreach (var operation in operations)
+        {
+            if (operation.InstanceId is not { } instanceId || latest.ContainsKey(instanceId))
+                continue;
+            latest[instanceId] = MapOperation(operation);
+        }
+
+        return latest;
     }
 
     public async Task<ElsaInstanceLifecycleTopologySnapshot?> GetLifecycleTopologyAsync(
@@ -155,20 +190,11 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
                 if (instance is null)
                     return null;
 
-                var nonterminalStates = new[]
-                {
-                    ElsaInstanceOperationState.Accepted,
-                    ElsaInstanceOperationState.WaitingForPriorOperation,
-                    ElsaInstanceOperationState.Queued,
-                    ElsaInstanceOperationState.EntitlementHeld,
-                    ElsaInstanceOperationState.Running,
-                    ElsaInstanceOperationState.RecoveryRequired
-                };
                 var operations = await dbContext.ElsaInstanceOperations
                     .AsNoTracking()
                     .Where(x => x.WorkspaceId == workspaceId &&
                                 x.InstanceId == instanceId &&
-                                nonterminalStates.Contains(x.State))
+                                BlockingOperationStates.Contains(x.State))
                     .OrderBy(x => x.AcceptedAt)
                     .ThenBy(x => x.CreatedAt)
                     .ThenBy(x => x.Id)
@@ -410,6 +436,24 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
             x.RequestKeyHash,
             x.OccurredAt)).ToList();
     }
+
+    private static ElsaInstanceOperationSummary MapOperation(Models.ElsaInstanceOperationEntity operation) =>
+        new(
+            operation.Id,
+            operation.InstanceId ?? throw new InvalidOperationException("Lifecycle operation is missing its instance."),
+            operation.Action,
+            operation.State,
+            operation.ExpectedVersion,
+            operation.AttemptNumber,
+            operation.AcceptedAt,
+            operation.StartedAt,
+            operation.CompletedAt,
+            operation.DesiredStateRevisionId,
+            operation.ResolvedPlanId,
+            operation.DeploymentRunId,
+            operation.FailureCode,
+            operation.ReconciledObservedLifecycle,
+            operation.ReconciledHealth);
 
     private static ElsaInstance? TryMapInstance(Models.ElsaInstanceEntity entity)
     {

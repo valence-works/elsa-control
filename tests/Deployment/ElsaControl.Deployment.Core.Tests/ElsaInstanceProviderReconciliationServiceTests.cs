@@ -270,7 +270,7 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
     }
 
     [Fact]
-    public async Task Unknown_health_gate_remains_unknown_and_recovery_required()
+    public async Task Unknown_health_gate_stays_in_progress_and_recovery_required()
     {
         var (store, accepted) = await RecoveryTargetAsync();
         var observation = new ElsaInstanceProviderObservation(
@@ -282,11 +282,35 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
         var result = await Service(store, new RecordingPort(observation)).ReconcileAsync(WorkspaceId, accepted.Operation.Id);
 
         Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, result.Outcome);
-        Assert.Equal(ElsaObservedLifecycle.Unknown, result.Projection.ObservedLifecycle);
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, result.Projection.ObservedLifecycle);
         Assert.Equal(ElsaInstanceHealth.Unknown, result.Projection.Health);
         Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, result.Projection.OperationState);
         Assert.Equal(ElsaInstanceProviderReconciliationService.HealthUnknownCode, result.DiagnosticCode);
     }
+
+    [Fact]
+    public async Task Confirmed_provisioning_observation_projects_provisioning_without_completing()
+    {
+        var (store, accepted) = await RecoveryTargetAsync();
+        var observation = new ElsaInstanceProviderObservation(
+            ElsaInstanceProviderObservationKind.Confirmed,
+            ElsaObservedLifecycle.Provisioning,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "observation-provisioning");
+
+        var first = await Service(store, new RecordingPort(observation)).ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+        var refresh = await Service(store, new RecordingPort(observation)).ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, first.Outcome);
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, first.Projection.ObservedLifecycle);
+        Assert.Equal(ElsaInstanceHealth.Unknown, first.Projection.Health);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, first.Projection.OperationState);
+        Assert.Equal(ElsaInstanceProviderReconciliationService.InProgressCode, first.DiagnosticCode);
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, refresh.Projection.ObservedLifecycle);
+        Assert.NotEqual(ElsaObservedLifecycle.Ready, refresh.Projection.ObservedLifecycle);
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, store.Instances.Single().ObservedLifecycle);
+    }
+
 
     [Fact]
     public async Task Provider_failure_is_value_free_and_remains_recovery_required()

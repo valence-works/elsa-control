@@ -60,10 +60,13 @@ public static class ManagedElsaInstanceEndpoints
                     pageResult.Items.Select(x => x.Id).ToArray(),
                     cancellationToken)
                 : new Dictionary<Guid, ManagedElsaInstanceIdentity>();
+            var activeOperations = await instances.GetActiveOperationsAsync(
+                workspaceId, pageResult.Items.Select(x => x.Id).ToArray(), cancellationToken);
             var items = new List<ManagedElsaInstanceResponse>(pageResult.Items.Count);
             foreach (var instance in pageResult.Items)
                 items.Add(ToResponse(instance, canOpen, workspaceId,
-                    identityByInstanceId.GetValueOrDefault(instance.Id)));
+                    identityByInstanceId.GetValueOrDefault(instance.Id),
+                    activeOperations.GetValueOrDefault(instance.Id)));
             return Results.Ok(new ManagedElsaInstanceListResponse(items, currentPage, currentPageSize, pageResult.TotalCount,
                 offset + currentPageSize < pageResult.TotalCount));
         }).RequireWorkspaceAccess().AllowCloudBff();
@@ -197,6 +200,7 @@ public static class ManagedElsaInstanceEndpoints
             HttpContext context,
             WorkspacePermissionService permissions,
             IElsaInstanceLifecycleStore lifecycle,
+            IManagedElsaInstanceApiStore queries,
             [FromServices] IManagedElsaInstanceIdentityStore identities,
             CancellationToken cancellationToken) =>
         {
@@ -205,7 +209,8 @@ public static class ManagedElsaInstanceEndpoints
                 return Results.NotFound();
             var canOpen = (await permissions.GetEffectivePermissionsAsync(workspaceId, context.GetWorkspaceAccess().AccountId, cancellationToken))
                 .Has(ManagedElsaInstancePermissions.Open);
-            var response = await ToResponseAsync(instance, canOpen, workspaceId, identities, cancellationToken);
+            var activeOperation = await TryGetActiveOperationAsync(queries, workspaceId, instance, cancellationToken);
+            var response = await ToResponseAsync(instance, canOpen, workspaceId, identities, cancellationToken, activeOperation);
             context.Response.Headers.ETag = response.ETag;
             return Results.Ok(response);
         }).RequireWorkspaceAccess();
@@ -695,7 +700,7 @@ public static class ManagedElsaInstanceEndpoints
             await ToResponseAsync(accepted.Instance,
                 (await permissions.GetEffectivePermissionsAsync(workspaceId, accountId, cancellationToken))
                 .Has(ManagedElsaInstancePermissions.Open),
-                workspaceId, identities, cancellationToken),
+                workspaceId, identities, cancellationToken, operation),
             ToOperationResponse(workspaceId, accepted.Instance.Id, operation),
             links));
     }
@@ -705,7 +710,8 @@ public static class ManagedElsaInstanceEndpoints
         bool canOpen,
         Guid workspaceId,
         IManagedElsaInstanceIdentityStore identities,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ElsaInstanceOperationSummary? activeOperation = null)
     {
         var healthy = instance.DesiredLifecycle == ElsaDesiredLifecycle.Running &&
                       instance.ObservedLifecycle == ElsaObservedLifecycle.Ready &&
@@ -713,15 +719,17 @@ public static class ManagedElsaInstanceEndpoints
         var identity = canOpen && healthy
             ? await identities.FindOpenableAsync(instance.OrganizationId, instance.Id, cancellationToken)
             : null;
-        return ToResponse(instance, canOpen, workspaceId, identity);
+        return ToResponse(instance, canOpen, workspaceId, identity, activeOperation);
     }
 
     internal static ManagedElsaInstanceResponse ToResponse(
         ElsaInstance instance,
         bool canOpen,
         Guid workspaceId,
-        ManagedElsaInstanceIdentity? identity = null)
+        ManagedElsaInstanceIdentity? identity = null,
+        ElsaInstanceOperationSummary? activeOperation = null)
     {
+        var observedLifecycle = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, activeOperation);
         var healthy = instance.DesiredLifecycle == ElsaDesiredLifecycle.Running &&
                       instance.ObservedLifecycle == ElsaObservedLifecycle.Ready &&
                       instance.Health == ElsaInstanceHealth.Healthy;
@@ -734,10 +742,12 @@ public static class ManagedElsaInstanceEndpoints
         var handoffConfigured = instance.CurrentDeploymentReference?.ManagedHandoff == true;
         var openable = canOpen && healthy && handoffConfigured && currentIdentity is not null;
         return new ManagedElsaInstanceResponse(instance.OrganizationId, instance.Id, instance.Name, instance.Slug,
-            instance.DesiredLifecycle, instance.ObservedLifecycle, instance.Health, openable,
+            instance.DesiredLifecycle, observedLifecycle, instance.Health, openable,
             openable ? currentIdentity!.Audience : null,
             openable ? currentIdentity!.CallbackUri.AbsoluteUri : null,
-            !canOpen ? "Not authorized to open this instance." : !healthy ? "This instance is not currently available." : !handoffConfigured ? HandoffUnavailableReason : currentIdentity is null ? "The current identity binding is unavailable." : null)
+            ManagedElsaInstanceCustomerProjection.UnavailableReason(
+                canOpen, healthy, handoffConfigured, currentIdentity is not null, observedLifecycle,
+                handoffUnavailableReason: HandoffUnavailableReason))
         {
             Version = instance.Version,
             ETag = ETag(instance.Version),
@@ -763,6 +773,22 @@ public static class ManagedElsaInstanceEndpoints
         };
     }
 
+    private static async Task<ElsaInstanceOperationSummary?> TryGetActiveOperationAsync(
+        IManagedElsaInstanceApiStore queries,
+        Guid workspaceId,
+        ElsaInstance instance,
+        CancellationToken cancellationToken)
+    {
+        if (instance.LastOperationId is not { } lastOperationId ||
+            !Guid.TryParse(lastOperationId.Value, out var operationId))
+            return null;
+
+        var operation = await queries.GetOperationAsync(workspaceId, instance.Id, operationId, cancellationToken);
+        return operation is not null && ElsaInstanceOperationGuard.IsBlocking(operation.State)
+            ? operation
+            : null;
+    }
+
     internal static ManagedElsaInstanceOperationResponse ToOperationResponse(Guid workspaceId, Guid instanceId, ElsaInstanceOperationSummary operation) =>
         new(operation.Id, instanceId, operation.Action, operation.State, operation.ExpectedVersion, operation.AttemptNumber,
             operation.AcceptedAt, operation.StartedAt, operation.CompletedAt, operation.DesiredStateRevisionId,
@@ -786,7 +812,10 @@ public static class ManagedElsaInstanceEndpoints
         return new ManagedElsaInstanceResponse(summary.OrganizationId, summary.InstanceId, summary.Name, summary.Slug,
             summary.DesiredLifecycle, summary.ObservedLifecycle, summary.Health, openable,
             openable ? summary.Audience : null, openable ? summary.CallbackUri!.OriginalString : null,
-            !canOpen ? "Not authorized to open this instance." : !healthy ? "This instance is not currently available." : !openable ? "The current instance binding is unavailable." : null);
+            ManagedElsaInstanceCustomerProjection.UnavailableReason(
+                canOpen, healthy, controlHandoffEnabled, summary.Audience is not null && summary.CallbackUri is not null,
+                summary.ObservedLifecycle,
+                identityUnavailableReason: "The current instance binding is unavailable."));
     }
 
     internal static IdempotencyKeyReadResult ReadIdempotencyKey(HttpContext context)
