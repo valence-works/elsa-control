@@ -140,7 +140,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             _operations[operationId] = operation;
             _instances[instance.Id] = ElsaInstance.Hydrate(
                 instance.Id, instance.OrganizationId, instance.WorkspaceId, instance.Name, instance.Slug, instance.Intent,
-                ElsaObservedLifecycle.Unknown, ElsaInstanceHealth.Unknown, instance.Version, instance.IdentityBinding,
+                instance.ObservedLifecycle, instance.Health, instance.Version, instance.IdentityBinding,
                 instance.DesiredStateRevisionId, instance.ResolvedPlanReference, instance.CurrentResolvedRelease,
                 instance.CurrentDeploymentReference, instance.PlacementAssignmentReference, instance.ElsaTenantReference,
                 instance.LastOperationId);
@@ -203,7 +203,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 };
             _instances[instance.Id] = ElsaInstance.Hydrate(
                 instance.Id, instance.OrganizationId, instance.WorkspaceId, instance.Name, instance.Slug,
-                instance.Intent, ElsaObservedLifecycle.Unknown, ElsaInstanceHealth.Unknown, instance.Version,
+                instance.Intent, instance.ObservedLifecycle, instance.Health, instance.Version,
                 instance.IdentityBinding, instance.DesiredStateRevisionId, instance.ResolvedPlanReference,
                 instance.CurrentResolvedRelease, instance.CurrentDeploymentReference,
                 commit.PlacementAssignmentId is null

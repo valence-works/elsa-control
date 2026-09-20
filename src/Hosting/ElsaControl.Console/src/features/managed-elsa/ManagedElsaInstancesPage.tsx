@@ -218,7 +218,9 @@ function ManagedElsaInstanceRow({
       </td>
       <td className="px-4 py-4 align-top">
         <span className="text-muted-foreground">{instance.observedLifecycle}</span>
-        {!instance.canOpen ? (
+        {shouldSurfaceLifecycleGuidance(instance) && instance.unavailableReason ? (
+          <p className="mt-1 max-w-xs text-xs text-muted-foreground">{instance.unavailableReason}</p>
+        ) : !instance.canOpen ? (
           <div className="mt-1">
             <OpenFailureNotice failure={classifyInstanceOpenFailure(instance)} compact />
           </div>
@@ -243,6 +245,13 @@ function ManagedElsaInstanceRow({
       </td>
     </tr>
   );
+}
+
+function shouldSurfaceLifecycleGuidance(instance: ManagedElsaInstance): boolean {
+  return instance.observedLifecycle === "Unknown" ||
+    instance.observedLifecycle === "Pending" ||
+    instance.observedLifecycle === "Provisioning" ||
+    instance.observedLifecycle === "Failed";
 }
 
 function InstanceHealthBadge({ instance }: { instance: ManagedElsaInstance }) {

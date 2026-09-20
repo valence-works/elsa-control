@@ -2479,6 +2479,21 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             submission.CorrelationId,
             Now));
 
+        db.ChangeTracker.Clear();
+        var inFlight = await new ElsaInstanceProviderReconciliationService(
+                lifecycleStore,
+                provider,
+                new FixedTimeProvider(Now.AddSeconds(30)))
+            .ReconcileAsync(workspace.Id, accepted.Operation.Id);
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, inFlight.Outcome);
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, inFlight.Projection.ObservedLifecycle);
+        Assert.Equal(ElsaInstanceHealth.Unknown, inFlight.Projection.Health);
+        Assert.NotEqual(ElsaObservedLifecycle.Ready, inFlight.Projection.ObservedLifecycle);
+        var inFlightList = Assert.Single(
+            (await new EfCoreManagedElsaInstanceApiStore(db).ListInstancesAsync(workspace.Id, 1, 10)).Items);
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, inFlightList.ObservedLifecycle);
+        Assert.Equal(ElsaInstanceHealth.Unknown, inFlightList.Health);
+
         var assignment = Assert.IsType<AzureProviderResourceAssignment>(await
             ((IAzureProviderResourceAssignmentStore)operationStore).GetAsync(
                 workspace.Id,

@@ -28,6 +28,11 @@ public interface IManagedElsaInstanceApiStore
         Guid operationId,
         CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyDictionary<Guid, ElsaInstanceOperationSummary>> GetActiveOperationsAsync(
+        Guid workspaceId,
+        IReadOnlyCollection<Guid> instanceIds,
+        CancellationToken cancellationToken = default);
+
     Task<ElsaInstanceLifecycleTopologySnapshot?> GetLifecycleTopologyAsync(
         Guid workspaceId,
         Guid instanceId,

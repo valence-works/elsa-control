@@ -64,6 +64,31 @@ describe("ManagedElsaInstancesPage", () => {
     expect(screen.queryByText(/live AC still open/i)).not.toBeInTheDocument();
   });
 
+  it("explains genuine unknown and keeps refresh available", async () => {
+    installFetch({
+      instances: [
+        instanceFixture({
+          instanceId: unavailableInstanceId,
+          name: "Indeterminate runtime",
+          slug: "indeterminate-runtime",
+          observedLifecycle: "Unknown",
+          health: "Unknown",
+          canOpen: false,
+          audience: null,
+          redirectUri: null,
+          unavailableReason: "Control cannot determine this instance's state. Refresh to retry observation, or recover the instance if it remains unknown."
+        })
+      ]
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/Control cannot determine this instance's state/i)).toBeInTheDocument();
+    expect(screen.getAllByText("Unknown").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Open" })).not.toBeInTheDocument();
+  });
+
   it("issues for the runtime challenge and posts only code and state to the exact callback", async () => {
     const issue = {
       token: "signed-handoff-token",
