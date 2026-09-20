@@ -154,6 +154,74 @@ public sealed class OrganizationBillingApiService(
         }
     }
 
+    public async Task<HostedSubscriptionManagementApiResult> GetHostedSubscriptionAsync(
+        TrustedWorkspaceIdentity identity,
+        Guid organizationId,
+        CancellationToken cancellationToken)
+    {
+        var access = await accounts.GetOrganizationAccessAsync(identity, organizationId, OrganizationOperation.ViewOrganization, cancellationToken);
+        if (!access.Succeeded)
+            return HostedSubscriptionManagementApiResult.Denied(access.Failure!.Value);
+
+        var canManage = OrganizationRolePolicy.Allows(access.Role!.Value, OrganizationOperation.ManageBilling);
+        var subscription = await billing.GetSubscriptionAsync(organizationId, cancellationToken);
+        var billingLinked = subscription is not null &&
+                            !string.IsNullOrWhiteSpace(subscription.ProviderCustomerReference);
+        var portalReady = IsStripeProvider && _stripeOptions.IsCloudPortalConfigured;
+        var action = !billingLinked
+            ? HostedSubscriptionManagementActions.NoBillingLinkage
+            : !portalReady
+                ? HostedSubscriptionManagementActions.Unavailable
+                : canManage
+                    ? HostedSubscriptionManagementActions.OpenPortal
+                    : HostedSubscriptionManagementActions.ViewOnly;
+
+        return HostedSubscriptionManagementApiResult.Success(new HostedSubscriptionManagementResponse(
+            organizationId,
+            subscription?.State.ToString(),
+            billingLinked,
+            billingLinked && portalReady && canManage,
+            canManage,
+            action,
+            billingLinked ? HostedBillingCopy.ForLinkedCustomer() : HostedBillingCopy.ForMissingLinkage()));
+    }
+
+    public async Task<HostedPortalApiResult> CreateHostedPortalAsync(
+        TrustedWorkspaceIdentity identity,
+        Guid organizationId,
+        HostedPortalSessionRequest request,
+        CancellationToken cancellationToken)
+    {
+        var access = await accounts.GetOrganizationAccessAsync(identity, organizationId, OrganizationOperation.ManageBilling, cancellationToken);
+        if (!access.Succeeded)
+            return HostedPortalApiResult.Denied(access.Failure!.Value);
+
+        if (!IsStripeProvider || !_stripeOptions.IsCloudPortalConfigured)
+            return HostedPortalApiResult.Unavailable();
+
+        if (!HostedBillingReturnUrls.TryResolve(_stripeOptions.CloudPortalReturnUrl, request.ReturnUrl, out var returnUrl))
+            return HostedPortalApiResult.InvalidReturnUrl();
+
+        var subscription = await billing.GetSubscriptionAsync(organizationId, cancellationToken);
+        if (subscription is null || string.IsNullOrWhiteSpace(subscription.ProviderCustomerReference))
+            return HostedPortalApiResult.CustomerUnavailable();
+
+        try
+        {
+            var session = await provider.CreateCustomerPortalSessionAsync(
+                new BillingCustomerPortalSessionRequest(
+                    organizationId,
+                    subscription.ProviderCustomerReference,
+                    returnUrl),
+                cancellationToken);
+            return HostedPortalApiResult.Success(session);
+        }
+        catch (BillingProviderUnavailableException)
+        {
+            return HostedPortalApiResult.Unavailable();
+        }
+    }
+
     public async Task<OrganizationBillingDeletionApiResult> RequestDeletionAsync(
         TrustedWorkspaceIdentity identity,
         Guid organizationId,
@@ -234,4 +302,30 @@ public sealed record OrganizationBillingDeletionApiResult(
     public static OrganizationBillingDeletionApiResult Accepted(OrganizationBillingLifecycleAdvance advance) => new(advance, null, false);
     public static OrganizationBillingDeletionApiResult Denied(OrganizationWorkspaceFailure failure) => new(null, failure, false);
     public static OrganizationBillingDeletionApiResult NotFound() => new(null, null, true);
+}
+
+public sealed record HostedSubscriptionManagementApiResult(
+    HostedSubscriptionManagementResponse? Status,
+    OrganizationWorkspaceFailure? Failure)
+{
+    public bool Succeeded => Status is not null && Failure is null;
+
+    public static HostedSubscriptionManagementApiResult Success(HostedSubscriptionManagementResponse status) => new(status, null);
+    public static HostedSubscriptionManagementApiResult Denied(OrganizationWorkspaceFailure failure) => new(null, failure);
+}
+
+public sealed record HostedPortalApiResult(
+    BillingSessionLink? Session,
+    OrganizationWorkspaceFailure? Failure,
+    bool ProviderUnavailable,
+    bool CustomerNotReady,
+    bool ReturnUrlInvalid)
+{
+    public bool Succeeded => Session is not null && Failure is null && !ProviderUnavailable && !CustomerNotReady && !ReturnUrlInvalid;
+
+    public static HostedPortalApiResult Success(BillingSessionLink session) => new(session, null, false, false, false);
+    public static HostedPortalApiResult Denied(OrganizationWorkspaceFailure failure) => new(null, failure, false, false, false);
+    public static HostedPortalApiResult Unavailable() => new(null, null, true, false, false);
+    public static HostedPortalApiResult CustomerUnavailable() => new(null, null, false, true, false);
+    public static HostedPortalApiResult InvalidReturnUrl() => new(null, null, false, false, true);
 }

@@ -43,9 +43,11 @@ public sealed class StripeBillingProviderTests
         await provider.CreateCustomerPortalSessionAsync(new BillingCustomerPortalSessionRequest(
             OrganizationId,
             "cus_123",
-            "https://console.test/billing"));
+            "https://elsacloud.app/dashboard"));
 
         Assert.Null(portal.RequestOptions!.IdempotencyKey);
+        Assert.Equal("cus_123", portal.Options!.Customer);
+        Assert.Equal("https://elsacloud.app/dashboard", portal.Options.ReturnUrl);
     }
 
     [Fact]
@@ -288,6 +290,7 @@ public sealed class StripeBillingProviderTests
 
     private sealed class RecordingPortalGateway : IStripeCustomerPortalGateway
     {
+        public global::Stripe.BillingPortal.SessionCreateOptions? Options { get; private set; }
         public RequestOptions? RequestOptions { get; private set; }
 
         public Task<global::Stripe.BillingPortal.Session> CreateAsync(global::Stripe.BillingPortal.SessionCreateOptions options, RequestOptions requestOptions, CancellationToken cancellationToken) =>
@@ -295,6 +298,7 @@ public sealed class StripeBillingProviderTests
 
         private Task<global::Stripe.BillingPortal.Session> CaptureAsync(global::Stripe.BillingPortal.SessionCreateOptions options, RequestOptions requestOptions)
         {
+            Options = options;
             RequestOptions = requestOptions;
             return Task.FromResult(new global::Stripe.BillingPortal.Session { Url = "https://billing.stripe.test/session" });
         }

@@ -265,7 +265,7 @@ public sealed class StripeBillingProvider(
 
     private void EnsurePortalConfigured()
     {
-        if (!_options.IsPortalConfigured)
+        if (!_options.IsProviderReady)
             throw new BillingProviderUnavailableException("The Stripe billing provider is not configured.");
     }
 

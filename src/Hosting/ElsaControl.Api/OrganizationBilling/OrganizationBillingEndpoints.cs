@@ -84,6 +84,46 @@ public static class OrganizationBillingEndpoints
             return ToHttpResult(result);
         });
 
+        group.MapGet("/hosted-subscription", async (
+            Guid organizationId,
+            HttpContext context,
+            IWorkspaceIdentityReader identityReader,
+            OrganizationBillingApiService billing,
+            CancellationToken cancellationToken) =>
+        {
+            var identity = await identityReader.ReadAsync(context);
+            if (identity is null)
+                return WorkspaceIdentityHttpContextExtensions.UnauthorizedWorkspaceIdentity();
+
+            var result = await billing.GetHostedSubscriptionAsync(identity, organizationId, cancellationToken);
+            if (result.Succeeded)
+                return Results.Ok(result.Status);
+
+            return result.Failure is OrganizationWorkspaceFailure.OrganizationNotAllowed
+                ? Results.NotFound(new { code = "organization.not-found" })
+                : Results.Forbid();
+        }).AllowCloudBff();
+
+        group.MapPost("/hosted-portal", async (
+            Guid organizationId,
+            HostedPortalSessionRequest? request,
+            HttpContext context,
+            IWorkspaceIdentityReader identityReader,
+            OrganizationBillingApiService billing,
+            CancellationToken cancellationToken) =>
+        {
+            var identity = await identityReader.ReadAsync(context);
+            if (identity is null)
+                return WorkspaceIdentityHttpContextExtensions.UnauthorizedWorkspaceIdentity();
+
+            var result = await billing.CreateHostedPortalAsync(
+                identity,
+                organizationId,
+                request ?? new HostedPortalSessionRequest(),
+                cancellationToken);
+            return ToHostedPortalHttpResult(result);
+        }).AllowCloudBff();
+
         group.MapPost("/delete", async (
             Guid organizationId,
             HttpContext context,
@@ -189,6 +229,23 @@ public static class OrganizationBillingEndpoints
             return Results.Conflict(new { code = "billing.customer-not-ready" });
         if (result.SubscriptionTerminal)
             return Results.Conflict(new { code = "billing.subscription-terminal" });
+        if (result.ProviderUnavailable)
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        return Results.BadRequest(new { code = "billing.invalid" });
+    }
+
+    private static IResult ToHostedPortalHttpResult(HostedPortalApiResult result)
+    {
+        if (result.Succeeded)
+            return Results.Ok(new HostedPortalSessionResponse(result.Session!.Url));
+        if (result.Failure is OrganizationWorkspaceFailure.OrganizationNotAllowed)
+            return Results.NotFound(new { code = "organization.not-found" });
+        if (result.Failure is OrganizationWorkspaceFailure.OrganizationRoleNotAllowed)
+            return Results.Forbid();
+        if (result.CustomerNotReady)
+            return Results.Conflict(new { code = "billing.customer-not-ready" });
+        if (result.ReturnUrlInvalid)
+            return Results.BadRequest(new { code = "billing.return-url-invalid" });
         if (result.ProviderUnavailable)
             return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         return Results.BadRequest(new { code = "billing.invalid" });

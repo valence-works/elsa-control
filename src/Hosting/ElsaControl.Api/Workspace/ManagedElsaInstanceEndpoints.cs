@@ -1,4 +1,5 @@
 using ElsaControl.Api.Authentication;
+using ElsaControl.Api.OrganizationBilling;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Workspace;
@@ -311,7 +312,8 @@ public static class ManagedElsaInstanceEndpoints
                 cancellationToken);
             return Results.Ok(new ManagedElsaInstanceDeleteConfirmationResponse(
                 confirmation.Id,
-                confirmation.ExpiresAt));
+                confirmation.ExpiresAt,
+                HostedBillingCopy.EngineDeletion));
         }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff();
 
         group.MapPost("/{instanceId:guid}/delete", async (
@@ -904,7 +906,10 @@ public static class ManagedElsaInstanceEndpoints
 public sealed record ManagedElsaInstanceCreateRequest(string? Name, string? Slug, ElsaInstanceIntent? Intent);
 public sealed record ManagedElsaInstancePatchRequest(ElsaInstanceIntent? Intent = null, string? Name = null, string? Reason = null);
 public sealed record ManagedElsaInstanceOperationRequest(ElsaInstanceOperationAction Action, int? ExpectedVersion = null, string? Reason = null, ElsaInstanceIntent? Intent = null, string? Name = null, Guid? DeleteConfirmationId = null);
-public sealed record ManagedElsaInstanceDeleteConfirmationResponse(Guid ConfirmationId, DateTimeOffset ExpiresAt);
+public sealed record ManagedElsaInstanceDeleteConfirmationResponse(
+    Guid ConfirmationId,
+    DateTimeOffset ExpiresAt,
+    HostedBillingCopyHook BillingNotice);
 public sealed record ManagedElsaInstanceDeleteRequest(Guid DeleteConfirmationId);
 public sealed record ManagedElsaInstanceListResponse(IReadOnlyList<ManagedElsaInstanceResponse> Items, int Page, int PageSize, int TotalCount, bool HasMore);
 public sealed record ManagedElsaInstanceOnboardingOptionsResponse(

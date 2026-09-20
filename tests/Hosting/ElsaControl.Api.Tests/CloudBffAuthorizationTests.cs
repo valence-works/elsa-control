@@ -4,6 +4,7 @@ using System.Security.Claims;
 using System.Text.Json;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Cloud;
+using ElsaControl.Api.OrganizationBilling;
 using ElsaControl.Api.Workspace;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
@@ -82,7 +83,8 @@ public sealed class CloudBffAuthorizationTests
             "hosted.instances.status.v1",
             "hosted.studio.handoff.issue.v1",
             "hosted.instances.quota-problem.v1",
-            "hosted.instances.confirmed-delete.v1"
+            "hosted.instances.confirmed-delete.v1",
+            "hosted.subscription.manage.v1"
         ],
             root.GetProperty("capabilities").EnumerateArray().Select(value => value.GetString()!).ToArray());
         Assert.DoesNotContain("environment", root.GetRawText(), StringComparison.OrdinalIgnoreCase);
@@ -170,6 +172,7 @@ public sealed class CloudBffAuthorizationTests
             "GET /api/cloud/compatibility",
             "GET /api/me/organizations",
             "GET /api/me/workspaces",
+            "GET /api/organizations/{organizationId:guid}/billing/hosted-subscription",
             "GET /api/workspaces/{workspaceId:guid}/external-engine-connections/",
             "GET /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}",
             "GET /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/pairing",
@@ -179,6 +182,7 @@ public sealed class CloudBffAuthorizationTests
             "PATCH /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}",
             "POST /api/cloud/bootstrap",
             "POST /api/managed-elsa/handoff/issue",
+            "POST /api/organizations/{organizationId:guid}/billing/hosted-portal",
             "POST /api/organizations/{organizationId:guid}/billing/prepare-hosted-trial",
             "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/",
             "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/disconnect",
@@ -281,6 +285,8 @@ public sealed class CloudBffAuthorizationTests
         var confirmation = await confirmationResponse.Content
             .ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
         Assert.NotNull(confirmation);
+        Assert.Equal(HostedBillingCopy.EngineDeletion.Code, confirmation!.BillingNotice.Code);
+        Assert.Contains("does not cancel", confirmation.BillingNotice.Message, StringComparison.OrdinalIgnoreCase);
 
         using var deleteRequest = new HttpRequestMessage(HttpMethod.Post,
             $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete")
