@@ -612,6 +612,11 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 if (expectedInstance is not null && existingForUpdate.Version != expectedInstance.Version)
                     throw new ElsaInstanceLifecycleConflictException("Instance version conflict.", ElsaInstanceLifecycleConflictReason.VersionConflict);
 
+                if (operation.RecoveryIdempotencyKey is not null && deleteConfirmation is not null &&
+                    (_deleteConfirmationAuthority is null ||
+                     !_deleteConfirmationAuthority.TryConsume(storedInstance, deleteConfirmation, outbox.CreatedAt)))
+                    throw new ElsaInstanceDeleteConfirmationException();
+
                 if (isRecoveryResume)
                     AppendRecoveryRequest(instance, operation, outbox.CreatedAt);
                 _instances[instance.Id] = instance;
