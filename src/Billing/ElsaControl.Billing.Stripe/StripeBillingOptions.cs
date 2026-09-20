@@ -11,10 +11,13 @@ public sealed class StripeBillingOptions
     public string? CheckoutSuccessUrl { get; set; }
     public string? CheckoutCancelUrl { get; set; }
     public string? PortalReturnUrl { get; set; }
+    public string? CloudPortalReturnUrl { get; set; }
+
+    public bool IsProviderReady =>
+        Enabled && !string.IsNullOrWhiteSpace(SecretKey);
 
     public bool IsCheckoutConfigured =>
-        Enabled &&
-        !string.IsNullOrWhiteSpace(SecretKey) &&
+        IsProviderReady &&
         !string.IsNullOrWhiteSpace(DefaultPriceId) &&
         Uri.TryCreate(CheckoutSuccessUrl, UriKind.Absolute, out var success) &&
         (success.Scheme == Uri.UriSchemeHttp || success.Scheme == Uri.UriSchemeHttps) &&
@@ -24,12 +27,22 @@ public sealed class StripeBillingOptions
     public bool IsWebhookConfigured => Enabled && !string.IsNullOrWhiteSpace(WebhookSigningSecret);
 
     public bool IsPortalConfigured =>
-        Enabled &&
-        !string.IsNullOrWhiteSpace(SecretKey) &&
+        IsProviderReady &&
         Uri.TryCreate(PortalReturnUrl, UriKind.Absolute, out var portal) &&
         (portal.Scheme == Uri.UriSchemeHttp || portal.Scheme == Uri.UriSchemeHttps);
 
+    public bool IsCloudPortalConfigured =>
+        IsProviderReady && IsSafeCloudReturnUrl(CloudPortalReturnUrl);
+
     public bool IsConfigured => IsCheckoutConfigured && IsWebhookConfigured;
+
+    public static bool IsSafeCloudReturnUrl(string? value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
+        uri.Scheme == Uri.UriSchemeHttps &&
+        string.IsNullOrEmpty(uri.UserInfo) &&
+        string.IsNullOrEmpty(uri.Query) &&
+        string.IsNullOrEmpty(uri.Fragment) &&
+        uri.AbsolutePath.Length > 0;
 }
 
 public sealed class BillingProviderUnavailableException : InvalidOperationException

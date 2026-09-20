@@ -76,6 +76,8 @@ scope from another client, is rejected.
 The Cloud BFF reads the static capability envelope at
 [`GET /api/cloud/compatibility`](cloud-compatibility-contract.md). Its versioning,
 capability mappings, and rollout rules are documented separately there.
+Hosted subscription management is documented in
+[`hosted-subscription-management.md`](hosted-subscription-management.md).
 
 Validated Entra BFF and Cloud account tokens are accepted only on these customer endpoints:
 
@@ -92,6 +94,8 @@ PATCH /api/workspaces/{workspaceId}/instances/{instanceId}
 POST /api/workspaces/{workspaceId}/instances/{instanceId}/delete-confirmations
 POST /api/workspaces/{workspaceId}/instances/{instanceId}/delete
 POST /api/organizations/{organizationId}/billing/prepare-hosted-trial
+GET  /api/organizations/{organizationId}/billing/hosted-subscription
+POST /api/organizations/{organizationId}/billing/hosted-portal
 POST /api/managed-elsa/handoff/issue
 GET  /api/workspaces/{workspaceId}/external-engine-connections
 POST /api/workspaces/{workspaceId}/external-engine-connections
