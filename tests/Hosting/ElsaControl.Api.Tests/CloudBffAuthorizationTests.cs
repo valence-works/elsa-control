@@ -59,6 +59,31 @@ public sealed class CloudBffAuthorizationTests
     }
 
     [Fact]
+    public async Task Valid_bff_token_can_read_customer_safe_provisioning_progress_with_workspace_concealment()
+    {
+        await using var app = CreateBffApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateBffClient(app);
+        using var bootstrapResponse = await client.PostAsJsonAsync(
+            "/api/cloud/bootstrap",
+            new CloudBootstrapRequest(),
+            ControlApiTestApplication.JsonOptions);
+        var bootstrap = await bootstrapResponse.Content.ReadFromJsonAsync<CloudBootstrapResponse>(
+            ControlApiTestApplication.JsonOptions);
+        Assert.NotNull(bootstrap);
+
+        using var response = await client.GetAsync(
+            $"/api/workspaces/{bootstrap.WorkspaceId:D}/instances/{Guid.NewGuid():D}/provisioning-progress");
+        using var foreign = await client.GetAsync(
+            $"/api/workspaces/{Guid.NewGuid():D}/instances/{Guid.NewGuid():D}/provisioning-progress");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, foreign.StatusCode);
+        Assert.True(response.Headers.CacheControl?.Private);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+    }
+
+    [Fact]
     public async Task Cloud_compatibility_returns_the_exact_static_no_store_contract()
     {
         await using var app = CreateBffApplication();
@@ -81,6 +106,7 @@ public sealed class CloudBffAuthorizationTests
             "hosted.instances.list.v1",
             "hosted.instances.create.v1",
             "hosted.instances.status.v1",
+            "hosted.instances.provisioning-progress.v1",
             "hosted.studio.handoff.issue.v1",
             "hosted.instances.quota-problem.v1",
             "hosted.instances.confirmed-delete.v1",
@@ -179,6 +205,7 @@ public sealed class CloudBffAuthorizationTests
             "GET /api/workspaces/{workspaceId:guid}/instances/",
             "GET /api/workspaces/{workspaceId:guid}/instances/onboarding-options",
             "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete-operations/{operationId:guid}",
+            "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/provisioning-progress",
             "PATCH /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}",
             "POST /api/cloud/bootstrap",
             "POST /api/managed-elsa/handoff/issue",

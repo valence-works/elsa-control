@@ -484,6 +484,9 @@ builder.Services.AddScoped<WorkspaceDeploymentService>();
 builder.Services.AddScoped<AzureProviderOperationStore>();
 builder.Services.AddScoped<IAzureProviderOperationStore>(services =>
     services.GetRequiredService<AzureProviderOperationStore>());
+builder.Services.AddScoped<IAzureManagedElsaProvisioningOperationStore>(services =>
+    services.GetRequiredService<AzureProviderOperationStore>());
+builder.Services.AddScoped<IManagedElsaProvisioningProgressReader, AzureManagedElsaProvisioningProgressReader>();
 builder.Services.AddScoped<IAzureProviderResourceAssignmentStore>(services =>
     services.GetRequiredService<AzureProviderOperationStore>());
 builder.Services.AddScoped<IAzureProviderRecoveryObservationStore>(services =>

@@ -14,6 +14,7 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 public sealed class AzureProviderOperationPersistenceTests : IDisposable
 {
     private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly Guid _organizationId = Guid.NewGuid();
     private readonly Guid _workspaceId = Guid.NewGuid();
 
     public AzureProviderOperationPersistenceTests()
@@ -21,7 +22,13 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
         _connection.Open();
         using var db = CreateContext();
         db.Database.EnsureCreated();
-        db.Workspaces.Add(new Workspace { Id = _workspaceId, Name = "Azure operation workspace" });
+        db.Organizations.Add(new Organization { Id = _organizationId, Name = "Azure operation organization" });
+        db.Workspaces.Add(new Workspace
+        {
+            Id = _workspaceId,
+            OrganizationId = _organizationId,
+            Name = "Azure operation workspace"
+        });
         db.SaveChanges();
     }
 
@@ -35,6 +42,186 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
                 ["Status", "LeaseExpiresAt", "UpdatedAt", "Id"]));
 
         Assert.Equal("IX_AzureProviderOperations_Status_LeaseExpiresAt_UpdatedAt_Id", index.GetDatabaseName());
+    }
+
+    [Fact]
+    public async Task Provisioning_lookup_correlates_the_exact_create_operation_without_accepting_a_provider_id()
+    {
+        var now = DateTimeOffset.Parse("2026-09-21T10:00:00Z");
+        var lifecycleOperationId = Guid.NewGuid();
+        using var db = CreateContext();
+        var instance = ElsaInstancePersistenceTests.NewInstance(_organizationId, _workspaceId);
+        instance.Version = 7;
+        db.ElsaInstances.Add(instance);
+        await db.SaveChangesAsync();
+        var store = new AzureProviderOperationStore(db);
+        var assignment = await Assignment(store, instance.OrganizationId, instance.Id, now);
+        instance.PlacementAssignmentId = assignment.Id.ToString("D");
+        db.ElsaInstances.Update(instance);
+        await db.SaveChangesAsync();
+        var operation = await store.CreateOrGetAsync(Request() with
+        {
+            IdempotencyKey = AzureProviderOperationValidation.LifecycleIdempotencyKey(lifecycleOperationId),
+            OrganizationId = instance.OrganizationId,
+            InstanceId = instance.Id,
+            LifecycleAction = ElsaInstanceOperationAction.Create,
+            ProviderAssignmentId = assignment.Id
+        }, now);
+        _ = await store.CreateOrGetAsync(Request() with
+        {
+            TargetKey = "matching-looking-unrelated-create",
+            IdempotencyKey = AzureProviderOperationValidation.LifecycleIdempotencyKey(Guid.NewGuid()),
+            OrganizationId = instance.OrganizationId,
+            InstanceId = instance.Id,
+            LifecycleAction = ElsaInstanceOperationAction.Create,
+            ProviderAssignmentId = assignment.Id
+        }, now.AddSeconds(1));
+
+        var snapshot = Assert.IsType<AzureManagedElsaProvisioningOperationSnapshot>(await
+            ((IAzureManagedElsaProvisioningOperationStore)store).GetCreateProvisioningAsync(
+                _workspaceId,
+                instance.Id,
+                lifecycleOperationId,
+                instance.Version));
+
+        Assert.False(snapshot.IsAmbiguous);
+        Assert.Equal(operation.Id, snapshot.Operation?.Id);
+        Assert.Single(snapshot.Transitions);
+        Assert.Equal("operation.accepted", snapshot.Transitions[0].Code);
+    }
+
+    [Fact]
+    public async Task Provisioning_lookup_returns_only_the_latest_one_hundred_transitions_in_chronological_order()
+    {
+        var now = DateTimeOffset.Parse("2026-09-21T10:00:00Z");
+        var lifecycleOperationId = Guid.NewGuid();
+        using var db = CreateContext();
+        var instance = ElsaInstancePersistenceTests.NewInstance(_organizationId, _workspaceId);
+        db.ElsaInstances.Add(instance);
+        await db.SaveChangesAsync();
+        var store = new AzureProviderOperationStore(db);
+        var assignment = await Assignment(store, instance.OrganizationId, instance.Id, now);
+        instance.PlacementAssignmentId = assignment.Id.ToString("D");
+        db.ElsaInstances.Update(instance);
+        await db.SaveChangesAsync();
+        var operation = await store.CreateOrGetAsync(Request() with
+        {
+            IdempotencyKey = AzureProviderOperationValidation.LifecycleIdempotencyKey(lifecycleOperationId),
+            OrganizationId = instance.OrganizationId,
+            InstanceId = instance.Id,
+            LifecycleAction = ElsaInstanceOperationAction.Create,
+            ProviderAssignmentId = assignment.Id
+        }, now);
+        db.AzureProviderOperationTransitions.AddRange(Enumerable.Range(2, 109).Select(sequence =>
+            new AzureProviderOperationTransitionEntity
+            {
+                Id = Guid.NewGuid(),
+                OperationId = operation.Id,
+                Sequence = sequence,
+                Status = AzureProviderOperationStatus.Running,
+                Phase = AzureProviderOperationPhase.WorkloadSubmitted,
+                Code = "private.code",
+                Message = "private message",
+                OccurredAt = now.AddSeconds(sequence)
+            }));
+        await db.SaveChangesAsync();
+
+        var snapshot = Assert.IsType<AzureManagedElsaProvisioningOperationSnapshot>(await
+            ((IAzureManagedElsaProvisioningOperationStore)store).GetCreateProvisioningAsync(
+                _workspaceId,
+                instance.Id,
+                lifecycleOperationId,
+                instance.Version));
+
+        Assert.Equal(100, snapshot.Transitions.Count);
+        Assert.Equal(11, snapshot.Transitions[0].Sequence);
+        Assert.Equal(110, snapshot.Transitions[^1].Sequence);
+        Assert.Equal(snapshot.Transitions.OrderBy(item => item.Sequence), snapshot.Transitions);
+    }
+
+    [Fact]
+    public async Task Provisioning_lookup_fails_closed_for_ambiguous_history_and_topology_drift()
+    {
+        var now = DateTimeOffset.Parse("2026-09-21T10:00:00Z");
+        using var db = CreateContext();
+        var instance = ElsaInstancePersistenceTests.NewInstance(_organizationId, _workspaceId);
+        instance.Version = 4;
+        db.ElsaInstances.Add(instance);
+        await db.SaveChangesAsync();
+        var store = new AzureProviderOperationStore(db);
+        var assignment = await Assignment(store, instance.OrganizationId, instance.Id, now);
+        instance.PlacementAssignmentId = assignment.Id.ToString("D");
+        db.ElsaInstances.Update(instance);
+        await db.SaveChangesAsync();
+        foreach (var operationId in new[] { Guid.NewGuid(), Guid.NewGuid() })
+        {
+            await store.CreateOrGetAsync(Request() with
+            {
+                TargetKey = $"workload-{operationId:N}",
+                IdempotencyKey = AzureProviderOperationValidation.LifecycleIdempotencyKey(operationId),
+                OrganizationId = instance.OrganizationId,
+                InstanceId = instance.Id,
+                LifecycleAction = ElsaInstanceOperationAction.Create,
+                ProviderAssignmentId = assignment.Id
+            }, now);
+        }
+
+        var ambiguous = Assert.IsType<AzureManagedElsaProvisioningOperationSnapshot>(await
+            ((IAzureManagedElsaProvisioningOperationStore)store).GetCreateProvisioningAsync(
+                _workspaceId,
+                instance.Id,
+                lifecycleOperationId: null,
+                instance.Version));
+        Assert.True(ambiguous.IsAmbiguous);
+        Assert.Null(ambiguous.Operation);
+        Assert.Empty(ambiguous.Transitions);
+
+        await Assert.ThrowsAsync<ElsaInstanceLifecycleTopologyChangedException>(() =>
+            ((IAzureManagedElsaProvisioningOperationStore)store).GetCreateProvisioningAsync(
+                _workspaceId,
+                instance.Id,
+                lifecycleOperationId: null,
+                expectedInstanceVersion: instance.Version - 1));
+    }
+
+    [Fact]
+    public async Task Provisioning_lookup_excludes_foreign_workspace_instance_and_lifecycle_action()
+    {
+        var now = DateTimeOffset.Parse("2026-09-21T10:00:00Z");
+        var lifecycleOperationId = Guid.NewGuid();
+        using var db = CreateContext();
+        var instance = ElsaInstancePersistenceTests.NewInstance(_organizationId, _workspaceId);
+        db.ElsaInstances.Add(instance);
+        await db.SaveChangesAsync();
+        var store = new AzureProviderOperationStore(db);
+        var assignment = await Assignment(store, instance.OrganizationId, instance.Id, now);
+        instance.PlacementAssignmentId = assignment.Id.ToString("D");
+        db.ElsaInstances.Update(instance);
+        await db.SaveChangesAsync();
+        _ = await store.CreateOrGetAsync(Request() with
+        {
+            IdempotencyKey = AzureProviderOperationValidation.LifecycleIdempotencyKey(lifecycleOperationId),
+            OrganizationId = instance.OrganizationId,
+            InstanceId = instance.Id,
+            LifecycleAction = ElsaInstanceOperationAction.Reconcile,
+            ProviderAssignmentId = assignment.Id
+        }, now);
+
+        Assert.Null(await ((IAzureManagedElsaProvisioningOperationStore)store).GetCreateProvisioningAsync(
+            _workspaceId,
+            instance.Id,
+            lifecycleOperationId,
+            instance.Version));
+        Assert.Null(await ((IAzureManagedElsaProvisioningOperationStore)store).GetCreateProvisioningAsync(
+            Guid.NewGuid(),
+            instance.Id,
+            lifecycleOperationId,
+            instance.Version));
+        Assert.Null(await ((IAzureManagedElsaProvisioningOperationStore)store).GetCreateProvisioningAsync(
+            _workspaceId,
+            Guid.NewGuid(),
+            lifecycleOperationId,
+            instance.Version));
     }
 
     [Fact]
