@@ -10,9 +10,9 @@
 
 **Purpose**: Establish clean cross-repository delivery context after roadmap approval.
 
-- [ ] T001 Create the four approved child issues under #529 and add them to Project #7 using `specs/040-managed-provisioning-progress/roadmap.md`
-- [ ] T002 Record child issue links, Project #7 URL/visibility, PRD, plan, roadmap, and tasks links in GitHub issue #529
-- [ ] T003 Verify no matching open PR or active competing claim exists for the first eligible slice using `scripts/issue_bus.py`
+- [x] T001 Create the four approved child issues under #529 and add them to Project #7 using `specs/040-managed-provisioning-progress/roadmap.md`
+- [x] T002 Record child issue links, Project #7 URL/visibility, PRD, plan, roadmap, and tasks links in GitHub issue #529
+- [x] T003 Verify no matching open PR or active competing claim exists for the first eligible slice using `scripts/issue_bus.py`
 - [ ] T004 Create clean isolated worktrees from current `origin/main` for the claimed Control or Cloud slice without touching dirty primary checkouts
 
 ---
