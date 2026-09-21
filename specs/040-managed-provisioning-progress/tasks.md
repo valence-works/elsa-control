@@ -44,7 +44,7 @@
 
 - [x] T016 Run the focused provider, persistence, and API tests from `specs/040-managed-provisioning-progress/quickstart.md` through the shared `dotnet` build-slot wrapper
 - [x] T017 Run S1 self-review/fix iterations, `git diff --check`, and the required repository validation; record results on the S1 issue
-- [ ] T018 Open the S1 Control PR with `Fixes #<S1>` and `Refs #529`, verify its Development link, comment `pr: <url>`, and move S1 to In Review / Review Required
+- [x] T018 Open the S1 Control PR with `Fixes #<S1>` and `Refs #529`, verify its Development link, comment `pr: <url>`, and move S1 to In Review / Review Required
 
 **Checkpoint**: The exact S1 PR head exposes a complete redacted progress contract and compatibility capability without any Cloud change.
 
