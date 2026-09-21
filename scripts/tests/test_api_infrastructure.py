@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[2]
 APPHOST = ROOT / "src" / "Hosting" / "ElsaControl.AppHost" / "AppHost.cs"
 API_MODULE = ROOT / "infra" / "api" / "api-website.module.bicep"
 API_PARAMETERS = ROOT / "src" / "Hosting" / "ElsaControl.AppHost" / "infra" / "api" / "api.tmpl.bicepparam"
+MAIN_BICEP = ROOT / "infra" / "main.bicep"
+MAIN_PARAMETERS = ROOT / "infra" / "main.parameters.json"
 REGENERATE_INFRA = ROOT / "dev" / "regenerate-infra.sh"
 PATCH_API_IDENTITY = ROOT / "dev" / "patch-api-provisioner-identity.py"
 APP_SERVICE_DOC = ROOT / "docs" / "deployment" / "azure-app-service.md"
@@ -80,6 +82,15 @@ def parameter_file(module_path: Path, parameter_directory: Path, provisioner_id:
 
 
 class ApiInfrastructureTests(unittest.TestCase):
+    def test_subscription_template_excludes_api_only_secrets(self) -> None:
+        main = MAIN_BICEP.read_text()
+        parameters = json.loads(MAIN_PARAMETERS.read_text())["parameters"]
+
+        for name in ("adminApiKey", "builderClientApiKey", "entraClientId", "entraClientSecret", "entraTenantId"):
+            self.assertNotIn(f"param {name} string", main)
+            self.assertNotIn(name, parameters)
+        self.assertIn("Stripping API-only parameters", REGENERATE_INFRA.read_text())
+
     def test_catalog_sql_pins_api_identity_without_credential_chain_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             webapp = self.webapp(self.snapshot(Path(temporary), PROVISIONER_ID))
@@ -97,6 +108,21 @@ class ApiInfrastructureTests(unittest.TestCase):
         module = API_MODULE.read_text().replace(
             'TrustServerCertificate=False;Authentication=Active Directory Managed Identity;User Id=${api_identity_outputs_clientid}',
             'Authentication="Active Directory Default"',
+        )
+        module = module.replace("    httpsOnly: true\n", "", 1)
+        cloud_parameter = re.compile(
+            r"\n@description\('Optional Elsa Cloud Supabase OIDC issuer\..*?"
+            r"\nparam cloudaccountissuer_value string = ''\n",
+            re.DOTALL,
+        )
+        module = cloud_parameter.sub("", module, count=1)
+        module = re.sub(
+            r"\n        \{\n          name: 'Authentication__CloudAccount__Enabled'.*?"
+            r"\n          value: 'authenticated'\n        \}\n",
+            "\n",
+            module,
+            count=1,
+            flags=re.DOTALL,
         )
         optional_parameter = re.compile(
             r"\n@description\('Optional full resource ID of the dedicated Azure provider provisioner identity\..*?"
@@ -182,6 +208,7 @@ class ApiInfrastructureTests(unittest.TestCase):
             {ACR_ID, API_ID},
         )
         self.assertEqual(webapp["properties"]["keyVaultReferenceIdentity"], API_ID)
+        self.assertTrue(webapp["properties"]["httpsOnly"])
         client_setting = next(
             setting
             for setting in webapp["properties"]["siteConfig"]["appSettings"]
@@ -215,6 +242,11 @@ class ApiInfrastructureTests(unittest.TestCase):
         regeneration = REGENERATE_INFRA.read_text()
 
         self.assertIn("param provisioner_identity_outputs_id string = ''", module)
+        self.assertIn("    httpsOnly: true", module)
+        self.assertIn("param cloudaccountissuer_value string = ''", module)
+        self.assertIn("Authentication__CloudAccount__Enabled", module)
+        self.assertIn("Authentication__CloudAccount__Issuer", module)
+        self.assertIn("Authentication__CloudAccount__Audience", module)
         self.assertIn("param api_egress_subnet_id string = ''", module)
         self.assertIn("virtualNetworkSubnetId: empty(api_egress_subnet_id) ? null : api_egress_subnet_id", module)
         self.assertIn("      vnetRouteAllEnabled: !empty(api_egress_subnet_id)", module)
@@ -230,6 +262,8 @@ class ApiInfrastructureTests(unittest.TestCase):
             r"param provisioner_identity_outputs_id = '\{\{ \.Env\.AZURE_PROVISIONER_IDENTITY_ID \}\}'\s+"
             r"\{\{ else \}\}\s+param provisioner_identity_outputs_id = ''\s+\{\{ end \}\}",
         )
+        self.assertIn("param cloudaccountissuer_value = ''", parameters)
+        self.assertNotIn(".Env.CLOUD_ACCOUNT_ISSUER", parameters)
         self.assertIn("same Microsoft Entra tenant", module)
         self.assertIn("userAssignedIdentities: union(", module)
         self.assertIn("empty(provisioner_identity_outputs_id)", module)
@@ -295,9 +329,11 @@ class ApiInfrastructureTests(unittest.TestCase):
         template = API_PARAMETERS.read_text()
         provisioner_block = re.compile(r'\{\{ if index \.Env "AZURE_PROVISIONER_IDENTITY_ID" \}\}.*?\{\{ end \}\}\n', re.DOTALL)
         egress_block = re.compile(r'\{\{ if index \.Env "AZURE_API_EGRESS_SUBNET_ID" \}\}.*?\{\{ end \}\}\n', re.DOTALL)
-        regenerated = egress_block.sub("", provisioner_block.sub("", template, count=1), count=1)
+        regenerated = template.replace("param cloudaccountissuer_value = ''\n", "", 1)
+        regenerated = egress_block.sub("", provisioner_block.sub("", regenerated, count=1), count=1)
         self.assertNotIn("provisioner_identity_outputs_id", regenerated)
         self.assertNotIn("api_egress_subnet_id", regenerated)
+        self.assertNotIn("cloudaccountissuer_value", regenerated)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             module_fixture = root / "infra" / "api" / "api-website.module.bicep"
@@ -311,6 +347,7 @@ class ApiInfrastructureTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, "patch helper should be idempotent")
             self.assertEqual(template_fixture.read_text(), template)
             self.assertEqual(1, template_fixture.read_text().count("param provisioner_identity_outputs_id = ''"))
+            self.assertEqual(1, template_fixture.read_text().count("param cloudaccountissuer_value = ''"))
 
     def test_regeneration_rejects_unknown_catalog_authentication_without_partial_write(self) -> None:
         generated = self.generated_api_module().replace("Active Directory Default", "Unexpected Authentication")
@@ -365,6 +402,28 @@ class ApiInfrastructureTests(unittest.TestCase):
             (directory / "manual.marker").write_text(relative_path)
 
         (temporary / "generated-api-website.module.bicep").write_text(self.generated_api_module())
+        generated_main = MAIN_BICEP.read_text().replace(
+            "var tags = {",
+            "@secure()\nparam adminApiKey string\n"
+            "@secure()\nparam builderClientApiKey string\n"
+            "param entraClientId string\n"
+            "@secure()\nparam entraClientSecret string\n"
+            "param entraTenantId string\n\n"
+            "var tags = {",
+            1,
+        )
+        (temporary / "generated-main.bicep").write_text(generated_main)
+        generated_parameters = json.loads(MAIN_PARAMETERS.read_text())
+        generated_parameters["parameters"].update(
+            {
+                "adminApiKey": {"value": "generated"},
+                "builderClientApiKey": {"value": "generated"},
+                "entraClientId": {"value": "generated"},
+                "entraClientSecret": {"value": "generated"},
+                "entraTenantId": {"value": "generated"},
+            }
+        )
+        (temporary / "generated-main.parameters.json").write_text(json.dumps(generated_parameters))
         (temporary / "collision.marker").write_text("generated-collision")
         fake_bin = temporary / "bin"
         fake_bin.mkdir()
@@ -374,6 +433,8 @@ class ApiInfrastructureTests(unittest.TestCase):
             "if [ \"${FAKE_AZD_MODE}\" = failure ]; then exit 19; fi\n"
             "mkdir -p infra/api\n"
             "cp generated-api-website.module.bicep infra/api/api-website.module.bicep\n"
+            "cp generated-main.bicep infra/main.bicep\n"
+            "cp generated-main.parameters.json infra/main.parameters.json\n"
             "if [ \"${FAKE_AZD_MODE}\" = collision ]; then\n"
             "  mkdir -p infra/azure-production\n"
             "  cp collision.marker infra/azure-production/generated.marker\n"
@@ -413,6 +474,8 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_manual_directories(self, project)
         self.assertIn("param provisioner_identity_outputs_id string = ''", (project / "infra/api/api-website.module.bicep").read_text())
+        self.assertNotIn("param adminApiKey string", (project / "infra/main.bicep").read_text())
+        self.assertNotIn("adminApiKey", json.loads((project / "infra/main.parameters.json").read_text())["parameters"])
 
     def test_regeneration_failure_restores_all_manual_authority_directories(self) -> None:
         result, project = self.run_regeneration_fixture("failure")

@@ -55,6 +55,11 @@ jobs:
       AZURE_WEBAPP_NAME: ${{ vars.AZURE_WEBAPP_NAME }}
       AZURE_CONTAINER_REGISTRY_ENDPOINT: ${{ vars.AZURE_CONTAINER_REGISTRY_ENDPOINT }}
       CLOUD_ACCOUNT_ISSUER: ${{ vars.CLOUD_ACCOUNT_ISSUER }}
+      EXPECTED_CLOUD_ACCOUNT_ISSUER: ${{ vars.EXPECTED_CLOUD_ACCOUNT_ISSUER }}
+      CONTROL_ENTRA_CLIENT_ID: ${{ vars.CONTROL_ENTRA_CLIENT_ID }}
+      CONTROL_ENTRA_TENANT_ID: ${{ vars.CONTROL_ENTRA_TENANT_ID }}
+      AZURE_PROVISIONER_IDENTITY_ID: ${{ vars.AZURE_PROVISIONER_IDENTITY_ID }}
+      AZURE_API_EGRESS_SUBNET_ID: ${{ vars.AZURE_API_EGRESS_SUBNET_ID }}
       CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
       EXPECTED_CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
       DOTNET_NOLOGO: true
@@ -78,9 +83,9 @@ jobs:
       - name: Check deployment configuration
         id: deployment-config
         env:
-          SQL_ADMINISTRATOR_LOGIN: ${{ env.DEPLOY_MODE == 'infra' && vars.SQL_ADMINISTRATOR_LOGIN || '' }}
           ADMIN_API_KEY: ${{ env.DEPLOY_MODE == 'infra' && secrets.ADMIN_API_KEY || '' }}
-          SQL_ADMINISTRATOR_PASSWORD: ${{ env.DEPLOY_MODE == 'infra' && secrets.SQL_ADMINISTRATOR_PASSWORD || '' }}
+          BUILDER_CLIENT_API_KEY: ${{ env.DEPLOY_MODE == 'infra' && secrets.BUILDER_CLIENT_API_KEY || '' }}
+          CONTROL_ENTRA_CLIENT_SECRET: ${{ env.DEPLOY_MODE == 'infra' && secrets.CONTROL_ENTRA_CLIENT_SECRET || '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -93,10 +98,15 @@ jobs:
               ;;
           esac
 
-          if [ -n "${CLOUD_ACCOUNT_ISSUER:-}" ] &&
-             [ "$CLOUD_ACCOUNT_ISSUER" != "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1" ]; then
-            echo "::error::The Cloud account issuer must match the Elsa Cloud project's verified OIDC issuer."
-            exit 1
+          if [ -n "${CLOUD_ACCOUNT_ISSUER:-}" ]; then
+            if [[ ! "${CLOUD_ACCOUNT_ISSUER:-}" =~ ^https://[a-z0-9]{20}\.supabase\.co/auth/v1$ ]]; then
+              echo "::error::The Cloud account issuer must be an exact Supabase Auth issuer URL."
+              exit 1
+            fi
+            if [ "$CLOUD_ACCOUNT_ISSUER" != "${EXPECTED_CLOUD_ACCOUNT_ISSUER:-}" ]; then
+              echo "::error::The Cloud account issuer must match the approved environment issuer."
+              exit 1
+            fi
           fi
 
           required=(
@@ -118,7 +128,10 @@ jobs:
           if [ "$DEPLOY_MODE" = "infra" ]; then
             required+=(
               ADMIN_API_KEY
-              SQL_ADMINISTRATOR_PASSWORD
+              BUILDER_CLIENT_API_KEY
+              CONTROL_ENTRA_CLIENT_ID
+              CONTROL_ENTRA_CLIENT_SECRET
+              CONTROL_ENTRA_TENANT_ID
             )
           fi
 
@@ -555,10 +568,10 @@ jobs:
         env:
           VALIDATED_CANDIDATE_IMAGE: ${{ steps.candidate-authority.outputs.candidate_image }}
           VALIDATED_CANDIDATE_BUILD_NUMBER: ${{ steps.candidate-authority.outputs.candidate_build_number }}
-          SQL_ADMINISTRATOR_LOGIN: ${{ env.DEPLOY_MODE == 'infra' && vars.SQL_ADMINISTRATOR_LOGIN || '' }}
           ADMIN_API_KEY: ${{ env.DEPLOY_MODE == 'infra' && secrets.ADMIN_API_KEY || '' }}
           BUILDER_CLIENT_API_KEY: ${{ env.DEPLOY_MODE == 'infra' && secrets.BUILDER_CLIENT_API_KEY || '' }}
-          SQL_ADMINISTRATOR_PASSWORD: ${{ env.DEPLOY_MODE == 'infra' && secrets.SQL_ADMINISTRATOR_PASSWORD || '' }}
+          CONTROL_ENTRA_CLIENT_SECRET: ${{ env.DEPLOY_MODE == 'infra' && secrets.CONTROL_ENTRA_CLIENT_SECRET || '' }}
+          APPLICATION_BUILD_NUMBER: ${{ github.run_number }}
         shell: bash
         run: |
           set -euo pipefail

@@ -82,5 +82,38 @@ PY
     rm -rf infra/api-roles-control-sql
 fi
 
+echo "Stripping API-only parameters from the subscription template..."
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+main_path = Path("infra/main.bicep")
+if main_path.exists():
+    content = main_path.read_text()
+    for block in (
+        "@secure()\nparam adminApiKey string\n",
+        "@secure()\nparam builderClientApiKey string\n",
+        "param entraClientId string\n",
+        "@secure()\nparam entraClientSecret string\n",
+        "param entraTenantId string\n",
+    ):
+        content = content.replace(block, "", 1)
+    main_path.write_text(content)
+
+parameters_path = Path("infra/main.parameters.json")
+if parameters_path.exists():
+    document = json.loads(parameters_path.read_text())
+    parameters = document.get("parameters", {})
+    for name in (
+        "adminApiKey",
+        "builderClientApiKey",
+        "entraClientId",
+        "entraClientSecret",
+        "entraTenantId",
+    ):
+        parameters.pop(name, None)
+    parameters_path.write_text(json.dumps(document, indent=2) + "\n")
+PY
+
 az bicep build --file infra/main.bicep --stdout > /dev/null
 echo "infra/ regenerated and patched."

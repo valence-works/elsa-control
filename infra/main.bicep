@@ -12,15 +12,6 @@ param location string
 @description('Id of the user or app to assign application roles')
 param principalId string = ''
 
-@secure()
-param adminApiKey string
-@secure()
-param builderClientApiKey string
-param entraClientId string
-@secure()
-param entraClientSecret string
-param entraTenantId string
-
 var tags = {
   'azd-env-name': environmentName
 }

@@ -57,6 +57,7 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
   name: take('${toLower('api')}-${uniqueString(resourceGroup().id)}', 60)
   location: location
   properties: {
+    httpsOnly: true
     serverFarmId: elsa_control_outputs_planid
     keyVaultReferenceIdentity: api_identity_outputs_id
     // Regional VNet integration for one static egress (#310); empty keeps the platform pool.

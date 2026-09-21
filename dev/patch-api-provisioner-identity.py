@@ -22,6 +22,59 @@ def lines(*parts: str) -> str:
 
 def patch_module(content: str) -> str:
 
+    # Public App Service endpoints must redirect HTTP before application middleware runs.
+    https_only = "    httpsOnly: true\n"
+    properties_anchor = "  properties: {\n    serverFarmId: elsa_control_outputs_planid\n"
+    content = replace_once(
+        content,
+        https_only,
+        properties_anchor,
+        "  properties: {\n" + https_only + "    serverFarmId: elsa_control_outputs_planid\n",
+        "generated Web App properties anchor for HTTPS enforcement",
+    )
+
+    # Optional Elsa Cloud Supabase JWT admission. Empty keeps the customer scheme disabled.
+    cloud_parameter = "param cloudaccountissuer_value string = ''"
+    cloud_parameter_description = (
+        "@description('Optional Elsa Cloud Supabase OIDC issuer. An empty value keeps Cloud account "
+        "JWT admission disabled. Set only after confirming this issuer publishes asymmetric signing keys.')"
+    )
+    entra_client_anchor = "param entraclientid_value string\n"
+    content = replace_once(
+        content,
+        cloud_parameter,
+        entra_client_anchor,
+        f"{entra_client_anchor}\n{cloud_parameter_description}\n{cloud_parameter}\n",
+        "generated Entra client parameter anchor for the Cloud issuer",
+    )
+    https_metadata_setting = lines(
+        "        {",
+        "          name: 'Authentication__ControlIdentity__RequireHttpsMetadata'",
+        "          value: 'true'",
+        "        }",
+    )
+    cloud_settings = lines(
+        "        {",
+        "          name: 'Authentication__CloudAccount__Enabled'",
+        "          value: empty(cloudaccountissuer_value) ? 'false' : 'true'",
+        "        }",
+        "        {",
+        "          name: 'Authentication__CloudAccount__Issuer'",
+        "          value: cloudaccountissuer_value",
+        "        }",
+        "        {",
+        "          name: 'Authentication__CloudAccount__Audience'",
+        "          value: 'authenticated'",
+        "        }",
+    )
+    content = replace_once(
+        content,
+        "name: 'Authentication__CloudAccount__Enabled'",
+        https_metadata_setting,
+        https_metadata_setting + cloud_settings,
+        "generated HTTPS metadata setting anchor for Cloud account settings",
+    )
+
     # Optional provisioner identity: attached only when the host supplies it.
     provisioner_parameter = "param provisioner_identity_outputs_id string = ''"
     provisioner_description = (
@@ -117,12 +170,23 @@ def patch_parameter_template(parameters: str) -> str:
         "param api_egress_subnet_id = ''\n"
         "{{ end }}\n"
     )
+    # The direct azd template cannot establish an independent environment trust
+    # binding, so it must keep Cloud JWT admission disabled. The reviewed
+    # deployment helper passes the approved issuer directly to the module.
+    cloud_block = "param cloudaccountissuer_value = ''\n"
     parameters = replace_once(
         parameters, "provisioner_identity_outputs_id", anchor, anchor + provisioner_block,
         "generated API identity parameter anchor in the parameter template")
     parameters = replace_once(
         parameters, "api_egress_subnet_id", provisioner_block, provisioner_block + egress_block,
         "provisioner parameter block to anchor the egress parameter")
+    parameters = replace_once(
+        parameters,
+        "cloudaccountissuer_value",
+        "param entraclientid_value = '{{ parameter \"entraClientId\" }}'\n",
+        "param entraclientid_value = '{{ parameter \"entraClientId\" }}'\n" + cloud_block,
+        "generated Entra client parameter anchor for the Cloud issuer",
+    )
     return parameters
 
 

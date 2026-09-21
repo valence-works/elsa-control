@@ -29,18 +29,21 @@ Deploy Control with this validation enabled before changing the Cloud BFF to
 forward Supabase user tokens. Keep the existing Entra scheme for operator login
 and Azure-specific customer integrations. Neither a browser-supplied user ID
 nor a privileged service key substitutes for the validated user JWT.
-For the current Hosted site, set the optional `cloudaccountissuer_value` input of
-`infra/api/api-website.module.bicep` to
-`https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1`. Verify its JWKS contains
-asymmetric public keys before enabling it. After Control has been deployed,
+For the current Hosted site, configure `CLOUD_ACCOUNT_ISSUER` through the
+reviewed deployment helper and bind it to the independently approved
+`EXPECTED_CLOUD_ACCOUNT_ISSUER` GitHub environment variable. The direct azd
+parameter template keeps Cloud JWT admission disabled because it cannot establish
+that independent environment trust binding. Verify the approved issuer's JWKS
+contains asymmetric public keys before enabling it. After Control has been deployed,
 publish the Cloud BFF and site together, then exercise Google, email confirmation,
 and Microsoft sign-in through checkout on the deployed origins. Check that each
 account sees only its own workspace, and that an admin route rejects a Cloud JWT.
 
 The current production API is released through `.github/workflows/azure-api-deploy.yml`.
-Set its production environment variable `CLOUD_ACCOUNT_ISSUER` to that exact
-issuer before dispatching a deployment from `main`. The workflow verifies the
-project issuer and sets the three `Authentication__CloudAccount__*` app settings
+Set its production environment variables `CLOUD_ACCOUNT_ISSUER` and
+`EXPECTED_CLOUD_ACCOUNT_ISSUER` to the same exact, independently reviewed issuer
+before dispatching a deployment from `main`. The workflow verifies their binding
+and sets the three `Authentication__CloudAccount__*` app settings
 in every mutating deploy mode. If the variable is empty, it disables the Cloud
 scheme; the Bicep module parameter alone does not configure the current
 production deploy path.

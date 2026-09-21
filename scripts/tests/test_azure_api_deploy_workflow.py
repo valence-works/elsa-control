@@ -118,6 +118,100 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
 
         self.assertIn("env.DEPLOY_MODE == 'infra' && secrets.ADMIN_API_KEY", self.source)
         self.assertIn("env.DEPLOY_MODE == 'infra' && secrets.BUILDER_CLIENT_API_KEY", self.source)
+        self.assertIn("env.DEPLOY_MODE == 'infra' && secrets.CONTROL_ENTRA_CLIENT_SECRET", self.source)
+        self.assertIn("CONTROL_ENTRA_CLIENT_ID", self.source)
+        self.assertIn("CONTROL_ENTRA_TENANT_ID", self.source)
+        self.assertIn("AZURE_PROVISIONER_IDENTITY_ID: ${{ vars.AZURE_PROVISIONER_IDENTITY_ID }}", self.source)
+        self.assertIn("AZURE_API_EGRESS_SUBNET_ID: ${{ vars.AZURE_API_EGRESS_SUBNET_ID }}", self.source)
+
+    def test_cloud_account_issuer_accepts_exact_supabase_projects_only(self) -> None:
+        check_start = self.source.index(
+            "        run: |\n",
+            self.source.index("      - name: Check deployment configuration"),
+        )
+        check_end = self.source.index("\n      - name:", check_start)
+        check_script = dedent(self.source[check_start + len("        run: |\n") : check_end])
+        check_script = check_script.replace("${{ github.event_name }}", "workflow_dispatch")
+
+        base_environment = os.environ.copy()
+        base_environment.update(
+            {
+                "DEPLOY_MODE": "app",
+                "AZURE_CLIENT_ID": "00000000-0000-0000-0000-000000000001",
+                "AZURE_TENANT_ID": "00000000-0000-0000-0000-000000000002",
+                "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
+                "AZURE_CONTAINER_REGISTRY_ENDPOINT": "test.azurecr.io",
+                "AZURE_ENV_NAME": "test",
+                "AZURE_LOCATION": "westeurope",
+                "AZURE_RESOURCE_GROUP": "rg-test",
+                "AZURE_WEBAPP_NAME": "test-api",
+            }
+        )
+
+        for issuer in (
+            "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1",
+            "https://abcdefghijklmnopqrst.supabase.co/auth/v1",
+        ):
+            with self.subTest(issuer=issuer), tempfile.NamedTemporaryFile() as output:
+                environment = base_environment | {
+                    "CLOUD_ACCOUNT_ISSUER": issuer,
+                    "EXPECTED_CLOUD_ACCOUNT_ISSUER": issuer,
+                    "GITHUB_OUTPUT": output.name,
+                }
+                result = subprocess.run(
+                    ["bash", "-c", check_script],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+
+        with tempfile.NamedTemporaryFile() as output:
+            rejected = subprocess.run(
+                ["bash", "-c", check_script],
+                env=base_environment
+                | {
+                    "CLOUD_ACCOUNT_ISSUER": "https://abcdefghijklmnopqrst.supabase.co/auth/v1/extra",
+                    "GITHUB_OUTPUT": output.name,
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("exact Supabase Auth issuer", rejected.stdout + rejected.stderr)
+
+        with tempfile.NamedTemporaryFile() as output:
+            mismatched = subprocess.run(
+                ["bash", "-c", check_script],
+                env=base_environment
+                | {
+                    "CLOUD_ACCOUNT_ISSUER": "https://abcdefghijklmnopqrst.supabase.co/auth/v1",
+                    "EXPECTED_CLOUD_ACCOUNT_ISSUER": "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1",
+                    "GITHUB_OUTPUT": output.name,
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertNotEqual(0, mismatched.returncode)
+        self.assertIn("approved environment issuer", mismatched.stdout + mismatched.stderr)
+
+        with tempfile.NamedTemporaryFile() as output:
+            disabled = subprocess.run(
+                ["bash", "-c", check_script],
+                env=base_environment
+                | {
+                    "CLOUD_ACCOUNT_ISSUER": "",
+                    "EXPECTED_CLOUD_ACCOUNT_ISSUER": "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1",
+                    "GITHUB_OUTPUT": output.name,
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(0, disabled.returncode, disabled.stderr)
 
     def test_promotion_reads_back_exact_runtime_before_settings_or_restart(self) -> None:
         deploy_start = self.source.index(
