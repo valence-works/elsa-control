@@ -2,10 +2,11 @@
 
 ## Recommendation
 
-Use Aspire and Azure Developer CLI (`azd`) as the deployment path. The AppHost
-declares the API, Azure App Service environment, and Azure SQL database;
-Aspire/azd provisions the resources, builds the app container image, pushes it
-to ACR, and deploys the Web App.
+Use the checked-in `scripts/deploy-azure-elsa-control.sh` helper as the
+repeatable deployment path. The Aspire AppHost generates the reviewed Bicep
+under `infra/`; the helper applies that subscription-scoped base, builds and
+pushes the API image, resolves its immutable digest, and applies the generated
+App Service module.
 
 The previous manually provisioned Web App can be deleted once anything important
 has been backed up.
@@ -28,15 +29,10 @@ prints an older version, move `~/.dotnet/tools` before `~/.aspire/bin` in
 
 ## Deploy
 
-```bash
-azd auth login
-azd init
-azd env set adminApiKey <strong-secret>
-azd up
-```
-
-When `azd init` asks how to initialize the app, scan the current directory and
-confirm the detected Aspire AppHost.
+Run `dev/regenerate-infra.sh` only when the AppHost resource model changes, and
+review the generated diff before committing it. For deployment commands and
+the first-run sequence, see
+[Azure Elsa Control Deployment Plan](azure-elsa-control-deployment-plan.md).
 
 ## GitHub Actions Deployment
 
@@ -59,15 +55,22 @@ admin API endpoints under `/api/admin`.
 This is the fast path for application-only updates because the Azure resources
 are expected to already exist. It also avoids reapplying the App Service Bicep
 module on every code change. If the AppHost infrastructure shape changes, run
-the same workflow manually and choose `deploy_mode: infra`; that path runs:
+the same workflow manually and choose `deploy_mode: infra`; that path runs the
+checked-in deployment helper:
 
 ```bash
-azd up --no-prompt
+scripts/deploy-azure-elsa-control.sh \
+  --environment "$AZURE_ENV_NAME" \
+  --resource-group "$AZURE_RESOURCE_GROUP" \
+  --location "$AZURE_LOCATION" \
+  --subscription "$AZURE_SUBSCRIPTION_ID" \
+  --image-tag "$GITHUB_SHA"
 ```
 
-`azd up` provisions infrastructure incrementally before deploying. Keep it as a
-manual choice so routine code changes do not spend time checking and updating
-Azure resources on every push.
+The helper applies the current subscription-scoped Aspire-generated base Bicep,
+pushes the API image, resolves it to an immutable digest, and applies the generated
+App Service module. Keep infrastructure deployment as a manual choice so routine
+code changes do not reapply Azure resources on every push.
 
 ### Staged immutable promotion
 
@@ -125,8 +128,8 @@ identity selects it for every Azure SDK call.
 The current production host uses its existing classic `DOCKER` deployment mode.
 Do not convert it to `SITECONTAINERS` by redeploying the full generated template
 just to attach this identity. Use the intended staged identity update, preserve
-the exact `AZURE_PROVISIONER_IDENTITY_ID` value in the azd environment for later
-infrastructure regeneration, and verify that the deployed identity set contains
+the exact `AZURE_PROVISIONER_IDENTITY_ID` GitHub environment variable for later
+infrastructure deployments, and verify that the deployed identity set contains
 the existing API/ACR identities plus only the explicitly supplied provisioner.
 
 Required GitHub Actions variables:
@@ -138,46 +141,131 @@ Required GitHub Actions variables:
   against `production` (it would replace the client id); see its README.
 - `AZURE_TENANT_ID`: Microsoft Entra tenant ID.
 - `AZURE_SUBSCRIPTION_ID`: target Azure subscription ID.
-- `AZURE_ENV_NAME`: existing or desired `azd` environment name, for example
-  `elsa-control`.
-- `AZURE_LOCATION`: Azure region for the `azd` environment, for example
+- `AZURE_ENV_NAME`: Bicep environment name. `infra/main.bicep` owns the resource
+  group `rg-<AZURE_ENV_NAME>`; for example, `test` maps to `rg-test`.
+- `AZURE_LOCATION`: Azure region for the environment, for example
   `westeurope`.
 - `AZURE_RESOURCE_GROUP`: resource group containing the deployed App Service,
-  for example `rg-elsa-control`.
+  and exactly `rg-<AZURE_ENV_NAME>`, for example `rg-test`.
 - `AZURE_WEBAPP_NAME`: API App Service name, for example `api-k35qdj734hds2`.
 - `AZURE_CONTAINER_REGISTRY_ENDPOINT`: ACR login server for app image pushes,
   for example `elsacontrolacrk35qdj734hds2.azurecr.io`.
-- `API_IDENTITY_CLIENTID` and `API_IDENTITY_ID`: managed identity values emitted
-  by `azd up` for the API Web App.
+- `CONTROL_ENTRA_CLIENT_ID`: client ID of the environment's Control operator app.
+- `CONTROL_ENTRA_TENANT_ID`: tenant ID of the environment's Control operator app.
+- Optional `CLOUD_ACCOUNT_ISSUER`: exact Supabase Auth issuer for the matching Cloud
+  environment, for example `https://<project-ref>.supabase.co/auth/v1`.
+- `EXPECTED_CLOUD_ACCOUNT_ISSUER`: the separately stored, approved issuer for
+  this GitHub environment. It must be established independently before running
+  the bootstrap script and exactly match `CLOUD_ACCOUNT_ISSUER`.
 - Optional `AZURE_PROVISIONER_IDENTITY_ID`: the exact full resource ID of the
   dedicated provider provisioner identity when the staged attachment is enabled.
-- `CONTROL_SQL_SQLSERVERFQDN`: Azure SQL server FQDN emitted by `azd up`.
-- `ELSA_CONTROL_AZURE_CONTAINER_REGISTRY_ENDPOINT`: ACR login server
-  emitted by `azd up`.
-- `ELSA_CONTROL_AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_CLIENT_ID` and
-  `ELSA_CONTROL_AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_ID`: managed
-  identity values emitted by `azd up` for ACR image pushes.
-- `ELSA_CONTROL_PLANID`: App Service plan resource ID emitted by
-  `azd up`.
 - Optional `AZURE_API_EGRESS_SUBNET_ID`: the exact resource ID of the delegated App Service
   integration subnet created by `infra/control-egress` (#310). When set, the API site joins that
   subnet with regional VNet integration and routes all outbound traffic through its NAT gateway, so
   the API has one static egress address for the provider runner's SQL bootstrap firewall rule.
   Empty keeps the platform outbound address pool. Attaching or detaching restarts the app once.
-  Once the production site is attached, keep this variable set in the azd environment: an
-  `azd provision` without it renders `virtualNetworkSubnetId` as null and detaches the site.
+  Once the production site is attached, keep this variable set in the GitHub
+  environment: an infrastructure deployment without it renders
+  `virtualNetworkSubnetId` as null and detaches the site.
 
 Required GitHub Actions secrets:
 
 - `ADMIN_API_KEY`: strong API key passed to the AppHost `adminApiKey` parameter
   and surfaced to the API as `Authentication__ApiKey`.
+- `BUILDER_CLIENT_API_KEY`: client key used by the public builder endpoint.
+- `CONTROL_ENTRA_CLIENT_SECRET`: secret for the environment's Control operator app.
 
 The workflow validates the configuration, restores the solution, builds the
 Aspire AppHost, runs the API test project, signs in to Azure with GitHub
-federated credentials, creates the local CI `azd` environment metadata, sets the
-secured `infra.parameters.adminApiKey` parameter and required azd environment
-outputs for the run, then deploys either the application container or the full
-infrastructure path.
+federated credentials, and then deploys either the application container or the
+current repository-owned Bicep infrastructure path. Secure parameters are written
+only to temporary mode-0600 files and removed when the helper exits.
+
+On the first deployment of a new environment, run the helper with `--base-only`,
+follow the contained-user runbook below, and then run the full helper to create
+the Web App. The generated
+Aspire SQL-role deployment script is intentionally excluded because its upstream
+PowerShell dependency is incompatible with the current deployment image. This is
+the only manual first-run database step; later infrastructure and application
+deployments reuse that identity and grant.
+
+### First-run Catalog contained user
+
+Run this from a trusted operator machine with Azure CLI, Python 3, and the Go
+`sqlcmd` installed. Supply one exact public IPv4 address for the temporary
+firewall rule. The cleanup trap restores the generated SQL administrator and
+removes that firewall rule even when `sqlcmd` fails.
+
+```bash
+set -euo pipefail
+export AZURE_ENV_NAME=test
+export AZURE_RESOURCE_GROUP="rg-$AZURE_ENV_NAME"
+export AZURE_SUBSCRIPTION_ID='<target-subscription-id>'
+export SQL_BOOTSTRAP_IP='<exact-public-ipv4>'
+
+az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+
+python3 - "$SQL_BOOTSTRAP_IP" <<'PY'
+import ipaddress, sys
+address = ipaddress.ip_address(sys.argv[1])
+if address.version != 4 or not address.is_global:
+    raise SystemExit("SQL_BOOTSTRAP_IP must be one exact public IPv4 address")
+PY
+
+deployment_name="elsa-control-$AZURE_ENV_NAME"
+outputs="$(az deployment sub show --subscription "$AZURE_SUBSCRIPTION_ID" --name "$deployment_name" --query properties.outputs -o json)"
+api_identity_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["API_IDENTITY_ID"]["value"])' <<<"$outputs")"
+api_client_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["API_IDENTITY_CLIENTID"]["value"])' <<<"$outputs")"
+sql_fqdn="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["CONTROL_SQL_SQLSERVERFQDN"]["value"])' <<<"$outputs")"
+api_identity_name="${api_identity_id##*/}"
+sql_server_name="${sql_fqdn%%.*}"
+
+original_admin="$(az sql server ad-admin list --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$AZURE_RESOURCE_GROUP" --server-name "$sql_server_name" --query '[0]' -o json)"
+original_login="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["login"])' <<<"$original_admin")"
+original_sid="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["sid"])' <<<"$original_admin")"
+# `az ad` is tenant-scoped; the selected subscription above pins the intended tenant.
+operator_id="$(az ad signed-in-user show --query id -o tsv)"
+operator_login="$(az ad signed-in-user show --query userPrincipalName -o tsv)"
+
+sql_file="$(mktemp)"
+firewall_rule="CatalogBootstrap-$(date +%s)"
+admin_changed=false
+firewall_created=false
+cleanup() {
+  set +e
+  if [[ "$firewall_created" == true ]]; then
+    az sql server firewall-rule delete --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$AZURE_RESOURCE_GROUP" --server "$sql_server_name" --name "$firewall_rule" >/dev/null
+  fi
+  if [[ "$admin_changed" == true ]]; then
+    az sql server ad-admin create --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$AZURE_RESOURCE_GROUP" --server-name "$sql_server_name" --display-name "$original_login" --object-id "$original_sid" >/dev/null
+  fi
+  rm -f "$sql_file"
+}
+trap cleanup EXIT
+
+python3 - "$api_identity_name" "$api_client_id" "$sql_file" <<'PY'
+import os, re, sys, uuid
+name, client_id, path = sys.argv[1:]
+if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", name):
+    raise SystemExit("Unsafe API identity name")
+uuid.UUID(client_id)
+template = open("infra/azure-production/sql-bootstrap.sql", encoding="utf-8").read()
+payload = template.replace("__WORKLOAD_IDENTITY_NAME__", name).replace("__WORKLOAD_IDENTITY_CLIENT_ID__", client_id)
+fd = os.open(path, os.O_WRONLY | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    handle.write(payload)
+PY
+
+admin_changed=true
+az sql server ad-admin create --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$AZURE_RESOURCE_GROUP" --server-name "$sql_server_name" --display-name "$operator_login" --object-id "$operator_id" >/dev/null
+firewall_created=true
+az sql server firewall-rule create --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$AZURE_RESOURCE_GROUP" --server "$sql_server_name" --name "$firewall_rule" --start-ip-address "$SQL_BOOTSTRAP_IP" --end-ip-address "$SQL_BOOTSTRAP_IP" >/dev/null
+sqlcmd -S "tcp:$sql_fqdn,1433" -d Catalog --authentication-method ActiveDirectoryAzCli -N true -b -i "$sql_file"
+```
+
+Wait for the cleanup commands to finish, then verify that the SQL administrator
+matches the original generated identity and that the temporary firewall rule is
+absent before running the full deployment helper.
 
 ### Multi-tenant Microsoft Entra sign-in (guided design partners)
 
@@ -221,40 +309,49 @@ Behaviour once enabled:
 
 ## GitHub/Azure Bootstrap
 
-Use the bootstrap script to recreate or refresh the GitHub `production`
-environment wiring from the selected `azd` environment:
+Use the bootstrap script to recreate or refresh a GitHub environment from the
+matching subscription deployment:
 
 ```bash
-scripts/bootstrap-github-azure.sh --azd-environment elsa-control
+scripts/bootstrap-github-azure.sh \
+  --environment test \
+  --azure-environment test \
+  --resource-group rg-test
 ```
 
 The script:
 
 - creates the GitHub environment if needed;
-- optionally runs `azd pipeline config --provider github --auth-type federated`
-  to configure the Microsoft Entra federated credential;
-- reads deployment outputs from `azd env get-value`;
+- creates or reuses a dedicated Microsoft Entra application and its GitHub
+  environment federated credential;
+- reads the current subscription deployment outputs and deployed Web App;
 - sets the required GitHub environment variables with `gh variable set`;
-- sets `ADMIN_API_KEY` with `gh secret set` without printing the value.
+- sets supplied deployment secrets with `gh secret set` without printing values.
 
-If the federated credential already exists and only the GitHub variables/secrets
-need to be refreshed, skip the Azure pipeline setup step:
-
-```bash
-scripts/bootstrap-github-azure.sh --skip-pipeline-config
-```
+When Cloud JWT admission is enabled, first establish
+`EXPECTED_CLOUD_ACCOUNT_ISSUER` independently in the protected GitHub
+environment. Then supply the matching `CLOUD_ACCOUNT_ISSUER` to the bootstrap
+process. Bootstrap reads and compares the approved value; it never creates or
+overwrites that approval variable. To disable Cloud JWT admission, run bootstrap
+with `--disable-cloud-account-issuer`; this removes only the active issuer and
+retains the approved value for a later reviewed re-enable.
 
 For a preview that does not modify Azure or GitHub:
 
 ```bash
-scripts/bootstrap-github-azure.sh --skip-pipeline-config --dry-run
+scripts/bootstrap-github-azure.sh --environment test --azure-environment test --dry-run
 ```
 
-Set `ADMIN_API_KEY` in the shell to override the value discovered from the local
-`azd` environment:
+Supply the Control identity values and secrets in the process environment when
+bootstrapping infrastructure delivery:
 
 ```bash
-ADMIN_API_KEY='<strong-secret>' scripts/bootstrap-github-azure.sh
+ADMIN_API_KEY='<strong-secret>' \
+BUILDER_CLIENT_API_KEY='<strong-secret>' \
+CONTROL_ENTRA_CLIENT_ID='<client-id>' \
+CONTROL_ENTRA_TENANT_ID='<tenant-id>' \
+CONTROL_ENTRA_CLIENT_SECRET='<client-secret>' \
+scripts/bootstrap-github-azure.sh --environment test --azure-environment test
 ```
 
 ## Removing Existing Resources

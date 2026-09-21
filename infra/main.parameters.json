@@ -1,31 +1,15 @@
 {
-    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
-    "contentVersion": "1.0.0.0",
-    "parameters": {
-      "principalId": {
-        "value": "${AZURE_PRINCIPAL_ID}"
-      },
-      "adminApiKey": {
-        "value": "${AZURE_ADMIN_API_KEY}"
-      },
-      "builderClientApiKey": {
-        "value": "${AZURE_BUILDER_CLIENT_API_KEY}"
-      },
-      "entraClientId": {
-        "value": "${AZURE_ENTRA_CLIENT_ID}"
-      },
-      "entraClientSecret": {
-        "value": "${AZURE_ENTRA_CLIENT_SECRET}"
-      },
-      "entraTenantId": {
-        "value": "${AZURE_ENTRA_TENANT_ID}"
-      },
-      "environmentName": {
-        "value": "${AZURE_ENV_NAME}"
-      },
-      "location": {
-        "value": "${AZURE_LOCATION}"
-      }
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "principalId": {
+      "value": "${AZURE_PRINCIPAL_ID}"
+    },
+    "environmentName": {
+      "value": "${AZURE_ENV_NAME}"
+    },
+    "location": {
+      "value": "${AZURE_LOCATION}"
     }
   }
-  
+}

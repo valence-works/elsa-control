@@ -11,9 +11,14 @@ RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-}"
 SUBSCRIPTION_ID="${AZURE_SUBSCRIPTION_ID:-}"
 APP_DISPLAY_NAME="${APP_DISPLAY_NAME:-}"
 AZURE_CLIENT_ID="${AZURE_CLIENT_ID:-}"
-SQL_ADMINISTRATOR_LOGIN="${SQL_ADMINISTRATOR_LOGIN:-elsaadmin}"
+CONTROL_ENTRA_CLIENT_ID="${CONTROL_ENTRA_CLIENT_ID:-${AZURE_ENTRA_CLIENT_ID:-}}"
+CONTROL_ENTRA_TENANT_ID="${CONTROL_ENTRA_TENANT_ID:-${AZURE_ENTRA_TENANT_ID:-}}"
+CLOUD_ACCOUNT_ISSUER="${CLOUD_ACCOUNT_ISSUER:-}"
+AZURE_PROVISIONER_IDENTITY_ID="${AZURE_PROVISIONER_IDENTITY_ID:-}"
+AZURE_API_EGRESS_SUBNET_ID="${AZURE_API_EGRESS_SUBNET_ID:-}"
 DRY_RUN=false
 SKIP_ROLE_ASSIGNMENTS=false
+DISABLE_CLOUD_ACCOUNT_ISSUER=false
 
 usage() {
   cat <<'USAGE'
@@ -26,19 +31,29 @@ Options:
   --environment <name>        GitHub environment name. Default: production.
   --azure-environment <name>  Azure/Bicep environment name. Default: GitHub environment,
                               with development mapped to dev.
-  --resource-group <name>     Azure resource group. Default: rg-elsa-control-<azure-env>.
+  --resource-group <name>     Azure resource group. Default: rg-<azure-env>.
   --location <name>           Azure region. Default: westeurope.
   --subscription <id>         Azure subscription ID. Default: current az account.
   --client-id <id>            Existing Entra app registration client ID to use.
   --app-display-name <name>   Entra app display name when creating/reusing OIDC app.
   --skip-role-assignments     Do not create Azure role assignments.
+  --disable-cloud-account-issuer
+                              Disable Cloud JWT admission while retaining the independently
+                              approved issuer for a later re-enable.
   --dry-run                   Print changes without writing Azure/GitHub state.
   -h, --help                  Show this help.
 
 Optional environment variables used as GitHub environment secrets:
   ADMIN_API_KEY
-  SQL_ADMINISTRATOR_PASSWORD
   BUILDER_CLIENT_API_KEY
+  CONTROL_ENTRA_CLIENT_SECRET
+
+Optional environment variables used as GitHub environment variables:
+  CONTROL_ENTRA_CLIENT_ID
+  CONTROL_ENTRA_TENANT_ID
+  CLOUD_ACCOUNT_ISSUER
+  AZURE_PROVISIONER_IDENTITY_ID
+  AZURE_API_EGRESS_SUBNET_ID
 USAGE
 }
 
@@ -76,6 +91,10 @@ while [[ $# -gt 0 ]]; do
       SKIP_ROLE_ASSIGNMENTS=true
       shift
       ;;
+    --disable-cloud-account-issuer)
+      DISABLE_CLOUD_ACCOUNT_ISSUER=true
+      shift
+      ;;
     --dry-run)
       DRY_RUN=true
       shift
@@ -91,6 +110,36 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$DISABLE_CLOUD_ACCOUNT_ISSUER" == true && -n "$CLOUD_ACCOUNT_ISSUER" ]]; then
+  echo "Do not set CLOUD_ACCOUNT_ISSUER when --disable-cloud-account-issuer is used." >&2
+  exit 1
+fi
+
+if [[ -n "$CLOUD_ACCOUNT_ISSUER" && ! "$CLOUD_ACCOUNT_ISSUER" =~ ^https://[a-z0-9]{20}\.supabase\.co/auth/v1$ ]]; then
+  echo "CLOUD_ACCOUNT_ISSUER must be an exact Supabase Auth issuer URL." >&2
+  exit 1
+fi
+
+if [[ -z "$AZURE_ENVIRONMENT" ]]; then
+  if [[ "$GITHUB_ENVIRONMENT" == "development" ]]; then
+    AZURE_ENVIRONMENT="dev"
+  else
+    AZURE_ENVIRONMENT="$GITHUB_ENVIRONMENT"
+  fi
+fi
+if [[ ! "$AZURE_ENVIRONMENT" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,62}$ ]]; then
+  echo "Azure environment name must contain only letters, numbers, and hyphens." >&2
+  exit 1
+fi
+
+EXPECTED_RESOURCE_GROUP="rg-$AZURE_ENVIRONMENT"
+RESOURCE_GROUP="${RESOURCE_GROUP:-$EXPECTED_RESOURCE_GROUP}"
+if [[ "$RESOURCE_GROUP" != "$EXPECTED_RESOURCE_GROUP" ]]; then
+  echo "Resource group must be $EXPECTED_RESOURCE_GROUP because infra/main.bicep owns that name." >&2
+  exit 1
+fi
+APP_DISPLAY_NAME="${APP_DISPLAY_NAME:-elsa-control-$GITHUB_ENVIRONMENT-github-actions}"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -151,19 +200,23 @@ ensure_role_assignment() {
   fi
 
   local existing
-  existing="$(az role assignment list --assignee "$assignee" --role "$role" --all --query "[?scope=='$scope'] | [0].id" -o tsv 2>/dev/null || true)"
+  if ! existing="$(az role assignment list --assignee "$assignee" --role "$role" --all --query "[?scope=='$scope'] | [0].id" -o tsv 2>/dev/null)"; then
+    echo "Could not verify Azure role '$role' at $scope." >&2
+    return 1
+  fi
   if [[ -n "$existing" ]]; then
     return
   fi
 
-  az role assignment create \
+  if ! az role assignment create \
     --assignee "$assignee" \
     --role "$role" \
     --scope "$scope" \
     --only-show-errors \
-    --output none || {
-      echo "Warning: Could not create Azure role '$role' at $scope. It may already exist, or your account may not have role assignment permissions." >&2
-    }
+    --output none; then
+    echo "Could not create Azure role '$role' at $scope." >&2
+    return 1
+  fi
 }
 
 require_command az
@@ -174,23 +227,24 @@ if [[ "$DRY_RUN" != true ]]; then
   gh auth status >/dev/null
 fi
 
+if [[ -n "$CLOUD_ACCOUNT_ISSUER" ]]; then
+  APPROVED_CLOUD_ACCOUNT_ISSUER="$(gh variable get EXPECTED_CLOUD_ACCOUNT_ISSUER --env "$GITHUB_ENVIRONMENT" --json value --jq .value 2>/dev/null || true)"
+  if [[ -z "$APPROVED_CLOUD_ACCOUNT_ISSUER" ]]; then
+    echo "GitHub environment $GITHUB_ENVIRONMENT has no independently approved Cloud account issuer." >&2
+    exit 1
+  fi
+  if [[ "$CLOUD_ACCOUNT_ISSUER" != "$APPROVED_CLOUD_ACCOUNT_ISSUER" ]]; then
+    echo "CLOUD_ACCOUNT_ISSUER does not match the independently approved environment issuer." >&2
+    exit 1
+  fi
+fi
+
 if [[ -z "$SUBSCRIPTION_ID" ]]; then
   SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
 fi
 
 az account set --subscription "$SUBSCRIPTION_ID"
 TENANT_ID="$(az account show --query tenantId -o tsv)"
-
-if [[ -z "$AZURE_ENVIRONMENT" ]]; then
-  if [[ "$GITHUB_ENVIRONMENT" == "development" ]]; then
-    AZURE_ENVIRONMENT="dev"
-  else
-    AZURE_ENVIRONMENT="$GITHUB_ENVIRONMENT"
-  fi
-fi
-
-RESOURCE_GROUP="${RESOURCE_GROUP:-rg-elsa-control-$AZURE_ENVIRONMENT}"
-APP_DISPLAY_NAME="${APP_DISPLAY_NAME:-elsa-control-$GITHUB_ENVIRONMENT-github-actions}"
 
 REPO_FULL_NAME="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
 SUBJECT="repo:$REPO_FULL_NAME:environment:$GITHUB_ENVIRONMENT"
@@ -201,7 +255,33 @@ echo "Using Azure environment: $AZURE_ENVIRONMENT"
 echo "Using resource group: $RESOURCE_GROUP"
 echo "Using subscription: $SUBSCRIPTION_ID"
 
-run gh api --method PUT "repos/:owner/:repo/environments/$GITHUB_ENVIRONMENT" >/dev/null
+DEPLOYMENT_NAME="elsa-control-$AZURE_ENVIRONMENT"
+OUTPUTS="$(az deployment sub show --name "$DEPLOYMENT_NAME" --query properties.outputs -o json 2>/dev/null || true)"
+if [[ -z "$OUTPUTS" || "$OUTPUTS" == "null" ]]; then
+  echo "Could not read subscription deployment outputs from $DEPLOYMENT_NAME. Run scripts/deploy-azure-elsa-control.sh first." >&2
+  exit 1
+fi
+
+ACR_ENDPOINT="$(OUTPUTS="$OUTPUTS" python3 - <<'PY'
+import json
+import os
+
+outputs = json.loads(os.environ["OUTPUTS"])
+value = outputs.get("AZURE_CONTAINER_REGISTRY_ENDPOINT", {}).get("value")
+if not value:
+    raise SystemExit("Missing deployment output: AZURE_CONTAINER_REGISTRY_ENDPOINT")
+print(value)
+PY
+)"
+ACR_NAME="${ACR_ENDPOINT%%.azurecr.io}"
+WEBAPP_COUNT="$(az webapp list --resource-group "$RESOURCE_GROUP" --query 'length(@)' --output tsv)"
+if [[ "$WEBAPP_COUNT" != "1" ]]; then
+  echo "Expected exactly one Web App in $RESOURCE_GROUP. Deploy the API module before bootstrapping GitHub." >&2
+  exit 1
+fi
+WEBAPP_NAME="$(az webapp list --resource-group "$RESOURCE_GROUP" --query '[0].name' --output tsv)"
+RESOURCE_GROUP_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP"
+ACR_ID="$(az acr show --resource-group "$RESOURCE_GROUP" --name "$ACR_NAME" --query id -o tsv)"
 
 if [[ -z "$AZURE_CLIENT_ID" ]]; then
   AZURE_CLIENT_ID="$(az ad app list --display-name "$APP_DISPLAY_NAME" --query '[0].appId' -o tsv)"
@@ -220,12 +300,28 @@ else
 fi
 
 APP_OBJECT_ID="$(az ad app show --id "$AZURE_CLIENT_ID" --query id -o tsv 2>/dev/null || true)"
+if [[ -z "$APP_OBJECT_ID" ]]; then
+  if [[ "$DRY_RUN" == true ]]; then
+    APP_OBJECT_ID="00000000-0000-0000-0000-000000000001"
+  else
+    echo "Could not resolve the Entra application object for $AZURE_CLIENT_ID." >&2
+    exit 1
+  fi
+fi
 
 if [[ "$DRY_RUN" != true ]]; then
   az ad sp create --id "$AZURE_CLIENT_ID" --only-show-errors --output none 2>/dev/null || true
 fi
 
 SERVICE_PRINCIPAL_OBJECT_ID="$(az ad sp show --id "$AZURE_CLIENT_ID" --query id -o tsv 2>/dev/null || true)"
+if [[ -z "$SERVICE_PRINCIPAL_OBJECT_ID" ]]; then
+  if [[ "$DRY_RUN" == true ]]; then
+    SERVICE_PRINCIPAL_OBJECT_ID="00000000-0000-0000-0000-000000000002"
+  else
+    echo "Could not resolve the Entra service principal for $AZURE_CLIENT_ID." >&2
+    exit 1
+  fi
+fi
 
 if [[ -n "$APP_OBJECT_ID" ]]; then
   EXISTING_CREDENTIAL="$(az ad app federated-credential list --id "$APP_OBJECT_ID" --query "[?subject=='$SUBJECT'].id | [0]" -o tsv 2>/dev/null || true)"
@@ -258,24 +354,12 @@ PY
   fi
 fi
 
-OUTPUTS="$(az deployment group show --resource-group "$RESOURCE_GROUP" --name main --query properties.outputs -o json 2>/dev/null || true)"
-if [[ -z "$OUTPUTS" || "$OUTPUTS" == "null" ]]; then
-  echo "Could not read deployment outputs from $RESOURCE_GROUP/main. Run an infra deployment first or create the resource group with scripts/deploy-azure-elsa-control.sh." >&2
-  exit 1
-fi
-
-WEBAPP_NAME="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["webAppName"]["value"])' <<<"$OUTPUTS")"
-ACR_ENDPOINT="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["containerRegistryLoginServer"]["value"])' <<<"$OUTPUTS")"
-ACR_NAME="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["containerRegistryName"]["value"])' <<<"$OUTPUTS")"
-
-RESOURCE_GROUP_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP"
-ACR_ID="$(az acr show --resource-group "$RESOURCE_GROUP" --name "$ACR_NAME" --query id -o tsv)"
-
 if [[ "$SKIP_ROLE_ASSIGNMENTS" != true ]]; then
-  ROLE_ASSIGNEE="${SERVICE_PRINCIPAL_OBJECT_ID:-$AZURE_CLIENT_ID}"
-  ensure_role_assignment "$ROLE_ASSIGNEE" Contributor "$RESOURCE_GROUP_ID"
-  ensure_role_assignment "$ROLE_ASSIGNEE" AcrPush "$ACR_ID"
+  ensure_role_assignment "$SERVICE_PRINCIPAL_OBJECT_ID" Contributor "$RESOURCE_GROUP_ID"
+  ensure_role_assignment "$SERVICE_PRINCIPAL_OBJECT_ID" AcrPush "$ACR_ID"
 fi
+
+run gh api --method PUT "repos/:owner/:repo/environments/$GITHUB_ENVIRONMENT" >/dev/null
 
 set_github_var AZURE_CLIENT_ID "$AZURE_CLIENT_ID"
 set_github_var AZURE_TENANT_ID "$TENANT_ID"
@@ -285,10 +369,30 @@ set_github_var AZURE_LOCATION "$LOCATION"
 set_github_var AZURE_RESOURCE_GROUP "$RESOURCE_GROUP"
 set_github_var AZURE_WEBAPP_NAME "$WEBAPP_NAME"
 set_github_var AZURE_CONTAINER_REGISTRY_ENDPOINT "$ACR_ENDPOINT"
-set_github_var SQL_ADMINISTRATOR_LOGIN "$SQL_ADMINISTRATOR_LOGIN"
+
+if [[ -n "$CONTROL_ENTRA_CLIENT_ID" ]]; then
+  set_github_var CONTROL_ENTRA_CLIENT_ID "$CONTROL_ENTRA_CLIENT_ID"
+fi
+if [[ -n "$CONTROL_ENTRA_TENANT_ID" ]]; then
+  set_github_var CONTROL_ENTRA_TENANT_ID "$CONTROL_ENTRA_TENANT_ID"
+fi
+if [[ "$DISABLE_CLOUD_ACCOUNT_ISSUER" == true ]]; then
+  if gh variable get CLOUD_ACCOUNT_ISSUER --env "$GITHUB_ENVIRONMENT" >/dev/null 2>&1; then
+    echo "Disabling Cloud JWT admission in environment $GITHUB_ENVIRONMENT."
+    run gh variable delete CLOUD_ACCOUNT_ISSUER --env "$GITHUB_ENVIRONMENT"
+  fi
+elif [[ -n "$CLOUD_ACCOUNT_ISSUER" ]]; then
+  set_github_var CLOUD_ACCOUNT_ISSUER "$CLOUD_ACCOUNT_ISSUER"
+fi
+if [[ -n "$AZURE_PROVISIONER_IDENTITY_ID" ]]; then
+  set_github_var AZURE_PROVISIONER_IDENTITY_ID "$AZURE_PROVISIONER_IDENTITY_ID"
+fi
+if [[ -n "$AZURE_API_EGRESS_SUBNET_ID" ]]; then
+  set_github_var AZURE_API_EGRESS_SUBNET_ID "$AZURE_API_EGRESS_SUBNET_ID"
+fi
 
 set_github_secret_if_present ADMIN_API_KEY
-set_github_secret_if_present SQL_ADMINISTRATOR_PASSWORD
 set_github_secret_if_present BUILDER_CLIENT_API_KEY
+set_github_secret_if_present CONTROL_ENTRA_CLIENT_SECRET
 
 echo "GitHub environment $GITHUB_ENVIRONMENT is configured for $RESOURCE_GROUP."

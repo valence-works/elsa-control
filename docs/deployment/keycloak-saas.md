@@ -1,9 +1,9 @@
 # Keycloak SaaS Deployment
 
 > **Legacy.** This hand-written Bicep stack (including its self-hosted Keycloak) is no longer
-> the deployment path. Provisioning is driven by the Aspire AppHost through `azd up`, which
-> uses Microsoft Entra ID for sign-in and managed identity for Azure SQL. These files are kept
-> under `infra-legacy/` for reference.
+> the deployment path. Current deployments apply the Aspire-generated Bicep through
+> `scripts/deploy-azure-elsa-control.sh`, use Microsoft Entra ID for sign-in, and use managed
+> identity for Azure SQL. These files are kept under `infra-legacy/` for reference.
 
 ## Decision
 
@@ -56,16 +56,11 @@ The deployment outputs include:
 The first deployment creates the Keycloak service and database. Keycloak creates
 its bootstrap admin only when the database is empty.
 
-For dev App Service deployments, the official Keycloak image can be run with the
-development startup command while the Azure shape is being validated:
-
-```bash
-KEYCLOAK_START_COMMAND='start-dev --hostname-strict=false' \
-scripts/deploy-azure-elsa-control.sh --environment dev --deploy-keycloak
-```
-
-Use the default production command once hostname, TLS, and realm configuration
-are ready for a non-development environment.
+The current `scripts/deploy-azure-elsa-control.sh` deploys the Control API only
+and does not provision Keycloak. The retired App Service Keycloak deployment is
+kept under `infra-legacy` for historical reference. Do not use that development
+shape for a current environment; configure the supported identity provider
+through the current Control deployment contract instead.
 
 ## Keycloak Realm Setup
 
