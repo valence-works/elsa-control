@@ -1852,6 +1852,80 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(unknown.StatusCode, crossWorkspace.StatusCode);
     }
 
+    [Fact]
+    public async Task Provisioning_progress_reports_a_safe_queued_create_and_conceals_cross_workspace_instances()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-progress-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var accepted = await CreateCanonicalInstanceAsync(owner, workspaceId, "managed-progress-runtime");
+        var instanceId = accepted.Instance.InstanceId;
+
+        var response = await owner.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/provisioning-progress");
+        var responseJson = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.Private);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        var progress = await response.Content.ReadControlJsonAsync<ManagedElsaProvisioningProgress>();
+        Assert.NotNull(progress);
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Queued, progress.State);
+        Assert.Equal("azure", progress.Provider);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.RequestAccepted, progress.CurrentStage);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.Ordered, progress.Stages.Select(stage => stage.Code));
+        Assert.Equal(ManagedElsaProvisioningProgressStageStatuses.Current, progress.Stages[0].Status);
+        Assert.All(progress.Stages.Skip(1), stage =>
+            Assert.Equal(ManagedElsaProvisioningProgressStageStatuses.Pending, stage.Status));
+        Assert.Contains(progress.Activity, activity =>
+            activity.MessageCode == "request.accepted" &&
+            activity.Stage == ManagedElsaProvisioningProgressStages.RequestAccepted);
+        Assert.DoesNotContain(workspaceId.ToString("D"), responseJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(instanceId.ToString("D"), responseJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("operationId", responseJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("endpoint", responseJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("worker", responseJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("fingerprint", responseJson, StringComparison.OrdinalIgnoreCase);
+
+        using var anonymous = app.CreateClient();
+        var unauthenticated = await anonymous.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/provisioning-progress");
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticated.StatusCode);
+
+        var other = app.CreateTrustedWorkspaceClient("managed-progress-other-owner");
+        var otherWorkspaceId = await other.GetDefaultWorkspaceIdAsync();
+        var crossWorkspace = await other.GetAsync(
+            $"/api/workspaces/{otherWorkspaceId:D}/instances/{instanceId:D}/provisioning-progress");
+        var unknown = await other.GetAsync(
+            $"/api/workspaces/{otherWorkspaceId:D}/instances/{Guid.NewGuid():D}/provisioning-progress");
+
+        Assert.Equal(HttpStatusCode.NotFound, crossWorkspace.StatusCode);
+        Assert.Equal(unknown.StatusCode, crossWorkspace.StatusCode);
+    }
+
+    [Fact]
+    public async Task Provisioning_progress_maps_consistency_drift_to_a_safe_retryable_conflict()
+    {
+        await using var app = new ControlApiTestApplication(configureServices: services =>
+        {
+            services.RemoveAll<IManagedElsaProvisioningProgressReader>();
+            services.AddScoped<IManagedElsaProvisioningProgressReader, TopologyChangedProgressReader>();
+        });
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var owner = app.CreateTrustedWorkspaceClient("managed-progress-drift-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+
+        var response = await owner.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{Guid.NewGuid():D}/provisioning-progress");
+        var json = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Contains("instance.provisioning-topology-changed", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("operation", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("provider", json, StringComparison.OrdinalIgnoreCase);
+    }
+
     public sealed class Fixture : IAsyncLifetime
     {
         private readonly FakeManagedElsaInstanceCatalog _instanceCatalog = new();
@@ -2316,6 +2390,15 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     private sealed class TopologyChangedStore : TopologyStoreStub
     {
         public override Task<ElsaInstanceLifecycleTopologySnapshot?> GetLifecycleTopologyAsync(
+            Guid workspaceId,
+            Guid instanceId,
+            CancellationToken cancellationToken = default) =>
+            throw new ElsaInstanceLifecycleTopologyChangedException();
+    }
+
+    private sealed class TopologyChangedProgressReader : IManagedElsaProvisioningProgressReader
+    {
+        public Task<ManagedElsaProvisioningProgress?> ReadAsync(
             Guid workspaceId,
             Guid instanceId,
             CancellationToken cancellationToken = default) =>

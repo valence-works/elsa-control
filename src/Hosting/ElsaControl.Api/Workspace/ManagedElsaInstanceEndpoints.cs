@@ -216,6 +216,26 @@ public static class ManagedElsaInstanceEndpoints
             return Results.Ok(response);
         }).RequireWorkspaceAccess();
 
+        group.MapGet("/{instanceId:guid}/provisioning-progress", async (
+            Guid workspaceId,
+            Guid instanceId,
+            IManagedElsaProvisioningProgressReader progress,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                var result = await progress.ReadAsync(workspaceId, instanceId, cancellationToken);
+                return result is null ? Results.NotFound() : Results.Ok(result);
+            }
+            catch (ElsaInstanceLifecycleTopologyChangedException)
+            {
+                return Problem(
+                    "instance.provisioning-topology-changed",
+                    "Provisioning state changed while it was being read. Retry the request.",
+                    StatusCodes.Status409Conflict);
+            }
+        }).RequireWorkspaceAccess().AllowCloudBff();
+
         group.MapGet("/{instanceId:guid}/health", async (
             Guid workspaceId,
             Guid instanceId,

@@ -10,6 +10,9 @@ namespace ElsaControl.Deployment.Azure;
 
 public static class AzureProviderOperationValidation
 {
+    public static string LifecycleIdempotencyKey(Guid operationId) =>
+        $"elsa-instance-operation:{operationId:D}";
+
     /// <summary>
     /// Binds a delete's canonical key (including bounded retry lineage) to its lifecycle
     /// operation. Unattributable long-chain hashed keys require explicit recovery.

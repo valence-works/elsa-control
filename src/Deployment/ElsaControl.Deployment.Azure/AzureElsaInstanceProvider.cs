@@ -872,7 +872,8 @@ public sealed class AzureElsaInstanceProvider(
 
     internal static string WorkloadName(Guid instanceId) => $"e{instanceId:N}"[..16];
 
-    internal static string IdempotencyKey(Guid operationId) => $"elsa-instance-operation:{operationId:D}";
+    internal static string IdempotencyKey(Guid operationId) =>
+        AzureProviderOperationValidation.LifecycleIdempotencyKey(operationId);
 
     private static string? NormalizeScope(string? value) => value?.Trim().ToLowerInvariant();
 }

@@ -14,11 +14,13 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 
 public sealed class AzureProviderOperationStore(CatalogDbContext db) :
     IAzureProviderOperationStore,
+    IAzureManagedElsaProvisioningOperationStore,
     IAzureProviderOperationAuthorizationStore,
     IAzureProviderResourceAssignmentStore,
     IAzureProviderRecoveryObservationStore,
     IAzureProviderDeleteRecoveryStore
 {
+    private const int MaxCustomerProvisioningTransitions = 100;
     private static readonly IReadOnlyDictionary<string, string> EmptySecretReferences =
         new ReadOnlyDictionary<string, string>(
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
@@ -1972,4 +1974,80 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
     }
 
     private static AzureProviderOperationTransition ToTransition(AzureProviderOperationTransitionEntity x) => new(x.Id, x.OperationId, x.Sequence, x.Status, x.Phase, x.Code, x.Message, x.OccurredAt);
+
+    async Task<AzureManagedElsaProvisioningOperationSnapshot?> IAzureManagedElsaProvisioningOperationStore.GetCreateProvisioningAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        Guid? lifecycleOperationId,
+        int expectedInstanceVersion,
+        CancellationToken cancellationToken)
+    {
+        if (workspaceId == Guid.Empty || instanceId == Guid.Empty || expectedInstanceVersion < 1)
+            return null;
+
+        return await db.ExecuteInTransactionAsync(
+            IsolationLevel.Serializable,
+            async () =>
+            {
+                var instance = await db.ElsaInstances.AsNoTracking()
+                    .Where(x => x.Id == instanceId && x.WorkspaceId == workspaceId)
+                    .Select(x => new
+                    {
+                        x.OrganizationId,
+                        x.Version,
+                        x.PlacementAssignmentId
+                    })
+                    .SingleOrDefaultAsync(cancellationToken);
+                if (instance is null)
+                    return null;
+                if (instance.Version != expectedInstanceVersion)
+                    throw new ElsaInstanceLifecycleTopologyChangedException();
+
+                var hasAssignment = Guid.TryParseExact(
+                    instance.PlacementAssignmentId,
+                    "D",
+                    out var providerAssignmentId);
+                if (!hasAssignment)
+                    return null;
+                var idempotencyKey = lifecycleOperationId is { } operationId
+                    ? AzureProviderOperationValidation.LifecycleIdempotencyKey(operationId)
+                    : null;
+
+                var query = db.AzureProviderOperations.AsNoTracking()
+                    .Where(x => x.WorkspaceId == workspaceId &&
+                                x.OrganizationId == instance.OrganizationId &&
+                                x.InstanceId == instanceId &&
+                                x.Action == AzureProviderOperationAction.Reconcile &&
+                                x.LifecycleAction == ElsaInstanceOperationAction.Create);
+                if (idempotencyKey is not null)
+                    query = query.Where(x => x.IdempotencyKey == idempotencyKey);
+                query = query.Where(x => x.ProviderAssignmentId == providerAssignmentId);
+
+                var candidates = await query
+                    .OrderByDescending(x => x.CreatedAt)
+                    .ThenByDescending(x => x.Id)
+                    .Take(2)
+                    .ToListAsync(cancellationToken);
+                if (candidates.Count == 0)
+                    return null;
+                if (candidates.Count > 1)
+                    return new AzureManagedElsaProvisioningOperationSnapshot(null, [], IsAmbiguous: true);
+
+                var operation = candidates[0];
+                var transitions = await db.AzureProviderOperationTransitions.AsNoTracking()
+                    .Where(x => x.OperationId == operation.Id)
+                    .OrderByDescending(x => x.Sequence)
+                    .ThenByDescending(x => x.OccurredAt)
+                    .Take(MaxCustomerProvisioningTransitions)
+                    .ToListAsync(cancellationToken);
+                return new AzureManagedElsaProvisioningOperationSnapshot(
+                    ToModel(operation),
+                    transitions
+                        .OrderBy(x => x.Sequence)
+                        .ThenBy(x => x.OccurredAt)
+                        .Select(ToTransition)
+                        .ToList());
+            },
+            cancellationToken);
+    }
 }

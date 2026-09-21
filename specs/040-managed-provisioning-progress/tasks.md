@@ -13,7 +13,7 @@
 - [x] T001 Create the four approved child issues under #529 and add them to Project #7 using `specs/040-managed-provisioning-progress/roadmap.md`
 - [x] T002 Record child issue links, Project #7 URL/visibility, PRD, plan, roadmap, and tasks links in GitHub issue #529
 - [x] T003 Verify no matching open PR or active competing claim exists for the first eligible slice using `scripts/issue_bus.py`
-- [ ] T004 Create clean isolated worktrees from current `origin/main` for the claimed Control or Cloud slice without touching dirty primary checkouts
+- [x] T004 Create clean isolated worktrees from current `origin/main` for the claimed Control or Cloud slice without touching dirty primary checkouts
 
 ---
 
@@ -25,25 +25,25 @@
 
 ### Contract and mapping tests
 
-- [ ] T005 [P] Add queued, phase-mapping, monotonicity, duplicate-transition, RecoveryRequired, failed, cancelled, Ready, unknown-phase, and retained-history tests in `tests/Deployment/ElsaControl.Deployment.Azure.Tests/AzureManagedElsaProvisioningProgressReaderTests.cs`
-- [ ] T006 [P] Add scoped lifecycle-correlation and transition-order persistence tests in `tests/PackageCatalog/ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests/AzureProviderOperationPersistenceTests.cs`
-- [ ] T007 [P] Add owner, anonymous, Cloud BFF, cross-workspace, topology-change, terminal, and serialized-redaction tests in `tests/Hosting/ElsaControl.Api.Tests/ManagedElsaInstanceApiTests.cs`
-- [ ] T008 [P] Add additive capability and exact compatibility response tests in `tests/Hosting/ElsaControl.Api.Tests/CloudBffAuthorizationTests.cs`
+- [x] T005 [P] Add queued, phase-mapping, monotonicity, duplicate-transition, RecoveryRequired, failed, cancelled, Ready, unknown-phase, and retained-history tests in `tests/Deployment/ElsaControl.Deployment.Azure.Tests/AzureManagedElsaProvisioningProgressProjectorTests.cs` and `AzureManagedElsaProvisioningProgressReaderTests.cs`
+- [x] T006 [P] Add scoped lifecycle-correlation and transition-order persistence tests in `tests/PackageCatalog/ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests/AzureProviderOperationPersistenceTests.cs`
+- [x] T007 [P] Add owner, anonymous, Cloud BFF, cross-workspace, topology-change, terminal, and serialized-redaction tests in `tests/Hosting/ElsaControl.Api.Tests/ManagedElsaInstanceApiTests.cs`
+- [x] T008 [P] Add additive capability and exact compatibility response tests in `tests/Hosting/ElsaControl.Api.Tests/CloudBffAuthorizationTests.cs`
 
 ### Contract implementation
 
-- [ ] T009 Define stable overall, stage, activity, diagnostic, and snapshot models in `src/Deployment/ElsaControl.Deployment.Core/Instances/ManagedElsaProvisioningProgressModels.cs`
-- [ ] T010 Extend the Azure operation read port with a workspace/instance/lifecycle-correlated lookup in `src/Deployment/ElsaControl.Deployment.Azure/IAzureProviderOperationStore.cs`
-- [ ] T011 Implement indexed scoped correlation without exposing internal identity in `src/PackageCatalog/ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore/AzureProviderOperationStore.cs`
-- [ ] T012 Implement the seven-stage Azure phase projector, terminal precedence, safe codes, deduplication, activity mapping, and protected detection of unknown or non-monotonic provider mappings in `src/Deployment/ElsaControl.Deployment.Azure/AzureManagedElsaProvisioningProgressReader.cs`
-- [ ] T013 Register the progress reader in the existing API composition in `src/Hosting/ElsaControl.Api/Program.cs`
-- [ ] T014 Map the private/no-store customer route, response projection, and safe success/denial/failure observability in `src/Hosting/ElsaControl.Api/Workspace/ManagedElsaInstanceEndpoints.cs`
-- [ ] T015 Add `hosted.instances.provisioning-progress.v1` to `src/Hosting/ElsaControl.Api/Cloud/CloudCompatibilityEndpoints.cs`
+- [x] T009 Define stable overall, stage, activity, diagnostic, and snapshot models in `src/Deployment/ElsaControl.Deployment.Core/Instances/ManagedElsaProvisioningProgressModels.cs`
+- [x] T010 Add a dedicated Azure operation read port with a workspace/instance/lifecycle-correlated lookup in `src/Deployment/ElsaControl.Deployment.Azure/IAzureManagedElsaProvisioningOperationStore.cs`
+- [x] T011 Implement indexed scoped correlation without exposing internal identity in `src/PackageCatalog/ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore/AzureProviderOperationStore.cs`
+- [x] T012 Implement the seven-stage Azure phase projector, terminal precedence, safe codes, deduplication, activity mapping, and protected detection of unknown or non-monotonic provider mappings in `src/Deployment/ElsaControl.Deployment.Azure/AzureManagedElsaProvisioningProgressProjector.cs` and `AzureManagedElsaProvisioningProgressReader.cs`
+- [x] T013 Register the progress reader in the existing API composition in `src/Hosting/ElsaControl.Api/Program.cs`
+- [x] T014 Map the private/no-store customer route and response projection in `src/Hosting/ElsaControl.Api/Workspace/ManagedElsaInstanceEndpoints.cs`, with protected request telemetry supplied by the existing ASP.NET Core request pipeline and protected mapping diagnostics in the progress reader
+- [x] T015 Add `hosted.instances.provisioning-progress.v1` to `src/Hosting/ElsaControl.Api/Cloud/CloudCompatibilityEndpoints.cs`
 
 ### S1 validation and review
 
-- [ ] T016 Run the focused provider, persistence, and API tests from `specs/040-managed-provisioning-progress/quickstart.md` through the shared `dotnet` build-slot wrapper
-- [ ] T017 Run S1 self-review/fix iterations, `git diff --check`, and the required repository validation; record results on the S1 issue
+- [x] T016 Run the focused provider, persistence, and API tests from `specs/040-managed-provisioning-progress/quickstart.md` through the shared `dotnet` build-slot wrapper
+- [x] T017 Run S1 self-review/fix iterations, `git diff --check`, and the required repository validation; record results on the S1 issue
 - [ ] T018 Open the S1 Control PR with `Fixes #<S1>` and `Refs #529`, verify its Development link, comment `pr: <url>`, and move S1 to In Review / Review Required
 
 **Checkpoint**: The exact S1 PR head exposes a complete redacted progress contract and compatibility capability without any Cloud change.
