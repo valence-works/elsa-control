@@ -9,6 +9,13 @@ public sealed class AzureProviderExecutorTests
     private static readonly Guid WorkspaceId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
     private static readonly DateTimeOffset Now = new(2026, 8, 29, 12, 0, 0, TimeSpan.Zero);
 
+    /// <summary>
+    /// Safety valve for waits on an observation that a correct executor reaches within milliseconds. A regression
+    /// that never renews the lease then fails the test instead of hanging the CI job. It is generous on purpose:
+    /// it must never be reached because the machine is busy.
+    /// </summary>
+    private static readonly TimeSpan GateTimeout = TimeSpan.FromSeconds(30);
+
     [Fact]
     public async Task Applies_the_checked_in_lifecycle_and_persists_safe_checkpoints()
     {
@@ -815,7 +822,7 @@ public sealed class AzureProviderExecutorTests
     public async Task Renews_the_durable_lease_while_a_remote_step_is_running()
     {
         var store = new FakeOperationStore();
-        var runner = new RecordingRunner { Delay = TimeSpan.FromMilliseconds(30) };
+        var runner = new RecordingRunner { RunUntil = store.NextHeartbeatAsync };
         var executor = new AzureProviderExecutor(
             store,
             runner,
@@ -833,7 +840,7 @@ public sealed class AzureProviderExecutorTests
     public async Task Persists_recovery_using_the_latest_version_after_a_heartbeated_failure()
     {
         var store = new FakeOperationStore();
-        var runner = new RecordingRunner { Delay = TimeSpan.FromMilliseconds(30), ThrowAfterDelay = true };
+        var runner = new RecordingRunner { RunUntil = store.NextHeartbeatAsync, ThrowInsteadOfResult = true };
         var executor = new AzureProviderExecutor(
             store,
             runner,
@@ -914,7 +921,7 @@ public sealed class AzureProviderExecutorTests
     public async Task Cancellation_after_a_heartbeat_persists_recovery_using_the_latest_version()
     {
         var store = new FakeOperationStore();
-        var runner = new RecordingRunner { Delay = TimeSpan.FromMilliseconds(100) };
+        var runner = new RecordingRunner { NonCooperativeStep = AzureProviderRunnerStep.Foundation };
         var executor = new AzureProviderExecutor(
             store,
             runner,
@@ -922,11 +929,11 @@ public sealed class AzureProviderExecutorTests
             TimeSpan.FromMilliseconds(100),
             heartbeatInterval: TimeSpan.FromMilliseconds(5));
         using var cancellation = new CancellationTokenSource();
+        var heartbeat = store.NextHeartbeatAsync();
 
         var execution = executor.ApplyAsync(CreateRequest(), CreatePlan(), cancellation.Token);
         await runner.Started.Task;
-        for (var attempt = 0; store.HeartbeatCount == 0 && attempt < 100; attempt++)
-            await Task.Delay(2);
+        await heartbeat.WaitAsync(GateTimeout);
         Assert.True(store.HeartbeatCount > 0);
         cancellation.Cancel();
         var result = await execution;
@@ -1196,7 +1203,7 @@ public sealed class AzureProviderExecutorTests
     public async Task Cleanup_renews_the_durable_lease_while_running()
     {
         var store = new FakeOperationStore();
-        var runner = new RecordingRunner { CleanupResources = new(), Delay = TimeSpan.FromMilliseconds(30) };
+        var runner = new RecordingRunner { CleanupResources = new(), RunUntil = store.NextHeartbeatAsync };
         var executor = new AzureProviderExecutor(
             store,
             runner,
@@ -1246,8 +1253,8 @@ public sealed class AzureProviderExecutorTests
         var runner = new RecordingRunner
         {
             PromotionOutcome = AzureProviderRunnerOutcome.Uncertain,
-            Delay = TimeSpan.FromMilliseconds(30),
-            DelayOnlyStep = AzureProviderRunnerStep.RestoreStableTraffic
+            RunUntil = store.NextHeartbeatAsync,
+            RunUntilStep = AzureProviderRunnerStep.RestoreStableTraffic
         };
         var executor = new AzureProviderExecutor(
             store,
@@ -1464,10 +1471,19 @@ public sealed class AzureProviderExecutorTests
         public string? StableTrafficRevisionName { get; init; } = "stable-revision";
         public bool OmitPromotionObservations { get; init; }
         public bool? OwnedResourcesAbsentOverride { get; init; }
-        public AzureProviderRunnerStep? DelayOnlyStep { get; init; }
         public string? EndpointOverride { get; init; }
         public AzureProviderResourceReferences? ResourcesOverride { get; init; }
-        public TimeSpan Delay { get; init; }
+
+        /// <summary>
+        /// Keeps a step running until the returned task completes. The factory is invoked synchronously when the step
+        /// starts, so a gate such as <see cref="FakeOperationStore.NextHeartbeatAsync"/> only observes work that
+        /// happens while the step is in flight. Gate on the observation being proven rather than on a wall-clock
+        /// delay, which races the heartbeat interval and is unreliable under parallel CI load.
+        /// </summary>
+        public Func<Task>? RunUntil { get; init; }
+
+        /// <summary>Restricts <see cref="RunUntil"/> to one step. Every step is gated when this is null.</summary>
+        public AzureProviderRunnerStep? RunUntilStep { get; init; }
         public bool HostileDiagnostics { get; init; }
         public bool UntrustedDiagnostics { get; init; }
         public AzureProviderRunnerStep? FailureStep { get; init; }
@@ -1475,7 +1491,7 @@ public sealed class AzureProviderExecutorTests
         public string FailureCode { get; init; } = "azure.step.failed";
         public string FailureMessage { get; init; } = "Azure lifecycle step failed.";
         public string RunnerMessage { get; init; } = "Azure lifecycle step completed.";
-        public bool ThrowAfterDelay { get; init; }
+        public bool ThrowInsteadOfResult { get; init; }
         public AzureProviderRunnerStep? WaitForCancellationStep { get; init; }
         public AzureProviderRunnerStep? NonCooperativeStep { get; init; }
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1500,8 +1516,9 @@ public sealed class AzureProviderExecutorTests
             if (NonCooperativeStep == command.Step)
                 return new TaskCompletionSource<AzureProviderRunnerResult>().Task;
 
-            if (Delay > TimeSpan.Zero && (!DelayOnlyStep.HasValue || DelayOnlyStep == command.Step))
-                return DelayedResultAsync(command);
+            if (RunUntil is { } runUntil && (!RunUntilStep.HasValue || RunUntilStep == command.Step))
+                return ResultWhenAsync(command, runUntil());
+
             var result = CreateResult(command);
             if (CancelAfterStep == command.Step)
                 CancelSource?.Cancel();
@@ -1522,10 +1539,10 @@ public sealed class AzureProviderExecutorTests
             }
         }
 
-        private async Task<AzureProviderRunnerResult> DelayedResultAsync(AzureProviderRunnerCommand command)
+        private async Task<AzureProviderRunnerResult> ResultWhenAsync(AzureProviderRunnerCommand command, Task gate)
         {
-            await Task.Delay(Delay);
-            if (ThrowAfterDelay)
+            await gate.WaitAsync(GateTimeout);
+            if (ThrowInsteadOfResult)
                 throw new InvalidOperationException("remote result was not confirmed");
             return CreateResult(command);
         }
@@ -1630,7 +1647,19 @@ public sealed class AzureProviderExecutorTests
     {
         private AzureProviderOperation? _operation;
         private readonly List<AzureProviderOperationTransition> _transitions = [];
-        public int HeartbeatCount { get; private set; }
+        private readonly object _heartbeatLock = new();
+        private TaskCompletionSource _nextHeartbeat = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _heartbeatCount;
+
+        public int HeartbeatCount
+        {
+            get
+            {
+                lock (_heartbeatLock)
+                    return _heartbeatCount;
+            }
+        }
+
         public int RecoveryClaimCount { get; private set; }
         public int DeleteRecoveryClaimCount { get; private set; }
         public AzureProviderDeleteRecoveryAuthority? DeleteRecoveryAuthority { get; set; }
@@ -1781,9 +1810,32 @@ public sealed class AzureProviderExecutorTests
             return Task.FromResult<AzureProviderOperation?>(_operation);
         }
 
+        /// <summary>
+        /// Returns a task that completes when the next heartbeat after this call is recorded. Capture it before the
+        /// step whose lease renewal is being proven, so the wait cannot be satisfied by an earlier heartbeat.
+        /// </summary>
+        public Task NextHeartbeatAsync()
+        {
+            lock (_heartbeatLock)
+                return _nextHeartbeat.Task;
+        }
+
+        private void RecordHeartbeat()
+        {
+            TaskCompletionSource observed;
+            lock (_heartbeatLock)
+            {
+                _heartbeatCount++;
+                observed = _nextHeartbeat;
+                _nextHeartbeat = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+
+            observed.TrySetResult();
+        }
+
         public Task<AzureProviderOperation?> HeartbeatAsync(Guid workspaceId, Guid operationId, string leaseToken, TimeSpan leaseDuration, DateTimeOffset now, long? expectedVersion = null, CancellationToken cancellationToken = default)
         {
-            HeartbeatCount++;
+            RecordHeartbeat();
             if (LoseLeaseOnHeartbeat)
                 return Task.FromResult<AzureProviderOperation?>(null);
             if (_operation is null || expectedVersion.HasValue && _operation.Version != expectedVersion.Value)
