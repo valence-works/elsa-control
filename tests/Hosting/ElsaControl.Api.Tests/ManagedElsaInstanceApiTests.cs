@@ -2275,10 +2275,14 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         await using (var scope = app.Services.CreateAsyncScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
-            instanceVersion = await db.ElsaInstances
-                .Where(x => x.Id == created.Instance.InstanceId)
-                .Select(x => x.Version)
-                .SingleAsync();
+            await db.Database.OpenConnectionAsync();
+            await using var command = db.Database.GetDbConnection().CreateCommand();
+            command.CommandText = "SELECT Version FROM ElsaInstances WHERE Id = @id";
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = "@id";
+            parameter.Value = created.Instance.InstanceId;
+            command.Parameters.Add(parameter);
+            instanceVersion = Convert.ToInt32(await command.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture);
         }
 
         return new(workspaceId, created.Instance.InstanceId, deletionBody.OperationId, instanceVersion);
