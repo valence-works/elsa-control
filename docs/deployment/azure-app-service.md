@@ -175,6 +175,63 @@ Required GitHub Actions secrets:
 - `BUILDER_CLIENT_API_KEY`: client key used by the public builder endpoint.
 - `CONTROL_ENTRA_CLIENT_SECRET`: secret for the environment's Control operator app.
 
+The persistent `test` environment also requires the staging-only Stripe values
+`STRIPE_TEST_SECRET_KEY` and `STRIPE_TEST_WEBHOOK_SIGNING_SECRET`, plus the
+non-secret variables `STRIPE_HOSTED_PRICE_ID` and
+`ELSA_CLOUD_STAGING_ORIGIN`. The Stripe key must be test mode. The normal
+deployment workflow passes these values only to the configuration preflight and
+the staging reconciliation step; they are not job-wide environment variables.
+
+Each non-build deployment to `test` runs
+`scripts/staging_stripe_reconcile.py --apply-azure-settings`. It fails closed
+unless the configured Hosted price is the active €99 monthly test price, the
+exact Control webhook is enabled for the admitted checkout/subscription event
+set, the Checkout callbacks resolve to the staging Cloud routes, and the active
+Customer Portal policy supports invoice history, payment-method updates, and
+period-end cancellation. Azure settings are applied from a mode-0600 temporary
+JSON file so credentials do not appear in the command line or logs. A failed
+post-write verification restores the prior billing-setting values and removes
+settings that were previously absent. The reconciler refuses to mutate these
+managed keys if Azure marks any of them as deployment-slot settings, because
+silently clearing slot stickiness would change swap behavior.
+
+If the first `infra` run creates a new test environment and a later deployment,
+reconciliation, or health gate fails, there is no prior runtime image to
+restore. The workflow reports that case explicitly and retains the isolated,
+empty test resources for diagnosis. Correct the failed gate and rerun the
+idempotent `infra` deployment. Remove the test resource group only through the
+environment teardown procedure; the deployment workflow does not guess that a
+partially provisioned resource group is safe to delete.
+
+Before building or deploying, the workflow runs the same Stripe resource audit
+without reading or changing Azure. The staging-only helper accepts Control hosts
+under `azurewebsites.net` and Cloud hosts under `azurestaticapps.net`; a public
+production origin therefore cannot satisfy the staging contract. Stripe list
+checks follow pagination, and the one-time webhook and portal bootstraps use
+stable idempotency keys so a safe retry cannot silently create a duplicate.
+
+For a new test Stripe account, create the webhook once from a trusted operator
+machine and capture its one-time secret in a private file. The command refuses
+live keys, existing or ambiguous endpoints, and stdout as a secret destination:
+
+```bash
+STRIPE_SECRET_KEY='<test-secret>' \
+STRIPE_HOSTED_PRICE_ID='<test-price-reference>' \
+CONTROL_STAGING_WEBHOOK_URL='https://<staging-control-host>/api/billing/webhooks/stripe' \
+CLOUD_PORTAL_RETURN_URL='https://<staging-cloud-host>/dashboard' \
+AZURE_RESOURCE_GROUP='<staging-resource-group>' \
+AZURE_WEBAPP_NAME='<staging-webapp>' \
+python3 scripts/staging_stripe_reconcile.py \
+  --bootstrap-webhook-secret /private/path/control-staging-webhook.secret \
+  --bootstrap-portal
+```
+
+Store the new signing secret as the protected GitHub `test` environment secret,
+then delete the local file. The portal bootstrap is idempotent when one valid
+active test configuration already exists. Product and price creation remains an
+explicit commercial bootstrap decision; the reconciler verifies the reviewed
+price rather than silently creating or changing it.
+
 The workflow validates the configuration, restores the solution, builds the
 Aspire AppHost, runs the API test project, signs in to Azure with GitHub
 federated credentials, and then deploys either the application container or the

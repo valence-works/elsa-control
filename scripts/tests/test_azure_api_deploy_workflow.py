@@ -59,11 +59,12 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertIn("capture_succeeded=true", self.source)
         self.assertIn("steps.current-deployment.outputs.capture_succeeded == 'true'", self.source)
         main_guard_start = self.source.index("      - name: Require main ref for Azure mutation")
+        main_guard_end = self.source.index("\n      - name:", main_guard_start + 1)
         restore_start = self.source.index("      - name: Restore")
         login_start = self.source.index("      - name: Log in Azure CLI")
         self.assertLess(main_guard_start, restore_start)
         self.assertLess(main_guard_start, login_start)
-        main_guard = self.source[main_guard_start:restore_start]
+        main_guard = self.source[main_guard_start:main_guard_end]
         self.assertIn('GITHUB_REF:-', main_guard)
         self.assertNotIn("DEPLOY_MODE != 'build'", main_guard)
         self.assertIn("The promoted runtime did not match the validated immutable image", self.source)
@@ -80,7 +81,7 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertIn("steps.deploy-api.outcome == 'failure'", self.source)
         self.assertIn("steps.health-gate.outcome == 'failure'", self.source)
         self.assertIn(
-            "Restore previous API deployment after deployment or health failure",
+            "Restore previous API deployment after deployment, configuration, or health failure",
             self.source,
         )
 
@@ -146,6 +147,7 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
                 "AZURE_LOCATION": "westeurope",
                 "AZURE_RESOURCE_GROUP": "rg-test",
                 "AZURE_WEBAPP_NAME": "test-api",
+                "TARGET_ENVIRONMENT": "production",
             }
         )
 
@@ -344,6 +346,55 @@ esac
         self.assertNotIn('Application__BuildNumber="$GITHUB_RUN_NUMBER"', self.source)
         self.assertIn('--arg expected_image_id "$expected_image_id"', self.source)
         self.assertIn('The Web App has a runtime image identity override; refusing promotion', self.source)
+
+    def test_test_environment_reconciles_stripe_without_exposing_secrets_job_wide(self) -> None:
+        job_env_start = self.source.index("    env:\n", self.source.index("    permissions:"))
+        job_env_end = self.source.index("    steps:\n", job_env_start)
+        job_env = self.source[job_env_start:job_env_end]
+        self.assertNotIn("STRIPE_TEST_SECRET_KEY:", job_env)
+        self.assertNotIn("STRIPE_TEST_WEBHOOK_SIGNING_SECRET:", job_env)
+        self.assertNotIn("STRIPE_HOSTED_PRICE_ID:", job_env)
+
+        config_start = self.source.index("      - name: Check deployment configuration")
+        config_end = self.source.index("\n      - name:", config_start + 1)
+        config_step = self.source[config_start:config_end]
+        self.assertIn("secrets.STRIPE_TEST_SECRET_KEY", config_step)
+        self.assertIn("secrets.STRIPE_TEST_WEBHOOK_SIGNING_SECRET", config_step)
+        self.assertIn('"$TARGET_ENVIRONMENT" = "test"', config_step)
+        self.assertIn("STRIPE_HOSTED_PRICE_ID", config_step)
+        self.assertIn("ELSA_CLOUD_STAGING_ORIGIN", config_step)
+
+        audit_start = self.source.index("      - name: Audit staging Stripe resources before deployment")
+        restore_start = self.source.index("      - name: Restore")
+        self.assertLess(audit_start, restore_start)
+        audit_end = self.source.index("\n      - name:", audit_start + 1)
+        audit_step = self.source[audit_start:audit_end]
+        self.assertIn("--audit-stripe-only", audit_step)
+        self.assertIn("env.TARGET_ENVIRONMENT == 'test'", audit_step)
+
+        reconcile_start = self.source.index("      - name: Reconcile staging Stripe billing")
+        reconcile_end = self.source.index("\n      - name:", reconcile_start + 1)
+        reconcile_step = self.source[reconcile_start:reconcile_end]
+        self.assertIn("env.TARGET_ENVIRONMENT == 'test'", reconcile_step)
+        self.assertIn("env.DEPLOY_MODE != 'build'", reconcile_step)
+        self.assertIn("scripts/staging_stripe_reconcile.py --apply-azure-settings", reconcile_step)
+        self.assertIn("/api/billing/webhooks/stripe", reconcile_step)
+        self.assertIn("${{ vars.ELSA_CLOUD_STAGING_ORIGIN }}/dashboard", reconcile_step)
+        self.assertIn("/checkout/return?session_id={CHECKOUT_SESSION_ID}", reconcile_step)
+        self.assertIn("/dashboard/billing", reconcile_step)
+        self.assertNotIn("sk_test_", reconcile_step)
+        self.assertNotIn("whsec_", reconcile_step)
+
+        rollback_start = self.source.index("      - name: Restore previous API deployment")
+        rollback_line = self.source[rollback_start:self.source.index("\n", rollback_start)] + self.source[self.source.index("\n", rollback_start):self.source.index("\n        env:", rollback_start)]
+        self.assertIn("steps.staging-stripe.outcome == 'failure'", rollback_line)
+
+        fresh_recovery_start = self.source.index("      - name: Report recovery path for a new test environment")
+        fresh_recovery = self.source[fresh_recovery_start:]
+        self.assertIn("env.DEPLOY_MODE == 'infra'", fresh_recovery)
+        self.assertIn("capture_succeeded != 'true'", fresh_recovery)
+        self.assertIn("retained for diagnosis", fresh_recovery)
+        self.assertIn("idempotent infra deployment", fresh_recovery)
 
     def test_health_gates_require_exact_http_200(self) -> None:
         self.assertGreaterEqual(
