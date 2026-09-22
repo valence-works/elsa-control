@@ -33,6 +33,7 @@ using ElsaControl.Api.Workspace;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.Billing.Stripe;
 using ElsaControl.Api.OrganizationBilling;
+using ElsaControl.Api.OrganizationDeployments;
 using ElsaControl.PackageCatalog.Core.Approvals;
 using ElsaControl.RuntimeBuilder.DeploymentTemplates;
 using ElsaControl.PackageCatalog.Core.Compatibility;
@@ -353,6 +354,10 @@ builder.Services.AddScoped<OrganizationBillingLifecycleWorker>(services =>
         services.GetService<IOrganizationBillingCleanupProvider>()));
 builder.Services.AddScoped<OrganizationBillingService>();
 builder.Services.AddScoped<OrganizationBillingApiService>();
+builder.Services.AddSingleton<InMemoryOrganizationDeploymentAuditStore>();
+builder.Services.AddSingleton<IOrganizationDeploymentAuditStore>(services =>
+    services.GetRequiredService<InMemoryOrganizationDeploymentAuditStore>());
+builder.Services.AddScoped<OrganizationDeploymentAuditService>();
 builder.Services.AddSingleton<Func<StripeClient>>(services =>
 {
     var options = services.GetRequiredService<IOptions<StripeBillingOptions>>().Value;
@@ -738,6 +743,7 @@ app.MapCloudBootstrapEndpoints();
 app.MapWorkspaceMeEndpoints();
 app.MapOrganizationWorkspaceEndpoints();
 app.MapOrganizationBillingEndpoints();
+app.MapOrganizationDeploymentAuditEndpoints();
 app.MapOrganizationAzureSubscriptionBindEndpoints();
 app.MapWorkspaceSourceEndpoints();
 app.MapWorkspacePackageEndpoints();

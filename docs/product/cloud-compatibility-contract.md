@@ -14,7 +14,8 @@ It returns this envelope with `Cache-Control: no-store`:
     "hosted.studio.handoff.issue.v1",
     "hosted.instances.quota-problem.v1",
     "hosted.instances.confirmed-delete.v1",
-    "hosted.subscription.manage.v1"
+    "hosted.subscription.manage.v1",
+    "hosted.deployments.audit.v1"
   ]
 }
 ```
@@ -38,6 +39,7 @@ Those checks continue at the corresponding API boundary for every request.
 | `hosted.instances.quota-problem.v1` | Managed-instance create returns the stable `instance_limit_reached` problem when the account's instance limit is reached; the response may include its current and maximum counts. Other commercial denials remain endpoint-specific. |
 | `hosted.instances.confirmed-delete.v1` | `POST /api/workspaces/{workspaceId}/instances/{instanceId}/delete-confirmations`, then `POST .../{instanceId}/delete`, followed by `GET .../{instanceId}/delete-operations/{operationId}`. Confirmation, permission, workspace scope, ETag, idempotency, and lifecycle checks still apply. |
 | `hosted.subscription.manage.v1` | `GET /api/organizations/{organizationId}/billing/hosted-subscription` returns Hosted billing-linkage and copy hooks; `POST .../hosted-portal` opens a Stripe Customer Portal session for the caller's billing customer and a validated Elsa Cloud return URL. |
+| `hosted.deployments.audit.v1` | `GET /api/organizations/{organizationId}/deployments/audit` returns a sanitized, paginated Cloud function-deploy audit feed. Empty organizations return an empty page, not 404. |
 
 The Cloud BFF token is admitted only on the explicit route allowlist in
 [`cloud-bff-auth-contract.md`](cloud-bff-auth-contract.md). Capabilities are

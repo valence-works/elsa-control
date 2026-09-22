@@ -110,13 +110,13 @@ public sealed class CloudBffAuthorizationTests
             "hosted.studio.handoff.issue.v1",
             "hosted.instances.quota-problem.v1",
             "hosted.instances.confirmed-delete.v1",
-            "hosted.subscription.manage.v1"
+            "hosted.subscription.manage.v1",
+            "hosted.deployments.audit.v1"
         ],
             root.GetProperty("capabilities").EnumerateArray().Select(value => value.GetString()!).ToArray());
         Assert.DoesNotContain("environment", root.GetRawText(), StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("customer", root.GetRawText(), StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("provider", root.GetRawText(), StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("deployment", root.GetRawText(), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -199,6 +199,7 @@ public sealed class CloudBffAuthorizationTests
             "GET /api/me/organizations",
             "GET /api/me/workspaces",
             "GET /api/organizations/{organizationId:guid}/billing/hosted-subscription",
+            "GET /api/organizations/{organizationId:guid}/deployments/audit",
             "GET /api/workspaces/{workspaceId:guid}/external-engine-connections/",
             "GET /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}",
             "GET /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/pairing",
