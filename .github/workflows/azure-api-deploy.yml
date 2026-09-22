@@ -386,7 +386,7 @@ jobs:
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_WEBAPP_NAME" \
               --container-name main \
-              --query properties.image \
+              --query image \
               --output tsv)"; then
               echo "::error::Could not capture the current main sitecontainer image; refusing an unprotected deployment."
               exit 1
@@ -673,7 +673,7 @@ jobs:
                 --resource-group "$AZURE_RESOURCE_GROUP" \
                 --name "$AZURE_WEBAPP_NAME" \
                 --container-name main \
-                --query properties.image \
+                --query image \
                 --output tsv \
                 --only-show-errors)"; then
                 echo "::error::The promoted main sitecontainer could not be read back; refusing promotion acceptance."
@@ -891,7 +891,7 @@ jobs:
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_WEBAPP_NAME" \
               --container-name main \
-              --query properties.image \
+              --query image \
               --output tsv)"; then
               echo "::error::Rollback failed: could not verify the restored main sitecontainer image."
               exit 1
