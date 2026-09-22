@@ -99,6 +99,7 @@ POST /api/workspaces/{workspaceId}/instances/{instanceId}/delete
 POST /api/organizations/{organizationId}/billing/prepare-hosted-trial
 GET  /api/organizations/{organizationId}/billing/hosted-subscription
 POST /api/organizations/{organizationId}/billing/hosted-portal
+GET  /api/organizations/{organizationId}/deployments/audit
 POST /api/managed-elsa/handoff/issue
 GET  /api/workspaces/{workspaceId}/external-engine-connections
 POST /api/workspaces/{workspaceId}/external-engine-connections

@@ -14,7 +14,8 @@ public static class CloudCompatibilityEndpoints
         "hosted.studio.handoff.issue.v1",
         "hosted.instances.quota-problem.v1",
         "hosted.instances.confirmed-delete.v1",
-        "hosted.subscription.manage.v1"
+        "hosted.subscription.manage.v1",
+        "hosted.deployments.audit.v1"
     ];
 
     public static IEndpointRouteBuilder MapCloudCompatibilityEndpoints(this IEndpointRouteBuilder endpoints)
