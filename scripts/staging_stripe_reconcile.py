@@ -281,9 +281,9 @@ class ReconciliationConfig:
                 raise ReconciliationError(f"{name} must not be negative")
             return result
 
-        def optional_https(name: str) -> str | None:
+        def optional_https(name: str, *, allow_query: bool = False) -> str | None:
             value = env.get(name, "").strip()
-            return parse_https_url(value, name=name) if value else None
+            return parse_https_url(value, name=name, allow_query=allow_query) if value else None
 
         return cls(
             hosted_price_id=price_id,
@@ -298,7 +298,10 @@ class ReconciliationConfig:
             cloud_portal_return_url=cloud_return,
             azure_resource_group=required("AZURE_RESOURCE_GROUP"),
             azure_webapp_name=required("AZURE_WEBAPP_NAME"),
-            expected_checkout_success_url=optional_https("AZURE_EXPECTED_CHECKOUT_SUCCESS_URL"),
+            expected_checkout_success_url=optional_https(
+                "AZURE_EXPECTED_CHECKOUT_SUCCESS_URL",
+                allow_query=True,
+            ),
             expected_checkout_cancel_url=optional_https("AZURE_EXPECTED_CHECKOUT_CANCEL_URL"),
             expected_portal_return_url=optional_https("AZURE_EXPECTED_PORTAL_RETURN_URL"),
         )

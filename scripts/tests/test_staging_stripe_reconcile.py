@@ -335,6 +335,30 @@ class StagingStripeReconciliationTests(unittest.TestCase):
         self.assertEqual(9900, parsed.hosted_price_amount_cents)
         self.assertEqual("eur", parsed.hosted_price_currency)
 
+    def test_environment_config_accepts_the_stripe_checkout_session_query_placeholder(self) -> None:
+        values = {
+            "STRIPE_HOSTED_PRICE_ID": PRICE_ID,
+            "STRIPE_WEBHOOK_SECRET": WEBHOOK_SECRET,
+            "CONTROL_STAGING_WEBHOOK_URL": WEBHOOK_URL,
+            "CLOUD_PORTAL_RETURN_URL": CLOUD_RETURN_URL,
+            "AZURE_RESOURCE_GROUP": "staging-rg",
+            "AZURE_WEBAPP_NAME": "staging-app",
+            "AZURE_EXPECTED_CHECKOUT_SUCCESS_URL": (
+                "https://cloud-staging.azurestaticapps.net/checkout/return"
+                "?session_id={CHECKOUT_SESSION_ID}"
+            ),
+            "AZURE_EXPECTED_CHECKOUT_CANCEL_URL": (
+                "https://cloud-staging.azurestaticapps.net/dashboard/billing"
+            ),
+        }
+
+        parsed = ReconciliationConfig.from_environment(values)
+
+        self.assertEqual(
+            values["AZURE_EXPECTED_CHECKOUT_SUCCESS_URL"],
+            parsed.expected_checkout_success_url,
+        )
+
     def test_environment_config_rejects_production_or_unapproved_hosts(self) -> None:
         values = {
             "STRIPE_HOSTED_PRICE_ID": PRICE_ID,
