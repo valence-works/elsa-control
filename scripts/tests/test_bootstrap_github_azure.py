@@ -76,7 +76,7 @@ class BootstrapGitHubAzureTests(unittest.TestCase):
             "    raise SystemExit(0)\n"
             "if args[:3] == ['deployment', 'sub', 'show']:\n"
             f"    print({'null'!r} if {missing_outputs!r} else "
-            "'{\"AZURE_CONTAINER_REGISTRY_ENDPOINT\":{\"value\":\"test.azurecr.io\"}}')\n"
+            "'{\"azurE_CONTAINER_REGISTRY_ENDPOINT\":{\"value\":\"test.azurecr.io\"}}')\n"
             "    raise SystemExit(0)\n"
             "if args[:2] == ['webapp', 'list']:\n"
             "    print('1' if 'length(@)' in args else 'test-webapp')\n"
@@ -258,7 +258,11 @@ class BootstrapGitHubAzureTests(unittest.TestCase):
 
             self.assertNotEqual(0, result.returncode)
             self.assertIn("Could not create Azure role 'Contributor'", result.stderr)
-            self.assertIn("role assignment create", az_log.read_text())
+            azure_calls = az_log.read_text()
+            self.assertIn("role assignment create", azure_calls)
+            self.assertIn("role assignment list", azure_calls)
+            self.assertIn("--scope /subscriptions/", azure_calls)
+            self.assertNotIn("role assignment list --assignee 00000000-0000-0000-0000-000000000007 --role Contributor --all", azure_calls)
             self.assertNotIn("api --method PUT", gh_log.read_text())
             self.assertNotIn("variable set", gh_log.read_text())
             self.assertNotIn("secret set", gh_log.read_text())
