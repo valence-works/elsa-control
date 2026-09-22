@@ -138,6 +138,8 @@ public sealed class HostedSubscriptionManagementApiTests : IAsyncLifetime
     [InlineData(null)]
     [InlineData(CloudDashboard)]
     [InlineData("https://elsacloud.app/dashboard/billing")]
+    [InlineData("/dashboard")]
+    [InlineData("/dashboard/billing")]
     public async Task Hosted_portal_accepts_safe_cloud_return_urls(string? returnUrl)
     {
         await _app.SeedAsync(_ => Task.CompletedTask);
@@ -150,7 +152,10 @@ public sealed class HostedSubscriptionManagementApiTests : IAsyncLifetime
             new HostedPortalSessionRequest(returnUrl));
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(returnUrl ?? CloudDashboard, _provider.LastPortal!.ReturnUrl);
+        var expected = returnUrl is null || returnUrl.StartsWith("https://", StringComparison.Ordinal)
+            ? returnUrl ?? CloudDashboard
+            : $"https://elsacloud.app{returnUrl}";
+        Assert.Equal(expected, _provider.LastPortal!.ReturnUrl);
     }
 
     [Theory]
@@ -161,6 +166,19 @@ public sealed class HostedSubscriptionManagementApiTests : IAsyncLifetime
     [InlineData("https://elsacloud.app/pricing")]
     [InlineData("https://evil.test/dashboard")]
     [InlineData("https://elsacloud.app.evil.test/dashboard")]
+    [InlineData("dashboard/billing")]
+    [InlineData("//evil.test/dashboard")]
+    [InlineData("/dashboard?next=1")]
+    [InlineData("/dashboard#fragment")]
+    [InlineData("/dashboard\\evil")]
+    [InlineData("/dashboard/../pricing")]
+    [InlineData("/dashboard/%2e%2e/pricing")]
+    [InlineData("/dashboard/%2f%2e%2e/pricing")]
+    [InlineData("/dashboard/%5c%2e%2e%5cpricing")]
+    [InlineData("/dashboard/%252f%252e%252e/pricing")]
+    [InlineData("https://elsacloud.app/dashboard/%2f%2e%2e/pricing")]
+    [InlineData("https://elsacloud.app/dashboard/%5c%2e%2e%5cpricing")]
+    [InlineData("/pricing")]
     public async Task Hosted_portal_rejects_unsafe_return_urls(string returnUrl)
     {
         await _app.SeedAsync(_ => Task.CompletedTask);
@@ -254,6 +272,8 @@ public sealed class HostedSubscriptionManagementApiTests : IAsyncLifetime
     [InlineData(CloudDashboard, null, CloudDashboard)]
     [InlineData(CloudDashboard, CloudDashboard, CloudDashboard)]
     [InlineData(CloudDashboard, "https://elsacloud.app/dashboard/billing", "https://elsacloud.app/dashboard/billing")]
+    [InlineData(CloudDashboard, "/dashboard", CloudDashboard)]
+    [InlineData(CloudDashboard, "/dashboard/billing", "https://elsacloud.app/dashboard/billing")]
     public void Safe_return_urls_resolve_to_the_cloud_dashboard(string configured, string? requested, string expected)
     {
         Assert.True(HostedBillingReturnUrls.TryResolve(configured, requested, out var resolved));
@@ -270,6 +290,19 @@ public sealed class HostedSubscriptionManagementApiTests : IAsyncLifetime
     [InlineData(CloudDashboard, "https://elsacloud.app/dashboard#x")]
     [InlineData(CloudDashboard, "https://elsacloud.app/pricing")]
     [InlineData(CloudDashboard, "https://evil.test/dashboard")]
+    [InlineData(CloudDashboard, "dashboard/billing")]
+    [InlineData(CloudDashboard, "//evil.test/dashboard")]
+    [InlineData(CloudDashboard, "/dashboard?next=1")]
+    [InlineData(CloudDashboard, "/dashboard#x")]
+    [InlineData(CloudDashboard, "/dashboard\\evil")]
+    [InlineData(CloudDashboard, "/dashboard/../pricing")]
+    [InlineData(CloudDashboard, "/dashboard/%2e%2e/pricing")]
+    [InlineData(CloudDashboard, "/dashboard/%2f%2e%2e/pricing")]
+    [InlineData(CloudDashboard, "/dashboard/%5c%2e%2e%5cpricing")]
+    [InlineData(CloudDashboard, "/dashboard/%252f%252e%252e/pricing")]
+    [InlineData(CloudDashboard, "https://elsacloud.app/dashboard/%2f%2e%2e/pricing")]
+    [InlineData(CloudDashboard, "https://elsacloud.app/dashboard/%5c%2e%2e%5cpricing")]
+    [InlineData(CloudDashboard, "/pricing")]
     public void Unsafe_return_urls_are_rejected(string? configured, string? requested)
     {
         Assert.False(HostedBillingReturnUrls.TryResolve(configured, requested, out var resolved));
