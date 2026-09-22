@@ -145,7 +145,9 @@ public static class AdminManagedElsaRecoveryEndpoints
             {
                 return ManagedElsaInstanceEndpoints.Problem(
                     ManagedElsaInstanceEndpoints.ConflictCode(exception),
-                    "The recovery request conflicts with the current instance state.",
+                    exception.Reason == ElsaInstanceLifecycleConflictReason.RecoveryAuthorityUnavailable
+                        ? "Azure delete recovery authority is unavailable because provider correlation is missing and assignment inventory does not prove the workload is absent."
+                        : "The recovery request conflicts with the current instance state.",
                     ManagedElsaInstanceEndpoints.ConflictStatusCode(exception));
             }
             catch (KeyNotFoundException)

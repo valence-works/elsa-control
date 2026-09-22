@@ -71,6 +71,16 @@ public static class AzureProviderDeleteRecoverySupport
         return true;
     }
 
+    /// <summary>
+    /// Durable assignment inventory that already proves the workload is gone. This is
+    /// assignment-owned evidence, not a substitute for correlating a provider Delete to
+    /// the current lifecycle operation when remote resources may still exist.
+    /// </summary>
+    public static bool IsConfirmedAbsentAssignment(AzureProviderResourceAssignment? assignment) =>
+        assignment is not null &&
+        assignment.State == AzureProviderAssignmentState.Deleted &&
+        IsGroupOnly(assignment.Resources, assignment.ResourceGroupName);
+
     private static bool IsGroupOnly(
         AzureProviderResourceReferences resources,
         string resourceGroupName) =>

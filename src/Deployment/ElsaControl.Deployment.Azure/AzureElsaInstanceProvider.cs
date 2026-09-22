@@ -560,11 +560,23 @@ public sealed class AzureElsaInstanceProvider(
             var completed = assignment.LastOperationId is { } operationId
                 ? await operationStore.GetAsync(request.WorkspaceId, operationId, cancellationToken)
                 : null;
-            // The assignment retains its immutable group name after deletion; only
-            // live resource inventory is cleared by the durable store.
-            return completed is not null && assignment.Resources == new AzureProviderResourceReferences(assignment.ResourceGroupName)
-                ? await ObserveCleanupAsync(request, assignment, completed, cancellationToken)
-                : CleanupUnknown(request, "deletion.provider-evidence-unavailable");
+            if (!AzureProviderDeleteRecoverySupport.IsConfirmedAbsentAssignment(assignment))
+                return CleanupUnknown(request, "deletion.provider-evidence-unavailable");
+            if (completed is not null)
+            {
+                var observed = await ObserveCleanupAsync(request, assignment, completed, cancellationToken);
+                // Keep correlated InProgress/Unknown/ConfirmedAbsent. Only an
+                // uncorrelated LastOperationId may fall back to assignment inventory.
+                if (observed.Kind != ElsaInstanceCleanupObservationKind.Ambiguous ||
+                    !string.Equals(observed.DiagnosticCode, "deletion.provider-correlation-invalid", StringComparison.Ordinal))
+                    return observed;
+            }
+
+            return new(
+                ElsaInstanceCleanupObservationKind.ConfirmedAbsent,
+                request.OperationId,
+                request.AttemptNumber,
+                "deletion.provider-confirmed-absent");
         }
 
         var reconcile = await operationStore.GetLatestReconcileAsync(
