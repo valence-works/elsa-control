@@ -211,9 +211,6 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         if (!tags.Succeeded || tags.Value is null || !OwnsGroup(tags.Value.Value, request.Plan.WorkloadName))
             return RecoveryObservationAmbiguous(request);
 
-        if (RequireFoundation(operation.Resources) is not null)
-            return RecoveryObservationInProgress(request);
-
         var deploymentName = ResourceName(operation.Resources.FoundationDeploymentId);
         if (deploymentName is null || !string.Equals(deploymentName, FoundationDeploymentName(command), StringComparison.Ordinal))
             return RecoveryObservationAmbiguous(request);
@@ -225,10 +222,37 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         if (!deployment.Succeeded || !string.Equals(deployment.Value?.Value, "Succeeded", StringComparison.OrdinalIgnoreCase))
             return RecoveryObservationInProgress(request);
 
+        var resources = operation.Resources;
+        if (RequireFoundation(resources) is not null)
+        {
+            var outputs = await ExecuteAzAsync(command,
+                ["deployment", "group", "show", "--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command),
+                    "--name", deploymentName, "--query", "properties.outputs", "--output", "json", "--only-show-errors"],
+                ParseDeploymentOutputsAsync,
+                cancellationToken);
+            if (!outputs.Succeeded || outputs.Value is null)
+                return RecoveryObservationInProgress(
+                    request,
+                    "azure.recovery.foundation-outputs-unavailable",
+                    "The retained Azure foundation outputs are not yet available for recovery observation.");
+
+            try
+            {
+                resources = ProjectFoundation(command, outputs.Value.Value, request.Plan, deploymentName);
+            }
+            catch (ArgumentException)
+            {
+                return RecoveryObservationAmbiguous(
+                    request,
+                    "azure.recovery.foundation-outputs-invalid",
+                    "The retained Azure foundation outputs do not match the governed recovery boundary.");
+            }
+        }
+
         return new(
             AzureProviderRecoveryObservationKind.Confirmed,
             AzureProviderRunnerStep.Foundation,
-            operation.Resources,
+            resources,
             AzureProviderHealth.Unknown,
             null,
             "azure.recovery.foundation-observed",
@@ -309,12 +333,30 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     }
 
     private static AzureProviderRecoveryObservation RecoveryObservationInProgress(AzureProviderRecoveryRequest request) =>
+        RecoveryObservationInProgress(
+            request,
+            "azure.recovery.observation-in-progress",
+            "The retained Azure postcondition is not yet proven.");
+
+    private static AzureProviderRecoveryObservation RecoveryObservationInProgress(
+        AzureProviderRecoveryRequest request,
+        string code,
+        string message) =>
         new(AzureProviderRecoveryObservationKind.InProgress, null, request.Operation.Resources, AzureProviderHealth.Unknown,
-            null, "azure.recovery.observation-in-progress", "The retained Azure postcondition is not yet proven.");
+            null, code, message);
 
     private static AzureProviderRecoveryObservation RecoveryObservationAmbiguous(AzureProviderRecoveryRequest request) =>
+        RecoveryObservationAmbiguous(
+            request,
+            "azure.recovery.observation-ambiguous",
+            "The retained Azure ownership boundary is ambiguous.");
+
+    private static AzureProviderRecoveryObservation RecoveryObservationAmbiguous(
+        AzureProviderRecoveryRequest request,
+        string code,
+        string message) =>
         new(AzureProviderRecoveryObservationKind.Ambiguous, null, request.Operation.Resources, AzureProviderHealth.Unknown,
-            null, "azure.recovery.observation-ambiguous", "The retained Azure ownership boundary is ambiguous.");
+            null, code, message);
 
     private static AzureProviderRecoveryObservation RecoveryObservationUnsupported(AzureProviderRecoveryRequest request) =>
         new(AzureProviderRecoveryObservationKind.Ambiguous, null, request.Operation.Resources, AzureProviderHealth.Unknown,

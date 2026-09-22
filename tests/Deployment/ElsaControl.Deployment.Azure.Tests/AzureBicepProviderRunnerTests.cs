@@ -487,13 +487,8 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     public async Task Recovery_observer_confirms_owned_foundation_without_mutation()
     {
         var process = new FakeCommandProcess();
-        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
-        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
-        process.Success(args => args.Contains("deployment") && args.Contains("show"), "Succeeded");
-        var foundation = _fixture.FoundationResources with
-        {
-            FoundationDeploymentId = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/proof-rg/providers/Microsoft.Resources/deployments/elsa-proof-aaaaaaaaaaaa-foundation"
-        };
+        ConfigureOwnedFoundationObservation(process);
+        var foundation = RecoverableFoundationResources();
 
         var observation = await _fixture.Runner(process)
             .ObserveAsync(CreateRecoveryRequest(foundation, AzureProviderRunnerStep.Foundation));
@@ -501,7 +496,79 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         Assert.Equal(AzureProviderRecoveryObservationKind.Confirmed, observation.Kind);
         Assert.Equal(AzureProviderRunnerStep.Foundation, observation.CompletedStep);
         Assert.Equal("azure.recovery.foundation-observed", observation.Code);
-        Assert.DoesNotContain(process.Calls, call => call.Contains("create") || call.Contains("delete") || call.Contains("set"));
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_reconstructs_missing_foundation_outputs_without_mutation()
+    {
+        var process = new FakeCommandProcess();
+        ConfigureOwnedFoundationObservation(process);
+        process.Success(args => args.Contains("properties.outputs"), FoundationOutputs());
+        var partial = PartialRecoverableFoundationResources();
+
+        var observation = await _fixture.Runner(process)
+            .ObserveAsync(CreateRecoveryRequest(
+                partial,
+                AzureProviderRunnerStep.Foundation,
+                AzureProviderOperationPhase.Planned));
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.Confirmed, observation.Kind);
+        Assert.Equal(AzureProviderRunnerStep.Foundation, observation.CompletedStep);
+        Assert.Equal(_fixture.FoundationResources with { FoundationDeploymentId = partial.FoundationDeploymentId }, observation.Resources);
+        Assert.Equal("azure.recovery.foundation-observed", observation.Code);
+        Assert.Equal(4, process.Calls.Count);
+        var outputsCall = Assert.Single(process.Calls, call => call.Contains("properties.outputs"));
+        Assert.Contains(_fixture.Scope.SubscriptionId, outputsCall);
+        Assert.Contains("proof-rg", outputsCall);
+        Assert.Contains("elsa-proof-aaaaaaaaaaaa-foundation", outputsCall);
+        AssertNoProviderMutation(process);
+    }
+
+    [Theory]
+    [InlineData("missing-principal")]
+    [InlineData("foreign-identity")]
+    [InlineData("wrong-resource-group")]
+    [InlineData("malformed-client")]
+    public async Task Recovery_observer_rejects_invalid_reconstructed_foundation_outputs_without_mutation(string invalidOutput)
+    {
+        var process = new FakeCommandProcess();
+        ConfigureOwnedFoundationObservation(process);
+        process.Success(args => args.Contains("properties.outputs"), InvalidFoundationOutputs(invalidOutput));
+        var partial = PartialRecoverableFoundationResources();
+
+        var observation = await _fixture.Runner(process)
+            .ObserveAsync(CreateRecoveryRequest(
+                partial,
+                AzureProviderRunnerStep.Foundation,
+                AzureProviderOperationPhase.Planned));
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.Ambiguous, observation.Kind);
+        Assert.Null(observation.CompletedStep);
+        Assert.Equal("azure.recovery.foundation-outputs-invalid", observation.Code);
+        Assert.Equal(4, process.Calls.Count);
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_keeps_unreadable_foundation_outputs_in_progress_without_mutation()
+    {
+        var process = new FakeCommandProcess();
+        ConfigureOwnedFoundationObservation(process);
+        process.Failure(args => args.Contains("properties.outputs"));
+        var partial = PartialRecoverableFoundationResources();
+
+        var observation = await _fixture.Runner(process)
+            .ObserveAsync(CreateRecoveryRequest(
+                partial,
+                AzureProviderRunnerStep.Foundation,
+                AzureProviderOperationPhase.Planned));
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.InProgress, observation.Kind);
+        Assert.Null(observation.CompletedStep);
+        Assert.Equal("azure.recovery.foundation-outputs-unavailable", observation.Code);
+        Assert.Equal(4, process.Calls.Count);
+        AssertNoProviderMutation(process);
     }
 
     [Fact]
@@ -2603,6 +2670,49 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     public void Dispose() => _fixture.Dispose();
+
+    private AzureProviderResourceReferences RecoverableFoundationResources() => _fixture.FoundationResources with
+    {
+        FoundationDeploymentId = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/proof-rg/providers/Microsoft.Resources/deployments/elsa-proof-aaaaaaaaaaaa-foundation"
+    };
+
+    private AzureProviderResourceReferences PartialRecoverableFoundationResources() => RecoverableFoundationResources() with
+    {
+        WorkloadIdentityClientId = null,
+        WorkloadIdentityPrincipalId = null
+    };
+
+    private static void ConfigureOwnedFoundationObservation(FakeCommandProcess process)
+    {
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("properties.provisioningState"), "Succeeded");
+    }
+
+    private static void AssertNoProviderMutation(FakeCommandProcess process) =>
+        Assert.DoesNotContain(process.Calls, call => call.Any(argument =>
+            argument is "create" or "delete" or "set" or "update"));
+
+    private static string InvalidFoundationOutputs(string invalidOutput) => invalidOutput switch
+    {
+        "missing-principal" => FoundationOutputs().Replace(
+            "  \"workloadIdentityPrincipalId\": { \"value\": \"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\" },\n",
+            string.Empty,
+            StringComparison.Ordinal),
+        "foreign-identity" => FoundationOutputs().Replace(
+            "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/proof-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/proof-identity",
+            "/subscriptions/99999999-9999-9999-9999-999999999999/resourceGroups/proof-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/proof-identity",
+            StringComparison.Ordinal),
+        "wrong-resource-group" => FoundationOutputs().Replace(
+            "\"resourceGroupName\": { \"value\": \"proof-rg\" }",
+            "\"resourceGroupName\": { \"value\": \"foreign-rg\" }",
+            StringComparison.Ordinal),
+        "malformed-client" => FoundationOutputs().Replace(
+            "\"workloadIdentityClientId\": { \"value\": \"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\" }",
+            "\"workloadIdentityClientId\": { \"value\": \"not-a-guid\" }",
+            StringComparison.Ordinal),
+        _ => throw new ArgumentOutOfRangeException(nameof(invalidOutput))
+    };
 
     private static string FoundationOutputs() => """
         {
