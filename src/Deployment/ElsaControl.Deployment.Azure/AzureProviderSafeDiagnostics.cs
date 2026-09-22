@@ -144,6 +144,7 @@ internal static class AzureProviderSafeDiagnostics
         "azure.runner.step-invalid",
         "azure.runner.uncertain",
         "azure.secrets.cancelled",
+        "azure.secrets.authorization-changed",
         "azure.secrets.foundation-missing",
         "azure.secrets.inventory-invalid",
         "azure.secrets.name-invalid",

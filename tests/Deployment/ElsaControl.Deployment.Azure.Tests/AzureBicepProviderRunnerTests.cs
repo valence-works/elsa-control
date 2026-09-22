@@ -1148,6 +1148,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
 
         Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
         Assert.Equal(expectedCode, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == expectedCode);
         Assert.Single(resolver.Requests);
         Assert.Single(resolver.AuthorizationRequests);
         Assert.Equal(resolver.Requests[0], resolver.AuthorizationRequests[0]);
