@@ -45,6 +45,7 @@ jobs:
       contents: read
       id-token: write
     env:
+      TARGET_ENVIRONMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || 'production' }}
       DEPLOY_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_mode || 'app' }}
       AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
@@ -86,6 +87,10 @@ jobs:
           ADMIN_API_KEY: ${{ env.DEPLOY_MODE == 'infra' && secrets.ADMIN_API_KEY || '' }}
           BUILDER_CLIENT_API_KEY: ${{ env.DEPLOY_MODE == 'infra' && secrets.BUILDER_CLIENT_API_KEY || '' }}
           CONTROL_ENTRA_CLIENT_SECRET: ${{ env.DEPLOY_MODE == 'infra' && secrets.CONTROL_ENTRA_CLIENT_SECRET || '' }}
+          STRIPE_TEST_SECRET_KEY: ${{ env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' && secrets.STRIPE_TEST_SECRET_KEY || '' }}
+          STRIPE_TEST_WEBHOOK_SIGNING_SECRET: ${{ env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' && secrets.STRIPE_TEST_WEBHOOK_SIGNING_SECRET || '' }}
+          ELSA_CLOUD_STAGING_ORIGIN: ${{ env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' && vars.ELSA_CLOUD_STAGING_ORIGIN || '' }}
+          STRIPE_HOSTED_PRICE_ID: ${{ env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' && vars.STRIPE_HOSTED_PRICE_ID || '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -135,6 +140,20 @@ jobs:
             )
           fi
 
+          if [ "$TARGET_ENVIRONMENT" = "test" ] && [ "$DEPLOY_MODE" != "build" ]; then
+            required+=(
+              ELSA_CLOUD_STAGING_ORIGIN
+              STRIPE_HOSTED_PRICE_ID
+              STRIPE_TEST_SECRET_KEY
+              STRIPE_TEST_WEBHOOK_SIGNING_SECRET
+            )
+            if [[ "${STRIPE_TEST_SECRET_KEY:-}" != sk_test_* ]] ||
+               [[ "${STRIPE_TEST_WEBHOOK_SIGNING_SECRET:-}" != whsec_* ]]; then
+              echo "::error::The test environment Stripe credentials have an unexpected shape."
+              exit 1
+            fi
+          fi
+
           missing=()
           for name in "${required[@]}"; do
             if [ -z "${!name:-}" ]; then
@@ -168,6 +187,19 @@ jobs:
             echo "::error::Azure deployment and candidate publication are permitted only from the main branch; refusing to continue."
             exit 1
           fi
+
+      - name: Audit staging Stripe resources before deployment
+        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' }}
+        env:
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_TEST_WEBHOOK_SIGNING_SECRET }}
+          STRIPE_HOSTED_PRICE_ID: ${{ vars.STRIPE_HOSTED_PRICE_ID }}
+          CONTROL_STAGING_WEBHOOK_URL: https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net/api/billing/webhooks/stripe
+          CLOUD_PORTAL_RETURN_URL: ${{ vars.ELSA_CLOUD_STAGING_ORIGIN }}/dashboard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/staging_stripe_reconcile.py --audit-stripe-only
 
       - name: Restore
         run: dotnet restore ElsaControl.sln
@@ -720,6 +752,22 @@ jobs:
             --name "$AZURE_WEBAPP_NAME" \
             --output none
 
+      - name: Reconcile staging Stripe billing
+        id: staging-stripe
+        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' }}
+        env:
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_TEST_WEBHOOK_SIGNING_SECRET }}
+          STRIPE_HOSTED_PRICE_ID: ${{ vars.STRIPE_HOSTED_PRICE_ID }}
+          CONTROL_STAGING_WEBHOOK_URL: https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net/api/billing/webhooks/stripe
+          CLOUD_PORTAL_RETURN_URL: ${{ vars.ELSA_CLOUD_STAGING_ORIGIN }}/dashboard
+          AZURE_EXPECTED_CHECKOUT_SUCCESS_URL: ${{ vars.ELSA_CLOUD_STAGING_ORIGIN }}/checkout/return?session_id={CHECKOUT_SESSION_ID}
+          AZURE_EXPECTED_CHECKOUT_CANCEL_URL: ${{ vars.ELSA_CLOUD_STAGING_ORIGIN }}/dashboard/billing
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/staging_stripe_reconcile.py --apply-azure-settings
+
       - name: Verify deployed API health
         id: health-gate
         if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.DEPLOY_MODE != 'build' }}
@@ -798,8 +846,8 @@ jobs:
           echo "::error::API health check failed after deployment: $health_url"
           exit 1
 
-      - name: Restore previous API deployment after deployment or health failure
-        if: ${{ failure() && steps.current-deployment.outcome == 'success' && steps.current-deployment.outputs.capture_succeeded == 'true' && (steps.deploy-api.outcome == 'failure' || steps.health-gate.outcome == 'failure') }}
+      - name: Restore previous API deployment after deployment, configuration, or health failure
+        if: ${{ failure() && steps.current-deployment.outcome == 'success' && steps.current-deployment.outputs.capture_succeeded == 'true' && (steps.deploy-api.outcome == 'failure' || steps.staging-stripe.outcome == 'failure' || steps.health-gate.outcome == 'failure') }}
         env:
           PREVIOUS_LINUX_FX_VERSION: ${{ steps.current-deployment.outputs.linux_fx_version }}
           PREVIOUS_DEPLOYMENT_MODE: ${{ steps.current-deployment.outputs.deployment_mode }}
@@ -967,3 +1015,10 @@ jobs:
           fi
 
           echo "::error::API health gate failed; restored the previous deployment image and build metadata."
+
+      - name: Report recovery path for a new test environment
+        if: ${{ failure() && env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE == 'infra' && steps.current-deployment.outcome == 'success' && steps.current-deployment.outputs.capture_succeeded != 'true' && (steps.deploy-api.outcome == 'failure' || steps.staging-stripe.outcome == 'failure' || steps.health-gate.outcome == 'failure') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::error::No previous API runtime existed, so an image rollback is unavailable. The isolated test resources are retained for diagnosis; correct the failed gate and rerun the idempotent infra deployment. Delete the test resource group only through the documented environment teardown procedure."
