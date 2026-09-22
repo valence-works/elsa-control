@@ -264,17 +264,7 @@ OUTPUTS="$(az deployment sub show \
 
 output_value() {
   local name="$1"
-  OUTPUTS="$OUTPUTS" python3 - "$name" <<'PY'
-import json
-import os
-import sys
-
-outputs = json.loads(os.environ["OUTPUTS"])
-value = outputs.get(sys.argv[1], {}).get("value")
-if value is None or value == "":
-    raise SystemExit(f"Missing deployment output: {sys.argv[1]}")
-print(value)
-PY
+  printf '%s' "$OUTPUTS" | python3 scripts/read-arm-deployment-output.py "$name"
 }
 
 ACR_LOGIN_SERVER="$(output_value AZURE_CONTAINER_REGISTRY_ENDPOINT)"

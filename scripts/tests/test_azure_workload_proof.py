@@ -287,8 +287,8 @@ class AzureWorkloadProofTests(unittest.TestCase):
             if "az role assignment list" in line
         ]
         self.assertEqual(1, len(bootstrap_role_list_lines))
-        self.assertIn("--all", bootstrap_role_list_lines[0])
-        self.assertNotIn("--scope", bootstrap_role_list_lines[0])
+        self.assertNotIn("--all", bootstrap_role_list_lines[0])
+        self.assertIn('--scope "$scope"', bootstrap_role_list_lines[0])
         self.assertIn("[?scope=='$scope']", bootstrap_role_list_lines[0])
         self.assertIn("tags.acrPrincipal", source)
         self.assertIn("tags.acrRegistryId", source)

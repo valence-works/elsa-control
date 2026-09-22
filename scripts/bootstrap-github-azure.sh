@@ -200,7 +200,7 @@ ensure_role_assignment() {
   fi
 
   local existing
-  if ! existing="$(az role assignment list --assignee "$assignee" --role "$role" --all --query "[?scope=='$scope'] | [0].id" -o tsv 2>/dev/null)"; then
+  if ! existing="$(az role assignment list --assignee "$assignee" --role "$role" --scope "$scope" --query "[?scope=='$scope'] | [0].id" -o tsv 2>/dev/null)"; then
     echo "Could not verify Azure role '$role' at $scope." >&2
     return 1
   fi
@@ -262,17 +262,7 @@ if [[ -z "$OUTPUTS" || "$OUTPUTS" == "null" ]]; then
   exit 1
 fi
 
-ACR_ENDPOINT="$(OUTPUTS="$OUTPUTS" python3 - <<'PY'
-import json
-import os
-
-outputs = json.loads(os.environ["OUTPUTS"])
-value = outputs.get("AZURE_CONTAINER_REGISTRY_ENDPOINT", {}).get("value")
-if not value:
-    raise SystemExit("Missing deployment output: AZURE_CONTAINER_REGISTRY_ENDPOINT")
-print(value)
-PY
-)"
+ACR_ENDPOINT="$(printf '%s' "$OUTPUTS" | python3 scripts/read-arm-deployment-output.py AZURE_CONTAINER_REGISTRY_ENDPOINT)"
 ACR_NAME="${ACR_ENDPOINT%%.azurecr.io}"
 WEBAPP_COUNT="$(az webapp list --resource-group "$RESOURCE_GROUP" --query 'length(@)' --output tsv)"
 if [[ "$WEBAPP_COUNT" != "1" ]]; then
