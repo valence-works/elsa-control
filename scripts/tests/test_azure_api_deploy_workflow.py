@@ -30,7 +30,8 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         )
         self.assertIn('elif [ "$linux_fx_version" = "SITECONTAINERS" ]', self.source)
         self.assertIn("az webapp sitecontainers show", self.source)
-        self.assertIn("--query properties.image", self.source)
+        self.assertEqual(3, self.source.count("--query image"))
+        self.assertNotIn("--query properties.image", self.source)
         self.assertIn(
             "Could not capture the current main sitecontainer image; refusing an unprotected deployment.",
             self.source,
@@ -67,7 +68,7 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertNotIn("DEPLOY_MODE != 'build'", main_guard)
         self.assertIn("The promoted runtime did not match the validated immutable image", self.source)
         self.assertIn("--query linuxFxVersion", self.source)
-        self.assertIn("--query properties.image", self.source)
+        self.assertEqual(3, self.source.count("--query image"))
         self.assertIn(
             'current_deployment_mode="${{ steps.current-deployment.outputs.deployment_mode }}"',
             self.source,
