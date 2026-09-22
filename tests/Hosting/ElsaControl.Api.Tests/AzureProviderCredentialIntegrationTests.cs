@@ -45,8 +45,17 @@ public sealed class AzureProviderCredentialIntegrationTests : IDisposable
         var authority = AzureProviderRunnerComposition.AddRunner(services, configuration);
         Assert.NotNull(authority);
 
+        var recoveredAuthorization = Authorization(authority!.ProviderScopeFingerprint, configuredReferences, InstanceA, AssignmentA, OperationA, "managed-a1", "work-a1", "11111111-1111-1111-1111-111111111111", PrincipalA);
+        recoveredAuthorization = recoveredAuthorization with
+        {
+            Operation = recoveredAuthorization.Operation with
+            {
+                Phase = AzureProviderOperationPhase.AcrPullObserved,
+                AttemptNumber = 2
+            }
+        };
         var authorization = new RecordingAuthorizationStore(
-            Authorization(authority!.ProviderScopeFingerprint, configuredReferences, InstanceA, AssignmentA, OperationA, "managed-a1", "work-a1", "11111111-1111-1111-1111-111111111111", PrincipalA),
+            recoveredAuthorization,
             Authorization(authority.ProviderScopeFingerprint, configuredReferences, InstanceB, AssignmentB, OperationB, "managed-b2", "work-b2", "22222222-2222-2222-2222-222222222222", PrincipalB));
         var reader = new RecordingKeyVaultReader();
         services.AddScoped<IAzureSecretAuthorizationStore>(_ => authorization);
@@ -57,7 +66,11 @@ public sealed class AzureProviderCredentialIntegrationTests : IDisposable
         var resolver = Assert.IsType<ManagedIdentityAzureSecretResolver>(scope.ServiceProvider.GetRequiredService<IAzureSecretResolver>());
         var runner = Assert.IsType<AzureBicepProviderRunner>(scope.ServiceProvider.GetRequiredService<IAzureProviderRunner>());
         var plan = Plan(configuredReferences);
-        var commandA = Command(authority, plan, InstanceA, AssignmentA, OperationA, "managed-a1", "work-a1", "11111111-1111-1111-1111-111111111111", PrincipalA);
+        var commandA = Command(authority, plan, InstanceA, AssignmentA, OperationA, "managed-a1", "work-a1", "11111111-1111-1111-1111-111111111111", PrincipalA) with
+        {
+            IsResume = true,
+            AttemptNumber = 2
+        };
         var commandB = Command(authority, plan, InstanceB, AssignmentB, OperationB, "managed-b2", "work-b2", "22222222-2222-2222-2222-222222222222", PrincipalB);
 
         var firstA = await runner.RunAsync(commandA);
@@ -257,7 +270,7 @@ public sealed class AzureProviderCredentialIntegrationTests : IDisposable
         string principalId) =>
         new(
             Assignment(scopeFingerprint, instanceId, assignmentId, operationId, resourceGroup, workloadName, clientId, principalId, Resources(resourceGroup, workloadName, clientId, principalId)),
-            Operation(scopeFingerprint, configuredReferences, instanceId, assignmentId, operationId, workloadName));
+            Operation(scopeFingerprint, configuredReferences, instanceId, assignmentId, operationId, resourceGroup, workloadName, clientId, principalId));
 
     private static AzureProviderOperation Operation(
         string scopeFingerprint,
@@ -265,7 +278,10 @@ public sealed class AzureProviderCredentialIntegrationTests : IDisposable
         Guid instanceId,
         Guid assignmentId,
         Guid operationId,
-        string workloadName) => new(
+        string resourceGroup,
+        string workloadName,
+        string clientId,
+        string principalId) => new(
         operationId,
         WorkspaceId,
         workloadName,
@@ -289,7 +305,7 @@ public sealed class AzureProviderCredentialIntegrationTests : IDisposable
         1,
         1,
         1,
-        new AzureProviderResourceReferences(),
+        Resources(resourceGroup, workloadName, clientId, principalId),
         null,
         AzureProviderHealth.Unknown,
         [],
@@ -304,7 +320,8 @@ public sealed class AzureProviderCredentialIntegrationTests : IDisposable
         OrganizationId: OrganizationId,
         InstanceId: instanceId,
         LifecycleAction: ElsaControl.Deployment.Abstractions.Instances.ElsaInstanceOperationAction.Reconcile,
-        ProviderAssignmentId: assignmentId);
+        ProviderAssignmentId: assignmentId,
+        AttemptedStep: AzureProviderRunnerStep.SeedSecrets);
 
     public void Dispose()
     {

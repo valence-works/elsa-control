@@ -243,6 +243,104 @@ public sealed class ManagedIdentityAzureSecretResolverTests
         Assert.Equal(0, reader.Calls);
     }
 
+    [Fact]
+    public async Task Authorizes_secret_resolution_from_the_exact_recovered_acr_boundary()
+    {
+        var reader = new FakeReader();
+        var current = ProviderOwnedAuthorization();
+        var authorization = current with
+        {
+            Operation = current.Operation with
+            {
+                Phase = AzureProviderOperationPhase.AcrPullObserved,
+                AttemptNumber = 2,
+                AttemptedStep = AzureProviderRunnerStep.SeedSecrets,
+                Resources = RecoveredResources()
+            }
+        };
+        var resolver = new ManagedIdentityAzureSecretResolver(new FakeAuthorizationStore(authorization), reader);
+        var request = RequestFor(
+            InstanceId,
+            AzureManagedSecretReferences.IdentitySigningKeyName,
+            AzureManagedSecretReferences.IdentitySigningKey) with
+        {
+            AttemptNumber = 2
+        };
+
+        Assert.True(await resolver.IsAuthorizedAsync(request));
+        await using var lease = await resolver.ResolveAsync(request);
+
+        Assert.True(lease.Value.Length >= 64);
+        Assert.Equal(0, reader.Calls);
+    }
+
+    [Fact]
+    public async Task Rejects_a_recovered_seed_boundary_with_later_workload_handles()
+    {
+        var reader = new FakeReader();
+        var current = ProviderOwnedAuthorization();
+        var authorization = current with
+        {
+            Operation = current.Operation with
+            {
+                Phase = AzureProviderOperationPhase.AcrPullObserved,
+                AttemptNumber = 2,
+                AttemptedStep = AzureProviderRunnerStep.SeedSecrets,
+                Resources = RecoveredResources() with
+                {
+                    WorkloadResourceId = "/subscriptions/66666666-6666-6666-6666-666666666666/resourceGroups/workload-rg/providers/Microsoft.App/containerApps/workload-app"
+                }
+            }
+        };
+        var resolver = new ManagedIdentityAzureSecretResolver(new FakeAuthorizationStore(authorization), reader);
+        var request = RequestFor(
+            InstanceId,
+            AzureManagedSecretReferences.IdentitySigningKeyName,
+            AzureManagedSecretReferences.IdentitySigningKey) with
+        {
+            AttemptNumber = 2
+        };
+
+        Assert.False(await resolver.IsAuthorizedAsync(request));
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await resolver.ResolveAsync(request));
+        Assert.Equal(0, reader.Calls);
+    }
+
+    [Theory]
+    [InlineData(AzureProviderOperationPhase.AcrPullObserved, 1, AzureProviderRunnerStep.SeedSecrets)]
+    [InlineData(AzureProviderOperationPhase.AcrPullObserved, 2, AzureProviderRunnerStep.AcrPull)]
+    [InlineData(AzureProviderOperationPhase.FoundationSubmitted, 1, AzureProviderRunnerStep.AcrPull)]
+    [InlineData(AzureProviderOperationPhase.SeedSecretsObserved, 2, AzureProviderRunnerStep.SeedSecrets)]
+    public async Task Rejects_secret_resolution_outside_an_exact_fresh_seed_boundary(
+        AzureProviderOperationPhase phase,
+        int attemptNumber,
+        AzureProviderRunnerStep attemptedStep)
+    {
+        var reader = new FakeReader();
+        var current = ProviderOwnedAuthorization();
+        var authorization = current with
+        {
+            Operation = current.Operation with
+            {
+                Phase = phase,
+                AttemptNumber = attemptNumber,
+                AttemptedStep = attemptedStep
+            }
+        };
+        var resolver = new ManagedIdentityAzureSecretResolver(new FakeAuthorizationStore(authorization), reader);
+        var request = RequestFor(
+            InstanceId,
+            AzureManagedSecretReferences.IdentitySigningKeyName,
+            AzureManagedSecretReferences.IdentitySigningKey) with
+        {
+            AttemptNumber = attemptNumber
+        };
+
+        Assert.False(await resolver.IsAuthorizedAsync(request));
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await resolver.ResolveAsync(request));
+        Assert.Equal(0, reader.Calls);
+    }
+
     [Theory]
     [InlineData("EmptyOperation")]
     [InlineData("ZeroAttempt")]
@@ -504,6 +602,18 @@ public sealed class ManagedIdentityAzureSecretResolverTests
         SqlServerResourceId: "/subscriptions/66666666-6666-6666-6666-666666666666/resourceGroups/workload-rg/providers/Microsoft.Sql/servers/workload-sql",
         SqlServerFqdn: "workload-sql.database.windows.net");
 
+    private static AzureProviderResourceReferences RecoveredResources() => SqlResources() with
+    {
+        FoundationDeploymentId = "/subscriptions/66666666-6666-6666-6666-666666666666/resourceGroups/workload-rg/providers/Microsoft.Resources/deployments/workload-foundation",
+        WorkloadIdentityPrincipalId = "88888888-8888-8888-8888-888888888888",
+        KeyVaultResourceId = "/subscriptions/66666666-6666-6666-6666-666666666666/resourceGroups/workload-rg/providers/Microsoft.KeyVault/vaults/workload-kv",
+        KeyVaultUri = "https://workload-kv.vault.azure.net/",
+        ContainerAppsEnvironmentResourceId = "/subscriptions/66666666-6666-6666-6666-666666666666/resourceGroups/workload-rg/providers/Microsoft.App/managedEnvironments/workload-aca",
+        RegistryResourceId = "/subscriptions/66666666-6666-6666-6666-666666666666/resourceGroups/registry-rg/providers/Microsoft.ContainerRegistry/registries/runtime",
+        AcrPullDeploymentId = "/subscriptions/66666666-6666-6666-6666-666666666666/resourceGroups/registry-rg/providers/Microsoft.Resources/deployments/workload-acr",
+        AcrPullRoleAssignmentId = "/subscriptions/66666666-6666-6666-6666-666666666666/resourceGroups/registry-rg/providers/Microsoft.ContainerRegistry/registries/runtime/providers/Microsoft.Authorization/roleAssignments/99999999-9999-9999-9999-999999999999"
+    };
+
     private static AzureSecretResolutionRequest Request() => new(
         WorkspaceId,
         OrganizationId,
@@ -591,7 +701,8 @@ public sealed class ManagedIdentityAzureSecretResolverTests
         OrganizationId: OrganizationId,
         InstanceId: InstanceId,
         LifecycleAction: ElsaControl.Deployment.Abstractions.Instances.ElsaInstanceOperationAction.Create,
-        ProviderAssignmentId: AssignmentId);
+        ProviderAssignmentId: AssignmentId,
+        AttemptedStep: AzureProviderRunnerStep.SeedSecrets);
 
     private sealed class FakeAuthorizationStore(AzureSecretAuthorization authorization) : IAzureSecretAuthorizationStore
     {

@@ -458,7 +458,7 @@ public sealed class ManagedIdentityAzureSecretResolver : IAzureSecretResolver
             // resumed operation keeps the fingerprint it was admitted with.
             operation.Status != AzureProviderOperationStatus.Running ||
             operation.Action != AzureProviderOperationAction.Reconcile ||
-            operation.Phase != AzureProviderOperationPhase.FoundationSubmitted ||
+            !IsAuthorizedSeedSecretsBoundary(operation) ||
             operation.LeaseExpiresAt is not { } leaseExpiresAt || leaseExpiresAt <= now ||
             string.IsNullOrWhiteSpace(operation.WorkerId) ||
             operation.PersistedMetadataInvalid ||
@@ -482,6 +482,12 @@ public sealed class ManagedIdentityAzureSecretResolver : IAzureSecretResolver
         return locator is not null &&
             AzureProviderOperationValidation.IsSecretReferenceBoundToKey(request.Name, request.Reference);
     }
+
+    private static bool IsAuthorizedSeedSecretsBoundary(AzureProviderOperation operation) =>
+        operation.AttemptedStep == AzureProviderRunnerStep.SeedSecrets &&
+        (operation.Phase == AzureProviderOperationPhase.FoundationSubmitted ||
+         (operation.AttemptNumber > 1 &&
+          AzureProviderRecoveryObservationSupport.IsSeedSecretsEligible(operation)));
 
     private static bool HasAuthorizedSqlResources(AzureProviderResourceAssignment assignment)
     {
