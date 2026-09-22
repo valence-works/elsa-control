@@ -95,13 +95,36 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
     public void Recovery_required_is_stale_and_blocks_the_last_known_stage()
     {
         var result = Project(
-            lifecycleState: ElsaInstanceOperationState.RecoveryRequired,
+            lifecycleState: ElsaInstanceOperationState.Running,
             provider: Provider(AzureProviderOperationStatus.RecoveryRequired, AzureProviderOperationPhase.WorkloadSubmitted),
             transitions: [Transition(1, AzureProviderOperationPhase.WorkloadSubmitted)]);
 
         Assert.Equal(ManagedElsaProvisioningProgressStates.Stale, result.State);
         Assert.Equal(ManagedElsaProvisioningProgressDiagnostics.RequiresAttention, result.DiagnosticCode);
         Assert.Equal(ManagedElsaProvisioningProgressStageStatuses.Blocked, result.Stages[3].Status);
+        Assert.Contains(result.Activity, entry => entry.Status == ManagedElsaProvisioningProgressActivityStatuses.Blocked);
+    }
+
+    [Fact]
+    public void Lifecycle_recovery_with_running_provider_keeps_progress_active()
+    {
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.RecoveryRequired,
+            provider: Provider(AzureProviderOperationStatus.Running, AzureProviderOperationPhase.WorkloadSubmitted),
+            transitions: [Transition(1, AzureProviderOperationPhase.WorkloadSubmitted)]);
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Active, result.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.RuntimeDeployment, result.CurrentStage);
+        Assert.DoesNotContain(result.Activity, entry => entry.Status == ManagedElsaProvisioningProgressActivityStatuses.Blocked);
+    }
+
+    [Fact]
+    public void Lifecycle_recovery_without_provider_remains_stale()
+    {
+        var result = Project(lifecycleState: ElsaInstanceOperationState.RecoveryRequired);
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Stale, result.State);
+        Assert.Equal(ManagedElsaProvisioningProgressDiagnostics.RequiresAttention, result.DiagnosticCode);
         Assert.Contains(result.Activity, entry => entry.Status == ManagedElsaProvisioningProgressActivityStatuses.Blocked);
     }
 

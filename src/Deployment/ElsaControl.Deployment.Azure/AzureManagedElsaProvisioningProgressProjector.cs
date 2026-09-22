@@ -126,7 +126,8 @@ public static class AzureManagedElsaProvisioningProgressProjector
                 : ManagedElsaProvisioningProgressDiagnostics.Failed;
             blocked = true;
         }
-        else if (lifecycleState == ElsaInstanceOperationState.RecoveryRequired ||
+        else if ((lifecycleState == ElsaInstanceOperationState.RecoveryRequired &&
+                  provider?.Status != AzureProviderOperationStatus.Running) ||
                  (!lifecycleTerminal && provider?.Status == AzureProviderOperationStatus.RecoveryRequired))
         {
             state = ManagedElsaProvisioningProgressStates.Stale;
