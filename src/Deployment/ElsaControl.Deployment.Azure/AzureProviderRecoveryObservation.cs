@@ -258,6 +258,7 @@ public static class AzureProviderRecoveryObservationSupport
         AzureProviderOperationPhase observedPhase)
     {
         if (completedStep is not (AzureProviderRunnerStep.Foundation or AzureProviderRunnerStep.AcrPull or
+            AzureProviderRunnerStep.SeedSecrets or
             AzureProviderRunnerStep.SqlFirewallCreate or AzureProviderRunnerStep.SqlBootstrapScript or
             AzureProviderRunnerStep.SqlFirewallCleanup))
             return false;
@@ -287,6 +288,10 @@ public static class AzureProviderRecoveryObservationSupport
             completedStep == AzureProviderRunnerStep.SqlBootstrap)
             return false;
 
+        if (attemptedStep == AzureProviderRunnerStep.SeedSecrets &&
+            currentPhase != AzureProviderOperationPhase.AcrPullObserved)
+            return false;
+
         if (attemptedStep is AzureProviderRunnerStep.SqlFirewallCreate or
                 AzureProviderRunnerStep.SqlBootstrapScript or
                 AzureProviderRunnerStep.SqlFirewallCleanup)
@@ -306,9 +311,12 @@ public static class AzureProviderRecoveryObservationSupport
         return attemptedStep is null
             ? completedStep == AzureProviderRunnerStep.Foundation
             : attemptedStep == completedStep ||
-              attemptedStep == AzureProviderRunnerStep.SqlFirewallCleanup &&
-              completedStep == AzureProviderRunnerStep.SqlBootstrapScript &&
-              currentPhase == AzureProviderOperationPhase.SqlBootstrapReady;
+              (attemptedStep == AzureProviderRunnerStep.SeedSecrets &&
+               completedStep == AzureProviderRunnerStep.AcrPull &&
+               currentPhase == AzureProviderOperationPhase.AcrPullObserved) ||
+              (attemptedStep == AzureProviderRunnerStep.SqlFirewallCleanup &&
+               completedStep == AzureProviderRunnerStep.SqlBootstrapScript &&
+               currentPhase == AzureProviderOperationPhase.SqlBootstrapReady);
     }
 
     private static bool HasFoundationAndRegistry(AzureProviderOperation operation) =>
@@ -329,6 +337,15 @@ public static class AzureProviderRecoveryObservationSupport
         operation.Resources.WorkloadResourceId is null &&
         operation.Resources.WorkloadRevisionName is null &&
         operation.Resources.StableTrafficRevisionName is null;
+
+    /// <summary>
+    /// Secret-seeding recovery is valid only after the independently observed registry boundary
+    /// and before SQL, workload or traffic has retained any later provider handle.
+    /// </summary>
+    public static bool IsSeedSecretsEligible(AzureProviderOperation operation) =>
+        operation.Phase == AzureProviderOperationPhase.AcrPullObserved &&
+        operation.AttemptedStep == AzureProviderRunnerStep.SeedSecrets &&
+        HasFoundationAndRegistry(operation);
 
     /// <summary>SQL firewall creation may be recovered only from the pre-SQL foundation phase.</summary>
     public static bool IsSqlFirewallCreateEligible(AzureProviderOperation operation) =>
