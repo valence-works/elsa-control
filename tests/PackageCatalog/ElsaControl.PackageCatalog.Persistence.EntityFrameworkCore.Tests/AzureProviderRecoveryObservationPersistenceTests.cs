@@ -25,7 +25,11 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
     [InlineData(AzureProviderRunnerStep.SqlFirewallCleanup, AzureProviderOperationPhase.SqlBootstrapReady, AzureProviderRunnerStep.SqlBootstrapScript, AzureProviderOperationPhase.SqlBootstrapReady, true)]
     [InlineData(AzureProviderRunnerStep.SqlBootstrapScript, AzureProviderOperationPhase.SqlFirewallReady, AzureProviderRunnerStep.SqlFirewallCleanup, AzureProviderOperationPhase.FoundationReady, false)]
     [InlineData(AzureProviderRunnerStep.SqlFirewallCreate, AzureProviderOperationPhase.SeedSecretsObserved, AzureProviderRunnerStep.SqlBootstrapScript, AzureProviderOperationPhase.SqlBootstrapReady, false)]
-    public async Task Sql_recovery_ledger_accepts_only_the_exact_durable_stage_or_proven_cleanup_replay(
+    [InlineData(AzureProviderRunnerStep.SeedSecrets, AzureProviderOperationPhase.AcrPullObserved, AzureProviderRunnerStep.AcrPull, AzureProviderOperationPhase.AcrPullObserved, true)]
+    [InlineData(AzureProviderRunnerStep.SeedSecrets, AzureProviderOperationPhase.AcrPullObserved, AzureProviderRunnerStep.SeedSecrets, AzureProviderOperationPhase.SeedSecretsObserved, true)]
+    [InlineData(AzureProviderRunnerStep.SeedSecrets, AzureProviderOperationPhase.FoundationSubmitted, AzureProviderRunnerStep.AcrPull, AzureProviderOperationPhase.AcrPullObserved, false)]
+    [InlineData(AzureProviderRunnerStep.SeedSecrets, AzureProviderOperationPhase.FoundationSubmitted, AzureProviderRunnerStep.SeedSecrets, AzureProviderOperationPhase.SeedSecretsObserved, false)]
+    public async Task Recovery_ledger_accepts_only_the_exact_durable_stage_or_proven_replay_boundary(
         AzureProviderRunnerStep attemptedStep,
         AzureProviderOperationPhase currentPhase,
         AzureProviderRunnerStep completedStep,

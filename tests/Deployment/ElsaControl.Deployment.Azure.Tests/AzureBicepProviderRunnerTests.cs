@@ -702,6 +702,132 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Recovery_observer_authorizes_seed_replay_from_acr_when_all_expected_secrets_are_absent()
+    {
+        var process = new FakeCommandProcess();
+        for (var index = 0; index < 3; index++)
+            process.Success(args => args.Contains("secret") && args.Contains("list"), "[]");
+        var request = CreateRecoveryRequest(
+            SqlFoundationResources(),
+            AzureProviderRunnerStep.SeedSecrets,
+            AzureProviderOperationPhase.AcrPullObserved,
+            ManagedSecretPlan());
+
+        var observation = await _fixture.Runner(process).ObserveAsync(request);
+
+        observation.Validate();
+        Assert.Equal(AzureProviderRecoveryObservationKind.Confirmed, observation.Kind);
+        Assert.Equal(AzureProviderRunnerStep.AcrPull, observation.CompletedStep);
+        Assert.Equal("azure.recovery.seed-secrets-absent", observation.Code);
+        Assert.Equal(3, process.Calls.Count);
+        AssertReadOnlySecretObservation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_confirms_seed_completion_when_all_expected_secrets_have_exact_metadata()
+    {
+        var process = new FakeCommandProcess();
+        var request = CreateRecoveryRequest(
+            SqlFoundationResources(),
+            AzureProviderRunnerStep.SeedSecrets,
+            AzureProviderOperationPhase.AcrPullObserved,
+            ManagedSecretPlan());
+        foreach (var secretName in new[] { "admin-password", "sql-connection", "identity-signing-key" })
+            process.Success(args => args.Contains("secret") && args.Contains("list"), OwnedSecretMetadata(request, secretName));
+
+        var observation = await _fixture.Runner(process).ObserveAsync(request);
+
+        observation.Validate();
+        Assert.Equal(AzureProviderRecoveryObservationKind.Confirmed, observation.Kind);
+        Assert.Equal(AzureProviderRunnerStep.SeedSecrets, observation.CompletedStep);
+        Assert.Equal("azure.recovery.seed-secrets-observed", observation.Code);
+        Assert.Equal(3, process.Calls.Count);
+        AssertReadOnlySecretObservation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_rejects_partial_secret_inventory_without_mutation()
+    {
+        var process = new FakeCommandProcess();
+        var request = CreateRecoveryRequest(
+            SqlFoundationResources(),
+            AzureProviderRunnerStep.SeedSecrets,
+            AzureProviderOperationPhase.AcrPullObserved,
+            ManagedSecretPlan());
+        process.Success(args => args.Contains("secret") && args.Contains("list"), OwnedSecretMetadata(request, "admin-password"));
+        process.Success(args => args.Contains("secret") && args.Contains("list"), "[]");
+        process.Success(args => args.Contains("secret") && args.Contains("list"), "[]");
+
+        var observation = await _fixture.Runner(process).ObserveAsync(request);
+
+        observation.Validate();
+        Assert.Equal(AzureProviderRecoveryObservationKind.Ambiguous, observation.Kind);
+        Assert.Null(observation.CompletedStep);
+        Assert.Equal("azure.recovery.seed-secrets-partial", observation.Code);
+        AssertReadOnlySecretObservation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_rejects_foreign_secret_metadata_without_mutation()
+    {
+        var process = new FakeCommandProcess();
+        var request = CreateRecoveryRequest(
+            SqlFoundationResources(),
+            AzureProviderRunnerStep.SeedSecrets,
+            AzureProviderOperationPhase.AcrPullObserved,
+            ManagedSecretPlan());
+        process.Success(args => args.Contains("secret") && args.Contains("list"),
+            "[{\"managedBy\":\"elsa-control\",\"assignmentId\":\"00000000-0000-0000-0000-000000000001\",\"instanceId\":\"00000000-0000-0000-0000-000000000002\",\"secretSlot\":\"admin-password\",\"generation\":\"provider-v1\"}]");
+
+        var observation = await _fixture.Runner(process).ObserveAsync(request);
+
+        observation.Validate();
+        Assert.Equal(AzureProviderRecoveryObservationKind.Ambiguous, observation.Kind);
+        Assert.Null(observation.CompletedStep);
+        AssertReadOnlySecretObservation(process);
+    }
+
+    [Theory]
+    [InlineData("[{},{}]")]
+    [InlineData("[null]")]
+    public async Task Recovery_observer_rejects_duplicate_or_malformed_secret_inventory_without_mutation(string inventory)
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("secret") && args.Contains("list"), inventory);
+        var request = CreateRecoveryRequest(
+            SqlFoundationResources(),
+            AzureProviderRunnerStep.SeedSecrets,
+            AzureProviderOperationPhase.AcrPullObserved,
+            ManagedSecretPlan());
+
+        var observation = await _fixture.Runner(process).ObserveAsync(request);
+
+        observation.Validate();
+        Assert.Equal(AzureProviderRecoveryObservationKind.Ambiguous, observation.Kind);
+        Assert.Null(observation.CompletedStep);
+        AssertReadOnlySecretObservation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_keeps_unavailable_secret_inventory_in_progress_without_mutation()
+    {
+        var process = new FakeCommandProcess();
+        process.Failure(args => args.Contains("secret") && args.Contains("list"));
+        var request = CreateRecoveryRequest(
+            SqlFoundationResources(),
+            AzureProviderRunnerStep.SeedSecrets,
+            AzureProviderOperationPhase.AcrPullObserved,
+            ManagedSecretPlan());
+
+        var observation = await _fixture.Runner(process).ObserveAsync(request);
+
+        observation.Validate();
+        Assert.Equal(AzureProviderRecoveryObservationKind.InProgress, observation.Kind);
+        Assert.Null(observation.CompletedStep);
+        AssertReadOnlySecretObservation(process);
+    }
+
+    [Fact]
     public async Task Recovery_observer_confirms_an_exact_owned_sql_firewall_create_without_mutation()
     {
         var process = new FakeCommandProcess();
@@ -855,6 +981,19 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
 
         Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
         Assert.Equal("azure.runner.scope-invalid", result.Code);
+        Assert.Empty(process.Calls);
+    }
+
+    [Fact]
+    public async Task Rejects_a_step_replay_that_is_not_bound_to_a_resumed_operation()
+    {
+        var process = new FakeCommandProcess();
+        var command = _fixture.Command(AzureProviderRunnerStep.Foundation) with { IsStepReplay = true };
+
+        var result = await _fixture.Runner(process).RunAsync(command);
+
+        Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
+        Assert.Equal("azure.runner.input-invalid", result.Code);
         Assert.Empty(process.Calls);
     }
 
@@ -1132,12 +1271,85 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
-    public async Task Resumed_provider_owned_seed_fails_closed_when_secret_is_absent()
+    public async Task New_sql_secret_records_the_same_safe_ownership_metadata()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("secret") && args.Contains("list"), "[]");
+        string[]? setArguments = null;
+        process.Success(args =>
+        {
+            setArguments = args;
+            return args.Contains("secret") && args.Contains("set");
+        });
+        var command = GeneratedAdminSeedCommand() with
+        {
+            Plan = _fixture.Plan with
+            {
+                SecretReferences = new Dictionary<string, string>
+                {
+                    [AzureManagedSecretReferences.DatabaseConnectionStringName] = AzureManagedSecretReferences.SqlConnection
+                }
+            }
+        };
+
+        var result = await _fixture.Runner(process, new RecordingSecretResolver("sql-value")).RunAsync(command);
+
+        Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
+        Assert.NotNull(setArguments);
+        Assert.Contains("--tags", setArguments!);
+        Assert.Contains("secret-slot=sql-connection", setArguments!);
+        Assert.Contains("generation=provider-v1", setArguments!);
+        Assert.DoesNotContain("sql-value", string.Join(" ", setArguments!), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Resumed_operation_can_run_provider_owned_seed_for_the_first_time()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("secret") && args.Contains("list"), "[]");
+        process.Success(args => args.Contains("secret") && args.Contains("set"));
+        var resolver = new RecordingSecretResolver("generated-value");
+        var command = GeneratedAdminSeedCommand(resume: true);
+
+        var result = await _fixture.Runner(process, resolver).RunAsync(command);
+
+        Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
+        Assert.Single(resolver.Requests);
+        Assert.Contains(process.Calls, call => call.Contains("secret") && call.Contains("set"));
+    }
+
+    [Fact]
+    public async Task Replayed_provider_owned_seed_fails_closed_when_secret_is_absent()
     {
         var process = new FakeCommandProcess();
         process.Success(args => args.Contains("secret") && args.Contains("list"), "[]");
         var resolver = new RecordingSecretResolver("must-not-be-generated");
-        var command = GeneratedAdminSeedCommand(resume: true);
+        var command = GeneratedAdminSeedCommand(resume: true, stepReplay: true);
+
+        var result = await _fixture.Runner(process, resolver).RunAsync(command);
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal("azure.secrets.recovery-required", result.Code);
+        Assert.Empty(resolver.Requests);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("secret") && call.Contains("set"));
+    }
+
+    [Fact]
+    public async Task Replayed_sql_seed_fails_closed_when_secret_is_absent()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("secret") && args.Contains("list"), "[]");
+        var resolver = new RecordingSecretResolver("must-not-be-generated");
+        var command = GeneratedAdminSeedCommand(resume: true, stepReplay: true) with
+        {
+            Plan = _fixture.Plan with
+            {
+                SecretReferences = new Dictionary<string, string>
+                {
+                    [AzureManagedSecretReferences.DatabaseConnectionStringName] = AzureManagedSecretReferences.SqlConnection
+                }
+            }
+        };
 
         var result = await _fixture.Runner(process, resolver).RunAsync(command);
 
@@ -2693,6 +2905,12 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         Assert.DoesNotContain(process.Calls, call => call.Any(argument =>
             argument is "create" or "delete" or "set" or "update"));
 
+    private static void AssertReadOnlySecretObservation(FakeCommandProcess process)
+    {
+        AssertNoProviderMutation(process);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("secret") && call.Contains("show"));
+    }
+
     private static string InvalidFoundationOutputs(string invalidOutput) => invalidOutput switch
     {
         "missing-principal" => FoundationOutputs().Replace(
@@ -2891,28 +3109,30 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     private AzureProviderRecoveryRequest CreateRecoveryRequest(
         AzureProviderResourceReferences resources,
         AzureProviderRunnerStep attemptedStep,
-        AzureProviderOperationPhase phase = AzureProviderOperationPhase.FoundationSubmitted)
+        AzureProviderOperationPhase phase = AzureProviderOperationPhase.FoundationSubmitted,
+        AzureWorkloadPlan? recoveryPlan = null)
     {
-        var context = _fixture.Context;
+        var plan = recoveryPlan ?? _fixture.Plan;
+        var context = _fixture.Context with { PlanFingerprint = plan.Fingerprint };
         var operation = new AzureProviderOperation(
             context.OperationId,
             context.WorkspaceId,
-            _fixture.Plan.WorkloadName,
+            plan.WorkloadName,
             AzureProviderOperationAction.Reconcile,
             context.IdempotencyKey,
             new string('c', 64),
             context.OperationIdentity,
-            _fixture.Plan.Fingerprint,
+            plan.Fingerprint,
             context.TemplateFingerprint,
-            _fixture.Plan.ElsaVersion,
-            _fixture.Plan.ReleaseLine,
-            _fixture.Plan.Topology,
-            _fixture.Plan.Isolation,
-            _fixture.Plan.Location,
-            _fixture.Plan.ImageRepository,
-            "sha256:" + _fixture.Plan.ImageDigest,
-            _fixture.Plan.ReleaseManifestDigest,
-            _fixture.Plan.ReleaseManifestSignatureDigest,
+            plan.ElsaVersion,
+            plan.ReleaseLine,
+            plan.Topology,
+            plan.Isolation,
+            plan.Location,
+            plan.ImageRepository,
+            "sha256:" + plan.ImageDigest,
+            plan.ReleaseManifestDigest,
+            plan.ReleaseManifestSignatureDigest,
             AzureProviderOperationStatus.RecoveryRequired,
             phase,
             2,
@@ -2928,19 +3148,19 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
             DateTimeOffset.UtcNow,
             DateTimeOffset.UtcNow,
             null,
-            _fixture.Plan.ReleaseManifestReference,
-            _fixture.Plan.ReleaseManifestSignatureReference,
-            _fixture.Plan.SecretReferences,
+            plan.ReleaseManifestReference,
+            plan.ReleaseManifestSignatureReference,
+            plan.SecretReferences,
             false,
             context.ProviderScopeFingerprint,
-            _fixture.Plan.SqlWorkflowPackageVersion,
-            _fixture.Plan.SqlQuartzPackageVersion,
+            plan.SqlWorkflowPackageVersion,
+            plan.SqlQuartzPackageVersion,
             context.OrganizationId,
             context.InstanceId,
             ElsaInstanceOperationAction.Reconcile,
             Guid.Parse(context.ProviderAssignmentId),
             attemptedStep,
-            _fixture.Plan.Capacity);
+            plan.Capacity);
         var assignmentId = Guid.Parse(context.ProviderAssignmentId);
         var assignment = new AzureProviderResourceAssignment(
             assignmentId,
@@ -2951,16 +3171,16 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
             1,
             _fixture.Scope.SubscriptionId,
             _fixture.Scope.ResourceGroupName,
-            _fixture.Plan.WorkloadName,
+            plan.WorkloadName,
             new string('d', 64),
-            _fixture.Plan.Location,
+            plan.Location,
             AzureProviderAssignmentState.Active,
             resources,
             operation.Id,
             1,
             DateTimeOffset.UtcNow,
             DateTimeOffset.UtcNow);
-        return new(operation, _fixture.Plan, assignment);
+        return new(operation, plan, assignment);
     }
 
     private AzureProviderResourceReferences SqlFoundationResources() => _fixture.FoundationResources with
@@ -2969,6 +3189,19 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         AcrPullDeploymentId = _fixture.RegistryDeploymentId,
         AcrPullRoleAssignmentId = _fixture.RegistryRoleAssignmentId
     };
+
+    private AzureWorkloadPlan ManagedSecretPlan() => _fixture.Plan with
+    {
+        SecretReferences = new Dictionary<string, string>
+        {
+            [AzureManagedSecretReferences.DatabaseConnectionStringName] = AzureManagedSecretReferences.SqlConnection,
+            [AzureManagedSecretReferences.IdentitySigningKeyName] = AzureManagedSecretReferences.IdentitySigningKey,
+            [AzureManagedSecretReferences.AdminPasswordName] = AzureManagedSecretReferences.AdminPassword
+        }
+    };
+
+    private static string OwnedSecretMetadata(AzureProviderRecoveryRequest request, string secretName) =>
+        $"[{{\"managedBy\":\"elsa-control\",\"assignmentId\":\"{request.Assignment!.Id:D}\",\"instanceId\":\"{request.Operation.InstanceId:D}\",\"secretSlot\":\"{secretName}\",\"generation\":\"provider-v1\"}}]";
 
     private sealed class RunnerFixture : IDisposable
     {
@@ -3039,7 +3272,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         public void Dispose() => Directory.Delete(_root, recursive: true);
     }
 
-    private AzureProviderRunnerCommand GeneratedAdminSeedCommand(bool resume = false)
+    private AzureProviderRunnerCommand GeneratedAdminSeedCommand(bool resume = false, bool stepReplay = false)
     {
         return _fixture.Command(AzureProviderRunnerStep.SeedSecrets, _fixture.FoundationResources with
         {
@@ -3049,6 +3282,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         }) with
         {
             IsResume = resume,
+            IsStepReplay = stepReplay,
             AttemptNumber = resume ? 2 : 1,
             Plan = _fixture.Plan with
             {

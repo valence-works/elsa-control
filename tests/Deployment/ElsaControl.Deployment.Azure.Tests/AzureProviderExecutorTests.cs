@@ -312,6 +312,8 @@ public sealed class AzureProviderExecutorTests
         Assert.Equal(AzureProviderOperationStatus.Succeeded, resumed.Operation.Status);
         Assert.Equal(10, runner.Steps.Count);
         Assert.Equal(AzureProviderRunnerStep.Foundation, runner.Steps[1]);
+        Assert.True(runner.Commands[1].IsResume);
+        Assert.True(runner.Commands[1].IsStepReplay);
     }
 
     [Fact]
@@ -471,8 +473,84 @@ public sealed class AzureProviderExecutorTests
         Assert.DoesNotContain(AzureProviderRunnerStep.SqlFirewallCreate, resumedSteps);
     }
 
+    [Fact]
+    public async Task Absent_secret_observation_replays_seed_as_a_fresh_step_on_the_resumed_operation()
+    {
+        var store = new FakeOperationStore();
+        var runner = new RecordingRunner
+        {
+            FoundationOutcome = AzureProviderRunnerOutcome.Uncertain,
+            FoundationResourcesOverride = FoundationResources()
+        };
+        var executor = new AzureProviderExecutor(store, runner, new StaticTimeProvider(Now), TimeSpan.FromMinutes(5));
+        var plan = CreatePlan();
+        var interrupted = await executor.ApplyAsync(CreateRequest(), plan);
+        var seedRecovery = interrupted.Operation with
+        {
+            Resources = SqlResourcesForRecovery(),
+            AttemptedStep = AzureProviderRunnerStep.SeedSecrets,
+            Phase = AzureProviderOperationPhase.AcrPullObserved
+        };
+        store.Replace(seedRecovery);
+        var observed = new AzureProviderRecoveryObservation(
+            AzureProviderRecoveryObservationKind.Confirmed,
+            AzureProviderRunnerStep.AcrPull,
+            SqlResourcesForRecovery(),
+            AzureProviderHealth.Unknown,
+            null,
+            "azure.recovery.seed-secrets-absent",
+            "All exact expected seed entries were observed absent without mutation.");
+
+        var previousCallCount = runner.Commands.Count;
+        var resumed = await executor.RecoverAsync(seedRecovery, plan, observed);
+        var seedCommand = Assert.Single(runner.Commands.Skip(previousCallCount), command =>
+            command.Step == AzureProviderRunnerStep.SeedSecrets);
+
+        Assert.Equal(AzureProviderExecutionOutcome.Succeeded, resumed.Outcome);
+        Assert.True(seedCommand.IsResume);
+        Assert.False(seedCommand.IsStepReplay);
+        Assert.Equal(1, store.RecoveryClaimCount);
+    }
+
+    [Fact]
+    public async Task Completed_secret_observation_skips_seed_and_resumes_at_sql()
+    {
+        var store = new FakeOperationStore();
+        var runner = new RecordingRunner
+        {
+            FoundationOutcome = AzureProviderRunnerOutcome.Uncertain,
+            FoundationResourcesOverride = FoundationResources()
+        };
+        var executor = new AzureProviderExecutor(store, runner, new StaticTimeProvider(Now), TimeSpan.FromMinutes(5));
+        var plan = CreatePlan();
+        var interrupted = await executor.ApplyAsync(CreateRequest(), plan);
+        var seedRecovery = interrupted.Operation with
+        {
+            Resources = SqlResourcesForRecovery(),
+            AttemptedStep = AzureProviderRunnerStep.SeedSecrets,
+            Phase = AzureProviderOperationPhase.AcrPullObserved
+        };
+        store.Replace(seedRecovery);
+        var observed = new AzureProviderRecoveryObservation(
+            AzureProviderRecoveryObservationKind.Confirmed,
+            AzureProviderRunnerStep.SeedSecrets,
+            SqlResourcesForRecovery(),
+            AzureProviderHealth.Unknown,
+            null,
+            "azure.recovery.seed-secrets-observed",
+            "All exact expected seed entries and provider-owned metadata were observed without mutation.");
+
+        var previousCallCount = runner.Commands.Count;
+        var resumed = await executor.RecoverAsync(seedRecovery, plan, observed);
+        var resumedCommands = runner.Commands.Skip(previousCallCount).ToArray();
+
+        Assert.Equal(AzureProviderExecutionOutcome.Succeeded, resumed.Outcome);
+        Assert.DoesNotContain(resumedCommands, command => command.Step == AzureProviderRunnerStep.SeedSecrets);
+        Assert.Equal(AzureProviderRunnerStep.SqlFirewallCreate, resumedCommands[0].Step);
+        Assert.Equal(1, store.RecoveryClaimCount);
+    }
+
     [Theory]
-    [InlineData(AzureProviderRunnerStep.SeedSecrets, AzureProviderOperationPhase.SeedSecretsObserved)]
     [InlineData(AzureProviderRunnerStep.Workload, AzureProviderOperationPhase.WorkloadReady)]
     [InlineData(AzureProviderRunnerStep.Health, AzureProviderOperationPhase.HealthVerified)]
     [InlineData(AzureProviderRunnerStep.Promotion, AzureProviderOperationPhase.TrafficPromoted)]

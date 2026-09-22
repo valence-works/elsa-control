@@ -277,6 +277,7 @@ public sealed class AzureProviderExecutor
         // recoverable from a single observation. They do not provide a safe precondition for
         // this executor's staged SQL recovery handoff.
         if (observedStep is not (AzureProviderRunnerStep.Foundation or AzureProviderRunnerStep.AcrPull or
+            AzureProviderRunnerStep.SeedSecrets or
             AzureProviderRunnerStep.SqlFirewallCreate or AzureProviderRunnerStep.SqlBootstrapScript or
             AzureProviderRunnerStep.SqlFirewallCleanup))
             return RecoveryInsufficient(operation);
@@ -298,7 +299,10 @@ public sealed class AzureProviderExecutor
             observedStep == AzureProviderRunnerStep.Foundation &&
             !AzureProviderRecoveryObservationSupport.IsFoundationOnlyEligible(operation) ||
             observedStep == AzureProviderRunnerStep.AcrPull &&
-            !AzureProviderRecoveryObservationSupport.IsAcrPullEligible(operation) ||
+            !(AzureProviderRecoveryObservationSupport.IsAcrPullEligible(operation) ||
+              AzureProviderRecoveryObservationSupport.IsSeedSecretsEligible(operation)) ||
+            observedStep == AzureProviderRunnerStep.SeedSecrets &&
+            !AzureProviderRecoveryObservationSupport.IsSeedSecretsEligible(operation) ||
             observedStep == AzureProviderRunnerStep.SqlFirewallCreate &&
             !AzureProviderRecoveryObservationSupport.IsSqlFirewallCreateEligible(operation) ||
             observedStep == AzureProviderRunnerStep.SqlBootstrapScript &&
@@ -489,6 +493,7 @@ public sealed class AzureProviderExecutor
                 if (entitlementResult is not null)
                     return entitlementResult;
 
+                var isStepReplay = operation.AttemptedStep == step;
                 var attempted = await MarkAttemptedStepAsync(operation, leaseToken, step);
                 if (attempted is null)
                     return await GetConcurrentResultAsync(operation);
@@ -502,7 +507,10 @@ public sealed class AzureProviderExecutor
                     operation.AttemptNumber > 1,
                     operation.AttemptNumber,
                     CreateExecutionContext(operation, assignment),
-                    assignment);
+                    assignment)
+                {
+                    IsStepReplay = isStepReplay
+                };
                 AzureProviderRunnerResult runnerResult;
                 try
                 {

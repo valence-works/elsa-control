@@ -137,6 +137,16 @@ public sealed class AzureProviderRecoveryObservationContractTests
             AzureProviderOperationPhase.FoundationSubmitted,
             AzureProviderRunnerStep.Foundation,
             AzureProviderOperationPhase.FoundationObserved));
+        Assert.True(AzureProviderRecoveryObservationSupport.IsCompatibleBoundary(
+            AzureProviderRunnerStep.SeedSecrets,
+            AzureProviderOperationPhase.AcrPullObserved,
+            AzureProviderRunnerStep.AcrPull,
+            AzureProviderOperationPhase.AcrPullObserved));
+        Assert.True(AzureProviderRecoveryObservationSupport.IsCompatibleBoundary(
+            AzureProviderRunnerStep.SeedSecrets,
+            AzureProviderOperationPhase.AcrPullObserved,
+            AzureProviderRunnerStep.SeedSecrets,
+            AzureProviderOperationPhase.SeedSecretsObserved));
 
         Assert.False(AzureProviderRecoveryObservationSupport.IsCompatibleBoundary(
             AzureProviderRunnerStep.SqlFirewallCreate,
@@ -168,6 +178,16 @@ public sealed class AzureProviderRecoveryObservationContractTests
             AzureProviderOperationPhase.WorkloadSubmitted,
             AzureProviderRunnerStep.Workload,
             AzureProviderOperationPhase.WorkloadReady));
+        Assert.False(AzureProviderRecoveryObservationSupport.IsCompatibleBoundary(
+            AzureProviderRunnerStep.SeedSecrets,
+            AzureProviderOperationPhase.FoundationSubmitted,
+            AzureProviderRunnerStep.AcrPull,
+            AzureProviderOperationPhase.AcrPullObserved));
+        Assert.False(AzureProviderRecoveryObservationSupport.IsCompatibleBoundary(
+            AzureProviderRunnerStep.SeedSecrets,
+            AzureProviderOperationPhase.FoundationSubmitted,
+            AzureProviderRunnerStep.SeedSecrets,
+            AzureProviderOperationPhase.SeedSecretsObserved));
     }
 
     [Theory]

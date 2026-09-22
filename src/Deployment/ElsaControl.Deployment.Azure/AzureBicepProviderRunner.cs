@@ -129,9 +129,10 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
 
             var operation = request.Operation;
             var sqlRecoveryStep = GetSqlRecoveryStep(operation);
+            var observesSeedSecrets = AzureProviderRecoveryObservationSupport.IsSeedSecretsEligible(operation);
             var observesAcrPull = AzureProviderRecoveryObservationSupport.IsAcrPullEligible(operation);
             var observesFoundation = AzureProviderRecoveryObservationSupport.IsFoundationOnlyEligible(operation);
-            if (sqlRecoveryStep is null && !observesAcrPull && !observesFoundation)
+            if (sqlRecoveryStep is null && !observesSeedSecrets && !observesAcrPull && !observesFoundation)
                 return RecoveryObservationUnsupported(request);
 
             var assignment = request.Assignment;
@@ -139,7 +140,9 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 return RecoveryObservationAmbiguous(request);
 
             var command = new AzureProviderRunnerCommand(
-                sqlRecoveryStep ?? (observesAcrPull ? AzureProviderRunnerStep.AcrPull : AzureProviderRunnerStep.Foundation),
+                sqlRecoveryStep ?? (observesSeedSecrets
+                    ? AzureProviderRunnerStep.SeedSecrets
+                    : observesAcrPull ? AzureProviderRunnerStep.AcrPull : AzureProviderRunnerStep.Foundation),
                 request.Plan,
                 operation.Resources,
                 operation.Resources.StableTrafficRevisionName,
@@ -162,6 +165,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
 
             return sqlRecoveryStep is not null
                 ? await ObserveSqlRecoveryAsync(request, command, sqlRecoveryStep.Value, cancellationToken)
+                : observesSeedSecrets
+                    ? await ObserveSeedSecretsAsync(request, command, cancellationToken)
                 : observesAcrPull
                     ? await ObserveAcrPullAsync(request, command, cancellationToken)
                     : await ObserveFoundationAsync(request, command, cancellationToken);
@@ -330,6 +335,88 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             null,
             "azure.recovery.acr-pull-observed",
             "The retained Azure registry access checkpoint was observed without mutation.");
+    }
+
+    private async Task<AzureProviderRecoveryObservation> ObserveSeedSecretsAsync(
+        AzureProviderRecoveryRequest request,
+        AzureProviderRunnerCommand command,
+        CancellationToken cancellationToken)
+    {
+        var missing = RequireRegistry(command.Resources);
+        var vaultName = ResourceName(command.Resources.KeyVaultResourceId);
+        if (missing is not null || vaultName is null)
+            return RecoveryObservationAmbiguous(request);
+
+        (string Key, string Reference, string Name)[] secretReferences;
+        try
+        {
+            secretReferences = (command.Plan.SecretReferences ?? EmptyReferences)
+                .OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(x => (x.Key, Reference: x.Value, Name: AzureProviderOperationValidation.MapSecretName(x.Key)))
+                .ToArray();
+        }
+        catch (ArgumentException)
+        {
+            return RecoveryObservationAmbiguous(request);
+        }
+
+        if (secretReferences.Length == 0)
+            return new(
+                AzureProviderRecoveryObservationKind.Confirmed,
+                AzureProviderRunnerStep.SeedSecrets,
+                request.Operation.Resources,
+                AzureProviderHealth.Unknown,
+                null,
+                "azure.recovery.seed-secrets-observed",
+                "The retained seed step has no expected entries and requires no mutation.");
+
+        var present = 0;
+        foreach (var (key, reference, secretName) in secretReferences)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var existing = await ExecuteAzAsync(command,
+                ["keyvault", "secret", "list", "--subscription", _scope.SubscriptionId, "--vault-name", vaultName,
+                    "--query", $"[?name=='{secretName}'] | [].{{managedBy:tags.\"managed-by\",assignmentId:tags.\"provider-assignment\",instanceId:tags.\"instance\",secretSlot:tags.\"secret-slot\",generation:tags.\"generation\"}}",
+                    "--output", "json", "--only-show-errors"],
+                ParseSecretSeedMetadataCollectionAsync,
+                cancellationToken);
+            if (!existing.Succeeded || existing.Value is null)
+                return RecoveryObservationInProgress(request);
+
+            var entries = existing.Value.Value;
+            if (entries.Count > 1)
+                return RecoveryObservationAmbiguous(request);
+            if (entries.Count == 0)
+                continue;
+            if (AzureManagedSecretReferences.IsProviderOwned(key, reference) &&
+                !IsOwnedSecretMetadata(command, secretName, entries[0]))
+                return RecoveryObservationAmbiguous(request);
+            present++;
+        }
+
+        if (present == 0)
+            return new(
+                AzureProviderRecoveryObservationKind.Confirmed,
+                AzureProviderRunnerStep.AcrPull,
+                request.Operation.Resources,
+                AzureProviderHealth.Unknown,
+                null,
+                "azure.recovery.seed-secrets-absent",
+                "All exact expected seed entries were observed absent without mutation.");
+        if (present != secretReferences.Length)
+            return RecoveryObservationAmbiguous(
+                request,
+                "azure.recovery.seed-secrets-partial",
+                "The retained seed inventory is partial and cannot authorize recovery.");
+
+        return new(
+            AzureProviderRecoveryObservationKind.Confirmed,
+            AzureProviderRunnerStep.SeedSecrets,
+            request.Operation.Resources,
+            AzureProviderHealth.Unknown,
+            null,
+            "azure.recovery.seed-secrets-observed",
+            "All exact expected seed entries and provider-owned metadata were observed without mutation.");
     }
 
     private static AzureProviderRecoveryObservation RecoveryObservationInProgress(AzureProviderRecoveryRequest request) =>
@@ -725,7 +812,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             var existingSecrets = existing.Value.Value;
             if (existingSecrets.Count == 1)
             {
-                if (IsGeneratedProviderOwnedSecret(key, reference))
+                if (AzureManagedSecretReferences.IsProviderOwned(key, reference))
                 {
                     if (!IsOwnedSecretMetadata(command, secretName, existingSecrets[0]))
                         return Failed(command, AzureProviderOperationPhase.FoundationSubmitted, "azure.secrets.metadata-invalid", "The provider-owned secret metadata is missing or invalid.");
@@ -734,12 +821,12 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             }
             if (existingSecrets.Count != 0)
                 return Failed(command, AzureProviderOperationPhase.FoundationSubmitted, "azure.secrets.inventory-invalid", "The secret inventory is ambiguous.");
-            if (command.IsResume && IsGeneratedProviderOwnedSecret(key, reference))
+            if (command.IsStepReplay)
                 return Uncertain(
                     command,
                     AzureProviderOperationPhase.FoundationSubmitted,
                     "azure.secrets.recovery-required",
-                    "A provider-owned secret is absent after an interrupted seed and requires explicit recovery.");
+                    "An expected seed entry is absent after an interrupted step and requires explicit recovery.");
 
             var secretRequest = new AzureSecretResolutionRequest(
                 command.Context.WorkspaceId,
@@ -796,7 +883,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                         "keyvault", "secret", "set", "--subscription", _scope.SubscriptionId, "--vault-name", vaultName,
                         "--name", secretName, "--file", file, "--output", "none", "--only-show-errors"
                     };
-                    if (IsGeneratedProviderOwnedSecret(key, reference))
+                    if (AzureManagedSecretReferences.IsProviderOwned(key, reference))
                     {
                         seedArguments.Add("--tags");
                         seedArguments.AddRange(OwnedSecretMetadataArguments(command, secretName));
@@ -2162,6 +2249,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             throw new ArgumentException("The Azure execution context identity is required.", nameof(command));
         if (command.AttemptNumber < 1)
             throw new ArgumentException("The Azure execution attempt is required.", nameof(command));
+        if (command.IsStepReplay && !command.IsResume)
+            throw new ArgumentException("A replayed Azure step requires a resumed operation.", nameof(command));
         if (!string.Equals(command.Plan.WorkloadName, command.Context.TargetKey, StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("The Azure plan target does not match its execution context.", nameof(command));
         if (!IsSafeWorkloadName(command.Plan.WorkloadName) ||
@@ -2701,10 +2790,6 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             start.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork &&
             System.Net.IPAddress.TryParse(rule.EndIpAddress, out var end) &&
             end.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
-
-    private static bool IsGeneratedProviderOwnedSecret(string key, string reference) =>
-        AzureManagedSecretReferences.IsProviderOwned(key, reference) &&
-        !AzureManagedSecretReferences.IsSqlConnection(key, reference);
 
     private static string[] OwnedSecretMetadataArguments(AzureProviderRunnerCommand command, string secretName) =>
     [

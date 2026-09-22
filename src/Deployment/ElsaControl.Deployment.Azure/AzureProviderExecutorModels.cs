@@ -39,7 +39,9 @@ public enum AzureProviderRunnerOutcome
 /// <summary>
 /// Safe execution context passed to the provider implementation. All persisted values are
 /// already bounded by <see cref="AzureProviderOperationValidation"/>; secret values are not
-/// representable and the plan contains references only.
+/// representable and the plan contains references only. <c>IsResume</c> describes the overall
+/// durable operation attempt; use <see cref="AzureProviderRunnerCommand.IsStepReplay"/> when a
+/// mutation depends on whether this exact step was previously attempted.
 /// </summary>
 public sealed record AzureProviderRunnerCommand(
     AzureProviderRunnerStep Step,
@@ -49,7 +51,15 @@ public sealed record AzureProviderRunnerCommand(
     bool IsResume,
     int AttemptNumber,
     AzureProviderExecutionContext Context,
-    AzureProviderResourceAssignment? Assignment = null);
+    AzureProviderResourceAssignment? Assignment = null)
+{
+    /// <summary>
+    /// True only when the durable operation had already marked this exact step before the
+    /// current runner call. This is distinct from <see cref="IsResume"/>, which describes the
+    /// overall operation attempt and may be true while a downstream step runs for the first time.
+    /// </summary>
+    public bool IsStepReplay { get; init; }
+}
 
 /// <summary>
 /// Safe durable correlation supplied to every runner step. Target Azure scope remains explicit
