@@ -247,7 +247,28 @@ az account set --subscription "$SUBSCRIPTION_ID"
 TENANT_ID="$(az account show --query tenantId -o tsv)"
 
 REPO_FULL_NAME="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
-SUBJECT="repo:$REPO_FULL_NAME:environment:$GITHUB_ENVIRONMENT"
+if ! OIDC_SUBJECT_CONFIG="$(gh api "repos/$REPO_FULL_NAME/actions/oidc/customization/sub")"; then
+  echo "Could not read the repository OIDC subject configuration." >&2
+  exit 1
+fi
+SUBJECT="$(OIDC_SUBJECT_CONFIG="$OIDC_SUBJECT_CONFIG" python3 - "$REPO_FULL_NAME" "$GITHUB_ENVIRONMENT" <<'PY'
+import json
+import os
+import re
+import sys
+
+repository, environment = sys.argv[1:]
+configuration = json.loads(os.environ["OIDC_SUBJECT_CONFIG"])
+prefix = configuration.get("sub_claim_prefix")
+if configuration.get("use_immutable_subject") is True and not prefix:
+    raise SystemExit("GitHub enabled immutable OIDC subjects but returned no subject prefix.")
+prefix = prefix or f"repo:{repository}"
+subject = f"{prefix}:environment:{environment}"
+if not re.fullmatch(r"repo:[^\s:]+:environment:[A-Za-z0-9_-]+", subject):
+    raise SystemExit("The repository OIDC subject configuration has an unexpected format.")
+print(subject)
+PY
+)"
 ISSUER="https://token.actions.githubusercontent.com"
 
 echo "Using GitHub environment: $GITHUB_ENVIRONMENT"
@@ -323,12 +344,13 @@ if [[ -n "$APP_OBJECT_ID" ]]; then
       CREDENTIAL_FILE="$(mktemp)"
       trap 'rm -f "$CREDENTIAL_FILE"' EXIT
       python3 - "$CREDENTIAL_FILE" "$GITHUB_ENVIRONMENT" "$ISSUER" "$SUBJECT" <<'PY'
+import hashlib
 import json
 import sys
 
 path, environment, issuer, subject = sys.argv[1:]
 credential = {
-    "name": f"github-{environment}",
+    "name": f"github-{environment}-{hashlib.sha256(subject.encode()).hexdigest()[:12]}",
     "issuer": issuer,
     "subject": subject,
     "audiences": ["api://AzureADTokenExchange"],
