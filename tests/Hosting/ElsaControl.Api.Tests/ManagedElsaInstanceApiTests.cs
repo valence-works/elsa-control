@@ -5,6 +5,7 @@ using ElsaControl.Api.Admin.Workspaces;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Workspace;
 using ElsaControl.Deployment.Abstractions.Instances;
+using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Provisioning;
 using ElsaControl.Deployment.Core.Workspace;
@@ -1136,6 +1137,59 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Admin_recover_fails_closed_when_correlation_invalid_delete_still_has_workload_inventory()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var topology = await SeedCorrelationInvalidDeleteTopologyAsync(
+            app, "admin-correlation-invalid-retained", retainWorkload: true, assignmentDeleted: false);
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        var path = $"/api/admin/workspaces/{topology.WorkspaceId:D}/instances/{topology.InstanceId:D}/operations/{topology.OperationId:D}/recover";
+        using var response = await SendAdminRecoveryAsync(
+            admin, path, $"\"{topology.InstanceVersion}\"", "admin-correlation-invalid-retained",
+            new AdminManagedElsaRecoveryRequest("operator recover"));
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("instance.recovery-authority-unavailable", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("instance.invalid-state", body, StringComparison.Ordinal);
+        await AssertOperationStateAsync(app, topology.OperationId, ElsaInstanceOperationState.RecoveryRequired);
+        Assert.Equal(1, await ReadOperationAttemptAsync(app, topology.OperationId));
+    }
+
+    [Fact]
+    public async Task Admin_recover_accepts_correlation_invalid_delete_when_assignment_is_confirmed_absent()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var topology = await SeedCorrelationInvalidDeleteTopologyAsync(
+            app, "admin-correlation-invalid-absent", retainWorkload: false, assignmentDeleted: true);
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        var path = $"/api/admin/workspaces/{topology.WorkspaceId:D}/instances/{topology.InstanceId:D}/operations/{topology.OperationId:D}/recover";
+        var request = new AdminManagedElsaRecoveryRequest("operator recover");
+        using var first = await SendAdminRecoveryAsync(
+            admin, path, $"\"{topology.InstanceVersion}\"", "admin-correlation-invalid-absent", request);
+        var firstText = await first.Content.ReadAsStringAsync();
+        Assert.True(first.StatusCode == HttpStatusCode.Accepted, firstText);
+        var firstBody = (await first.Content.ReadControlJsonAsync<AdminManagedElsaRecoveryResponse>())!;
+        Assert.Equal(topology.OperationId, firstBody.OperationId);
+        Assert.Equal(ElsaInstanceOperationState.Queued, firstBody.State);
+        Assert.Equal(2, firstBody.AttemptNumber);
+        Assert.False(firstBody.Replayed);
+
+        var rowCounts = await ReadLifecycleRowCountsAsync(app);
+        using var replay = await SendAdminRecoveryAsync(
+            admin, path, $"\"{topology.InstanceVersion}\"", "admin-correlation-invalid-absent", request);
+        Assert.Equal(HttpStatusCode.Accepted, replay.StatusCode);
+        var replayBody = (await replay.Content.ReadControlJsonAsync<AdminManagedElsaRecoveryResponse>())!;
+        Assert.True(replayBody.Replayed);
+        Assert.Equal(firstBody.AttemptNumber, replayBody.AttemptNumber);
+        Assert.Equal(rowCounts, await ReadLifecycleRowCountsAsync(app));
+    }
+
+    [Fact]
     public async Task Admin_recovery_requires_operator_authentication_and_strong_preconditions()
     {
         var app = await PrepareApplicationAsync([]);
@@ -2133,6 +2187,108 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         await db.Database.ExecuteSqlInterpolatedAsync(
             $"UPDATE ElsaInstanceOperations SET State = {ElsaInstanceOperationState.Succeeded.ToString()}, CompletedAt = {completedAtTicks} WHERE Id = {operationId}");
     }
+
+    private static async Task<CorrelationInvalidDeleteTopology> SeedCorrelationInvalidDeleteTopologyAsync(
+        ControlApiTestApplication app,
+        string slug,
+        bool retainWorkload,
+        bool assignmentDeleted)
+    {
+        var customer = app.CreateTrustedWorkspaceClient($"{slug}-owner");
+        var workspaceId = await customer.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(customer, workspaceId, slug);
+        await MarkOperationSucceededAsync(app, created.Operation.Id);
+
+        Guid organizationId;
+        Guid assignmentId;
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            organizationId = await db.Workspaces.Where(x => x.Id == workspaceId)
+                .Select(x => x.OrganizationId)
+                .SingleAsync();
+            var assignmentStore = (IAzureProviderResourceAssignmentStore)new AzureProviderOperationStore(db);
+            var assignment = await assignmentStore.CreateOrGetAsync(
+                new(
+                    workspaceId,
+                    organizationId,
+                    created.Instance.InstanceId,
+                    new string('a', 64),
+                    "11111111-1111-1111-1111-111111111111",
+                    "rg-correlation",
+                    $"e{created.Instance.InstanceId:N}"[..16],
+                    "westeurope"),
+                DateTimeOffset.UtcNow);
+            assignmentId = assignment.Id;
+            var workloadResourceId = retainWorkload
+                ? "/subscriptions/retained/resourceGroups/retained/providers/Microsoft.App/containerApps/retained"
+                : null;
+            var deletedAt = assignmentDeleted ? DateTimeOffset.UtcNow.UtcTicks : (long?)null;
+            var state = assignmentDeleted
+                ? AzureProviderAssignmentState.Deleted.ToString()
+                : AzureProviderAssignmentState.Active.ToString();
+            var lastOperationId = Guid.NewGuid();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE AzureProviderResourceAssignments
+                SET State = {state},
+                    LastOperationId = {lastOperationId},
+                    WorkloadResourceId = {workloadResourceId},
+                    DeletedAt = {deletedAt}
+                WHERE Id = {assignmentId}
+                """);
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE ElsaInstances
+                SET PlacementAssignmentId = {assignmentId.ToString("D")},
+                    ObservedLifecycle = {ElsaObservedLifecycle.Unknown.ToString()},
+                    Version = Version + 1
+                WHERE Id = {created.Instance.InstanceId}
+                """);
+        }
+
+        using var confirmationResponse = await customer.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content
+            .ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+        var currentEtag = $"\"{created.Instance.Version + 1}\"";
+        using var deletion = await SendDeleteAsync(
+            customer, workspaceId, created.Instance.InstanceId, currentEtag, $"{slug}-delete",
+            confirmation!.ConfirmationId);
+        var deletionText = await deletion.Content.ReadAsStringAsync();
+        Assert.True(deletion.StatusCode == HttpStatusCode.Accepted, deletionText);
+        var deletionBody = (await deletion.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>())!;
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE ElsaInstanceOperations
+                SET State = {ElsaInstanceOperationState.RecoveryRequired.ToString()},
+                    FailureCode = {"deletion.provider-correlation-invalid"},
+                    DeletionDiagnosticCode = {"deletion.provider-correlation-invalid"},
+                    CompletedAt = NULL
+                WHERE Id = {deletionBody.OperationId}
+                """);
+        }
+
+        int instanceVersion;
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            instanceVersion = await db.ElsaInstances
+                .Where(x => x.Id == created.Instance.InstanceId)
+                .Select(x => x.Version)
+                .SingleAsync();
+        }
+
+        return new(workspaceId, created.Instance.InstanceId, deletionBody.OperationId, instanceVersion);
+    }
+
+    private sealed record CorrelationInvalidDeleteTopology(
+        Guid WorkspaceId,
+        Guid InstanceId,
+        Guid OperationId,
+        int InstanceVersion);
 
     private static async Task MarkOperationRecoveryRequiredAsync(ControlApiTestApplication app, Guid operationId)
     {

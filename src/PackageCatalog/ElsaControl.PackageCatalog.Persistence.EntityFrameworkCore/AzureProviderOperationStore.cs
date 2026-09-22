@@ -243,6 +243,9 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
             ToModel(operation),
             ToModel(assignment));
 
+    internal static bool IsConfirmedAbsentAssignment(AzureProviderResourceAssignmentEntity assignment) =>
+        AzureProviderDeleteRecoverySupport.IsConfirmedAbsentAssignment(ToModel(assignment));
+
     async Task<AzureProviderRecoveryObservationReceipt> IAzureProviderRecoveryObservationStore.CreateOrGetAsync(
         AzureProviderRecoveryObservationRecord observation,
         CancellationToken cancellationToken)

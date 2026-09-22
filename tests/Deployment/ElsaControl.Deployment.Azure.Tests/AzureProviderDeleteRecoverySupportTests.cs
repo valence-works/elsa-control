@@ -94,6 +94,23 @@ public sealed class AzureProviderDeleteRecoverySupportTests
     }
 
     [Fact]
+    public void Confirmed_absent_assignment_requires_deleted_group_only_inventory()
+    {
+        var (_, assignment) = Fixture(
+            AzureProviderOperationStatus.Succeeded,
+            AzureProviderAssignmentState.Deleted);
+
+        Assert.True(AzureProviderDeleteRecoverySupport.IsConfirmedAbsentAssignment(assignment));
+        Assert.False(AzureProviderDeleteRecoverySupport.IsConfirmedAbsentAssignment(null));
+        Assert.False(AzureProviderDeleteRecoverySupport.IsConfirmedAbsentAssignment(
+            assignment with { State = AzureProviderAssignmentState.Active }));
+        Assert.False(AzureProviderDeleteRecoverySupport.IsConfirmedAbsentAssignment(
+            assignment with { Resources = assignment.Resources with { WorkloadResourceId = "/owned/workload" } }));
+        Assert.False(AzureProviderDeleteRecoverySupport.IsConfirmedAbsentAssignment(
+            assignment with { ResourceGroupName = "" }));
+    }
+
+    [Fact]
     public void Verified_cleanup_rejects_null_operation_or_assignment()
     {
         var (operation, assignment) = Fixture(

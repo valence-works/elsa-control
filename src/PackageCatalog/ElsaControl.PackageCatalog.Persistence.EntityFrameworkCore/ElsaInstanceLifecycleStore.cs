@@ -2746,8 +2746,10 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                                        x.WorkspaceId == lifecycleOperation.WorkspaceId &&
                                        x.InstanceId == instance.Id,
                 cancellationToken);
-        if (assignment is null || assignment.LastOperationId is not { } providerOperationId)
-            throw Conflict("Azure delete recovery assignment authority is unavailable.");
+        if (assignment is null)
+            throw RecoveryAuthorityUnavailable("Azure delete recovery assignment authority is unavailable.");
+        if (assignment.LastOperationId is not { } providerOperationId)
+            return RequireConfirmedAbsentAssignment(assignment);
 
         var providerOperation = await dbContext.AzureProviderOperations.AsNoTracking()
             .SingleOrDefaultAsync(x => x.Id == providerOperationId &&
@@ -2764,7 +2766,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 NormalizeProviderScope(assignment.ProviderScopeFingerprint), StringComparison.Ordinal) ||
             !AzureProviderOperationValidation.IsLifecycleDeleteIdempotencyKey(
                 providerOperation.IdempotencyKey, lifecycleOperation.Id))
-            throw Conflict("Azure delete recovery provider authority is unavailable.");
+            return RequireConfirmedAbsentAssignment(assignment);
 
         // A successful provider delete has no uncertain remote action to replay. Preserve the
         // existing finalization path for that known outcome, while never downgrading a malformed
@@ -2823,6 +2825,19 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             throw Conflict("Azure delete recovery provider authority is invalid.");
         }
     }
+
+    private static AzureProviderDeleteRecoveryAuthority? RequireConfirmedAbsentAssignment(
+        AzureProviderResourceAssignmentEntity assignment)
+    {
+        // An uncorrelated or missing LastOperationId cannot authorize Azure Delete
+        // replay. Assignment inventory may still prove the workload is already gone.
+        if (AzureProviderOperationStore.IsConfirmedAbsentAssignment(assignment))
+            return null;
+        throw RecoveryAuthorityUnavailable("Azure delete recovery provider authority is unavailable.");
+    }
+
+    private static ElsaInstanceLifecycleConflictException RecoveryAuthorityUnavailable(string message) =>
+        Conflict(message, ElsaInstanceLifecycleConflictReason.RecoveryAuthorityUnavailable);
 
     private static string? NormalizeProviderScope(string? value) => value?.Trim().ToLowerInvariant();
 

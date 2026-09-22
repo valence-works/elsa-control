@@ -240,6 +240,12 @@ public enum ElsaInstanceLifecycleConflictReason
     /// <summary>The organization commercial projection does not permit this mutation.</summary>
     CommercialDenied,
 
+    /// <summary>
+    /// Azure delete recovery cannot capture correlatable provider authority, and the
+    /// durable assignment inventory does not prove the workload is already absent.
+    /// </summary>
+    RecoveryAuthorityUnavailable,
+
     /// <summary>Any other invariant violation that does not fit the categories above.</summary>
     InvalidState,
 }
