@@ -35,7 +35,9 @@ actions distinct:
 `Billing:Stripe:CloudPortalReturnUrl` must be an HTTPS Elsa Cloud dashboard URL
 with no userinfo, query, or fragment. Production uses
 `https://elsacloud.app/dashboard`. An optional request `returnUrl` is accepted
-only when it stays on that configured origin and under that path.
+as either an absolute URL on that configured origin or an absolute path such as
+`/dashboard/billing`. In both forms it must stay under the configured dashboard
+path and cannot contain a query or fragment.
 
 ## Stripe sandbox
 
