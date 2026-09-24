@@ -202,7 +202,13 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     [InlineData(AzureProviderRunnerStep.Workload)]
     public async Task Production_deployment_configures_the_runtime_handoff_from_Control_and_the_instance_identity(AzureProviderRunnerStep step)
     {
-        var options = _fixture.Options with { ManagedHandoff = ControlHandoff };
+        var options = _fixture.Options with
+        {
+            ManagedHandoff = ControlHandoff with
+            {
+                AllowedRuntimePermissions = ManagedElsaRuntimePermissions.OwnerAdministrator
+            }
+        };
         var context = ContextFor(options);
 
         var deployment = await ProductionDeploymentAsync(step, _fixture.Plan with { ManagedHandoff = true }, options, context);
@@ -216,7 +222,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
             "managedHandoffControlBaseUrl=https://control.example.test",
             "managedHandoffControlContinuationUrl=https://control.example.test/admin/runtimes",
             "managedHandoffRuntimeMaximumLifetime=08:00:00",
-            "managedHandoffAllowedRuntimePermissions=[\"read:diagnostics:structured-logs\"]"
+            $"managedHandoffAllowedRuntimePermissions={JsonSerializer.Serialize(ManagedElsaRuntimePermissions.OwnerAdministrator)}"
         ], deployment.Where(IsHandoffArgument));
         Assert.DoesNotContain(deployment, argument => argument.StartsWith("managedHandoffCallbackUri=", StringComparison.Ordinal));
     }

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
 
 namespace ElsaControl.Deployment.Azure.Tests;
@@ -224,6 +225,20 @@ public sealed class AzureProviderRunnerOptionsTests : IDisposable
             DisposableExpiryUtc = new DateOnly(2026, 9, 30),
             AzureCliClientId = null
         }).Validate());
+    }
+
+    [Fact]
+    public void Accepts_the_exact_managed_studio_permission_set()
+    {
+        var options = ValidOptions() with
+        {
+            ManagedHandoff = ValidHandoff() with
+            {
+                AllowedRuntimePermissions = ManagedElsaRuntimePermissions.OwnerAdministrator
+            }
+        };
+
+        options.Validate();
     }
 
     [Fact]

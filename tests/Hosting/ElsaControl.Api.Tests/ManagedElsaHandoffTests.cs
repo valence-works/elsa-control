@@ -79,7 +79,7 @@ public sealed class ManagedElsaHandoffTests
     [InlineData(WorkspaceRole.Reader, OrganizationRole.Administrator, true)]
     [InlineData(WorkspaceRole.Reader, OrganizationRole.Member, false)]
     [InlineData(WorkspaceRole.SourceAdmin, OrganizationRole.Member, false)]
-    public void Runtime_permission_mapping_grants_only_structured_log_read_to_authorized_roles(
+    public void Runtime_permission_mapping_grants_exact_studio_permissions_only_to_owner_and_admin(
         WorkspaceRole workspaceRole,
         OrganizationRole organizationRole,
         bool expected)
@@ -88,8 +88,34 @@ public sealed class ManagedElsaHandoffTests
 
         var permissions = ManagedElsaRuntimePermissionMapping.For(access);
 
-        Assert.Equal(expected, permissions.Contains(ManagedElsaRuntimePermissionMapping.StructuredLogsRead));
-        Assert.All(permissions, permission => Assert.Equal(ManagedElsaRuntimePermissionMapping.StructuredLogsRead, permission));
+        string[] expectedPermissions =
+        [
+            "read:diagnostics:structured-logs",
+            "read:dashboard",
+            "read:workflow-definitions",
+            "write:workflow-definitions",
+            "publish:workflow-definitions",
+            "read:activity-descriptors",
+            "read:activity-descriptors-options",
+            "read:expression-descriptors",
+            "read:variable-descriptors",
+            "read:output-converters",
+            "read:commit-strategies",
+            "read:incident-strategies",
+            "read:log-persistence-strategies",
+            "read:storage-drivers",
+            "read:workflow-activation-strategies",
+            "read:installed-features"
+        ];
+        if (expected)
+        {
+            Assert.Equal(expectedPermissions.Length, permissions.Count);
+            Assert.All(expectedPermissions, permission => Assert.Contains(permission, permissions));
+        }
+        else
+        {
+            Assert.Empty(permissions);
+        }
     }
 
     [Theory]
@@ -294,8 +320,12 @@ public sealed class ManagedElsaHandoffTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var issued = (await response.Content.ReadControlJsonAsync<ManagedElsaHandoffIssueResponse>())!;
         var token = new JwtSecurityTokenHandler().ReadJwtToken(issued.Token);
-        Assert.Equal(ManagedElsaRuntimePermissionMapping.StructuredLogsRead,
-            token.Claims.Single(claim => claim.Type == ManagedElsaHandoffDefaults.RuntimePermissionClaim).Value);
+        var grants = token.Claims
+            .Where(claim => claim.Type == ManagedElsaHandoffDefaults.RuntimePermissionClaim)
+            .Select(claim => claim.Value)
+            .ToHashSet(StringComparer.Ordinal);
+        Assert.Equal(ManagedElsaRuntimePermissionMapping.AllowedPermissions.Count, grants.Count);
+        Assert.All(ManagedElsaRuntimePermissionMapping.AllowedPermissions, permission => Assert.Contains(permission, grants));
     }
 
     [Theory]
