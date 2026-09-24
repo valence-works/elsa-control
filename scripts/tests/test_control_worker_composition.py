@@ -221,12 +221,63 @@ class RenderTests(unittest.TestCase):
             with self.assertRaises(renderer.CompositionError):
                 renderer.load_rollback(path)
 
+    def test_staging_handoff_profile_contains_only_the_approved_non_secret_settings(self):
+        settings = renderer.load_staging_handoff()
+        self.assertEqual(renderer.HANDOFF_SETTINGS_KEYS, set(settings))
+        self.assertEqual("true", settings[renderer.HANDOFF_ENABLE_KEY])
+        self.assertEqual(renderer.STAGING_CONTROL_ORIGIN, settings["ManagedElsa__Handoff__Issuer"])
+        self.assertEqual(renderer.STAGING_CLOUD_CONTINUATION_URL,
+                         settings["ManagedElsa__Handoff__CloudContinuationUrl"])
+        self.assertFalse(any("PrivateKey" in key or "Pem" in key for key in settings))
+
+    def test_staging_handoff_profile_rejects_scope_drift_and_unapproved_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            settings = renderer.load_staging_handoff()
+            for key, value in (("ManagedElsa__Handoff__Issuer", "https://cloud.elsaworkflows.io"),
+                               ("ManagedElsa__Handoff__CloudContinuationUrl", "https://production.example/dashboard"),
+                               (renderer.HANDOFF_ENABLE_KEY, "false")):
+                changed = dict(settings)
+                changed[key] = value
+                path.write_text(json.dumps(changed))
+                with self.assertRaises(renderer.CompositionError):
+                    renderer.load_staging_handoff(path)
+            with_key = dict(settings)
+            with_key["ManagedElsa__Handoff__ActivePrivateKeyPem"] = "must-not-be-rendered"
+            path.write_text(json.dumps(with_key))
+            with self.assertRaises(renderer.CompositionError):
+                renderer.load_staging_handoff(path)
+            for key, value in (("$private", "must-not-be-rendered"),
+                               ("ManagedElsa__Handoff__Issuer", None)):
+                changed = dict(settings)
+                changed[key] = value
+                path.write_text(json.dumps(changed))
+                with self.assertRaises(renderer.CompositionError):
+                    renderer.load_staging_handoff(path)
+
+    def test_handoff_rollback_disables_only_the_handoff_switch(self):
+        payload = renderer.load_handoff_rollback()
+        self.assertEqual([{"name": renderer.HANDOFF_ENABLE_KEY, "value": "false", "slotSetting": False}], payload)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff-rollback.json"
+            for invalid in ([], [{"name": renderer.HANDOFF_ENABLE_KEY, "value": "true", "slotSetting": False}],
+                            [{"name": renderer.HANDOFF_ENABLE_KEY, "value": "false", "slotSetting": False},
+                             {"name": "ManagedElsa__Handoff__ActivePrivateKeyPem", "value": "x", "slotSetting": False}]):
+                path.write_text(json.dumps(invalid))
+                with self.assertRaises(renderer.CompositionError):
+                    renderer.load_handoff_rollback(path)
+
     def test_cli_status_and_pending_exit_code(self):
         self.assertEqual(0, renderer.main(["status"]))
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(0, renderer.main(["workers", "--output", str(Path(directory) / "w.json")]))
             self.assertEqual(0, renderer.main(["release-verification", "--output", str(Path(directory) / "v.json")]))
             self.assertEqual(0, renderer.main(["rollback", "--output", str(Path(directory) / "r.json")]))
+            handoff = Path(directory) / "h.json"
+            self.assertEqual(0, renderer.main(["handoff", "--output", str(handoff)]))
+            self.assertEqual(0, renderer.main(["handoff-rollback", "--output", str(Path(directory) / "hr.json")]))
+            self.assertEqual(renderer.HANDOFF_SETTINGS_KEYS,
+                             {entry["name"] for entry in json.loads(handoff.read_text())})
 
     def test_staging_worker_payload_bounds_concurrency_and_cold_start_commands(self):
         with tempfile.TemporaryDirectory() as directory:

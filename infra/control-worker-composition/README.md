@@ -12,6 +12,8 @@ and a renderer that refuses to produce a payload until every referenced decision
 | `worker-settings.parameters.production.json` | Production identifiers. A value shaped `{ "pending": "#N" }` is an undecided input and blocks rendering. |
 | `worker-settings.parameters.staging.json` | Resolved staging authority for the dedicated workload subscription and provisioner identity. |
 | `worker-rollback.json` | Turns the three worker switches and the health monitor off. Apply it as-is; it has no parameters. |
+| `handoff-settings.staging.json` | Non-secret staging handoff issuer and console continuation settings. The signing key is excluded. |
+| `handoff-rollback.json` | Turns the staging handoff switch off while preserving the signing key and other settings. |
 
 Contract gates: `python3 scripts/tests/test_control_worker_composition.py` (renderer and file shape) and
 `ProductionWorkerCompositionContractTests` in `tests/Hosting/ElsaControl.Api.Tests` (the rendered
@@ -88,6 +90,64 @@ image and configuration if startup or live verification fails, then check `/heal
 provider operation is claimed. Remove only run-scoped staging resources after deletion reaches
 provider absence. Record sanitized evidence in #561; never include rendered payloads, credentials,
 customer identifiers, or provider resource IDs in an issue or CI artifact.
+
+### Staging managed Elsa handoff (#561)
+
+The handoff settings are governed separately from the provider workers. The checked-in staging profile
+contains only `Enabled`, `Issuer`, and `CloudContinuationUrl`, and the renderer pins both URLs to the
+staging API and console. The private signing key remains in the staging App Service configuration;
+neither renderer command reads, exports, replaces, or prints it. Do not include it in an app-settings
+payload, issue, or CI output.
+
+Before enabling, confirm the staging API is healthy and the private signing key remains configured in
+the staging Web App. Render the reviewed profile and apply only that payload to the staging Web App;
+these commands print setting names and a payload digest, never values:
+
+```sh
+set -eu
+: "${STAGING_CONTROL_SUBSCRIPTION:?Set the isolated staging Control subscription}"
+test "${STAGING_CONTROL_RESOURCE_GROUP:?}" = "rg-valence-control-staging"
+test "${STAGING_CONTROL_WEBAPP:?}" = "api-tud53zotij43k"
+site_id=$(az webapp show --subscription "$STAGING_CONTROL_SUBSCRIPTION" \
+  --resource-group "$STAGING_CONTROL_RESOURCE_GROUP" --name "$STAGING_CONTROL_WEBAPP" --query id --output tsv)
+test "$site_id" = "/subscriptions/$STAGING_CONTROL_SUBSCRIPTION/resourceGroups/rg-valence-control-staging/providers/Microsoft.Web/sites/api-tud53zotij43k"
+test "$(az webapp show --subscription "$STAGING_CONTROL_SUBSCRIPTION" \
+  --resource-group "$STAGING_CONTROL_RESOURCE_GROUP" --name "$STAGING_CONTROL_WEBAPP" --query defaultHostName --output tsv)" = \
+  "api-tud53zotij43k.azurewebsites.net"
+mkdir -p ~/.elsa-control-ops
+python3 scripts/render-worker-settings.py handoff --output ~/.elsa-control-ops/staging-handoff.json
+az webapp config appsettings set --subscription "$STAGING_CONTROL_SUBSCRIPTION" \
+  --resource-group "$STAGING_CONTROL_RESOURCE_GROUP" --name "$STAGING_CONTROL_WEBAPP" \
+  --settings @"$HOME/.elsa-control-ops/staging-handoff.json" --query "[].name" --output tsv
+az webapp restart --subscription "$STAGING_CONTROL_SUBSCRIPTION" \
+  --resource-group "$STAGING_CONTROL_RESOURCE_GROUP" --name "$STAGING_CONTROL_WEBAPP"
+```
+
+Use the isolated staging Control API and console to verify a managed-instance handoff end to end,
+including Studio and Structured Logs access. If startup or verification fails, render and apply the
+handoff rollback, restart the same staging Web App, then confirm `/health` and that handoff is
+unavailable. Rollback changes only `ManagedElsa__Handoff__Enabled`; it leaves the private signing key
+and worker settings intact. Never apply either payload to production:
+
+```sh
+set -eu
+: "${STAGING_CONTROL_SUBSCRIPTION:?Set the isolated staging Control subscription}"
+test "${STAGING_CONTROL_RESOURCE_GROUP:?}" = "rg-valence-control-staging"
+test "${STAGING_CONTROL_WEBAPP:?}" = "api-tud53zotij43k"
+site_id=$(az webapp show --subscription "$STAGING_CONTROL_SUBSCRIPTION" \
+  --resource-group "$STAGING_CONTROL_RESOURCE_GROUP" --name "$STAGING_CONTROL_WEBAPP" --query id --output tsv)
+test "$site_id" = "/subscriptions/$STAGING_CONTROL_SUBSCRIPTION/resourceGroups/rg-valence-control-staging/providers/Microsoft.Web/sites/api-tud53zotij43k"
+test "$(az webapp show --subscription "$STAGING_CONTROL_SUBSCRIPTION" \
+  --resource-group "$STAGING_CONTROL_RESOURCE_GROUP" --name "$STAGING_CONTROL_WEBAPP" --query defaultHostName --output tsv)" = \
+  "api-tud53zotij43k.azurewebsites.net"
+mkdir -p ~/.elsa-control-ops
+python3 scripts/render-worker-settings.py handoff-rollback --output ~/.elsa-control-ops/staging-handoff-off.json
+az webapp config appsettings set --subscription "$STAGING_CONTROL_SUBSCRIPTION" \
+  --resource-group "$STAGING_CONTROL_RESOURCE_GROUP" --name "$STAGING_CONTROL_WEBAPP" \
+  --settings @"$HOME/.elsa-control-ops/staging-handoff-off.json" --query "[].name" --output tsv
+az webapp restart --subscription "$STAGING_CONTROL_SUBSCRIPTION" \
+  --resource-group "$STAGING_CONTROL_RESOURCE_GROUP" --name "$STAGING_CONTROL_WEBAPP"
+```
 
 ## What the template binds
 
