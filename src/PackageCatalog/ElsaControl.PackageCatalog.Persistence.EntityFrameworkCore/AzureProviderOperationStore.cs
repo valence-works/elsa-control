@@ -513,6 +513,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
                     CapacityCpuMillicores = normalized.Capacity?.CpuMillicores,
                     CapacityMemoryMiB = normalized.Capacity?.MemoryMiB,
                     ManagedHandoff = normalized.ManagedHandoff,
+                    ManagedHandoffStudioGrants = normalized.ManagedHandoffStudioGrants,
                     ElsaVersion = normalized.ElsaVersion,
                     ReleaseLine = normalized.ReleaseLine,
                     Topology = normalized.Topology,
@@ -1335,7 +1336,8 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
                 operation.LifecycleAction,
                 operation.ProviderAssignmentId,
                 capacity,
-                operation.ManagedHandoff);
+                operation.ManagedHandoff,
+                operation.ManagedHandoffStudioGrants);
             if (!string.Equals(
                     AzureProviderOperationValidation.ComputeRequestHash(request),
                     operation.RequestHash,
@@ -1578,7 +1580,8 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             x.ProviderAssignmentId,
             x.AttemptedStep,
             capacity,
-            x.ManagedHandoff);
+            x.ManagedHandoff,
+            x.ManagedHandoffStudioGrants);
     }
 
     /// <summary>

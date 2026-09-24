@@ -198,9 +198,11 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Theory]
-    [InlineData(AzureProviderRunnerStep.Foundation)]
-    [InlineData(AzureProviderRunnerStep.Workload)]
-    public async Task Production_deployment_configures_the_runtime_handoff_from_Control_and_the_instance_identity(AzureProviderRunnerStep step)
+    [InlineData(AzureProviderRunnerStep.Foundation, false)]
+    [InlineData(AzureProviderRunnerStep.Workload, false)]
+    [InlineData(AzureProviderRunnerStep.Foundation, true)]
+    [InlineData(AzureProviderRunnerStep.Workload, true)]
+    public async Task Production_deployment_selects_the_runtime_grant_profile_from_the_admitted_image(AzureProviderRunnerStep step, bool supportsStudioGrants)
     {
         var options = _fixture.Options with
         {
@@ -211,7 +213,11 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         };
         var context = ContextFor(options);
 
-        var deployment = await ProductionDeploymentAsync(step, _fixture.Plan with { ManagedHandoff = true }, options, context);
+        var deployment = await ProductionDeploymentAsync(step, _fixture.Plan with
+        {
+            ManagedHandoff = true,
+            ManagedHandoffStudioGrants = supportsStudioGrants
+        }, options, context);
 
         var instanceId = context.InstanceId.ToString("D");
         Assert.Equal(
@@ -222,9 +228,38 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
             "managedHandoffControlBaseUrl=https://control.example.test",
             "managedHandoffControlContinuationUrl=https://control.example.test/admin/runtimes",
             "managedHandoffRuntimeMaximumLifetime=08:00:00",
-            $"managedHandoffAllowedRuntimePermissions={JsonSerializer.Serialize(ManagedElsaRuntimePermissions.OwnerAdministrator)}"
+            $"managedHandoffAllowedRuntimePermissions={JsonSerializer.Serialize(supportsStudioGrants
+                ? ManagedElsaRuntimePermissions.OwnerAdministrator
+                : ManagedElsaRuntimePermissions.DiagnosticsOnly)}"
         ], deployment.Where(IsHandoffArgument));
         Assert.DoesNotContain(deployment, argument => argument.StartsWith("managedHandoffCallbackUri=", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.Foundation)]
+    [InlineData(AzureProviderRunnerStep.Workload)]
+    public async Task Studio_grants_cannot_exceed_Control_configured_permission_ceiling(AzureProviderRunnerStep step)
+    {
+        var options = _fixture.Options with
+        {
+            ManagedHandoff = ControlHandoff with
+            {
+                AllowedRuntimePermissions = ManagedElsaRuntimePermissions.DiagnosticsOnly
+            }
+        };
+        var process = new FakeCommandProcess();
+        var runner = new AzureBicepProviderRunner(options, _fixture.Scope, process);
+        var command = _fixture.Command(step, RegistryReadyResources()) with
+        {
+            Context = ContextFor(options),
+            Plan = _fixture.Plan with { ManagedHandoff = true, ManagedHandoffStudioGrants = true }
+        };
+
+        var result = await runner.RunAsync(command);
+
+        Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
+        Assert.Equal("azure.handoff.grants-not-authorized", result.Code);
+        Assert.Empty(process.Calls);
     }
 
     [Theory]

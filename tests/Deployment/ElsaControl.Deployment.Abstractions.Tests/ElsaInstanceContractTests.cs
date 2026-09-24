@@ -729,6 +729,9 @@ public sealed class ElsaInstanceContractTests
         Assert.False(new ElsaCurrentDeploymentReference("deployment_01", endpointUri: "https://runtime.example.test").ManagedHandoff);
         Assert.True(new ElsaCurrentDeploymentReference("deployment_01", endpointUri: "https://runtime.example.test", managedHandoff: true).ManagedHandoff);
         Assert.Throws<ArgumentException>(() => new ElsaCurrentDeploymentReference("deployment_01", managedHandoff: true));
+        Assert.False(new ElsaCurrentDeploymentReference("deployment_01", endpointUri: "https://runtime.example.test", managedHandoff: true).StudioGrantsSupported);
+        Assert.True(new ElsaCurrentDeploymentReference("deployment_01", endpointUri: "https://runtime.example.test", managedHandoff: true, studioGrantsSupported: true).StudioGrantsSupported);
+        Assert.Throws<ArgumentException>(() => new ElsaCurrentDeploymentReference("deployment_01", endpointUri: "https://runtime.example.test", studioGrantsSupported: true));
     }
 
     [Fact]

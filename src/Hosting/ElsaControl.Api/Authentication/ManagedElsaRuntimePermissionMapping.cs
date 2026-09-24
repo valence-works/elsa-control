@@ -12,12 +12,14 @@ public static class ManagedElsaRuntimePermissionMapping
     public const string StructuredLogsRead = ManagedElsaRuntimePermissions.StructuredLogsRead;
 
     private static readonly IReadOnlySet<string> Empty = Array.Empty<string>().ToFrozenSet(StringComparer.Ordinal);
+    private static readonly IReadOnlySet<string> StructuredLogsAdministrator =
+        ManagedElsaRuntimePermissions.DiagnosticsOnly.ToFrozenSet(StringComparer.Ordinal);
     private static readonly IReadOnlySet<string> OwnerAdministrator =
         ManagedElsaRuntimePermissions.OwnerAdministrator.ToFrozenSet(StringComparer.Ordinal);
 
     public static IReadOnlyList<string> AllowedPermissions { get; } = ManagedElsaRuntimePermissions.OwnerAdministrator;
 
-    public static IReadOnlySet<string> For(WorkspaceAccess access)
+    public static IReadOnlySet<string> For(WorkspaceAccess access, bool studioGrantsSupported = false)
     {
         ArgumentNullException.ThrowIfNull(access);
 
@@ -25,7 +27,7 @@ public static class ManagedElsaRuntimePermissionMapping
         // to workspace owners and organization owners/admins who also have instances.open.
         return access.Role is WorkspaceRole.Owner ||
                access.OrganizationRole is OrganizationRole.Owner or OrganizationRole.Administrator
-            ? OwnerAdministrator
+            ? studioGrantsSupported ? OwnerAdministrator : StructuredLogsAdministrator
             : Empty;
     }
 

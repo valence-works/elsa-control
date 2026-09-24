@@ -11,6 +11,8 @@ public static class ManagedElsaRuntimePermissions
 {
     public const string StructuredLogsRead = "read:diagnostics:structured-logs";
 
+    public static IReadOnlyList<string> DiagnosticsOnly { get; } = Array.AsReadOnly(new[] { StructuredLogsRead });
+
     public static IReadOnlyList<string> OwnerAdministrator { get; } = Array.AsReadOnly(new[]
     {
         StructuredLogsRead,
