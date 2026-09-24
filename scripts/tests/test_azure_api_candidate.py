@@ -86,6 +86,8 @@ esac
         environment.update(
             PATH=f"{self.bin}:{environment['PATH']}",
             FAKE_RUN_JSON=json.dumps(run),
+            GITHUB_REF="refs/heads/main",
+            TARGET_ENVIRONMENT="production",
         )
         environment.update(overrides)
         return subprocess.run(
@@ -133,7 +135,12 @@ esac
                 SOURCE_REPOSITORY,
                 str(self.output),
             ],
-            env={**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}"},
+            env={
+                **os.environ,
+                "PATH": f"{self.bin}:{os.environ['PATH']}",
+                "GITHUB_REF": "refs/heads/main",
+                "TARGET_ENVIRONMENT": "production",
+            },
             capture_output=True,
             text=True,
             check=False,
@@ -211,6 +218,36 @@ esac
 
         self.assertNotEqual(0, result.returncode)
         self.assertIn("trusted successful build", result.stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_staging_candidate_requires_the_exact_staging_branch_and_environment(self) -> None:
+        run = {
+            "id": 123,
+            "name": "Azure Control API Deploy",
+            "path": ".github/workflows/azure-api-deploy.yml",
+            "repository": {"full_name": SOURCE_REPOSITORY},
+            "head_repository": {"full_name": SOURCE_REPOSITORY},
+            "status": "completed",
+            "conclusion": "success",
+            "event": "workflow_dispatch",
+            "head_branch": "candidate/staging",
+            "head_sha": SOURCE_SHA,
+            "run_number": 77,
+        }
+        staging = self.run_helper(
+            GITHUB_REF="refs/heads/candidate/staging",
+            TARGET_ENVIRONMENT="test",
+            FAKE_RUN_JSON=json.dumps(run),
+        )
+        self.assertEqual(0, staging.returncode, staging.stderr)
+
+        self.output.unlink()
+        production = self.run_helper(
+            GITHUB_REF="refs/heads/candidate/staging",
+            TARGET_ENVIRONMENT="production",
+            FAKE_RUN_JSON=json.dumps(run),
+        )
+        self.assertNotEqual(0, production.returncode)
         self.assertFalse(self.output.exists())
 
     def test_source_that_is_not_an_ancestor_of_main_is_rejected(self) -> None:
