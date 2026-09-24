@@ -596,6 +596,7 @@ class IssueBus:
         claim_body = f"claim: {worker} starting"
         changed: list[str] = []
         claim_comment_id: str | None = None
+        frozen_expiry_cutoff: datetime | None = None
 
         try:
             changed.append("claim comment")
@@ -629,17 +630,21 @@ class IssueBus:
                 raise ClaimLost(
                     "pre-assignment invariants changed: " + "; ".join(after_arbitration.failures)
                 )
-            after_arbitration_winner = earliest_claim(
-                active_claims_for_issue(
-                    after_arbitration.issue,
-                    after_arbitration.project.item,
-                    self.clock(),
-                )
+            arbitration_time = self.clock()
+            active_after_arbitration = active_claims_for_issue(
+                after_arbitration.issue,
+                after_arbitration.project.item,
+                arbitration_time,
             )
+            after_arbitration_winner = earliest_claim(active_after_arbitration)
             if after_arbitration_winner is None or after_arbitration_winner.id != claim_comment.id:
                 raise ClaimLost(
                     f"earlier active claim {after_arbitration_winner.id if after_arbitration_winner else 'unknown'} won"
                 )
+            # Freeze the Ready-state expiry decision after arbitration. Older
+            # expired leases must not revive when this worker removes readiness,
+            # but claims posted later must still participate in verification.
+            frozen_expiry_cutoff = _as_utc(arbitration_time) - CLAIM_EXPIRY
             refreshed_item = after_arbitration.project.item
             refreshed_status = after_arbitration.project.fields.get("status")
             refreshed_agent = after_arbitration.project.fields.get("agent state")
@@ -675,7 +680,12 @@ class IssueBus:
             final_labels = _labels(final_issue)
             final_item = final_project.item
             final_winner = earliest_claim(
-                active_claims_for_issue(final_issue, final_project.item, self.clock())
+                active_claims_for_issue(
+                    final_issue,
+                    final_project.item,
+                    self.clock(),
+                    frozen_expiry_cutoff=frozen_expiry_cutoff,
+                )
             )
             if (
                 final_claim is None
@@ -691,7 +701,17 @@ class IssueBus:
                 raise ClaimLost("claim state was changed during final verification")
         except (IssueBusError, ClaimLost) as exc:
             reason = str(exc)
-            rollback_ok = self._rollback(number, login, item, status_field, agent_field, changed, claim_comment_id, reason)
+            rollback_ok = self._rollback(
+                number,
+                login,
+                item,
+                status_field,
+                agent_field,
+                changed,
+                claim_comment_id,
+                reason,
+                frozen_expiry_cutoff,
+            )
             if not rollback_ok:
                 blocked_ok = self._blocked_path(
                     number,
@@ -721,16 +741,19 @@ class IssueBus:
         changed: Sequence[str],
         claim_comment_id: str | None,
         reason: str,
+        frozen_expiry_cutoff: datetime | None,
     ) -> bool:
         ok = True
         for mutation in reversed(changed):
             try:
                 if mutation == "project claim fields":
-                    self._restore_project_fields(number, claim_comment_id, status_field, agent_field)
+                    self._restore_project_fields(
+                        number, claim_comment_id, status_field, agent_field, frozen_expiry_cutoff
+                    )
                 elif mutation == "ready-for-agent removal":
-                    self._restore_ready_label(number, claim_comment_id)
+                    self._restore_ready_label(number, claim_comment_id, frozen_expiry_cutoff)
                 elif mutation == "assignment":
-                    self._restore_assignment(number, claim_comment_id, login)
+                    self._restore_assignment(number, claim_comment_id, login, frozen_expiry_cutoff)
             except IssueBusError:
                 ok = False
         if "claim comment" in changed:
@@ -755,13 +778,17 @@ class IssueBus:
         return ok
 
     def _rollback_state(
-        self, number: int, claim_comment_id: str | None
+        self, number: int, claim_comment_id: str | None, frozen_expiry_cutoff: datetime | None
     ) -> tuple[Mapping[str, Any], ProjectSnapshot]:
         if claim_comment_id is None:
             raise ClaimLost("claim lease identity is unavailable")
         issue = self.client.issue(number)
         project = self.client.project_for_issue(number)
-        winner = earliest_claim(active_claims_for_issue(issue, project.item, self.clock()))
+        winner = earliest_claim(
+            active_claims_for_issue(
+                issue, project.item, self.clock(), frozen_expiry_cutoff=frozen_expiry_cutoff
+            )
+        )
         if winner is None or winner.id != claim_comment_id:
             raise ClaimLost("claim lease no longer owns the current state")
         return issue, project
@@ -772,8 +799,9 @@ class IssueBus:
         claim_comment_id: str | None,
         status_field: ProjectField,
         agent_field: ProjectField,
+        frozen_expiry_cutoff: datetime | None,
     ) -> None:
-        _, project = self._rollback_state(number, claim_comment_id)
+        _, project = self._rollback_state(number, claim_comment_id, frozen_expiry_cutoff)
         current_item = project.item
         current_status = project.fields.get("status") or status_field
         current_agent = project.fields.get("agent state") or agent_field
@@ -795,16 +823,18 @@ class IssueBus:
             ),
         )
 
-    def _restore_ready_label(self, number: int, claim_comment_id: str | None) -> None:
-        issue, _ = self._rollback_state(number, claim_comment_id)
+    def _restore_ready_label(
+        self, number: int, claim_comment_id: str | None, frozen_expiry_cutoff: datetime | None
+    ) -> None:
+        issue, _ = self._rollback_state(number, claim_comment_id, frozen_expiry_cutoff)
         if READY_LABEL in _labels(issue):
             return
         self.client.add_label(number, READY_LABEL)
 
     def _restore_assignment(
-        self, number: int, claim_comment_id: str | None, login: str
+        self, number: int, claim_comment_id: str | None, login: str, frozen_expiry_cutoff: datetime | None
     ) -> None:
-        issue, _ = self._rollback_state(number, claim_comment_id)
+        issue, _ = self._rollback_state(number, claim_comment_id, frozen_expiry_cutoff)
         assignees = _assignee_logins(issue)
         if not assignees:
             return
@@ -1147,15 +1177,20 @@ def active_claims_from(comments: Any) -> list[ClaimComment]:
 
 
 def active_claims_for_issue(
-    issue: Mapping[str, Any], project_item: ProjectItem | None, now: datetime
+    issue: Mapping[str, Any],
+    project_item: ProjectItem | None,
+    now: datetime,
+    frozen_expiry_cutoff: datetime | None = None,
 ) -> list[ClaimComment]:
-    """Apply the protocol's 15-minute expiry only in the fully-ready state.
+    """Apply Ready-state expiry or a cutoff frozen by a winning claim attempt.
 
     A malformed or missing timestamp remains active. This keeps an unreadable
     reservation fail-closed while allowing an operator to reconcile it.
     """
 
     claims = active_claims_from(issue.get("comments", []))
+    if frozen_expiry_cutoff is not None:
+        return [claim for claim in claims if not _claim_expired(claim, frozen_expiry_cutoff)]
     if (
         READY_LABEL not in _labels(issue)
         or project_item is None

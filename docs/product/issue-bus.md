@@ -95,6 +95,10 @@ no active claim and still shows that fully-ready state, it is an orphaned claim
 from an interrupted session. Operator reconciliation must unassign it before
 requeueing. The command never auto-unassigns an assignee before it has reserved
 the issue, because that mutation is unsafe during a race.
+Leases found expired during Ready-state arbitration stay excluded through that
+claim attempt's final verification and rollback checks, even after the winning
+worker removes `ready-for-agent` and moves the Project item to `In Progress` /
+`Assigned`. Claims posted later still participate in arbitration.
 
 ## While in flight
 

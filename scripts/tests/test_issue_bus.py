@@ -35,6 +35,14 @@ def cross_referenced_pr(number: int) -> dict[str, Any]:
     }
 
 
+def expired_claim() -> dict[str, str]:
+    return {
+        "id": "expired",
+        "createdAt": "2026-09-12T23:45:00Z",
+        "body": "claim: claude starting",
+    }
+
+
 class GhClientAdapterTests(unittest.TestCase):
     def test_targeted_rest_project_query_parses_numeric_ids_and_options(self) -> None:
         fields_response = [
@@ -416,6 +424,7 @@ class FakeClient:
         self.link_at_final = False
         self.external_assignee_at_final: str | None = None
         self.external_project_status_at_final: str | None = None
+        self.competing_claim_at_final = False
         self.linked_calls = 0
         self.assignee_after_claim: str | None = None
         self.comment_sequence = 0
@@ -520,6 +529,14 @@ class FakeClient:
             self.item = issue_bus.ProjectItem(item.id, item.project_id, item.issue_number, option_name, self.item.agent_state, item.raw)
         else:
             self.item = issue_bus.ProjectItem(item.id, item.project_id, item.issue_number, self.item.status, option_name, item.raw)
+            if option_name == "Assigned" and self.competing_claim_at_final:
+                self.issue_data["comments"].append(
+                    {
+                        "id": "comment-0",
+                        "createdAt": "2026-09-13T00:00:01Z",
+                        "body": "claim: cursor starting",
+                    }
+                )
 
     def project_items(self) -> list[dict[str, Any]]:
         return [
@@ -756,18 +773,47 @@ class IssueBusTests(unittest.TestCase):
 
     def test_claim_expires_only_after_fifteen_minutes_in_fully_ready_state(self) -> None:
         client = FakeClient()
-        client.issue_data["comments"] = [
-            {
-                "id": "expired",
-                "createdAt": "2026-09-12T23:45:00Z",
-                "body": "claim: claude starting",
-            }
-        ]
+        client.issue_data["comments"] = [expired_claim()]
         bus, _ = self.run_bus(client)
 
         preflight = bus.preflight(401, "codex")
 
         self.assertNotIn("active claim exists (expired)", preflight.failures)
+
+    def test_expired_ready_claim_stays_expired_through_final_verification(self) -> None:
+        client = FakeClient()
+        client.issue_data["comments"] = [expired_claim()]
+        bus, output = self.run_bus(client)
+
+        self.assertTrue(bus.claim(401, "codex"), output)
+        self.assertEqual(client.item.status, "In Progress")
+        self.assertEqual(client.item.agent_state, "Assigned")
+        self.assertNotIn("ready-for-agent", {label["name"] for label in client.issue_data["labels"]})
+        self.assertFalse(any(comment["body"].startswith("claim-abandoned:") for comment in client.issue_data["comments"]))
+
+    def test_rollback_keeps_expired_ready_claim_out_of_ownership_check(self) -> None:
+        client = FakeClient()
+        client.issue_data["comments"] = [expired_claim()]
+        client.apply_then_error.add("remove_label")
+        bus, output = self.run_bus(client)
+
+        self.assertFalse(bus.claim(401, "codex"))
+        self.assertIn("rollback completed", output[-1])
+        self.assertEqual(client.item.status, "Ready")
+        self.assertEqual(client.item.agent_state, "Agent Ready")
+        self.assertEqual(client.issue_data["assignees"], [])
+        self.assertIn("ready-for-agent", {label["name"] for label in client.issue_data["labels"]})
+        self.assertNotIn("blocked", {label["name"] for label in client.issue_data["labels"]})
+
+    def test_concurrent_claim_after_arbitration_still_competes_with_frozen_expiry(self) -> None:
+        client = FakeClient()
+        client.issue_data["comments"] = [expired_claim()]
+        client.competing_claim_at_final = True
+        bus, output = self.run_bus(client)
+
+        self.assertFalse(bus.claim(401, "codex"))
+        self.assertIn("rollback failed", output[-1])
+        self.assertIn("blocked", {label["name"] for label in client.issue_data["labels"]})
 
     def test_missing_or_malformed_claim_timestamp_remains_active(self) -> None:
         for created_at in (None, "not-a-timestamp"):
