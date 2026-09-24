@@ -21,11 +21,17 @@ the production registry and the producer's `main` or version-tag workflow identi
    current candidate/image references in a protected rollback record. Change only
    staging Control's `ReleaseCatalog__Verification__RegistryHost`,
    `ReleaseCatalog__Verification__Repository`,
-   `ReleaseCatalog__Admission__ExpectedSignatureSubject`, and
-   `Deployment__AzureProvider__Runner__TargetScope__RegistryName` to the isolated
-   staging registry and exact candidate signer. Preserve the existing strict OIDC
-   issuer and all other verifier checks. The registry scope must match the signed
-   paid `runtime-combined` image repository exactly.
+   `ReleaseCatalog__Admission__ExpectedSignatureSubject`, and the three
+   `Deployment__AzureProvider__Runner__TargetScope__RegistrySubscriptionId`,
+   `RegistryResourceGroupName`, and `RegistryName` values to the isolated staging
+   registry and exact candidate signer. Preserve the existing strict OIDC issuer
+   and all other verifier checks. The registry scope must match the signed paid
+   `runtime-combined` image repository exactly. Before restart, grant the verifier
+   identity read access to that ACR, and configure the narrow provider's exact
+   deployment-metadata and conditional role-administration assignments at the
+   new staging registry scope. Never reuse assignment IDs from a different
+   registry. If ACR blob reads redirect, add only the exact observed staging blob
+   host to the verifier allowlist.
 4. Deploy the matching Control candidate to the staging API/worker using the
    `candidate/staging` ref, `test` target, and immutable build-then-promote workflow.
    The workflow refuses this ref for production. Admit the signed manifest through
