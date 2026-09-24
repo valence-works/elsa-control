@@ -924,13 +924,20 @@ public sealed class OrganizationBillingPersistenceTests
             OrganizationBillingCleanupOutcome.ConfirmedAbsent,
             Now.AddMinutes(5)));
 
+        var ambiguous = await store.ConsumeAsync(
+            Event(OrganizationId, "evt-ambiguous-same-second", OrganizationSubscriptionState.Active,
+                Now.AddMinutes(5), "cus_acme", "sub_paid_again"),
+            Now.AddMinutes(5).AddSeconds(1));
+        Assert.Equal(BillingEventConsumptionOutcome.Rejected, ambiguous.Outcome);
+        db.ChangeTracker.Clear();
+
         var paid = await store.ConsumeAsync(
             Event(OrganizationId, "evt-paid-again", OrganizationSubscriptionState.Active,
-                Now.AddMinutes(5), "cus_acme", "sub_paid_again"),
+                Now.AddMinutes(5).AddSeconds(1), "cus_acme", "sub_paid_again"),
             Now.AddMinutes(7));
         var replay = await store.ConsumeAsync(
             Event(OrganizationId, "evt-paid-again", OrganizationSubscriptionState.Active,
-                Now.AddMinutes(5), "cus_acme", "sub_paid_again"),
+                Now.AddMinutes(5).AddSeconds(1), "cus_acme", "sub_paid_again"),
             Now.AddMinutes(8));
 
         Assert.Equal(BillingEventConsumptionOutcome.Applied, paid.Outcome);
@@ -946,7 +953,7 @@ public sealed class OrganizationBillingPersistenceTests
         Assert.Equal(OrganizationSubscriptionState.Deleted, history[0].State);
         Assert.Null(history[0].ProviderSubscriptionReference);
         Assert.Equal("sub_paid_again", history[1].ProviderSubscriptionReference);
-        Assert.Equal(2, await db.BillingProviderEvents.CountAsync());
+        Assert.Equal(3, await db.BillingProviderEvents.CountAsync());
         Assert.Equal(OrganizationSubscriptionState.Active, (await store.GetSubscriptionAsync(OrganizationId))!.State);
     }
 

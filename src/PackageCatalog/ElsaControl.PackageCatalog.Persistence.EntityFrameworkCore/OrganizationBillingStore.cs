@@ -533,9 +533,9 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             string.IsNullOrWhiteSpace(providerEvent.ProviderCustomerReference) ||
             string.IsNullOrWhiteSpace(providerEvent.ProviderSubscriptionReference) ||
             subscription.DeletedAt is not { } deletedAt ||
-            // Stripe event creation is recorded to the second. Cleanup has
-            // finer precision, so a new event in that same second is valid.
-            occurrence < DateTimeOffset.FromUnixTimeSeconds(deletedAt.ToUnixTimeSeconds()))
+            // Stripe event creation is recorded to the second. An event in
+            // the cleanup second cannot prove that it happened afterward.
+            occurrence <= deletedAt)
             return false;
 
         var cleanupConfirmed = await dbContext.OrganizationBillingCleanups.AsNoTracking().AnyAsync(x =>
@@ -552,7 +552,7 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             x.OrganizationId == subscription.OrganizationId &&
             x.Provider == providerEvent.Provider &&
             x.ProviderSubscriptionReference == providerEvent.ProviderSubscriptionReference &&
-            x.State != null &&
+            x.ProcessingStatus == BillingProviderEventProcessingStatus.Applied &&
             x.OccurredAt <= deletedAt,
             cancellationToken);
     }
