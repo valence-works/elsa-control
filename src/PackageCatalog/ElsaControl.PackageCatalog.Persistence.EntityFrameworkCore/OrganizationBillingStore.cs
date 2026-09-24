@@ -198,6 +198,13 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                     providerEvent.ProviderSubscriptionReference,
                     cancellationToken) ?? subscription;
             }
+            // A confirmed cleanup tombstones the old subscription and releases
+            // its provider references. A later paid Stripe subscription is a
+            // new lifecycle, not a transition out of Deleted or a new trial.
+            if (subscription is not null &&
+                await CanStartPaidSubscriptionAfterConfirmedDeletionAsync(
+                    subscription, providerEvent, occurrence, cancellationToken))
+                subscription = null;
             var existingSubscription = subscription;
             if (subscription is not null)
             {
@@ -511,6 +518,43 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         var entitlement = await CurrentEntitlementAsync(subscription.OrganizationId, cancellationToken);
         return entitlement is { ManagedHostingEnabled: false, SubscriptionId: not null } &&
                entitlement.SubscriptionId == subscription.Id;
+    }
+
+    private async Task<bool> CanStartPaidSubscriptionAfterConfirmedDeletionAsync(
+        OrganizationSubscription subscription,
+        BillingProviderEvent providerEvent,
+        DateTimeOffset occurrence,
+        CancellationToken cancellationToken)
+    {
+        if (subscription.State != OrganizationSubscriptionState.Deleted ||
+            !string.Equals(subscription.Provider, BillingProviderNames.Stripe, StringComparison.Ordinal) ||
+            !string.Equals(providerEvent.Provider, BillingProviderNames.Stripe, StringComparison.Ordinal) ||
+            providerEvent.State != OrganizationSubscriptionState.Active ||
+            string.IsNullOrWhiteSpace(providerEvent.ProviderCustomerReference) ||
+            string.IsNullOrWhiteSpace(providerEvent.ProviderSubscriptionReference) ||
+            subscription.DeletedAt is not { } deletedAt ||
+            // Stripe event creation is recorded to the second. Cleanup has
+            // finer precision, so a new event in that same second is valid.
+            occurrence < DateTimeOffset.FromUnixTimeSeconds(deletedAt.ToUnixTimeSeconds()))
+            return false;
+
+        var cleanupConfirmed = await dbContext.OrganizationBillingCleanups.AsNoTracking().AnyAsync(x =>
+            x.OrganizationId == subscription.OrganizationId &&
+            x.SubscriptionId == subscription.Id &&
+            x.State == OrganizationBillingCleanupState.Confirmed,
+            cancellationToken);
+        if (!cleanupConfirmed)
+            return false;
+
+        // A delayed event from the deleted Stripe subscription must not
+        // resurrect it as a new paid subscription after its references clear.
+        return !await dbContext.BillingProviderEvents.AsNoTracking().AnyAsync(x =>
+            x.OrganizationId == subscription.OrganizationId &&
+            x.Provider == providerEvent.Provider &&
+            x.ProviderSubscriptionReference == providerEvent.ProviderSubscriptionReference &&
+            x.State != null &&
+            x.OccurredAt <= deletedAt,
+            cancellationToken);
     }
 
     private void AddBillingAudit(Guid organizationId, Guid eventId, string summary, DateTimeOffset createdAt) =>

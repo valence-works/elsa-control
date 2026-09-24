@@ -899,6 +899,118 @@ public sealed class OrganizationBillingPersistenceTests
         Assert.Equal(ElsaInstanceCommercialOperation.LifecycleConstrained, decision.Code);
     }
 
+    [Fact]
+    public async Task Confirmed_Stripe_cleanup_allows_a_later_paid_subscription_without_renewing_the_trial()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        await db.SaveChangesAsync();
+
+        var store = new OrganizationBillingStore(db);
+        var original = await store.ConsumeAsync(
+            Event("evt-original", OrganizationSubscriptionState.Active, Now.AddMinutes(1)),
+            Now.AddMinutes(2));
+        await store.RequestDeletionAsync(OrganizationId, Now.AddMinutes(3));
+        var cleanup = Assert.IsType<OrganizationBillingCleanupWorkItem>(
+            await store.TryClaimCleanupAsync("test-worker", Now.AddMinutes(4)));
+        await store.CompleteCleanupAsync(new(
+            cleanup.Id,
+            cleanup.OrganizationId,
+            cleanup.SubscriptionId,
+            cleanup.LeaseToken,
+            OrganizationBillingCleanupOutcome.ConfirmedAbsent,
+            Now.AddMinutes(5)));
+
+        var paid = await store.ConsumeAsync(
+            Event(OrganizationId, "evt-paid-again", OrganizationSubscriptionState.Active,
+                Now.AddMinutes(5), "cus_acme", "sub_paid_again"),
+            Now.AddMinutes(7));
+        var replay = await store.ConsumeAsync(
+            Event(OrganizationId, "evt-paid-again", OrganizationSubscriptionState.Active,
+                Now.AddMinutes(5), "cus_acme", "sub_paid_again"),
+            Now.AddMinutes(8));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Applied, paid.Outcome);
+        Assert.Equal(BillingEventConsumptionOutcome.Replayed, replay.Outcome);
+        Assert.NotEqual(original.Subscription!.Id, paid.Subscription!.Id);
+        Assert.Equal(OrganizationSubscriptionState.Active, paid.Subscription.State);
+        Assert.Null(paid.Entitlement!.ManagedHostingExpiresAt);
+        Assert.Equal(paid.Subscription.Id, paid.Entitlement.SubscriptionId);
+        Assert.True(paid.Entitlement.ManagedHostingEnabled);
+        Assert.Equal(1, paid.Entitlement.MaxInstances);
+        var history = await db.OrganizationSubscriptions.OrderBy(x => x.CreatedAt).ToListAsync();
+        Assert.Equal(2, history.Count);
+        Assert.Equal(OrganizationSubscriptionState.Deleted, history[0].State);
+        Assert.Null(history[0].ProviderSubscriptionReference);
+        Assert.Equal("sub_paid_again", history[1].ProviderSubscriptionReference);
+        Assert.Equal(2, await db.BillingProviderEvents.CountAsync());
+        Assert.Equal(OrganizationSubscriptionState.Active, (await store.GetSubscriptionAsync(OrganizationId))!.State);
+    }
+
+    [Fact]
+    public async Task New_Stripe_subscription_remains_blocked_until_old_cleanup_is_confirmed()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        await db.SaveChangesAsync();
+
+        var store = new OrganizationBillingStore(db);
+        await store.ConsumeAsync(Event("evt-original", OrganizationSubscriptionState.Active, Now.AddMinutes(1)), Now.AddMinutes(2));
+        await store.RequestDeletionAsync(OrganizationId, Now.AddMinutes(3));
+
+        await Assert.ThrowsAsync<BillingProviderEventConflictException>(() => store.ConsumeAsync(
+            Event(OrganizationId, "evt-premature", OrganizationSubscriptionState.Active,
+                Now.AddMinutes(4), "cus_acme", "sub_paid_again"),
+            Now.AddMinutes(5)));
+        db.ChangeTracker.Clear();
+        Assert.Equal(OrganizationSubscriptionState.Suspended, (await store.GetSubscriptionAsync(OrganizationId))!.State);
+        Assert.Single(await db.BillingProviderEvents.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Confirmed_cleanup_does_not_allow_a_second_trial_or_a_late_old_subscription_event()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        await db.SaveChangesAsync();
+
+        var store = new OrganizationBillingStore(db);
+        await store.ConsumeAsync(Event("evt-original", OrganizationSubscriptionState.Active, Now.AddMinutes(1)), Now.AddMinutes(2));
+        await store.RequestDeletionAsync(OrganizationId, Now.AddMinutes(3));
+        var cleanup = Assert.IsType<OrganizationBillingCleanupWorkItem>(
+            await store.TryClaimCleanupAsync("test-worker", Now.AddMinutes(4)));
+        await store.CompleteCleanupAsync(new(
+            cleanup.Id,
+            cleanup.OrganizationId,
+            cleanup.SubscriptionId,
+            cleanup.LeaseToken,
+            OrganizationBillingCleanupOutcome.ConfirmedAbsent,
+            Now.AddMinutes(5)));
+
+        var trial = await store.ConsumeAsync(
+            Event(OrganizationId, "evt-new-trial", OrganizationSubscriptionState.Trial,
+                Now.AddMinutes(6), "cus_acme", "sub_trial_again"),
+            Now.AddMinutes(7));
+        var lateOld = await store.ConsumeAsync(
+            Event("evt-late-old", OrganizationSubscriptionState.Active, Now.AddMinutes(8)),
+            Now.AddMinutes(9));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Rejected, trial.Outcome);
+        Assert.Equal(BillingEventConsumptionOutcome.Rejected, lateOld.Outcome);
+        Assert.Equal(OrganizationSubscriptionState.Deleted, (await store.GetSubscriptionAsync(OrganizationId))!.State);
+        Assert.Single(await db.OrganizationSubscriptions.ToListAsync());
+        Assert.False((await db.OrganizationEntitlementSnapshots.SingleAsync()).SubscriptionState == OrganizationSubscriptionState.Active);
+    }
+
     private static BillingProviderEvent Event(string id, OrganizationSubscriptionState state, DateTimeOffset occurredAt) =>
         Event(OrganizationId, id, state, occurredAt, "cus_acme", "sub_acme");
 
