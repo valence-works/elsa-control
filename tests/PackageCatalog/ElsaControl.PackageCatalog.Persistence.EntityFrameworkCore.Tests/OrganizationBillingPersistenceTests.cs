@@ -922,7 +922,7 @@ public sealed class OrganizationBillingPersistenceTests
             cleanup.SubscriptionId,
             cleanup.LeaseToken,
             OrganizationBillingCleanupOutcome.ConfirmedAbsent,
-            Now.AddMinutes(5)));
+            Now.AddMinutes(5).AddMilliseconds(500)));
 
         var ambiguous = await store.ConsumeAsync(
             Event(OrganizationId, "evt-ambiguous-same-second", OrganizationSubscriptionState.Active,
