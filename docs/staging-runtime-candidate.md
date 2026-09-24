@@ -17,25 +17,29 @@ the production registry and the producer's `main` or version-tag workflow identi
    Use the immutable manifest reference and digest from the publication envelope;
    never infer authority from a tag. Verify the signature and evidence against the
    exact producer workflow identity ending in `@refs/heads/candidate/staging`.
-3. Before admitting the candidate, record the previous non-secret staging Control
-   authority settings and image reference in a protected rollback record. Do not
-   copy credentials into that record. Change only
-   staging Control's `ReleaseCatalog__Verification__RegistryHost`,
+3. Before admitting the candidate, retain the prior reviewed staging parameter
+   profile and record the current image reference for rollback. Do not copy
+   credentials into the rollback record. Update the non-secret staging profile in
+   `infra/control-worker-composition/worker-settings.parameters.staging.json` and
+   render it with `scripts/render-worker-settings.py`. Apply only these nine
+   resulting staging Control settings to the isolated registry and exact candidate
+   signer: `ReleaseCatalog__Verification__RegistryHost`,
    `ReleaseCatalog__Verification__Repository`,
-   `ReleaseCatalog__Admission__ExpectedSignatureSubject`, the three
+   `ReleaseCatalog__Admission__ExpectedSignatureSubject`,
    `Deployment__AzureProvider__Runner__TargetScope__RegistrySubscriptionId`,
-   `RegistryResourceGroupName`, and `RegistryName` values, plus the three
+   `Deployment__AzureProvider__Runner__TargetScope__RegistryResourceGroupName`,
+   `Deployment__AzureProvider__Runner__TargetScope__RegistryName`,
    `Deployment__AzureProvider__Runner__RegistryDeploymentMetadataRoleDefinitionId`,
-   `RegistryDeploymentMetadataRoleAssignmentId`, and
-   `RegistryRoleAdministrationAssignmentId` values to the isolated staging registry
-   and exact candidate signer. Preserve the existing strict OIDC issuer
+   `Deployment__AzureProvider__Runner__RegistryDeploymentMetadataRoleAssignmentId`,
+   and `Deployment__AzureProvider__Runner__RegistryRoleAdministrationAssignmentId`.
+   Preserve the existing strict OIDC issuer
    and all other verifier checks. The registry scope must match the signed paid
    `runtime-combined` image repository exactly. Before restart, grant the verifier
    identity read access to that ACR, and configure the narrow provider's exact
    deployment-metadata assignment at the staging registry resource-group scope
    and conditional role-administration assignment at the registry scope. Never
-   reuse assignment IDs from a different
-   registry. If ACR blob reads redirect, add only the exact observed staging blob
+   reuse assignment IDs from a different registry. If ACR blob reads redirect,
+   add only the exact observed staging blob
    host to the verifier allowlist.
 4. Deploy the matching Control candidate to the staging API/worker using the
    `candidate/staging` ref, `test` target, and immutable build-then-promote workflow.
