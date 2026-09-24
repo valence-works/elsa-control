@@ -319,7 +319,7 @@ class GhClientAdapterTests(unittest.TestCase):
             if "/issues/401/timeline" in rendered:
                 response = [[]]
             elif "/issues/401/comments?" in rendered:
-                response = [[{"body": "pr: valence-works/elsa-control#398"}]]
+                response = [[{"body": "pr: valence-works/elsa-control#398\nimage-pr: https://example.test/image.png\nAdditional evidence"}]]
             elif "/issues/401" in rendered:
                 response = {"number": 401, "state": "open", "labels": [], "assignees": []}
             elif "pr view 398" in rendered:

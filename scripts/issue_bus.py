@@ -357,7 +357,8 @@ class GhClient:
             body = str(comment.get("body", "")) if isinstance(comment, Mapping) else ""
             if not body.lower().startswith("pr:"):
                 continue
-            raw_reference = body[3:].strip().strip("`<>")
+            first_line = body.splitlines()[0]
+            raw_reference = first_line[3:].strip().strip("`<>")
             match = PR_URL_PATTERN.fullmatch(raw_reference) or PR_SHORT_REFERENCE_PATTERN.fullmatch(raw_reference)
             if match is None:
                 raise GhError("canonical pr: comment does not contain one readable pull request reference")

@@ -71,7 +71,7 @@ the issue when any check fails:
 8. The worker takes only this one Task for the session.
 
 An open PR is an owning PR when GitHub reports that it closes the issue, or
-when the issue has a canonical `pr: <url>` comment for that PR. A timeline
+when the issue has a canonical first-line `pr: <url>` comment for that PR. A timeline
 cross-reference alone can describe a dependency and does not establish
 ownership. The claim command reads GitHub's `closingIssuesReferences` for
 cross-referenced PRs and fails closed when timeline or closing-reference data
