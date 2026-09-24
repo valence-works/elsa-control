@@ -21,6 +21,20 @@ sys.modules[SPEC.name] = issue_bus
 SPEC.loader.exec_module(issue_bus)
 
 
+def cross_referenced_pr(number: int) -> dict[str, Any]:
+    return {
+        "event": "cross-referenced",
+        "source": {
+            "type": "issue",
+            "issue": {
+                "number": number,
+                "repository_url": "https://api.github.com/repos/valence-works/elsa-control",
+                "pull_request": {"url": f"https://api.github.com/pr/{number}"},
+            },
+        },
+    }
+
+
 class GhClientAdapterTests(unittest.TestCase):
     def test_targeted_rest_project_query_parses_numeric_ids_and_options(self) -> None:
         fields_response = [
@@ -195,11 +209,9 @@ class GhClientAdapterTests(unittest.TestCase):
                 )
             if "/timeline" in rendered:
                 return issue_bus.CommandResult("[]", "", 0)
-            if "/pulls/398" in rendered:
+            if "pr view 398" in rendered:
                 return issue_bus.CommandResult(
-                    json.dumps({"number": 398, "state": "open", "html_url": "https://example/pr/398"}),
-                    "",
-                    0,
+                    json.dumps({"state": "OPEN", "closingIssuesReferences": []}), "", 0
                 )
             return issue_bus.CommandResult("{}", "", 0)
 
@@ -218,12 +230,149 @@ class GhClientAdapterTests(unittest.TestCase):
         rendered_calls = [" ".join(command) for command, _ in calls]
         self.assertTrue(any("repos/valence-works/elsa-control/issues/401" in call for call in rendered_calls))
         self.assertTrue(any("/comments?per_page=100 --paginate --slurp" in call for call in rendered_calls))
-        self.assertTrue(any("/pulls/398" in call for call in rendered_calls))
+        self.assertTrue(any("pr view 398" in call for call in rendered_calls))
         self.assertTrue(any("/assignees" in call and "POST" in call for call in rendered_calls))
         self.assertTrue(any("/assignees" in call and "DELETE" in call for call in rendered_calls))
         self.assertTrue(any("/labels" in call and "POST" in call for call in rendered_calls))
         self.assertTrue(any("/labels/blocked" in call and "DELETE" in call for call in rendered_calls))
-        self.assertTrue(all(issue_bus.GITHUB_API_VERSION in call for call in rendered_calls))
+        self.assertTrue(
+            all(issue_bus.GITHUB_API_VERSION in call for call in rendered_calls if " api " in f" {call} ")
+        )
+
+    def test_dependency_cross_reference_does_not_make_pr_an_owner(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def runner(*command: str, **kwargs: Any) -> issue_bus.CommandResult:
+            calls.append(command)
+            rendered = " ".join(command)
+            if "/issues/401/timeline" in rendered:
+                response = [[cross_referenced_pr(398)]]
+            elif "/issues/401/comments?" in rendered:
+                response = [[]]
+            elif "pr view 398" in rendered:
+                response = {
+                    "state": "OPEN",
+                    "closingIssuesReferences": [
+                        {"number": 565, "repository": {"name": "elsa-control", "owner": {"login": "valence-works"}}}
+                    ],
+                }
+            elif "/issues/401" in rendered:
+                response = {"number": 401, "state": "open", "labels": [], "assignees": []}
+            else:
+                response = {}
+            return issue_bus.CommandResult(json.dumps(response), "", 0)
+
+        client = issue_bus.GhClient("valence-works/elsa-control", runner=runner)
+
+        self.assertEqual(client.linked_open_prs(401), ())
+
+    def test_closing_issue_reference_keeps_open_pr_as_owner(self) -> None:
+        def runner(*command: str, **kwargs: Any) -> issue_bus.CommandResult:
+            rendered = " ".join(command)
+            if "/issues/401/timeline" in rendered:
+                response = [[cross_referenced_pr(398)]]
+            elif "/issues/401/comments?" in rendered:
+                response = [[]]
+            elif "/issues/401" in rendered:
+                response = {"number": 401, "state": "open", "labels": [], "assignees": []}
+            elif "pr view 398" in rendered:
+                response = {
+                    "state": "OPEN",
+                    "closingIssuesReferences": [
+                        {"number": 401, "repository": {"name": "elsa-control", "owner": {"login": "valence-works"}}}
+                    ],
+                }
+            else:
+                response = {}
+            return issue_bus.CommandResult(json.dumps(response), "", 0)
+
+        client = issue_bus.GhClient("valence-works/elsa-control", runner=runner)
+
+        linked = client.linked_open_prs(401)
+
+        self.assertEqual([pr["number"] for pr in linked], [398])
+
+    def test_typed_non_issue_cross_reference_is_ignored(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def runner(*command: str, **kwargs: Any) -> issue_bus.CommandResult:
+            calls.append(command)
+            rendered = " ".join(command)
+            if "/issues/401/timeline" in rendered:
+                response = [[{"event": "cross-referenced", "source": {"type": "commit", "sha": "abc123"}}]]
+            elif "/issues/401/comments?" in rendered:
+                response = [[]]
+            elif "/issues/401" in rendered:
+                response = {"number": 401, "state": "open", "labels": [], "assignees": []}
+            else:
+                response = {}
+            return issue_bus.CommandResult(json.dumps(response), "", 0)
+
+        client = issue_bus.GhClient("valence-works/elsa-control", runner=runner)
+
+        self.assertEqual(client.linked_open_prs(401), ())
+        self.assertFalse(any("pr view" in " ".join(command) for command in calls))
+
+    def test_canonical_pr_comment_accepts_repository_qualified_reference(self) -> None:
+        def runner(*command: str, **kwargs: Any) -> issue_bus.CommandResult:
+            rendered = " ".join(command)
+            if "/issues/401/timeline" in rendered:
+                response = [[]]
+            elif "/issues/401/comments?" in rendered:
+                response = [[{"body": "pr: valence-works/elsa-control#398\nimage-pr: https://example.test/image.png\nAdditional evidence"}]]
+            elif "/issues/401" in rendered:
+                response = {"number": 401, "state": "open", "labels": [], "assignees": []}
+            elif "pr view 398" in rendered:
+                response = {"state": "OPEN", "closingIssuesReferences": []}
+            else:
+                response = {}
+            return issue_bus.CommandResult(json.dumps(response), "", 0)
+
+        client = issue_bus.GhClient("valence-works/elsa-control", runner=runner)
+
+        linked = client.linked_open_prs(401)
+
+        self.assertEqual([pr["number"] for pr in linked], [398])
+
+    def test_ambiguous_timeline_cross_reference_fails_closed(self) -> None:
+        def runner(*command: str, **kwargs: Any) -> issue_bus.CommandResult:
+            rendered = " ".join(command)
+            if "/issues/401/timeline" in rendered:
+                return issue_bus.CommandResult(json.dumps([[{"event": "cross-referenced"}]]), "", 0)
+            if "/issues/401/comments?" in rendered:
+                return issue_bus.CommandResult("[[]]", "", 0)
+            if "/issues/401" in rendered:
+                return issue_bus.CommandResult(json.dumps({"number": 401, "state": "open", "labels": [], "assignees": []}), "", 0)
+            return issue_bus.CommandResult("{}", "", 0)
+
+        client = issue_bus.GhClient("valence-works/elsa-control", runner=runner)
+
+        with self.assertRaises(issue_bus.GhError):
+            client.linked_open_prs(401)
+
+    def test_unreadable_closing_issue_references_fail_closed(self) -> None:
+        def runner(*command: str, **kwargs: Any) -> issue_bus.CommandResult:
+            rendered = " ".join(command)
+            if "/issues/401/timeline" in rendered:
+                return issue_bus.CommandResult(
+                    json.dumps(
+                        [[cross_referenced_pr(398)]]
+                    ),
+                    "",
+                    0,
+                )
+            if "/issues/401/comments?" in rendered:
+                return issue_bus.CommandResult("[[]]", "", 0)
+            if "/issues/401" in rendered:
+                return issue_bus.CommandResult(json.dumps({"number": 401, "state": "open", "labels": [], "assignees": []}), "", 0)
+            if "pr view 398" in rendered:
+                return issue_bus.CommandResult(json.dumps({"state": "OPEN"}), "", 0)
+            return issue_bus.CommandResult("{}", "", 0)
+
+        client = issue_bus.GhClient("valence-works/elsa-control", runner=runner)
+
+        with self.assertRaises(issue_bus.GhError):
+            client.linked_open_prs(401)
 
 
 class FakeClient:
