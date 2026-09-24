@@ -65,8 +65,16 @@ targets are the isolated staging Control API, and that the identity has **no** w
 production. Apply the staging verification settings first. Apply the worker settings only after the
 same-image staging startup and authority preflight succeed in a disposable rehearsal. Workers start
 claiming queued work when enabled; do not use the production deployment workflow or a production
-profile to perform this step. Verify one synthetic engine through Ready, Studio, second-create
-denial, and confirmed Delete to provider absence. Confirm the included engine allowance is reusable.
+profile to perform this step. Before opening the customer Create flow, use the staging Control
+console's **Releases** page to admit a reviewed producer manifest from the governed registry by
+its immutable OCI reference, digest, and exact payload. The staging API verifies the signature
+against its server-owned signer policy and assigns the catalog lifecycle; a registry tag or an
+unverified local fixture is not a customer option. Confirm that the admitted paid Preview release
+appears in the staging workspace's onboarding options. Keep the raw manifest payload and registry
+credentials out of issues, CI output, and browser logs. Do not seed the catalog directly or copy
+production catalog rows into staging. Verify one synthetic engine through Ready, Studio,
+second-create denial, and confirmed Delete to provider absence. Confirm the included engine
+allowance is reusable.
 
 Rollback stops claims by applying `staging-workers-off.json` and restarting the staging Web App.
 Preserve durable operation rows; do not truncate the staging catalog or queue. Restore the captured
