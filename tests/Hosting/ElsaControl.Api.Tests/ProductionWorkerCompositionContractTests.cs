@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using ElsaControl.Api.Authentication;
 using ElsaControl.Api.ReleaseCatalog;
 using ElsaControl.RuntimeBuilder.Abstractions.ReleaseManifests;
 using System.Text.RegularExpressions;
@@ -115,7 +116,7 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
         Assert.Equal(origin, handoff.ControlBaseUrl);
         Assert.Equal(origin + "/admin/runtimes", handoff.ControlContinuationUrl);
         Assert.Equal(TimeSpan.FromHours(8), handoff.RuntimeMaximumLifetime);
-        Assert.Equal(["read:diagnostics:structured-logs"], handoff.AllowedRuntimePermissions);
+        Assert.Equal(ManagedElsaRuntimePermissionMapping.AllowedPermissions, handoff.AllowedRuntimePermissions);
         var withoutHandoff = authority.Options with { ManagedHandoff = null };
         Assert.NotEqual(withoutHandoff.ComputeProviderScopeFingerprint(authority.Scope), authority.ProviderScopeFingerprint);
     }
