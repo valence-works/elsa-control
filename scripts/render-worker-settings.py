@@ -30,7 +30,12 @@ PRODUCTION_PARAMETERS = COMPOSITION / "worker-settings.parameters.production.jso
 STAGING_PARAMETERS = COMPOSITION / "worker-settings.parameters.staging.json"
 ROLLBACK = COMPOSITION / "worker-rollback.json"
 STAGING_CONTROL_ORIGIN = "https://api-tud53zotij43k.azurewebsites.net"
-STAGING_WORKER_SETTINGS = {"Deployment__AzureProvider__BatchSize": "1"}
+STAGING_WORKER_SETTINGS = {
+    "Deployment__AzureProvider__BatchSize": "1",
+    # A cold Container Apps environment can exceed the production 15-minute command bound.
+    # Keep staging's first-engine rehearsal bounded without timing out healthy Azure work.
+    "Deployment__AzureProvider__Runner__CommandTimeout": "00:45:00",
+}
 
 PLACEHOLDER = re.compile(r"\$\{([A-Za-z][A-Za-z0-9_]*)\}")
 ALLOWED_KEY_PREFIXES = (

@@ -62,7 +62,7 @@ class CompositionFilesTests(unittest.TestCase):
         self.assertEqual({}, pending)
         self.assertEqual(renderer.STAGING_CONTROL_ORIGIN, staging["ControlPlaneOrigin"])
         renderer.validate_staging_authority(staging, self.resolved)
-        self.assertNotIn("Deployment__AzureProvider__Runner__CommandTimeout", renderer.STAGING_WORKER_SETTINGS)
+        self.assertEqual("00:45:00", renderer.STAGING_WORKER_SETTINGS["Deployment__AzureProvider__Runner__CommandTimeout"])
         self.assertEqual("1", renderer.STAGING_WORKER_SETTINGS["Deployment__AzureProvider__BatchSize"])
 
     def test_production_parameters_are_non_secret_identifiers(self):
@@ -228,13 +228,13 @@ class RenderTests(unittest.TestCase):
             self.assertEqual(0, renderer.main(["release-verification", "--output", str(Path(directory) / "v.json")]))
             self.assertEqual(0, renderer.main(["rollback", "--output", str(Path(directory) / "r.json")]))
 
-    def test_staging_worker_payload_bounds_concurrency_without_shortening_azure_commands(self):
+    def test_staging_worker_payload_bounds_concurrency_and_cold_start_commands(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "staging.json"
             self.assertEqual(0, renderer.main(["workers", "--environment", "staging", "--output", str(output)]))
             settings = {entry["name"]: entry["value"] for entry in json.loads(output.read_text())}
         self.assertEqual("1", settings["Deployment__AzureProvider__BatchSize"])
-        self.assertNotIn("Deployment__AzureProvider__Runner__CommandTimeout", settings)
+        self.assertEqual("00:45:00", settings["Deployment__AzureProvider__Runner__CommandTimeout"])
 
     def test_cli_has_no_value_override_so_only_the_checked_in_parameters_reach_production(self):
         for argv in (["workers", "--output", "x.json", "--set", "SqlBootstrapIp=203.0.113.10"],

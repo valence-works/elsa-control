@@ -57,8 +57,10 @@ python3 scripts/render-worker-settings.py release-verification --environment sta
 python3 scripts/render-worker-settings.py rollback --output ~/.elsa-control-ops/staging-workers-off.json
 ```
 
-The staging worker payload sets provider `BatchSize=1` to bound concurrent spend. It preserves the
-normal command timeout because Azure resource deployments can exceed a short startup check.
+The staging worker payload sets provider `BatchSize=1` to bound concurrent spend and a 45-minute
+command timeout for a cold Container Apps environment. Production retains its 15-minute setting;
+the staging bound stays below the runner's one-hour validation limit. A timed-out local command
+does not prove Azure stopped working: inspect provider state and ownership before any recovery.
 Before applying settings, capture the staging Web App's current image digest, worker switch values,
 identity attachment, and health result. Verify the Azure CLI subscription/resource group/Web App
 targets are the isolated staging Control API, and that the identity has **no** workload authority in
