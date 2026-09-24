@@ -5,6 +5,7 @@ import json
 import re
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -54,6 +55,15 @@ class CompositionFilesTests(unittest.TestCase):
                 referenced.update(renderer.PLACEHOLDER.findall(value))
         declared = set(self.resolved) | set(self.pending)
         self.assertEqual(referenced, declared)
+
+    def test_staging_profile_declares_the_same_authority_without_copying_production_values(self):
+        staging, pending = renderer.load_parameters(renderer.STAGING_PARAMETERS)
+        self.assertEqual(set(self.resolved), set(staging) | set(pending))
+        self.assertEqual({}, pending)
+        self.assertEqual(renderer.STAGING_CONTROL_ORIGIN, staging["ControlPlaneOrigin"])
+        renderer.validate_staging_authority(staging, self.resolved)
+        self.assertNotIn("Deployment__AzureProvider__Runner__CommandTimeout", renderer.STAGING_WORKER_SETTINGS)
+        self.assertEqual("1", renderer.STAGING_WORKER_SETTINGS["Deployment__AzureProvider__BatchSize"])
 
     def test_production_parameters_are_non_secret_identifiers(self):
         for name, value in self.resolved.items():
@@ -218,11 +228,66 @@ class RenderTests(unittest.TestCase):
             self.assertEqual(0, renderer.main(["release-verification", "--output", str(Path(directory) / "v.json")]))
             self.assertEqual(0, renderer.main(["rollback", "--output", str(Path(directory) / "r.json")]))
 
+    def test_staging_worker_payload_bounds_concurrency_without_shortening_azure_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "staging.json"
+            self.assertEqual(0, renderer.main(["workers", "--environment", "staging", "--output", str(output)]))
+            settings = {entry["name"]: entry["value"] for entry in json.loads(output.read_text())}
+        self.assertEqual("1", settings["Deployment__AzureProvider__BatchSize"])
+        self.assertNotIn("Deployment__AzureProvider__Runner__CommandTimeout", settings)
+
     def test_cli_has_no_value_override_so_only_the_checked_in_parameters_reach_production(self):
         for argv in (["workers", "--output", "x.json", "--set", "SqlBootstrapIp=203.0.113.10"],
                      ["workers", "--output", "x.json", "--parameters", "other.json"]):
             with self.assertRaises(SystemExit):
                 renderer.main(argv)
+
+    def test_staging_renderer_fails_closed_when_authority_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parameters = json.loads(renderer.STAGING_PARAMETERS.read_text())
+            parameters["parameters"]["ProvisionerClientId"] = {"pending": "#561"}
+            pending_file = Path(directory) / "pending.json"
+            pending_file.write_text(json.dumps(parameters))
+            with mock.patch.object(renderer, "STAGING_PARAMETERS", pending_file):
+                self.assertEqual(0, renderer.main(["status", "--environment", "staging"]))
+                for command in ("workers", "release-verification"):
+                    output = Path(directory) / f"{command}.json"
+                    self.assertEqual(2, renderer.main([command, "--environment", "staging", "--output", str(output)]))
+                    self.assertFalse(output.exists())
+
+    def test_staging_authority_rejects_production_identity_scope_and_origin(self):
+        staging = dict(self.resolved)
+        staging.update({
+            "WorkloadSubscriptionId": "11111111-1111-4111-8111-111111111111",
+            "ProvisionerClientId": "22222222-2222-4222-8222-222222222222",
+            "ProvisionerPrincipalId": "33333333-3333-4333-8333-333333333333",
+            "ProvisionerIdentityName": "mi-elsa-cloud-provisioner-stage-weu",
+            "SqlBootstrapIp": "203.0.113.15",
+            "WorkloadResourceGroupName": "rg-elsa-cloud-workloads-platform-staging-weu",
+            "ReleaseVerificationClientId": "44444444-4444-4444-8444-444444444444",
+            "RegistryDeploymentMetadataRoleAssignmentId": "stage-metadata-assignment",
+            "RegistryRoleAdministrationAssignmentId": "stage-registry-assignment",
+            "ControlPlaneOrigin": renderer.STAGING_CONTROL_ORIGIN,
+        })
+        renderer.validate_staging_authority(staging, self.resolved)
+        for name in ("WorkloadSubscriptionId", "ProvisionerClientId", "ProvisionerPrincipalId",
+                     "ProvisionerIdentityName", "SqlBootstrapIp", "WorkloadResourceGroupName",
+                     "ReleaseVerificationClientId",
+                     "RegistryDeploymentMetadataRoleAssignmentId", "RegistryRoleAdministrationAssignmentId",
+                     "ControlPlaneOrigin"):
+            with self.subTest(name=name):
+                invalid = dict(staging)
+                invalid[name] = self.resolved[name]
+                with self.assertRaises(renderer.CompositionError):
+                    renderer.validate_staging_authority(invalid, self.resolved)
+        invalid = dict(staging)
+        invalid["RegistrySubscriptionId"] = staging["WorkloadSubscriptionId"]
+        with self.assertRaises(renderer.CompositionError):
+            renderer.validate_staging_authority(invalid, self.resolved)
+        incomplete = dict(staging)
+        del incomplete["ProvisionerClientId"]
+        with self.assertRaises(renderer.CompositionError):
+            renderer.validate_staging_authority(incomplete, self.resolved)
 
 
 if __name__ == "__main__":

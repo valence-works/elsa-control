@@ -1,15 +1,16 @@
 # Control API worker composition
 
-The production Control API runs with its managed-instance lifecycle and Azure provider workers
-disabled. This directory is the only reviewed way to turn them on (#315, part of #264): a settings
-template, a production parameter file holding non-secret identifiers, a rollback file, and a
-renderer that refuses to produce a payload until every referenced decision is made.
+The Control API runs with its managed-instance lifecycle and Azure provider workers disabled by
+default. This directory is the reviewed way to turn them on (#315, part of #264): a settings
+template, environment-specific parameter files holding non-secret identifiers, a rollback file,
+and a renderer that refuses to produce a payload until every referenced decision is made.
 
 | File | Purpose |
 | --- | --- |
 | `worker-settings.template.json` | Every App Service setting the workers need; `${Name}` placeholders resolve from the parameter file. |
 | `release-verification.template.json` | Governed release-manifest signature verification for the dogfood release admission (#311). Pins the linux/amd64 cosign digest; the production App Service host is amd64. |
 | `worker-settings.parameters.production.json` | Production identifiers. A value shaped `{ "pending": "#N" }` is an undecided input and blocks rendering. |
+| `worker-settings.parameters.staging.json` | Resolved staging authority for the dedicated workload subscription and provisioner identity. |
 | `worker-rollback.json` | Turns the three worker switches and the health monitor off. Apply it as-is; it has no parameters. |
 
 Contract gates: `python3 scripts/tests/test_control_worker_composition.py` (renderer and file shape) and
@@ -20,6 +21,59 @@ settings compose through the same `AzureProviderRunnerComposition`, `AzureInstan
 release-verification template is composed through `ReleaseManifestVerifierComposition` the same way,
 with the image-owned cosign and trust-root files stood in by digest-matched fixtures).
 `dev/regenerate-infra.sh` preserves this directory.
+
+## Isolated staging composition (#561)
+
+`python3 scripts/render-worker-settings.py status --environment staging` lists decisions without
+values. Both `workers` and `release-verification` accept `--environment staging`; production remains
+the default. The staging renderer refuses **either** payload while any staging decision is pending.
+It also rejects the production workload subscription, provisioner identity, registry role assignments,
+release-verification identity, or Control origin in the staging profile. There is no arbitrary
+parameter-file or value override.
+
+The Azure provider creates a sibling resource group per engine. A staging resource group beside a
+production group in the same subscription is therefore insufficient isolation: the provider needs
+subscription-scope resource and role-assignment authority. The staging profile uses a dedicated
+**workload subscription** with its own budget alert and a separate provisioner managed identity.
+Grant that identity only the required workload-subscription roles and
+the registry's narrow metadata/pull administration described in
+`infra/azure-customer-subscription/README.md`. Do not attach the production provisioner or target the
+production workload subscription. A budget alert is not a hard spending cap; bound the rehearsal to
+one engine and remove run-scoped resources promptly. The `test` infrastructure deploy now requires
+`AZURE_PROVISIONER_IDENTITY_ID`, so it cannot silently omit the staging identity attachment.
+The current staging allocation is two EUR 250 monthly alert budgets: one for the existing Control
+staging subscription and one for the dedicated workload subscription. Together they match the EUR 500
+incremental staging ceiling, but Azure budgets only notify and cost data can lag. Check actual spend
+before each rehearsal and stop or clean up if the projection would cross the ceiling.
+
+Review the subscription, identity, SQL bootstrap egress, registry authority and release-verification
+identity against their **non-secret** identifiers in the staging parameter file.
+Confirm `ControlPlaneOrigin` is the isolated staging Control API. Then render to a private directory
+outside the checkout:
+
+```sh
+python3 scripts/render-worker-settings.py workers --environment staging --output ~/.elsa-control-ops/staging-workers.json
+python3 scripts/render-worker-settings.py release-verification --environment staging --output ~/.elsa-control-ops/staging-verification.json
+python3 scripts/render-worker-settings.py rollback --output ~/.elsa-control-ops/staging-workers-off.json
+```
+
+The staging worker payload sets provider `BatchSize=1` to bound concurrent spend. It preserves the
+normal command timeout because Azure resource deployments can exceed a short startup check.
+Before applying settings, capture the staging Web App's current image digest, worker switch values,
+identity attachment, and health result. Verify the Azure CLI subscription/resource group/Web App
+targets are the isolated staging Control API, and that the identity has **no** workload authority in
+production. Apply the staging verification settings first. Apply the worker settings only after the
+same-image staging startup and authority preflight succeed in a disposable rehearsal. Workers start
+claiming queued work when enabled; do not use the production deployment workflow or a production
+profile to perform this step. Verify one synthetic engine through Ready, Studio, second-create
+denial, and confirmed Delete to provider absence. Confirm the included engine allowance is reusable.
+
+Rollback stops claims by applying `staging-workers-off.json` and restarting the staging Web App.
+Preserve durable operation rows; do not truncate the staging catalog or queue. Restore the captured
+image and configuration if startup or live verification fails, then check `/health` and that no new
+provider operation is claimed. Remove only run-scoped staging resources after deletion reaches
+provider absence. Record sanitized evidence in #561; never include rendered payloads, credentials,
+customer identifiers, or provider resource IDs in an issue or CI artifact.
 
 ## What the template binds
 

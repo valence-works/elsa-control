@@ -6,6 +6,10 @@ targetScope = 'subscription'
 @allowed(['westeurope'])
 param location string = 'westeurope'
 
+@description('Explicit environment tag; production remains the default for existing deployments.')
+@allowed(['production', 'staging'])
+param environment string = 'production'
+
 param anchorResourceGroupName string = 'rg-elsa-cloud-workloads-platform-prod-weu'
 param provisionerIdentityName string = 'mi-elsa-cloud-provisioner-prod-weu'
 param budgetName string = 'elsa-cloud-customer-workloads-monthly'
@@ -28,7 +32,7 @@ param budgetContactEmail string
 var resourceTags = {
   product: 'elsa-cloud'
   component: 'customer-workload-bootstrap'
-  environment: 'production'
+  environment: environment
   'managed-by': 'elsa-control'
 }
 

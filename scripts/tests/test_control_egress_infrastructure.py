@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 MAIN = ROOT / "infra/control-egress/main.bicep"
 PRODUCTION = ROOT / "infra/control-egress/main.parameters.production.json"
+STAGING = ROOT / "infra/control-egress/main.parameters.staging.json"
 README = ROOT / "infra/control-egress/README.md"
 ALLOWED_TYPES = {
     "Microsoft.Network/publicIPAddresses",
@@ -31,6 +32,7 @@ class ControlEgressTests(unittest.TestCase):
         for resource in cls.template["resources"]:
             cls.by_type.setdefault(resource["type"], []).append(resource)
         cls.production = json.loads(PRODUCTION.read_text())["parameters"]
+        cls.staging = json.loads(STAGING.read_text())["parameters"]
 
     def test_only_network_egress_resources_are_created(self):
         self.assertEqual(ALLOWED_TYPES, set(self.by_type))
@@ -73,6 +75,13 @@ class ControlEgressTests(unittest.TestCase):
         self.assertTrue(vnet_prefix.startswith("10."))
         self.assertTrue(subnet_prefix.startswith(vnet_prefix.split("/")[0].rsplit(".", 1)[0]))
         self.assertLess(int(vnet_prefix.split("/")[1]), int(subnet_prefix.split("/")[1]))
+
+    def test_staging_egress_is_region_and_address_space_isolated(self):
+        self.assertEqual("westeurope", self.staging["location"]["value"])
+        for key in ("virtualNetworkName", "natGatewayName", "publicIpName", "virtualNetworkAddressPrefix"):
+            self.assertNotEqual(self.production[key]["value"], self.staging[key]["value"])
+        self.assertEqual("staging", self.staging["tags"]["value"]["environment"])
+        self.assertTrue(self.staging["subnetAddressPrefix"]["value"].startswith("10.61.0."))
 
     def test_outputs_expose_the_subnet_id_and_egress_address_only(self):
         self.assertEqual({"integrationSubnetResourceId", "egressIpAddress"}, set(self.template["outputs"]))

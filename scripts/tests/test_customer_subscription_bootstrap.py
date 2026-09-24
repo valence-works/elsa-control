@@ -56,6 +56,9 @@ class CustomerSubscriptionBootstrapTests(unittest.TestCase):
         self.assertNotRegex(serialized, r"(?i)[\w.+-]+@[\w.-]+\.[a-z]{2,}")
         self.assertNotIn("Microsoft.Authorization/roleAssignments", serialized)
         self.assertNotIn("Microsoft.Web/sites", serialized)
+        self.assertEqual("production", self.template["parameters"]["environment"]["defaultValue"])
+        self.assertEqual(["production", "staging"],
+                         self.template["parameters"]["environment"]["allowedValues"])
 
     def test_budget_is_alert_only_and_recipient_is_not_an_output(self):
         parameters = self.template["parameters"]

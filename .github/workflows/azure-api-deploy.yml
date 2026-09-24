@@ -138,6 +138,9 @@ jobs:
               CONTROL_ENTRA_CLIENT_SECRET
               CONTROL_ENTRA_TENANT_ID
             )
+            if [ "$TARGET_ENVIRONMENT" = "test" ]; then
+              required+=(AZURE_PROVISIONER_IDENTITY_ID)
+            fi
           fi
 
           if [ "$TARGET_ENVIRONMENT" = "test" ] && [ "$DEPLOY_MODE" != "build" ]; then

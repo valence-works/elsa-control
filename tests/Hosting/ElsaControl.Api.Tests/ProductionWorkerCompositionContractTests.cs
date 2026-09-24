@@ -15,7 +15,7 @@ using Microsoft.Extensions.Options;
 namespace ElsaControl.Api.Tests;
 
 /// <summary>
-/// The checked-in production worker composition (infra/control-worker-composition) must compose
+/// The checked-in worker compositions (infra/control-worker-composition) must compose
 /// through the same seams Program.cs uses, against the template authority the API image ships
 /// (infra/azure-production), with no Azure access. Tool paths come from the image and pending
 /// operator decisions are substituted with documented test values.
@@ -151,6 +151,32 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
     }
 
     [Fact]
+    public async Task Staging_worker_composition_is_isolated_and_fails_closed_on_preflight_denial()
+    {
+        var staging = Render("worker-settings.template.json", "staging");
+        var configuration = Configuration(staging);
+        var services = new ServiceCollection();
+        var authority = AzureProviderRunnerComposition.AddRunner(services, configuration);
+        Assert.NotNull(authority);
+        Assert.True(AzureInstanceLifecycleComposition.AddProviderPorts(services, configuration, authority));
+        Assert.NotEqual(_settings["Deployment:AzureProvider:Runner:AzureCliClientId"], authority.Options.AzureCliClientId);
+        Assert.NotEqual(_settings["Deployment:AzureProvider:Runner:TargetScope:SubscriptionId"], authority.Scope.SubscriptionId);
+        Assert.NotEqual(_settings["Deployment:AzureProvider:Runner:SqlBootstrapIp"], authority.Options.SqlBootstrapIp);
+        Assert.Equal("https://api-tud53zotij43k.azurewebsites.net", staging["ControlPlane:Origin"]);
+
+        using var provider = services.BuildServiceProvider();
+        var instanceProvider = provider.GetRequiredService<AzureElsaInstanceProviderOptions>();
+        var validator = new ManagedAzureProviderConfigurationValidator(
+            Options.Create(configuration.GetSection(ElsaInstanceLifecycleWorkerOptions.ConfigurationSection).Get<ElsaInstanceLifecycleWorkerOptions>()!),
+            Options.Create(configuration.GetSection(AzureProviderOperationOptions.ConfigurationSection).Get<AzureProviderOperationOptions>()!),
+            instanceProvider,
+            new DenyingPreflight(),
+            HealthMonitorOptions(configuration));
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => validator.StartAsync(CancellationToken.None));
+        Assert.Contains("preflight failed", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Rollback_file_turns_every_worker_off_and_keeps_the_provider_fail_closed()
     {
         var rollback = JsonSerializer.Deserialize<JsonElement>(File.ReadAllText(Path.Combine(CompositionRoot, "worker-rollback.json")));
@@ -227,9 +253,9 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
                 or "Deployment__AzureProvider__Runner__CurlPath" or "Deployment__AzureProvider__Runner__TemplateRoot");
     }
 
-    private static Dictionary<string, string?> Render(string templateName)
+    private static Dictionary<string, string?> Render(string templateName, string environment = "production")
     {
-        var parameters = ReadParameters();
+        var parameters = ReadParameters(environment);
         var settings = new Dictionary<string, string?>();
         foreach (var (key, raw) in ReadTemplate(templateName))
         {
@@ -266,9 +292,9 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
     }
 
     /// <summary>Resolved parameters map to their value; pending decisions map to null; anything else is malformed.</summary>
-    private static Dictionary<string, string?> ReadParameters()
+    private static Dictionary<string, string?> ReadParameters(string environment = "production")
     {
-        using var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(CompositionRoot, "worker-settings.parameters.production.json")));
+        using var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(CompositionRoot, $"worker-settings.parameters.{environment}.json")));
         return document.RootElement.GetProperty("parameters").EnumerateObject()
             .ToDictionary(property => property.Name, property => property.Value switch
             {
@@ -307,5 +333,11 @@ public sealed class ProductionWorkerCompositionContractTests : IDisposable
     {
         public Task<AzureProviderAuthorityPreflightResult> ValidateAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult(new AzureProviderAuthorityPreflightResult(true, "ok", ""));
+    }
+
+    private sealed class DenyingPreflight : IAzureProviderAuthorityPreflight
+    {
+        public Task<AzureProviderAuthorityPreflightResult> ValidateAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(new AzureProviderAuthorityPreflightResult(false, "scope-denied", ""));
     }
 }
