@@ -33,7 +33,15 @@ BLOCKED_PATTERN = re.compile(r"^blocked:\s+", re.IGNORECASE)
 CLAIM_EXPIRY = timedelta(minutes=15)
 GITHUB_API_VERSION = "X-GitHub-Api-Version: 2026-03-10"
 PR_URL_PATTERN = re.compile(
-    r"https://github\.com/(?P<repo>[^/]+/[^/#]+)/(?:pull|issues)/(?P<number>\d+)",
+    r"https://github\.com/(?P<repo>[^/\s<>]+/[^/\s<>]+)/pull/(?P<number>\d+)/?\Z",
+    re.IGNORECASE,
+)
+PR_SHORT_REFERENCE_PATTERN = re.compile(
+    r"(?P<repo>[^/\s#]+/[^/\s#]+)#(?P<number>\d+)\Z",
+    re.IGNORECASE,
+)
+REPOSITORY_API_URL_PATTERN = re.compile(
+    r"https://api\.github\.com/repos/(?P<repo>[^/?#]+/[^/?#]+)\Z",
     re.IGNORECASE,
 )
 
@@ -174,10 +182,12 @@ class GhClient:
             "--slurp",
             json_output=True,
         )
+        if not isinstance(comments_value, list):
+            raise GhError("REST issue comments endpoint returned an unreadable collection")
         comments = []
         for comment in _flatten_pages(comments_value):
-            if not isinstance(comment, Mapping):
-                continue
+            if not isinstance(comment, Mapping) or not isinstance(comment.get("body"), str):
+                raise GhError("REST issue comments endpoint returned an unreadable comment")
             normalized = dict(comment)
             if "createdAt" not in normalized and "created_at" in normalized:
                 normalized["createdAt"] = normalized["created_at"]
@@ -287,10 +297,12 @@ class GhClient:
         return ProjectSnapshot(item, fields)
 
     def linked_open_prs(self, number: int) -> Sequence[Mapping[str, Any]]:
-        """Return open pull requests cross-referenced from an issue.
+        """Return open PRs that own an issue through closing or protocol evidence.
 
         Timeline access is deliberately fail-closed: an inability to inspect
-        links cannot safely establish that no implementation PR exists.
+        links cannot safely establish that no implementation PR exists. A
+        timeline source PR is an owner only when GitHub reports an
+        auto-closing reference to this issue.
         """
 
         value = self.run(
@@ -302,54 +314,91 @@ class GhClient:
             "--slurp",
             json_output=True,
         )
+        if not isinstance(value, list):
+            raise GhError("REST issue timeline endpoint returned an unreadable collection")
         events = _flatten_pages(value)
         candidates: dict[int, Mapping[str, Any]] = {}
         for event in events:
             if not isinstance(event, Mapping):
+                raise GhError("REST issue timeline endpoint returned an unreadable event")
+            event_type = event.get("event")
+            if not isinstance(event_type, str) or not event_type:
+                raise GhError("REST issue timeline event is missing its event type")
+            if event_type != "cross-referenced":
                 continue
             source = event.get("source")
-            source_issue = source.get("issue") if isinstance(source, Mapping) else None
+            source_type = source.get("type") if isinstance(source, Mapping) else None
+            if not isinstance(source_type, str) or not source_type:
+                raise GhError("REST cross-reference event has an unreadable source type")
+            if source_type != "issue":
+                continue
+            source_issue = source.get("issue")
             if not isinstance(source_issue, Mapping):
-                source_issue = source if isinstance(source, Mapping) else None
-            pull_request = source_issue.get("pull_request") if isinstance(source_issue, Mapping) else None
-            number_value = source_issue.get("number") if isinstance(source_issue, Mapping) else None
-            if not isinstance(pull_request, Mapping) and "pull_request" not in event:
+                raise GhError("REST cross-reference event has an unreadable source issue")
+            if "pull_request" not in source_issue:
                 continue
-            if isinstance(event.get("pull_request"), Mapping):
-                pull_request = event["pull_request"]
-            try:
-                pr_number = int(number_value)
-            except (TypeError, ValueError):
-                continue
-            state = str(source_issue.get("state", "")) if isinstance(source_issue, Mapping) else ""
-            if state.upper() == "OPEN":
-                candidates[pr_number] = {
-                    "number": pr_number,
-                    "url": source_issue.get("html_url") or source_issue.get("url"),
-                    "state": state,
-                }
+            if not isinstance(source_issue["pull_request"], Mapping):
+                raise GhError("REST cross-reference event has an ambiguous pull request source")
+            raw_pr_number = source_issue.get("number")
+            pr_number = _positive_int(raw_pr_number)
+            if pr_number is None:
+                raise GhError("REST cross-reference event has no valid pull request number")
+            source_repository = _repository_from_api_url(source_issue.get("repository_url"))
+            if source_repository is None:
+                raise GhError("REST cross-reference event has an unreadable source repository")
+            pr = self._pull_request(pr_number, source_repository)
+            if pr is not None and _closes_issue(pr, self.repository, number):
+                candidates[pr_number] = pr
 
-        # A canonical ``pr:`` comment is also an explicit link.  Check the
-        # referenced PR directly because timeline responses vary by event type.
+        # A canonical ``pr:`` comment is explicit ownership evidence even
+        # when its PR body does not close the issue.
         issue = self.issue(number)
         for comment in issue.get("comments", []):
             body = str(comment.get("body", "")) if isinstance(comment, Mapping) else ""
             if not body.lower().startswith("pr:"):
                 continue
-            match = PR_URL_PATTERN.search(body)
-            if match is None or match.group("repo").lower() != self.repository.lower():
-                continue
+            first_line = body.splitlines()[0]
+            raw_reference = first_line[3:].strip().strip("`<>")
+            match = PR_URL_PATTERN.fullmatch(raw_reference) or PR_SHORT_REFERENCE_PATTERN.fullmatch(raw_reference)
+            if match is None:
+                raise GhError("canonical pr: comment does not contain one readable pull request reference")
+            if match.group("repo").casefold() != self.repository.casefold():
+                raise GhError("canonical pr: comment points outside the configured repository")
             pr_number = int(match.group("number"))
-            pr = self.run(
-                "api",
-                "-H",
-                GITHUB_API_VERSION,
-                f"repos/{self.repository}/pulls/{pr_number}",
-                json_output=True,
-            )
-            if isinstance(pr, Mapping) and str(pr.get("state", "")).upper() == "OPEN":
+            pr = self._pull_request(pr_number)
+            if pr is not None:
                 candidates[pr_number] = pr
         return tuple(candidates.values())
+
+    def _pull_request(self, number: int, repository: str | None = None) -> Mapping[str, Any] | None:
+        repository = repository or self.repository
+        value = self.run(
+            "pr",
+            "view",
+            str(number),
+            "--repo",
+            repository,
+            "--json",
+            "state,closingIssuesReferences",
+            json_output=True,
+        )
+        if not isinstance(value, Mapping):
+            raise GhError(f"GitHub pull request query returned ambiguous data for {repository}#{number}")
+        state = value.get("state")
+        if not isinstance(state, str) or state.casefold() not in {"open", "closed", "merged"}:
+            raise GhError(f"GitHub pull request {repository}#{number} has an unreadable state")
+        references = value.get("closingIssuesReferences")
+        if not isinstance(references, list):
+            raise GhError(f"pull request {repository}#{number} has unreadable closing-issue references")
+        for reference in references:
+            if not isinstance(reference, Mapping) or _positive_int(reference.get("number")) is None:
+                raise GhError(f"pull request {repository}#{number} has an ambiguous closing-issue reference")
+            reference_repository = reference.get("repository")
+            if not isinstance(reference_repository, Mapping) or not _repository_full_name(reference_repository):
+                raise GhError(f"pull request {repository}#{number} has an unreadable closing-issue repository")
+        if state.casefold() != "open":
+            return None
+        return {"number": number, "repository": repository, **value}
 
     def assign(self, number: int, login: str) -> None:
         self.run(
@@ -887,6 +936,53 @@ def _rest_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    parsed = _rest_int(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _repository_full_name(repository: Mapping[str, Any]) -> str | None:
+    full_name = repository.get("nameWithOwner")
+    if isinstance(full_name, str) and "/" in full_name:
+        return full_name
+    owner = repository.get("owner")
+    name = repository.get("name")
+    login = owner.get("login") if isinstance(owner, Mapping) else None
+    if isinstance(login, str) and login and isinstance(name, str) and name:
+        return f"{login}/{name}"
+    return None
+
+
+def _repository_from_api_url(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    match = REPOSITORY_API_URL_PATTERN.fullmatch(value)
+    return match.group("repo") if match is not None else None
+
+
+def _closes_issue(pr: Mapping[str, Any], repository: str, issue_number: int) -> bool:
+    """Use GitHub's resolved closing-issue references as PR ownership evidence."""
+
+    references = pr.get("closingIssuesReferences")
+    if not isinstance(references, list):
+        raise GhError("pull request closing-issue references are unreadable")
+    for reference in references:
+        if not isinstance(reference, Mapping):
+            raise GhError("pull request has an ambiguous closing-issue reference")
+        reference_number = _positive_int(reference.get("number"))
+        reference_repository = reference.get("repository")
+        if reference_number is None or not isinstance(reference_repository, Mapping):
+            raise GhError("pull request has an unreadable closing-issue reference")
+        full_name = _repository_full_name(reference_repository)
+        if not full_name:
+            raise GhError("pull request has an unreadable closing-issue repository")
+        if reference_number == issue_number and full_name.casefold() == repository.casefold():
+            return True
+    return False
 
 
 def _rest_option_name(option: Mapping[str, Any]) -> str:
