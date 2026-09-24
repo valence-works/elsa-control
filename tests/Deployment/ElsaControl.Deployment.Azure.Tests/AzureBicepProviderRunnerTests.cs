@@ -991,6 +991,22 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Rejects_an_image_from_a_registry_outside_the_configured_scope_before_execution()
+    {
+        var process = new FakeCommandProcess();
+        var command = _fixture.Command(AzureProviderRunnerStep.Foundation) with
+        {
+            Plan = _fixture.Plan with { ImageRepository = "otherregistry.azurecr.io/runtime-combined" }
+        };
+
+        var result = await _fixture.Runner(process).RunAsync(command);
+
+        Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
+        Assert.Equal("azure.runner.input-invalid", result.Code);
+        Assert.Empty(process.Calls);
+    }
+
+    [Fact]
     public async Task Rejects_a_step_replay_that_is_not_bound_to_a_resumed_operation()
     {
         var process = new FakeCommandProcess();

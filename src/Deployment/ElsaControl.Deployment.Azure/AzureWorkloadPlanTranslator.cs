@@ -42,14 +42,28 @@ public static class AzureWorkloadPlanTranslator
         ["database:connectionstring", "identity:signingkey", "admin:password"]);
     public static AzureWorkloadPlanTranslation Translate(
         ResolvedElsaApplicationPlan? resolvedPlan,
-        AzureWorkloadTarget? target)
+        AzureWorkloadTarget? target,
+        AzureProviderTargetScope? providerScope = null)
     {
         var findings = ResolvedElsaApplicationPlanValidator.Validate(resolvedPlan).ToList();
         var basePlanIsValid = findings.Count == 0;
         ValidateTarget(target, findings);
 
+        var imageRepositoryAuthority = SupportedRepository;
+        if (providerScope is not null)
+        {
+            try
+            {
+                imageRepositoryAuthority = providerScope.GetPaidRuntimeRepository();
+            }
+            catch (ArgumentException)
+            {
+                findings.Add(new("azure.providerScope.invalid", "The Azure provider scope is invalid.", "azure.providerScope"));
+            }
+        }
+
         if (basePlanIsValid && resolvedPlan is not null)
-            ValidateProviderProfile(resolvedPlan, findings);
+            ValidateProviderProfile(resolvedPlan, findings, imageRepositoryAuthority);
 
         if (findings.Count > 0 || resolvedPlan is null || target is null)
             return Rejected(findings);
@@ -247,7 +261,8 @@ public static class AzureWorkloadPlanTranslator
 
     private static void ValidateProviderProfile(
         ResolvedElsaApplicationPlan plan,
-        List<ResolvedPlanValidationFinding> findings)
+        List<ResolvedPlanValidationFinding> findings,
+        string imageRepositoryAuthority)
     {
         if (plan.Topology is not null && !string.Equals(plan.Topology.Id, SupportedTopology, StringComparison.OrdinalIgnoreCase))
             findings.Add(new("azure.topology.unsupported", "The requested topology is not supported by the initial Azure provider profile.", "topology.id"));
@@ -297,7 +312,7 @@ public static class AzureWorkloadPlanTranslator
             findings.Add(new("azure.imageRepository.invalid", "Azure image repositories must be credential-free registry paths.", "topology.components.image.repository"));
         if (images.Any(x => !string.Equals(x.RegistryClass, SupportedRegistryClass, StringComparison.OrdinalIgnoreCase) ||
                             string.IsNullOrWhiteSpace(x.Repository) ||
-                            !x.Repository.StartsWith($"{SupportedRegistryHost}/", StringComparison.Ordinal)))
+                            !string.Equals(x.Repository, imageRepositoryAuthority, StringComparison.Ordinal)))
         {
             findings.Add(new("azure.imageRegistry.unsupported", "The image is outside the initial governed Azure registry authority.", "topology.components.image.registry"));
         }
@@ -330,8 +345,24 @@ public static class AzureWorkloadPlanTranslator
 
     private static bool IsSafeImageRepository(string repository)
     {
-        return string.Equals(repository, SupportedRepository, StringComparison.Ordinal);
+        const string hostSuffix = ".azurecr.io";
+        const string path = "/" + AzureProviderTargetScope.PaidRuntimeRepositoryName;
+        if (string.IsNullOrWhiteSpace(repository) || repository.Length > 512 ||
+            repository.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '.' and not '-' and not '/') ||
+            !repository.EndsWith(path, StringComparison.Ordinal))
+            return false;
+
+        var host = repository[..^path.Length];
+        if (!host.EndsWith(hostSuffix, StringComparison.Ordinal))
+            return false;
+        var registryName = host[..^hostSuffix.Length];
+        return registryName.Length is >= 5 and <= 50 && registryName.All(char.IsAsciiLetterOrDigit) &&
+               string.Equals(registryName, registryName.ToLowerInvariant(), StringComparison.Ordinal);
     }
+
+    /// <summary>Checks that a durable operation names the paid runtime repository shape.</summary>
+    internal static bool IsGovernedPaidRuntimeRepository(string? repository) =>
+        !string.IsNullOrWhiteSpace(repository) && IsSafeImageRepository(repository);
 
     private static bool ImageReferenceMatchesRepository(ResolvedImageIdentity image)
     {

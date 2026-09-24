@@ -18,7 +18,8 @@ public sealed class AzureElsaInstanceProvider(
     AzureProviderExecutor? executor = null,
     IAzureProviderRecoveryObserver? recoveryObserver = null,
     IAzureProviderRecoveryObservationStore? recoveryObservationStore = null,
-    IAzureRuntimeHealthProbe? runtimeHealthProbe = null) :
+    IAzureRuntimeHealthProbe? runtimeHealthProbe = null,
+    AzureProviderTargetScope? providerScope = null) :
     IElsaInstanceProviderSubmissionPort,
     IElsaInstanceProviderReconciliationPort,
     IElsaInstanceProviderCleanupPort,
@@ -32,6 +33,7 @@ public sealed class AzureElsaInstanceProvider(
     private readonly IAzureProviderRecoveryObserver? _recoveryObserver = recoveryObserver;
     private readonly IAzureProviderRecoveryObservationStore? _recoveryObservationStore = recoveryObservationStore;
     private readonly IAzureRuntimeHealthProbe? _runtimeHealthProbe = runtimeHealthProbe;
+    private readonly AzureProviderTargetScope? _providerScope = providerScope;
 
     public async Task<ElsaInstanceProviderSubmissionResult> SubmitAsync(
         ElsaInstanceProviderSubmission request,
@@ -49,7 +51,7 @@ public sealed class AzureElsaInstanceProvider(
                 throw new InvalidOperationException("Managed instance provider placement is unavailable.");
 
             var target = new AzureWorkloadTarget(WorkloadName(request.InstanceId), location);
-            var translation = AzureWorkloadPlanTranslator.Translate(request.Plan, target);
+            var translation = AzureWorkloadPlanTranslator.Translate(request.Plan, target, _providerScope);
             if (!translation.IsAccepted)
                 throw new InvalidOperationException("The resolved plan is outside the governed Azure provider profile.");
 
@@ -371,7 +373,8 @@ public sealed class AzureElsaInstanceProvider(
 
         var translatedRequestedPlan = AzureWorkloadPlanTranslator.Translate(
             submission.Plan,
-            new AzureWorkloadTarget(operation.TargetKey, operation.Location));
+            new AzureWorkloadTarget(operation.TargetKey, operation.Location),
+            _providerScope);
         if (!translatedRequestedPlan.IsAccepted ||
             translatedRequestedPlan.Plan is null ||
             !string.Equals(translatedRequestedPlan.Plan.Fingerprint, retainedPlan.Fingerprint, StringComparison.Ordinal))

@@ -551,6 +551,53 @@ public sealed class AzureWorkloadPlanTranslatorTests
     }
 
     [Fact]
+    public void Accepts_signed_paid_image_from_the_validated_staging_registry_scope()
+    {
+        var plan = CreatePlan();
+        var component = plan.Topology.Components[0];
+        const string repository = "stagingregistry.azurecr.io/runtime-combined";
+        var stagingPlan = plan with
+        {
+            Topology = plan.Topology with
+            {
+                Components = [component with
+                {
+                    Image = component.Image with
+                    {
+                        Repository = repository,
+                        Reference = $"{repository}@{ImageDigest}"
+                    }
+                }]
+            }
+        };
+
+        var result = AzureWorkloadPlanTranslator.Translate(stagingPlan, new("workload-a", "westeurope"), StagingScope());
+
+        Assert.True(result.IsAccepted, string.Join("; ", result.Findings.Select(x => x.Code)));
+        Assert.Equal(repository, result.Plan!.ImageRepository);
+    }
+
+    [Fact]
+    public void Rejects_image_from_a_registry_outside_the_validated_staging_scope()
+    {
+        var result = AzureWorkloadPlanTranslator.Translate(CreatePlan(), new("workload-a", "westeurope"), StagingScope());
+
+        Assert.False(result.IsAccepted);
+        Assert.Contains(result.Findings, x => x.Code == "azure.imageRegistry.unsupported");
+    }
+
+    [Fact]
+    public void Rejects_invalid_provider_scope_instead_of_using_it_as_image_authority()
+    {
+        var invalidScope = StagingScope() with { RegistryName = "StagingRegistry" };
+
+        var result = AzureWorkloadPlanTranslator.Translate(CreatePlan(), new("workload-a", "westeurope"), invalidScope);
+
+        Assert.False(result.IsAccepted);
+        Assert.Contains(result.Findings, x => x.Code == "azure.providerScope.invalid");
+    }
+
+    [Fact]
     public void Rejects_images_outside_initial_paid_registry_authority()
     {
         var plan = CreatePlan();
@@ -763,6 +810,14 @@ public sealed class AzureWorkloadPlanTranslatorTests
 
     private static AzureWorkloadPlanTranslation Translate(ResolvedElsaApplicationPlan plan) =>
         AzureWorkloadPlanTranslator.Translate(plan, new("workload-a", "westeurope"));
+
+    private static AzureProviderTargetScope StagingScope() => new(
+        "11111111-1111-1111-1111-111111111111",
+        "control-staging",
+        "22222222-2222-2222-2222-222222222222",
+        "control-staging-registry",
+        "stagingregistry",
+        "westeurope");
 
     private static ResolvedElsaApplicationPlan WithCapacity(
         int minReplicas, int maxReplicas, int cpuMillicores, int memoryMiB, int? ephemeralStorageMiB = null)

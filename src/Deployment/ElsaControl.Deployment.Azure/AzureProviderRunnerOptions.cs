@@ -19,6 +19,18 @@ public sealed record AzureProviderTargetScope(
     string Location)
 {
     public const string ConfigurationSection = "Deployment:AzureProvider:Runner:TargetScope";
+    public const string PaidRuntimeRepositoryName = "runtime-combined";
+
+    /// <summary>
+    /// Returns the paid runtime repository governed by this validated provider scope.
+    /// Registry identity is already part of the scope fingerprint persisted with operations.
+    /// </summary>
+    public string GetPaidRuntimeRepository()
+    {
+        Validate();
+        return $"{RegistryName}.azurecr.io/{PaidRuntimeRepositoryName}";
+    }
+
     public string ComputeFingerprint()
     {
         Validate();

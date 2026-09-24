@@ -12,7 +12,7 @@ using ElsaControl.RuntimeBuilder.Abstractions.Plans;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 
-public sealed class AzureProviderOperationStore(CatalogDbContext db) :
+public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProviderTargetScope? providerScope = null) :
     IAzureProviderOperationStore,
     IAzureManagedElsaProvisioningOperationStore,
     IAzureProviderOperationAuthorizationStore,
@@ -1389,7 +1389,8 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
         var translation = AzureWorkloadPlanTranslator.Translate(
             typedPlan,
             new AzureWorkloadTarget(observation.TargetKey, (await db.AzureProviderOperations.AsNoTracking()
-                .SingleAsync(x => x.Id == observation.ProviderOperationId, cancellationToken)).Location));
+                .SingleAsync(x => x.Id == observation.ProviderOperationId, cancellationToken)).Location),
+            providerScope);
         if (!translation.IsAccepted || translation.Plan is null ||
             !string.Equals(translation.Plan.Fingerprint, observation.ProviderPlanFingerprint, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Recovery observation provider plan does not match the retained resolved plan.");

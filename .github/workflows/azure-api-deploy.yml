@@ -180,16 +180,22 @@ jobs:
 
           echo "::notice::Deployment skipped because configuration is incomplete. Missing: $missing_names"
 
-      - name: Require main ref for Azure mutation
+      - name: Require an approved ref for Azure mutation
         if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ "${GITHUB_REF:-}" != "refs/heads/main" ]; then
-            echo "::error::Azure deployment and candidate publication are permitted only from the main branch; refusing to continue."
-            exit 1
+          if [ "${GITHUB_REF:-}" = "refs/heads/main" ]; then
+            exit 0
           fi
+          if [ "${GITHUB_REF:-}" = "refs/heads/candidate/staging" ] &&
+             [ "$TARGET_ENVIRONMENT" = "test" ] &&
+             { [ "$DEPLOY_MODE" = "build" ] || [ "$DEPLOY_MODE" = "promote" ]; }; then
+            exit 0
+          fi
+          echo "::error::This ref is not approved for the selected Azure environment and deployment mode."
+          exit 1
 
       - name: Audit staging Stripe resources before deployment
         if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' }}

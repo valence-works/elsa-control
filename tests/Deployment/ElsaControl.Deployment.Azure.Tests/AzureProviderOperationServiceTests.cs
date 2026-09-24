@@ -145,7 +145,7 @@ public sealed class AzureProviderOperationServiceTests
     }
 
     [Theory]
-    [InlineData("other.azurecr.io/runtime-combined")]
+    [InlineData("other.azurecr.io/runtime-server")]
     [InlineData("valenceruntimeimages.azurecr.io/other-runtime")]
     public async Task Submit_rejects_a_plan_outside_the_governed_repository_before_persistence(string repository)
     {

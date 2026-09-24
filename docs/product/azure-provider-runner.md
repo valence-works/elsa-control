@@ -35,6 +35,11 @@ An enabled worker host must provide absolute, non-symbolic paths for the pinned
 root. It must also provide the exact target subscription/resource-group/registry
 scope under `Deployment:AzureProvider:Runner:TargetScope`. Startup rejects
 partial configuration; it never silently falls back to an unconfigured runner.
+The paid `runtime-combined` image repository is derived from that validated
+registry scope. A staging candidate can therefore use its isolated ACR without
+weakening production's exact registry check. Follow the
+[staging runtime candidate runbook](../staging-runtime-candidate.md) before
+changing the staging registry or signer authority.
 When managed-instance lifecycle integration is enabled, its template and
 provider-scope fingerprints are derived directly from this validated runner
 authority. The host rejects lifecycle enablement without the concrete worker;

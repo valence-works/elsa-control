@@ -18,6 +18,29 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 
 public sealed partial class AzureProviderRecoveryObservationPersistenceTests
 {
+    [Fact]
+    public async Task Recovery_observation_requires_the_configured_staging_registry_authority()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+
+        var scope = StagingScope();
+        var fixture = await SeedProviderObservationAsync(db, providerScope: scope);
+        var withoutStagingAuthority = (IAzureProviderRecoveryObservationStore)new AzureProviderOperationStore(db);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            withoutStagingAuthority.CreateOrGetAsync(fixture.Observation));
+        Assert.Empty(await db.AzureProviderRecoveryObservations.ToListAsync());
+
+        var authorized = (IAzureProviderRecoveryObservationStore)fixture.OperationStore;
+        var receipt = await authorized.CreateOrGetAsync(fixture.Observation);
+        Assert.NotNull(await authorized.GetAndValidateRecordedAsync(
+            fixture.Workspace.OrganizationId, fixture.Workspace.Id, fixture.InstanceId,
+            fixture.LifecycleOperationId, fixture.Observation.ObservedLifecycleAttemptNumber,
+            receipt.Reference, receipt.Digest));
+    }
+
     [Theory]
     [InlineData(AzureProviderRunnerStep.SqlFirewallCreate, AzureProviderOperationPhase.SeedSecretsObserved, AzureProviderRunnerStep.SqlFirewallCreate, AzureProviderOperationPhase.SqlFirewallReady, true)]
     [InlineData(AzureProviderRunnerStep.SqlBootstrapScript, AzureProviderOperationPhase.SqlFirewallReady, AzureProviderRunnerStep.SqlBootstrapScript, AzureProviderOperationPhase.SqlBootstrapReady, true)]
@@ -1374,18 +1397,20 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
 
     private static async Task<ObservationFixture> SeedProviderObservationAsync(
         CatalogDbContext db,
-        ElsaInstanceOperationAction lifecycleAction = ElsaInstanceOperationAction.Reconcile)
+        ElsaInstanceOperationAction lifecycleAction = ElsaInstanceOperationAction.Reconcile,
+        AzureProviderTargetScope? providerScope = null)
     {
         var (workspace, instanceId, lifecycleOperationId, resolvedPlan, providerPlan) =
-            await SeedLifecycleAuthorityAsync(db, lifecycleAction);
+            await SeedLifecycleAuthorityAsync(db, lifecycleAction, providerScope);
         var now = DateTimeOffset.Parse("2026-09-05T16:00:00Z");
-        var operationStore = new AzureProviderOperationStore(db);
+        var operationStore = new AzureProviderOperationStore(db, providerScope);
+        var providerScopeFingerprint = providerScope?.ComputeFingerprint() ?? new string('a', 64);
         var assignment = await ((IAzureProviderResourceAssignmentStore)operationStore).CreateOrGetAsync(
             new(
                 workspace.Id,
                 workspace.OrganizationId,
                 instanceId,
-                new string('a', 64),
+                providerScopeFingerprint,
                 "11111111-1111-1111-1111-111111111111",
                 "rg-recovery",
                 $"e{instanceId:N}"[..16],
@@ -1411,7 +1436,7 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
                 providerPlan.ReleaseManifestReference,
                 providerPlan.ReleaseManifestSignatureReference,
                 providerPlan.SecretReferences,
-                ProviderScopeFingerprint: new string('a', 64),
+                ProviderScopeFingerprint: providerScopeFingerprint,
                 SqlWorkflowPackageVersion: providerPlan.SqlWorkflowPackageVersion,
                 SqlQuartzPackageVersion: providerPlan.SqlQuartzPackageVersion,
                 OrganizationId: workspace.OrganizationId,
@@ -1646,7 +1671,8 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
 
     private static async Task<(Workspace Workspace, Guid InstanceId, Guid LifecycleOperationId, ElsaInstanceResolvedPlanEntity Plan, AzureWorkloadPlan ProviderPlan)> SeedLifecycleAuthorityAsync(
         CatalogDbContext db,
-        ElsaInstanceOperationAction lifecycleAction = ElsaInstanceOperationAction.Reconcile)
+        ElsaInstanceOperationAction lifecycleAction = ElsaInstanceOperationAction.Reconcile,
+        AzureProviderTargetScope? providerScope = null)
     {
         var workspace = new Workspace { Id = Guid.NewGuid(), Name = "Recovery observation workspace" };
         db.Workspaces.Add(workspace);
@@ -1655,11 +1681,24 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
         var lifecycleOperationId = Guid.NewGuid();
         var now = DateTimeOffset.Parse("2026-09-05T16:00:00Z");
         var plan = CreateAzurePlan();
+        if (providerScope is not null)
+        {
+            var repository = providerScope.GetPaidRuntimeRepository();
+            var component = plan.Topology.Components.Single();
+            plan = plan with { Topology = plan.Topology with { Components = [component with
+            {
+                Image = component.Image with
+                {
+                    Repository = repository,
+                    Reference = $"{repository}@{component.Image.Digest}"
+                }
+            }] } };
+        }
         var planId = "plan_recovery_01";
         var planUri = $"https://control.example.test/api/workspaces/{workspace.Id:D}/instances/{instanceId:D}/resolved-plans/{planId}";
         var serialized = ResolvedElsaApplicationPlanSerialization.Serialize(plan);
         var contentHash = ResolvedElsaApplicationPlanSerialization.ComputeContentHash(plan);
-        var providerPlan = AssertProviderPlan(plan, $"e{instanceId:N}"[..16]);
+        var providerPlan = AssertProviderPlan(plan, $"e{instanceId:N}"[..16], providerScope);
 
         db.ElsaInstances.Add(new ElsaInstanceEntity
         {
@@ -1801,12 +1840,18 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
         };
     }
 
-    private static AzureWorkloadPlan AssertProviderPlan(ResolvedElsaApplicationPlan plan, string workloadName)
+    private static AzureWorkloadPlan AssertProviderPlan(
+        ResolvedElsaApplicationPlan plan, string workloadName, AzureProviderTargetScope? providerScope = null)
     {
-        var translation = AzureWorkloadPlanTranslator.Translate(plan, new(workloadName, "westeurope"));
+        var translation = AzureWorkloadPlanTranslator.Translate(plan, new(workloadName, "westeurope"), providerScope);
         Assert.True(translation.IsAccepted, string.Join("; ", translation.Findings.Select(x => $"{x.Code}:{x.Scope}")));
         return Assert.IsType<AzureWorkloadPlan>(translation.Plan);
     }
+
+    private static AzureProviderTargetScope StagingScope() => new(
+        "11111111-1111-1111-1111-111111111111", "rg-recovery",
+        "22222222-2222-2222-2222-222222222222", "rg-staging-registry",
+        "stagingregistry", "westeurope");
 
     private static CatalogDbContext CreateMigratedContext(SqliteConnection connection) =>
         new(new DbContextOptionsBuilder<CatalogDbContext>()

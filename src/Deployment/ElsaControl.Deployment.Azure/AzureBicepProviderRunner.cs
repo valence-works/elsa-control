@@ -2267,7 +2267,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         if (!string.Equals(command.Plan.Topology, AzureWorkloadPlanTranslator.SupportedTopology, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(command.Plan.Isolation, AzureWorkloadPlanTranslator.SupportedIsolation, StringComparison.OrdinalIgnoreCase) ||
             !BelongsToReleaseLine(command.Plan.ReleaseLine, command.Plan.ElsaVersion) ||
-            !string.Equals(command.Plan.ImageRepository, AzureWorkloadPlanTranslator.SupportedRepository, StringComparison.Ordinal) ||
+            !string.Equals(command.Plan.ImageRepository, _scope.GetPaidRuntimeRepository(), StringComparison.Ordinal) ||
             !AzureWorkloadPlanTranslator.IsSupportedLocation(command.Plan.Location) ||
             command.Plan.ImageDigest.Length != 64 || !command.Plan.ImageDigest.All(Uri.IsHexDigit) ||
             !AzureProviderOperationValidation.IsSafePackageVersion(command.Plan.SqlWorkflowPackageVersion) ||
