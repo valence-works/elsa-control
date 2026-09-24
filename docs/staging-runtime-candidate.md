@@ -17,14 +17,18 @@ the production registry and the producer's `main` or version-tag workflow identi
    Use the immutable manifest reference and digest from the publication envelope;
    never infer authority from a tag. Verify the signature and evidence against the
    exact producer workflow identity ending in `@refs/heads/candidate/staging`.
-3. Before admitting the candidate, capture the staging Control app settings and
-   current candidate/image references in a protected rollback record. Change only
+3. Before admitting the candidate, record the previous non-secret staging Control
+   authority settings and image reference in a protected rollback record. Do not
+   copy credentials into that record. Change only
    staging Control's `ReleaseCatalog__Verification__RegistryHost`,
    `ReleaseCatalog__Verification__Repository`,
-   `ReleaseCatalog__Admission__ExpectedSignatureSubject`, and the three
+   `ReleaseCatalog__Admission__ExpectedSignatureSubject`, the three
    `Deployment__AzureProvider__Runner__TargetScope__RegistrySubscriptionId`,
-   `RegistryResourceGroupName`, and `RegistryName` values to the isolated staging
-   registry and exact candidate signer. Preserve the existing strict OIDC issuer
+   `RegistryResourceGroupName`, and `RegistryName` values, plus the three
+   `Deployment__AzureProvider__Runner__RegistryDeploymentMetadataRoleDefinitionId`,
+   `RegistryDeploymentMetadataRoleAssignmentId`, and
+   `RegistryRoleAdministrationAssignmentId` values to the isolated staging registry
+   and exact candidate signer. Preserve the existing strict OIDC issuer
    and all other verifier checks. The registry scope must match the signed paid
    `runtime-combined` image repository exactly. Before restart, grant the verifier
    identity read access to that ACR, and configure the narrow provider's exact
