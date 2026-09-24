@@ -96,6 +96,8 @@ def stripe_objects() -> dict[str, Mapping[str, Any]]:
 
 def azure_settings() -> list[dict[str, str]]:
     return [
+        {"name": "Billing__Lifecycle__Enabled", "value": "true"},
+        {"name": "Billing__Lifecycle__PollInterval", "value": "00:00:15"},
         {"name": "Billing__Stripe__Enabled", "value": "true"},
         {"name": "Billing__Stripe__SecretKey", "value": "sk_test_staging"},
         {"name": "Billing__Stripe__WebhookSigningSecret", "value": WEBHOOK_SECRET},
@@ -215,6 +217,8 @@ class StagingStripeReconciliationTests(unittest.TestCase):
     def test_apply_reconciles_the_complete_secret_bearing_azure_subset_before_audit(self) -> None:
         azure = FakeAzure(
             [item for item in azure_settings() if item["name"] not in {
+                "Billing__Lifecycle__Enabled",
+                "Billing__Lifecycle__PollInterval",
                 "Billing__Stripe__Enabled",
                 "Billing__Stripe__SecretKey",
                 "Billing__Stripe__WebhookSigningSecret",
@@ -228,6 +232,8 @@ class StagingStripeReconciliationTests(unittest.TestCase):
             stripe_secret_key="sk_test_staging",
         )
 
+        self.assertEqual("true", azure.applied["Billing__Lifecycle__Enabled"])
+        self.assertEqual("00:00:15", azure.applied["Billing__Lifecycle__PollInterval"])
         self.assertEqual("true", azure.applied["Billing__Stripe__Enabled"])
         self.assertEqual(WEBHOOK_SECRET, azure.applied["Billing__Stripe__WebhookSigningSecret"])
         self.assertEqual(PRICE_ID, azure.applied["Billing__Stripe__DefaultPriceId"])
@@ -237,6 +243,14 @@ class StagingStripeReconciliationTests(unittest.TestCase):
         with self.assertRaisesRegex(ReconciliationError, "audited test account"):
             StagingStripeReconciler(FakeStripe(), FakeAzure(), config()).run(
                 stripe_secret_key="sk_test_different",
+            )
+
+    def test_audit_requires_staging_billing_cleanup_worker(self) -> None:
+        azure = FakeAzure([item for item in azure_settings() if item["name"] != "Billing__Lifecycle__Enabled"])
+
+        with self.assertRaisesRegex(ReconciliationError, "Billing__Lifecycle__Enabled does not match"):
+            StagingStripeReconciler(FakeStripe(), azure, config()).run(
+                stripe_secret_key="sk_test_staging",
             )
 
     def test_apply_rejects_live_key_before_azure_mutation(self) -> None:

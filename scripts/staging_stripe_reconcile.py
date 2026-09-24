@@ -451,6 +451,8 @@ class StagingStripeReconciler:
         # Provider resources are validated before the only Azure mutation. A
         # missing or live-mode Stripe object therefore cannot write settings.
         desired_settings = {
+            "Billing__Lifecycle__Enabled": "true",
+            "Billing__Lifecycle__PollInterval": "00:00:15",
             "Billing__Stripe__Enabled": "true",
             "Billing__Stripe__SecretKey": stripe_secret_key,
             "Billing__Stripe__WebhookSigningSecret": self._config.webhook_secret,
@@ -564,6 +566,8 @@ class StagingStripeReconciler:
     def check_azure_settings(self, *, expected_stripe_secret_key: str | None = None) -> None:
         settings = self._azure.app_settings()
         expected = {
+            "Billing__Lifecycle__Enabled": "true",
+            "Billing__Lifecycle__PollInterval": "00:00:15",
             "Billing__Stripe__Enabled": "true",
             "Billing__Stripe__DefaultPriceId": self._config.hosted_price_id,
             "Billing__Stripe__WebhookSigningSecret": self._config.webhook_secret,

@@ -2,6 +2,7 @@ using ElsaControl.Billing.Stripe;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using Microsoft.Extensions.Options;
 using Stripe;
+using System.Net;
 using System.Net.Http;
 
 namespace ElsaControl.Billing.Stripe.Tests;
@@ -75,6 +76,54 @@ public sealed class StripeBillingProviderTests
 
         Assert.Equal(OrganizationBillingCleanupOutcome.Unknown, result);
         Assert.Null(cleanup.SubscriptionReference);
+    }
+
+    [Fact]
+    public async Task Cleanup_gateway_confirms_an_already_canceled_subscription_without_canceling_again()
+    {
+        var http = new RecordingStripeHttpClient((HttpStatusCode.OK, "canceled"));
+        var gateway = new StripeSubscriptionCleanupGateway(() => new StripeClient("sk_test_no_network", httpClient: http));
+
+        var confirmed = await gateway.CancelOrConfirmAbsentAsync("sub_123", new RequestOptions(), CancellationToken.None);
+
+        Assert.True(confirmed);
+        Assert.Equal(["GET"], http.Methods);
+    }
+
+    [Fact]
+    public async Task Cleanup_gateway_cancels_an_existing_subscription_and_requires_canceled_status()
+    {
+        var http = new RecordingStripeHttpClient((HttpStatusCode.OK, "active"), (HttpStatusCode.OK, "canceled"));
+        var gateway = new StripeSubscriptionCleanupGateway(() => new StripeClient("sk_test_no_network", httpClient: http));
+
+        var confirmed = await gateway.CancelOrConfirmAbsentAsync("sub_123", new RequestOptions(), CancellationToken.None);
+
+        Assert.True(confirmed);
+        Assert.Equal(["GET", "DELETE"], http.Methods);
+    }
+
+    [Fact]
+    public async Task Cleanup_gateway_confirms_a_subscription_that_stripe_no_longer_has()
+    {
+        var http = new RecordingStripeHttpClient((HttpStatusCode.NotFound, "missing"));
+        var gateway = new StripeSubscriptionCleanupGateway(() => new StripeClient("sk_test_no_network", httpClient: http));
+
+        var confirmed = await gateway.CancelOrConfirmAbsentAsync("sub_123", new RequestOptions(), CancellationToken.None);
+
+        Assert.True(confirmed);
+        Assert.Equal(["GET"], http.Methods);
+    }
+
+    [Fact]
+    public async Task Cleanup_gateway_does_not_confirm_when_cancel_has_not_ended_the_subscription()
+    {
+        var http = new RecordingStripeHttpClient((HttpStatusCode.OK, "active"), (HttpStatusCode.OK, "active"));
+        var gateway = new StripeSubscriptionCleanupGateway(() => new StripeClient("sk_test_no_network", httpClient: http));
+
+        var confirmed = await gateway.CancelOrConfirmAbsentAsync("sub_123", new RequestOptions(), CancellationToken.None);
+
+        Assert.False(confirmed);
+        Assert.Equal(["GET", "DELETE"], http.Methods);
     }
 
     [Fact]
@@ -327,5 +376,24 @@ public sealed class StripeBillingProviderTests
             RequestOptions = requestOptions;
             return Task.FromResult(true);
         }
+    }
+
+    private sealed class RecordingStripeHttpClient(params (HttpStatusCode Status, string SubscriptionStatus)[] responses) : IHttpClient
+    {
+        private readonly Queue<(HttpStatusCode Status, string SubscriptionStatus)> _responses = new(responses);
+        public List<string> Methods { get; } = [];
+
+        public Task<StripeResponse> MakeRequestAsync(StripeRequest request, CancellationToken cancellationToken = default)
+        {
+            Methods.Add(request.Method.ToString().ToUpperInvariant());
+            var response = _responses.Dequeue();
+            var content = response.Status == HttpStatusCode.NotFound
+                ? "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"No such subscription\"}}"
+                : $"{{\"id\":\"sub_123\",\"object\":\"subscription\",\"status\":\"{response.SubscriptionStatus}\"}}";
+            return Task.FromResult(new StripeResponse(response.Status, new HttpResponseMessage().Headers, content));
+        }
+
+        public Task<StripeStreamedResponse> MakeStreamingRequestAsync(StripeRequest request, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException("The cleanup gateway does not make streaming requests.");
     }
 }

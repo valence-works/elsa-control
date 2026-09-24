@@ -137,7 +137,7 @@ public static class OrganizationBillingEndpoints
 
             var result = await billing.RequestDeletionAsync(identity, organizationId, cancellationToken);
             return ToDeletionHttpResult(result);
-        });
+        }).AllowCloudBff();
 
         endpoints.MapPost("/api/billing/webhooks/stripe", HandleStripeWebhookAsync)
             .WithTags("Billing Webhooks");
