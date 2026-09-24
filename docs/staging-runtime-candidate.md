@@ -32,8 +32,9 @@ the production registry and the producer's `main` or version-tag workflow identi
    and all other verifier checks. The registry scope must match the signed paid
    `runtime-combined` image repository exactly. Before restart, grant the verifier
    identity read access to that ACR, and configure the narrow provider's exact
-   deployment-metadata and conditional role-administration assignments at the
-   new staging registry scope. Never reuse assignment IDs from a different
+   deployment-metadata assignment at the staging registry resource-group scope
+   and conditional role-administration assignment at the registry scope. Never
+   reuse assignment IDs from a different
    registry. If ACR blob reads redirect, add only the exact observed staging blob
    host to the verifier allowlist.
 4. Deploy the matching Control candidate to the staging API/worker using the
