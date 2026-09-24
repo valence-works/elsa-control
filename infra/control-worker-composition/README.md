@@ -104,6 +104,7 @@ the staging Web App. Render the reviewed profile and apply only that payload to 
 these commands print setting names and a payload digest, never values:
 
 ```sh
+set -eu
 : "${STAGING_CONTROL_SUBSCRIPTION:?Set the isolated staging Control subscription}"
 test "${STAGING_CONTROL_RESOURCE_GROUP:?}" = "rg-valence-control-staging"
 test "${STAGING_CONTROL_WEBAPP:?}" = "api-tud53zotij43k"
@@ -123,6 +124,7 @@ unavailable. Rollback changes only `ManagedElsa__Handoff__Enabled`; it leaves th
 and worker settings intact. Never apply either payload to production:
 
 ```sh
+set -eu
 : "${STAGING_CONTROL_SUBSCRIPTION:?Set the isolated staging Control subscription}"
 test "${STAGING_CONTROL_RESOURCE_GROUP:?}" = "rg-valence-control-staging"
 test "${STAGING_CONTROL_WEBAPP:?}" = "api-tud53zotij43k"
