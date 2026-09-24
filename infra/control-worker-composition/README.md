@@ -61,6 +61,10 @@ The staging worker payload sets provider `BatchSize=1` to bound concurrent spend
 command timeout for a cold Container Apps environment. Production retains its 15-minute setting;
 the staging bound stays below the runner's one-hour validation limit. A timed-out local command
 does not prove Azure stopped working: inspect provider state and ownership before any recovery.
+The admin-only `GET /api/admin/workspaces/{workspaceId}/instances/{instanceId}/operations/provider-current`
+returns only the correlated provider status, phase, attempted step, checkpoint, and safe diagnostic
+codes. Use it with the lifecycle topology and Azure deployment state before calling the guarded
+recovery endpoint. A 409 recovery rejection is a stop signal, not a reason to submit Create again.
 Before applying settings, capture the staging Web App's current image digest, worker switch values,
 identity attachment, and health result. Verify the Azure CLI subscription/resource group/Web App
 targets are the isolated staging Control API, and that the identity has **no** workload authority in

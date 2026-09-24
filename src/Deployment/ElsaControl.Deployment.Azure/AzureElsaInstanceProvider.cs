@@ -882,7 +882,7 @@ public sealed class AzureElsaInstanceProvider(
     private static ElsaCurrentDeploymentReference? CurrentDeployment(AzureProviderOperation operation) =>
         new(operation.OperationIdentity, $"attempt-{operation.AttemptNumber}", operation.Endpoint, operation.ManagedHandoff);
 
-    internal static string WorkloadName(Guid instanceId) => $"e{instanceId:N}"[..16];
+    public static string WorkloadName(Guid instanceId) => $"e{instanceId:N}"[..16];
 
     internal static string IdempotencyKey(Guid operationId) =>
         AzureProviderOperationValidation.LifecycleIdempotencyKey(operationId);
