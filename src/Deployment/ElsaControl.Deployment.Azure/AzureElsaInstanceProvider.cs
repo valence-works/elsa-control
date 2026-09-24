@@ -883,7 +883,8 @@ public sealed class AzureElsaInstanceProvider(
     /// callback that is not the one of this endpoint. That is the fact Control gates Open on.
     /// </summary>
     private static ElsaCurrentDeploymentReference? CurrentDeployment(AzureProviderOperation operation) =>
-        new(operation.OperationIdentity, $"attempt-{operation.AttemptNumber}", operation.Endpoint, operation.ManagedHandoff);
+        new(operation.OperationIdentity, $"attempt-{operation.AttemptNumber}", operation.Endpoint,
+            operation.ManagedHandoff, operation.ManagedHandoffStudioGrants);
 
     public static string WorkloadName(Guid instanceId) => $"e{instanceId:N}"[..16];
 

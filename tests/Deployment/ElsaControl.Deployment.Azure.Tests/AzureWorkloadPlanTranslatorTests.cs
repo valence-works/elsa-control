@@ -339,6 +339,32 @@ public sealed class AzureWorkloadPlanTranslatorTests
     }
 
     [Fact]
+    public void Studio_grants_are_enabled_only_by_the_selected_image_capability_and_are_fingerprinted()
+    {
+        var legacy = Translate(WithManagedHandoffCapability(true, CreatePlan())).Plan!;
+        var capablePlan = WithStudioGrantsCapability(WithManagedHandoffCapability(true, CreatePlan()));
+        var capable = Translate(capablePlan).Plan!;
+
+        Assert.True(legacy.ManagedHandoff);
+        Assert.False(legacy.ManagedHandoffStudioGrants);
+        Assert.True(capable.ManagedHandoff);
+        Assert.True(capable.ManagedHandoffStudioGrants);
+        Assert.NotEqual(legacy.Fingerprint, capable.Fingerprint);
+        Assert.Equal(capable.Fingerprint, Translate(capablePlan).Plan!.Fingerprint);
+    }
+
+    [Fact]
+    public void Studio_grants_capability_does_not_enable_grants_without_the_managed_handoff()
+    {
+        var plan = WithStudioGrantsCapability(CreatePlan());
+
+        var translated = Translate(plan).Plan!;
+
+        Assert.False(translated.ManagedHandoff);
+        Assert.False(translated.ManagedHandoffStudioGrants);
+    }
+
+    [Fact]
     public void Rejects_a_plan_without_capacity_for_the_workload_component()
     {
         var plan = CreatePlan();
@@ -846,6 +872,24 @@ public sealed class AzureWorkloadPlanTranslatorTests
                         Capabilities = declared
                             ? [.. component.Capabilities, ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV2]
                             : component.Capabilities
+                    }
+                ]
+            }
+        };
+    }
+
+    private static ResolvedElsaApplicationPlan WithStudioGrantsCapability(ResolvedElsaApplicationPlan plan)
+    {
+        var component = plan.Topology.Components[0];
+        return plan with
+        {
+            Topology = plan.Topology with
+            {
+                Components =
+                [
+                    component with
+                    {
+                        Capabilities = [.. component.Capabilities, ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV1]
                     }
                 ]
             }

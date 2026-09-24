@@ -233,6 +233,10 @@ public sealed record ElsaInstanceProviderObservation
         // when set keeps their evidence fingerprints stable while distinguishing a configured deployment.
         if (CurrentDeploymentReference?.ManagedHandoff == true)
             canonical += "managed-handoff\n";
+        // Older observations did not carry this capability; preserve their fingerprints while
+        // binding new Studio grants to the exact provider-confirmed deployment projection.
+        if (CurrentDeploymentReference?.StudioGrantsSupported == true)
+            canonical += "managed-studio-grants:v1\n";
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 }

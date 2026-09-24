@@ -239,7 +239,8 @@ public sealed class AzureProviderOperationService(
             lifecycleAction,
             providerAssignmentId,
             plan.Capacity,
-            plan.ManagedHandoff);
+            plan.ManagedHandoff,
+            plan.ManagedHandoffStudioGrants);
 
     internal static AzureProviderOperationRequest CreateOperationRequest(AzureProviderOperation operation) =>
         new(
@@ -269,7 +270,8 @@ public sealed class AzureProviderOperationService(
             operation.LifecycleAction,
             operation.ProviderAssignmentId,
             operation.Capacity,
-            operation.ManagedHandoff);
+            operation.ManagedHandoff,
+            operation.ManagedHandoffStudioGrants);
 
     /// <summary>
     /// Rebuilds the admitted plan from the persisted operation columns. An operation retained
@@ -313,7 +315,8 @@ public sealed class AzureProviderOperationService(
                 operationRequest.SqlWorkflowPackageVersion,
                 operationRequest.SqlQuartzPackageVersion,
                 operationRequest.Capacity,
-                operationRequest.ManagedHandoff);
+                operationRequest.ManagedHandoff,
+                operationRequest.ManagedHandoffStudioGrants);
 
             AzureProviderExecutor.ValidateExecutionRequest(
                 new AzureProviderExecutionRequest(operationRequest, plan));
@@ -362,6 +365,8 @@ public sealed class AzureProviderOperationService(
             throw new ArgumentException("The provider capacity has no exact Azure Container Apps mapping.", parameterName);
         if (plan.ManagedHandoff && plan.Capacity is not { MinReplicas: 1, MaxReplicas: 1 })
             throw new ArgumentException("The managed handoff requires a single-replica workload.", parameterName);
+        if (plan.ManagedHandoffStudioGrants && !plan.ManagedHandoff)
+            throw new ArgumentException("Managed Studio grants require the managed handoff.", parameterName);
     }
 
     private static bool IsFingerprint(string? value) => value is not null && value.Length == 64 && value.All(Uri.IsHexDigit);

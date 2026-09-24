@@ -117,6 +117,44 @@ public sealed class ReleaseManifestAdmissionTests
     }
 
     [Fact]
+    public async Task Studio_grant_capability_is_projected_only_from_a_signed_handoff_image()
+    {
+        var producer = JsonNode.Parse(ProducerFixture())!;
+        AddManagedHandoffCapability(producer, "3.8", "combined");
+        var combined = producer["distributions"]!.AsArray()
+            .Single(distribution => distribution!["topology"]!.GetValue<string>() == "combined")!;
+        combined["capabilities"]!.AsArray().Add(ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV1);
+        RefreshProducerCanonicalDigest(producer);
+        var artifact = ProducerArtifact(producer.ToJsonString());
+
+        var admission = await new ReleaseManifestAdmissionService(
+                new StubSignatureVerifier(ProducerVerification(artifact)))
+            .AdmitAsync(artifact, new(ProducerSigner, "paid", "combined"));
+
+        Assert.True(admission.Accepted, string.Join("; ", admission.Findings.Select(x => x.Code)));
+        var component = Assert.Single(ReleaseManifestPlanProjector.Project(admission, CreatePlan()).Topology.Components);
+        Assert.Contains(ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV1, component.Capabilities);
+    }
+
+    [Fact]
+    public async Task Studio_grant_capability_without_managed_handoff_is_rejected()
+    {
+        var producer = JsonNode.Parse(ProducerFixture())!;
+        var combined = producer["distributions"]!.AsArray()
+            .Single(distribution => distribution!["topology"]!.GetValue<string>() == "combined")!;
+        combined["capabilities"]!.AsArray().Add(ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV1);
+        RefreshProducerCanonicalDigest(producer);
+        var artifact = ProducerArtifact(producer.ToJsonString());
+
+        var admission = await new ReleaseManifestAdmissionService(
+                new StubSignatureVerifier(ProducerVerification(artifact)))
+            .AdmitAsync(artifact, new(ProducerSigner, "paid", "combined"));
+
+        Assert.False(admission.Accepted);
+        Assert.Contains(admission.Findings, finding => finding.Code == "integration.studioGrants.handoffRequired");
+    }
+
+    [Fact]
     public async Task Managed_handoff_claim_on_studio_only_image_is_rejected_before_admission()
     {
         var producer = JsonNode.Parse(ProducerFixture())!;

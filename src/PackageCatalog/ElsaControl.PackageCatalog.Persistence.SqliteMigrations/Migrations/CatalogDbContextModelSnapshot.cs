@@ -1466,6 +1466,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<bool>("ManagedHandoff")
                         .HasColumnType("INTEGER");
 
+                    b.Property<bool>("ManagedHandoffStudioGrants")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("OperationIdentity")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -2888,6 +2891,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<string>("CurrentDeploymentRevisionId")
                         .HasMaxLength(128)
                         .HasColumnType("TEXT");
+
+                    b.Property<bool>("CurrentDeploymentStudioGrants")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("CurrentReleaseComponentDigestsJson")
                         .HasMaxLength(65536)

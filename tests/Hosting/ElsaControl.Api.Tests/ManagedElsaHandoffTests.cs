@@ -79,14 +79,15 @@ public sealed class ManagedElsaHandoffTests
     [InlineData(WorkspaceRole.Reader, OrganizationRole.Administrator, true)]
     [InlineData(WorkspaceRole.Reader, OrganizationRole.Member, false)]
     [InlineData(WorkspaceRole.SourceAdmin, OrganizationRole.Member, false)]
-    public void Runtime_permission_mapping_grants_exact_studio_permissions_only_to_owner_and_admin(
+    public void Runtime_permission_mapping_respects_role_and_deployed_image_capability(
         WorkspaceRole workspaceRole,
         OrganizationRole organizationRole,
         bool expected)
     {
         var access = new WorkspaceAccess(Guid.NewGuid(), Guid.NewGuid(), workspaceRole, Guid.NewGuid(), organizationRole);
 
-        var permissions = ManagedElsaRuntimePermissionMapping.For(access);
+        var legacyPermissions = ManagedElsaRuntimePermissionMapping.For(access, studioGrantsSupported: false);
+        var studioPermissions = ManagedElsaRuntimePermissionMapping.For(access, studioGrantsSupported: true);
 
         string[] expectedPermissions =
         [
@@ -109,12 +110,14 @@ public sealed class ManagedElsaHandoffTests
         ];
         if (expected)
         {
-            Assert.Equal(expectedPermissions.Length, permissions.Count);
-            Assert.All(expectedPermissions, permission => Assert.Contains(permission, permissions));
+            Assert.Equal([ManagedElsaRuntimePermissionMapping.StructuredLogsRead], legacyPermissions);
+            Assert.Equal(expectedPermissions.Length, studioPermissions.Count);
+            Assert.All(expectedPermissions, permission => Assert.Contains(permission, studioPermissions));
         }
         else
         {
-            Assert.Empty(permissions);
+            Assert.Empty(legacyPermissions);
+            Assert.Empty(studioPermissions);
         }
     }
 
@@ -236,8 +239,10 @@ public sealed class ManagedElsaHandoffTests
         Assert.False(ControlIdentityReader.TryReadBearerExpiry(principal, out _));
     }
 
-    [Fact]
-    public async Task Production_wiring_creates_persisted_binding_and_issues_handoff_token()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Production_wiring_issues_only_grants_supported_by_current_deployment(bool studioGrantsSupported)
     {
         await using var app = new ControlApiTestApplication(new Dictionary<string, string?>
         {
@@ -281,7 +286,7 @@ public sealed class ManagedElsaHandoffTests
             const string deploymentId = "deployment-managed";
             const string endpointUri = "https://managed.example.test";
             await db.Database.ExecuteSqlInterpolatedAsync(
-                $"UPDATE ElsaInstances SET CurrentDeploymentId = {deploymentId}, CurrentDeploymentEndpointUri = {endpointUri}, CurrentDeploymentManagedHandoff = {true}, DesiredLifecycle = {ElsaDesiredLifecycle.Running.ToString()}, ObservedLifecycle = {ElsaObservedLifecycle.Ready.ToString()}, Health = {ElsaInstanceHealth.Healthy.ToString()} WHERE Id = {instanceId}");
+                $"UPDATE ElsaInstances SET CurrentDeploymentId = {deploymentId}, CurrentDeploymentEndpointUri = {endpointUri}, CurrentDeploymentManagedHandoff = {true}, CurrentDeploymentStudioGrants = {studioGrantsSupported}, DesiredLifecycle = {ElsaDesiredLifecycle.Running.ToString()}, ObservedLifecycle = {ElsaObservedLifecycle.Ready.ToString()}, Health = {ElsaInstanceHealth.Healthy.ToString()} WHERE Id = {instanceId}");
             db.ChangeTracker.Clear();
         }
 
@@ -324,8 +329,13 @@ public sealed class ManagedElsaHandoffTests
             .Where(claim => claim.Type == ManagedElsaHandoffDefaults.RuntimePermissionClaim)
             .Select(claim => claim.Value)
             .ToHashSet(StringComparer.Ordinal);
-        Assert.Equal(ManagedElsaRuntimePermissionMapping.AllowedPermissions.Count, grants.Count);
-        Assert.All(ManagedElsaRuntimePermissionMapping.AllowedPermissions, permission => Assert.Contains(permission, grants));
+        if (studioGrantsSupported)
+        {
+            Assert.Equal(ManagedElsaRuntimePermissionMapping.AllowedPermissions.Count, grants.Count);
+            Assert.All(ManagedElsaRuntimePermissionMapping.AllowedPermissions, permission => Assert.Contains(permission, grants));
+        }
+        else
+            Assert.Equal([ManagedElsaRuntimePermissionMapping.StructuredLogsRead], grants);
     }
 
     [Theory]

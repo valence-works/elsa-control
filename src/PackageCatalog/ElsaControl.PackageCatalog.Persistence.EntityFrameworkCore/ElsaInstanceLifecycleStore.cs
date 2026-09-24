@@ -3550,6 +3550,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         entity.CurrentDeploymentRevisionId = instance.CurrentDeploymentReference?.RevisionId;
         entity.CurrentDeploymentEndpointUri = instance.CurrentDeploymentReference?.EndpointUri;
         entity.CurrentDeploymentManagedHandoff = instance.CurrentDeploymentReference?.ManagedHandoff == true;
+        entity.CurrentDeploymentStudioGrants = instance.CurrentDeploymentReference?.StudioGrantsSupported == true;
         entity.PlacementAssignmentId = instance.PlacementAssignmentReference?.AssignmentId;
         entity.ElsaTenantId = instance.ElsaTenantReference?.TenantId;
         entity.ElsaTenantAudience = instance.ElsaTenantReference?.Audience;
@@ -4054,7 +4055,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         if (entity.CurrentDeploymentId is null)
         {
             if (entity.CurrentDeploymentRevisionId is not null || entity.CurrentDeploymentEndpointUri is not null ||
-                entity.CurrentDeploymentManagedHandoff)
+                entity.CurrentDeploymentManagedHandoff || entity.CurrentDeploymentStudioGrants)
                 throw new InvalidOperationException();
             return null;
         }
@@ -4064,7 +4065,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         // A handoff is only meaningful for the verified origin it was bound to; a legacy-invalid endpoint
         // therefore drops it rather than failing to load the instance.
         return new ElsaCurrentDeploymentReference(entity.CurrentDeploymentId, entity.CurrentDeploymentRevisionId, endpoint,
-            entity.CurrentDeploymentManagedHandoff && endpoint is not null);
+            entity.CurrentDeploymentManagedHandoff && endpoint is not null,
+            entity.CurrentDeploymentStudioGrants && endpoint is not null);
     }
 
     private static ElsaTenantReference? MapTenant(ElsaInstanceEntity entity)

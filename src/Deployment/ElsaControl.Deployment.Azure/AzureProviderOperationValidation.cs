@@ -379,6 +379,7 @@ public static class AzureProviderOperationValidation
         if ((request.ReleaseManifestReference is null) != (request.ReleaseManifestSignatureReference is null)) errors.Add("releaseManifestReferences.incomplete");
         if (request.Capacity is not null && AzureContainerAppsCapacity.Map(request.Capacity) is null) errors.Add("capacity.invalid");
         if (request.ManagedHandoff && request.Capacity is not { MinReplicas: 1, MaxReplicas: 1 }) errors.Add("managedHandoff.replicasUnsupported");
+        if (request.ManagedHandoffStudioGrants && !request.ManagedHandoff) errors.Add("managedHandoff.studioGrantsRequireHandoff");
         ValidateSecretReferences(request.SecretReferences, errors);
 
         BoundedSafe(request.TargetKey, 128, "target", errors);
@@ -433,7 +434,9 @@ public static class AzureProviderOperationValidation
                 secretReferences = normalized.SecretReferences
             });
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-            WithManagedHandoff(WithCapacity(canonical, normalized.Capacity), normalized.ManagedHandoff)))).ToLowerInvariant();
+            WithManagedHandoffStudioGrants(
+                WithManagedHandoff(WithCapacity(canonical, normalized.Capacity), normalized.ManagedHandoff),
+                normalized.ManagedHandoffStudioGrants)))).ToLowerInvariant();
     }
 
     /// <summary>
@@ -443,6 +446,10 @@ public static class AzureProviderOperationValidation
     /// </summary>
     private static string WithManagedHandoff(string canonical, bool managedHandoff) =>
         managedHandoff ? $"{canonical}|managed-handoff:v1" : canonical;
+
+    /// <summary>False is omitted to preserve hashes for rows written before image grant profiles existed.</summary>
+    private static string WithManagedHandoffStudioGrants(string canonical, bool enabled) =>
+        enabled ? $"{canonical}|managed-handoff-studio-grants:v1" : canonical;
 
     /// <summary>
     /// Capacity joined the persisted projection after operations were already retained. Those

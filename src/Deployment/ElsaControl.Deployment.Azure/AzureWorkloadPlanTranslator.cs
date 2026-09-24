@@ -86,6 +86,9 @@ public static class AzureWorkloadPlanTranslator
         if (findings.Count > 0)
             return Rejected(findings);
         var managedHandoff = ConfiguresManagedHandoff(component, capacity!);
+        var managedHandoffStudioGrants = managedHandoff && component.Capabilities.Contains(
+            ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV1,
+            StringComparer.Ordinal);
         var evidence = normalized.Evidence.Single(x =>
             string.Equals(x.Kind, ReleaseManifestEvidenceKinds.Manifest, StringComparison.OrdinalIgnoreCase));
         var signatureEvidence = normalized.Evidence.Single(x =>
@@ -107,8 +110,9 @@ public static class AzureWorkloadPlanTranslator
         };
         var fingerprintInputs = new
         {
-            // v2 binds the workload capacity and v3 whether the runtime handoff is configured. Either
-            // change therefore yields a new plan fingerprint and, through it, a new revision suffix.
+            // v2 binds workload capacity and v3 whether the runtime handoff is configured. Keep
+            // that canonical payload byte-compatible for legacy images; the newer grant contract
+            // is added as a suffix only when the selected image supports it.
             schema = "azure-workload-plan/v3",
             canonicalTarget.workloadName,
             canonicalTarget.location,
@@ -141,7 +145,8 @@ public static class AzureWorkloadPlanTranslator
                 .Select(x => new { key = x.Key.ToLowerInvariant(), reference = x.Value })
                 .ToArray()
         };
-        var fingerprintInput = JsonSerializer.Serialize(fingerprintInputs, FingerprintJsonOptions);
+        var fingerprintInput = JsonSerializer.Serialize(fingerprintInputs, FingerprintJsonOptions) +
+            (managedHandoffStudioGrants ? "|managed-handoff-studio-grants:v1" : "");
         var fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(fingerprintInput)));
 
         return new(
@@ -163,7 +168,8 @@ public static class AzureWorkloadPlanTranslator
                 sqlWorkflowPackageVersion,
                 sqlQuartzPackageVersion,
                 capacity,
-                managedHandoff),
+                managedHandoff,
+                managedHandoffStudioGrants),
             []);
     }
 

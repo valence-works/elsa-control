@@ -7,7 +7,8 @@ public sealed record ManagedElsaInstanceIdentity(
     string Audience,
     Uri CallbackUri,
     int BindingVersion,
-    DateTimeOffset ChangedAt);
+    DateTimeOffset ChangedAt,
+    bool StudioGrantsSupported = false);
 
 public sealed record ManagedElsaInstanceScope(Guid OrganizationId, Guid WorkspaceId, Guid InstanceId);
 

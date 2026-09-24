@@ -849,10 +849,16 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
                 // handoff without a current deployment endpoint is an invalid write.
                 if (allowLegacyEndpoint && persistedEndpoint is not null && instance.CurrentDeploymentEndpointUri is null &&
                     !entry.Property(x => x.CurrentDeploymentManagedHandoff).IsModified)
+                {
                     instance.CurrentDeploymentManagedHandoff = false;
+                    if (!entry.Property(x => x.CurrentDeploymentStudioGrants).IsModified)
+                        instance.CurrentDeploymentStudioGrants = false;
+                }
                 else
                     throw new InvalidOperationException("A managed handoff must belong to a current deployment with an endpoint.");
             }
+            if (instance.CurrentDeploymentStudioGrants && !instance.CurrentDeploymentManagedHandoff)
+                throw new InvalidOperationException("Studio grants must belong to the current managed handoff deployment.");
             instance.PlacementAssignmentId = OptionalSafeReference(instance.PlacementAssignmentId, nameof(instance.PlacementAssignmentId), 128);
             instance.ElsaTenantId = OptionalSafeReference(instance.ElsaTenantId, nameof(instance.ElsaTenantId), 128);
             var tenantAudience = OptionalAudience(instance.ElsaTenantAudience, nameof(instance.ElsaTenantAudience));
