@@ -1,0 +1,49 @@
+# Isolated staging runtime candidate
+
+This runbook stages a signed Valence Runtime image for a managed-engine customer-flow
+rehearsal before production image publication. It is limited to the persistent staging
+Control deployment and the staging ACR. Production release admission remains pinned to
+the production registry and the producer's `main` or version-tag workflow identity.
+
+## Producer and admission boundary
+
+1. Review the runtime-image PR and run its tests and vulnerability gates. Push the
+   reviewed commit to the protected `candidate/staging` branch in
+   `valence-works/elsa-production-image`. Its GitHub `staging` environment must permit
+   only that branch, use a federated identity with `AcrPush` at the staging ACR scope,
+   and set `STAGING_RUNTIME_REGISTRY` to that exact ACR hostname. The workflow fails
+   closed if the selected registry is missing or equals production.
+2. Record the successful workflow run and its `signed-release-manifest-*` artifact.
+   Use the immutable manifest reference and digest from the publication envelope;
+   never infer authority from a tag. Verify the signature and evidence against the
+   exact producer workflow identity ending in `@refs/heads/candidate/staging`.
+3. Before admitting the candidate, capture the staging Control app settings and
+   current candidate/image references in a protected rollback record. Change only
+   staging Control's `ReleaseCatalog__Verification__RegistryHost`,
+   `ReleaseCatalog__Verification__Repository`,
+   `ReleaseCatalog__Admission__ExpectedSignatureSubject`, and
+   `Deployment__AzureProvider__Runner__TargetScope__RegistryName` to the isolated
+   staging registry and exact candidate signer. Preserve the existing strict OIDC
+   issuer and all other verifier checks. The registry scope must match the signed
+   paid `runtime-combined` image repository exactly.
+4. Deploy the matching Control candidate to the staging API/worker using the
+   `candidate/staging` ref, `test` target, and immutable build-then-promote workflow.
+   The workflow refuses this ref for production. Admit the signed manifest through
+   the existing authorized catalog API; a PR check or source inspection alone does
+   not establish admission.
+5. Create or upgrade a staging managed engine through the customer path and verify
+   the exact owner/admin Studio dashboard, Workflow Definitions/designer, Structured
+   Logs, lower-role denial, and cross-account denial on desktop and 390×844. Record
+   sanitized outcomes in the active Issue Bus issue before any production promotion.
+
+## Rollback
+
+If admission, provisioning, authorization, or the customer flow fails, stop new
+staging Create/upgrade requests. Do not remove an engine or cancel billing merely to
+roll back a release. Restore the captured staging Control image and app settings,
+then verify API/worker health, the old catalog authority, and the state of any durable
+in-flight operation before allowing new mutations. An operation already submitted
+to Azure may still be running: use the existing provider observation/recovery path
+to determine its outcome, not a blind replay. Keep the candidate ACR artifacts for
+forensic comparison until the issue is resolved. No production registry, identity,
+release alias, or customer environment is part of this rollback.

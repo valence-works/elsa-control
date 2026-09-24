@@ -33,6 +33,14 @@ fi
 [[ -n "$output_file" && ! -L "$output_file" ]] || fail "candidate output path is invalid"
 command -v jq >/dev/null 2>&1 || fail "JSON validator is unavailable"
 
+if [[ "${TARGET_ENVIRONMENT:-}" == test && "${GITHUB_REF:-}" == refs/heads/candidate/staging ]]; then
+  trusted_branch=candidate/staging
+elif [[ "${GITHUB_REF:-}" == refs/heads/main ]]; then
+  trusted_branch=main
+else
+  fail "candidate promotion ref is not approved for this environment"
+fi
+
 jq -e '
   type == "object" and
   ((keys | sort) == ([
@@ -79,6 +87,7 @@ jq -e \
   --arg run_number "$descriptor_run_number" \
   --arg source_sha "$source_sha" \
   --arg repository "$expected_github_repository" \
+  --arg trusted_branch "$trusted_branch" \
   '(.id | tostring) == $run_id and
    .name == "Azure Control API Deploy" and
    .path == ".github/workflows/azure-api-deploy.yml" and
@@ -87,7 +96,7 @@ jq -e \
    .status == "completed" and
    .conclusion == "success" and
    .event == "workflow_dispatch" and
-   .head_branch == "main" and
+   .head_branch == $trusted_branch and
    .head_sha == $source_sha and
    (.run_number | tostring) == $run_number' \
   "$run_file" >/dev/null 2>&1 || fail "candidate workflow run is not a trusted successful build"
@@ -95,12 +104,12 @@ jq -e \
 command -v git >/dev/null 2>&1 || fail "Git is unavailable"
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "source repository is unavailable"
 if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null || true)" == true ]]; then
-  git fetch --no-tags --quiet --unshallow origin main >/dev/null 2>&1 || fail "main ancestry could not be verified"
+  git fetch --no-tags --quiet --unshallow origin "$trusted_branch" >/dev/null 2>&1 || fail "candidate ancestry could not be verified"
 else
-  git fetch --no-tags --quiet origin main >/dev/null 2>&1 || fail "main ancestry could not be verified"
+  git fetch --no-tags --quiet origin "$trusted_branch" >/dev/null 2>&1 || fail "candidate ancestry could not be verified"
 fi
 git cat-file -e "$source_sha^{commit}" >/dev/null 2>&1 || fail "candidate source commit could not be verified"
-git merge-base --is-ancestor "$source_sha" origin/main >/dev/null 2>&1 || fail "candidate source is not an ancestor of main"
+git merge-base --is-ancestor "$source_sha" "origin/$trusted_branch" >/dev/null 2>&1 || fail "candidate source is not an ancestor of the approved branch"
 
 printf '%s\n' \
   "candidate_repository=$descriptor_repository" \
