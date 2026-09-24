@@ -319,7 +319,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             "rg-delete-claim",
             "22222222-2222-2222-2222-222222222222",
             "registry-rg",
-            "registry1",
+            "valenceruntimeimages",
             "westeurope");
         var runnerOptions = fixture.Tools.Options;
         var providerOptions = new AzureElsaInstanceProviderOptions
