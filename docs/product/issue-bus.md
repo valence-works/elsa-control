@@ -61,7 +61,7 @@ Use `--dry-run` when inspecting a candidate without changing GitHub. Before
 writing code, the command performs all of these preflight checks and hard-skips
 the issue when any check fails:
 
-1. The issue is open, is a leaf (`type:task`, `type:bug`, or `type:spike`), has `ready-for-agent`, has neither `blocked` nor `needs:decision`, is unassigned, has no active claim, and has no linked open PR.
+1. The issue is open, is a leaf (`type:task`, `type:bug`, or `type:spike`), has `ready-for-agent`, has neither `blocked` nor `needs:decision`, is unassigned, has no active claim, and has no owning open PR.
 2. The Project item exists with Status exactly `Ready` and Agent State exactly `Agent Ready`.
 3. Every `worker:*` label is compatible with the requested lane. A lane label for another worker is a hard skip; an issue without a worker lane remains eligible to Codex and Claude.
 4. The command obtains the authenticated `gh` login and posts exactly `claim: <worker> starting`. The immutable GitHub comment `node_id` returned by the authenticated API is the unique machine-readable lease identity.
@@ -70,9 +70,14 @@ the issue when any check fails:
 7. The command re-reads the issue and Project item after all three mutations. It only reports success when the lease, assignment, label removal, Status, and Agent State remain intact.
 8. The worker takes only this one Task for the session.
 
-An open pull request linked from the issue is always a preflight hard skip,
-including when its worker lane appears available. Generic `worker:*` lanes are
-data, not a hard-coded allow-list; every lane other than the requested lane is
+An open PR is an owning PR when GitHub reports that it closes the issue, or
+when the issue has a canonical `pr: <url>` comment for that PR. A timeline
+cross-reference alone can describe a dependency and does not establish
+ownership. The claim command reads GitHub's `closingIssuesReferences` for
+cross-referenced PRs and fails closed when timeline or closing-reference data
+is unreadable or ambiguous. A canonical `pr:` comment remains an owner signal
+regardless of the PR's closing references. Generic `worker:*` lanes are data,
+not a hard-coded allow-list; every lane other than the requested lane is
 conflicting.
 
 If any claim mutation or permission check fails, implementation is forbidden. The command records `claim-abandoned` and reverses the mutations it can verify. If complete safe rollback is not possible, it follows the canonical blocked path: comment `blocked: claim failed - <reason>`, add `blocked`, set Project Status to `Blocked`, set Agent State to `Not Ready`, unassign if possible, and stop. Only an operator may requeue that issue by removing `blocked` and restoring `ready-for-agent`, Status `Ready`, and Agent State `Agent Ready`.
@@ -134,18 +139,20 @@ python3 scripts/issue_bus.py drift 371
 python3 scripts/issue_bus.py drift --all --json
 ```
 
-Single-issue claim and drift reads use targeted GitHub REST requests: the issue
-and paginated comments, the canonical linked pull request, and Project #7's
-`fields` plus `items?q=<issue-number>&fields=<Status-id>,<Agent-State-id>`
-endpoints. They never enumerate the board. Project mutations use the numeric
-REST item/field IDs and one PATCH containing both claim-state field updates.
-All these calls send `X-GitHub-Api-Version: 2026-03-10`. `drift --all` is the
-explicit whole-board operation and uses the paginated Project REST items
-adapter (100 items per page), then checks linked PRs only for rows carrying
-`ready-for-agent`; it is intentionally not part of the claim path.
+Single-issue claim and drift reads use targeted GitHub requests for the issue,
+paginated comments, timeline cross-references, and Project #7's `fields` plus
+`items?q=<issue-number>&fields=<Status-id>,<Agent-State-id>` endpoints. For a
+cross-referenced PR, `gh pr view --json state,closingIssuesReferences` supplies
+GitHub's resolved ownership evidence. These reads never enumerate the board.
+Project mutations use numeric REST item/field IDs and one PATCH containing both
+claim-state field updates. REST calls send
+`X-GitHub-Api-Version: 2026-03-10`. `drift --all` is the explicit whole-board
+operation and uses the paginated Project REST items adapter (100 items per
+page), then checks linked PRs only for rows carrying `ready-for-agent`; it is
+intentionally not part of the claim path.
 
 The check reports at least `ready-for-agent` with Status `In Progress`,
-`ready-for-agent` with a linked open PR, and Status `Done` with Agent State
+`ready-for-agent` with an owning open PR, and Status `Done` with Agent State
 `Review Required`. It also reports multiple worker lanes and issues that
 cannot be read safely. These checks cover the contradictory label, board, and
 linked-PR state observed in the #371 collision.
