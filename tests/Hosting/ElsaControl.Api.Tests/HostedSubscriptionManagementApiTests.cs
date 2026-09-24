@@ -243,6 +243,33 @@ public sealed class HostedSubscriptionManagementApiTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Cloud_Bff_billing_deletion_stays_scoped_to_the_billing_owner()
+    {
+        await _app.SeedAsync(_ => Task.CompletedTask);
+        var owner = CreateBffClient("hosted-delete-owner");
+        var stranger = CreateBffClient("hosted-delete-stranger");
+        var organizationId = await OrganizationIdAsync(owner);
+        await LinkStripeCustomerAsync(organizationId, "cus_hosted_delete");
+        await AddMemberAsync(organizationId, "hosted-delete-member", OrganizationRole.Member);
+        var member = CreateBffClient("hosted-delete-member");
+
+        var foreign = await stranger.PostControlJsonAsync(
+            $"/api/organizations/{organizationId:D}/billing/delete", new { });
+        var forbidden = await member.PostControlJsonAsync(
+            $"/api/organizations/{organizationId:D}/billing/delete", new { });
+        var accepted = await owner.PostControlJsonAsync(
+            $"/api/organizations/{organizationId:D}/billing/delete", new { });
+
+        Assert.Equal(HttpStatusCode.NotFound, foreign.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, accepted.StatusCode);
+        Assert.True(accepted.Headers.CacheControl?.NoStore);
+        await using var scope = _app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Single(await db.OrganizationBillingCleanups.Where(x => x.OrganizationId == organizationId).ToListAsync());
+    }
+
+    [Fact]
     public async Task Cloud_bff_cannot_use_the_control_console_portal_route()
     {
         await _app.SeedAsync(_ => Task.CompletedTask);

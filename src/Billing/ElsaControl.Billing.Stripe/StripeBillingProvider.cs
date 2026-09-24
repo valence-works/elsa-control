@@ -42,8 +42,13 @@ public sealed class StripeSubscriptionCleanupGateway(Func<StripeClient> clientFa
     {
         try
         {
-            await new SubscriptionService(clientFactory()).CancelAsync(subscriptionReference, null, requestOptions, cancellationToken);
-            return true;
+            var subscriptions = new SubscriptionService(clientFactory());
+            var subscription = await subscriptions.GetAsync(subscriptionReference, null, null, cancellationToken);
+            if (string.Equals(subscription.Status, "canceled", StringComparison.Ordinal))
+                return true;
+
+            var canceled = await subscriptions.CancelAsync(subscriptionReference, null, requestOptions, cancellationToken);
+            return string.Equals(canceled.Status, "canceled", StringComparison.Ordinal);
         }
         catch (StripeException exception) when (exception.HttpStatusCode == System.Net.HttpStatusCode.NotFound)
         {

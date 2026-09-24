@@ -194,6 +194,9 @@ post-write verification restores the prior billing-setting values and removes
 settings that were previously absent. The reconciler refuses to mutate these
 managed keys if Azure marks any of them as deployment-slot settings, because
 silently clearing slot stickiness would change swap behavior.
+The same staging reconciliation enables the billing lifecycle worker with a
+15-second poll interval so confirmed Stripe test cleanup can reach `Deleted`
+before a new paid Hosted checkout; these worker settings remain staging-only.
 
 If the first `infra` run creates a new test environment and a later deployment,
 reconciliation, or health gate fails, there is no prior runtime image to
