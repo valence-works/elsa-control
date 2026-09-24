@@ -108,6 +108,12 @@ set -eu
 : "${STAGING_CONTROL_SUBSCRIPTION:?Set the isolated staging Control subscription}"
 test "${STAGING_CONTROL_RESOURCE_GROUP:?}" = "rg-valence-control-staging"
 test "${STAGING_CONTROL_WEBAPP:?}" = "api-tud53zotij43k"
+site_id=$(az webapp show --subscription "$STAGING_CONTROL_SUBSCRIPTION" \
+  --resource-group "$STAGING_CONTROL_RESOURCE_GROUP" --name "$STAGING_CONTROL_WEBAPP" --query id --output tsv)
+test "$site_id" = "/subscriptions/$STAGING_CONTROL_SUBSCRIPTION/resourceGroups/rg-valence-control-staging/providers/Microsoft.Web/sites/api-tud53zotij43k"
+test "$(az webapp show --subscription "$STAGING_CONTROL_SUBSCRIPTION" \
+  --resource-group "$STAGING_CONTROL_RESOURCE_GROUP" --name "$STAGING_CONTROL_WEBAPP" --query defaultHostName --output tsv)" = \
+  "api-tud53zotij43k.azurewebsites.net"
 mkdir -p ~/.elsa-control-ops
 python3 scripts/render-worker-settings.py handoff --output ~/.elsa-control-ops/staging-handoff.json
 az webapp config appsettings set --subscription "$STAGING_CONTROL_SUBSCRIPTION" \
@@ -128,6 +134,12 @@ set -eu
 : "${STAGING_CONTROL_SUBSCRIPTION:?Set the isolated staging Control subscription}"
 test "${STAGING_CONTROL_RESOURCE_GROUP:?}" = "rg-valence-control-staging"
 test "${STAGING_CONTROL_WEBAPP:?}" = "api-tud53zotij43k"
+site_id=$(az webapp show --subscription "$STAGING_CONTROL_SUBSCRIPTION" \
+  --resource-group "$STAGING_CONTROL_RESOURCE_GROUP" --name "$STAGING_CONTROL_WEBAPP" --query id --output tsv)
+test "$site_id" = "/subscriptions/$STAGING_CONTROL_SUBSCRIPTION/resourceGroups/rg-valence-control-staging/providers/Microsoft.Web/sites/api-tud53zotij43k"
+test "$(az webapp show --subscription "$STAGING_CONTROL_SUBSCRIPTION" \
+  --resource-group "$STAGING_CONTROL_RESOURCE_GROUP" --name "$STAGING_CONTROL_WEBAPP" --query defaultHostName --output tsv)" = \
+  "api-tud53zotij43k.azurewebsites.net"
 mkdir -p ~/.elsa-control-ops
 python3 scripts/render-worker-settings.py handoff-rollback --output ~/.elsa-control-ops/staging-handoff-off.json
 az webapp config appsettings set --subscription "$STAGING_CONTROL_SUBSCRIPTION" \
