@@ -297,7 +297,7 @@ public static class AzureProviderOperationValidation
             throw new ArgumentException("Azure DNS name is unsafe.", name);
     }
 
-    private static bool IsSafeCode(string? value) => value is not null && value.Length <= 128 && Regex.IsMatch(value, "^[a-z0-9]+(?:[._-][a-z0-9]+)*\\z");
+    public static bool IsSafeCode(string? value) => value is not null && value.Length <= 128 && Regex.IsMatch(value, "^[a-z0-9]+(?:[._-][a-z0-9]+)*\\z");
 
     private static bool IsSha256Digest(string? value) => value is not null && value.Length == "sha256:".Length + 64 &&
         value.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) && value["sha256:".Length..].All(Uri.IsHexDigit);

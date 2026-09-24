@@ -835,6 +835,51 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Admin_provider_readout_requires_admin_and_a_concrete_provider()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var customer = app.CreateTrustedWorkspaceClient("provider-readout-owner");
+        var workspaceId = await customer.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(customer, workspaceId, "provider-readout-runtime");
+        var path = $"/api/admin/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations/provider-current";
+
+        using var anonymous = app.CreateClient();
+        using var unauthenticated = await anonymous.GetAsync(path);
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticated.StatusCode);
+
+        using var customerIdentity = app.CreateControlIdentityClient();
+        using var customerResponse = await customerIdentity.GetAsync(path);
+        Assert.Equal(HttpStatusCode.Unauthorized, customerResponse.StatusCode);
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        using var noProvider = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.NotFound, noProvider.StatusCode);
+    }
+
+    [Fact]
+    public void Admin_provider_readout_contract_contains_only_value_free_status()
+    {
+        var status = new AdminManagedElsaProviderOperationResponse(
+            AzureProviderOperationStatus.RecoveryRequired,
+            AzureProviderOperationPhase.FoundationSubmitted,
+            AzureProviderRunnerStep.Foundation,
+            1,
+            0,
+            DateTimeOffset.UtcNow,
+            "azure.command.timeout",
+            ["azure.command.timeout"]);
+        var json = System.Text.Json.JsonSerializer.Serialize(status, ControlApiTestApplication.JsonOptions);
+
+        Assert.Contains("azure.command.timeout", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("resource", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("endpoint", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("identity", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Admin_api_key_can_recover_exact_operation_and_replay_exact_request()
     {
         var app = await PrepareApplicationAsync([]);

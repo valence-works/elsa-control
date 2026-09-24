@@ -2,6 +2,7 @@ using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Workspace;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
+using ElsaControl.Deployment.Azure;
 
 namespace ElsaControl.Api.Admin.Workspaces;
 
@@ -80,6 +81,65 @@ public static class AdminManagedElsaRecoveryEndpoints
                     "The lifecycle topology changed while it was being read. Retry discovery.",
                     StatusCodes.Status409Conflict);
             }
+        });
+
+        // A provider command may time out after Azure has accepted it. Expose only
+        // value-free durable state to operators before they consider an explicit
+        // recovery; never return the provider row's resources, endpoint or plan.
+        group.MapGet("/provider-current", async (
+            Guid workspaceId,
+            Guid instanceId,
+            IElsaInstanceLifecycleStore lifecycle,
+            IAzureProviderOperationStore providerOperations,
+            IServiceProvider services,
+            CancellationToken cancellationToken) =>
+        {
+            var instance = await lifecycle.GetInstanceAsync(workspaceId, instanceId, cancellationToken);
+            if (instance is null)
+                return Results.NotFound();
+
+            var lifecycleOperation = await lifecycle.GetActiveOperationAsync(workspaceId, instanceId, cancellationToken);
+            if (lifecycleOperation is null)
+                return Results.NoContent();
+
+            var options = services.GetService<AzureElsaInstanceProviderOptions>();
+            if (options is null || !options.Enabled)
+                return Results.NotFound();
+
+            var providerOperation = await providerOperations.GetLatestReconcileAsync(
+                workspaceId,
+                AzureElsaInstanceProvider.WorkloadName(instanceId),
+                options.ProviderScopeFingerprint,
+                cancellationToken);
+            if (providerOperation is null || providerOperation.WorkspaceId != workspaceId ||
+                providerOperation.InstanceId != instanceId ||
+                !string.Equals(providerOperation.TargetKey,
+                    AzureElsaInstanceProvider.WorkloadName(instanceId), StringComparison.OrdinalIgnoreCase) ||
+                providerOperation.Action != AzureProviderOperationAction.Reconcile ||
+                providerOperation.LifecycleAction != lifecycleOperation.Action ||
+                !string.Equals(providerOperation.IdempotencyKey,
+                    AzureProviderOperationValidation.LifecycleIdempotencyKey(lifecycleOperation.Id),
+                    StringComparison.Ordinal) ||
+                !string.Equals(providerOperation.ProviderScopeFingerprint,
+                    options.ProviderScopeFingerprint, StringComparison.Ordinal))
+                return Results.NotFound();
+
+            var transitions = await providerOperations.ListTransitionsAsync(
+                workspaceId, providerOperation.Id, cancellationToken);
+            var latestTransition = transitions.MaxBy(transition => transition.Sequence);
+            return Results.Ok(new AdminManagedElsaProviderOperationResponse(
+                providerOperation.Status,
+                providerOperation.Phase,
+                providerOperation.AttemptedStep,
+                providerOperation.AttemptNumber,
+                providerOperation.CheckpointSequence,
+                providerOperation.UpdatedAt,
+                AzureProviderOperationValidation.IsSafeCode(latestTransition?.Code)
+                    ? latestTransition!.Code
+                    : null,
+                AzureProviderOperationValidation.IsSafeDiagnostics(providerOperation.Diagnostics)
+                    ? providerOperation.Diagnostics.Select(diagnostic => diagnostic.Code).ToArray()
+                    : []));
         });
 
         group.MapGet("/{operationId:guid}", async (
@@ -174,3 +234,13 @@ public sealed record AdminManagedElsaRecoveryResponse(
     int InstanceVersion,
     bool Replayed,
     string OperationUrl);
+
+public sealed record AdminManagedElsaProviderOperationResponse(
+    AzureProviderOperationStatus Status,
+    AzureProviderOperationPhase Phase,
+    AzureProviderRunnerStep? AttemptedStep,
+    int AttemptNumber,
+    long CheckpointSequence,
+    DateTimeOffset UpdatedAt,
+    string? LastTransitionCode,
+    IReadOnlyList<string> DiagnosticCodes);

@@ -216,6 +216,38 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
             )
         self.assertEqual(0, disabled.returncode, disabled.stderr)
 
+    def test_staging_infra_requires_a_provisioner_identity(self) -> None:
+        check_start = self.source.index("        run: |\n", self.source.index("      - name: Check deployment configuration"))
+        check_end = self.source.index("\n      - name:", check_start)
+        check_script = dedent(self.source[check_start + len("        run: |\n") : check_end])
+        check_script = check_script.replace("${{ github.event_name }}", "workflow_dispatch")
+        environment = os.environ.copy() | {
+            "TARGET_ENVIRONMENT": "test", "DEPLOY_MODE": "infra",
+            "AZURE_CLIENT_ID": "00000000-0000-0000-0000-000000000001",
+            "AZURE_TENANT_ID": "00000000-0000-0000-0000-000000000002",
+            "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
+            "AZURE_CONTAINER_REGISTRY_ENDPOINT": "test.azurecr.io",
+            "AZURE_ENV_NAME": "test", "AZURE_LOCATION": "westeurope",
+            "AZURE_RESOURCE_GROUP": "rg-test", "AZURE_WEBAPP_NAME": "test-api",
+            "ADMIN_API_KEY": "test-only", "BUILDER_CLIENT_API_KEY": "test-only",
+            "CONTROL_ENTRA_CLIENT_ID": "00000000-0000-0000-0000-000000000004",
+            "CONTROL_ENTRA_CLIENT_SECRET": "test-only",
+            "CONTROL_ENTRA_TENANT_ID": "00000000-0000-0000-0000-000000000005",
+            "ELSA_CLOUD_STAGING_ORIGIN": "https://staging.example.test",
+            "STRIPE_HOSTED_PRICE_ID": "price_test", "STRIPE_TEST_SECRET_KEY": "sk_test_fixture",
+            "STRIPE_TEST_WEBHOOK_SIGNING_SECRET": "whsec_fixture",
+        }
+        with tempfile.NamedTemporaryFile() as output:
+            environment["GITHUB_OUTPUT"] = output.name
+            missing = subprocess.run(["bash", "-c", check_script], env=environment,
+                                     capture_output=True, text=True, check=False)
+            self.assertNotEqual(0, missing.returncode)
+            self.assertIn("AZURE_PROVISIONER_IDENTITY_ID", missing.stdout + missing.stderr)
+            environment["AZURE_PROVISIONER_IDENTITY_ID"] = "staging-identity"
+            configured = subprocess.run(["bash", "-c", check_script], env=environment,
+                                        capture_output=True, text=True, check=False)
+            self.assertEqual(0, configured.returncode, configured.stdout + configured.stderr)
+
     def test_promotion_reads_back_exact_runtime_before_settings_or_restart(self) -> None:
         deploy_start = self.source.index(
             "        run: |\n",

@@ -20,6 +20,7 @@ route-all only affects application traffic, not the platform's own configuration
 | --- | --- |
 | `main.bicep` | VNet, delegated subnet, NAT gateway, static public IP; outputs the subnet id and the egress address. |
 | `main.parameters.production.json` | Production region `belgiumcentral` (the API site's region; regional VNet integration requires the same region), names (`vnet-valence-control-prod-bec`, `snet-api-egress`, `natgw-valence-control-prod-bec`, `pip-natgw-valence-control-prod-bec`) and address space (`10.60.0.0/24`, subnet `/26`). |
+| `main.parameters.staging.json` | Isolated staging API region `westeurope`, staging names, and a distinct `10.61.0.0/24` address space. |
 
 The site attachment is not in this template. `dev/patch-api-provisioner-identity.py` adds the optional
 `api_egress_subnet_id` parameter to the Aspire-generated API module (`virtualNetworkSubnetId` and
@@ -77,6 +78,13 @@ Once attached, `AZURE_API_EGRESS_SUBNET_ID` must be present in the azd environme
 `azd provision`: the generated module sets `virtualNetworkSubnetId` to null when the variable is empty,
 which detaches the site and returns it to the platform pool. Workers would then fail closed at the SQL
 bootstrap firewall rule rather than silently continue, but the detachment itself is not announced.
+
+For staging, use `main.parameters.staging.json` only with the staging Control resource group and API
+site. Read back the staging subnet attachment, route-all setting and health before enabling workers.
+The `test` GitHub environment must retain `AZURE_API_EGRESS_SUBNET_ID` across later infra deployments.
+The staging NAT address is the `SqlBootstrapIp` in the staging worker composition; the two profiles
+must never be interchanged. A live SQL bootstrap through the managed-engine path remains the decisive
+egress proof when the API container has no interactive shell.
 
 Sources: [App Service regional VNet integration](https://learn.microsoft.com/en-us/azure/app-service/overview-vnet-integration),
 [NAT gateway with App Service](https://learn.microsoft.com/en-us/azure/app-service/networking/nat-gateway-integration),

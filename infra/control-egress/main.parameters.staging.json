@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": { "value": "westeurope" },
+    "virtualNetworkName": { "value": "vnet-valence-control-staging-weu" },
+    "subnetName": { "value": "snet-api-egress" },
+    "natGatewayName": { "value": "natgw-valence-control-staging-weu" },
+    "publicIpName": { "value": "pip-natgw-valence-control-staging-weu" },
+    "virtualNetworkAddressPrefix": { "value": "10.61.0.0/24" },
+    "subnetAddressPrefix": { "value": "10.61.0.0/26" },
+    "tags": {
+      "value": {
+        "owner": "elsa-control",
+        "purpose": "api-egress",
+        "environment": "staging"
+      }
+    }
+  }
+}

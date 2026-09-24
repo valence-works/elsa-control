@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Render the checked-in Control API worker composition into an App Service settings payload.
 
-The template in infra/control-worker-composition names every setting the production API
-needs to run the managed-instance lifecycle and Azure provider workers. Parameters hold
-non-secret identifiers only and are the single source of values: there is no command-line
-override, so a value reaches production only through a reviewed change to that file. The
+The template in infra/control-worker-composition names every setting the Control API
+needs to run the managed-instance lifecycle and Azure provider workers. Production and
+staging profiles hold non-secret identifiers only and are the single source of values:
+there is no command-line value override, so an authority change requires a reviewed file. The
 rendered payload is the sole input to `az webapp config appsettings set --settings @<file>`;
 this script never prints values.
 
@@ -27,7 +27,15 @@ COMPOSITION = ROOT / "infra" / "control-worker-composition"
 WORKER_TEMPLATE = COMPOSITION / "worker-settings.template.json"
 VERIFICATION_TEMPLATE = COMPOSITION / "release-verification.template.json"
 PRODUCTION_PARAMETERS = COMPOSITION / "worker-settings.parameters.production.json"
+STAGING_PARAMETERS = COMPOSITION / "worker-settings.parameters.staging.json"
 ROLLBACK = COMPOSITION / "worker-rollback.json"
+STAGING_CONTROL_ORIGIN = "https://api-tud53zotij43k.azurewebsites.net"
+STAGING_WORKER_SETTINGS = {
+    "Deployment__AzureProvider__BatchSize": "1",
+    # A cold Container Apps environment can exceed the production 15-minute command bound.
+    # Keep staging's first-engine rehearsal bounded without timing out healthy Azure work.
+    "Deployment__AzureProvider__Runner__CommandTimeout": "00:45:00",
+}
 
 PLACEHOLDER = re.compile(r"\$\{([A-Za-z][A-Za-z0-9_]*)\}")
 ALLOWED_KEY_PREFIXES = (
@@ -166,6 +174,32 @@ def render(template: dict[str, str], parameters: dict[str, str], pending: dict[s
     return rendered
 
 
+def validate_staging_authority(staging: dict[str, str], production: dict[str, str]) -> None:
+    """Reject a staging profile that could exercise production workload authority."""
+    if set(staging) != set(production):
+        raise CompositionError("staging and production authority parameter names must match")
+    distinct = (
+        "WorkloadSubscriptionId",
+        "ProvisionerClientId",
+        "ProvisionerPrincipalId",
+        "ProvisionerIdentityName",
+        "SqlBootstrapIp",
+        "WorkloadResourceGroupName",
+        "ReleaseVerificationClientId",
+        "RegistryDeploymentMetadataRoleAssignmentId",
+        "RegistryRoleAdministrationAssignmentId",
+    )
+    for name in distinct:
+        if staging[name] == production[name]:
+            raise CompositionError(f"staging {name} must differ from production")
+    if staging["WorkloadSubscriptionId"] == staging["RegistrySubscriptionId"]:
+        raise CompositionError("staging workload and registry subscriptions must differ")
+    if staging["ControlPlaneOrigin"] != STAGING_CONTROL_ORIGIN:
+        raise CompositionError("staging ControlPlaneOrigin must be the approved staging API")
+    if staging["ControlPlaneOrigin"] == production["ControlPlaneOrigin"]:
+        raise CompositionError("staging ControlPlaneOrigin must differ from production")
+
+
 def to_app_settings(rendered: dict[str, str]) -> list[dict[str, object]]:
     return [{"name": key, "value": value, "slotSetting": False} for key, value in rendered.items()]
 
@@ -197,23 +231,33 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("workers", "release-verification"):
         command = sub.add_parser(name, help=f"render the {name} settings payload from the checked-in parameters")
         command.add_argument("--output", type=Path, required=True)
+        command.add_argument("--environment", choices=("production", "staging"), default="production")
     rollback = sub.add_parser("rollback", help="write the workers-off payload")
     rollback.add_argument("--output", type=Path, required=True)
-    sub.add_parser("status", help="list resolved and pending parameters without values")
+    status = sub.add_parser("status", help="list resolved and pending parameters without values")
+    status.add_argument("--environment", choices=("production", "staging"), default="production")
     args = parser.parse_args(argv)
     try:
         if args.command == "rollback":
             digest = write_payload(load_rollback(), args.output)
             print(f"rendered {len(ROLLBACK_KEYS)} settings to {args.output} sha256={digest}")
             return 0
-        resolved, pending = load_parameters(PRODUCTION_PARAMETERS)
+        resolved, pending = load_parameters(
+            STAGING_PARAMETERS if args.environment == "staging" else PRODUCTION_PARAMETERS)
         if args.command == "status":
             for name in sorted(resolved):
                 print(f"resolved {name}")
             for name, issue in sorted(pending.items()):
                 print(f"pending  {name} -> {issue}")
             return 0
+        if args.environment == "staging" and pending:
+            raise CompositionError("staging authority decisions are pending; no settings may be rendered")
+        if args.environment == "staging":
+            production, _ = load_parameters(PRODUCTION_PARAMETERS)
+            validate_staging_authority(resolved, production)
         template = load_template(WORKER_TEMPLATE if args.command == "workers" else VERIFICATION_TEMPLATE)
+        if args.environment == "staging" and args.command == "workers":
+            template.update(STAGING_WORKER_SETTINGS)
         rendered = render(template, resolved, pending)
         digest = write_payload(to_app_settings(rendered), args.output)
         for key in rendered:
