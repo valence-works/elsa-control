@@ -46,10 +46,18 @@ the production registry and the producer's `main` or version-tag workflow identi
 
 If admission, provisioning, authorization, or the customer flow fails, stop new
 staging Create/upgrade requests. Do not remove an engine or cancel billing merely to
-roll back a release. Restore the captured staging Control image and app settings,
-then verify API/worker health, the old catalog authority, and the state of any durable
-in-flight operation before allowing new mutations. An operation already submitted
-to Azure may still be running: use the existing provider observation/recovery path
-to determine its outcome, not a blind replay. Keep the candidate ACR artifacts for
-forensic comparison until the issue is resolved. No production registry, identity,
-release alias, or customer environment is part of this rollback.
+roll back a release. First inspect the durable operations and provider resources
+under the staging registry target. If no operation or engine was created against
+that target, restore the captured staging Control image and app settings, then
+verify API/worker health and the old catalog authority before allowing mutations.
+
+If a candidate operation has started, retain the matching registry target and a
+Control worker capable of observing it. An Azure operation may still be running:
+use provider observation/recovery to establish its terminal state, not a blind
+replay. Do not restore the old global registry target while a candidate engine or
+unresolved operation remains; that would make its persisted scope fail closed for
+recovery or Delete. Either keep the candidate target and recover the engine there,
+or perform an authorized customer Delete under that same target and confirm
+provider absence before restoring the prior settings. Keep the candidate ACR
+artifacts for forensic comparison until resolution. No production registry,
+identity, release alias, or customer environment is part of this rollback.
