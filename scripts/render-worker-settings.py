@@ -29,7 +29,16 @@ VERIFICATION_TEMPLATE = COMPOSITION / "release-verification.template.json"
 PRODUCTION_PARAMETERS = COMPOSITION / "worker-settings.parameters.production.json"
 STAGING_PARAMETERS = COMPOSITION / "worker-settings.parameters.staging.json"
 ROLLBACK = COMPOSITION / "worker-rollback.json"
+STAGING_HANDOFF = COMPOSITION / "handoff-settings.staging.json"
+HANDOFF_ROLLBACK = COMPOSITION / "handoff-rollback.json"
 STAGING_CONTROL_ORIGIN = "https://api-tud53zotij43k.azurewebsites.net"
+STAGING_CLOUD_CONTINUATION_URL = "https://calm-sand-03964eb03.2.azurestaticapps.net/dashboard"
+HANDOFF_ENABLE_KEY = "ManagedElsa__Handoff__Enabled"
+HANDOFF_SETTINGS_KEYS = frozenset({
+    HANDOFF_ENABLE_KEY,
+    "ManagedElsa__Handoff__Issuer",
+    "ManagedElsa__Handoff__CloudContinuationUrl",
+})
 STAGING_WORKER_SETTINGS = {
     "Deployment__AzureProvider__BatchSize": "1",
     # A cold Container Apps environment can exceed the production 15-minute command bound.
@@ -225,6 +234,36 @@ def load_rollback(path: Path = ROLLBACK) -> list[dict[str, object]]:
     return payload
 
 
+def load_staging_handoff(path: Path = STAGING_HANDOFF) -> dict[str, str]:
+    """Load the reviewed, non-secret staging handoff settings and reject scope drift."""
+    document = load_json(path)
+    if not isinstance(document, dict) or not all(isinstance(key, str) for key in document):
+        raise CompositionError("staging handoff settings must be an object with string keys")
+    if any(key.startswith("$") and key != "$comment" for key in document):
+        raise CompositionError("staging handoff settings contain unsupported metadata")
+    settings = {key: value for key, value in document.items() if key != "$comment"}
+    if set(settings) != HANDOFF_SETTINGS_KEYS or not all(isinstance(value, str) for value in settings.values()):
+        raise CompositionError("staging handoff settings must contain exactly the three governed keys")
+    if settings.get(HANDOFF_ENABLE_KEY) != "true":
+        raise CompositionError("staging handoff enablement must be true")
+    if settings.get("ManagedElsa__Handoff__Issuer") != STAGING_CONTROL_ORIGIN:
+        raise CompositionError("staging handoff issuer must be the approved staging API")
+    if settings.get("ManagedElsa__Handoff__CloudContinuationUrl") != STAGING_CLOUD_CONTINUATION_URL:
+        raise CompositionError("staging handoff continuation must be the approved staging console")
+    return settings
+
+
+def load_handoff_rollback(path: Path = HANDOFF_ROLLBACK) -> list[dict[str, object]]:
+    payload = load_json(path)
+    if (not isinstance(payload, list) or len(payload) != 1
+            or not isinstance(payload[0], dict)
+            or payload[0].get("name") != HANDOFF_ENABLE_KEY
+            or payload[0].get("value") != "false"
+            or payload[0].get("slotSetting") is not False):
+        raise CompositionError("handoff rollback must disable only the handoff switch")
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -234,6 +273,10 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--environment", choices=("production", "staging"), default="production")
     rollback = sub.add_parser("rollback", help="write the workers-off payload")
     rollback.add_argument("--output", type=Path, required=True)
+    handoff = sub.add_parser("handoff", help="render the reviewed staging handoff settings")
+    handoff.add_argument("--output", type=Path, required=True)
+    handoff_rollback = sub.add_parser("handoff-rollback", help="write the staging handoff-off payload")
+    handoff_rollback.add_argument("--output", type=Path, required=True)
     status = sub.add_parser("status", help="list resolved and pending parameters without values")
     status.add_argument("--environment", choices=("production", "staging"), default="production")
     args = parser.parse_args(argv)
@@ -241,6 +284,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "rollback":
             digest = write_payload(load_rollback(), args.output)
             print(f"rendered {len(ROLLBACK_KEYS)} settings to {args.output} sha256={digest}")
+            return 0
+        if args.command == "handoff":
+            rendered = load_staging_handoff()
+            digest = write_payload(to_app_settings(rendered), args.output)
+            for key in rendered:
+                print(f"setting {key}")
+            print(f"rendered {len(rendered)} settings to {args.output} sha256={digest}")
+            return 0
+        if args.command == "handoff-rollback":
+            payload = load_handoff_rollback()
+            digest = write_payload(payload, args.output)
+            print(f"rendered {len(payload)} settings to {args.output} sha256={digest}")
             return 0
         resolved, pending = load_parameters(
             STAGING_PARAMETERS if args.environment == "staging" else PRODUCTION_PARAMETERS)

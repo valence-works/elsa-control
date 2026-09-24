@@ -1,0 +1,6 @@
+{
+  "$comment": "Non-secret staging-only managed Elsa handoff settings for #561. The private signing key remains in the staging App Service settings and is deliberately absent.",
+  "ManagedElsa__Handoff__Enabled": "true",
+  "ManagedElsa__Handoff__Issuer": "https://api-tud53zotij43k.azurewebsites.net",
+  "ManagedElsa__Handoff__CloudContinuationUrl": "https://calm-sand-03964eb03.2.azurestaticapps.net/dashboard"
+}
