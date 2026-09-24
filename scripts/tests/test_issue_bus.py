@@ -292,6 +292,48 @@ class GhClientAdapterTests(unittest.TestCase):
 
         self.assertEqual([pr["number"] for pr in linked], [398])
 
+    def test_typed_non_issue_cross_reference_is_ignored(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def runner(*command: str, **kwargs: Any) -> issue_bus.CommandResult:
+            calls.append(command)
+            rendered = " ".join(command)
+            if "/issues/401/timeline" in rendered:
+                response = [[{"event": "cross-referenced", "source": {"type": "commit", "sha": "abc123"}}]]
+            elif "/issues/401/comments?" in rendered:
+                response = [[]]
+            elif "/issues/401" in rendered:
+                response = {"number": 401, "state": "open", "labels": [], "assignees": []}
+            else:
+                response = {}
+            return issue_bus.CommandResult(json.dumps(response), "", 0)
+
+        client = issue_bus.GhClient("valence-works/elsa-control", runner=runner)
+
+        self.assertEqual(client.linked_open_prs(401), ())
+        self.assertFalse(any("pr view" in " ".join(command) for command in calls))
+
+    def test_canonical_pr_comment_accepts_repository_qualified_reference(self) -> None:
+        def runner(*command: str, **kwargs: Any) -> issue_bus.CommandResult:
+            rendered = " ".join(command)
+            if "/issues/401/timeline" in rendered:
+                response = [[]]
+            elif "/issues/401/comments?" in rendered:
+                response = [[{"body": "pr: valence-works/elsa-control#398"}]]
+            elif "/issues/401" in rendered:
+                response = {"number": 401, "state": "open", "labels": [], "assignees": []}
+            elif "pr view 398" in rendered:
+                response = {"state": "OPEN", "closingIssuesReferences": []}
+            else:
+                response = {}
+            return issue_bus.CommandResult(json.dumps(response), "", 0)
+
+        client = issue_bus.GhClient("valence-works/elsa-control", runner=runner)
+
+        linked = client.linked_open_prs(401)
+
+        self.assertEqual([pr["number"] for pr in linked], [398])
+
     def test_ambiguous_timeline_cross_reference_fails_closed(self) -> None:
         def runner(*command: str, **kwargs: Any) -> issue_bus.CommandResult:
             rendered = " ".join(command)

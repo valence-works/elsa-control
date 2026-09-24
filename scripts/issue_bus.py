@@ -33,7 +33,11 @@ BLOCKED_PATTERN = re.compile(r"^blocked:\s+", re.IGNORECASE)
 CLAIM_EXPIRY = timedelta(minutes=15)
 GITHUB_API_VERSION = "X-GitHub-Api-Version: 2026-03-10"
 PR_URL_PATTERN = re.compile(
-    r"https://github\.com/(?P<repo>[^/]+/[^/#]+?)/pull/(?P<number>\d+)(?:\b|/)",
+    r"https://github\.com/(?P<repo>[^/\s<>]+/[^/\s<>]+)/pull/(?P<number>\d+)/?\Z",
+    re.IGNORECASE,
+)
+PR_SHORT_REFERENCE_PATTERN = re.compile(
+    r"(?P<repo>[^/\s#]+/[^/\s#]+)#(?P<number>\d+)\Z",
     re.IGNORECASE,
 )
 REPOSITORY_API_URL_PATTERN = re.compile(
@@ -323,8 +327,13 @@ class GhClient:
             if event_type != "cross-referenced":
                 continue
             source = event.get("source")
-            source_issue = source.get("issue") if isinstance(source, Mapping) else None
-            if not isinstance(source, Mapping) or source.get("type") != "issue" or not isinstance(source_issue, Mapping):
+            source_type = source.get("type") if isinstance(source, Mapping) else None
+            if not isinstance(source_type, str) or not source_type:
+                raise GhError("REST cross-reference event has an unreadable source type")
+            if source_type != "issue":
+                continue
+            source_issue = source.get("issue")
+            if not isinstance(source_issue, Mapping):
                 raise GhError("REST cross-reference event has an unreadable source issue")
             if "pull_request" not in source_issue:
                 continue
@@ -348,10 +357,10 @@ class GhClient:
             body = str(comment.get("body", "")) if isinstance(comment, Mapping) else ""
             if not body.lower().startswith("pr:"):
                 continue
-            matches = list(PR_URL_PATTERN.finditer(body))
-            if len(matches) != 1:
-                raise GhError("canonical pr: comment does not contain exactly one readable pull request URL")
-            match = matches[0]
+            raw_reference = body[3:].strip().strip("`<>")
+            match = PR_URL_PATTERN.fullmatch(raw_reference) or PR_SHORT_REFERENCE_PATTERN.fullmatch(raw_reference)
+            if match is None:
+                raise GhError("canonical pr: comment does not contain one readable pull request reference")
             if match.group("repo").casefold() != self.repository.casefold():
                 raise GhError("canonical pr: comment points outside the configured repository")
             pr_number = int(match.group("number"))

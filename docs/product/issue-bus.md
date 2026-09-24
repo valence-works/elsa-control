@@ -235,7 +235,7 @@ Machine-readable comments on the claimed issue:
 |---------|------|
 | `claim: <worker> starting` (the immutable comment `node_id` is the lease identity) | Immediately on claim |
 | `claim-abandoned: <claim-comment-id>` | When a previously posted claim loses collision resolution or no longer remains intact |
-| `pr: <url>` | When the implementing PR is open |
+| `pr: <url>` or `pr: <owner>/<repo>#<number>` | When the implementing PR is open |
 | `blocked: <reason>` | When work cannot continue |
 
 ## Relationship to the operating model
