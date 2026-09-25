@@ -19,7 +19,7 @@
     "TenantId": "f35bcd45-7991-4e24-84f1-e964394501ad",
     "ControlPlaneOrigin": "https://api-tud53zotij43k.azurewebsites.net",
     "ReleaseVerificationClientId": "f2033bcc-4efe-4a30-839a-ef7e29c2e8b9",
-    "ReleaseVerificationBlobRedirectHost": "becmanaged36.blob.core.windows.net",
+    "ReleaseVerificationBlobRedirectHost": "weumanaged18.blob.core.windows.net",
     "ReleaseProducerSignatureSubject": "https://github.com/valence-works/elsa-production-image/.github/workflows/build-and-push.yml@refs/heads/candidate/staging",
     "ReleaseProducerOidcIssuer": "https://token.actions.githubusercontent.com"
   }
