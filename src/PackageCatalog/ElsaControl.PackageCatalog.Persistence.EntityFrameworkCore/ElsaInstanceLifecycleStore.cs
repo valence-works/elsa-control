@@ -151,21 +151,24 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
 
                 if (commit.Operation.State == ElsaInstanceOperationState.Succeeded &&
                     instance.DesiredLifecycle == ElsaDesiredLifecycle.Deleting &&
-                    operation.Action != ElsaInstanceOperationAction.Delete &&
-                    (operation.ReconciledInstanceVersion is not { } predecessorReconciledVersion ||
-                     (!await HasExactWaitingDeleteSuccessorAsync(
-                          instance,
-                          operation,
-                          predecessorReconciledVersion,
-                          checked(predecessorReconciledVersion + 1),
-                          cancellationToken) &&
-                      !await HasExactWaitingDeleteSuccessorAsync(
-                          instance,
-                          operation,
-                          predecessorReconciledVersion,
-                          checked(predecessorReconciledVersion + 2),
-                          cancellationToken))))
-                    throw Conflict("Provider reconciliation target changed concurrently.");
+                    operation.Action != ElsaInstanceOperationAction.Delete)
+                {
+                    var exactPredecessor = operation.ReconciledInstanceVersion is { } predecessorVersion &&
+                        (await HasExactWaitingDeleteSuccessorAsync(
+                             instance, operation, predecessorVersion, checked(predecessorVersion + 1), cancellationToken) ||
+                         await HasExactWaitingDeleteSuccessorAsync(
+                             instance, operation, predecessorVersion, checked(predecessorVersion + 2), cancellationToken));
+                    // Later provider observations can advance the aggregate after
+                    // Delete was accepted, so the latest reconciliation version is
+                    // no longer its immutable acceptance version. A confirmed
+                    // provider convergence may still release only the exact waiting
+                    // Delete; absence-based predecessor supersession retains the
+                    // stricter version proof in its separate cleanup path.
+                    if (!exactPredecessor &&
+                        (commit.DiagnosticCode != ElsaInstanceProviderReconciliationService.ConvergedCode ||
+                         !await HasWaitingDeleteSuccessorForConfirmedProviderAsync(instance, operation, cancellationToken)))
+                        throw Conflict("Provider reconciliation target changed concurrently.");
+                }
 
                 var priorObservedLifecycle = instance.ObservedLifecycle;
                 ApplyAggregate(instance, commit.Instance);
@@ -2710,6 +2713,43 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             x.State == ElsaInstanceOperationState.WaitingForPriorOperation &&
             x.ExpectedVersion == reconciledInstanceVersion &&
             x.AcceptedAt >= reconciledAt,
+            cancellationToken);
+    }
+
+    private async Task<bool> HasWaitingDeleteSuccessorForConfirmedProviderAsync(
+        ElsaInstanceEntity instance,
+        ElsaInstanceOperationEntity predecessor,
+        CancellationToken cancellationToken)
+    {
+        if (instance.DesiredLifecycle != ElsaDesiredLifecycle.Deleting ||
+            predecessor.Action == ElsaInstanceOperationAction.Delete ||
+            instance.Version <= predecessor.ExpectedVersion ||
+            !Guid.TryParseExact(instance.LastOperationId, "D", out var successorId) ||
+            successorId == predecessor.Id)
+            return false;
+
+        var exactSuccessor = await dbContext.ElsaInstanceOperations.AsNoTracking().AnyAsync(x =>
+            x.Id == successorId &&
+            x.OrganizationId == predecessor.OrganizationId &&
+            x.WorkspaceId == predecessor.WorkspaceId &&
+            x.InstanceId == instance.Id &&
+            x.Action == ElsaInstanceOperationAction.Delete &&
+            x.State == ElsaInstanceOperationState.WaitingForPriorOperation &&
+            x.ExpectedVersion >= predecessor.ExpectedVersion &&
+            x.ExpectedVersion < instance.Version &&
+            x.AcceptedAt >= predecessor.AcceptedAt,
+            cancellationToken);
+        if (!exactSuccessor)
+            return false;
+
+        // LastOperationId proves the visible successor, while this excludes an
+        // intervening operation that completed before reconciliation resumed.
+        return !await dbContext.ElsaInstanceOperations.AsNoTracking().AnyAsync(x =>
+            x.OrganizationId == predecessor.OrganizationId &&
+            x.WorkspaceId == predecessor.WorkspaceId &&
+            x.InstanceId == instance.Id &&
+            x.Id != predecessor.Id && x.Id != successorId &&
+            x.AcceptedAt >= predecessor.AcceptedAt,
             cancellationToken);
     }
 
