@@ -2735,21 +2735,21 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             x.InstanceId == instance.Id &&
             x.Action == ElsaInstanceOperationAction.Delete &&
             x.State == ElsaInstanceOperationState.WaitingForPriorOperation &&
-            x.ExpectedVersion >= predecessor.ExpectedVersion &&
-            x.ExpectedVersion < instance.Version &&
-            x.AcceptedAt >= predecessor.AcceptedAt,
+            x.ExpectedVersion > predecessor.ExpectedVersion &&
+            x.ExpectedVersion < instance.Version,
             cancellationToken);
         if (!exactSuccessor)
             return false;
 
-        // LastOperationId proves the visible successor, while this excludes an
-        // intervening operation that completed before reconciliation resumed.
+        // Acceptance increments the instance version. Unlike timestamps, the
+        // immutable expected versions order earlier and intervening operations.
+        // LastOperationId proves that the waiting Delete is still the latest.
         return !await dbContext.ElsaInstanceOperations.AsNoTracking().AnyAsync(x =>
             x.OrganizationId == predecessor.OrganizationId &&
             x.WorkspaceId == predecessor.WorkspaceId &&
             x.InstanceId == instance.Id &&
             x.Id != predecessor.Id && x.Id != successorId &&
-            x.AcceptedAt >= predecessor.AcceptedAt,
+            x.ExpectedVersion > predecessor.ExpectedVersion,
             cancellationToken);
     }
 

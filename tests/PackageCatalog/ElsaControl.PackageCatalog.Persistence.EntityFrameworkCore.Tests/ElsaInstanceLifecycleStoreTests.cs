@@ -2543,10 +2543,12 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
     public async Task Healthy_create_reconciliation_releases_the_exact_waiting_delete_even_after_an_intermediate_observation(
-        bool intermediateObservation)
+        bool intermediateObservation,
+        bool skewedAcceptanceTime)
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -2554,6 +2556,12 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         await db.Database.MigrateAsync();
         var (workspace, accepted, _, deletion) = await QueueRecoveryBlockedDeleteAsync(
             db, "Healthy predecessor workspace", $"healthy-predecessor-{Guid.NewGuid():N}");
+        if (skewedAcceptanceTime)
+        {
+            await db.ElsaInstanceOperations.Where(x => x.Id == deletion.Operation.Id)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.AcceptedAt, Now.AddMinutes(-1)));
+            db.ChangeTracker.Clear();
+        }
         var observations = new List<ElsaInstanceProviderObservation>();
         if (intermediateObservation)
             observations.Add(new(ElsaInstanceProviderObservationKind.Confirmed,
