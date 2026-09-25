@@ -225,7 +225,9 @@ public static class AdminManagedElsaRecoveryEndpoints
                 assignmentPlacementMatchesCurrent,
                 retainedAssignment?.State,
                 retainedAssignment is not null && AzureProviderDeleteRecoverySupport.IsBoundGroupOnly(
-                    providerOperation, retainedAssignment)));
+                    providerOperation, retainedAssignment),
+                providerOperation.Health,
+                ElsaManagedEndpointOrigin.TryCreate(providerOperation.Endpoint, out _)));
         });
 
         group.MapGet("/{operationId:guid}", async (
@@ -339,4 +341,6 @@ public sealed record AdminManagedElsaProviderOperationResponse(
     bool OperationScopeCurrent = true,
     bool AssignmentPlacementMatchesCurrent = true,
     AzureProviderAssignmentState? AssignmentState = null,
-    bool AssignmentGroupOnly = false);
+    bool AssignmentGroupOnly = false,
+    AzureProviderHealth Health = AzureProviderHealth.Unknown,
+    bool EndpointValid = false);

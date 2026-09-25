@@ -105,7 +105,8 @@ public sealed record ElsaInstanceLifecycleTopologyOperation(
     string? FailureCode,
     string? DeletionDiagnosticCode,
     string? ReconciliationDiagnosticCode,
-    ElsaInstanceLifecycleTopologyOutbox? Outbox);
+    ElsaInstanceLifecycleTopologyOutbox? Outbox,
+    WorkspaceDeploymentRunStatus? RunStatus = null);
 
 public sealed record ElsaInstanceLifecycleTopologyOutbox(
     Guid Id,
