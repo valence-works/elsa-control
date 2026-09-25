@@ -79,6 +79,36 @@ public sealed class AzureProviderOperationServiceTests
     }
 
     [Fact]
+    public async Task Submit_persists_the_admitted_studio_grant_profile_with_the_safe_projection()
+    {
+        var store = new CapturingStore();
+        var service = new AzureProviderOperationService(store, new FixedTimeProvider(Now));
+
+        await service.SubmitAsync(WorkspaceId, new AzureProviderOperationSubmission("request-1", new('b', 64), CreatePlan() with
+        {
+            ManagedHandoff = true,
+            ManagedHandoffStudioGrants = true
+        }));
+
+        Assert.True(store.Request!.ManagedHandoffStudioGrants);
+    }
+
+    [Fact]
+    public async Task Submit_rejects_studio_grants_without_the_managed_handoff()
+    {
+        var store = new CapturingStore();
+        var service = new AzureProviderOperationService(store, new FixedTimeProvider(Now));
+
+        await Assert.ThrowsAsync<ArgumentException>(() => service.SubmitAsync(
+            WorkspaceId,
+            new AzureProviderOperationSubmission("request-1", new('b', 64), CreatePlan() with
+            {
+                ManagedHandoffStudioGrants = true
+            })));
+        Assert.Null(store.Request);
+    }
+
+    [Fact]
     public async Task Submit_rejects_a_managed_handoff_on_more_than_one_replica_before_persistence()
     {
         var store = new CapturingStore();
@@ -145,7 +175,7 @@ public sealed class AzureProviderOperationServiceTests
     }
 
     [Theory]
-    [InlineData("other.azurecr.io/runtime-combined")]
+    [InlineData("other.azurecr.io/runtime-server")]
     [InlineData("valenceruntimeimages.azurecr.io/other-runtime")]
     public async Task Submit_rejects_a_plan_outside_the_governed_repository_before_persistence(string repository)
     {

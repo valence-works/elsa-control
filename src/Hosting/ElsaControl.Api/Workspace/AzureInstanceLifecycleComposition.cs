@@ -29,6 +29,8 @@ internal static class AzureInstanceLifecycleComposition
             throw new InvalidOperationException(
                 "Managed instance lifecycle requires the enabled concrete Azure provider worker authority.");
 
+        services.AddSingleton(runnerAuthority.Scope);
+
         // Derive, rather than duplicate, both fingerprints from the validated
         // runner authority so lifecycle reservations cannot drift from execution.
         var options = new AzureElsaInstanceProviderOptions

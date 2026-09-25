@@ -2267,7 +2267,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         if (!string.Equals(command.Plan.Topology, AzureWorkloadPlanTranslator.SupportedTopology, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(command.Plan.Isolation, AzureWorkloadPlanTranslator.SupportedIsolation, StringComparison.OrdinalIgnoreCase) ||
             !BelongsToReleaseLine(command.Plan.ReleaseLine, command.Plan.ElsaVersion) ||
-            !string.Equals(command.Plan.ImageRepository, AzureWorkloadPlanTranslator.SupportedRepository, StringComparison.Ordinal) ||
+            !string.Equals(command.Plan.ImageRepository, _scope.GetPaidRuntimeRepository(), StringComparison.Ordinal) ||
             !AzureWorkloadPlanTranslator.IsSupportedLocation(command.Plan.Location) ||
             command.Plan.ImageDigest.Length != 64 || !command.Plan.ImageDigest.All(Uri.IsHexDigit) ||
             !AzureProviderOperationValidation.IsSafePackageVersion(command.Plan.SqlWorkflowPackageVersion) ||
@@ -2699,6 +2699,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             ? null
             : _options.ManagedHandoff is null
                 ? Failed(command, phase, "azure.handoff.configuration-required", "The release declares the managed handoff but Control supplied no handoff configuration.")
+                : !SelectedHandoffPermissions(command).All(_options.ManagedHandoff.AllowedRuntimePermissions.Contains)
+                    ? Failed(command, phase, "azure.handoff.grants-not-authorized", "The managed handoff grant profile exceeds Control's configured permission ceiling.")
                 : command.Plan.Capacity is not { MinReplicas: 1, MaxReplicas: 1 }
                     ? Failed(command, phase, "azure.handoff.replicas-unsupported", "The managed handoff requires exactly one always-running replica.")
                     : null;
@@ -2724,9 +2726,14 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             $"managedHandoffControlBaseUrl={handoff.ControlBaseUrl}",
             $"managedHandoffControlContinuationUrl={handoff.ControlContinuationUrl}",
             $"managedHandoffRuntimeMaximumLifetime={handoff.RuntimeMaximumLifetimeValue}",
-            $"managedHandoffAllowedRuntimePermissions={JsonSerializer.Serialize(handoff.AllowedRuntimePermissions)}"
+            $"managedHandoffAllowedRuntimePermissions={JsonSerializer.Serialize(SelectedHandoffPermissions(command))}"
         ];
     }
+
+    private static IReadOnlyList<string> SelectedHandoffPermissions(AzureProviderRunnerCommand command) =>
+        command.Plan.ManagedHandoffStudioGrants
+            ? ManagedElsaRuntimePermissions.OwnerAdministrator
+            : ManagedElsaRuntimePermissions.DiagnosticsOnly;
 
     /// <summary>
     /// Control binds the instance's handoff callback to the verified endpoint origin. The runtime is only

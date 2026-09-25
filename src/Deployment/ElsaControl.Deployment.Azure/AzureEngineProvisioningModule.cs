@@ -3,7 +3,7 @@ using ElsaControl.RuntimeBuilder.Abstractions.Plans;
 
 namespace ElsaControl.Deployment.Azure;
 
-public sealed class AzureEngineProvisioningModule : IEngineProvisioningModule
+public sealed class AzureEngineProvisioningModule(AzureProviderTargetScope? providerScope = null) : IEngineProvisioningModule
 {
     public string Id => "azure";
 
@@ -19,7 +19,8 @@ public sealed class AzureEngineProvisioningModule : IEngineProvisioningModule
         // revalidates the resolved plan against the actual generated name.
         var translation = AzureWorkloadPlanTranslator.Translate(
             plan,
-            new AzureWorkloadTarget(AzureElsaInstanceProvider.WorkloadName(Guid.Empty), region));
+            new AzureWorkloadTarget(AzureElsaInstanceProvider.WorkloadName(Guid.Empty), region),
+            providerScope);
         return translation.Findings
             .Select(finding => ElsaInstancePlanResolutionFinding.Error(finding.Code, finding.Message, finding.Scope))
             .ToArray();

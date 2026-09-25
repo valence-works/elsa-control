@@ -339,6 +339,32 @@ public sealed class AzureWorkloadPlanTranslatorTests
     }
 
     [Fact]
+    public void Studio_grants_are_enabled_only_by_the_selected_image_capability_and_are_fingerprinted()
+    {
+        var legacy = Translate(WithManagedHandoffCapability(true, CreatePlan())).Plan!;
+        var capablePlan = WithStudioGrantsCapability(WithManagedHandoffCapability(true, CreatePlan()));
+        var capable = Translate(capablePlan).Plan!;
+
+        Assert.True(legacy.ManagedHandoff);
+        Assert.False(legacy.ManagedHandoffStudioGrants);
+        Assert.True(capable.ManagedHandoff);
+        Assert.True(capable.ManagedHandoffStudioGrants);
+        Assert.NotEqual(legacy.Fingerprint, capable.Fingerprint);
+        Assert.Equal(capable.Fingerprint, Translate(capablePlan).Plan!.Fingerprint);
+    }
+
+    [Fact]
+    public void Studio_grants_capability_does_not_enable_grants_without_the_managed_handoff()
+    {
+        var plan = WithStudioGrantsCapability(CreatePlan());
+
+        var translated = Translate(plan).Plan!;
+
+        Assert.False(translated.ManagedHandoff);
+        Assert.False(translated.ManagedHandoffStudioGrants);
+    }
+
+    [Fact]
     public void Rejects_a_plan_without_capacity_for_the_workload_component()
     {
         var plan = CreatePlan();
@@ -548,6 +574,53 @@ public sealed class AzureWorkloadPlanTranslatorTests
             new("workload-a", "westeurope"));
 
         Assert.Contains(result.Findings, x => x.Code == "azure.imageRepository.invalid");
+    }
+
+    [Fact]
+    public void Accepts_signed_paid_image_from_the_validated_staging_registry_scope()
+    {
+        var plan = CreatePlan();
+        var component = plan.Topology.Components[0];
+        const string repository = "stagingregistry.azurecr.io/runtime-combined";
+        var stagingPlan = plan with
+        {
+            Topology = plan.Topology with
+            {
+                Components = [component with
+                {
+                    Image = component.Image with
+                    {
+                        Repository = repository,
+                        Reference = $"{repository}@{ImageDigest}"
+                    }
+                }]
+            }
+        };
+
+        var result = AzureWorkloadPlanTranslator.Translate(stagingPlan, new("workload-a", "westeurope"), StagingScope());
+
+        Assert.True(result.IsAccepted, string.Join("; ", result.Findings.Select(x => x.Code)));
+        Assert.Equal(repository, result.Plan!.ImageRepository);
+    }
+
+    [Fact]
+    public void Rejects_image_from_a_registry_outside_the_validated_staging_scope()
+    {
+        var result = AzureWorkloadPlanTranslator.Translate(CreatePlan(), new("workload-a", "westeurope"), StagingScope());
+
+        Assert.False(result.IsAccepted);
+        Assert.Contains(result.Findings, x => x.Code == "azure.imageRegistry.unsupported");
+    }
+
+    [Fact]
+    public void Rejects_invalid_provider_scope_instead_of_using_it_as_image_authority()
+    {
+        var invalidScope = StagingScope() with { RegistryName = "StagingRegistry" };
+
+        var result = AzureWorkloadPlanTranslator.Translate(CreatePlan(), new("workload-a", "westeurope"), invalidScope);
+
+        Assert.False(result.IsAccepted);
+        Assert.Contains(result.Findings, x => x.Code == "azure.providerScope.invalid");
     }
 
     [Fact]
@@ -764,6 +837,14 @@ public sealed class AzureWorkloadPlanTranslatorTests
     private static AzureWorkloadPlanTranslation Translate(ResolvedElsaApplicationPlan plan) =>
         AzureWorkloadPlanTranslator.Translate(plan, new("workload-a", "westeurope"));
 
+    private static AzureProviderTargetScope StagingScope() => new(
+        "11111111-1111-1111-1111-111111111111",
+        "control-staging",
+        "22222222-2222-2222-2222-222222222222",
+        "control-staging-registry",
+        "stagingregistry",
+        "westeurope");
+
     private static ResolvedElsaApplicationPlan WithCapacity(
         int minReplicas, int maxReplicas, int cpuMillicores, int memoryMiB, int? ephemeralStorageMiB = null)
     {
@@ -791,6 +872,24 @@ public sealed class AzureWorkloadPlanTranslatorTests
                         Capabilities = declared
                             ? [.. component.Capabilities, ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV2]
                             : component.Capabilities
+                    }
+                ]
+            }
+        };
+    }
+
+    private static ResolvedElsaApplicationPlan WithStudioGrantsCapability(ResolvedElsaApplicationPlan plan)
+    {
+        var component = plan.Topology.Components[0];
+        return plan with
+        {
+            Topology = plan.Topology with
+            {
+                Components =
+                [
+                    component with
+                    {
+                        Capabilities = [.. component.Capabilities, ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV1]
                     }
                 ]
             }

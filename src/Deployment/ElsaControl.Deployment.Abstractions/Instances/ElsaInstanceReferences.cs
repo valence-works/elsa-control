@@ -190,14 +190,18 @@ public sealed record ElsaCurrentDeploymentReference
         string deploymentId,
         string? revisionId = null,
         string? endpointUri = null,
-        bool managedHandoff = false)
+        bool managedHandoff = false,
+        bool studioGrantsSupported = false)
     {
         DeploymentId = ElsaInstanceReferenceValue.RequireToken(deploymentId, nameof(deploymentId));
         RevisionId = ElsaInstanceReferenceValue.OptionalToken(revisionId, nameof(revisionId));
         EndpointOrigin = endpointUri is null ? null : new ElsaManagedEndpointOrigin(endpointUri);
         if (managedHandoff && EndpointOrigin is null)
             throw new ArgumentException("A managed handoff is bound to a verified endpoint origin.", nameof(managedHandoff));
+        if (studioGrantsSupported && !managedHandoff)
+            throw new ArgumentException("Studio grants require a managed handoff on the deployed image.", nameof(studioGrantsSupported));
         ManagedHandoff = managedHandoff;
+        StudioGrantsSupported = studioGrantsSupported;
     }
 
     public string DeploymentId { get; }
@@ -210,6 +214,9 @@ public sealed record ElsaCurrentDeploymentReference
     public string? EndpointUri => EndpointOrigin?.Value;
 
     public bool ManagedHandoff { get; }
+
+    /// <summary>True only after the current deployment's signed image supports exact Studio grants.</summary>
+    public bool StudioGrantsSupported { get; }
 
     public string DeploymentReference => DeploymentId;
 
