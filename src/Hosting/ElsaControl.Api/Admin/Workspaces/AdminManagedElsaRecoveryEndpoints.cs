@@ -108,6 +108,11 @@ public static class AdminManagedElsaRecoveryEndpoints
                 return ProviderReadoutUnavailable("provider-readout.disabled");
 
             AzureProviderOperation? providerOperation;
+            Guid? retainedAssignmentId = null;
+            AzureProviderResourceAssignment? retainedAssignment = null;
+            var assignmentScopeCurrent = true;
+            var assignmentPlacementMatchesCurrent = true;
+            var expectedOperationScope = options.ProviderScopeFingerprint;
             if (lifecycleOperation.Action == ElsaInstanceOperationAction.Delete)
             {
                 // Delete is a distinct provider action. Follow the durable placement's
@@ -127,11 +132,22 @@ public static class AdminManagedElsaRecoveryEndpoints
                 if (!string.Equals(assignment.WorkloadName,
                         AzureElsaInstanceProvider.WorkloadName(instanceId), StringComparison.OrdinalIgnoreCase))
                     return ProviderReadoutUnavailable("provider-readout.assignment-workload-mismatch");
-                if (!string.Equals(assignment.ProviderScopeFingerprint,
-                        options.ProviderScopeFingerprint, StringComparison.Ordinal))
-                    return ProviderReadoutUnavailable("provider-readout.assignment-scope-mismatch");
+                // Retained operations can have a previous runner fingerprint after a
+                // template/tool rotation. Reading their status does not rebind the
+                // assignment or authorize recovery; report the drift explicitly.
+                assignmentScopeCurrent = string.Equals(assignment.ProviderScopeFingerprint,
+                    options.ProviderScopeFingerprint, StringComparison.Ordinal);
+                assignmentPlacementMatchesCurrent = assignment.NamingVersion == options.ResourceGroupNamingVersion &&
+                    string.Equals(assignment.SubscriptionId, options.SubscriptionId, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(assignment.ResourceGroupName,
+                        AzureProviderResourceAssignmentNaming.ResourceGroupName(
+                            options.ResourceGroupNamePrefix, instanceId, options.ResourceGroupNamingVersion),
+                        StringComparison.Ordinal);
+                expectedOperationScope = assignment.ProviderScopeFingerprint;
                 if (assignment.LastOperationId is not { } providerOperationId)
                     return ProviderReadoutUnavailable("provider-readout.operation-reference-missing");
+                retainedAssignmentId = assignment.Id;
+                retainedAssignment = assignment;
 
                 providerOperation = await providerOperations.GetAsync(workspaceId, providerOperationId, cancellationToken);
                 if (providerOperation is null)
@@ -162,9 +178,29 @@ public static class AdminManagedElsaRecoveryEndpoints
                 providerOperation.InstanceId != instanceId ||
                 !string.Equals(providerOperation.TargetKey,
                     AzureElsaInstanceProvider.WorkloadName(instanceId), StringComparison.OrdinalIgnoreCase) ||
-                providerOperation.LifecycleAction != lifecycleOperation.Action ||
-                !string.Equals(providerOperation.ProviderScopeFingerprint,
-                    options.ProviderScopeFingerprint, StringComparison.Ordinal))
+                providerOperation.LifecycleAction != lifecycleOperation.Action)
+                return ProviderReadoutUnavailable("provider-readout.operation-correlation-mismatch");
+
+            var operationScopeCorrelated = string.Equals(providerOperation.ProviderScopeFingerprint,
+                expectedOperationScope, StringComparison.Ordinal);
+            if (!operationScopeCorrelated && retainedAssignmentId is { } boundAssignmentId &&
+                !string.IsNullOrWhiteSpace(providerOperation.ProviderScopeFingerprint) &&
+                !string.IsNullOrWhiteSpace(expectedOperationScope))
+            {
+                // A governed rebind updates the assignment but retains the original
+                // operation scope. Only its append-only lineage can bridge them.
+                try
+                {
+                    operationScopeCorrelated = await assignments.HasRebindLineageAsync(
+                        workspaceId, boundAssignmentId, providerOperation.ProviderScopeFingerprint,
+                        expectedOperationScope, cancellationToken);
+                }
+                catch (NotSupportedException)
+                {
+                    operationScopeCorrelated = false;
+                }
+            }
+            if (!operationScopeCorrelated)
                 return ProviderReadoutUnavailable("provider-readout.operation-correlation-mismatch");
 
             var transitions = await providerOperations.ListTransitionsAsync(
@@ -182,7 +218,14 @@ public static class AdminManagedElsaRecoveryEndpoints
                     : null,
                 AzureProviderOperationValidation.IsSafeDiagnostics(providerOperation.Diagnostics)
                     ? providerOperation.Diagnostics.Select(diagnostic => diagnostic.Code).ToArray()
-                    : []));
+                    : [],
+                assignmentScopeCurrent,
+                string.Equals(providerOperation.ProviderScopeFingerprint,
+                    options.ProviderScopeFingerprint, StringComparison.Ordinal),
+                assignmentPlacementMatchesCurrent,
+                retainedAssignment?.State,
+                retainedAssignment is not null && AzureProviderDeleteRecoverySupport.IsBoundGroupOnly(
+                    providerOperation, retainedAssignment)));
         });
 
         group.MapGet("/{operationId:guid}", async (
@@ -291,4 +334,9 @@ public sealed record AdminManagedElsaProviderOperationResponse(
     long CheckpointSequence,
     DateTimeOffset UpdatedAt,
     string? LastTransitionCode,
-    IReadOnlyList<string> DiagnosticCodes);
+    IReadOnlyList<string> DiagnosticCodes,
+    bool AssignmentScopeCurrent = true,
+    bool OperationScopeCurrent = true,
+    bool AssignmentPlacementMatchesCurrent = true,
+    AzureProviderAssignmentState? AssignmentState = null,
+    bool AssignmentGroupOnly = false);

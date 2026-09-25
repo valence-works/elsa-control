@@ -932,6 +932,10 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(AzureProviderOperationPhase.CleanupSubmitted, body.Phase);
         Assert.Equal(AzureProviderRunnerStep.Cleanup, body.AttemptedStep);
         Assert.Equal("cleanup.timeout", body.LastTransitionCode);
+        Assert.True(body.AssignmentScopeCurrent);
+        Assert.True(body.OperationScopeCurrent);
+        Assert.True(body.AssignmentPlacementMatchesCurrent);
+        Assert.True(body.AssignmentGroupOnly);
         var json = await response.Content.ReadAsStringAsync();
         Assert.DoesNotContain(providerOperationId.ToString("D"), json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(topology.InstanceId.ToString("D"), json, StringComparison.OrdinalIgnoreCase);
@@ -967,12 +971,89 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
                 WHERE WorkspaceId = {topology.WorkspaceId} AND InstanceId = {topology.InstanceId}
                 """);
         }
-        using var wrongScope = await admin.GetAsync(path);
-        Assert.Equal(HttpStatusCode.NotFound, wrongScope.StatusCode);
-        var wrongScopeJson = await wrongScope.Content.ReadAsStringAsync();
-        using var scopeProblem = System.Text.Json.JsonDocument.Parse(wrongScopeJson);
-        Assert.Equal("provider-readout.assignment-scope-mismatch", scopeProblem.RootElement.GetProperty("code").GetString());
-        Assert.DoesNotContain(topology.InstanceId.ToString("D"), wrongScopeJson, StringComparison.OrdinalIgnoreCase);
+        using var mismatchedOperationScope = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.NotFound, mismatchedOperationScope.StatusCode);
+        var mismatchJson = await mismatchedOperationScope.Content.ReadAsStringAsync();
+        using var scopeProblem = System.Text.Json.JsonDocument.Parse(mismatchJson);
+        Assert.Equal("provider-readout.operation-correlation-mismatch", scopeProblem.RootElement.GetProperty("code").GetString());
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE AzureProviderOperations SET ProviderScopeFingerprint = {new string('d', 64)}
+                WHERE Id = {providerOperationId}
+                """);
+        }
+        using var retainedScope = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, retainedScope.StatusCode);
+        var retainedBody = (await retainedScope.Content.ReadControlJsonAsync<AdminManagedElsaProviderOperationResponse>())!;
+        Assert.Equal(AzureProviderOperationStatus.RecoveryRequired, retainedBody.Status);
+        Assert.False(retainedBody.AssignmentScopeCurrent);
+        Assert.False(retainedBody.OperationScopeCurrent);
+        Assert.True(retainedBody.AssignmentPlacementMatchesCurrent);
+        Assert.True(retainedBody.AssignmentGroupOnly);
+        var retainedJson = await retainedScope.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(providerOperationId.ToString("D"), retainedJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(topology.InstanceId.ToString("D"), retainedJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(resourceGroupName, retainedJson, StringComparison.OrdinalIgnoreCase);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE AzureProviderResourceAssignments SET ResourceGroupName = {"unrelated"}
+                WHERE WorkspaceId = {topology.WorkspaceId} AND InstanceId = {topology.InstanceId}
+                """);
+        }
+        using var movedPlacement = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, movedPlacement.StatusCode);
+        var movedBody = (await movedPlacement.Content.ReadControlJsonAsync<AdminManagedElsaProviderOperationResponse>())!;
+        Assert.False(movedBody.AssignmentPlacementMatchesCurrent);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            var assignmentId = Guid.Parse(await db.Database.SqlQuery<string>($"""
+                SELECT PlacementAssignmentId AS Value FROM ElsaInstances
+                WHERE WorkspaceId = {topology.WorkspaceId} AND Id = {topology.InstanceId}
+                """).SingleAsync());
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE AzureProviderResourceAssignments
+                SET ProviderScopeFingerprint = {new string('a', 64)}, ResourceGroupName = {resourceGroupName}
+                WHERE Id = {assignmentId}
+                """);
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                INSERT INTO AzureProviderAssignmentRebinds
+                    (Id, AssignmentId, WorkspaceId, InstanceId, FromProviderScopeFingerprint,
+                     ToProviderScopeFingerprint, TriggeredBy, TriggerOperationId, OccurredAt)
+                VALUES ({Guid.NewGuid()}, {assignmentId}, {topology.WorkspaceId}, {topology.InstanceId},
+                        {new string('d', 64)}, {new string('a', 64)}, {"test-rebind"},
+                        {topology.OperationId}, {DateTimeOffset.UtcNow})
+                """);
+        }
+        using var reboundScope = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, reboundScope.StatusCode);
+        var reboundBody = (await reboundScope.Content.ReadControlJsonAsync<AdminManagedElsaProviderOperationResponse>())!;
+        Assert.True(reboundBody.AssignmentScopeCurrent);
+        Assert.False(reboundBody.OperationScopeCurrent);
+        Assert.True(reboundBody.AssignmentPlacementMatchesCurrent);
+        Assert.True(reboundBody.AssignmentGroupOnly);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE AzureProviderResourceAssignments SET State = {AzureProviderAssignmentState.Deleted}
+                WHERE WorkspaceId = {topology.WorkspaceId} AND InstanceId = {topology.InstanceId}
+                """);
+        }
+        using var deletedAssignment = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, deletedAssignment.StatusCode);
+        var deletedBody = (await deletedAssignment.Content.ReadControlJsonAsync<AdminManagedElsaProviderOperationResponse>())!;
+        Assert.Equal(AzureProviderAssignmentState.Deleted, deletedBody.AssignmentState);
+        Assert.True(deletedBody.AssignmentPlacementMatchesCurrent);
+        Assert.True(deletedBody.AssignmentGroupOnly);
     }
 
     [Fact]
