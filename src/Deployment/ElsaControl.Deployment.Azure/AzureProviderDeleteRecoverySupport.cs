@@ -10,6 +10,22 @@ namespace ElsaControl.Deployment.Azure;
 /// </summary>
 public static class AzureProviderDeleteRecoverySupport
 {
+    /// <summary>
+    /// A completed provider Delete can finish a retained lifecycle Delete without another
+    /// provider attempt. The caller must additionally verify the lifecycle idempotency key
+    /// and that the historical placement still matches its configured Azure destination.
+    /// </summary>
+    public static bool IsTerminalVerifiedCleanupEligible(
+        AzureProviderOperation? operation,
+        AzureProviderResourceAssignment? assignment) =>
+        IsBoundGroupOnly(operation, assignment) &&
+        operation!.Status == AzureProviderOperationStatus.Succeeded &&
+        operation.Phase == AzureProviderOperationPhase.CleanupVerified &&
+        operation.AttemptedStep is null &&
+        operation.Endpoint is null &&
+        assignment!.State == AzureProviderAssignmentState.Deleted &&
+        string.Equals(operation.ProviderScopeFingerprint, assignment.ProviderScopeFingerprint, StringComparison.Ordinal);
+
     public static bool IsVerifiedCleanupEligible(
         AzureProviderOperation? operation,
         AzureProviderResourceAssignment? assignment)
