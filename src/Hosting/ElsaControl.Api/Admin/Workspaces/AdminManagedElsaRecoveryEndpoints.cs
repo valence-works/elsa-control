@@ -109,7 +109,8 @@ public static class AdminManagedElsaRecoveryEndpoints
 
             AzureProviderOperation? providerOperation;
             Guid? retainedAssignmentId = null;
-            var providerScopeCurrent = true;
+            AzureProviderResourceAssignment? retainedAssignment = null;
+            var assignmentScopeCurrent = true;
             var assignmentPlacementMatchesCurrent = true;
             var expectedOperationScope = options.ProviderScopeFingerprint;
             if (lifecycleOperation.Action == ElsaInstanceOperationAction.Delete)
@@ -134,10 +135,9 @@ public static class AdminManagedElsaRecoveryEndpoints
                 // Retained operations can have a previous runner fingerprint after a
                 // template/tool rotation. Reading their status does not rebind the
                 // assignment or authorize recovery; report the drift explicitly.
-                providerScopeCurrent = string.Equals(assignment.ProviderScopeFingerprint,
+                assignmentScopeCurrent = string.Equals(assignment.ProviderScopeFingerprint,
                     options.ProviderScopeFingerprint, StringComparison.Ordinal);
-                assignmentPlacementMatchesCurrent = assignment.State != AzureProviderAssignmentState.Deleted &&
-                    assignment.NamingVersion == options.ResourceGroupNamingVersion &&
+                assignmentPlacementMatchesCurrent = assignment.NamingVersion == options.ResourceGroupNamingVersion &&
                     string.Equals(assignment.SubscriptionId, options.SubscriptionId, StringComparison.OrdinalIgnoreCase) &&
                     string.Equals(assignment.ResourceGroupName,
                         AzureProviderResourceAssignmentNaming.ResourceGroupName(
@@ -147,6 +147,7 @@ public static class AdminManagedElsaRecoveryEndpoints
                 if (assignment.LastOperationId is not { } providerOperationId)
                     return ProviderReadoutUnavailable("provider-readout.operation-reference-missing");
                 retainedAssignmentId = assignment.Id;
+                retainedAssignment = assignment;
 
                 providerOperation = await providerOperations.GetAsync(workspaceId, providerOperationId, cancellationToken);
                 if (providerOperation is null)
@@ -218,8 +219,13 @@ public static class AdminManagedElsaRecoveryEndpoints
                 AzureProviderOperationValidation.IsSafeDiagnostics(providerOperation.Diagnostics)
                     ? providerOperation.Diagnostics.Select(diagnostic => diagnostic.Code).ToArray()
                     : [],
-                providerScopeCurrent,
-                assignmentPlacementMatchesCurrent));
+                assignmentScopeCurrent,
+                string.Equals(providerOperation.ProviderScopeFingerprint,
+                    options.ProviderScopeFingerprint, StringComparison.Ordinal),
+                assignmentPlacementMatchesCurrent,
+                retainedAssignment?.State,
+                retainedAssignment is not null && AzureProviderDeleteRecoverySupport.IsBoundGroupOnly(
+                    providerOperation, retainedAssignment)));
         });
 
         group.MapGet("/{operationId:guid}", async (
@@ -329,5 +335,8 @@ public sealed record AdminManagedElsaProviderOperationResponse(
     DateTimeOffset UpdatedAt,
     string? LastTransitionCode,
     IReadOnlyList<string> DiagnosticCodes,
-    bool ProviderScopeCurrent = true,
-    bool AssignmentPlacementMatchesCurrent = true);
+    bool AssignmentScopeCurrent = true,
+    bool OperationScopeCurrent = true,
+    bool AssignmentPlacementMatchesCurrent = true,
+    AzureProviderAssignmentState? AssignmentState = null,
+    bool AssignmentGroupOnly = false);

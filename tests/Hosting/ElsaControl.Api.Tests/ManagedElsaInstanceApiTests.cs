@@ -932,8 +932,10 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(AzureProviderOperationPhase.CleanupSubmitted, body.Phase);
         Assert.Equal(AzureProviderRunnerStep.Cleanup, body.AttemptedStep);
         Assert.Equal("cleanup.timeout", body.LastTransitionCode);
-        Assert.True(body.ProviderScopeCurrent);
+        Assert.True(body.AssignmentScopeCurrent);
+        Assert.True(body.OperationScopeCurrent);
         Assert.True(body.AssignmentPlacementMatchesCurrent);
+        Assert.True(body.AssignmentGroupOnly);
         var json = await response.Content.ReadAsStringAsync();
         Assert.DoesNotContain(providerOperationId.ToString("D"), json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(topology.InstanceId.ToString("D"), json, StringComparison.OrdinalIgnoreCase);
@@ -987,8 +989,10 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(HttpStatusCode.OK, retainedScope.StatusCode);
         var retainedBody = (await retainedScope.Content.ReadControlJsonAsync<AdminManagedElsaProviderOperationResponse>())!;
         Assert.Equal(AzureProviderOperationStatus.RecoveryRequired, retainedBody.Status);
-        Assert.False(retainedBody.ProviderScopeCurrent);
+        Assert.False(retainedBody.AssignmentScopeCurrent);
+        Assert.False(retainedBody.OperationScopeCurrent);
         Assert.True(retainedBody.AssignmentPlacementMatchesCurrent);
+        Assert.True(retainedBody.AssignmentGroupOnly);
         var retainedJson = await retainedScope.Content.ReadAsStringAsync();
         Assert.DoesNotContain(providerOperationId.ToString("D"), retainedJson, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(topology.InstanceId.ToString("D"), retainedJson, StringComparison.OrdinalIgnoreCase);
@@ -1031,8 +1035,25 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         using var reboundScope = await admin.GetAsync(path);
         Assert.Equal(HttpStatusCode.OK, reboundScope.StatusCode);
         var reboundBody = (await reboundScope.Content.ReadControlJsonAsync<AdminManagedElsaProviderOperationResponse>())!;
-        Assert.True(reboundBody.ProviderScopeCurrent);
+        Assert.True(reboundBody.AssignmentScopeCurrent);
+        Assert.False(reboundBody.OperationScopeCurrent);
         Assert.True(reboundBody.AssignmentPlacementMatchesCurrent);
+        Assert.True(reboundBody.AssignmentGroupOnly);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE AzureProviderResourceAssignments SET State = {AzureProviderAssignmentState.Deleted}
+                WHERE WorkspaceId = {topology.WorkspaceId} AND InstanceId = {topology.InstanceId}
+                """);
+        }
+        using var deletedAssignment = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, deletedAssignment.StatusCode);
+        var deletedBody = (await deletedAssignment.Content.ReadControlJsonAsync<AdminManagedElsaProviderOperationResponse>())!;
+        Assert.Equal(AzureProviderAssignmentState.Deleted, deletedBody.AssignmentState);
+        Assert.True(deletedBody.AssignmentPlacementMatchesCurrent);
+        Assert.True(deletedBody.AssignmentGroupOnly);
     }
 
     [Fact]

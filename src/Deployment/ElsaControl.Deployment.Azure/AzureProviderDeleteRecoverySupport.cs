@@ -44,7 +44,7 @@ public static class AzureProviderDeleteRecoverySupport
         return true;
     }
 
-    private static bool IsBoundGroupOnly(
+    public static bool IsBoundGroupOnly(
         AzureProviderOperation? operation,
         AzureProviderResourceAssignment? assignment)
     {
