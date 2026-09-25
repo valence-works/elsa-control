@@ -648,7 +648,11 @@ public static class ElsaInstanceStateMachine
         ArgumentNullException.ThrowIfNull(instance);
         if (instance.Intent.DesiredLifecycle != ElsaDesiredLifecycle.Deleting)
             throw new InvalidOperationException("An instance can be deleted only after deletion intent is recorded.");
-        if (instance.ObservedLifecycle is not (ElsaObservedLifecycle.Deleting or ElsaObservedLifecycle.Unknown))
+        // A retained Delete may still carry a stale Ready observation after provider
+        // cleanup succeeds. The deletion coordinator verifies absence before calling
+        // this terminal projection, and the Deleting intent remains mandatory.
+        if (instance.ObservedLifecycle is not (ElsaObservedLifecycle.Deleting or
+            ElsaObservedLifecycle.Unknown or ElsaObservedLifecycle.Ready))
             throw new InvalidOperationException("An instance cannot finalize deletion from its current lifecycle state.");
         if (deletedAt == default)
             throw new ArgumentException("Deletion timestamp is required.", nameof(deletedAt));
