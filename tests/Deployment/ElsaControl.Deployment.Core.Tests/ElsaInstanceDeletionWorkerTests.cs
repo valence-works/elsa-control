@@ -46,6 +46,38 @@ public sealed class ElsaInstanceDeletionWorkerTests
     }
 
     [Fact]
+    public async Task Confirmed_absence_finalizes_retained_delete_with_stale_ready_observation()
+    {
+        var item = WorkItem(local: false, observedLifecycle: ElsaObservedLifecycle.Ready);
+        var store = new RecordingStore(item);
+        var port = new RecordingPort(new(ElsaInstanceCleanupObservationKind.ConfirmedAbsent,
+            item.Operation.Id, item.Operation.AttemptNumber, "deletion.provider-confirmed-absent"));
+
+        var result = await new ElsaInstanceDeletionWorker(store, port, new FixedTimeProvider(Now))
+            .ProcessAvailableAsync("delete-worker");
+
+        Assert.Equal(1, result.ProviderInvocations);
+        Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Deleted, Assert.Single(result.Results).Outcome);
+        Assert.Equal(ElsaObservedLifecycle.Deleted, store.Commit!.Instance.ObservedLifecycle);
+        Assert.Null(store.Failure);
+    }
+
+    [Fact]
+    public async Task Stale_ready_observation_without_absence_proof_does_not_finalize()
+    {
+        var item = WorkItem(local: false, observedLifecycle: ElsaObservedLifecycle.Ready);
+        var store = new RecordingStore(item);
+        var port = new RecordingPort(new(ElsaInstanceCleanupObservationKind.Unknown,
+            item.Operation.Id, item.Operation.AttemptNumber, "deletion.provider.unknown"));
+
+        await new ElsaInstanceDeletionWorker(store, port, new FixedTimeProvider(Now))
+            .ProcessAvailableAsync("delete-worker");
+
+        Assert.Null(store.Commit);
+        Assert.Equal("deletion.provider.unknown", store.Failure!.DiagnosticCode);
+    }
+
+    [Fact]
     public async Task In_progress_cleanup_is_deferred_then_same_delete_completes_on_next_poll()
     {
         var item = WorkItem(local: false);

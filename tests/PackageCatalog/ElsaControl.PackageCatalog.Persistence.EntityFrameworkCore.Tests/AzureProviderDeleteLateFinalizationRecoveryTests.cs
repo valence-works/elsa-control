@@ -167,6 +167,78 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [PosixFact]
+    public async Task Completed_retained_provider_delete_finalizes_stale_ready_lifecycle_without_runner_replay()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        await using var fixture = await SeedDeleteRecoveryClaimAsync(db);
+
+        var claimed = Assert.IsType<AzureProviderOperation>(await fixture.Store.ClaimDeleteRecoveryAsync(
+            fixture.Request, TimeSpan.FromMinutes(5), fixture.Now));
+        var verified = Assert.IsType<AzureProviderOperation>(await fixture.OperationStore.CheckpointAsync(
+            fixture.WorkspaceId, fixture.ProviderOperationId, fixture.Request.LeaseToken,
+            new(AzureProviderOperationPhase.CleanupVerified, "cleanup.verified",
+                "The provider cleanup postcondition was observed.", new(), null,
+                AzureProviderHealth.Unknown, [], ReplaceResources: true),
+            fixture.Now.AddSeconds(1), claimed.Version));
+        var completed = Assert.IsType<AzureProviderOperation>(await fixture.OperationStore.FinalizeAsync(
+            fixture.WorkspaceId, fixture.ProviderOperationId, fixture.Request.LeaseToken,
+            AzureProviderOperationStatus.Succeeded, "azure.cleanup.completed",
+            fixture.Now.AddSeconds(2), verified.Version));
+        Assert.Equal(AzureProviderOperationPhase.CleanupVerified, completed.Phase);
+
+        var lifecycleStore = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(fixture.Now.AddSeconds(3)));
+        var outbox = await db.ElsaInstanceLifecycleOutbox.AsNoTracking()
+            .SingleAsync(x => x.OperationId == fixture.Request.LifecycleOperationId);
+        await lifecycleStore.RequireDeletionRecoveryAsync(new(
+            fixture.WorkspaceId, fixture.InstanceId, fixture.Request.LifecycleOperationId, outbox.Id,
+            fixture.Request.InstanceVersion, fixture.Request.LifecycleAttemptNumber, null,
+            fixture.Request.WorkerId, fixture.Request.LeaseToken, fixture.Request.LeaseVersion,
+            new string('f', 64), "deletion.provider-finalization-pending", fixture.Now.AddSeconds(3)));
+
+        // Retained fixtures can carry an old Ready observation even though Delete intent
+        // and the provider's durable absence proof are already established.
+        db.ChangeTracker.Clear();
+        var instance = await db.ElsaInstances.SingleAsync(x => x.Id == fixture.InstanceId);
+        instance.ObservedLifecycle = ElsaObservedLifecycle.Ready;
+        instance.Version++;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var current = Assert.IsType<ElsaInstance>(await CreateStore(db).GetInstanceAsync(
+            fixture.WorkspaceId, fixture.InstanceId));
+        var accepted = await new ElsaInstanceLifecycleService(
+                CreateStore(db), new FixedTimeProvider(fixture.Now.AddMinutes(1)))
+            .RecoverAsync(new(fixture.WorkspaceId, fixture.InstanceId, current.Version,
+                "terminal-provider-stale-ready"));
+        Assert.Equal(ElsaInstanceOperationState.Queued, accepted.Operation.State);
+        var recovery = await db.ElsaInstanceRecoveryRequests.AsNoTracking()
+            .SingleAsync(x => x.OperationId == fixture.Request.LifecycleOperationId &&
+                              x.AttemptNumber == accepted.Operation.AttemptNumber);
+        Assert.Null(recovery.AzureDeleteRecoveryAuthority);
+
+        var (_, options) = DeleteRecoveryProviderConfiguration(fixture);
+        var retainedOptions = options with { ProviderScopeFingerprint = new string('b', 64) };
+        Assert.NotEqual(options.ProviderScopeFingerprint, retainedOptions.ProviderScopeFingerprint);
+        var worker = new ElsaInstanceDeletionWorker(
+            new EfCoreElsaInstanceLifecycleStore(
+                db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(fixture.Now.AddMinutes(2))),
+            CreateProvider(new AzureProviderOperationStore(db), retainedOptions, fixture.Now.AddMinutes(2)),
+            new FixedTimeProvider(fixture.Now.AddMinutes(2)));
+        var beforeCommands = await fixture.Tools.ReadLogAsync();
+
+        var batch = await worker.ProcessAvailableAsync(fixture.Request.WorkerId);
+
+        Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Deleted, Assert.Single(batch.Results).Outcome);
+        Assert.Equal(1, batch.ProviderInvocations);
+        Assert.Equal(beforeCommands, await fixture.Tools.ReadLogAsync());
+        await AssertLateFinalizationCompletedAsync(db, fixture);
+    }
+
+    [PosixFact]
     public async Task Delete_finalization_recovery_rejects_inventory_changed_after_acceptance_without_claim_or_runner_replay()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
