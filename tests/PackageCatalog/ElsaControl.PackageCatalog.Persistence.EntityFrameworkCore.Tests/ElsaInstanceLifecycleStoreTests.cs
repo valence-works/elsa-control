@@ -2543,6 +2543,88 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Healthy_create_reconciliation_releases_the_exact_waiting_delete_even_after_an_intermediate_observation(
+        bool intermediateObservation,
+        bool skewedAcceptanceTime)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted, _, deletion) = await QueueRecoveryBlockedDeleteAsync(
+            db, "Healthy predecessor workspace", $"healthy-predecessor-{Guid.NewGuid():N}");
+        if (skewedAcceptanceTime)
+        {
+            await db.ElsaInstanceOperations.Where(x => x.Id == deletion.Operation.Id)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.AcceptedAt, Now.AddMinutes(-1)));
+            db.ChangeTracker.Clear();
+        }
+        var observations = new List<ElsaInstanceProviderObservation>();
+        if (intermediateObservation)
+            observations.Add(new(ElsaInstanceProviderObservationKind.Confirmed,
+                ElsaObservedLifecycle.Provisioning, ElsaInstanceProviderHealthGate.Unknown, "provider-provisioning"));
+        observations.Add(new(ElsaInstanceProviderObservationKind.Confirmed,
+            ElsaObservedLifecycle.Ready, ElsaInstanceProviderHealthGate.Passed, "provider-healthy"));
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now.AddMinutes(12)));
+        var service = new ElsaInstanceProviderReconciliationService(
+            store, new QueueProviderPort(observations.ToArray()), new FixedTimeProvider(Now.AddMinutes(12)));
+
+        if (intermediateObservation)
+        {
+            var pending = await service.ReconcileAsync(workspace.Id, accepted.Operation.Id);
+            Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, pending.Outcome);
+        }
+        var converged = await service.ReconcileAsync(workspace.Id, accepted.Operation.Id);
+
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.Converged, converged.Outcome);
+        Assert.Equal(ElsaInstanceOperationState.Succeeded, converged.Projection.OperationState);
+        Assert.Equal(ElsaObservedLifecycle.Ready, converged.Projection.ObservedLifecycle);
+        var current = (await store.GetInstanceAsync(workspace.Id, accepted.Instance.Id))!;
+        Assert.Equal(ElsaDesiredLifecycle.Deleting, current.Intent.DesiredLifecycle);
+        Assert.Equal(new ElsaLastOperationId(deletion.Operation.Id), current.LastOperationId);
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation,
+            (await db.ElsaInstanceOperations.AsNoTracking()
+                .SingleAsync(x => x.Id == deletion.Operation.Id)).State);
+        var claimedDelete = await store.TryClaimNextDeletionAsync("deletion-worker", Now.AddMinutes(13));
+        Assert.NotNull(claimedDelete);
+        Assert.Equal(deletion.Operation.Id, claimedDelete.Operation.Id);
+    }
+
+    [Fact]
+    public async Task Healthy_create_reconciliation_rejects_a_delete_that_is_no_longer_waiting()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted, _, deletion) = await QueueRecoveryBlockedDeleteAsync(
+            db, "Changed successor workspace", $"changed-successor-{Guid.NewGuid():N}");
+        await db.ElsaInstanceOperations.Where(x => x.Id == deletion.Operation.Id)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.State, ElsaInstanceOperationState.Failed));
+        db.ChangeTracker.Clear();
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now.AddMinutes(12)));
+        var service = new ElsaInstanceProviderReconciliationService(
+            store,
+            new QueueProviderPort(new ElsaInstanceProviderObservation(
+                ElsaInstanceProviderObservationKind.Confirmed,
+                ElsaObservedLifecycle.Ready,
+                ElsaInstanceProviderHealthGate.Passed,
+                "provider-healthy")),
+            new FixedTimeProvider(Now.AddMinutes(12)));
+
+        await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            service.ReconcileAsync(workspace.Id, accepted.Operation.Id));
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired,
+            (await db.ElsaInstanceOperations.AsNoTracking()
+                .SingleAsync(x => x.Id == accepted.Operation.Id)).State);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task Azure_provider_reconciliation_persists_safe_origin_and_identity_in_EF_projection(bool declaresManagedHandoff)
