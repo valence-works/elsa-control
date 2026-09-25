@@ -947,6 +947,11 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         }
         using var wrongLifecycle = await admin.GetAsync(path);
         Assert.Equal(HttpStatusCode.NotFound, wrongLifecycle.StatusCode);
+        var unavailableJson = await wrongLifecycle.Content.ReadAsStringAsync();
+        using var unavailable = System.Text.Json.JsonDocument.Parse(unavailableJson);
+        Assert.Equal("provider-readout.delete-correlation-mismatch", unavailable.RootElement.GetProperty("code").GetString());
+        Assert.DoesNotContain(providerOperationId.ToString("D"), unavailableJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(topology.InstanceId.ToString("D"), unavailableJson, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
