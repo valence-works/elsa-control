@@ -65,9 +65,12 @@ public static class ManagedElsaInstanceEndpoints
                 workspaceId, pageResult.Items.Select(x => x.Id).ToArray(), cancellationToken);
             var items = new List<ManagedElsaInstanceResponse>(pageResult.Items.Count);
             foreach (var instance in pageResult.Items)
+            {
+                var operation = await GetCustomerOperationAsync(
+                    instances, workspaceId, instance, activeOperations.GetValueOrDefault(instance.Id), cancellationToken);
                 items.Add(ToResponse(instance, canOpen, workspaceId,
-                    identityByInstanceId.GetValueOrDefault(instance.Id),
-                    activeOperations.GetValueOrDefault(instance.Id)));
+                    identityByInstanceId.GetValueOrDefault(instance.Id), operation));
+            }
             return Results.Ok(new ManagedElsaInstanceListResponse(items, currentPage, currentPageSize, pageResult.TotalCount,
                 offset + currentPageSize < pageResult.TotalCount));
         }).RequireWorkspaceAccess().AllowCloudBff();
@@ -210,8 +213,10 @@ public static class ManagedElsaInstanceEndpoints
                 return Results.NotFound();
             var canOpen = (await permissions.GetEffectivePermissionsAsync(workspaceId, context.GetWorkspaceAccess().AccountId, cancellationToken))
                 .Has(ManagedElsaInstancePermissions.Open);
-            var activeOperation = await TryGetActiveOperationAsync(queries, workspaceId, instance, cancellationToken);
-            var response = await ToResponseAsync(instance, canOpen, workspaceId, identities, cancellationToken, activeOperation);
+            var activeOperations = await queries.GetActiveOperationsAsync(workspaceId, [instance.Id], cancellationToken);
+            var operation = await GetCustomerOperationAsync(
+                queries, workspaceId, instance, activeOperations.GetValueOrDefault(instance.Id), cancellationToken);
+            var response = await ToResponseAsync(instance, canOpen, workspaceId, identities, cancellationToken, operation);
             context.Response.Headers.ETag = response.ETag;
             return Results.Ok(response);
         }).RequireWorkspaceAccess();
@@ -803,6 +808,9 @@ public static class ManagedElsaInstanceEndpoints
                 currentIdentity.ChangedAt) : null,
             IdentityBindingState = !canOpen ? "not-authorized" : !healthy ? "instance-unavailable" : !handoffConfigured ? "handoff-unavailable" : currentIdentity is null ? "identity-unavailable" : "available",
             Intent = instance.Intent,
+            ActiveOperation = activeOperation is null ? null : new ManagedElsaInstanceCurrentOperationResponse(
+                activeOperation.Id, activeOperation.Action, activeOperation.State,
+                activeOperation.AcceptedAt, activeOperation.StartedAt, activeOperation.CompletedAt),
             Links = new Dictionary<string, string>
             {
                 ["self"] = $"/api/workspaces/{workspaceId:D}/instances/{instance.Id:D}",
@@ -815,20 +823,28 @@ public static class ManagedElsaInstanceEndpoints
         };
     }
 
-    private static async Task<ElsaInstanceOperationSummary?> TryGetActiveOperationAsync(
+    private static async Task<ElsaInstanceOperationSummary?> GetCustomerOperationAsync(
         IManagedElsaInstanceApiStore queries,
         Guid workspaceId,
         ElsaInstance instance,
+        ElsaInstanceOperationSummary? activeOperation,
         CancellationToken cancellationToken)
     {
-        if (instance.LastOperationId is not { } lastOperationId ||
-            !Guid.TryParse(lastOperationId.Value, out var operationId))
-            return null;
+        if (instance.DesiredLifecycle != ElsaDesiredLifecycle.Deleting)
+            return activeOperation;
 
-        var operation = await queries.GetOperationAsync(workspaceId, instance.Id, operationId, cancellationToken);
-        return operation is not null && ElsaInstanceOperationGuard.IsBlocking(operation.State)
-            ? operation
-            : null;
+        // A terminal Delete can coexist with an older blocking Create. Read the
+        // instance's last operation before considering the active-operation map,
+        // so a stale Create cannot mask the customer's Delete outcome.
+        if (instance.LastOperationId is { } lastOperationId &&
+            Guid.TryParse(lastOperationId.Value, out var operationId))
+        {
+            var last = await queries.GetOperationAsync(workspaceId, instance.Id, operationId, cancellationToken);
+            if (last?.Action == ElsaInstanceOperationAction.Delete)
+                return last;
+        }
+
+        return activeOperation?.Action == ElsaInstanceOperationAction.Delete ? activeOperation : null;
     }
 
     internal static ManagedElsaInstanceOperationResponse ToOperationResponse(Guid workspaceId, Guid instanceId, ElsaInstanceOperationSummary operation) =>
@@ -1032,5 +1048,15 @@ public sealed record ManagedElsaInstanceResponse(Guid OrganizationId, Guid Insta
     public ManagedElsaInstanceIdentityBindingResponse? IdentityBinding { get; init; }
     public string IdentityBindingState { get; init; } = "identity-unavailable";
     public ElsaInstanceIntent? Intent { get; init; }
+    public ManagedElsaInstanceCurrentOperationResponse? ActiveOperation { get; init; }
     public IReadOnlyDictionary<string, string> Links { get; init; } = new Dictionary<string, string>();
 }
+
+/// <summary>Customer-safe current lifecycle state; excludes provider and worker diagnostics.</summary>
+public sealed record ManagedElsaInstanceCurrentOperationResponse(
+    Guid Id,
+    ElsaInstanceOperationAction Action,
+    ElsaInstanceOperationState State,
+    DateTimeOffset AcceptedAt,
+    DateTimeOffset? StartedAt,
+    DateTimeOffset? CompletedAt);

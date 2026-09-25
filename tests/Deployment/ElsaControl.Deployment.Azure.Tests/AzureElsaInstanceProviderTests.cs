@@ -599,19 +599,29 @@ public sealed class AzureElsaInstanceProviderTests
     [InlineData(true, AzureProviderOperationStatus.Succeeded, false, ElsaInstanceCleanupObservationKind.Unknown, null, "retained-inventory")]
     [InlineData(true, AzureProviderOperationStatus.Succeeded, false, ElsaInstanceCleanupObservationKind.Unknown, null, "wrong-phase")]
     [InlineData(true, AzureProviderOperationStatus.Succeeded, false, ElsaInstanceCleanupObservationKind.Unknown, null, "endpoint")]
+    [InlineData(true, AzureProviderOperationStatus.Succeeded, false, ElsaInstanceCleanupObservationKind.ConfirmedAbsent, null, null, "retained")]
+    [InlineData(true, AzureProviderOperationStatus.Running, false, ElsaInstanceCleanupObservationKind.Ambiguous, null, null, "retained")]
+    [InlineData(true, AzureProviderOperationStatus.Succeeded, false, ElsaInstanceCleanupObservationKind.Ambiguous, "other-lifecycle", null, "retained")]
+    [InlineData(true, AzureProviderOperationStatus.Succeeded, false, ElsaInstanceCleanupObservationKind.Ambiguous, null, "endpoint", "retained")]
+    [InlineData(true, AzureProviderOperationStatus.Succeeded, false, ElsaInstanceCleanupObservationKind.Ambiguous, null, "wrong-phase", "retained")]
+    [InlineData(true, AzureProviderOperationStatus.Succeeded, false, ElsaInstanceCleanupObservationKind.Ambiguous, null, "retained-inventory", "retained")]
+    [InlineData(true, AzureProviderOperationStatus.Succeeded, false, ElsaInstanceCleanupObservationKind.Ambiguous, null, null, "retained-placement")]
+    [InlineData(true, AzureProviderOperationStatus.Succeeded, false, ElsaInstanceCleanupObservationKind.Ambiguous, null, null, "retained-operation-scope")]
     public async Task Cleanup_submits_or_reobserves_delete_and_confirms_only_verified_absence(
         bool alreadyDeleted, AzureProviderOperationStatus status, bool retainedResource, ElsaInstanceCleanupObservationKind expectedKind,
-        string? correlation = null, string? observationVariant = null)
+        string? correlation = null, string? observationVariant = null, string? scopeVariant = null)
     {
         var workspaceId = Guid.NewGuid();
         var lifecycleOperationId = Guid.NewGuid();
         var plan = Translate("5.0", "5.0.0");
         plan = plan with { WorkloadName = AzureElsaInstanceProvider.WorkloadName(TestInstanceId) };
+        var providerScope = scopeVariant is null ? new string('a', 64) : new string('b', 64);
         var reconcile = CreateOperation(workspaceId, plan, Guid.NewGuid()) with
         {
             OrganizationId = TestOrganizationId,
             InstanceId = TestInstanceId,
             LifecycleAction = ElsaInstanceOperationAction.Reconcile,
+            ProviderScopeFingerprint = providerScope,
             SqlWorkflowPackageVersion = plan.SqlWorkflowPackageVersion,
             SqlQuartzPackageVersion = plan.SqlQuartzPackageVersion
         };
@@ -653,9 +663,9 @@ public sealed class AzureElsaInstanceProviderTests
             workspaceId,
             TestOrganizationId,
             TestInstanceId,
-            new string('a', 64),
+            providerScope,
             "11111111-1111-1111-1111-111111111111",
-            "rg-elsa",
+            scopeVariant == "retained-placement" ? "rg-other" : "rg-elsa",
             AzureElsaInstanceProvider.WorkloadName(TestInstanceId),
             "westeurope"),
             DateTimeOffset.UtcNow);
@@ -674,6 +684,7 @@ public sealed class AzureElsaInstanceProviderTests
         delete = delete with
         {
             ProviderAssignmentId = assignment.Id,
+            ProviderScopeFingerprint = scopeVariant == "retained-operation-scope" ? new string('c', 64) : providerScope,
             Phase = observationVariant == "wrong-phase" ? AzureProviderOperationPhase.CleanupSubmitted : delete.Phase,
             Resources = observationVariant switch
             {
@@ -702,7 +713,15 @@ public sealed class AzureElsaInstanceProviderTests
         Assert.Equal(lifecycleOperationId, result.OperationId);
         Assert.Equal(3, result.AttemptNumber);
         if (alreadyDeleted)
+        {
             Assert.Empty(service.DeleteSubmissions);
+            if (scopeVariant is not null)
+            {
+                Assert.Empty(await assignmentStore.ListRebindsAsync(workspaceId, assignment.Id));
+                Assert.Equal(providerScope,
+                    (await assignmentStore.GetAsync(workspaceId, assignment.Id))!.ProviderScopeFingerprint);
+            }
+        }
         else
         {
             var submission = Assert.Single(service.DeleteSubmissions);
@@ -1318,7 +1337,7 @@ public sealed class AzureElsaInstanceProviderTests
             AzureProviderAssignmentScopeAuthority authority,
             DateTimeOffset now,
             CancellationToken cancellationToken = default) =>
-            _assignment is null
+            _assignment is null || _assignment.State == AzureProviderAssignmentState.Deleted
                 ? null
                 : await RebindIfNeededAsync(
                     _assignment,
