@@ -15,6 +15,7 @@ using ElsaControl.RuntimeBuilder.Abstractions.ReleaseCatalog;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 
 namespace ElsaControl.Api.Tests;
 
@@ -856,6 +857,96 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
         using var noProvider = await admin.GetAsync(path);
         Assert.Equal(HttpStatusCode.NotFound, noProvider.StatusCode);
+    }
+
+    [Fact]
+    public async Task Admin_provider_readout_follows_the_correlated_delete_assignment()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var topology = await SeedCorrelationInvalidDeleteTopologyAsync(
+            app, "admin-provider-delete-readout", retainWorkload: true, assignmentDeleted: false);
+        Guid providerOperationId;
+        string resourceGroupName;
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            var store = new AzureProviderOperationStore(db);
+            var assignmentId = Guid.Parse(await db.Database.SqlQuery<string>($"""
+                SELECT PlacementAssignmentId AS Value FROM ElsaInstances
+                WHERE WorkspaceId = {topology.WorkspaceId} AND Id = {topology.InstanceId}
+                """).SingleAsync());
+            var assignment = (await ((IAzureProviderResourceAssignmentStore)store)
+                .GetAsync(topology.WorkspaceId, assignmentId))!;
+            resourceGroupName = assignment.ResourceGroupName;
+            var operation = await store.CreateOrGetAsync(new AzureProviderOperationRequest(
+                topology.WorkspaceId,
+                AzureElsaInstanceProvider.WorkloadName(topology.InstanceId),
+                AzureProviderOperationAction.Delete,
+                AzureProviderOperationValidation.LifecycleIdempotencyKey(topology.OperationId) + ":delete",
+                new string('a', 64), new string('b', 64), "3.8.0", "3.8", "combined", "Dedicated",
+                "westeurope", "valenceruntimeimages.azurecr.io/runtime-combined",
+                "sha256:" + new string('c', 64),
+                ProviderScopeFingerprint: new string('a', 64),
+                OrganizationId: assignment.OrganizationId,
+                InstanceId: topology.InstanceId,
+                LifecycleAction: ElsaInstanceOperationAction.Delete,
+                ProviderAssignmentId: assignment.Id), DateTimeOffset.UtcNow);
+            providerOperationId = operation.Id;
+        }
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        var path = $"/api/admin/workspaces/{topology.WorkspaceId:D}/instances/{topology.InstanceId:D}/operations/provider-current";
+        // An uncheckpointed reservation has no assignment authority yet.
+        using var unbound = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.NotFound, unbound.StatusCode);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var store = new AzureProviderOperationStore(scope.ServiceProvider.GetRequiredService<CatalogDbContext>());
+            var now = DateTimeOffset.UtcNow;
+            const string leaseToken = "admin-readout-delete-lease";
+            var claimed = (await store.ClaimAsync(topology.WorkspaceId, providerOperationId,
+                "admin-readout-worker", leaseToken, TimeSpan.FromMinutes(1), now))!;
+            var checkpointed = (await store.CheckpointAsync(topology.WorkspaceId, providerOperationId,
+                leaseToken,
+                new AzureProviderCheckpoint(
+                    AzureProviderOperationPhase.CleanupSubmitted,
+                    "cleanup.submitted",
+                    "Cleanup submitted.",
+                    new AzureProviderResourceReferences(ResourceGroupName: resourceGroupName),
+                    null,
+                    AzureProviderHealth.Unknown,
+                    [],
+                    AttemptedStep: AzureProviderRunnerStep.Cleanup),
+                now, claimed.Version))!;
+            Assert.NotNull(await store.FinalizeAsync(topology.WorkspaceId, providerOperationId,
+                leaseToken, AzureProviderOperationStatus.RecoveryRequired, "cleanup.timeout",
+                now, checkpointed.Version));
+        }
+
+        using var response = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = (await response.Content.ReadControlJsonAsync<AdminManagedElsaProviderOperationResponse>())!;
+        Assert.Equal(AzureProviderOperationStatus.RecoveryRequired, body.Status);
+        Assert.Equal(AzureProviderOperationPhase.CleanupSubmitted, body.Phase);
+        Assert.Equal(AzureProviderRunnerStep.Cleanup, body.AttemptedStep);
+        Assert.Equal("cleanup.timeout", body.LastTransitionCode);
+        var json = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(providerOperationId.ToString("D"), json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(topology.InstanceId.ToString("D"), json, StringComparison.OrdinalIgnoreCase);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE AzureProviderOperations
+                SET IdempotencyKey = {AzureProviderOperationValidation.LifecycleIdempotencyKey(Guid.NewGuid()) + ":delete"}
+                WHERE Id = {providerOperationId}
+                """);
+        }
+        using var wrongLifecycle = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.NotFound, wrongLifecycle.StatusCode);
     }
 
     [Fact]
@@ -2106,6 +2197,19 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
                 },
                 configureServices: services =>
                 {
+                    // The API fixture supplies a durable provider read model without
+                    // starting Azure workers or running production authority preflight.
+                    services.Remove(services.Single(descriptor =>
+                        descriptor.ServiceType == typeof(IHostedService) &&
+                        descriptor.ImplementationType == typeof(ManagedAzureProviderConfigurationValidator)));
+                    services.AddSingleton(new AzureElsaInstanceProviderOptions
+                    {
+                        Enabled = true,
+                        TemplateFingerprint = new string('b', 64),
+                        ProviderScopeFingerprint = new string('a', 64),
+                        SubscriptionId = "11111111-1111-1111-1111-111111111111",
+                        ResourceGroupNamePrefix = "rg-correlation"
+                    });
                     services.AddSingleton<IEngineProvisioningModule, TestProvisioningModule>();
                     services.RemoveAll<IManagedElsaInstanceCatalog>();
                     services.AddSingleton<IManagedElsaInstanceCatalog>(_instanceCatalog);
