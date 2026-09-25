@@ -91,6 +91,7 @@ public static class AdminManagedElsaRecoveryEndpoints
             Guid instanceId,
             IElsaInstanceLifecycleStore lifecycle,
             IAzureProviderOperationStore providerOperations,
+            IAzureProviderResourceAssignmentStore assignments,
             IServiceProvider services,
             CancellationToken cancellationToken) =>
         {
@@ -106,20 +107,54 @@ public static class AdminManagedElsaRecoveryEndpoints
             if (options is null || !options.Enabled)
                 return Results.NotFound();
 
-            var providerOperation = await providerOperations.GetLatestReconcileAsync(
-                workspaceId,
-                AzureElsaInstanceProvider.WorkloadName(instanceId),
-                options.ProviderScopeFingerprint,
-                cancellationToken);
+            AzureProviderOperation? providerOperation;
+            if (lifecycleOperation.Action == ElsaInstanceOperationAction.Delete)
+            {
+                // Delete is a distinct provider action. Follow the durable placement's
+                // last operation, the same authority used by lifecycle recovery, rather
+                // than querying the latest Reconcile (which cannot return a Delete).
+                if (!Guid.TryParseExact(instance.PlacementAssignmentReference?.AssignmentId, "D", out var assignmentId))
+                    return Results.NotFound();
+                var assignment = await assignments.GetAsync(workspaceId, assignmentId, cancellationToken);
+                if (assignment is null || assignment.WorkspaceId != workspaceId ||
+                    assignment.OrganizationId != instance.OrganizationId ||
+                    assignment.InstanceId != instanceId ||
+                    !string.Equals(assignment.WorkloadName,
+                        AzureElsaInstanceProvider.WorkloadName(instanceId), StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(assignment.ProviderScopeFingerprint,
+                        options.ProviderScopeFingerprint, StringComparison.Ordinal) ||
+                    assignment.LastOperationId is not { } providerOperationId)
+                    return Results.NotFound();
+
+                providerOperation = await providerOperations.GetAsync(workspaceId, providerOperationId, cancellationToken);
+                if (providerOperation is null ||
+                    providerOperation.Action != AzureProviderOperationAction.Delete ||
+                    providerOperation.ProviderAssignmentId != assignment.Id ||
+                    !AzureProviderOperationValidation.IsLifecycleDeleteIdempotencyKey(
+                        providerOperation.IdempotencyKey, lifecycleOperation.Id))
+                    return Results.NotFound();
+            }
+            else
+            {
+                providerOperation = await providerOperations.GetLatestReconcileAsync(
+                    workspaceId,
+                    AzureElsaInstanceProvider.WorkloadName(instanceId),
+                    options.ProviderScopeFingerprint,
+                    cancellationToken);
+                if (providerOperation is null ||
+                    providerOperation.Action != AzureProviderOperationAction.Reconcile ||
+                    !string.Equals(providerOperation.IdempotencyKey,
+                        AzureProviderOperationValidation.LifecycleIdempotencyKey(lifecycleOperation.Id),
+                        StringComparison.Ordinal))
+                    return Results.NotFound();
+            }
             if (providerOperation is null || providerOperation.WorkspaceId != workspaceId ||
+                (lifecycleOperation.Action == ElsaInstanceOperationAction.Delete &&
+                 providerOperation.OrganizationId != instance.OrganizationId) ||
                 providerOperation.InstanceId != instanceId ||
                 !string.Equals(providerOperation.TargetKey,
                     AzureElsaInstanceProvider.WorkloadName(instanceId), StringComparison.OrdinalIgnoreCase) ||
-                providerOperation.Action != AzureProviderOperationAction.Reconcile ||
                 providerOperation.LifecycleAction != lifecycleOperation.Action ||
-                !string.Equals(providerOperation.IdempotencyKey,
-                    AzureProviderOperationValidation.LifecycleIdempotencyKey(lifecycleOperation.Id),
-                    StringComparison.Ordinal) ||
                 !string.Equals(providerOperation.ProviderScopeFingerprint,
                     options.ProviderScopeFingerprint, StringComparison.Ordinal))
                 return Results.NotFound();
