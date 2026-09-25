@@ -548,8 +548,12 @@ public sealed class AzureElsaInstanceProvider(
             assignment.Id != assignmentId ||
             assignment.WorkspaceId != request.WorkspaceId ||
             assignment.InstanceId != request.InstanceId ||
-            !string.Equals(assignment.ProviderScopeFingerprint, NormalizeScope(_options.ProviderScopeFingerprint), StringComparison.Ordinal) ||
             !string.Equals(assignment.WorkloadName, WorkloadName(request.InstanceId), StringComparison.OrdinalIgnoreCase))
+            return CleanupUnknown(request, "deletion.provider-assignment-invalid", ElsaInstanceCleanupObservationKind.Ambiguous);
+
+        var scopeCurrent = string.Equals(assignment.ProviderScopeFingerprint,
+            NormalizeScope(_options.ProviderScopeFingerprint), StringComparison.Ordinal);
+        if (!scopeCurrent && assignment.State != AzureProviderAssignmentState.Deleted)
             return CleanupUnknown(request, "deletion.provider-assignment-invalid", ElsaInstanceCleanupObservationKind.Ambiguous);
 
         // A completed provider delete can be observed again after the lifecycle worker
@@ -562,6 +566,25 @@ public sealed class AzureElsaInstanceProvider(
                 : null;
             if (!AzureProviderDeleteRecoverySupport.IsConfirmedAbsentAssignment(assignment))
                 return CleanupUnknown(request, "deletion.provider-evidence-unavailable");
+            if (!scopeCurrent)
+            {
+                // A template/tool rotation can leave a completed Delete on the old scope.
+                // Trust only the already-terminal, exactly correlated durable absence proof
+                // at the same Azure placement. No provider operation or rebind is submitted.
+                var placementCurrent = assignment.NamingVersion == _options.ResourceGroupNamingVersion &&
+                    string.Equals(assignment.SubscriptionId, _options.SubscriptionId, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(assignment.ResourceGroupName,
+                        AzureProviderResourceAssignmentNaming.ResourceGroupName(
+                            _options.ResourceGroupNamePrefix, request.InstanceId, _options.ResourceGroupNamingVersion),
+                        StringComparison.Ordinal);
+                if (!placementCurrent ||
+                    !AzureProviderDeleteRecoverySupport.IsTerminalVerifiedCleanupEligible(completed, assignment) ||
+                    !AzureProviderOperationValidation.IsLifecycleDeleteIdempotencyKey(
+                        completed!.IdempotencyKey, request.OperationId))
+                    return CleanupUnknown(request, "deletion.provider-correlation-invalid", ElsaInstanceCleanupObservationKind.Ambiguous);
+                return new(ElsaInstanceCleanupObservationKind.ConfirmedAbsent, request.OperationId,
+                    request.AttemptNumber, "deletion.provider-confirmed-absent");
+            }
             if (completed is not null)
             {
                 var observed = await ObserveCleanupAsync(request, assignment, completed, cancellationToken);
