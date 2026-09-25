@@ -952,6 +952,27 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal("provider-readout.delete-correlation-mismatch", unavailable.RootElement.GetProperty("code").GetString());
         Assert.DoesNotContain(providerOperationId.ToString("D"), unavailableJson, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(topology.InstanceId.ToString("D"), unavailableJson, StringComparison.OrdinalIgnoreCase);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE AzureProviderOperations
+                SET IdempotencyKey = {AzureProviderOperationValidation.LifecycleIdempotencyKey(topology.OperationId) + ":delete"}
+                WHERE Id = {providerOperationId}
+                """);
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE AzureProviderResourceAssignments
+                SET ProviderScopeFingerprint = {new string('d', 64)}
+                WHERE WorkspaceId = {topology.WorkspaceId} AND InstanceId = {topology.InstanceId}
+                """);
+        }
+        using var wrongScope = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.NotFound, wrongScope.StatusCode);
+        var wrongScopeJson = await wrongScope.Content.ReadAsStringAsync();
+        using var scopeProblem = System.Text.Json.JsonDocument.Parse(wrongScopeJson);
+        Assert.Equal("provider-readout.assignment-scope-mismatch", scopeProblem.RootElement.GetProperty("code").GetString());
+        Assert.DoesNotContain(topology.InstanceId.ToString("D"), wrongScopeJson, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

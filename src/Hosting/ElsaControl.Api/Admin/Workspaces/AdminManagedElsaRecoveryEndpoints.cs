@@ -118,14 +118,18 @@ public static class AdminManagedElsaRecoveryEndpoints
                 var assignment = await assignments.GetAsync(workspaceId, assignmentId, cancellationToken);
                 if (assignment is null)
                     return ProviderReadoutUnavailable("provider-readout.assignment-missing");
-                if (assignment.WorkspaceId != workspaceId ||
-                    assignment.OrganizationId != instance.OrganizationId ||
-                    assignment.InstanceId != instanceId ||
-                    !string.Equals(assignment.WorkloadName,
-                        AzureElsaInstanceProvider.WorkloadName(instanceId), StringComparison.OrdinalIgnoreCase) ||
-                    !string.Equals(assignment.ProviderScopeFingerprint,
+                if (assignment.WorkspaceId != workspaceId)
+                    return ProviderReadoutUnavailable("provider-readout.assignment-workspace-mismatch");
+                if (assignment.OrganizationId != instance.OrganizationId)
+                    return ProviderReadoutUnavailable("provider-readout.assignment-organization-mismatch");
+                if (assignment.InstanceId != instanceId)
+                    return ProviderReadoutUnavailable("provider-readout.assignment-instance-mismatch");
+                if (!string.Equals(assignment.WorkloadName,
+                        AzureElsaInstanceProvider.WorkloadName(instanceId), StringComparison.OrdinalIgnoreCase))
+                    return ProviderReadoutUnavailable("provider-readout.assignment-workload-mismatch");
+                if (!string.Equals(assignment.ProviderScopeFingerprint,
                         options.ProviderScopeFingerprint, StringComparison.Ordinal))
-                    return ProviderReadoutUnavailable("provider-readout.assignment-correlation-mismatch");
+                    return ProviderReadoutUnavailable("provider-readout.assignment-scope-mismatch");
                 if (assignment.LastOperationId is not { } providerOperationId)
                     return ProviderReadoutUnavailable("provider-readout.operation-reference-missing");
 
