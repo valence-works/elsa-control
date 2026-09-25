@@ -271,6 +271,53 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
+    public async Task Lifecycle_topology_includes_run_status_for_the_exact_workspace_and_instance()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Topology run status workspace");
+        var operation = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == accepted.Operation.Id);
+        var run = await db.DeploymentRuns.SingleAsync(x => x.Id == operation.DeploymentRunId);
+        run.Status = WorkspaceDeploymentRunStatus.RecoveryRequired;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var topology = await new EfCoreManagedElsaInstanceApiStore(db)
+            .GetLifecycleTopologyAsync(workspace.Id, accepted.Instance.Id);
+
+        var topologyOperation = Assert.Single(topology!.Operations);
+        Assert.Equal(operation.DeploymentRunId, topologyOperation.DeploymentRunId);
+        Assert.Equal(WorkspaceDeploymentRunStatus.RecoveryRequired, topologyOperation.RunStatus);
+    }
+
+    [Fact]
+    public async Task Lifecycle_topology_does_not_read_run_status_from_another_workspace()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Topology run tenant scope owner");
+        var (_, otherAccepted) = await QueueManagedLifecycleRunAsync(db, "Topology run tenant scope other");
+        var otherOperation = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == otherAccepted.Operation.Id);
+        var otherRun = await db.DeploymentRuns.SingleAsync(x => x.Id == otherOperation.DeploymentRunId);
+        var operation = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == accepted.Operation.Id);
+        await db.ElsaInstanceOperations
+            .Where(x => x.Id == operation.Id)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.DeploymentRunId, otherRun.Id));
+        db.ChangeTracker.Clear();
+
+        var topology = await new EfCoreManagedElsaInstanceApiStore(db)
+            .GetLifecycleTopologyAsync(workspace.Id, accepted.Instance.Id);
+
+        var topologyOperation = Assert.Single(topology!.Operations);
+        Assert.Equal(otherRun.Id, topologyOperation.DeploymentRunId);
+        Assert.Null(topologyOperation.RunStatus);
+    }
+
+    [Fact]
     public async Task Create_commits_instance_revision_operation_and_outbox_and_replays_exactly()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

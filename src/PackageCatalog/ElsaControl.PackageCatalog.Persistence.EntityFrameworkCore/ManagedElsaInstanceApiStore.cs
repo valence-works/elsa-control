@@ -214,6 +214,20 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
                         x.ReconciliationDiagnosticCode
                     })
                     .ToListAsync(cancellationToken);
+                var deploymentRunIds = operations
+                    .Where(operation => operation.DeploymentRunId is not null)
+                    .Select(operation => operation.DeploymentRunId!.Value)
+                    .Distinct()
+                    .ToArray();
+                var runStatuses = deploymentRunIds.Length == 0
+                    ? new Dictionary<Guid, WorkspaceDeploymentRunStatus>()
+                    : await dbContext.DeploymentRuns
+                        .AsNoTracking()
+                        .Where(run => deploymentRunIds.Contains(run.Id) &&
+                                      run.WorkspaceId == workspaceId &&
+                                      run.ElsaInstanceId == instanceId)
+                        .Select(run => new { run.Id, run.Status })
+                        .ToDictionaryAsync(run => run.Id, run => run.Status, cancellationToken);
                 var operationIds = operations.Select(x => x.Id).ToList();
                 var outboxes = operationIds.Count == 0
                     ? []
@@ -254,6 +268,10 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
                                 outbox.CreatedAt,
                                 outbox.QuarantinedAt,
                                 outbox.QuarantineCode)
+                            : null,
+                        operation.DeploymentRunId is { } deploymentRunId &&
+                        runStatuses.TryGetValue(deploymentRunId, out var runStatus)
+                            ? runStatus
                             : null);
                 }).ToList();
 

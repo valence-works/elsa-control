@@ -936,6 +936,8 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.True(body.OperationScopeCurrent);
         Assert.True(body.AssignmentPlacementMatchesCurrent);
         Assert.True(body.AssignmentGroupOnly);
+        Assert.Equal(AzureProviderHealth.Unknown, body.Health);
+        Assert.False(body.EndpointValid);
         var json = await response.Content.ReadAsStringAsync();
         Assert.DoesNotContain(providerOperationId.ToString("D"), json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(topology.InstanceId.ToString("D"), json, StringComparison.OrdinalIgnoreCase);
@@ -1067,12 +1069,17 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
             0,
             DateTimeOffset.UtcNow,
             "azure.command.timeout",
-            ["azure.command.timeout"]);
+            ["azure.command.timeout"],
+            Health: AzureProviderHealth.Healthy,
+            EndpointValid: true);
         var json = System.Text.Json.JsonSerializer.Serialize(status, ControlApiTestApplication.JsonOptions);
 
         Assert.Contains("azure.command.timeout", json, StringComparison.Ordinal);
+        Assert.Contains("\"health\":\"Healthy\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"endpointValid\":true", json, StringComparison.Ordinal);
         Assert.DoesNotContain("resource", json, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("endpoint", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("endpointUri", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("https://managed.example.test/", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("secret", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("identity", json, StringComparison.OrdinalIgnoreCase);
     }
