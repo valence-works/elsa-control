@@ -961,6 +961,67 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Customer_list_and_detail_keep_delete_outcome_when_an_older_create_is_still_active()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var customer = app.CreateTrustedWorkspaceClient("delete-current-operation-owner");
+        var workspaceId = await customer.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(customer, workspaceId, "delete-current-operation-runtime");
+        await MarkOperationRecoveryRequiredAsync(app, created.Operation.Id);
+
+        using var confirmationResponse = await customer.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+
+        using var deletion = await SendDeleteAsync(customer, workspaceId, created.Instance.InstanceId,
+            created.Instance.ETag, "delete-current-operation", confirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.Accepted, deletion.StatusCode);
+        var accepted = await deletion.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>();
+        Assert.NotNull(accepted);
+
+        async Task AssertCustomerOperationAsync(ElsaInstanceOperationState expected)
+        {
+            using var list = await customer.GetAsync($"/api/workspaces/{workspaceId:D}/instances");
+            Assert.Equal(HttpStatusCode.OK, list.StatusCode);
+            var listBody = await list.Content.ReadControlJsonAsync<ManagedElsaInstanceListResponse>();
+            var listed = Assert.Single(listBody!.Items);
+            Assert.Equal(ElsaDesiredLifecycle.Deleting, listed.DesiredLifecycle);
+            Assert.Equal(accepted!.OperationId, listed.ActiveOperation?.Id);
+            Assert.Equal(ElsaInstanceOperationAction.Delete, listed.ActiveOperation?.Action);
+            Assert.Equal(expected, listed.ActiveOperation?.State);
+            Assert.False(listed.CanOpen);
+
+            using var detail = await customer.GetAsync(
+                $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}");
+            Assert.Equal(HttpStatusCode.OK, detail.StatusCode);
+            var detailBody = await detail.Content.ReadControlJsonAsync<ManagedElsaInstanceResponse>();
+            Assert.Equal(listed.ActiveOperation, detailBody!.ActiveOperation);
+        }
+
+        await AssertCustomerOperationAsync(ElsaInstanceOperationState.WaitingForPriorOperation);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE ElsaInstanceOperations SET State = {ElsaInstanceOperationState.Failed.ToString()}, FailureCode = {"provider.private-secret-value"} WHERE Id = {accepted!.OperationId}");
+        }
+
+        await AssertCustomerOperationAsync(ElsaInstanceOperationState.Failed);
+        using var sanitized = await customer.GetAsync($"/api/workspaces/{workspaceId:D}/instances");
+        Assert.DoesNotContain("provider.private-secret-value", await sanitized.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        var outsider = app.CreateTrustedWorkspaceClient("delete-current-operation-outsider");
+        var otherWorkspaceId = await outsider.GetDefaultWorkspaceIdAsync();
+        using var otherList = await outsider.GetAsync($"/api/workspaces/{otherWorkspaceId:D}/instances");
+        var otherBody = await otherList.Content.ReadControlJsonAsync<ManagedElsaInstanceListResponse>();
+        Assert.Equal(HttpStatusCode.OK, otherList.StatusCode);
+        Assert.DoesNotContain(otherBody!.Items, item => item.InstanceId == created.Instance.InstanceId);
+    }
+
+    [Fact]
     public async Task Admin_topology_exposes_safe_complete_nonterminal_operation_graph()
     {
         var app = await PrepareApplicationAsync([]);
