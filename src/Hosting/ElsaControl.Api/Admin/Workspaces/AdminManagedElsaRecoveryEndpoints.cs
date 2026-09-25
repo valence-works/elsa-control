@@ -105,7 +105,7 @@ public static class AdminManagedElsaRecoveryEndpoints
 
             var options = services.GetService<AzureElsaInstanceProviderOptions>();
             if (options is null || !options.Enabled)
-                return Results.NotFound();
+                return ProviderReadoutUnavailable("provider-readout.disabled");
 
             AzureProviderOperation? providerOperation;
             if (lifecycleOperation.Action == ElsaInstanceOperationAction.Delete)
@@ -114,25 +114,29 @@ public static class AdminManagedElsaRecoveryEndpoints
                 // last operation, the same authority used by lifecycle recovery, rather
                 // than querying the latest Reconcile (which cannot return a Delete).
                 if (!Guid.TryParseExact(instance.PlacementAssignmentReference?.AssignmentId, "D", out var assignmentId))
-                    return Results.NotFound();
+                    return ProviderReadoutUnavailable("provider-readout.assignment-reference-missing");
                 var assignment = await assignments.GetAsync(workspaceId, assignmentId, cancellationToken);
-                if (assignment is null || assignment.WorkspaceId != workspaceId ||
+                if (assignment is null)
+                    return ProviderReadoutUnavailable("provider-readout.assignment-missing");
+                if (assignment.WorkspaceId != workspaceId ||
                     assignment.OrganizationId != instance.OrganizationId ||
                     assignment.InstanceId != instanceId ||
                     !string.Equals(assignment.WorkloadName,
                         AzureElsaInstanceProvider.WorkloadName(instanceId), StringComparison.OrdinalIgnoreCase) ||
                     !string.Equals(assignment.ProviderScopeFingerprint,
-                        options.ProviderScopeFingerprint, StringComparison.Ordinal) ||
-                    assignment.LastOperationId is not { } providerOperationId)
-                    return Results.NotFound();
+                        options.ProviderScopeFingerprint, StringComparison.Ordinal))
+                    return ProviderReadoutUnavailable("provider-readout.assignment-correlation-mismatch");
+                if (assignment.LastOperationId is not { } providerOperationId)
+                    return ProviderReadoutUnavailable("provider-readout.operation-reference-missing");
 
                 providerOperation = await providerOperations.GetAsync(workspaceId, providerOperationId, cancellationToken);
-                if (providerOperation is null ||
-                    providerOperation.Action != AzureProviderOperationAction.Delete ||
+                if (providerOperation is null)
+                    return ProviderReadoutUnavailable("provider-readout.operation-missing");
+                if (providerOperation.Action != AzureProviderOperationAction.Delete ||
                     providerOperation.ProviderAssignmentId != assignment.Id ||
                     !AzureProviderOperationValidation.IsLifecycleDeleteIdempotencyKey(
                         providerOperation.IdempotencyKey, lifecycleOperation.Id))
-                    return Results.NotFound();
+                    return ProviderReadoutUnavailable("provider-readout.delete-correlation-mismatch");
             }
             else
             {
@@ -157,7 +161,7 @@ public static class AdminManagedElsaRecoveryEndpoints
                 providerOperation.LifecycleAction != lifecycleOperation.Action ||
                 !string.Equals(providerOperation.ProviderScopeFingerprint,
                     options.ProviderScopeFingerprint, StringComparison.Ordinal))
-                return Results.NotFound();
+                return ProviderReadoutUnavailable("provider-readout.operation-correlation-mismatch");
 
             var transitions = await providerOperations.ListTransitionsAsync(
                 workspaceId, providerOperation.Id, cancellationToken);
@@ -258,6 +262,11 @@ public static class AdminManagedElsaRecoveryEndpoints
         return endpoints;
     }
 
+    private static IResult ProviderReadoutUnavailable(string code) =>
+        ManagedElsaInstanceEndpoints.Problem(
+            code,
+            "The provider operation cannot be correlated with the current managed instance.",
+            StatusCodes.Status404NotFound);
 }
 
 public sealed record AdminManagedElsaRecoveryRequest(string? Reason = null);
