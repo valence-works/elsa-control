@@ -21,10 +21,11 @@ the production registry and the producer's `main` or version-tag workflow identi
    profile and record the current image reference for rollback. Do not copy
    credentials into the rollback record. Update the non-secret staging profile in
    `infra/control-worker-composition/worker-settings.parameters.staging.json` and
-   render it with `scripts/render-worker-settings.py`. Apply only these nine
+   render it with `scripts/render-worker-settings.py`. Apply only these ten
    resulting staging Control settings to the isolated registry and exact candidate
    signer: `ReleaseCatalog__Verification__RegistryHost`,
    `ReleaseCatalog__Verification__Repository`,
+   `ReleaseCatalog__Verification__BlobRedirectHosts__0`,
    `ReleaseCatalog__Admission__ExpectedSignatureSubject`,
    `Deployment__AzureProvider__Runner__TargetScope__RegistrySubscriptionId`,
    `Deployment__AzureProvider__Runner__TargetScope__RegistryResourceGroupName`,
@@ -38,9 +39,11 @@ the production registry and the producer's `main` or version-tag workflow identi
    identity read access to that ACR, and configure the narrow provider's exact
    deployment-metadata assignment at the staging registry resource-group scope
    and conditional role-administration assignment at the registry scope. Never
-   reuse assignment IDs from a different registry. If ACR blob reads redirect,
-   add only the exact observed staging blob
-   host to the verifier allowlist.
+   reuse assignment IDs from a different registry. ACR blob reads redirect;
+   pin only the exact observed staging blob host in the verifier allowlist.
+   Allow the App Service setting change to reach the running process before
+   retrying admission; a healthy old process can briefly retain the prior
+   allowlist.
 4. Deploy the matching Control candidate to the staging API/worker using the
    `candidate/staging` ref, `test` target, and immutable build-then-promote workflow.
    The workflow refuses this ref for production. Admit the signed manifest through
