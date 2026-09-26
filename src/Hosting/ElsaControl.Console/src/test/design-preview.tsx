@@ -22,6 +22,7 @@ async function startDesignPreview() {
     import("@/lib/auth/AuthProvider"),
     import("@/lib/query/queryClient"),
     import("@/lib/theme/ThemeProvider"),
+    import("@/lib/theme/fonts"),
     import("@/styles.css"),
     import("@/console-layout.css")
   ]);

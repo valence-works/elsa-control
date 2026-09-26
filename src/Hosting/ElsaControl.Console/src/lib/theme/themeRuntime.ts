@@ -49,12 +49,14 @@ const legacyAccentMap: Record<string, ThemeAccent> = {
   violet: "iris",
   amber: "ember",
   rose: "ember",
+  cobalt: "cobalt",
   lime: "lime",
   glacier: "glacier",
   iris: "iris",
   ember: "ember"
 };
 const legacyAccentByAccent: Record<ThemeAccent, string> = {
+  cobalt: "blue",
   lime: "teal",
   glacier: "blue",
   iris: "violet",
@@ -104,8 +106,10 @@ export function applyThemePreferences(
   root.dataset.consoleLayout = theme.layout;
   root.dataset.consolePattern = theme.backgroundPattern;
   root.dataset.themeAccent = normalized.accent;
-  root.classList.toggle("dark", resolvedMode === "dark");
-  root.style.colorScheme = resolvedMode;
+  root.dataset.colorMode = resolvedMode;
+  // Dim is a dark colour scheme: Tailwind `dark:` variants and native controls follow it.
+  root.classList.toggle("dark", resolvedMode !== "light");
+  root.style.colorScheme = resolvedMode === "light" ? "light" : "dark";
 
   return resolvedMode;
 }
@@ -219,8 +223,9 @@ export function persistPreferences(preferences: ThemePreferences) {
   try {
     storage.setItem(appearanceStorageKey, versioned);
     // Keep the old keys readable for older console bundles. `system` has no
-    // legacy representation, so its current resolved value is used there.
-    storage.setItem(legacyThemeStorageKey, resolvedMode);
+    // legacy representation, so its current resolved value is used there;
+    // Dim is stored as dark, its closest legacy value.
+    storage.setItem(legacyThemeStorageKey, resolvedMode === "light" ? "light" : "dark");
     storage.setItem(legacyAccentStorageKey, legacyAccentByAccent[normalized.accent]);
   } catch {
     // Browser storage can be unavailable in private browsing or embedded
@@ -281,7 +286,7 @@ function isThemeId(value: unknown): value is ThemeId {
 }
 
 function isThemeMode(value: unknown): value is ThemeMode {
-  return value === "light" || value === "dark" || value === "system";
+  return value === "light" || value === "dim" || value === "dark" || value === "system";
 }
 
 function isThemeAccent(value: unknown): value is ThemeAccent {

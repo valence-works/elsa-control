@@ -1,12 +1,13 @@
 import { useEffect, useRef } from "react";
 import type { CSSProperties } from "react";
-import { Check, Monitor, Moon, Sun, X } from "lucide-react";
+import { Check, Monitor, Moon, Sun, SunDim, X } from "lucide-react";
 import { accentDefinitions, themes } from "@/lib/theme/themes";
 import type { ThemeMode } from "@/lib/theme/themes";
 import { useTheme } from "@/lib/theme/ThemeProvider";
 
 const modes = [
   { id: "light", name: "Light", icon: Sun },
+  { id: "dim", name: "Dim", icon: SunDim },
   { id: "dark", name: "Dark", icon: Moon },
   { id: "system", name: "System", icon: Monitor }
 ] satisfies Array<{ id: ThemeMode; name: string; icon: typeof Sun }>;

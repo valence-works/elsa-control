@@ -120,8 +120,8 @@ describe("AppShell", () => {
     expect(document.documentElement).toHaveAttribute("data-console-theme", "aperture");
     expect(document.documentElement).toHaveClass("dark");
     await user.click(screen.getByRole("button", { name: "Appearance" }));
-    expect(screen.getByRole("radio", { name: "Dark" })).toBeChecked();
-    expect(screen.getByRole("radio", { name: "Lime" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Dim" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Cobalt" })).toBeChecked();
     await user.click(screen.getByRole("radio", { name: "Glacier" }));
     await user.click(screen.getByRole("radio", { name: "Light" }));
     expect(document.documentElement).toHaveAttribute("data-theme-accent", "glacier");

@@ -22,6 +22,7 @@ function ThemeProbe() {
       <output data-testid="theme-name">{theme.name}</output>
       <button onClick={() => setMode("system")}>system</button>
       <button onClick={() => setMode("light")}>light</button>
+      <button onClick={() => setMode("dim")}>dim</button>
       <button onClick={() => setAccent("lime")}>lime</button>
       <button onClick={() => setAccent("glacier")}>glacier</button>
       <button onClick={() => setAccent("iris")}>iris</button>
@@ -80,6 +81,7 @@ beforeEach(() => {
   document.documentElement.removeAttribute("data-console-layout");
   document.documentElement.removeAttribute("data-console-pattern");
   document.documentElement.removeAttribute("data-theme-accent");
+  document.documentElement.removeAttribute("data-color-mode");
   document.documentElement.classList.remove("dark");
   document.documentElement.removeAttribute("style");
 });
@@ -98,67 +100,92 @@ afterEach(() => {
 });
 
 describe("theme registry", () => {
-  it("contains the Aperture base and future-ready accent metadata", () => {
+  it("contains the Lanes palettes for every color mode and the accent metadata", () => {
     expect(themes.map((theme) => theme.id)).toEqual(["aperture"]);
-    expect(accentDefinitions.map((accent) => accent.id)).toEqual(["lime", "glacier", "iris", "ember"]);
+    expect(themes[0].name).toBe("Lanes");
+    expect(accentDefinitions.map((accent) => accent.id)).toEqual(["cobalt", "glacier", "iris", "ember", "lime"]);
 
     expect(themes[0].palettes.light).toMatchObject({
-      background: "80 18% 97%",
-      foreground: "193 11% 16%",
+      background: "216 26% 95%",
+      foreground: "217 46% 10%",
       surface: "0 0% 100%",
-      band: "193 12% 14%",
-      bandForeground: "120 13% 94%",
-      bandMuted: "160 9% 73%",
-      bandBorder: "174 6% 31%"
+      border: "215 25% 89%"
+    });
+    expect(themes[0].palettes.dim).toMatchObject({
+      background: "216 20% 16%",
+      foreground: "213 25% 88%",
+      surface: "216 18% 20%"
     });
     expect(themes[0].palettes.dark).toMatchObject({
-      background: "200 10% 11%",
-      foreground: "144 13% 92%",
-      surface: "202 11% 15%",
-      band: "189 17% 8%",
-      bandForeground: "120 13% 94%",
-      bandMuted: "160 9% 73%",
-      bandBorder: "174 6% 31%"
+      background: "222 28% 7%",
+      foreground: "214 32% 93%",
+      surface: "220 24% 10%"
     });
 
     for (const theme of themes) {
       expect(theme.layout).toBe("topbar");
       expect(theme.version).toBeGreaterThan(0);
-      expect(Object.keys(theme.palettes.light)).toEqual(Object.keys(theme.palettes.dark));
-      expect(theme.fontDisplay).toBe('-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif');
-      expect(theme.fontMono).toBe('"SFMono-Regular", Consolas, monospace');
+      expect(Object.keys(theme.palettes.dim)).toEqual(Object.keys(theme.palettes.light));
+      expect(Object.keys(theme.palettes.dark)).toEqual(Object.keys(theme.palettes.light));
+      expect(theme.radius).toBe("8px");
+      expect(theme.fontDisplay).toBe('"IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif');
+      expect(theme.fontMono).toBe('"IBM Plex Mono", "SFMono-Regular", Consolas, monospace');
     }
   });
 
-  it("keeps accent fills and text readable in both modes", () => {
+  it("keeps accent fills, links and secondary text readable in every mode", () => {
     const theme = themes[0];
-    for (const accent of accentDefinitions) {
-      for (const mode of ["light", "dark"] as const) {
-        const palette = accent.palettes[mode];
-        expect(contrast(palette.primaryForeground, palette.primary)).toBeGreaterThanOrEqual(4.5);
-        expect(contrast(palette.primaryText, theme.palettes[mode].background)).toBeGreaterThanOrEqual(4.5);
+    for (const mode of ["light", "dim", "dark"] as const) {
+      const palette = theme.palettes[mode];
+      expect(contrast(palette.foreground, palette.background)).toBeGreaterThanOrEqual(7);
+      expect(contrast(palette.mutedForeground, palette.background)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(palette.mutedForeground, palette.surface)).toBeGreaterThanOrEqual(4.5);
+      for (const accent of accentDefinitions) {
+        const accentPalette = accent.palettes[mode];
+        expect(contrast(accentPalette.primaryForeground, accentPalette.primary)).toBeGreaterThanOrEqual(4.5);
+        expect(contrast(accentPalette.primaryText, palette.background)).toBeGreaterThanOrEqual(4.5);
+        expect(contrast(accentPalette.primaryText, palette.surface)).toBeGreaterThanOrEqual(4.5);
       }
     }
   });
 });
 
 describe("ThemeProvider", () => {
-  it("uses Aperture dark and Lime for fresh preferences", () => {
+  it("uses Lanes Dim and Cobalt for fresh preferences", () => {
     renderTheme();
 
     expect(screen.getByTestId("preferences")).toHaveTextContent(
-      '{"themeId":"aperture","mode":"dark","accent":"lime"}'
+      '{"themeId":"aperture","mode":"dim","accent":"cobalt"}'
     );
-    expect(screen.getByTestId("theme-name")).toHaveTextContent("Aperture");
+    expect(screen.getByTestId("theme-name")).toHaveTextContent("Lanes");
+    expect(screen.getByTestId("resolved-mode")).toHaveTextContent("dim");
     expect(document.documentElement).toHaveClass("dark");
+    expect(document.documentElement).toHaveAttribute("data-color-mode", "dim");
+    expect(document.documentElement.style.colorScheme).toBe("dark");
+    expect(document.documentElement.style.getPropertyValue("--background")).toBe("216 20% 16%");
     expect(document.documentElement).toHaveAttribute("data-console-theme", "aperture");
     expect(document.documentElement).toHaveAttribute("data-console-layout", "topbar");
     expect(JSON.parse(window.localStorage.getItem(appearanceStorageKey)!)).toEqual({
       version: appearanceStorageVersion,
       themeId: "aperture",
-      mode: "dark",
-      accent: "lime"
+      mode: "dim",
+      accent: "cobalt"
     });
+    expect(window.localStorage.getItem(legacyThemeStorageKey)).toBe("dark");
+  });
+
+  it("switches between Dim and Light", () => {
+    renderTheme();
+
+    fireEvent.click(screen.getByRole("button", { name: "light" }));
+    expect(screen.getByTestId("resolved-mode")).toHaveTextContent("light");
+    expect(document.documentElement).not.toHaveClass("dark");
+    expect(document.documentElement.style.getPropertyValue("--background")).toBe("216 26% 95%");
+
+    fireEvent.click(screen.getByRole("button", { name: "dim" }));
+    expect(screen.getByTestId("resolved-mode")).toHaveTextContent("dim");
+    expect(document.documentElement).toHaveClass("dark");
+    expect(JSON.parse(window.localStorage.getItem(appearanceStorageKey)!)).toMatchObject({ mode: "dim" });
   });
 
   it("migrates legacy keys to Aperture accents while preserving mode", () => {
@@ -213,9 +240,9 @@ describe("ThemeProvider", () => {
     expect(screen.getByTestId("preferences")).toHaveTextContent("glacier");
     expect(screen.getByTestId("resolved-mode")).toHaveTextContent("light");
     expect(document.documentElement).not.toHaveClass("dark");
-    expect(document.documentElement.style.getPropertyValue("--primary")).toBe("191 64% 74%");
-    expect(document.documentElement.style.getPropertyValue("--primary-text")).toBe("193 45% 16%");
-    expect(document.documentElement.style.getPropertyValue("--radius-ui")).toBe("4px");
+    expect(document.documentElement.style.getPropertyValue("--primary")).toBe("172 78% 27%");
+    expect(document.documentElement.style.getPropertyValue("--primary-text")).toBe("172 78% 24%");
+    expect(document.documentElement.style.getPropertyValue("--radius-ui")).toBe("8px");
   });
 
   it.each(["not-an-accent", "__proto__", "constructor"])("falls back safely from malformed storage and invalid accent %s", (accent) => {
@@ -226,14 +253,14 @@ describe("ThemeProvider", () => {
     renderTheme();
 
     expect(screen.getByTestId("preferences")).toHaveTextContent(
-      '{"themeId":"aperture","mode":"dark","accent":"lime"}'
+      '{"themeId":"aperture","mode":"dim","accent":"cobalt"}'
     );
     expect(document.documentElement).toHaveClass("dark");
     expect(JSON.parse(window.localStorage.getItem(appearanceStorageKey)!)).toEqual({
       version: appearanceStorageVersion,
       themeId: "aperture",
-      mode: "dark",
-      accent: "lime"
+      mode: "dim",
+      accent: "cobalt"
     });
   });
 
@@ -248,7 +275,7 @@ describe("ThemeProvider", () => {
     expect(() => initializeTheme()).not.toThrow();
     expect(() => renderTheme()).not.toThrow();
     expect(screen.getByTestId("preferences")).toHaveTextContent(
-      '{"themeId":"aperture","mode":"dark","accent":"lime"}'
+      '{"themeId":"aperture","mode":"dim","accent":"cobalt"}'
     );
     expect(document.documentElement).toHaveClass("dark");
   });
@@ -338,12 +365,12 @@ describe("ThemeProvider", () => {
     const bandTokens = ["--band", "--band-foreground", "--band-muted", "--band-border"].map((name) =>
       document.documentElement.style.getPropertyValue(name)
     );
-    const limePrimary = document.documentElement.style.getPropertyValue("--primary");
+    const cobaltPrimary = document.documentElement.style.getPropertyValue("--primary");
 
     fireEvent.click(screen.getByRole("button", { name: "iris" }));
 
-    expect(document.documentElement.style.getPropertyValue("--primary")).not.toBe(limePrimary);
-    expect(document.documentElement.style.getPropertyValue("--primary-text")).toBe("254 62% 82%");
+    expect(document.documentElement.style.getPropertyValue("--primary")).not.toBe(cobaltPrimary);
+    expect(document.documentElement.style.getPropertyValue("--primary-text")).toBe("256 85% 82%");
     expect(["--destructive", "--warning", "--success"].map((name) => document.documentElement.style.getPropertyValue(name))).toEqual(
       statuses
     );

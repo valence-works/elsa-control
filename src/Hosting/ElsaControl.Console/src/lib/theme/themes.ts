@@ -23,8 +23,9 @@ export interface ThemePalette {
 }
 
 export type ThemeId = "aperture";
-export type ThemeMode = "light" | "dark" | "system";
-export type ThemeAccent = "lime" | "glacier" | "iris" | "ember";
+/** Dim is a softer, blue-slate dark mode; System follows the OS light/dark preference. */
+export type ThemeMode = "light" | "dim" | "dark" | "system";
+export type ThemeAccent = "cobalt" | "lime" | "glacier" | "iris" | "ember";
 export type ResolvedThemeMode = Exclude<ThemeMode, "system">;
 
 export interface ThemeAccentPalette {
@@ -36,10 +37,7 @@ export interface ThemeAccentPalette {
 export interface ThemeAccentDefinition {
   id: ThemeAccent;
   name: string;
-  palettes: {
-    light: ThemeAccentPalette;
-    dark: ThemeAccentPalette;
-  };
+  palettes: Record<ResolvedThemeMode, ThemeAccentPalette>;
 }
 
 /**
@@ -49,35 +47,48 @@ export interface ThemeAccentDefinition {
  */
 export const accentDefinitions: readonly ThemeAccentDefinition[] = [
   {
-    id: "lime",
-    name: "Lime",
+    id: "cobalt",
+    name: "Cobalt",
     palettes: {
-      light: { primary: "72 72% 72%", primaryForeground: "79 46% 16%", primaryText: "79 46% 16%" },
-      dark: { primary: "72 72% 72%", primaryForeground: "79 46% 16%", primaryText: "72 72% 72%" }
+      light: { primary: "226 81% 55%", primaryForeground: "0 0% 100%", primaryText: "226 70% 45%" },
+      dim: { primary: "225 85% 68%", primaryForeground: "222 47% 11%", primaryText: "225 90% 76%" },
+      dark: { primary: "225 90% 66%", primaryForeground: "222 47% 9%", primaryText: "225 95% 75%" }
     }
   },
   {
     id: "glacier",
     name: "Glacier",
     palettes: {
-      light: { primary: "191 64% 74%", primaryForeground: "193 45% 16%", primaryText: "193 45% 16%" },
-      dark: { primary: "191 64% 74%", primaryForeground: "193 45% 16%", primaryText: "191 64% 74%" }
+      light: { primary: "172 78% 27%", primaryForeground: "0 0% 100%", primaryText: "172 78% 24%" },
+      dim: { primary: "170 50% 54%", primaryForeground: "172 60% 10%", primaryText: "170 55% 64%" },
+      dark: { primary: "170 55% 55%", primaryForeground: "172 60% 9%", primaryText: "170 60% 65%" }
     }
   },
   {
     id: "iris",
     name: "Iris",
     palettes: {
-      light: { primary: "254 62% 82%", primaryForeground: "259 30% 20%", primaryText: "259 30% 20%" },
-      dark: { primary: "254 62% 82%", primaryForeground: "259 30% 20%", primaryText: "254 62% 82%" }
+      light: { primary: "258 67% 55%", primaryForeground: "0 0% 100%", primaryText: "258 60% 48%" },
+      dim: { primary: "256 80% 76%", primaryForeground: "258 40% 14%", primaryText: "256 85% 82%" },
+      dark: { primary: "256 80% 74%", primaryForeground: "258 40% 12%", primaryText: "256 85% 80%" }
     }
   },
   {
     id: "ember",
     name: "Ember",
     palettes: {
-      light: { primary: "23 72% 75%", primaryForeground: "22 35% 18%", primaryText: "22 35% 18%" },
-      dark: { primary: "23 72% 75%", primaryForeground: "22 35% 18%", primaryText: "23 72% 75%" }
+      light: { primary: "17 88% 40%", primaryForeground: "0 0% 100%", primaryText: "17 88% 37%" },
+      dim: { primary: "22 80% 64%", primaryForeground: "20 50% 12%", primaryText: "24 85% 72%" },
+      dark: { primary: "22 80% 62%", primaryForeground: "20 50% 10%", primaryText: "24 85% 70%" }
+    }
+  },
+  {
+    id: "lime",
+    name: "Lime",
+    palettes: {
+      light: { primary: "72 72% 72%", primaryForeground: "79 46% 16%", primaryText: "79 46% 22%" },
+      dim: { primary: "72 72% 72%", primaryForeground: "79 46% 16%", primaryText: "72 72% 72%" },
+      dark: { primary: "72 72% 72%", primaryForeground: "79 46% 16%", primaryText: "72 72% 72%" }
     }
   }
 ];
@@ -92,10 +103,7 @@ export interface ThemeDefinition {
   version: number;
   layout: "topbar";
   backgroundPattern: "none" | "grid";
-  palettes: {
-    light: ThemePalette;
-    dark: ThemePalette;
-  };
+  palettes: Record<ResolvedThemeMode, ThemePalette>;
   radius: string;
   fontDisplay: string;
   fontBody: string;
@@ -110,63 +118,83 @@ export interface ThemePreferences {
 
 export const DEFAULT_THEME_PREFERENCES: ThemePreferences = {
   themeId: "aperture",
-  mode: "dark",
-  accent: "lime"
+  mode: "dim",
+  accent: "cobalt"
 };
 
-const apertureLight: ThemePalette = {
-  background: "80 18% 97%",
-  foreground: "193 11% 16%",
+// Lanes: cool grey canvas, white cards, cobalt accent. Dim and Dark share its blue-slate hue.
+const lanesLight: ThemePalette = {
+  background: "216 26% 95%",
+  foreground: "217 46% 10%",
   surface: "0 0% 100%",
-  muted: "96 15% 94%",
-  mutedForeground: "185 5% 42%",
-  border: "130 9% 87%",
-  primary: "72 72% 72%",
-  primaryForeground: "79 46% 16%",
-  primaryText: "79 46% 16%",
-  band: "193 12% 14%",
-  bandForeground: "120 13% 94%",
-  bandMuted: "160 9% 73%",
-  bandBorder: "174 6% 31%",
-  destructive: "5 62% 45%",
-  warning: "38 55% 34%",
-  success: "130 17% 35%"
+  muted: "216 25% 92%",
+  mutedForeground: "213 16% 38%",
+  border: "215 25% 89%",
+  primary: "226 81% 55%",
+  primaryForeground: "0 0% 100%",
+  primaryText: "226 70% 45%",
+  band: "217 46% 10%",
+  bandForeground: "214 30% 94%",
+  bandMuted: "215 16% 70%",
+  bandBorder: "217 22% 24%",
+  destructive: "3 65% 45%",
+  warning: "34 100% 27%",
+  success: "145 61% 28%"
 };
 
-const apertureDark: ThemePalette = {
-  background: "200 10% 11%",
-  foreground: "144 13% 92%",
-  surface: "202 11% 15%",
-  muted: "187 10% 18%",
-  mutedForeground: "175 8% 69%",
-  border: "191 9% 25%",
-  primary: "72 72% 72%",
-  primaryForeground: "79 46% 16%",
-  primaryText: "72 72% 72%",
-  band: "189 17% 8%",
-  bandForeground: "120 13% 94%",
-  bandMuted: "160 9% 73%",
-  bandBorder: "174 6% 31%",
-  destructive: "5 72% 68%",
-  warning: "39 48% 73%",
-  success: "114 23% 74%"
+const lanesDim: ThemePalette = {
+  background: "216 20% 16%",
+  foreground: "213 25% 88%",
+  surface: "216 18% 20%",
+  muted: "216 16% 25%",
+  mutedForeground: "214 13% 68%",
+  border: "215 14% 30%",
+  primary: "225 85% 68%",
+  primaryForeground: "222 47% 11%",
+  primaryText: "225 90% 76%",
+  band: "216 22% 12%",
+  bandForeground: "213 25% 90%",
+  bandMuted: "214 13% 68%",
+  bandBorder: "215 14% 30%",
+  destructive: "4 80% 70%",
+  warning: "38 75% 66%",
+  success: "145 45% 62%"
 };
 
-const nativeFont = '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-const monoFont = '"SFMono-Regular", Consolas, monospace';
+const lanesDark: ThemePalette = {
+  background: "222 28% 7%",
+  foreground: "214 32% 93%",
+  surface: "220 24% 10%",
+  muted: "219 20% 15%",
+  mutedForeground: "215 14% 66%",
+  border: "218 17% 20%",
+  primary: "225 90% 66%",
+  primaryForeground: "222 47% 9%",
+  primaryText: "225 95% 75%",
+  band: "222 30% 5%",
+  bandForeground: "214 32% 93%",
+  bandMuted: "215 14% 66%",
+  bandBorder: "218 17% 20%",
+  destructive: "4 85% 70%",
+  warning: "40 85% 62%",
+  success: "142 55% 58%"
+};
+
+const sansFont = '"IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+const monoFont = '"IBM Plex Mono", "SFMono-Regular", Consolas, monospace';
 
 export const themes: ThemeDefinition[] = [
   {
     id: "aperture",
-    name: "Aperture",
-    description: "A calm charcoal workspace for finding engines and connecting fast.",
+    name: "Lanes",
+    description: "A cool, light workspace with cobalt accents; Dim and Dark keep the same structure.",
     version: 1,
     layout: "topbar",
     backgroundPattern: "none",
-    palettes: { light: apertureLight, dark: apertureDark },
-    radius: "4px",
-    fontDisplay: nativeFont,
-    fontBody: nativeFont,
+    palettes: { light: lanesLight, dim: lanesDim, dark: lanesDark },
+    radius: "8px",
+    fontDisplay: sansFont,
+    fontBody: sansFont,
     fontMono: monoFont
   }
 ];

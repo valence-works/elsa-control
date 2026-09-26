@@ -27,7 +27,7 @@ node scripts/generate-third-party-inventory.mjs
 ## Summary
 
 - NuGet: 299 unique package/version records (43 used directly).
-- npm: 324 unique package/version records (23 used directly).
+- npm: 326 unique package/version records (25 used directly).
 - Container base images: 4.
 - GitHub Actions: 5 pinned action/version references.
 - Unknown NuGet licence metadata: 0.
@@ -59,6 +59,7 @@ node scripts/generate-third-party-inventory.mjs
 | ISC | 13 |
 | MIT | 292 |
 | MIT-0 | 1 |
+| OFL-1.1 | 2 |
 | Unlicense | 1 |
 
 ## NuGet packages
@@ -423,6 +424,8 @@ node scripts/generate-third-party-inventory.mjs
 | [@esbuild/win32-arm64](https://www.npmjs.com/package/%40esbuild%2Fwin32-arm64) | 0.25.12 | Transitive | Development | src/Hosting/ElsaControl.Console/package-lock.json | MIT | <br>[source](https://registry.npmjs.org/@esbuild/win32-arm64/-/win32-arm64-0.25.12.tgz)<br>`sha512-rMmLrur64A7+DKlnSuwqUdRKyd3UE7oPJZmnljqEptesKM8wx9J8gx5u0+9Pq0fQQW8vqeKebwNXdfOyP+8Bsg==` |
 | [@esbuild/win32-ia32](https://www.npmjs.com/package/%40esbuild%2Fwin32-ia32) | 0.25.12 | Transitive | Development | src/Hosting/ElsaControl.Console/package-lock.json | MIT | <br>[source](https://registry.npmjs.org/@esbuild/win32-ia32/-/win32-ia32-0.25.12.tgz)<br>`sha512-HkqnmmBoCbCwxUKKNPBixiWDGCpQGVsrQfJoVGYLPT41XWF8lHuE5N6WhVia2n4o5QK5M4tYr21827fNhi4byQ==` |
 | [@esbuild/win32-x64](https://www.npmjs.com/package/%40esbuild%2Fwin32-x64) | 0.25.12 | Transitive | Development | src/Hosting/ElsaControl.Console/package-lock.json | MIT | <br>[source](https://registry.npmjs.org/@esbuild/win32-x64/-/win32-x64-0.25.12.tgz)<br>`sha512-alJC0uCZpTFrSL0CCDjcgleBXPnCrEAhTBILpeAp7M/OFgoqtAetfBzX0xM00MUsVVPpVjlPuMbREqnZCXaTnA==` |
+| [@fontsource/ibm-plex-mono](https://www.npmjs.com/package/%40fontsource%2Fibm-plex-mono) | 5.3.0 | Direct | Runtime | src/Hosting/ElsaControl.Console/package-lock.json | OFL-1.1 | <br>[source](https://registry.npmjs.org/@fontsource/ibm-plex-mono/-/ibm-plex-mono-5.3.0.tgz)<br>`sha512-eTgnZjZEGk1QtD3ZstF+Vclo2HLAni8YMy34/DxllwZvyz1lR/1RF/xTiAquOBO7MvqBx8D2Ig2WCPMVfdZu7Q==` |
+| [@fontsource/ibm-plex-sans](https://www.npmjs.com/package/%40fontsource%2Fibm-plex-sans) | 5.3.0 | Direct | Runtime | src/Hosting/ElsaControl.Console/package-lock.json | OFL-1.1 | <br>[source](https://registry.npmjs.org/@fontsource/ibm-plex-sans/-/ibm-plex-sans-5.3.0.tgz)<br>`sha512-CbE4CbbEEZJX860XyUiRpsksXIQR8Rp2XDva2VO53NJox9tVNtusrysd2x5YkUEY3ErQ66W1IiiQL8/wihhw5w==` |
 | [@jridgewell/gen-mapping](https://www.npmjs.com/package/%40jridgewell%2Fgen-mapping) | 0.3.13 | Transitive | Development | src/Hosting/ElsaControl.Console/package-lock.json | MIT | <br>[source](https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz)<br>`sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==` |
 | [@jridgewell/remapping](https://www.npmjs.com/package/%40jridgewell%2Fremapping) | 2.3.5 | Transitive | Development | src/Hosting/ElsaControl.Console/package-lock.json | MIT | <br>[source](https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz)<br>`sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==` |
 | [@jridgewell/resolve-uri](https://www.npmjs.com/package/%40jridgewell%2Fresolve-uri) | 3.1.2 | Transitive | Development | src/Hosting/ElsaControl.Console/package-lock.json | MIT | <br>[source](https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz)<br>`sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==` |

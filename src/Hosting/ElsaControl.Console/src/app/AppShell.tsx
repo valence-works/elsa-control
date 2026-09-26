@@ -42,7 +42,7 @@ function AppShellLayout() {
             <Menu aria-hidden size={18} />
           </button>
           <Link to="/admin/overview" className="console-brand console-topbar-brand" aria-label="Elsa Control home">
-            <span className="console-brand-mark"><Aperture aria-hidden size={22} strokeWidth={1.5} /></span>
+            <span className="console-brand-mark"><Aperture aria-hidden size={18} strokeWidth={1.75} /></span>
             <span>elsa<span className="console-brand-product">control</span></span>
           </Link>
           <button className="console-search-trigger" aria-label="Search console" title="Search console (⌘/Ctrl K)" aria-haspopup="dialog" onClick={() => setSearchOpen(true)}>
@@ -88,7 +88,7 @@ function ConsoleSidebar({ onNavigate }: { onNavigate?: () => void }) {
   const linkClass = ({ isActive }: { isActive: boolean }) => "console-nav-link" + (isActive ? " is-active" : "");
   return <>
     <Link to="/admin/overview" className="console-brand" aria-label="Elsa Control home" onClick={onNavigate}>
-      <span className="console-brand-mark"><Aperture aria-hidden size={24} strokeWidth={1.5} /></span>
+      <span className="console-brand-mark"><Aperture aria-hidden size={18} strokeWidth={1.75} /></span>
       <span>elsa<span className="console-brand-product">control</span></span>
     </Link>
     <OrganizationWorkspaceSwitcher />
