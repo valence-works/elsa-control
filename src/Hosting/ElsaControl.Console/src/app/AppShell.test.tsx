@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes } from "react-router-dom";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppShell } from "@/app/AppShell";
+import { consoleNavigation } from "@/app/consoleNavigation";
 import { AdminLoginPage, ConsoleNotFoundPage } from "@/app/routes";
 import { AdminOrganizationsPage } from "@/features/organizations/AdminOrganizationsPage";
 import { AuthProvider } from "@/lib/auth/AuthProvider";
@@ -35,9 +36,8 @@ describe("AppShell", () => {
   it("renders the unified Elsa Control navigation with package catalog active links", async () => {
     renderAppShell();
 
-    expect(screen.getByRole("link", { name: "Workspace" })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Browse console" }));
-    const navigationText = screen.getByRole("navigation", { name: "All pages" }).textContent ?? "";
+    const navigationText = screen.getByRole("navigation", { name: "Primary" }).textContent ?? "";
+    expect(screen.queryByRole("button", { name: "Browse console" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: "Overview" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: "Sources" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: "Packages" }).length).toBeGreaterThan(0);
@@ -64,7 +64,6 @@ describe("AppShell", () => {
 
   it("shows the application build number", async () => {
     renderAppShell("2026.05.16.7");
-    await userEvent.click(screen.getByRole("button", { name: "Browse console" }));
 
     const buildLabels = await screen.findAllByLabelText("Application build number");
     expect(buildLabels).toHaveLength(1);
@@ -85,15 +84,33 @@ describe("AppShell", () => {
     expect(screen.queryByRole("dialog", { name: "Go to a page" })).not.toBeInTheDocument();
   });
 
-  it("exposes all destinations in the shared navigation dialog", async () => {
+  it("keeps every destination visible in the sidebar without opening a dialog", () => {
     renderAppShell();
-    const user = userEvent.setup();
-    const toggle = screen.getByRole("button", { name: "Browse console" });
-    await user.click(toggle);
-    expect(screen.getByRole("dialog", { name: "Browse console" })).toHaveAttribute("open");
+    const sidebar = screen.getByRole("navigation", { name: "Primary" });
+    const destinations = consoleNavigation.flatMap(section => section.items);
+    destinations.forEach(item => expect(within(sidebar).getByRole("link", { name: item.label })).toHaveAttribute("href", item.to));
+    expect(within(sidebar).getByRole("group", { name: "Manage" })).toBeInTheDocument();
     expect(screen.queryByText("Soon")).not.toBeInTheDocument();
+  });
+
+  it("opens the sidebar as a navigation drawer on narrow screens and closes it after navigating", async () => {
+    renderAppShellRoute("/admin/overview");
+    const user = userEvent.setup();
+    const toggle = screen.getByRole("button", { name: "Open navigation" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await user.click(toggle);
+    const drawer = screen.getByRole("dialog", { name: "Console navigation" });
+    expect(drawer).toHaveAttribute("open");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await user.click(within(drawer).getByRole("link", { name: "Releases" }));
+    expect(await screen.findByRole("heading", { name: "Console page not found" })).toBeInTheDocument();
+    expect(drawer).not.toHaveAttribute("open");
+    expect(screen.queryByRole("dialog", { name: "Console navigation" })).not.toBeInTheDocument();
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+
+    await user.click(toggle);
     await user.click(screen.getByRole("button", { name: "Close navigation" }));
-    expect(screen.getByRole("button", { name: "Browse console" })).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
   });
 
   it("changes accent and color mode without disturbing the current form", async () => {
@@ -103,8 +120,8 @@ describe("AppShell", () => {
     expect(document.documentElement).toHaveAttribute("data-console-theme", "aperture");
     expect(document.documentElement).toHaveClass("dark");
     await user.click(screen.getByRole("button", { name: "Appearance" }));
-    expect(screen.getByRole("radio", { name: "Dark" })).toBeChecked();
-    expect(screen.getByRole("radio", { name: "Lime" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Dim" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Cobalt" })).toBeChecked();
     await user.click(screen.getByRole("radio", { name: "Glacier" }));
     await user.click(screen.getByRole("radio", { name: "Light" }));
     expect(document.documentElement).toHaveAttribute("data-theme-accent", "glacier");
@@ -163,7 +180,6 @@ describe("AppShell", () => {
 
   it("keeps workspace choices scoped to the selected organization", async () => {
     renderAppShell("0.0.1", multiOrganizationContextFixture());
-    await userEvent.click(screen.getByRole("button", { name: "Browse console" }));
 
     const organizationSelect = (await screen.findAllByRole("combobox", { name: "Organization" }, { timeout: 5_000 }))[0];
     const workspaceSelect = screen.getAllByRole("combobox", { name: "Workspace" })[0];

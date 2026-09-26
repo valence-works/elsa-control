@@ -73,13 +73,16 @@ The preview entry is not included in the normal production build.
 
 ## Console appearance
 
-Aperture is the shared console design: a compact top bar, engine inventory with
-an inspector, application cards, and a single connection form. Workspace and
-Applications are always available in the header. **More** opens all pages and
-the organization/workspace switcher; Cmd/Ctrl+K opens quick navigation.
+Lanes is the shared console design (theme id `aperture`): a persistent left
+sidebar with every page plus the organization/workspace switcher, a top bar with
+the Cmd/Ctrl+K search trigger, engine inventory with an inspector, application
+cards, and a single connection form. Below 960px the sidebar opens as a drawer
+from the menu button. Type is IBM Plex Sans and IBM Plex Mono, bundled with the
+console through `@fontsource` (no remote font requests).
 
-Open **Appearance** for Lime, Glacier, Iris, or Ember accents and Light, Dark, or
-System mode. Fresh preferences start with charcoal and Lime. Changes apply
+Open **Appearance** for Cobalt, Glacier, Iris, Ember, or Lime accents and Light,
+Dim, Dark, or System mode. Dim is a softer blue-slate dark mode; System follows
+the OS light/dark preference. Fresh preferences start with Dim and Cobalt. Changes apply
 immediately without remounting the current route or resetting form state.
 Preferences persist in the browser and synchronize across tabs. They are not
 account settings; blocked storage falls back to the current session. Feedback
@@ -88,7 +91,7 @@ is collected externally by email; no in-app feedback or telemetry is added.
 ### Extending the framework
 
 `src/lib/theme/themes.ts` separates style definitions from curated accent
-palettes. A style owns complete light/dark surfaces, semantic status colors,
+palettes. A style owns complete light/dim/dark surfaces, semantic status colors,
 header band colors, display/body/mono font stacks, and corner radius. An accent
 owns its fill, the text on that fill, and readable accent text for each mode.
 Success, warning, and destructive colors remain independent of accents.
@@ -96,8 +99,8 @@ Success, warning, and destructive colors remain independent of accents.
 To add an accent, extend `ThemeAccent` and `accentDefinitions`. To add a style,
 extend `ThemeId` and `themes`; the picker shows style choices when there is more
 than one. Keep the shared page layout and navigation. Different fonts, surfaces,
-and corners belong in tokens, not separate page implementations. Native fonts
-are used by default, with no remote font request.
+and corners belong in tokens, not separate page implementations. Fonts are
+bundled from `src/lib/theme/fonts.ts`; never add remote font requests.
 
 `ThemeProvider` applies those tokens before React renders, and the shared CSS
 consumes them. Use `bg-primary` for accent fills, `text-primary-foreground` for
@@ -106,9 +109,11 @@ text on those fills, and `text-primary` for accent links (mapped separately to
 `rounded-ui` rather than fixed fonts or corner sizes in new components.
 
 The version-2 `elsa-control-console-appearance` record is authoritative. Earlier
-style choices migrate to Aperture, preserving mode and mapping teal to Lime,
-blue to Glacier, violet to Iris, and amber/rose to Ember. Legacy keys remain
-readable by older bundles. Invalid settings fall back safely.
+style choices migrate to the current style, preserving mode and mapping teal to
+Lime, blue to Glacier, violet to Iris, and amber/rose to Ember. Legacy keys remain
+readable by older bundles (Dim is written to them as dark). Stored choices are
+kept; only fresh preferences get the Dim/Cobalt default. Invalid settings fall
+back safely.
 
 Verify new combinations for text and focus contrast, form/error states,
 keyboard navigation, text wrapping, and narrow screens. Run the console quality

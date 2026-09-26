@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Aperture, Bot, ChevronDown, ChevronRight, Palette, Search, X } from "lucide-react";
+import { Aperture, Bot, ChevronRight, Menu, Palette, Search, X } from "lucide-react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import { getApplicationInfo } from "@/app/applicationApi";
 import { WorkspaceContextProvider, useWorkspaceContext } from "@/app/WorkspaceContextProvider";
@@ -30,45 +30,50 @@ function AppShellLayout() {
   const isWorkspacePage = location.pathname === "/admin/overview";
   const isConnectionPage = location.pathname === "/admin/engines/connect";
 
+  useEffect(() => setNavigationOpen(false), [location.pathname]);
+
   return (
     <div className="console-shell">
       <a href="#console-content" className="console-skip-link">Skip to content</a>
-      <header className="console-topbar">
-        <Link to="/admin/overview" className="console-brand" aria-label="Elsa Control home">
-          <span className="console-brand-mark"><Aperture aria-hidden size={24} strokeWidth={1.5} /></span>
-          <span>elsa<span className="console-brand-product">control</span></span>
-        </Link>
-        <nav className="console-primary-nav" aria-label="Primary">
-          <NavLink to="/admin/overview">Workspace</NavLink>
-          <NavLink to="/admin/deployments/applications">Applications</NavLink>
-          <button aria-label="Browse console" aria-haspopup="dialog" aria-expanded={navigationOpen} aria-controls="console-navigation" onClick={() => setNavigationOpen(true)}>More <ChevronDown aria-hidden size={12} /></button>
-        </nav>
-        <div className="console-topbar-actions">
-          <button className="console-icon-button" aria-label="Search console" title="Search console (⌘/Ctrl K)" aria-haspopup="dialog" onClick={() => setSearchOpen(true)}>
-            <Search aria-hidden size={16} />
+      <div className="console-sidebar"><ConsoleSidebar /></div>
+      <div className="console-main">
+        <header className="console-topbar">
+          <button className="console-icon-button console-menu-button" aria-label="Open navigation" aria-haspopup="dialog" aria-expanded={navigationOpen} aria-controls="console-navigation" onClick={() => setNavigationOpen(true)}>
+            <Menu aria-hidden size={18} />
           </button>
-          <button className="console-icon-button" aria-label="Appearance" title="Appearance" aria-haspopup="dialog" onClick={() => setAppearanceOpen(true)}><Palette aria-hidden size={18} /></button>
-          <button className="console-icon-button" aria-label="Open Weaver assistant" title="Weaver" onClick={() => setWeaverOpen(true)}><Bot aria-hidden size={18} /></button>
-          {auth.session?.authenticated && <details className="console-account" onKeyDown={event => {
-            if (event.key === "Escape") {
-              event.currentTarget.open = false;
-              event.currentTarget.querySelector("summary")?.focus();
-            }
-          }} onBlur={event => {
-            if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
-          }}>
-            <summary className="console-avatar" aria-label="Account menu">{(auth.session.displayName ?? "User").split(/\s+/).slice(0, 2).map(name => name[0]).join("").toUpperCase()}</summary>
-            <div className="console-account-menu">
-              <p className="text-sm font-medium">{auth.session.displayName}</p>
-              <p className="mt-1 truncate text-xs text-muted-foreground">{auth.session.email}</p>
-              <button className="mt-4 w-full rounded-ui border border-border px-3 py-2 text-left text-sm hover:bg-muted" onClick={() => auth.signOut()}>Sign out</button>
-            </div>
-          </details>}
+          <Link to="/admin/overview" className="console-brand console-topbar-brand" aria-label="Elsa Control home">
+            <span className="console-brand-mark"><Aperture aria-hidden size={18} strokeWidth={1.75} /></span>
+            <span>elsa<span className="console-brand-product">control</span></span>
+          </Link>
+          <button className="console-search-trigger" aria-label="Search console" title="Search console (⌘/Ctrl K)" aria-haspopup="dialog" onClick={() => setSearchOpen(true)}>
+            <Search aria-hidden size={16} />
+            <span className="console-search-trigger-label">Search or jump to…</span>
+            <kbd aria-hidden>⌘K</kbd>
+          </button>
+          <div className="console-topbar-actions">
+            <button className="console-icon-button" aria-label="Appearance" title="Appearance" aria-haspopup="dialog" onClick={() => setAppearanceOpen(true)}><Palette aria-hidden size={18} /></button>
+            <button className="console-icon-button" aria-label="Open Weaver assistant" title="Weaver" onClick={() => setWeaverOpen(true)}><Bot aria-hidden size={18} /></button>
+            {auth.session?.authenticated && <details className="console-account" onKeyDown={event => {
+              if (event.key === "Escape") {
+                event.currentTarget.open = false;
+                event.currentTarget.querySelector("summary")?.focus();
+              }
+            }} onBlur={event => {
+              if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
+            }}>
+              <summary className="console-avatar" aria-label="Account menu">{(auth.session.displayName ?? "User").split(/\s+/).slice(0, 2).map(name => name[0]).join("").toUpperCase()}</summary>
+              <div className="console-account-menu">
+                <p className="text-sm font-medium">{auth.session.displayName}</p>
+                <p className="mt-1 truncate text-xs text-muted-foreground">{auth.session.email}</p>
+                <button className="mt-4 w-full rounded-ui border border-border px-3 py-2 text-left text-sm hover:bg-muted" onClick={() => auth.signOut()}>Sign out</button>
+              </div>
+            </details>}
+          </div>
+        </header>
+        <div className="console-workspace">
+          {!isWorkspacePage && !isConnectionPage && <div className="console-breadcrumb"><span>{selectedWorkspace?.name ?? "Console"}</span><ChevronRight aria-hidden size={12} /><span>{currentPage}</span></div>}
+          <main id="console-content" tabIndex={-1} className="console-content"><Outlet /></main>
         </div>
-      </header>
-      <div className="console-workspace">
-        {!isWorkspacePage && !isConnectionPage && <div className="console-breadcrumb"><span>{selectedWorkspace?.name ?? "Console"}</span><ChevronRight aria-hidden size={12} /><span>{currentPage}</span></div>}
-        <main id="console-content" tabIndex={-1} className="console-content"><Outlet /></main>
       </div>
       <NavigationDialog open={navigationOpen} onClose={() => setNavigationOpen(false)} />
       <QuickNavigate open={searchOpen} onOpen={() => setSearchOpen(true)} onClose={() => setSearchOpen(false)} />
@@ -78,31 +83,47 @@ function AppShellLayout() {
   );
 }
 
-function NavigationDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+function ConsoleSidebar({ onNavigate }: { onNavigate?: () => void }) {
   const auth = useAuth();
+  const linkClass = ({ isActive }: { isActive: boolean }) => "console-nav-link" + (isActive ? " is-active" : "");
+  return <>
+    <Link to="/admin/overview" className="console-brand" aria-label="Elsa Control home" onClick={onNavigate}>
+      <span className="console-brand-mark"><Aperture aria-hidden size={18} strokeWidth={1.75} /></span>
+      <span>elsa<span className="console-brand-product">control</span></span>
+    </Link>
+    <OrganizationWorkspaceSwitcher />
+    <nav aria-label="Primary" className="console-sidebar-nav">
+      {consoleNavigation.map(section => <div className="console-nav-group" role="group" aria-label={section.label} key={section.label}>
+        <span className="console-nav-heading" aria-hidden>{section.label}</span>
+        {section.items.map(item => <NavLink key={item.to} to={item.to} end={item.end} onClick={onNavigate} className={linkClass}><item.icon aria-hidden size={16} /><span>{item.label}</span></NavLink>)}
+      </div>)}
+      {auth.session?.isAdmin ? <div className="console-nav-group" role="group" aria-label="Administration"><span className="console-nav-heading" aria-hidden>Administration</span><NavLink to="/admin/organizations" onClick={onNavigate} className={linkClass}><Aperture aria-hidden size={16} /><span>Organizations</span></NavLink></div> : null}
+    </nav>
+    <ApplicationBuildNumber />
+  </>;
+}
+
+// Narrow viewports hide the sidebar; the same content opens as a modal drawer.
+function NavigationDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     if (open && !dialog.current?.open) dialog.current?.showModal();
     if (!open && dialog.current?.open) dialog.current.close();
   }, [open]);
-  return <dialog ref={dialog} id="console-navigation" className="console-navigation-dialog" aria-label="Browse console" onCancel={onClose} onClose={onClose}>
-    <header className="console-dialog-heading"><h2>Browse console</h2><button className="console-icon-button" aria-label="Close navigation" onClick={onClose}><X aria-hidden size={18} /></button></header>
-    <OrganizationWorkspaceSwitcher />
-    <nav aria-label="All pages">
-      {consoleNavigation.map(section => <div className="console-nav-group" key={section.label}>
-        <h3 className="console-nav-heading">{section.label}</h3>
-        {section.items.map(item => <NavLink key={item.to} to={item.to} end={item.end} onClick={onClose} className={({ isActive }) => "console-nav-link " + (isActive ? "is-active" : "")}><item.icon aria-hidden size={16} /><span>{item.label}</span></NavLink>)}
-      </div>)}
-      {auth.session?.isAdmin ? <div className="console-nav-group"><h3 className="console-nav-heading">Administration</h3><NavLink to="/admin/organizations" onClick={onClose} className={({ isActive }) => "console-nav-link " + (isActive ? "is-active" : "")}><Aperture aria-hidden size={16} /><span>Organizations</span></NavLink></div> : null}
-    </nav>
-    <ApplicationBuildNumber />
+  return <dialog ref={dialog} id="console-navigation" className="console-navigation-dialog" aria-label="Console navigation" onCancel={onClose} onClose={onClose} onClick={event => {
+    if (event.target === event.currentTarget) onClose();
+  }}>
+    {open && <div className="console-navigation-drawer">
+      <button className="console-icon-button console-navigation-close" aria-label="Close navigation" onClick={onClose}><X aria-hidden size={18} /></button>
+      <ConsoleSidebar onNavigate={onClose} />
+    </div>}
   </dialog>;
 }
 
 function OrganizationWorkspaceSwitcher() {
   const auth = useAuth();
   const context = useWorkspaceContext();
-  if (!auth.session?.authenticated) return <span className="console-context-placeholder" />;
+  if (!auth.session?.authenticated) return null;
   if (context.isLoading) return <span className="console-context-placeholder text-muted-foreground text-xs">Loading workspace…</span>;
   if (context.isError || !context.organizations.length) return <span className="console-context-placeholder text-muted-foreground text-xs">No workspace available</span>;
   return <div className="console-context">
