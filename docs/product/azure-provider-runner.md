@@ -125,6 +125,48 @@ parked recovery can resume on the new Control build. A placement change is
 never rebound. These gates do not replace the separate two-instance negative
 authentication and confirmed-cleanup acceptance proof tracked in #287.
 
+## Long-running ARM deployments
+
+The foundation and workload steps submit their resource-group ARM deployment
+with `--no-wait`, so no CLI process is held for the deployment's lifetime and
+`CommandTimeout` bounds each individual command only. The runner then tracks the
+deployment by its deterministic name with short `deployment group show` polls
+every `DeploymentPollInterval` (default 15 seconds) until Azure reports a
+terminal state or the step's own wait limit elapses:
+
+| Setting | Default | Bound |
+|---------|---------|-------|
+| `Deployment:AzureProvider:Runner:FoundationDeploymentTimeout` | 90 minutes | 6 hours |
+| `Deployment:AzureProvider:Runner:WorkloadDeploymentTimeout` | 30 minutes | 6 hours |
+| `Deployment:AzureProvider:Runner:DeploymentPollInterval` | 15 seconds | 5 minutes |
+
+A cold foundation has been observed at 15m29s, just past the 15-minute
+command timeout that previously bounded the whole deployment (#564, #601).
+Outcomes:
+
+- `Succeeded`: the outputs are read from the named deployment and the step
+  completes as before.
+- `Failed` or `Canceled` reported by Azure: the step is `Uncertain` with
+  `azure.deployment.failed`, because a failed deployment can leave partial
+  resources that recovery must observe.
+- Still running when the wait limit elapses: the step is `Uncertain` with
+  `azure.deployment.wait-exceeded`. The runner never cancels or resubmits the
+  remote deployment; recovery observes the same named deployment.
+- Up to two consecutive failed or timed-out state reads are retried. A third,
+  or any cancelled or unproven-terminated read, ends the step as `Uncertain`.
+
+A replayed step (the durable operation already attempted this exact step)
+first lists the named deployment. If it is still in flight, the runner attaches
+to it instead of submitting again. An absent or terminal deployment is
+resubmitted, which is the same idempotent reconcile as before. The executor
+keeps renewing the operation lease while the step polls.
+
+Rollout needs no configuration: the defaults apply. Raise a wait limit only
+when a longer cold start has been observed. To roll back, redeploy the previous
+Control build. Operations parked by this build keep their deterministic
+deployment names, so the previous build's recovery observation still reads
+them. The new settings are ignored by builds that do not know them.
+
 ## Secret-seeding generation guard
 
 The production runner binds every transient secret-resolution request to the

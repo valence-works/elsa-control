@@ -25,6 +25,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private const string SqlConnectionSecretName = "sql-connection";
     private const string SigningKeySecretName = "identity-signing-key";
     private const string AdminPasswordSecretName = "admin-password";
+    private const int MaximumConsecutiveDeploymentObservationFailures = 3;
+    private static readonly HashSet<string> TerminalDeploymentStates = new(["Succeeded", "Failed", "Canceled"], StringComparer.OrdinalIgnoreCase);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = true
@@ -34,6 +36,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private readonly AzureProviderTargetScope _scope;
     private readonly IAzureCommandProcess _process;
     private readonly IAzureSecretResolver _secretResolver;
+    private readonly TimeProvider _timeProvider;
 
     public AzureBicepProviderRunner(
         AzureProviderRunnerOptions options,
@@ -47,12 +50,14 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         AzureProviderRunnerOptions options,
         AzureProviderTargetScope scope,
         IAzureCommandProcess process,
-        IAzureSecretResolver? secretResolver = null)
+        IAzureSecretResolver? secretResolver = null,
+        TimeProvider? timeProvider = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _scope = scope ?? throw new ArgumentNullException(nameof(scope));
         _process = process ?? throw new ArgumentNullException(nameof(process));
         _secretResolver = secretResolver ?? new UnconfiguredAzureSecretResolver();
+        _timeProvider = timeProvider ?? TimeProvider.System;
         _options.Validate();
         _scope.Validate();
     }
@@ -683,17 +688,14 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         }
 
         var deploymentName = FoundationDeploymentName(command);
-        EnsureMutationAuthority(command);
-        var output = await ExecuteAzAsync(command,
-            FoundationDeploymentArguments(command, deploymentName, provisionDatabase),
-            ParseDeploymentOutputsAsync,
-            cancellationToken);
-        if (!output.Succeeded || output.Value is null)
-            return ProcessFailure(command, AzureProviderOperationPhase.FoundationSubmitted, output, resources, mutation: true);
+        var deployment = await DeployAndAwaitAsync(command, AzureProviderOperationPhase.FoundationSubmitted, deploymentName,
+            FoundationDeploymentArguments(command, deploymentName, provisionDatabase), _options.FoundationDeploymentTimeout, resources, cancellationToken);
+        if (deployment.Error is not null)
+            return deployment.Error;
 
         try
         {
-            resources = ProjectFoundation(command, output.Value!.Value, command.Plan, deploymentName);
+            resources = ProjectFoundation(command, deployment.Outputs!, command.Plan, deploymentName);
             return Completed(command, AzureProviderOperationPhase.FoundationSubmitted, resources);
         }
         catch (ArgumentException exception)
@@ -1145,24 +1147,21 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             return revision.Error;
 
         var deploymentName = WorkloadDeploymentName(command);
-        EnsureMutationAuthority(command);
-        var output = await ExecuteAzAsync(command,
-            WorkloadDeploymentArguments(command, deploymentName, revision.Suffix!, stable),
-            ParseDeploymentOutputsAsync,
-            cancellationToken);
-        if (!output.Succeeded || output.Value is null)
-            return ProcessFailure(command, AzureProviderOperationPhase.WorkloadReady, output, command.Resources, mutation: true);
+        var deployment = await DeployAndAwaitAsync(command, AzureProviderOperationPhase.WorkloadReady, deploymentName,
+            WorkloadDeploymentArguments(command, deploymentName, revision.Suffix!, stable), _options.WorkloadDeploymentTimeout, command.Resources, cancellationToken);
+        if (deployment.Error is not null)
+            return deployment.Error;
 
         AzureProviderResourceReferences resources;
         try
         {
-            resources = ProjectWorkload(command, output.Value!.Value, command.Resources, command.Plan, deploymentName, revision.Suffix!, stable);
+            resources = ProjectWorkload(command, deployment.Outputs!, command.Resources, command.Plan, deploymentName, revision.Suffix!, stable);
         }
         catch (ArgumentException exception)
         {
             return Failed(command, AzureProviderOperationPhase.WorkloadReady, "azure.workload.output-invalid", exception.Message);
         }
-        if (!HasExpectedManagedHandoffCallback(command, output.Value!.Value))
+        if (!HasExpectedManagedHandoffCallback(command, deployment.Outputs!))
             return Failed(command, AzureProviderOperationPhase.WorkloadReady, "azure.handoff.callback-mismatch",
                 "The workload handoff callback is not the callback of its verified endpoint origin.", resources);
 
@@ -2220,7 +2219,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             $"sqlWorkflowPackageVersion={command.Plan.SqlWorkflowPackageVersion}", $"sqlQuartzPackageVersion={command.Plan.SqlQuartzPackageVersion}",
             ..CapacityArguments(command), ..ManagedHandoffArguments(command),
             $"templateFingerprint={command.Context.TemplateFingerprint}", "deployWorkload=false", ..DatabaseProvisioningArguments(provisionDatabase),
-            "--query", "properties.outputs", "--output", "json", "--only-show-errors"];
+            "--no-wait", "--output", "none", "--only-show-errors"];
 
     private IReadOnlyList<string> AcrDeploymentArguments(AzureProviderRunnerCommand command, string identityId, string principalId, string deploymentName) =>
         ["deployment", "group", "create", "--subscription", _scope.RegistrySubscriptionId, "--resource-group", _scope.RegistryResourceGroupName,
@@ -2241,7 +2240,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             $"sqlWorkflowPackageVersion={command.Plan.SqlWorkflowPackageVersion}", $"sqlQuartzPackageVersion={command.Plan.SqlQuartzPackageVersion}",
             ..CapacityArguments(command), ..ManagedHandoffArguments(command),
             $"templateFingerprint={command.Context.TemplateFingerprint}", "deployWorkload=true", ..DatabaseProvisioningArguments(provisionDatabase: false), $"workloadRevisionSuffix={revision}",
-            $"stableTrafficRevisionName={stable ?? string.Empty}", "--query", "properties.outputs", "--output", "json", "--only-show-errors"];
+            $"stableTrafficRevisionName={stable ?? string.Empty}", "--no-wait", "--output", "none", "--only-show-errors"];
 
     private void ValidateCommand(AzureProviderRunnerCommand command)
     {
@@ -2411,6 +2410,91 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             return false;
         return officers.Length == 0 || string.Equals(officers[0].PrincipalId, _options.SqlBootstrapObjectId, StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// Submits a resource-group ARM deployment without holding a CLI process for its lifetime, then
+    /// tracks it by its deterministic name with short polls. A replayed step attaches to a deployment
+    /// that is still in flight instead of resubmitting it. The local wait limit never cancels the
+    /// remote deployment: it ends the step as Uncertain so recovery observes the same named deployment.
+    /// </summary>
+    private async Task<(DeploymentOutputs? Outputs, AzureProviderRunnerResult? Error)> DeployAndAwaitAsync(
+        AzureProviderRunnerCommand command,
+        AzureProviderOperationPhase phase,
+        string deploymentName,
+        IReadOnlyList<string> submitArguments,
+        TimeSpan waitLimit,
+        AzureProviderResourceReferences resources,
+        CancellationToken cancellationToken)
+    {
+        string[] deploymentScope = ["--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command)];
+        var inFlight = false;
+        if (command.IsStepReplay)
+        {
+            var existing = await ExecuteAzAsync(command,
+                ["deployment", "group", "list", ..deploymentScope,
+                    "--query", $"[?name=='{deploymentName}'].properties.provisioningState", "--output", "json", "--only-show-errors"],
+                ParseStringArrayAsync,
+                cancellationToken);
+            if (!existing.Succeeded || existing.Value is null)
+                return (null, ProcessFailure(command, phase, existing, resources, mutation: true));
+            inFlight = existing.Value.Value is [var existingState] && !IsTerminalDeploymentState(existingState);
+        }
+
+        if (!inFlight)
+        {
+            EnsureMutationAuthority(command);
+            var submitted = await ExecuteAzAsync<AzureCommandNoOutput>(command, submitArguments, static _ => AzureCommandNoOutput.Instance, cancellationToken);
+            if (!submitted.Succeeded)
+                return (null, ProcessFailure(command, phase, submitted, resources, mutation: true));
+        }
+
+        var deadline = _timeProvider.GetUtcNow() + waitLimit;
+        var failedObservations = 0;
+        while (true)
+        {
+            var state = await ExecuteAzAsync(command,
+                ["deployment", "group", "show", ..deploymentScope, "--name", deploymentName,
+                    "--query", "properties.provisioningState", "--output", "tsv", "--only-show-errors"],
+                ParseStringAsync,
+                cancellationToken);
+            if (state.Succeeded)
+            {
+                failedObservations = 0;
+                if (string.Equals(state.Value?.Value, "Succeeded", StringComparison.OrdinalIgnoreCase))
+                    break;
+                if (IsTerminalDeploymentState(state.Value?.Value))
+                    return (null, Uncertain(command, phase, "azure.deployment.failed",
+                        "Azure reported the deployment as failed or canceled, so its partial result requires recovery.", resources));
+            }
+            else if (!IsTransientObservationFailure(state) || ++failedObservations >= MaximumConsecutiveDeploymentObservationFailures)
+            {
+                return (null, ProcessFailure(command, phase, state, resources, mutation: true));
+            }
+
+            if (_timeProvider.GetUtcNow() >= deadline)
+                return (null, Uncertain(command, phase, "azure.deployment.wait-exceeded",
+                    "The Azure deployment was still running when its configured wait limit elapsed. It was neither cancelled nor resubmitted.", resources));
+            await Task.Delay(_options.DeploymentPollInterval, _timeProvider, cancellationToken);
+        }
+
+        var outputs = await ExecuteAzAsync(command,
+            ["deployment", "group", "show", ..deploymentScope, "--name", deploymentName,
+                "--query", "properties.outputs", "--output", "json", "--only-show-errors"],
+            ParseDeploymentOutputsAsync,
+            cancellationToken);
+        return outputs.Succeeded && outputs.Value is not null
+            ? (outputs.Value.Value, null)
+            : (null, ProcessFailure(command, phase, outputs, resources, mutation: true));
+    }
+
+    private static bool IsTerminalDeploymentState(string? state) =>
+        state is not null && TerminalDeploymentStates.Contains(state);
+
+    /// <summary>A plain failed or timed-out read may be retried; cancellation and unproven termination may not.</summary>
+    private static bool IsTransientObservationFailure<T>(AzureCommandProcessResult<T> result)
+        where T : AzureCommandSafeOutput =>
+        result.Status is AzureCommandProcessStatus.Failed or AzureCommandProcessStatus.TimedOut &&
+        result.FailureKind is not (AzureCommandProcessFailureKind.Cancelled or AzureCommandProcessFailureKind.TerminationUncertain);
 
     private static string? RequireFoundation(AzureProviderResourceReferences resources) =>
         resources.ResourceGroupName is null || resources.FoundationDeploymentId is null || resources.WorkloadIdentityResourceId is null ||

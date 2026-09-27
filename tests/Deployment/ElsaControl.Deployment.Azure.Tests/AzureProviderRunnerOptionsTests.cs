@@ -37,6 +37,34 @@ public sealed class AzureProviderRunnerOptionsTests : IDisposable
     }
 
     [Fact]
+    public void Defaults_the_foundation_deployment_wait_well_above_the_command_timeout()
+    {
+        var options = ValidOptions();
+
+        Assert.True(options.FoundationDeploymentTimeout > options.CommandTimeout);
+    }
+
+    [Theory]
+    [InlineData(nameof(AzureProviderRunnerOptions.FoundationDeploymentTimeout), 0)]
+    [InlineData(nameof(AzureProviderRunnerOptions.FoundationDeploymentTimeout), 361)]
+    [InlineData(nameof(AzureProviderRunnerOptions.WorkloadDeploymentTimeout), 0)]
+    [InlineData(nameof(AzureProviderRunnerOptions.WorkloadDeploymentTimeout), 361)]
+    [InlineData(nameof(AzureProviderRunnerOptions.DeploymentPollInterval), -1)]
+    [InlineData(nameof(AzureProviderRunnerOptions.DeploymentPollInterval), 6)]
+    public void Rejects_deployment_tracking_bounds_outside_the_governed_range(string option, int minutes)
+    {
+        var value = TimeSpan.FromMinutes(minutes);
+        var options = option switch
+        {
+            nameof(AzureProviderRunnerOptions.FoundationDeploymentTimeout) => ValidOptions() with { FoundationDeploymentTimeout = value },
+            nameof(AzureProviderRunnerOptions.WorkloadDeploymentTimeout) => ValidOptions() with { WorkloadDeploymentTimeout = value },
+            _ => ValidOptions() with { DeploymentPollInterval = value }
+        };
+
+        Assert.Equal(option, Assert.Throws<ArgumentOutOfRangeException>(options.Validate).ParamName);
+    }
+
+    [Fact]
     public void Rejects_template_authority_outside_the_bounded_tree()
     {
         for (var index = 0; index < 33; index++)
