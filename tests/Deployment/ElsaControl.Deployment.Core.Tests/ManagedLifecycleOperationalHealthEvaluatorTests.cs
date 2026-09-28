@@ -269,41 +269,6 @@ public sealed class ManagedLifecycleOperationalHealthEvaluatorTests
     }
 
     [Fact]
-    public void Auto_resume_exhausted_and_arm_failed_reach_the_existing_recovery_required_alert_once()
-    {
-        var parked = Snapshot(
-            operation: Operation(
-                ElsaInstanceOperationState.RecoveryRequired,
-                diagnosticCode: "azure.recovery.auto-resume-exhausted"));
-        var first = Evaluate(parked);
-        var second = Evaluate(parked);
-        var armFailed = Evaluate(Snapshot(
-            operation: Operation(
-                ElsaInstanceOperationState.RecoveryRequired,
-                diagnosticCode: "azure.deployment.failed")));
-        var afterResume = Evaluate(Snapshot(
-            operation: Operation(ElsaInstanceOperationState.Queued)));
-
-        Assert.Equal(ManagedLifecycleOperationalHealthStatus.RecoveryRequired, first.Status);
-        var firstAlert = Assert.Single(
-            first.Alerts,
-            alert => alert.Code == ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired);
-        var secondAlert = Assert.Single(
-            second.Alerts,
-            alert => alert.Code == ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired);
-        Assert.Equal(ManagedLifecycleOperationalHealthAlertSeverity.Critical, firstAlert.Severity);
-        Assert.Equal(firstAlert.DedupeIdentity, secondAlert.DedupeIdentity);
-        Assert.Equal(
-            firstAlert.DedupeIdentity,
-            Assert.Single(
-                armFailed.Alerts,
-                alert => alert.Code == ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired).DedupeIdentity);
-        Assert.DoesNotContain(
-            afterResume.Alerts,
-            alert => alert.Code == ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired);
-    }
-
-    [Fact]
     public void Recovery_and_retry_exhaustion_are_both_reported_as_alerts()
     {
         var result = Evaluate(

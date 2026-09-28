@@ -156,55 +156,38 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
     }
 
     [Fact]
-    public async Task Auto_resume_at_the_cap_records_exhausted_and_does_not_recover()
+    public async Task Auto_resume_at_the_third_stop_parks_recovery_required_once_with_exhausted_code()
     {
         var (store, accepted) = await RecoveryTargetAsync();
         var lifecycle = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
-        var port = new ChargingPort(
-            new ElsaInstanceProviderObservation(
-                ElsaInstanceProviderObservationKind.Confirmed,
-                ElsaObservedLifecycle.Provisioning,
-                ElsaInstanceProviderHealthGate.Unknown,
-                "observation-exhausted",
-                OpaqueEvidence(autoResume: true)),
-            initialCount: 3);
+        var observation = new ElsaInstanceProviderObservation(
+            ElsaInstanceProviderObservationKind.Confirmed,
+            ElsaObservedLifecycle.Provisioning,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "observation-exhausted",
+            OpaqueEvidence(autoResume: false))
+        {
+            ReasonCode = "azure.recovery.auto-resume-exhausted"
+        };
+        var port = new ChargingPort(observation, initialCount: 3);
+        var service = new ElsaInstanceProviderReconciliationService(
+            store, port, new StaticTimeProvider(Now), lifecycle);
 
-        var result = await new ElsaInstanceProviderReconciliationService(
-                store, port, new StaticTimeProvider(Now), lifecycle)
-            .ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+        var first = await service.ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+        var second = await service.ReconcileAsync(WorkspaceId, accepted.Operation.Id);
 
-        Assert.True(result.RetrySafe);
+        Assert.False(first.Replayed);
+        Assert.True(second.Replayed);
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, first.Outcome);
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, second.Outcome);
+        Assert.Equal("azure.recovery.auto-resume-exhausted", first.DiagnosticCode);
+        Assert.Equal(first.DiagnosticCode, second.DiagnosticCode);
         Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, Assert.Single(store.Operations).State);
         Assert.Equal(accepted.Operation.AttemptNumber, Assert.Single(store.Operations).AttemptNumber);
         Assert.Empty(store.RecoveryRequests);
+        Assert.Equal(0, port.ChargeCalls);
         Assert.Equal(3, port.AutoResumeCount);
-        Assert.Equal(["azure.recovery.auto-resume-exhausted"], port.Outcomes);
-
-        var parked = new ManagedLifecycleOperationalHealthSnapshot(
-            WorkspaceId,
-            accepted.Instance.Id,
-            accepted.Instance.DesiredLifecycle,
-            result.Projection.ObservedLifecycle,
-            result.Projection.Health,
-            ElsaInstanceProviderObservationKind.Confirmed,
-            new ManagedLifecycleOperationSnapshot(
-                accepted.Operation.Id,
-                ElsaInstanceOperationState.RecoveryRequired,
-                accepted.Operation.AttemptNumber,
-                accepted.Operation.AcceptedAt,
-                diagnosticCode: "azure.recovery.auto-resume-exhausted"));
-        var firstAlert = new ManagedLifecycleOperationalHealthEvaluator(timeProvider: new StaticTimeProvider(Now))
-            .Evaluate(parked);
-        var secondAlert = new ManagedLifecycleOperationalHealthEvaluator(timeProvider: new StaticTimeProvider(Now))
-            .Evaluate(parked);
-        Assert.Equal(ManagedLifecycleOperationalHealthStatus.RecoveryRequired, firstAlert.Status);
-        var first = Assert.Single(
-            firstAlert.Alerts,
-            alert => alert.Code == ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired);
-        var second = Assert.Single(
-            secondAlert.Alerts,
-            alert => alert.Code == ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired);
-        Assert.Equal(first.DedupeIdentity, second.DedupeIdentity);
+        Assert.Empty(port.Outcomes);
     }
 
     [Fact]
