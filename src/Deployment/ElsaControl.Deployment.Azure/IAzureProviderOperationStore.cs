@@ -126,7 +126,6 @@ public interface IAzureProviderOperationStore
         Guid workspaceId,
         Guid operationId,
         string reasonCode,
-        DateTimeOffset occurredAt,
         CancellationToken cancellationToken = default) =>
         Task.CompletedTask;
 }

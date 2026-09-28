@@ -274,7 +274,8 @@ public sealed record ElsaInstanceProviderReconciliationRequest(
     ElsaDesiredLifecycle DesiredLifecycle,
     ElsaResolvedPlanReference? ResolvedPlanReference,
     ElsaCurrentDeploymentReference? CurrentDeploymentReference,
-    int InstanceVersion = 0);
+    int InstanceVersion = 0,
+    bool OperatorInitiated = false);
 
 public sealed record ElsaInstanceProviderReconciliationTarget(
     ElsaInstance Instance,
@@ -322,11 +323,24 @@ public sealed record ElsaInstanceProviderReconciliationCommit(
         if (Instance.Id != InstanceId || Instance.WorkspaceId != WorkspaceId ||
             Operation.Id != OperationId || Operation.InstanceId != InstanceId ||
             Operation.AttemptNumber != ExpectedAttemptNumber ||
-            RetrySafe != (RetryEvidenceReference is not null && RetryEvidenceDigest is not null) ||
+            !IsRetrySafeConsistent() ||
             Operation.State is not (ElsaInstanceOperationState.RecoveryRequired or ElsaInstanceOperationState.Succeeded or ElsaInstanceOperationState.Failed))
             throw new InvalidOperationException("Provider reconciliation commit state is invalid.");
-        if (RetrySafe)
-            _ = new ElsaInstanceProviderRetryEvidence(RetryEvidenceReference!, RetryEvidenceDigest!);
+        if (RetrySafe && RetryEvidenceReference is not null && RetryEvidenceDigest is not null)
+            _ = new ElsaInstanceProviderRetryEvidence(RetryEvidenceReference, RetryEvidenceDigest);
+    }
+
+    private bool IsRetrySafeConsistent()
+    {
+        var hasEvidence = RetryEvidenceReference is not null && RetryEvidenceDigest is not null;
+        if (RetrySafe == hasEvidence)
+            return true;
+        return RetrySafe &&
+            !hasEvidence &&
+            string.Equals(
+                DiagnosticCode,
+                ElsaInstanceProviderReconciliationService.AutoResumeExhaustedCode,
+                StringComparison.Ordinal);
     }
 }
 

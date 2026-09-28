@@ -176,6 +176,30 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
             latest[instanceId] = MapOperation(operation);
         }
 
+        if (latest.Count == 0)
+            return latest;
+
+        var operationIds = latest.Values.Select(x => x.Id).ToArray();
+        var recoveryStarts = await dbContext.ElsaInstanceRecoveryRequests
+            .AsNoTracking()
+            .Where(x => x.WorkspaceId == workspaceId && operationIds.Contains(x.OperationId))
+            .Select(x => new { x.OperationId, x.AttemptNumber, x.AcceptedAt })
+            .ToListAsync(cancellationToken);
+        if (recoveryStarts.Count == 0)
+            return latest;
+
+        foreach (var instanceId in latest.Keys.ToArray())
+        {
+            var operation = latest[instanceId];
+            var attemptStartedAt = recoveryStarts
+                .Where(x => x.OperationId == operation.Id && x.AttemptNumber == operation.AttemptNumber)
+                .Select(x => (DateTimeOffset?)x.AcceptedAt)
+                .OrderByDescending(x => x)
+                .FirstOrDefault();
+            if (attemptStartedAt is not null)
+                latest[instanceId] = operation with { AttemptStartedAt = attemptStartedAt };
+        }
+
         return latest;
     }
 

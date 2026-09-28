@@ -132,6 +132,9 @@ public sealed class ElsaInstanceProviderReconciliationService(
             var retryEvidence = projection.Operation.State == ElsaInstanceOperationState.RecoveryRequired
                 ? observation.RetryEvidence
                 : null;
+            var exhausted = string.Equals(
+                    observation.ReasonCode, AutoResumeExhaustedCode, StringComparison.Ordinal) ||
+                string.Equals(projection.Code, AutoResumeExhaustedCode, StringComparison.Ordinal);
             var result = await store.CommitAsync(new(
                 workspaceId,
                 instance.Id,
@@ -143,7 +146,7 @@ public sealed class ElsaInstanceProviderReconciliationService(
                 projection.Instance,
                 projection.Operation,
                 projection.Code,
-                retryEvidence is not null,
+                retryEvidence is not null || exhausted,
                 retryEvidence?.Reference,
                 retryEvidence?.Digest,
                 projection.At), cancellationToken);

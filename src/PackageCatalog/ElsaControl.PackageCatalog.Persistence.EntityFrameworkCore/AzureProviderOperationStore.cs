@@ -372,6 +372,25 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         return entity is null ? null : ToRecoveryObservationReceipt(entity);
     }
 
+    async Task<AzureProviderRecoveryObservationReceipt?> IAzureProviderRecoveryObservationStore.GetLatestReceiptForOperationAsync(
+        Guid workspaceId,
+        Guid lifecycleOperationId,
+        Guid providerOperationId,
+        CancellationToken cancellationToken)
+    {
+        if (workspaceId == Guid.Empty || lifecycleOperationId == Guid.Empty || providerOperationId == Guid.Empty)
+            return null;
+
+        var entity = await db.AzureProviderRecoveryObservations.AsNoTracking()
+            .Where(x => x.WorkspaceId == workspaceId &&
+                        x.LifecycleOperationId == lifecycleOperationId &&
+                        x.ProviderOperationId == providerOperationId)
+            .OrderByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
+            .FirstOrDefaultAsync(cancellationToken);
+        return entity is null ? null : ToRecoveryObservationReceipt(entity);
+    }
+
     private async Task<AzureProviderRecoveryObservationRecord?> LoadAcceptedRecoveryObservationAsync(
         AzureProviderRecoveryObservationBinding binding,
         CancellationToken cancellationToken,
@@ -1298,12 +1317,10 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         Guid workspaceId,
         Guid operationId,
         string reasonCode,
-        DateTimeOffset occurredAt,
         CancellationToken cancellationToken = default)
     {
         if (!AzureProviderOperationValidation.IsSafeCode(reasonCode))
             return;
-        _ = occurredAt;
         var entity = await db.AzureProviderOperations.SingleOrDefaultAsync(
             x => x.WorkspaceId == workspaceId && x.Id == operationId, cancellationToken);
         if (entity is null)

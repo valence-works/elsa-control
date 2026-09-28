@@ -91,7 +91,8 @@ public sealed record ElsaInstanceOperationSummary(
     string? FailureCode,
     ElsaObservedLifecycle? ReconciledObservedLifecycle,
     ElsaInstanceHealth? ReconciledHealth,
-    string? ReasonCode = null);
+    string? ReasonCode = null,
+    DateTimeOffset? AttemptStartedAt = null);
 
 /// <summary>
 /// Safe operator projection of one instance's unfinished lifecycle topology.

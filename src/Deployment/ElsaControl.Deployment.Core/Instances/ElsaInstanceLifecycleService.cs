@@ -12,7 +12,8 @@ namespace ElsaControl.Deployment.Core.Instances;
 /// </summary>
 public sealed class ElsaInstanceLifecycleService(
     IElsaInstanceLifecycleStore store,
-    TimeProvider? timeProvider = null)
+    TimeProvider? timeProvider = null,
+    IElsaInstanceProviderReconciliationPort? provider = null)
 {
     public const string CreateIdempotencyScope = "instances";
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
@@ -137,13 +138,69 @@ public sealed class ElsaInstanceLifecycleService(
             request.ExpectedVersion, request.IdempotencyKey, null, null, request.Reason, cancellationToken,
             actorAccountId: request.ActorAccountId);
 
-    public Task<ElsaInstanceLifecycleAcceptance> RecoverAsync(
+    public async Task<ElsaInstanceLifecycleAcceptance> RecoverAsync(
         ElsaInstanceLifecycleRequest request,
-        CancellationToken cancellationToken = default) =>
-        AcceptAsync(request.WorkspaceId, request.InstanceId, ElsaInstanceOperationAction.Recover,
+        CancellationToken cancellationToken = default)
+    {
+        await RefreshOperatorRecoveryEvidenceAsync(request, cancellationToken);
+        return await AcceptAsync(request.WorkspaceId, request.InstanceId, ElsaInstanceOperationAction.Recover,
             request.ExpectedVersion, request.IdempotencyKey, null, null, request.Reason, cancellationToken,
             actorAccountId: request.ActorAccountId,
             expectedOperationId: request.ExpectedOperationId);
+    }
+
+    private async Task RefreshOperatorRecoveryEvidenceAsync(
+        ElsaInstanceLifecycleRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (provider is null || store is not IElsaInstanceProviderReconciliationStore reconciliation)
+            return;
+
+        var instance = await store.GetInstanceAsync(request.WorkspaceId, request.InstanceId, cancellationToken);
+        if (instance is null || instance.Version != request.ExpectedVersion)
+            return;
+        var operation = await store.GetActiveOperationAsync(request.WorkspaceId, request.InstanceId, cancellationToken);
+        if (operation is null ||
+            operation.State != ElsaInstanceOperationState.RecoveryRequired ||
+            (request.ExpectedOperationId is { } expected && operation.Id != expected))
+            return;
+
+        ElsaInstanceProviderObservation observation;
+        try
+        {
+            observation = await provider.ObserveAsync(
+                new ElsaInstanceProviderReconciliationRequest(
+                    request.WorkspaceId,
+                    instance.Id,
+                    operation.Id,
+                    operation.AttemptNumber,
+                    instance.DesiredLifecycle,
+                    instance.ResolvedPlanReference,
+                    instance.CurrentDeploymentReference,
+                    instance.Version,
+                    OperatorInitiated: true),
+                cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return;
+        }
+
+        if (observation.RetryEvidence is not { } evidence)
+            return;
+        await reconciliation.AttachRetryEvidenceAsync(
+            request.WorkspaceId,
+            instance.Id,
+            operation.Id,
+            evidence.Reference,
+            evidence.Digest,
+            observation.ReasonCode,
+            cancellationToken);
+    }
 
     public Task<ElsaInstanceLifecycleAcceptance> RecoverDeleteAsync(
         ElsaInstanceLifecycleRequest request,

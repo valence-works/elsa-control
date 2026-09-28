@@ -172,7 +172,8 @@ public sealed record AzureProviderRecoveryRequest(
     AzureProviderOperation Operation,
     AzureWorkloadPlan Plan,
     AzureProviderResourceAssignment? Assignment = null,
-    AzureProviderTargetScope? ProviderScope = null)
+    AzureProviderTargetScope? ProviderScope = null,
+    bool OperatorInitiated = false)
 {
     public void Validate()
     {

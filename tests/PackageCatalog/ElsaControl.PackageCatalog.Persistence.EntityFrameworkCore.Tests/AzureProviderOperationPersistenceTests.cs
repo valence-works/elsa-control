@@ -1238,7 +1238,7 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
         Assert.Equal(workload.Version, atCap.Version);
 
         await store.RecordAutoResumeOutcomeAsync(
-            _workspaceId, created.Id, AzureLateSuccessCodes.AutoResumeAccepted, now.AddMinutes(10));
+            _workspaceId, created.Id, AzureLateSuccessCodes.AutoResumeAccepted);
         var afterOutcome = await store.GetAsync(_workspaceId, created.Id);
         Assert.Equal(AzureLateSuccessCodes.AutoResumeAccepted, afterOutcome!.LastObservationReasonCode);
         Assert.Equal(workload.Version, afterOutcome.Version);
@@ -1260,7 +1260,7 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
             "azure.operation.recovery-required", now.AddSeconds(5), claimed.Version));
 
         await store.RecordAutoResumeOutcomeAsync(
-            _workspaceId, operation.Id, AzureLateSuccessCodes.AutoResumeAccepted, now.AddSeconds(6));
+            _workspaceId, operation.Id, AzureLateSuccessCodes.AutoResumeAccepted);
         var afterOutcome = await store.GetAsync(_workspaceId, operation.Id);
         Assert.Equal(parked.Version, afterOutcome!.Version);
         Assert.DoesNotContain(
@@ -1293,7 +1293,7 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
             "azure.operation.recovery-required", now.AddSeconds(5), claimed.Version));
 
         await store.RecordAutoResumeOutcomeAsync(
-            _workspaceId, operation.Id, AzureLateSuccessCodes.AutoResumeExhausted, now.AddSeconds(6));
+            _workspaceId, operation.Id, AzureLateSuccessCodes.AutoResumeExhausted);
         var afterOutcome = await store.GetAsync(_workspaceId, operation.Id);
         Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes, afterOutcome!.AutoResumeCount);
         Assert.Equal(parked.Version, afterOutcome.Version);

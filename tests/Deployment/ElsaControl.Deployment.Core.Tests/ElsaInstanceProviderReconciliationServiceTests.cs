@@ -261,8 +261,10 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
             ElsaInstanceProviderObservationKind.Confirmed,
             ElsaObservedLifecycle.Provisioning,
             ElsaInstanceProviderHealthGate.Unknown,
-            "observation-manual-after-cap",
-            OpaqueEvidence(autoResume: false));
+            "observation-manual-after-cap")
+        {
+            ReasonCode = ElsaInstanceProviderReconciliationService.AutoResumeExhaustedCode
+        };
         var lifecycle = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
         var port = new ChargingPort(observation, initialCount: 3);
 
@@ -271,6 +273,7 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
             .ReconcileAsync(WorkspaceId, accepted.Operation.Id);
 
         Assert.True(result.RetrySafe);
+        Assert.Equal(ElsaInstanceProviderReconciliationService.AutoResumeExhaustedCode, result.DiagnosticCode);
         Assert.Equal(0, port.ChargeCalls);
         Assert.Empty(store.RecoveryRequests);
         Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, Assert.Single(store.Operations).State);

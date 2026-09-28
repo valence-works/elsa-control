@@ -1095,6 +1095,9 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             "overview-attempt-restart"));
         Assert.Equal(HttpStatusCode.Accepted, restart.StatusCode);
         var restarted = (await restart.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>())!;
+        var afterRestart = await client.GetControlJsonAsync<ManagedElsaInstanceOverviewResponse>(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        var originalStartedAt = afterRestart!.ActiveOperation!.StartedAt;
 
         await ParkRecoveryRequiredAsync(app, restarted.OperationId, "a");
         using var recover2 = await client.SendAsync(Mutation(
@@ -1108,8 +1111,8 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         var overview2 = await client.GetControlJsonAsync<ManagedElsaInstanceOverviewResponse>(
             $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
         Assert.Equal(2, overview2!.ActiveOperation!.Progress!.AttemptNumber);
+        Assert.Equal(originalStartedAt, overview2.ActiveOperation.StartedAt);
         Assert.NotNull(overview2.ActiveOperation.Progress.AttemptStartedAt);
-        Assert.Equal(overview2.ActiveOperation.StartedAt, overview2.ActiveOperation.Progress.AttemptStartedAt);
         var startedAt2 = overview2.ActiveOperation.Progress.AttemptStartedAt!.Value;
 
         await ParkRecoveryRequiredAsync(app, restarted.OperationId, "b");
@@ -1124,8 +1127,8 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         var overview3 = await client.GetControlJsonAsync<ManagedElsaInstanceOverviewResponse>(
             $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
         Assert.Equal(3, overview3!.ActiveOperation!.Progress!.AttemptNumber);
+        Assert.Equal(originalStartedAt, overview3.ActiveOperation.StartedAt);
         Assert.NotNull(overview3.ActiveOperation.Progress.AttemptStartedAt);
-        Assert.Equal(overview3.ActiveOperation.StartedAt, overview3.ActiveOperation.Progress.AttemptStartedAt);
         Assert.True(overview3.ActiveOperation.Progress.AttemptStartedAt > startedAt2);
     }
 

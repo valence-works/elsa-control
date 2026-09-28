@@ -93,6 +93,39 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         return ReconciliationResult(operation, replayed: false);
     }
 
+    public async Task AttachRetryEvidenceAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        Guid operationId,
+        string reference,
+        string digest,
+        string? reasonCode,
+        CancellationToken cancellationToken = default)
+    {
+        if (workspaceId == Guid.Empty || instanceId == Guid.Empty || operationId == Guid.Empty ||
+            string.IsNullOrWhiteSpace(reference) || string.IsNullOrWhiteSpace(digest))
+            return;
+
+        dbContext.ChangeTracker.Clear();
+        var diagnostic = reasonCode is { Length: > 0 and <= 128 } ? reasonCode : null;
+        await dbContext.ElsaInstanceOperations
+            .Where(x => x.WorkspaceId == workspaceId &&
+                        x.Id == operationId &&
+                        x.InstanceId == instanceId &&
+                        x.State == ElsaInstanceOperationState.RecoveryRequired)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(x => x.FailureCode, ElsaInstanceProviderReconciliationService.RetrySafeCode)
+                    .SetProperty(x => x.FailureSummary, (string?)null)
+                    .SetProperty(x => x.ReconciliationRetryEvidenceReference, reference)
+                    .SetProperty(x => x.ReconciliationRetryEvidenceDigest, digest)
+                    .SetProperty(
+                        x => x.ReconciliationDiagnosticCode,
+                        diagnostic ?? ElsaInstanceProviderReconciliationService.RetrySafeCode),
+                cancellationToken);
+        dbContext.ChangeTracker.Clear();
+    }
+
     public async Task<ElsaInstanceProviderReconciliationResult> CommitAsync(
         ElsaInstanceProviderReconciliationCommit commit,
         CancellationToken cancellationToken = default)
@@ -2536,10 +2569,10 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             requestedOperation.State == ElsaInstanceOperationState.Queued &&
             requestedOperation.AttemptNumber == existingOperation.AttemptNumber + 1;
         if (isRecoveryResume && existingOperation.Action != ElsaInstanceOperationAction.Delete &&
-            (!string.Equals(existingOperation.FailureCode,
-                 ElsaInstanceProviderReconciliationService.RetrySafeCode, StringComparison.Ordinal) ||
-             existingOperation.ReconciliationRetryEvidenceReference is null ||
-             existingOperation.ReconciliationRetryEvidenceDigest is null))
+            !string.Equals(existingOperation.FailureCode,
+                ElsaInstanceProviderReconciliationService.RetrySafeCode, StringComparison.Ordinal) &&
+            !string.Equals(existingOperation.ReconciliationDiagnosticCode,
+                ElsaInstanceProviderReconciliationService.AutoResumeExhaustedCode, StringComparison.Ordinal))
             throw Conflict("Provider reconciliation has not established that retry is safe.");
         if ((!canTransition && !isRecoveryResume) || requestedOperation.AttemptNumber < existingOperation.AttemptNumber)
             throw Conflict("Lifecycle operation state transition is not valid.");
@@ -2575,7 +2608,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 existingOperation.ReconciliationRetryEvidenceDigest,
                 cancellationToken);
             if (observation is null || existingOperation.ReconciledInstanceVersion is not { } reconciledInstanceVersion ||
-                observation.ObservedInstanceVersion != reconciledInstanceVersion - 1)
+                (observation.ObservedInstanceVersion != reconciledInstanceVersion - 1 &&
+                 observation.ObservedInstanceVersion != observedInstanceVersion))
                 throw Conflict("Provider reconciliation retry observation is stale.");
 
             var instanceIsAtReconciledVersion = observedInstanceVersion == reconciledInstanceVersion;
@@ -2636,7 +2670,6 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             await dbContext.ElsaInstanceRecoveryRequests.AddAsync(recovery, cancellationToken);
             existingOperation.FailureCode = null;
             existingOperation.FailureSummary = null;
-            existingOperation.StartedAt = requestedAt.ToUniversalTime();
             if (existingOperation.DeploymentRunId is { } deploymentRunId)
             {
                 var run = await dbContext.DeploymentRuns

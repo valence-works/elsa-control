@@ -513,4 +513,17 @@ public interface IAzureProviderRecoveryObservationStore
         Guid providerOperationId,
         CancellationToken cancellationToken = default) =>
         Task.FromResult<AzureProviderRecoveryObservationReceipt?>(null);
+
+    /// <summary>
+    /// Latest receipt for this provider operation, regardless of lifecycle
+    /// attempt, so an exhausted park on attempt N+1 can restamp the last
+    /// postcondition onto the current attempt and instance version without
+    /// another automatic ARM read.
+    /// </summary>
+    Task<AzureProviderRecoveryObservationReceipt?> GetLatestReceiptForOperationAsync(
+        Guid workspaceId,
+        Guid lifecycleOperationId,
+        Guid providerOperationId,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<AzureProviderRecoveryObservationReceipt?>(null);
 }

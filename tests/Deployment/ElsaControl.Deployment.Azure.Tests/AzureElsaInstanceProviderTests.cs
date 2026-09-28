@@ -421,11 +421,61 @@ public sealed class AzureElsaInstanceProviderTests
 
         Assert.Null(observation.RetryEvidence);
         Assert.Equal(AzureLateSuccessCodes.AutoResumeExhausted, observation.ReasonCode);
+        Assert.Equal(AzureLateSuccessCodes.AutoResumeExhausted, fixture.OperationStore.Current!.LastObservationReasonCode);
+        Assert.Contains(AzureLateSuccessCodes.AutoResumeExhausted, fixture.OperationStore.AutoResumeOutcomes);
         Assert.Equal(0, fixture.Observer.Calls);
         Assert.Equal(0, fixture.ObservationStore.CreateCalls);
         Assert.Equal(0, fixture.OperationStore.ArmClockCalls);
         Assert.Equal(0, fixture.OperationStore.AutoResumeIncrements);
+        Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes, fixture.OperationStore.Current.AutoResumeCount);
+    }
+
+    [Fact]
+    public async Task Operator_observe_at_the_cap_still_reads_arm_and_mints_evidence()
+    {
+        var fixture = await CreateObserveFixtureAsync(
+            ConfirmedObservation(AzureProviderRunnerStep.Workload),
+            attemptedStep: AzureProviderRunnerStep.Workload,
+            phase: AzureProviderOperationPhase.FoundationReady,
+            autoResumeCount: AzureNamedDeploymentFreshness.MaximumAutoResumes);
+
+        var observation = await fixture.Provider.ObserveAsync(
+            fixture.Request with { OperatorInitiated = true });
+
+        Assert.NotNull(observation.RetryEvidence);
+        Assert.False(observation.RetryEvidence.AutoResume);
+        Assert.Equal(AzureLateSuccessCodes.AutoResumeExhausted, observation.ReasonCode);
+        Assert.Equal(1, fixture.Observer.Calls);
+        Assert.Equal(1, fixture.ObservationStore.CreateCalls);
         Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes, fixture.OperationStore.Current!.AutoResumeCount);
+    }
+
+    [Fact]
+    public async Task Recovery_required_stale_receipt_is_reminted_for_the_current_instance_version()
+    {
+        var now = DateTimeOffset.Parse("2026-09-24T00:48:18Z");
+        var fixture = await CreateObserveFixtureAsync(
+            ConfirmedObservation(AzureProviderRunnerStep.Workload),
+            attemptedStep: AzureProviderRunnerStep.Workload,
+            phase: AzureProviderOperationPhase.FoundationReady,
+            now: now);
+
+        var first = await fixture.Provider.ObserveAsync(fixture.Request);
+        Assert.NotNull(first.RetryEvidence);
+        Assert.Equal(1, fixture.ObservationStore.CreateCalls);
+
+        fixture.OperationStore.Current = fixture.OperationStore.Current! with
+        {
+            LastArmObservedAt = now.AddSeconds(-120),
+            ArmObservationBackoffSeconds = AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds
+        };
+        var reminted = await fixture.Provider.ObserveAsync(
+            fixture.Request with { InstanceVersion = fixture.Request.InstanceVersion + 2 });
+
+        Assert.NotNull(reminted.RetryEvidence);
+        Assert.Equal(2, fixture.Observer.Calls);
+        Assert.Equal(2, fixture.ObservationStore.CreateCalls);
+        Assert.Equal(fixture.Request.InstanceVersion + 2, fixture.ObservationStore.LastReceipt!.Observation.ObservedInstanceVersion);
     }
 
     [Fact]
@@ -1508,6 +1558,19 @@ public sealed class AzureElsaInstanceProviderTests
                     ? receipt
                     : null);
 
+        public Task<AzureProviderRecoveryObservationReceipt?> GetLatestReceiptForOperationAsync(
+            Guid workspaceId,
+            Guid lifecycleOperationId,
+            Guid providerOperationId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(
+                LastReceipt is { } receipt &&
+                receipt.Observation.WorkspaceId == workspaceId &&
+                receipt.Observation.LifecycleOperationId == lifecycleOperationId &&
+                receipt.Observation.ProviderOperationId == providerOperationId
+                    ? receipt
+                    : null);
+
         public Task<AzureProviderRecoveryObservationRecord?> GetAndValidateRecordedAsync(
             Guid organizationId,
             Guid workspaceId,
@@ -1698,7 +1761,7 @@ public sealed class AzureElsaInstanceProviderTests
             return Task.FromResult<AzureProviderOperation?>(Current);
         }
         public List<string> AutoResumeOutcomes { get; } = [];
-        public Task RecordAutoResumeOutcomeAsync(Guid workspaceId, Guid operationId, string reasonCode, DateTimeOffset occurredAt, CancellationToken cancellationToken = default)
+        public Task RecordAutoResumeOutcomeAsync(Guid workspaceId, Guid operationId, string reasonCode, CancellationToken cancellationToken = default)
         {
             AutoResumeOutcomes.Add(reasonCode);
             if (Current is not null)
