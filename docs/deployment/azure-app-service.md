@@ -338,13 +338,27 @@ authenticate / heartbeat / rotate / revoke stay available for existing
 connections.
 
 - Production ships the setting empty. Do not add public or Hosted customer
-  organizations.
-- Staging lists only rehearsal organizations that #101 pairing needs. Set them
-  as App Service settings, for example
-  `ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__0=<rehearsal org id>`.
+  organizations. The deploy workflow fails if
+  `EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS` is set on any environment other
+  than `test`.
+- Staging lists only rehearsal organizations that #101 pairing needs. Set the
+  comma-separated GUID list as the **`test` GitHub environment** variable
+  `EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS` (this repository's staging
+  environment). The Azure Control API Deploy workflow passes that value into
+  the App Service Bicep app settings, so an `infra` deploy no longer wipes a
+  hand-edited portal setting. Do not echo the full list in logs or tickets.
 - The staging Hosted smoke's synthetic owner organization must **not** be on
   the staging allowlist. QA's #508 row 23 proves the refusal with that
   organization; #101 rehearsal setup must use a separate rehearsal org.
+  Control mints that organization with `Guid.NewGuid()` on the smoke owner's
+  first Cloud sign-in (`AccountWorkspaceService.MintOwnedOrganizationAsync`),
+  so the id is stable for the life of the staging catalog row and is **not** a
+  source-control constant. After the first smoke sign-in, record the minted
+  id as the non-secret `test` environment variable
+  `STAGING_SMOKE_OWNER_ORGANIZATION_ID`. The workflow fails if the allowlist
+  contains that id. Obtain it from `GET /api/me/organizations` as the Hosted
+  smoke owner (elsa-cloud staging smoke/harness); the owner email and subject
+  live in elsa-cloud, not this repository.
 
 ### Multi-tenant Microsoft Entra sign-in (guided design partners)
 

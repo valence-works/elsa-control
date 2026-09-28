@@ -119,10 +119,13 @@ code `external_engine_pairing_unavailable` — the same code the Cloud BFF
 surfaces — after authentication and workspace permission checks, and before
 any challenge or connection record is created. Cloud's own "Coming soon"
 flags remain UX only; this Control list is the real gate. Production ships
-the setting empty. Staging lists only rehearsal organizations. The staging
-Hosted smoke's synthetic owner organization must **not** be on the staging
-allowlist; QA's #508 row 23 proves the refusal with that organization, and
-#101 rehearsal pairing must use a separate rehearsal org.
+the setting empty. Staging lists only rehearsal organizations via the `test`
+GitHub environment variable `EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS`. The
+staging Hosted smoke's synthetic owner organization must **not** be on the
+staging allowlist; record its minted catalog id as
+`STAGING_SMOKE_OWNER_ORGANIZATION_ID` on `test`. QA's #508 row 23 proves the
+refusal with that organization, and #101 rehearsal pairing must use a
+separate rehearsal org.
 
 Every other customer endpoint and every `/api/admin/...` endpoint rejects these
 Cloud tokens. Admin routes continue to require the existing admin API key or

@@ -99,6 +99,27 @@ def patch_module(content: str) -> str:
         content, egress_parameter, f"{provisioner_parameter}\n",
         f"{provisioner_parameter}\n\n{egress_description}\n{egress_parameter}\n",
         "provisioner parameter anchor for the egress parameter")
+
+    pairing_parameter = "param pairingallowedorganizationids_value string = ''"
+    pairing_description = (
+        "@description('Comma-separated organization GUIDs allowed to create or repair "
+        "external-engine pairings. Empty refuses every organization. Staging only; "
+        "production must stay empty.')"
+    )
+    pairing_vars = (
+        "var pairingAllowedOrganizationIds = empty(pairingallowedorganizationids_value)\n"
+        "  ? []\n"
+        "  : filter(map(split(pairingallowedorganizationids_value, ','), id => trim(id)), id => !empty(id))\n"
+        "\n"
+        "var pairingAllowlistSettings = [for (organizationId, i) in pairingAllowedOrganizationIds: {\n"
+        "  name: 'ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__${i}'\n"
+        "  value: organizationId\n"
+        "}]\n"
+    )
+    content = replace_once(
+        content, pairing_parameter, f"{egress_parameter}\n",
+        f"{egress_parameter}\n\n{pairing_description}\n{pairing_parameter}\n\n{pairing_vars}",
+        "egress parameter anchor for the pairing allowlist")
     egress_properties = lines(
         "    keyVaultReferenceIdentity: api_identity_outputs_id",
         "    // Regional VNet integration for one static egress (#310); empty keeps the platform pool.",
@@ -150,6 +171,24 @@ def patch_module(content: str) -> str:
     content = replace_once(content, new_catalog, old_catalog, new_catalog, "generated Catalog authentication setting")
     if content.count(new_catalog) != 1 or old_catalog in content:
         raise SystemExit("Generated Catalog authentication setting is ambiguous.")
+
+    pairing_settings = "      appSettings: concat(\n        ["
+    content = replace_once(
+        content,
+        pairing_settings,
+        "      appSettings: [",
+        pairing_settings,
+        "generated appSettings array open for the pairing allowlist",
+    )
+    pairing_settings_close = "        ],\n        pairingAllowlistSettings)"
+    content = replace_once(
+        content,
+        pairing_settings_close,
+        "        {\n          name: 'ASPIRE_ENVIRONMENT_NAME'\n          value: 'elsa-control'\n        }\n      ]",
+        "        {\n          name: 'ASPIRE_ENVIRONMENT_NAME'\n          value: 'elsa-control'\n        }\n"
+        + pairing_settings_close,
+        "generated appSettings array close for the pairing allowlist",
+    )
     return content
 
 
@@ -174,6 +213,7 @@ def patch_parameter_template(parameters: str) -> str:
     # binding, so it must keep Cloud JWT admission disabled. The reviewed
     # deployment helper passes the approved issuer directly to the module.
     cloud_block = "param cloudaccountissuer_value = ''\n"
+    pairing_block = "param pairingallowedorganizationids_value = ''\n"
     parameters = replace_once(
         parameters, "provisioner_identity_outputs_id", anchor, anchor + provisioner_block,
         "generated API identity parameter anchor in the parameter template")
@@ -186,6 +226,13 @@ def patch_parameter_template(parameters: str) -> str:
         "param entraclientid_value = '{{ parameter \"entraClientId\" }}'\n",
         "param entraclientid_value = '{{ parameter \"entraClientId\" }}'\n" + cloud_block,
         "generated Entra client parameter anchor for the Cloud issuer",
+    )
+    parameters = replace_once(
+        parameters,
+        "pairingallowedorganizationids_value",
+        cloud_block,
+        cloud_block + pairing_block,
+        "Cloud issuer parameter anchor for the pairing allowlist",
     )
     return parameters
 

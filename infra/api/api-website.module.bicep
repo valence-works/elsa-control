@@ -41,6 +41,18 @@ param provisioner_identity_outputs_id string = ''
 @description('Optional resource ID of the delegated App Service integration subnet from infra/control-egress that carries all API egress through one static NAT address. Empty keeps the platform outbound address pool.')
 param api_egress_subnet_id string = ''
 
+@description('Comma-separated organization GUIDs allowed to create or repair external-engine pairings. Empty refuses every organization. Staging only; production must stay empty.')
+param pairingallowedorganizationids_value string = ''
+
+var pairingAllowedOrganizationIds = empty(pairingallowedorganizationids_value)
+  ? []
+  : filter(map(split(pairingallowedorganizationids_value, ','), id => trim(id)), id => !empty(id))
+
+var pairingAllowlistSettings = [for (organizationId, i) in pairingAllowedOrganizationIds: {
+  name: 'ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__${i}'
+  value: organizationId
+}]
+
 resource mainContainer 'Microsoft.Web/sites/sitecontainers@2025-03-01' = {
   name: 'main'
   properties: {
@@ -68,7 +80,8 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
       linuxFxVersion: 'SITECONTAINERS'
       acrUseManagedIdentityCreds: true
       acrUserManagedIdentityID: elsa_control_outputs_azure_container_registry_managed_identity_client_id
-      appSettings: [
+      appSettings: concat(
+        [
         {
           name: 'WEBSITES_PORT'
           value: api_containerport
@@ -217,7 +230,8 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
           name: 'ASPIRE_ENVIRONMENT_NAME'
           value: 'elsa-control'
         }
-      ]
+        ],
+        pairingAllowlistSettings)
     }
   }
   identity: {

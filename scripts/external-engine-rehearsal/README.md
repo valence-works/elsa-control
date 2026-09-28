@@ -15,7 +15,7 @@ dotnet test scripts/external-engine-rehearsal/tests/ExternalEngineRehearsal.Test
 
 Create a connection in Elsa Cloud, choose **Copy setup bundle**, then run the driver and paste the bundle into standard input. End input with Ctrl-D. Do not put the bundle in command arguments, shell history, URLs, logs, screenshots, or committed files.
 
-Staging Control only issues a pairing challenge when the organization is listed in `ElsaControl:ExternalEngines:PairingAllowedOrganizationIds`. Use a rehearsal organization for that list. Do not add the staging Hosted smoke's synthetic owner organization; QA proves the 403 `external_engine_pairing_unavailable` refusal with that org (#508 row 23). Production ships the list empty.
+Staging Control only issues a pairing challenge when the organization is listed in `ElsaControl:ExternalEngines:PairingAllowedOrganizationIds`. Set rehearsal organization ids on the `test` GitHub environment as `EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS`. Do not add the staging Hosted smoke's synthetic owner organization; record that minted catalog id as `STAGING_SMOKE_OWNER_ORGANIZATION_ID` on `test`. QA proves the 403 `external_engine_pairing_unavailable` refusal with that org (#508 row 23). Production ships the list empty.
 
 ```bash
 dotnet run --project scripts/external-engine-rehearsal/ExternalEngineRehearsal.csproj -- \

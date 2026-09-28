@@ -41,11 +41,28 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         self.assertIn("--template-file infra/main.bicep", self.source)
         self.assertIn("az deployment group create", self.source)
         self.assertIn("--template-file infra/api/api-website.module.bicep", self.source)
+        self.assertIn("pairingallowedorganizationids_value", self.source)
+        self.assertIn("EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS", self.source)
         self.assertIn("IMAGE=\"$IMAGE_REPOSITORY@$IMAGE_DIGEST\"", self.source)
         self.assertIn("AZURE_CONTAINER_REGISTRY_ENDPOINT", self.source)
         self.assertIn("CONTROL_SQL_SQLSERVERFQDN", self.source)
         self.assertNotIn("SQL_ADMINISTRATOR_PASSWORD", self.source)
         self.assertNotIn("containerRegistryLoginServer", self.source)
+
+    def test_refuses_a_pairing_allowlist_unless_the_target_is_staging(self) -> None:
+        environment = self.environment()
+        environment["EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        result = subprocess.run(
+            [str(DEPLOY_SCRIPT), "--environment", "prod"],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("only permitted for the test (staging) environment", result.stderr)
+        self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
 
     def test_rejects_non_supabase_cloud_issuer_before_azure_mutation(self) -> None:
         environment = self.environment()

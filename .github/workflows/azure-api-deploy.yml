@@ -61,6 +61,12 @@ jobs:
       CONTROL_ENTRA_TENANT_ID: ${{ vars.CONTROL_ENTRA_TENANT_ID }}
       AZURE_PROVISIONER_IDENTITY_ID: ${{ vars.AZURE_PROVISIONER_IDENTITY_ID }}
       AZURE_API_EGRESS_SUBNET_ID: ${{ vars.AZURE_API_EGRESS_SUBNET_ID }}
+      # Staging (`test`) only. Production must leave this unset. Org ids are not
+      # secret; do not echo the list. The Hosted smoke owner org is minted with
+      # Guid.NewGuid() on first Cloud sign-in, so its id is recorded on `test`
+      # as STAGING_SMOKE_OWNER_ORGANIZATION_ID rather than as a source constant.
+      EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ vars.EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS }}
+      STAGING_SMOKE_OWNER_ORGANIZATION_ID: ${{ vars.STAGING_SMOKE_OWNER_ORGANIZATION_ID }}
       CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
       EXPECTED_CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
       DOTNET_NOLOGO: true
@@ -113,6 +119,65 @@ jobs:
               exit 1
             fi
           fi
+
+          pairing_guid_pattern='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+          pairing_allowlist_raw="${EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS:-}"
+          pairing_allowlist_count=0
+          pairing_normalized=""
+          if [ -n "$pairing_allowlist_raw" ]; then
+            if [ "$TARGET_ENVIRONMENT" != "test" ]; then
+              echo "::error::EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS must be unset for ${TARGET_ENVIRONMENT}; production ships an empty pairing allowlist."
+              exit 1
+            fi
+            if [[ "$pairing_allowlist_raw" =~ (^|,)[[:space:]]*(,|$) ]]; then
+              echo "::error::EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS contains an empty organization id."
+              exit 1
+            fi
+            IFS=',' read -r -a pairing_entries <<< "$pairing_allowlist_raw"
+            for entry in "${pairing_entries[@]}"; do
+              trimmed="${entry#"${entry%%[![:space:]]*}"}"
+              trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+              if [ -z "$trimmed" ]; then
+                echo "::error::EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS contains an empty organization id."
+                exit 1
+              fi
+              if [[ ! "$trimmed" =~ $pairing_guid_pattern ]] || [ "$trimmed" = "00000000-0000-0000-0000-000000000000" ]; then
+                echo "::error::EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS contains an entry that is not a GUID organization id."
+                exit 1
+              fi
+              if [ -n "$pairing_normalized" ]; then
+                pairing_normalized+=","
+              fi
+              pairing_normalized+="$trimmed"
+              pairing_allowlist_count=$((pairing_allowlist_count + 1))
+            done
+          fi
+          if [ -n "${GITHUB_OUTPUT:-}" ]; then
+            {
+              printf 'pairing_allowlist_count=%s\n' "$pairing_allowlist_count"
+              printf 'pairing_allowlist=%s\n' "$pairing_normalized"
+            } >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "${GITHUB_ENV:-}" ]; then
+            printf 'EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS=%s\n' "$pairing_normalized" >> "$GITHUB_ENV"
+          fi
+
+          smoke_owner_org_id="${STAGING_SMOKE_OWNER_ORGANIZATION_ID:-}"
+          if [ "$TARGET_ENVIRONMENT" = "test" ] && [ "$pairing_allowlist_count" -gt 0 ]; then
+            if [ -z "$smoke_owner_org_id" ]; then
+              echo "::error::STAGING_SMOKE_OWNER_ORGANIZATION_ID must be set on the test environment so the pairing allowlist can be checked against the Hosted smoke owner organization."
+              exit 1
+            fi
+            if [[ ! "$smoke_owner_org_id" =~ $pairing_guid_pattern ]] || [ "$smoke_owner_org_id" = "00000000-0000-0000-0000-000000000000" ]; then
+              echo "::error::STAGING_SMOKE_OWNER_ORGANIZATION_ID must be a GUID organization id."
+              exit 1
+            fi
+            if [[ ",${pairing_normalized,,}," == *",${smoke_owner_org_id,,},"* ]]; then
+              echo "::error::EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS must not include the staging Hosted smoke owner organization."
+              exit 1
+            fi
+          fi
+          echo "External-engine pairing allowlist: ${pairing_allowlist_count} organization id(s)."
 
           required=(
             AZURE_CLIENT_ID
@@ -607,11 +672,26 @@ jobs:
           BUILDER_CLIENT_API_KEY: ${{ env.DEPLOY_MODE == 'infra' && secrets.BUILDER_CLIENT_API_KEY || '' }}
           CONTROL_ENTRA_CLIENT_SECRET: ${{ env.DEPLOY_MODE == 'infra' && secrets.CONTROL_ENTRA_CLIENT_SECRET || '' }}
           APPLICATION_BUILD_NUMBER: ${{ github.run_number }}
+          EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ steps.deployment-config.outputs.pairing_allowlist }}
         shell: bash
         run: |
           set -euo pipefail
 
+          pairing_allowlist_prefix='ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__'
+          pairing_before_count=""
+
           if [ "$DEPLOY_MODE" = "infra" ]; then
+            if pairing_before_count="$(az webapp config appsettings list \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$AZURE_WEBAPP_NAME" \
+              --query "[?starts_with(name, '${pairing_allowlist_prefix}')] | length(@)" \
+              --output tsv \
+              --only-show-errors 2>/dev/null)"; then
+              :
+            else
+              pairing_before_count=0
+            fi
+            pairing_before_count="${pairing_before_count:-0}"
             scripts/deploy-azure-elsa-control.sh \
               --environment "$AZURE_ENV_NAME" \
               --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -736,6 +816,19 @@ jobs:
             "Authentication__CloudAccount__Issuer=${CLOUD_ACCOUNT_ISSUER:-}"
             "Authentication__CloudAccount__Audience=authenticated"
           )
+          if [ -z "$pairing_before_count" ]; then
+            if pairing_before_count="$(az webapp config appsettings list \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$AZURE_WEBAPP_NAME" \
+              --query "[?starts_with(name, '${pairing_allowlist_prefix}')] | length(@)" \
+              --output tsv \
+              --only-show-errors 2>/dev/null)"; then
+              :
+            else
+              pairing_before_count=0
+            fi
+            pairing_before_count="${pairing_before_count:-0}"
+          fi
           if [ "$DEPLOY_MODE" = "infra" ]; then
             az webapp config appsettings set \
               --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -749,6 +842,7 @@ jobs:
               --settings AZURE_TOKEN_CREDENTIALS=prod Application__BuildNumber="$application_build_number" "${cloud_account_settings[@]}" \
               --output none
           fi
+          PAIRING_BEFORE_COUNT="$pairing_before_count" scripts/apply-external-engine-pairing-settings.sh
 
           az webapp restart \
             --resource-group "$AZURE_RESOURCE_GROUP" \

@@ -23,5 +23,6 @@ param elsa_control_outputs_azure_container_registry_managed_identity_id = '{{ .E
 param elsa_control_outputs_planid = '{{ .Env.ELSA_CONTROL_PLANID }}'
 param entraclientid_value = '{{ parameter "entraClientId" }}'
 param cloudaccountissuer_value = ''
+param pairingallowedorganizationids_value = ''
 param entraclientsecret_value = '{{ securedParameter "entraClientSecret" }}'
 param entratenantid_value = '{{ parameter "entraTenantId" }}'

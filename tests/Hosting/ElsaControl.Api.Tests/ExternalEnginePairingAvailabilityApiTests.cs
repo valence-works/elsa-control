@@ -181,12 +181,66 @@ public sealed class ExternalEnginePairingAvailabilityApiTests
         using var createdAfterRemoval = await CreateAsync(owner, workspace.Id, "Blocked after removal", "blocked-after");
         await AssertPairingUnavailableAsync(createdAfterRemoval);
 
+        using var repairedAfterRemoval = await owner.PostAsJsonAsync(
+            $"/api/workspaces/{workspace.Id:D}/external-engine-connections/{pairing.Connection.Id:D}/repair",
+            new { }, ControlApiTestApplication.JsonOptions);
+        await AssertPairingUnavailableAsync(repairedAfterRemoval);
+
         using var disconnected = await owner.PostAsJsonAsync(
             $"/api/workspaces/{workspace.Id:D}/external-engine-connections/{pairing.Connection.Id:D}/disconnect",
             new { }, ControlApiTestApplication.JsonOptions);
         Assert.Equal(HttpStatusCode.OK, disconnected.StatusCode);
         var tombstone = await disconnected.Content.ReadControlJsonAsync<ExternalEngineConnectionResponse>();
         Assert.Equal(ExternalEngineConnectionStatus.Revoked, tombstone!.Status);
+    }
+
+    [Fact]
+    public async Task Repair_against_a_real_connection_in_an_unlisted_organization_is_refused()
+    {
+        await using var app = new ControlApiTestApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var owner = app.CreateTrustedWorkspaceClient("pairing-gate-repair-unlisted");
+        var workspace = (await owner.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces"))!
+            .Workspaces.Single();
+        using var created = await CreateAsync(owner, workspace.Id, "Repair target", "repair-unlisted-create");
+        var pairing = (await created.Content.ReadControlJsonAsync<ExternalEnginePairingAttemptResponse>())!;
+
+        using var progressBefore = await owner.GetAsync(
+            $"/api/workspaces/{workspace.Id:D}/external-engine-connections/{pairing.Connection.Id:D}/pairing");
+        Assert.Equal(HttpStatusCode.OK, progressBefore.StatusCode);
+        var before = await progressBefore.Content.ReadControlJsonAsync<ExternalEnginePairingProgressResponse>();
+
+        app.ExternalEnginePairing.AllowAll = false;
+        app.ExternalEnginePairing.ClearAllowed();
+
+        using var repair = await owner.PostAsJsonAsync(
+            $"/api/workspaces/{workspace.Id:D}/external-engine-connections/{pairing.Connection.Id:D}/repair",
+            new { }, ControlApiTestApplication.JsonOptions);
+        await AssertPairingUnavailableAsync(repair);
+
+        using var progressAfter = await owner.GetAsync(
+            $"/api/workspaces/{workspace.Id:D}/external-engine-connections/{pairing.Connection.Id:D}/pairing");
+        Assert.Equal(HttpStatusCode.OK, progressAfter.StatusCode);
+        var after = await progressAfter.Content.ReadControlJsonAsync<ExternalEnginePairingProgressResponse>();
+        Assert.Equal(before!.ChallengeId, after!.ChallengeId);
+        Assert.Equal(before.State, after.State);
+        Assert.Equal(before.IssuedAt, after.IssuedAt);
+        Assert.Equal(pairing.Enrollment.ChallengeId, after.ChallengeId);
+
+        await using var scope = app.Services.CreateAsyncScope();
+        var connections = scope.ServiceProvider.GetRequiredService<IExternalEngineConnectionStore>();
+        var remaining = await connections.ListAsync(workspace.OrganizationId, workspace.Id);
+        Assert.Single(remaining);
+        Assert.Equal(pairing.Connection.Id, remaining[0].Id);
+
+        var enrollment = scope.ServiceProvider.GetRequiredService<IExternalEngineEnrollmentStore>();
+        var challenge = await enrollment.FindChallengeAsync(
+            workspace.OrganizationId,
+            workspace.Id,
+            pairing.Connection.Id,
+            pairing.Enrollment.ChallengeId);
+        Assert.NotNull(challenge);
+        Assert.Equal(pairing.Enrollment.ChallengeId, challenge.Id);
     }
 
     [Fact]
