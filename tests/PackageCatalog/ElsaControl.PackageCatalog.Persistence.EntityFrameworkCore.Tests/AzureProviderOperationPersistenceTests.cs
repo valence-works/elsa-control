@@ -1059,6 +1059,34 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
     }
 
     [Fact]
+    public async Task StatusChangedAt_moves_only_when_status_changes()
+    {
+        var now = DateTimeOffset.Parse("2026-09-21T10:00:00Z");
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var created = await store.CreateOrGetAsync(Request(), now);
+        Assert.Equal(now, created.StatusChangedAt);
+        Assert.Equal(now, created.CreatedAt);
+
+        var claimed = Assert.IsType<AzureProviderOperation>(await store.ClaimAsync(
+            _workspaceId, created.Id, "worker", "lease", TimeSpan.FromMinutes(30), now.AddSeconds(5)));
+        Assert.Equal(now.AddSeconds(5), claimed.StatusChangedAt);
+        Assert.Equal(AzureProviderOperationStatus.Running, claimed.Status);
+
+        var heartbeat = Assert.IsType<AzureProviderOperation>(await store.HeartbeatAsync(
+            _workspaceId, created.Id, "lease", TimeSpan.FromMinutes(30), now.AddMinutes(2), claimed.Version));
+        Assert.Equal(now.AddSeconds(5), heartbeat.StatusChangedAt);
+        Assert.Equal(now.AddMinutes(2), heartbeat.UpdatedAt);
+        Assert.Equal(AzureProviderOperationStatus.Running, heartbeat.Status);
+
+        var finalized = Assert.IsType<AzureProviderOperation>(await store.FinalizeAsync(
+            _workspaceId, created.Id, "lease", AzureProviderOperationStatus.Succeeded, "operation.succeeded",
+            now.AddMinutes(8), heartbeat.Version));
+        Assert.Equal(now.AddMinutes(8), finalized.StatusChangedAt);
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, finalized.Status);
+    }
+
+    [Fact]
     public async Task Checkpoints_with_distinct_codes_preserve_distinct_transitions()
     {
         var now = DateTimeOffset.UtcNow;

@@ -36,7 +36,7 @@ Relevant fields:
 - Server-side correlation to workspace, instance, lifecycle action, and idempotency key.
 - Provider status and phase.
 - Checkpoint sequence.
-- Created, updated, and completed timestamps.
+- Created, updated, completed, and status-changed timestamps. `StatusChangedAt` is written only when `Status` changes and is backfilled from `CreatedAt`.
 
 Provider IDs, target keys, resource references, endpoints, fingerprints, images, worker/lease data, and diagnostics are never copied into the customer projection.
 
@@ -117,7 +117,7 @@ Validation rules:
 | Same healthy-continuation reasons with provider Accepted/Queued/Running | `active` | mapped stage current (`request-accepted` while Accepted/Queued); earlier complete; later pending. Stage never moves backwards. |
 | Healthy continuation (`accepted`, `in-progress`, or `provider.reconciliation.health-unknown`) with provider Succeeded before Ready, or `health-unknown` during verification | `active` | `max(known stage, health-verification)` current |
 | Transient uncertainty (`provider.reconciliation.unavailable` or `provider.reconciliation.unknown`), null FailureCode | `active` | last known stage held (never moves backwards) until the progress bound |
-| No provider progress for 10:00 or more while Create has not finished (healthy and transient groups). Progress is the latest provider heartbeat or status-transition `OccurredAt`, else provider `CreatedAt`, else Create `AcceptedAt`. Inclusive: exactly 10:00 is `stale`. Skipped once Create has finished. | `stale` | last known stage blocked; requires-attention diagnostic |
+| No provider `Status` change for 10:00 or more while Create has not finished (healthy and transient groups). Clock is `StatusChangedAt` (written only when `Status` changes; backfilled from `CreatedAt`), or Create `AcceptedAt` when there is no provider row. Inclusive: exactly 10:00 is `stale`. Skipped while the provider is `Running` and once Create has finished. Applies to Accepted/Queued, no provider row, and Succeeded-before-Ready. | `stale` | last known stage blocked; requires-attention diagnostic |
 | Create recovery-required with any FailureCode; current reason `provider.submission.uncertain`, `provider.reconciliation.ambiguous`, `provider.reconciliation.correlation-mismatch`, `provider.reconciliation.retry-safe`, or any unrecognised reason; or provider recovery-required | `stale` | last known stage blocked; requires-attention diagnostic |
 | Healthy continuation with provider Failed/Cancelled | `failed` | last known stage blocked; safe failure diagnostic |
 | Healthy continuation with provider Succeeded and instance Ready | `ready` | every stage complete |

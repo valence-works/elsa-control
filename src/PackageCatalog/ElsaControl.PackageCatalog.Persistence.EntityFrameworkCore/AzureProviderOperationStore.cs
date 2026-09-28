@@ -176,6 +176,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                     return null;
 
                 providerOperation.Status = AzureProviderOperationStatus.Running;
+                providerOperation.StatusChangedAt = nowUtc;
                 providerOperation.WorkerId = request.WorkerId;
                 providerOperation.LeaseTokenHash = Hash(request.LeaseToken);
                 providerOperation.CompletionLeaseTokenHash = null;
@@ -464,6 +465,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                     {
                         supersededHeldOperationId = heldSafeExit.Id;
                         heldSafeExit.Status = AzureProviderOperationStatus.Cancelled;
+                        heldSafeExit.StatusChangedAt = now;
                         heldSafeExit.CompletedAt = now;
                         heldSafeExit.UpdatedAt = now;
                         heldSafeExit.Version++;
@@ -533,6 +535,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                     Health = AzureProviderHealth.Unknown,
                     CreatedAt = now,
                     UpdatedAt = now,
+                    StatusChangedAt = now,
                     ResourceGroupName = previousResources?.Resources.ResourceGroupName,
                     FoundationDeploymentId = previousResources?.Resources.FoundationDeploymentId,
                     WorkloadDeploymentId = previousResources?.Resources.WorkloadDeploymentId,
@@ -831,6 +834,9 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                     .SetProperty(x => x.Status, x => x.Status == AzureProviderOperationStatus.RecoveryRequired
                         ? AzureProviderOperationStatus.RecoveryRequired
                         : AzureProviderOperationStatus.Failed)
+                    .SetProperty(x => x.StatusChangedAt, x => x.Status == AzureProviderOperationStatus.RecoveryRequired
+                        ? x.StatusChangedAt
+                        : now)
                     .SetProperty(x => x.CompletedAt, x => x.Status == AzureProviderOperationStatus.RecoveryRequired ? null : now)
                     .SetProperty(x => x.UpdatedAt, now)
                     .SetProperty(x => x.Version, x => x.Version + 1)
@@ -913,6 +919,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                 return new AzureProviderOperationAuthorizationResult(ToModel(entity), decision);
 
             entity.Status = AzureProviderOperationStatus.EntitlementHeld;
+            entity.StatusChangedAt = now;
             entity.CompletedAt = null;
             entity.UpdatedAt = now;
             entity.Version++;
@@ -960,6 +967,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                           other.Status == AzureProviderOperationStatus.Running || other.Status == AzureProviderOperationStatus.RecoveryRequired)))
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(x => x.Status, AzureProviderOperationStatus.Running)
+                    .SetProperty(x => x.StatusChangedAt, now)
                     .SetProperty(x => x.WorkerId, workerId)
                     .SetProperty(x => x.LeaseTokenHash, hash)
                     .SetProperty(x => x.CompletionLeaseTokenHash, (string?)null)
@@ -1100,7 +1108,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
             if (assignment.OrganizationId != entity.OrganizationId || assignment.InstanceId != entity.InstanceId)
                 throw new InvalidOperationException("The Azure provider assignment binding is invalid.");
         }
-        entity.Status = status; entity.UpdatedAt = now; entity.Version++;
+        entity.Status = status; entity.StatusChangedAt = now; entity.UpdatedAt = now; entity.Version++;
         // Recovery-required operations stay reservable for operator reconciliation, so they are
         // never stamped as completed regardless of which transition produced the status.
         entity.CompletedAt = status is AzureProviderOperationStatus.RecoveryRequired or AzureProviderOperationStatus.EntitlementHeld ? null : now;
@@ -1141,6 +1149,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
             {
                 var changed = await db.AzureProviderOperations.Where(x => x.Id == candidate.Id && x.Status == AzureProviderOperationStatus.Running && x.Version == candidate.Version && x.LeaseExpiresAt != null && x.LeaseExpiresAt <= now)
                     .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.Status, AzureProviderOperationStatus.RecoveryRequired)
+                        .SetProperty(x => x.StatusChangedAt, now)
                         .SetProperty(x => x.UpdatedAt, now).SetProperty(x => x.Version, x => x.Version + 1)
                         .SetProperty(x => x.LeaseTokenHash, (string?)null).SetProperty(x => x.LeaseExpiresAt, (DateTimeOffset?)null)
                         .SetProperty(x => x.WorkerId, (string?)null)
@@ -1577,7 +1586,8 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
             x.ProviderAssignmentId,
             x.AttemptedStep,
             capacity,
-            x.ManagedHandoff);
+            x.ManagedHandoff,
+            x.StatusChangedAt);
     }
 
     /// <summary>

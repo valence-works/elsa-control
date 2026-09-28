@@ -1571,6 +1571,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("nvarchar(32)");
 
+                    b.Property<long>("StatusChangedAt")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("TargetKey")
                         .IsRequired()
                         .HasMaxLength(128)

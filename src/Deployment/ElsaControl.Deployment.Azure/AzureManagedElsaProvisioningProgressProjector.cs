@@ -145,7 +145,7 @@ public static class AzureManagedElsaProvisioningProgressProjector
         var providerAcceptedOrQueued = provider?.Status is AzureProviderOperationStatus.Accepted
             or AzureProviderOperationStatus.Queued;
         var providerProgressStale = !lifecycleTerminal &&
-            HasExceededProviderProgressBound(now, lifecycle, provider, input.Transitions);
+            HasExceededProviderProgressBound(now, lifecycle, provider);
 
         // Lifecycle terminal state is authoritative whenever it is available.
         if (lifecycleState is ElsaInstanceOperationState.Failed or ElsaInstanceOperationState.Cancelled)
@@ -184,8 +184,9 @@ public static class AzureManagedElsaProvisioningProgressProjector
         {
             // Immediate stale: provider RecoveryRequired, any FailureCode, uncertain /
             // ambiguous / correlation-mismatch / retry-safe / unrecognised reasons.
-            // The 10-minute bound is inclusive and uses provider progress only
-            // (heartbeat or status transition), never run UpdatedAt or reason-write time.
+            // The 10-minute bound is inclusive and uses StatusChangedAt only
+            // (or Create AcceptedAt when no provider row exists). Heartbeats,
+            // UpdatedAt, and reason-write time do not reset it. Skipped while Running.
             state = ManagedElsaProvisioningProgressStates.Stale;
             diagnosticCode = ManagedElsaProvisioningProgressDiagnostics.RequiresAttention;
             blocked = true;
@@ -513,39 +514,38 @@ public static class AzureManagedElsaProvisioningProgressProjector
     }
 
     /// <summary>
-    /// Provider progress is a real provider status change or heartbeat.
-    /// Source, in order of recency: <see cref="AzureProviderOperation.HeartbeatAt"/>,
-    /// the latest <see cref="AzureProviderOperationTransition.OccurredAt"/>, then
-    /// <see cref="AzureProviderOperation.CreatedAt"/> (the initial Accepted write).
-    /// With no provider row, the Create operation's <c>AcceptedAt</c> is used.
-    /// This is not the deployment run's UpdatedAt and not the time RecoveryReason
-    /// was last written — reconcile rewrites that reason about every 5s.
-    /// The bound is inclusive: elapsed == 10:00 is stale. It is skipped once
-    /// Create has finished (Succeeded/Failed/Cancelled).
+    /// The 10-minute clock starts from the provider operation's last status
+    /// change (<see cref="AzureProviderOperation.StatusChangedAt"/>, backfilled
+    /// from <see cref="AzureProviderOperation.CreatedAt"/>). Heartbeats, run
+    /// <c>UpdatedAt</c>, reason-write time, and provider <c>UpdatedAt</c> do not
+    /// reset it. With no provider row, Create <c>AcceptedAt</c> is used.
+    /// The clock is skipped while the provider is <c>Running</c> and once Create
+    /// has finished. Inclusive: elapsed == 10:00 is stale. It covers Accepted,
+    /// Queued, no provider row, and Succeeded-before-Ready.
     /// </summary>
     private static bool HasExceededProviderProgressBound(
         DateTimeOffset now,
         ElsaInstanceLifecycleTopologyOperation? lifecycle,
-        AzureProviderOperation? provider,
-        IReadOnlyList<AzureProviderOperationTransition>? transitions)
+        AzureProviderOperation? provider)
     {
-        var progressAt = ResolveProviderProgressAt(lifecycle, provider, transitions);
-        return progressAt is { } origin &&
+        if (provider?.Status == AzureProviderOperationStatus.Running)
+            return false;
+        if (provider?.Status is AzureProviderOperationStatus.Failed or
+            AzureProviderOperationStatus.Cancelled or
+            AzureProviderOperationStatus.RecoveryRequired or
+            AzureProviderOperationStatus.EntitlementHeld)
+            return false;
+        if (provider is not null &&
+            provider.Status is not (AzureProviderOperationStatus.Accepted or
+                AzureProviderOperationStatus.Queued or
+                AzureProviderOperationStatus.Succeeded))
+            return false;
+
+        var clockStart = provider is not null
+            ? (provider.StatusChangedAt ?? provider.CreatedAt)
+            : lifecycle?.AcceptedAt;
+        return clockStart is { } origin &&
                now - origin.ToUniversalTime() >= ProviderProgressStaleAfter;
-    }
-
-    private static DateTimeOffset? ResolveProviderProgressAt(
-        ElsaInstanceLifecycleTopologyOperation? lifecycle,
-        AzureProviderOperation? provider,
-        IReadOnlyList<AzureProviderOperationTransition>? transitions)
-    {
-        if (provider is not null)
-            return Latest(
-                provider.HeartbeatAt,
-                provider.CreatedAt,
-                transitions?.Select(transition => transition.OccurredAt).ToArray());
-
-        return lifecycle?.AcceptedAt;
     }
 
     private enum RecoveryReasonGroup

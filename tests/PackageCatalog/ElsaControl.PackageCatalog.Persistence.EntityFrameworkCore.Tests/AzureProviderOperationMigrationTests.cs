@@ -45,6 +45,7 @@ public sealed class AzureProviderOperationMigrationTests
         Assert.Contains("ProviderScopeFingerprint", columns);
         Assert.Contains("SqlWorkflowPackageVersion", columns);
         Assert.Contains("SqlQuartzPackageVersion", columns);
+        Assert.Contains("StatusChangedAt", columns);
         Assert.Contains("AzureProviderResourceAssignments", tables);
         Assert.Contains("AzureProviderAssignmentRebinds", tables);
         Assert.Contains("AzureProviderRecoveryObservations", tables);

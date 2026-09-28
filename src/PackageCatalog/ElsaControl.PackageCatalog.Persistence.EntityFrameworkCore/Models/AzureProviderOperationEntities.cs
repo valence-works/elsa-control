@@ -77,6 +77,7 @@ internal sealed class AzureProviderOperationEntity
     public DateTimeOffset? HeartbeatAt { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
+    public DateTimeOffset StatusChangedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
     public List<AzureProviderOperationTransitionEntity> Transitions { get; set; } = [];
 }

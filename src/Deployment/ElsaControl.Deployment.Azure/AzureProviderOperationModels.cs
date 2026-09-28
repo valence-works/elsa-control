@@ -176,7 +176,8 @@ public sealed record AzureProviderOperation(
     Guid? ProviderAssignmentId = null,
     AzureProviderRunnerStep? AttemptedStep = null,
     AzureWorkloadCapacity? Capacity = null,
-    bool ManagedHandoff = false)
+    bool ManagedHandoff = false,
+    DateTimeOffset? StatusChangedAt = null)
 {
     [JsonIgnore]
     public IReadOnlyDictionary<string, string> SafeSecretReferences => SecretReferences ?? EmptySecretReferences;
