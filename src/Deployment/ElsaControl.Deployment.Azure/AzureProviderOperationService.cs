@@ -70,7 +70,8 @@ public interface IAzureProviderOperationReplayService
 /// </summary>
 public sealed class AzureProviderOperationService(
     IAzureProviderOperationStore store,
-    TimeProvider? timeProvider = null) : IAzureProviderOperationService, IAzureProviderOperationReplayService
+    TimeProvider? timeProvider = null,
+    AzureProviderTargetScope? providerScope = null) : IAzureProviderOperationService, IAzureProviderOperationReplayService
 {
     private const int MaximumIdempotencyKeyLength = 512;
     private const string DeleteIdempotencySuffix = ":delete";
@@ -179,7 +180,7 @@ public sealed class AzureProviderOperationService(
         ArgumentNullException.ThrowIfNull(submission.Plan);
 
         var plan = submission.Plan;
-        ValidateSubmissionPlan(plan, nameof(submission));
+        ValidateSubmissionPlan(plan, providerScope, nameof(submission));
         if (!IsFingerprint(submission.TemplateFingerprint))
             throw new ArgumentException("A compiled template fingerprint is required.", nameof(submission));
 
@@ -239,7 +240,8 @@ public sealed class AzureProviderOperationService(
             lifecycleAction,
             providerAssignmentId,
             plan.Capacity,
-            plan.ManagedHandoff);
+            plan.ManagedHandoff,
+            plan.ManagedHandoffStudioGrants);
 
     internal static AzureProviderOperationRequest CreateOperationRequest(AzureProviderOperation operation) =>
         new(
@@ -269,7 +271,8 @@ public sealed class AzureProviderOperationService(
             operation.LifecycleAction,
             operation.ProviderAssignmentId,
             operation.Capacity,
-            operation.ManagedHandoff);
+            operation.ManagedHandoff,
+            operation.ManagedHandoffStudioGrants);
 
     /// <summary>
     /// Rebuilds the admitted plan from the persisted operation columns. An operation retained
@@ -277,7 +280,7 @@ public sealed class AzureProviderOperationService(
     /// observation and cleanup, while the runner refuses to deploy a workload from it. One retained
     /// before the managed handoff joined restores with the handoff off, which is what it deployed.
     /// </summary>
-    internal static AzureWorkloadPlan? TryRestorePlan(AzureProviderOperation operation)
+    internal static AzureWorkloadPlan? TryRestorePlan(AzureProviderOperation operation, AzureProviderTargetScope? providerScope)
     {
         if (operation is null || operation.Id == Guid.Empty || operation.PersistedMetadataInvalid)
             return null;
@@ -313,10 +316,11 @@ public sealed class AzureProviderOperationService(
                 operationRequest.SqlWorkflowPackageVersion,
                 operationRequest.SqlQuartzPackageVersion,
                 operationRequest.Capacity,
-                operationRequest.ManagedHandoff);
+                operationRequest.ManagedHandoff,
+                operationRequest.ManagedHandoffStudioGrants);
 
             AzureProviderExecutor.ValidateExecutionRequest(
-                new AzureProviderExecutionRequest(operationRequest, plan));
+                new AzureProviderExecutionRequest(operationRequest, plan), providerScope);
             return plan;
         }
         catch (ArgumentException)
@@ -329,7 +333,7 @@ public sealed class AzureProviderOperationService(
         }
     }
 
-    private static void ValidateSubmissionPlan(AzureWorkloadPlan plan, string parameterName)
+    private static void ValidateSubmissionPlan(AzureWorkloadPlan plan, AzureProviderTargetScope? providerScope, string parameterName)
     {
         if (string.IsNullOrWhiteSpace(plan.WorkloadName) ||
             !string.Equals(plan.WorkloadName, plan.WorkloadName.Trim(), StringComparison.Ordinal) ||
@@ -344,10 +348,7 @@ public sealed class AzureProviderOperationService(
             throw new ArgumentException("The provider location is invalid.", parameterName);
         if (!IsFingerprint(plan.Fingerprint))
             throw new ArgumentException("The provider plan fingerprint is invalid.", parameterName);
-        if (!string.Equals(
-                plan.ImageRepository,
-                AzureWorkloadPlanTranslator.SupportedRepository,
-                StringComparison.Ordinal))
+        if (!string.Equals(plan.ImageRepository, AzureWorkloadPlanTranslator.GovernedRepository(providerScope), StringComparison.Ordinal))
             throw new ArgumentException("The provider image repository is invalid.", parameterName);
         if (plan.ImageDigest is null || plan.ImageDigest.Length != 64 || !plan.ImageDigest.All(Uri.IsHexDigit))
             throw new ArgumentException("The provider image digest is invalid.", parameterName);
@@ -365,6 +366,8 @@ public sealed class AzureProviderOperationService(
             throw new ArgumentException("The provider capacity has no exact Azure Container Apps mapping.", parameterName);
         if (plan.ManagedHandoff && plan.Capacity is not { MinReplicas: 1, MaxReplicas: 1 })
             throw new ArgumentException("The managed handoff requires a single-replica workload.", parameterName);
+        if (plan.ManagedHandoffStudioGrants && !plan.ManagedHandoff)
+            throw new ArgumentException("Managed Studio grants require the managed handoff.", parameterName);
     }
 
     private static bool IsFingerprint(string? value) => value is not null && value.Length == 64 && value.All(Uri.IsHexDigit);

@@ -12,7 +12,7 @@ using ElsaControl.RuntimeBuilder.Abstractions.Plans;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 
-public sealed class AzureProviderOperationStore(CatalogDbContext db) :
+public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProviderTargetScope? providerScope = null) :
     IAzureProviderOperationStore,
     IAzureManagedElsaProvisioningOperationStore,
     IAzureProviderOperationAuthorizationStore,
@@ -515,6 +515,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                     CapacityCpuMillicores = normalized.Capacity?.CpuMillicores,
                     CapacityMemoryMiB = normalized.Capacity?.MemoryMiB,
                     ManagedHandoff = normalized.ManagedHandoff,
+                    ManagedHandoffStudioGrants = normalized.ManagedHandoffStudioGrants,
                     ElsaVersion = normalized.ElsaVersion,
                     ReleaseLine = normalized.ReleaseLine,
                     Topology = normalized.Topology,
@@ -1361,7 +1362,8 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                 operation.LifecycleAction,
                 operation.ProviderAssignmentId,
                 capacity,
-                operation.ManagedHandoff);
+                operation.ManagedHandoff,
+                operation.ManagedHandoffStudioGrants);
             if (!string.Equals(
                     AzureProviderOperationValidation.ComputeRequestHash(request),
                     operation.RequestHash,
@@ -1415,7 +1417,8 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
         var translation = AzureWorkloadPlanTranslator.Translate(
             typedPlan,
             new AzureWorkloadTarget(observation.TargetKey, (await db.AzureProviderOperations.AsNoTracking()
-                .SingleAsync(x => x.Id == observation.ProviderOperationId, cancellationToken)).Location));
+                .SingleAsync(x => x.Id == observation.ProviderOperationId, cancellationToken)).Location),
+            providerScope);
         if (!translation.IsAccepted || translation.Plan is null ||
             !string.Equals(translation.Plan.Fingerprint, observation.ProviderPlanFingerprint, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Recovery observation provider plan does not match the retained resolved plan.");
@@ -1604,6 +1607,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
             x.AttemptedStep,
             capacity,
             x.ManagedHandoff,
+            x.ManagedHandoffStudioGrants,
             x.StatusChangedAt);
     }
 

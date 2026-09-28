@@ -6,8 +6,10 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text.Json;
 using ElsaControl.Api.Authentication;
+using ElsaControl.Api.Workspace;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
+using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
@@ -73,28 +75,43 @@ public sealed class ManagedElsaHandoffTests
         Assert.Equal(sessionExpiresAt, session.SessionExpiresAt);
     }
 
+    public enum Grants { None, StructuredLogs, Studio }
+
     [Theory]
-    [InlineData(WorkspaceRole.Owner, OrganizationRole.Member, true)]
-    [InlineData(WorkspaceRole.Reader, OrganizationRole.Owner, true)]
-    [InlineData(WorkspaceRole.Reader, OrganizationRole.Administrator, true)]
-    [InlineData(WorkspaceRole.Reader, OrganizationRole.Member, false)]
-    [InlineData(WorkspaceRole.SourceAdmin, OrganizationRole.Member, false)]
-    public void Runtime_permission_mapping_grants_only_structured_log_read_to_authorized_roles(
+    [InlineData(WorkspaceRole.Owner, OrganizationRole.Member, Grants.Studio)]
+    [InlineData(WorkspaceRole.Owner, OrganizationRole.Owner, Grants.Studio)]
+    [InlineData(WorkspaceRole.Reader, OrganizationRole.Administrator, Grants.StructuredLogs)]
+    [InlineData(WorkspaceRole.Reader, OrganizationRole.Owner, Grants.StructuredLogs)]
+    [InlineData(WorkspaceRole.SourceAdmin, OrganizationRole.Administrator, Grants.StructuredLogs)]
+    [InlineData(WorkspaceRole.Reader, OrganizationRole.Member, Grants.None)]
+    [InlineData(WorkspaceRole.SourceAdmin, OrganizationRole.Member, Grants.None)]
+    public void Workspace_role_sets_the_runtime_permission_ceiling(
         WorkspaceRole workspaceRole,
         OrganizationRole organizationRole,
-        bool expected)
+        Grants onStudioImage)
     {
         var access = new WorkspaceAccess(Guid.NewGuid(), Guid.NewGuid(), workspaceRole, Guid.NewGuid(), organizationRole);
+        var onLegacyImage = onStudioImage == Grants.Studio ? Grants.StructuredLogs : onStudioImage;
 
-        var permissions = ManagedElsaRuntimePermissionMapping.For(access);
-
-        Assert.Equal(expected, permissions.Contains(ManagedElsaRuntimePermissionMapping.StructuredLogsRead));
-        Assert.All(permissions, permission => Assert.Equal(ManagedElsaRuntimePermissionMapping.StructuredLogsRead, permission));
+        Assert.Equal(Permissions(onLegacyImage), ManagedElsaRuntimePermissionMapping.For(access, studioGrantsSupported: false).Order());
+        Assert.Equal(Permissions(onStudioImage), ManagedElsaRuntimePermissionMapping.For(access, studioGrantsSupported: true).Order());
     }
+
+    private static IEnumerable<string> Permissions(Grants grants) => (grants switch
+    {
+        Grants.Studio => ManagedElsaRuntimePermissions.StudioGrantsV1,
+        Grants.StructuredLogs => [ManagedElsaRuntimePermissionMapping.StructuredLogsRead],
+        _ => []
+    }).Order();
 
     [Theory]
     [InlineData("*")]
+    [InlineData("read:*")]
     [InlineData("read:workflows")]
+    [InlineData("READ:DASHBOARD")]
+    [InlineData("read:dashboard ")]
+    [InlineData("read:workflow-instances")]
+    [InlineData("delete:workflow-definitions")]
     public void Handoff_issuer_rejects_wildcard_and_unknown_runtime_grants(string permission)
     {
         using var fixture = CreateFixture();
@@ -210,8 +227,10 @@ public sealed class ManagedElsaHandoffTests
         Assert.False(ControlIdentityReader.TryReadBearerExpiry(principal, out _));
     }
 
-    [Fact]
-    public async Task Production_wiring_creates_persisted_binding_and_issues_handoff_token()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Production_wiring_issues_only_grants_supported_by_current_deployment(bool studioGrantsSupported)
     {
         await using var app = new ControlApiTestApplication(new Dictionary<string, string?>
         {
@@ -255,7 +274,7 @@ public sealed class ManagedElsaHandoffTests
             const string deploymentId = "deployment-managed";
             const string endpointUri = "https://managed.example.test";
             await db.Database.ExecuteSqlInterpolatedAsync(
-                $"UPDATE ElsaInstances SET CurrentDeploymentId = {deploymentId}, CurrentDeploymentEndpointUri = {endpointUri}, CurrentDeploymentManagedHandoff = {true}, DesiredLifecycle = {ElsaDesiredLifecycle.Running.ToString()}, ObservedLifecycle = {ElsaObservedLifecycle.Ready.ToString()}, Health = {ElsaInstanceHealth.Healthy.ToString()} WHERE Id = {instanceId}");
+                $"UPDATE ElsaInstances SET CurrentDeploymentId = {deploymentId}, CurrentDeploymentEndpointUri = {endpointUri}, CurrentDeploymentManagedHandoff = {true}, CurrentDeploymentStudioGrants = {studioGrantsSupported}, DesiredLifecycle = {ElsaDesiredLifecycle.Running.ToString()}, ObservedLifecycle = {ElsaObservedLifecycle.Ready.ToString()}, Health = {ElsaInstanceHealth.Healthy.ToString()} WHERE Id = {instanceId}");
             db.ChangeTracker.Clear();
         }
 
@@ -294,8 +313,185 @@ public sealed class ManagedElsaHandoffTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var issued = (await response.Content.ReadControlJsonAsync<ManagedElsaHandoffIssueResponse>())!;
         var token = new JwtSecurityTokenHandler().ReadJwtToken(issued.Token);
-        Assert.Equal(ManagedElsaRuntimePermissionMapping.StructuredLogsRead,
-            token.Claims.Single(claim => claim.Type == ManagedElsaHandoffDefaults.RuntimePermissionClaim).Value);
+        var grants = token.Claims
+            .Where(claim => claim.Type == ManagedElsaHandoffDefaults.RuntimePermissionClaim)
+            .Select(claim => claim.Value)
+            .ToHashSet(StringComparer.Ordinal);
+        if (studioGrantsSupported)
+        {
+            Assert.Equal(ManagedElsaRuntimePermissionMapping.AllowedPermissions.Count, grants.Count);
+            Assert.All(ManagedElsaRuntimePermissionMapping.AllowedPermissions, permission => Assert.Contains(permission, grants));
+        }
+        else
+            Assert.Equal([ManagedElsaRuntimePermissionMapping.StructuredLogsRead], grants);
+    }
+
+    [Theory]
+    [InlineData(OrganizationRole.Member)]
+    [InlineData(OrganizationRole.Administrator)]
+    public async Task Workspace_reader_with_instance_open_never_receives_studio_permissions(OrganizationRole organizationRole)
+    {
+        var setup = await SeedManagedInstanceAsync(
+            ElsaDesiredLifecycle.Running,
+            ElsaObservedLifecycle.Ready,
+            ElsaInstanceHealth.Healthy,
+            bind: true);
+        await using var app = setup.App;
+        const string readerSubject = "managed-reader-with-open";
+        Guid readerAccountId;
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            var workspace = await db.Workspaces.SingleAsync(x => x.Id == setup.WorkspaceId);
+            var readerAccount = new Account
+            {
+                DisplayName = readerSubject,
+                Email = $"{readerSubject}@example.test"
+            };
+            readerAccount.ExternalIdentities.Add(new ExternalIdentity
+            {
+                Account = readerAccount,
+                Issuer = ControlApiTestApplication.TestControlIdentityIssuer,
+                Subject = readerSubject,
+                DisplayName = readerSubject,
+                Email = readerAccount.Email
+            });
+            readerAccount.OrganizationMemberships.Add(new OrganizationMembership
+            {
+                Account = readerAccount,
+                OrganizationId = workspace.OrganizationId,
+                Role = organizationRole
+            });
+            readerAccount.Memberships.Add(new WorkspaceMembership
+            {
+                Account = readerAccount,
+                Workspace = workspace,
+                Role = WorkspaceRole.Reader
+            });
+            db.Accounts.Add(readerAccount);
+            await db.SaveChangesAsync();
+            readerAccountId = readerAccount.Id;
+
+            // Exercise the strongest deployed Studio capability set; a workspace Reader must still receive none of
+            // its dashboard or designer grants, whatever their organization role.
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE ElsaInstances SET CurrentDeploymentStudioGrants = {true} WHERE Id = {setup.InstanceId}");
+        }
+
+        using var reader = app.CreateControlIdentityClient(readerSubject);
+        var readerContext = await reader.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces");
+        var readerWorkspace = Assert.Single(readerContext!.Workspaces);
+        Assert.Equal(setup.WorkspaceId, readerWorkspace.Id);
+        Assert.Equal(WorkspaceRole.Reader, readerWorkspace.Role);
+        Assert.Equal(organizationRole, readerWorkspace.OrganizationRole);
+
+        var grantsUri = $"/api/workspaces/{setup.WorkspaceId:D}/permissions/grants";
+        var grant = await setup.Client.PostControlJsonAsync(
+            grantsUri,
+            new WorkspacePermissionGrantRequest(readerAccountId, ManagedElsaInstancePermissions.Open));
+        Assert.Equal(HttpStatusCode.OK, grant.StatusCode);
+        var grants = await setup.Client.GetControlJsonAsync<WorkspacePermissionGrantsResponse>(
+            $"{grantsUri}?accountId={readerAccountId:D}");
+        var activeGrants = grants!.Items.Where(x => x.RevokedAt is null).ToArray();
+        Assert.Equal([ManagedElsaInstancePermissions.Open], activeGrants.Select(x => x.Permission));
+
+        var request = new ManagedElsaHandoffIssueRequest(
+            setup.OrganizationId,
+            setup.InstanceId,
+            setup.Audience,
+            setup.RedirectUri,
+            ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier));
+        var issue = await reader.PostControlJsonAsync("/api/managed-elsa/handoff/issue", request);
+        Assert.Equal(HttpStatusCode.OK, issue.StatusCode);
+        var issued = (await issue.Content.ReadControlJsonAsync<ManagedElsaHandoffIssueResponse>())!;
+        var redeem = await app.CreateClient().PostControlJsonAsync(
+            "/api/managed-elsa/handoff/redeem",
+            new ManagedElsaHandoffRedeemRequest(
+                issued.Token,
+                setup.Audience,
+                setup.RedirectUri,
+                CodeVerifier));
+
+        Assert.Equal(HttpStatusCode.OK, redeem.StatusCode);
+        var session = (await redeem.Content.ReadControlJsonAsync<ManagedElsaHandoffRedeemResponse>())!;
+        Assert.Equal(readerAccountId, session.AccountId);
+        Assert.Equal(setup.OrganizationId, session.OrganizationId);
+        Assert.Equal(setup.InstanceId, session.InstanceId);
+        // An organization administrator keeps the Structured Logs read they have always had, and nothing more.
+        Assert.Equal(
+            organizationRole == OrganizationRole.Administrator ? [ManagedElsaRuntimePermissionMapping.StructuredLogsRead] : [],
+            session.RuntimePermissions);
+
+        var pendingIssue = await reader.PostControlJsonAsync("/api/managed-elsa/handoff/issue", request);
+        Assert.Equal(HttpStatusCode.OK, pendingIssue.StatusCode);
+        var pendingToken = (await pendingIssue.Content.ReadControlJsonAsync<ManagedElsaHandoffIssueResponse>())!.Token;
+
+        var revoke = await setup.Client.PostControlJsonAsync(
+            $"/api/workspaces/{setup.WorkspaceId:D}/permissions/revocations",
+            new WorkspacePermissionRevokeRequest(readerAccountId, ManagedElsaInstancePermissions.Open));
+        Assert.Equal(HttpStatusCode.OK, revoke.StatusCode);
+        Assert.True((await revoke.Content.ReadControlJsonAsync<RevokeWorkspacePermissionResult>())!.Changed);
+
+        var deniedRedeem = await app.CreateClient().PostControlJsonAsync(
+            "/api/managed-elsa/handoff/redeem",
+            new ManagedElsaHandoffRedeemRequest(
+                pendingToken,
+                setup.Audience,
+                setup.RedirectUri,
+                CodeVerifier));
+        Assert.Equal(HttpStatusCode.Forbidden, deniedRedeem.StatusCode);
+
+        var deniedIssue = await reader.PostControlJsonAsync("/api/managed-elsa/handoff/issue", request);
+        Assert.Equal(HttpStatusCode.Forbidden, deniedIssue.StatusCode);
+    }
+
+    public enum RedemptionChange { OwnerDemotedToReader, EngineBackOnLegacyImage }
+
+    [Theory]
+    [InlineData(RedemptionChange.OwnerDemotedToReader)]
+    [InlineData(RedemptionChange.EngineBackOnLegacyImage)]
+    public async Task Studio_grant_token_is_denied_when_the_grant_no_longer_holds_at_redemption(RedemptionChange change)
+    {
+        var setup = await SeedManagedInstanceAsync(
+            ElsaDesiredLifecycle.Running,
+            ElsaObservedLifecycle.Ready,
+            ElsaInstanceHealth.Healthy,
+            bind: true);
+        await using var app = setup.App;
+        await ExecuteSqlAsync(app, db => db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE ElsaInstances SET CurrentDeploymentStudioGrants = {true} WHERE Id = {setup.InstanceId}"));
+        var request = new ManagedElsaHandoffIssueRequest(
+            setup.OrganizationId,
+            setup.InstanceId,
+            setup.Audience,
+            setup.RedirectUri,
+            ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier));
+        var issue = await setup.Client.PostControlJsonAsync("/api/managed-elsa/handoff/issue", request);
+        Assert.Equal(HttpStatusCode.OK, issue.StatusCode);
+        var token = (await issue.Content.ReadControlJsonAsync<ManagedElsaHandoffIssueResponse>())!.Token;
+        Assert.Equal(
+            ManagedElsaRuntimePermissions.StudioGrantsV1.Count,
+            new JwtSecurityTokenHandler().ReadJwtToken(token).Claims
+                .Count(claim => claim.Type == ManagedElsaHandoffDefaults.RuntimePermissionClaim));
+
+        await ExecuteSqlAsync(app, db => change == RedemptionChange.OwnerDemotedToReader
+            ? db.WorkspaceMemberships
+                .Where(x => x.WorkspaceId == setup.WorkspaceId && x.Account.ExternalIdentities.Any(identity => identity.Subject == setup.Subject))
+                .ExecuteUpdateAsync(x => x.SetProperty(membership => membership.Role, WorkspaceRole.Reader))
+            : db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE ElsaInstances SET CurrentDeploymentStudioGrants = {false} WHERE Id = {setup.InstanceId}"));
+
+        var redeem = await app.CreateClient().PostControlJsonAsync(
+            "/api/managed-elsa/handoff/redeem",
+            new ManagedElsaHandoffRedeemRequest(token, setup.Audience, setup.RedirectUri, CodeVerifier));
+
+        Assert.Equal(HttpStatusCode.Forbidden, redeem.StatusCode);
+    }
+
+    private static async Task ExecuteSqlAsync(ControlApiTestApplication app, Func<CatalogDbContext, Task> change)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        await change(scope.ServiceProvider.GetRequiredService<CatalogDbContext>());
     }
 
     [Theory]

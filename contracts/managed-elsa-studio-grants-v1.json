@@ -1,0 +1,21 @@
+{
+  "capability": "managed-elsa-studio-grants-v1",
+  "permissions": [
+    "read:diagnostics:structured-logs",
+    "read:dashboard",
+    "read:workflow-definitions",
+    "write:workflow-definitions",
+    "publish:workflow-definitions",
+    "read:activity-descriptors",
+    "read:activity-descriptors-options",
+    "read:expression-descriptors",
+    "read:variable-descriptors",
+    "read:output-converters",
+    "read:commit-strategies",
+    "read:incident-strategies",
+    "read:log-persistence-strategies",
+    "read:storage-drivers",
+    "read:workflow-activation-strategies",
+    "read:installed-features"
+  ]
+}

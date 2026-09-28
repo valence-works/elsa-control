@@ -941,8 +941,16 @@ internal static class ProducerReleaseManifestMapper
         var hasManagedHandoff = capabilities.Contains(
             ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV2,
             StringComparer.Ordinal);
+        var hasStudioGrants = capabilities.Contains(
+            ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV1,
+            StringComparer.Ordinal);
         var hasServerRuntime = runtimeKinds.Contains("elsa.server", StringComparer.OrdinalIgnoreCase);
         var hasIntegrations = image.TryGetProperty("integrations", out var integrations);
+
+        if (hasStudioGrants && !hasManagedHandoff)
+            Add(findings, "integration.studioGrants.handoffRequired", "Studio grants require the managed handoff capability.", "image.capabilities");
+        if (hasStudioGrants && !hasServerRuntime)
+            Add(findings, "integration.studioGrants.runtimeKindRequired", "Studio grants require an Elsa server runtime kind.", "image.capabilities");
 
         if (!hasIntegrations)
         {

@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using ElsaControl.Deployment.Abstractions.Instances;
 
 namespace ElsaControl.Deployment.Azure;
 
@@ -18,6 +19,18 @@ public sealed record AzureProviderTargetScope(
     string Location)
 {
     public const string ConfigurationSection = "Deployment:AzureProvider:Runner:TargetScope";
+    public const string PaidRuntimeRepositoryName = "runtime-combined";
+
+    /// <summary>
+    /// Returns the paid runtime repository governed by this validated provider scope.
+    /// Registry identity is already part of the scope fingerprint persisted with operations.
+    /// </summary>
+    public string GetPaidRuntimeRepository()
+    {
+        Validate();
+        return $"{RegistryName}.azurecr.io/{PaidRuntimeRepositoryName}";
+    }
+
     public string ComputeFingerprint()
     {
         Validate();
@@ -94,7 +107,7 @@ public sealed record AzureManagedHandoffOptions(
             AllowedRuntimePermissions.Distinct(StringComparer.Ordinal).Count() != AllowedRuntimePermissions.Count ||
             AllowedRuntimePermissions.Any(permission => string.IsNullOrWhiteSpace(permission) || permission.Length > 128 ||
                                                  permission.Any(character => char.IsControl(character) || char.IsWhiteSpace(character) || character is ',' or '"')) ||
-            AllowedRuntimePermissions.Any(permission => !string.Equals(permission, "read:diagnostics:structured-logs", StringComparison.Ordinal)))
+            AllowedRuntimePermissions.Any(permission => !ManagedElsaRuntimePermissions.IsSupported(permission)))
             throw new ArgumentException("The runtime allowlist must contain only supported, distinct permission names.", nameof(AllowedRuntimePermissions));
     }
 

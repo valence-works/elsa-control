@@ -782,6 +782,27 @@ public sealed class AzureProviderExecutorTests
         await Assert.ThrowsAsync<ArgumentException>(() => executor.ApplyAsync(request, plan));
     }
 
+    [Theory]
+    [InlineData("valenceruntimeimages.azurecr.io/runtime-combined")]
+    [InlineData("otherregistry.azurecr.io/runtime-combined")]
+    public async Task Execution_under_a_provider_scope_accepts_only_that_scopes_repository(string repository)
+    {
+        var executor = new AzureProviderExecutor(
+            new FakeOperationStore(), new RecordingRunner(), new StaticTimeProvider(Now), TimeSpan.FromMinutes(5),
+            providerScope: StagingScope());
+        var request = CreateRequest() with { ImageRepository = repository };
+
+        await Assert.ThrowsAsync<ArgumentException>(() => executor.ApplyAsync(request, CreatePlan() with { ImageRepository = repository }));
+    }
+
+    private static AzureProviderTargetScope StagingScope() => new(
+        "11111111-1111-1111-1111-111111111111",
+        "control-staging",
+        "22222222-2222-2222-2222-222222222222",
+        "control-staging-registry",
+        "stagingregistry",
+        "westeurope");
+
     [Fact]
     public async Task Hostile_runner_message_is_not_returned_or_persisted()
     {

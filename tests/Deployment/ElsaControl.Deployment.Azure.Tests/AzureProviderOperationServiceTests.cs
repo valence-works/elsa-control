@@ -79,6 +79,57 @@ public sealed class AzureProviderOperationServiceTests
     }
 
     [Fact]
+    public async Task Submit_persists_the_admitted_studio_grant_profile_with_the_safe_projection()
+    {
+        var store = new CapturingStore();
+        var service = new AzureProviderOperationService(store, new FixedTimeProvider(Now));
+
+        await service.SubmitAsync(WorkspaceId, new AzureProviderOperationSubmission("request-1", new('b', 64), CreatePlan() with
+        {
+            ManagedHandoff = true,
+            ManagedHandoffStudioGrants = true
+        }));
+
+        Assert.True(store.Request!.ManagedHandoffStudioGrants);
+    }
+
+    [Theory]
+    [InlineData("valenceruntimeimages.azurecr.io/runtime-combined", false)]
+    [InlineData("otherregistry.azurecr.io/runtime-combined", false)]
+    [InlineData("stagingregistry.azurecr.io/runtime-combined", true)]
+    public async Task Submit_under_a_provider_scope_accepts_only_that_scopes_repository(string repository, bool accepted)
+    {
+        var store = new CapturingStore();
+        var scope = new AzureProviderTargetScope(
+            "11111111-1111-1111-1111-111111111111", "control-staging",
+            "22222222-2222-2222-2222-222222222222", "control-staging-registry", "stagingregistry", "westeurope");
+        var service = new AzureProviderOperationService(store, new FixedTimeProvider(Now), scope);
+        var submission = new AzureProviderOperationSubmission("request-1", new('b', 64), CreatePlan() with { ImageRepository = repository });
+
+        if (accepted)
+            await service.SubmitAsync(WorkspaceId, submission);
+        else
+            await Assert.ThrowsAsync<ArgumentException>(() => service.SubmitAsync(WorkspaceId, submission));
+
+        Assert.Equal(accepted, store.Request is not null);
+    }
+
+    [Fact]
+    public async Task Submit_rejects_studio_grants_without_the_managed_handoff()
+    {
+        var store = new CapturingStore();
+        var service = new AzureProviderOperationService(store, new FixedTimeProvider(Now));
+
+        await Assert.ThrowsAsync<ArgumentException>(() => service.SubmitAsync(
+            WorkspaceId,
+            new AzureProviderOperationSubmission("request-1", new('b', 64), CreatePlan() with
+            {
+                ManagedHandoffStudioGrants = true
+            })));
+        Assert.Null(store.Request);
+    }
+
+    [Fact]
     public async Task Submit_rejects_a_managed_handoff_on_more_than_one_replica_before_persistence()
     {
         var store = new CapturingStore();
@@ -125,7 +176,7 @@ public sealed class AzureProviderOperationServiceTests
             legacyPlan);
         var operation = await store.CreateOrGetAsync(AzureProviderOperationValidation.Normalize(request), Now);
 
-        Assert.Null(AzureProviderOperationService.TryRestorePlan(operation));
+        Assert.Null(AzureProviderOperationService.TryRestorePlan(operation, providerScope: null));
     }
 
     [Fact]

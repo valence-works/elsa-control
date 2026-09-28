@@ -106,6 +106,8 @@ internal sealed class ElsaInstanceEntity
     public string? CurrentDeploymentEndpointUri { get; set; }
     // The provider configured the current deployment's runtime handoff, bound to its endpoint origin.
     public bool CurrentDeploymentManagedHandoff { get; set; }
+    // Set only from the provider-confirmed current deployment, not the next resolved release.
+    public bool CurrentDeploymentStudioGrants { get; set; }
     public string? PlacementAssignmentId { get; set; }
     public string? ElsaTenantId { get; set; }
     public string? ElsaTenantAudience { get; set; }

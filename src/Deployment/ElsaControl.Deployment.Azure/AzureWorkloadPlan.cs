@@ -32,7 +32,8 @@ public sealed record AzureWorkloadPlan(
     string? SqlWorkflowPackageVersion = null,
     string? SqlQuartzPackageVersion = null,
     AzureWorkloadCapacity? Capacity = null,
-    bool ManagedHandoff = false);
+    bool ManagedHandoff = false,
+    bool ManagedHandoffStudioGrants = false);
 
 /// <summary>
 /// Governed sizing of the single workload container, in the resolved plan's own units.

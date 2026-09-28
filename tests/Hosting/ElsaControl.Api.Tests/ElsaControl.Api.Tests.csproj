@@ -27,5 +27,8 @@
     <None Include="..\..\RuntimeBuilder\ElsaControl.RuntimeBuilder.Core.Tests\Fixtures\producer-release-manifest-2.0.0.json"
           Link="Fixtures\producer-release-manifest-2.0.0.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\..\contracts\managed-elsa-studio-grants-v1.json"
+          Link="Fixtures\managed-elsa-studio-grants-v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

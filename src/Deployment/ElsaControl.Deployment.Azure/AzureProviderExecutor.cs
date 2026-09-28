@@ -24,6 +24,9 @@ public sealed class AzureProviderExecutor
     private readonly IElsaInstanceCommercialGate? _commercialGate;
     private readonly IAzureProviderResourceAssignmentStore? _assignmentStore;
 
+    /// <summary>The provider scope whose registry every executed plan must name exactly; production when absent.</summary>
+    internal AzureProviderTargetScope? ProviderScope { get; }
+
     public AzureProviderExecutor(
         IAzureProviderOperationStore store,
         IAzureProviderRunner runner,
@@ -32,7 +35,8 @@ public sealed class AzureProviderExecutor
         string? workerId = null,
         TimeSpan? heartbeatInterval = null,
         IElsaInstanceCommercialGate? commercialGate = null,
-        IAzureProviderResourceAssignmentStore? assignmentStore = null)
+        IAzureProviderResourceAssignmentStore? assignmentStore = null,
+        AzureProviderTargetScope? providerScope = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _runner = runner ?? throw new ArgumentNullException(nameof(runner));
@@ -47,6 +51,7 @@ public sealed class AzureProviderExecutor
         AzureProviderOperationValidation.ValidateWorkerId(_workerId);
         _commercialGate = commercialGate;
         _assignmentStore = assignmentStore;
+        ProviderScope = providerScope;
     }
 
     /// <summary>
@@ -155,15 +160,15 @@ public sealed class AzureProviderExecutor
         return await ExecuteClaimedAsync(CopySafePlan(plan), claimed, request.LeaseToken, cancellationToken);
     }
 
-    private static bool IsPlanForOperation(AzureProviderOperation operation, AzureWorkloadPlan plan)
+    private bool IsPlanForOperation(AzureProviderOperation operation, AzureWorkloadPlan plan)
     {
         try
         {
-            if (AzureProviderOperationService.TryRestorePlan(operation) is null)
+            if (AzureProviderOperationService.TryRestorePlan(operation, ProviderScope) is null)
                 return false;
             ValidateExecutionRequest(new AzureProviderExecutionRequest(
                 AzureProviderOperationService.CreateOperationRequest(operation),
-                plan));
+                plan), ProviderScope);
             return true;
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
@@ -244,7 +249,7 @@ public sealed class AzureProviderExecutor
         AzureProviderExecutionRequest request,
         CancellationToken cancellationToken = default)
     {
-        ValidateExecutionRequest(request);
+        ValidateExecutionRequest(request, ProviderScope);
         return ExecuteCoreAsync(request with { Plan = CopySafePlan(request.Plan) }, cancellationToken);
     }
 
@@ -262,7 +267,7 @@ public sealed class AzureProviderExecutor
         ArgumentNullException.ThrowIfNull(operation);
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(observation);
-        var recovery = new AzureProviderRecoveryRequest(operation, CopySafePlan(plan));
+        var recovery = new AzureProviderRecoveryRequest(operation, CopySafePlan(plan), ProviderScope: ProviderScope);
         recovery.Validate();
         observation.Validate();
 
@@ -1394,7 +1399,7 @@ public sealed class AzureProviderExecutor
         public Exception Cause { get; } = cause;
     }
 
-    internal static void ValidateExecutionRequest(AzureProviderExecutionRequest request)
+    internal static void ValidateExecutionRequest(AzureProviderExecutionRequest request, AzureProviderTargetScope? providerScope)
     {
         if (request is null)
             throw new ArgumentNullException(nameof(request));
@@ -1438,10 +1443,7 @@ public sealed class AzureProviderExecutor
             throw new ArgumentException("The provider plan must include verified release-manifest digests.", nameof(request));
         if (string.IsNullOrWhiteSpace(plan.ImageDigest) || plan.ImageDigest.Length != 64 || !plan.ImageDigest.All(Uri.IsHexDigit))
             throw new ArgumentException("The provider plan image digest must be exactly 64 hexadecimal characters.", nameof(request));
-        if (!string.Equals(
-                plan.ImageRepository,
-                AzureWorkloadPlanTranslator.SupportedRepository,
-                StringComparison.Ordinal))
+        if (!string.Equals(plan.ImageRepository, AzureWorkloadPlanTranslator.GovernedRepository(providerScope), StringComparison.Ordinal))
             throw new ArgumentException("The provider plan image must use the governed Azure repository.", nameof(request));
         if (!AzureProviderOperationValidation.IsSafePackageVersion(plan.SqlWorkflowPackageVersion) ||
             !AzureProviderOperationValidation.IsSafePackageVersion(plan.SqlQuartzPackageVersion))

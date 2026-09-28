@@ -106,7 +106,8 @@ public sealed record AzureProviderOperationRequest(
     ElsaInstanceOperationAction? LifecycleAction = null,
     Guid? ProviderAssignmentId = null,
     AzureWorkloadCapacity? Capacity = null,
-    bool ManagedHandoff = false);
+    bool ManagedHandoff = false,
+    bool ManagedHandoffStudioGrants = false);
 
 public sealed record AzureProviderResourceReferences(
     string? ResourceGroupName = null,
@@ -177,6 +178,7 @@ public sealed record AzureProviderOperation(
     AzureProviderRunnerStep? AttemptedStep = null,
     AzureWorkloadCapacity? Capacity = null,
     bool ManagedHandoff = false,
+    bool ManagedHandoffStudioGrants = false,
     DateTimeOffset? StatusChangedAt = null)
 {
     [JsonIgnore]
