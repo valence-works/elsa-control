@@ -143,7 +143,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 instance.ObservedLifecycle, instance.Health, instance.Version, instance.IdentityBinding,
                 instance.DesiredStateRevisionId, instance.ResolvedPlanReference, instance.CurrentResolvedRelease,
                 instance.CurrentDeploymentReference, instance.PlacementAssignmentReference, instance.ElsaTenantReference,
-                instance.LastOperationId);
+                instance.LastOperationId, createdAt: instance.CreatedAt, updatedAt: instance.UpdatedAt);
         }
     }
 
@@ -209,7 +209,8 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 commit.PlacementAssignmentId is null
                     ? instance.PlacementAssignmentReference
                     : new ElsaPlacementAssignmentReference(commit.PlacementAssignmentId),
-                instance.ElsaTenantReference, instance.LastOperationId);
+                instance.ElsaTenantReference, instance.LastOperationId,
+                createdAt: instance.CreatedAt, updatedAt: instance.UpdatedAt);
         }
         return Task.CompletedTask;
     }
@@ -220,7 +221,8 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             instance.Intent, instance.ObservedLifecycle, instance.Health, instance.Version,
             instance.IdentityBinding, instance.DesiredStateRevisionId, instance.ResolvedPlanReference,
             instance.CurrentResolvedRelease, instance.CurrentDeploymentReference,
-            new ElsaPlacementAssignmentReference(assignmentId), instance.ElsaTenantReference, instance.LastOperationId);
+            new ElsaPlacementAssignmentReference(assignmentId), instance.ElsaTenantReference, instance.LastOperationId,
+            createdAt: instance.CreatedAt, updatedAt: instance.UpdatedAt);
 
     public Task<IReadOnlyList<ElsaInstanceProviderPendingOperation>> ListPendingProviderOperationsAsync(
         int limit,
@@ -408,7 +410,9 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         instance.PlacementAssignmentReference,
         instance.ElsaTenantReference,
         instance.LastOperationId,
-        instance.DeletedAt);
+        instance.DeletedAt,
+        instance.CreatedAt,
+        instance.UpdatedAt);
 
     /// <summary>
     /// Supplies safe, already-admitted resolution inputs to the worker seam. A real

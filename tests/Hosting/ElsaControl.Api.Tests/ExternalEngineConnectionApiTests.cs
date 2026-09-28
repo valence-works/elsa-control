@@ -7,8 +7,10 @@ using ElsaControl.Deployment.Core.ExternalConnections;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
+using ElsaControl.RuntimeBuilder.Abstractions.ReleaseCatalog;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace ElsaControl.Api.Tests;
 
@@ -306,6 +308,9 @@ public sealed class ExternalEngineConnectionApiTests
         Assert.Equal(ExternalEngineConnectionStatus.Connected, connected!.Status);
         Assert.Equal(ExternalEngineHeartbeatFreshness.Fresh, connected.HeartbeatFreshness);
         Assert.Equal(ExternalEngineReleaseEvidenceLevel.SelfReported, connected.ReleaseEvidenceLevel);
+        Assert.Null(connected.ReleaseEvidenceReference);
+        Assert.Equal("valence-runtime", connected.ObservedDistribution);
+        Assert.Equal("3.8.1", connected.ObservedVersion);
         Assert.Equal(2, connected.LastHeartbeatSequence);
         Assert.Equal("server", connected.ObservedRuntimeKind);
         Assert.Equal(ExternalEngineConnectorCompatibilityStatus.Compatible, connected.ConnectorCompatibilityStatus);
@@ -448,6 +453,117 @@ public sealed class ExternalEngineConnectionApiTests
         Assert.Equal(HttpStatusCode.NotFound, revokedHeartbeat.StatusCode);
     }
 
+    [Fact]
+    public async Task Connector_heartbeat_claiming_valence_runtime_with_matching_digests_is_self_reported()
+    {
+        const string imageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        var catalog = new MatchingReleaseCatalogStore(imageDigest);
+        await using var app = new ControlApiTestApplication(configureServices: services =>
+        {
+            services.RemoveAll<IGovernedReleaseCatalogStore>();
+            services.AddSingleton<IGovernedReleaseCatalogStore>(catalog);
+        });
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var owner = app.CreateTrustedWorkspaceClient("connector-self-reported-owner");
+        var context = await owner.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces");
+        var workspace = Assert.Single(context!.Workspaces);
+        using var created = await CreateAsync(owner, workspace.Id, "Customer host", "self-reported-engine");
+        var pairing = (await created.Content.ReadControlJsonAsync<ExternalEnginePairingAttemptResponse>())!;
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var redemption = Redemption(pairing, workspace.OrganizationId, workspace.Id, key);
+        using var redeemed = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/enrollment/redeem", redemption);
+        var identity = await redeemed.Content.ReadControlJsonAsync<ExternalEngineConnectorIdentityResponse>();
+        Assert.NotNull(identity);
+
+        var report = new ExternalEngineHeartbeatReport(
+            1,
+            DateTimeOffset.UtcNow,
+            ExternalEngineHeartbeatService.CurrentProtocol,
+            "1.4.0",
+            ExternalEngineRuntimeHealth.Healthy,
+            "server",
+            "valence-runtime",
+            "3.8.1",
+            "https://studio.example.test/elsa/",
+            [ExternalEngineHeartbeatService.StatusCapability],
+            [new ExternalEngineComponentObservation("runtime", imageDigest)]);
+        var proof = Proof(
+            identity!,
+            workspace.OrganizationId,
+            workspace.Id,
+            pairing.Connection.Id,
+            pairing.Enrollment.Audience,
+            ExternalEngineHeartbeatService.HeartbeatOperation,
+            ExternalEngineHeartbeatService.CreatePayloadDigest(report),
+            key);
+        using var heartbeat = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/heartbeat",
+            new ExternalEngineHeartbeatRequest(proof, report));
+
+        Assert.Equal(HttpStatusCode.OK, heartbeat.StatusCode);
+        var connected = await heartbeat.Content.ReadControlJsonAsync<ExternalEngineConnectionResponse>();
+        Assert.Equal(ExternalEngineConnectionStatus.Connected, connected!.Status);
+        Assert.Equal(ExternalEngineReleaseEvidenceLevel.SelfReported, connected.ReleaseEvidenceLevel);
+        Assert.Null(connected.ReleaseEvidenceReference);
+        Assert.Equal("valence-runtime", connected.ObservedDistribution);
+        Assert.Equal("3.8.1", connected.ObservedVersion);
+        Assert.Equal("server", connected.ObservedRuntimeKind);
+        Assert.Equal("Customer host", connected.DisplayName);
+    }
+
+    [Fact]
+    public async Task Connector_heartbeat_display_name_replaces_the_pairing_label()
+    {
+        await using var app = new ControlApiTestApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var owner = app.CreateTrustedWorkspaceClient("connector-display-name-owner");
+        var context = await owner.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces");
+        var workspace = Assert.Single(context!.Workspaces);
+        using var created = await CreateAsync(owner, workspace.Id, "Pairing label", "display-name-engine");
+        var pairing = (await created.Content.ReadControlJsonAsync<ExternalEnginePairingAttemptResponse>())!;
+        Assert.Equal("Pairing label", pairing.Connection.DisplayName);
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var redemption = Redemption(pairing, workspace.OrganizationId, workspace.Id, key);
+        using var redeemed = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/enrollment/redeem", redemption);
+        var identity = await redeemed.Content.ReadControlJsonAsync<ExternalEngineConnectorIdentityResponse>();
+        Assert.NotNull(identity);
+
+        var report = new ExternalEngineHeartbeatReport(
+            1,
+            DateTimeOffset.UtcNow,
+            ExternalEngineHeartbeatService.CurrentProtocol,
+            "1.4.0",
+            ExternalEngineRuntimeHealth.Healthy,
+            "server",
+            "elsa-oss",
+            "3.8.4",
+            null,
+            [ExternalEngineHeartbeatService.StatusCapability],
+            [],
+            "Acme Orders Engine");
+        var proof = Proof(
+            identity!,
+            workspace.OrganizationId,
+            workspace.Id,
+            pairing.Connection.Id,
+            pairing.Enrollment.Audience,
+            ExternalEngineHeartbeatService.HeartbeatOperation,
+            ExternalEngineHeartbeatService.CreatePayloadDigest(report),
+            key);
+        using var heartbeat = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/heartbeat",
+            new ExternalEngineHeartbeatRequest(proof, report));
+
+        Assert.Equal(HttpStatusCode.OK, heartbeat.StatusCode);
+        var connected = await heartbeat.Content.ReadControlJsonAsync<ExternalEngineConnectionResponse>();
+        Assert.Equal("Acme Orders Engine", connected!.DisplayName);
+        Assert.Equal(ExternalEngineReleaseEvidenceLevel.SelfReported, connected.ReleaseEvidenceLevel);
+        Assert.Null(connected.ReleaseEvidenceReference);
+        Assert.Equal("elsa-oss", connected.ObservedDistribution);
+    }
+
     private static ExternalEngineConnectorProof Proof(
         ExternalEngineConnectorIdentityResponse identity,
         Guid organizationId,
@@ -525,5 +641,38 @@ public sealed class ExternalEngineConnectionApiTests
         };
         request.Headers.Add("Idempotency-Key", idempotencyKey);
         return client.SendAsync(request);
+    }
+
+    private sealed class MatchingReleaseCatalogStore(string imageDigest) : IGovernedReleaseCatalogStore
+    {
+        public Task<GovernedReleaseCatalogWriteResult> StoreAsync(
+            IReadOnlyList<GovernedReleaseCatalogEntry> entries,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task<IReadOnlyList<GovernedReleaseCatalogEntry>> QueryAsync(
+            GovernedReleaseCatalogQuery query,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<GovernedReleaseCatalogEntry>>([
+                new(
+                    "1",
+                    "manifest-ref",
+                    "manifest-sha256",
+                    "payload-sha256",
+                    "signature-ref",
+                    "signature-sha256",
+                    "paid",
+                    new("valence-runtime", "3", "3.8", "3.8.1", "stable", "released", "community", "repo", "commit", "run"),
+                    new(
+                        "combined",
+                        "1",
+                        ["server"],
+                        [],
+                        [],
+                        [new("runtime", "registry.example/runtime@" + imageDigest, imageDigest,
+                            new Dictionary<string, string>(), [], [], [], null)],
+                        []),
+                    "Supported",
+                    DateTimeOffset.UtcNow)
+            ]);
     }
 }

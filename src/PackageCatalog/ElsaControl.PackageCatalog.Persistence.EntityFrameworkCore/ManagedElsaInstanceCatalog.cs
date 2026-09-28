@@ -54,6 +54,10 @@ public sealed class EfCoreManagedElsaInstanceCatalog(CatalogDbContext dbContext)
             entity.Health,
             audience,
             callbackUri,
-            bindingVersion);
+            bindingVersion)
+        {
+            CreatedAt = entity.CreatedAt.ToUniversalTime(),
+            UpdatedAt = entity.UpdatedAt.ToUniversalTime()
+        };
     }
 }

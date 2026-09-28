@@ -41,6 +41,8 @@ export type ManagedElsaInstance = {
   intent?: ManagedElsaInstanceIntent | null;
   currentResolvedRelease?: ManagedElsaCurrentResolvedRelease | null;
   identityBindingState?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 export type ManagedElsaInstanceList = {
@@ -111,6 +113,14 @@ export type ManagedElsaOperation = {
   attemptNumber: number;
   failureCode: string | null;
   links: Record<string, string>;
+};
+
+export type ManagedElsaOperationList = {
+  items: ManagedElsaOperation[];
+  page: number;
+  pageSize: number;
+  totalCount: number;
+  hasMore: boolean;
 };
 
 export type ManagedElsaOperationalHealthStatus =
