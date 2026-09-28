@@ -240,18 +240,23 @@ public static class AzureManagedElsaProvisioningProgressProjector
             waitingStage ??= WaitingStage(null);
             knownStage ??= 0;
         }
-        else if (lifecycleState == ElsaInstanceOperationState.EntitlementHeld)
+        else if (lifecycleState == ElsaInstanceOperationState.EntitlementHeld &&
+                 lifecycle?.Action != ElsaInstanceOperationAction.Delete)
         {
             state = ManagedElsaProvisioningProgressStates.EntitlementHeld;
             knownStage ??= 0;
         }
         else if (provider is null && (healthyContinuation || transientUncertainty ||
                  lifecycleState is ElsaInstanceOperationState.Accepted or
-                 ElsaInstanceOperationState.Queued))
+                 ElsaInstanceOperationState.Queued or
+                 ElsaInstanceOperationState.EntitlementHeld))
         {
+            // Delete is never projected as EntitlementHeld; a held Delete uses
+            // the ordinary Accepted/Queued clock and queued/active states.
             state = healthyContinuation ||
                     lifecycleState is ElsaInstanceOperationState.Accepted or
-                    ElsaInstanceOperationState.Queued
+                    ElsaInstanceOperationState.Queued or
+                    ElsaInstanceOperationState.EntitlementHeld
                 ? ManagedElsaProvisioningProgressStates.Queued
                 : ManagedElsaProvisioningProgressStates.Active;
             knownStage ??= 0;
@@ -584,18 +589,22 @@ public static class AzureManagedElsaProvisioningProgressProjector
     /// lifecycle <c>AcceptedAt</c> is used and the clock applies only to
     /// Accepted/Queued (any operation kind, including Delete) and the
     /// RecoveryRequired hand-off. Lifecycle <c>WaitingForPriorOperation</c> and
-    /// <c>EntitlementHeld</c> are exempt and have no clock of their own. The
-    /// clock is skipped while the provider is <c>Running</c> and once Create has
-    /// finished. Inclusive: elapsed == 10:00 is stale. It covers Accepted,
-    /// Queued, and Succeeded-before-Ready.
+    /// non-Delete <c>EntitlementHeld</c> are exempt and have no clock of their
+    /// own. Delete is never treated as entitlement-held: its clock and
+    /// staleness stay the Accepted/Queued rules. The clock is skipped while the
+    /// provider is <c>Running</c> and once Create has finished. Inclusive:
+    /// elapsed == 10:00 is stale. It covers Accepted, Queued, and
+    /// Succeeded-before-Ready.
     /// </summary>
     private static bool HasExceededProviderProgressBound(
         DateTimeOffset now,
         ElsaInstanceLifecycleTopologyOperation? lifecycle,
         AzureProviderOperation? provider)
     {
-        if (lifecycle?.State is ElsaInstanceOperationState.WaitingForPriorOperation
-            or ElsaInstanceOperationState.EntitlementHeld)
+        if (lifecycle?.State == ElsaInstanceOperationState.WaitingForPriorOperation)
+            return false;
+        if (lifecycle?.State == ElsaInstanceOperationState.EntitlementHeld &&
+            lifecycle.Action != ElsaInstanceOperationAction.Delete)
             return false;
         if (provider?.Status == AzureProviderOperationStatus.Running)
             return false;
@@ -612,7 +621,9 @@ public static class AzureManagedElsaProvisioningProgressProjector
         if (provider is null &&
             lifecycle?.State is not (ElsaInstanceOperationState.Accepted or
                 ElsaInstanceOperationState.Queued or
-                ElsaInstanceOperationState.RecoveryRequired))
+                ElsaInstanceOperationState.RecoveryRequired) &&
+            !(lifecycle?.State == ElsaInstanceOperationState.EntitlementHeld &&
+              lifecycle.Action == ElsaInstanceOperationAction.Delete))
             return false;
 
         var clockStart = provider is not null

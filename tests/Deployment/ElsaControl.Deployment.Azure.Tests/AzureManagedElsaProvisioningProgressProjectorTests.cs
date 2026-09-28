@@ -645,6 +645,28 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
     }
 
     [Fact]
+    public void Delete_is_never_shown_as_entitlement_held_and_keeps_the_ordinary_clock()
+    {
+        var before = Project(
+            lifecycleState: ElsaInstanceOperationState.EntitlementHeld,
+            action: ElsaInstanceOperationAction.Delete,
+            failureCode: null,
+            timeProvider: new FixedTimeProvider(AcceptedAt.AddMinutes(9).AddSeconds(59)));
+        var atBound = Project(
+            lifecycleState: ElsaInstanceOperationState.EntitlementHeld,
+            action: ElsaInstanceOperationAction.Delete,
+            failureCode: null,
+            timeProvider: new FixedTimeProvider(AcceptedAt.AddMinutes(10)));
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Queued, before.State);
+        Assert.NotEqual(ManagedElsaProvisioningProgressStates.EntitlementHeld, before.State);
+        Assert.NotEqual(ManagedElsaProvisioningProgressStages.EntitlementHeld, before.CurrentStage);
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Stale, atBound.State);
+        Assert.NotEqual(ManagedElsaProvisioningProgressStates.EntitlementHeld, atBound.State);
+        Assert.Equal(ManagedElsaProvisioningProgressDiagnostics.RequiresAttention, atBound.DiagnosticCode);
+    }
+
+    [Fact]
     public void Entitlement_held_is_exempt_from_the_progress_clock()
     {
         var result = Project(
@@ -789,7 +811,11 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
     [Fact]
     public void Non_failed_customer_facing_tokens_do_not_mention_failure_or_time_estimates()
     {
-        var forbidden = new[] { "failed", "error", "lost", "minute", "minutes", "hour", "hours", "10:00", "ten minute" };
+        var forbidden = new[]
+        {
+            "failed", "error", "lost", "minute", "minutes", "hour", "hours", "10:00", "ten minute",
+            "subscription", "billing", "payment"
+        };
         var allowedFailedTokens = new HashSet<string>(StringComparer.Ordinal)
         {
             ManagedElsaProvisioningProgressStates.Failed,
@@ -825,7 +851,8 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
             "health.verified",
             "traffic.routing",
             "traffic.routed",
-            "engine.ready"
+            "engine.ready",
+            ManagedElsaProvisioningProgressCopy.EntitlementHeld
         ];
 
         Assert.All(tokens, token =>

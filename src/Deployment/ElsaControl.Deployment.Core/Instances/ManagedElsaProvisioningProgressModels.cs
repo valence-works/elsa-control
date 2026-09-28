@@ -124,3 +124,13 @@ public static class ManagedElsaProvisioningProgressStaleReasons
     public const string BlockingOperationStale = "blocking-operation-stale";
     public const string BlockingOperationUnresolvable = "blocking-operation-unresolvable";
 }
+
+/// <summary>
+/// Control-side customer copy. Snapshot/BFF still serialize codes, not these
+/// strings. Cloud dashboard wording lives in #646 and must not be copied here.
+/// </summary>
+public static class ManagedElsaProvisioningProgressCopy
+{
+    public const string EntitlementHeld =
+        "New changes to this engine aren't available right now. Resolve this on elsacloud.app.";
+}
