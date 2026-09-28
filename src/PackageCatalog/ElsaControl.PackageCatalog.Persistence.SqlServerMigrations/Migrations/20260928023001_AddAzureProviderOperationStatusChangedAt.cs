@@ -19,7 +19,7 @@ public sealed class AddAzureProviderOperationStatusChangedAt : Migration
 
         migrationBuilder.Sql("""
             UPDATE [AzureProviderOperations]
-            SET [StatusChangedAt] = [CreatedAt]
+            SET [StatusChangedAt] = [UpdatedAt]
             WHERE [StatusChangedAt] = 0;
             """);
     }

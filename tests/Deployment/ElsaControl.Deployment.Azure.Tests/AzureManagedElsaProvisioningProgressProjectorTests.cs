@@ -301,6 +301,32 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
         Assert.Equal(ManagedElsaProvisioningProgressStates.Stale, atBound.State);
     }
 
+    [Fact]
+    public void Succeeded_before_ready_with_old_created_at_stays_active_from_status_changed_at()
+    {
+        // In-flight rows backfill StatusChangedAt from UpdatedAt. A 25-minute
+        // CreatedAt must not make health-verification stale at deploy.
+        var now = AcceptedAt.AddMinutes(25);
+        var succeededAt = now.AddMinutes(-2);
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.RecoveryRequired,
+            failureCode: null,
+            recoveryReason: AzureManagedElsaProvisioningProgressProjector.ProviderReconciliationHealthUnknown,
+            observedLifecycle: ElsaObservedLifecycle.Provisioning,
+            provider: Provider(
+                AzureProviderOperationStatus.Succeeded,
+                AzureProviderOperationPhase.HealthVerified,
+                completedAt: succeededAt,
+                createdAt: AcceptedAt,
+                updatedAt: succeededAt,
+                statusChangedAt: succeededAt),
+            timeProvider: new FixedTimeProvider(now));
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Active, result.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.HealthVerification, result.CurrentStage);
+        Assert.Null(result.DiagnosticCode);
+    }
+
     [Theory]
     [InlineData(AzureProviderOperationStatus.Accepted, 9, 59, ManagedElsaProvisioningProgressStates.Active)]
     [InlineData(AzureProviderOperationStatus.Queued, 9, 59, ManagedElsaProvisioningProgressStates.Active)]

@@ -101,6 +101,8 @@ public sealed class AzureManagedElsaProvisioningProgressReader(
                 HistoryUnavailable: true),
             _timeProvider);
 
+    // Finished Creates never stay RecoveryRequired, so omitting RecoveryReason
+    // here cannot hide a definite-problem hand-off.
     private static ElsaInstanceLifecycleTopologyOperation ToTopologyOperation(
         ElsaInstanceOperationSummary operation) =>
         new(

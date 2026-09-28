@@ -516,12 +516,14 @@ public static class AzureManagedElsaProvisioningProgressProjector
     /// <summary>
     /// The 10-minute clock starts from the provider operation's last status
     /// change (<see cref="AzureProviderOperation.StatusChangedAt"/>, backfilled
-    /// from <see cref="AzureProviderOperation.CreatedAt"/>). Heartbeats, run
-    /// <c>UpdatedAt</c>, reason-write time, and provider <c>UpdatedAt</c> do not
-    /// reset it. With no provider row, Create <c>AcceptedAt</c> is used.
-    /// The clock is skipped while the provider is <c>Running</c> and once Create
-    /// has finished. Inclusive: elapsed == 10:00 is stale. It covers Accepted,
-    /// Queued, no provider row, and Succeeded-before-Ready.
+    /// from <see cref="AzureProviderOperation.UpdatedAt"/> so an in-flight
+    /// Succeeded-before-Ready row does not inherit a CreatedAt older than 10
+    /// minutes). Heartbeats, run <c>UpdatedAt</c>, reason-write time, and later
+    /// provider <c>UpdatedAt</c> writes do not reset it. With no provider row,
+    /// Create <c>AcceptedAt</c> is used. The clock is skipped while the provider
+    /// is <c>Running</c> and once Create has finished. Inclusive: elapsed ==
+    /// 10:00 is stale. It covers Accepted, Queued, no provider row, and
+    /// Succeeded-before-Ready.
     /// </summary>
     private static bool HasExceededProviderProgressBound(
         DateTimeOffset now,

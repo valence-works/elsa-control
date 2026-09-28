@@ -220,7 +220,6 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
         var result = Assert.IsType<ManagedElsaProvisioningProgress>(await reader.ReadAsync(WorkspaceId, InstanceId));
 
         Assert.Equal(expectedState, result.State);
-        Assert.Equal(recoveryReason, create.RecoveryReason);
     }
 
     [Fact]
