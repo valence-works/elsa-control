@@ -570,6 +570,45 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
     }
 
     [Fact]
+    public async Task Store_written_entitlement_hold_on_the_same_operation_is_not_failed()
+    {
+        // AuthorizeProviderSubmissionAsync writes lifecycle.entitlement-held with the
+        // same OperationId as the accepted row and sets operation.FailureCode. That
+        // FailureCode must not paint the hold (or accepted) row as Failed.
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-store-hold-owner");
+        var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, "overview-store-hold-runtime");
+        var accepted = await RestartAsync(
+            client, workspaceId, created.Instance.InstanceId, created.Instance.ETag, "overview-store-hold");
+        await SetOperationStateAsync(
+            app, accepted.OperationId, ElsaInstanceOperationState.Queued, failureCode: null, completed: false);
+        await SetManagedHostingEnabledAsync(app, workspaceId, enabled: false);
+
+        ElsaInstanceCommercialGateDecision decision;
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var holdStore = scope.ServiceProvider.GetRequiredService<IElsaInstanceEntitlementHoldStore>();
+            decision = await holdStore.AuthorizeProviderSubmissionAsync(
+                workspaceId, created.Instance.InstanceId, accepted.OperationId, DateTimeOffset.UtcNow);
+        }
+
+        Assert.False(decision.Allowed);
+        Assert.Equal(ElsaInstanceCommercialOperation.EntitlementRequired, decision.Code);
+
+        var activity = await client.GetControlJsonAsync<ManagedElsaInstanceActivityResponse>(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/activity");
+        Assert.Contains(activity!.Items, item =>
+            item.EventType == "lifecycle.accepted" &&
+            item.Action == ElsaInstanceOperationAction.Restart &&
+            item.Severity != ManagedElsaInstanceActivitySeverity.Failed);
+        var hold = Assert.Single(activity.Items, item => item.EventType == "lifecycle.entitlement-held");
+        Assert.Equal(ElsaInstanceOperationAction.Restart, hold.Action);
+        Assert.NotEqual(ManagedElsaInstanceActivitySeverity.Failed, hold.Severity);
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Warning, hold.Severity);
+        Assert.Equal(ElsaInstanceCommercialOperation.EntitlementRequired, hold.DiagnosticCode);
+    }
+
+    [Fact]
     public async Task Operation_failure_code_submission_uncertain_precedes_failed()
     {
         // Warning set wins: FailureCode = provider.submission.uncertain together with a
@@ -1166,6 +1205,23 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         if (idempotencyKey is not null)
             request.Headers.Add("Idempotency-Key", idempotencyKey);
         return request;
+    }
+
+    private static async Task SetManagedHostingEnabledAsync(
+        ControlApiTestApplication app,
+        Guid workspaceId,
+        bool enabled)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var organizationId = await db.Workspaces.Where(x => x.Id == workspaceId)
+            .Select(x => x.OrganizationId)
+            .SingleAsync();
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE OrganizationEntitlementSnapshots
+            SET ManagedHostingEnabled = {enabled}
+            WHERE OrganizationId = {organizationId}
+            """);
     }
 
     private static async Task EnableManagedHostingAsync(ControlApiTestApplication app, Guid workspaceId)
