@@ -111,6 +111,42 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
         return operation is null || operation.InstanceId is null ? null : MapOperation(operation);
     }
 
+    public async Task<ElsaInstanceOperationPage> ListOperationsAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken = default)
+    {
+        if (workspaceId == Guid.Empty || instanceId == Guid.Empty)
+            return new ElsaInstanceOperationPage([], 0);
+
+        page = Math.Max(page, 1);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+        var offset = (long)(page - 1) * pageSize;
+        var query = dbContext.ElsaInstanceOperations
+            .AsNoTracking()
+            .Where(x => x.WorkspaceId == workspaceId &&
+                        x.InstanceId == instanceId);
+        var totalCount = await query.CountAsync(cancellationToken);
+        if (offset >= totalCount)
+            return new ElsaInstanceOperationPage([], totalCount);
+
+        var operations = await query
+            .OrderByDescending(x => x.AcceptedAt)
+            .ThenByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
+            .Skip((int)offset)
+            .Take(pageSize)
+            .ToListAsync(cancellationToken);
+        return new ElsaInstanceOperationPage(
+            operations
+                .Where(x => x.InstanceId is not null)
+                .Select(MapOperation)
+                .ToList(),
+            totalCount);
+    }
+
     public async Task<IReadOnlyDictionary<Guid, ElsaInstanceOperationSummary>> GetActiveOperationsAsync(
         Guid workspaceId,
         IReadOnlyCollection<Guid> instanceIds,
@@ -425,17 +461,20 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
     public async Task<IReadOnlyList<ElsaInstanceAuditEventSummary>> ListAuditAsync(
         Guid workspaceId,
         Guid instanceId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        int? limit = null)
     {
         if (workspaceId == Guid.Empty || instanceId == Guid.Empty)
             return [];
 
-        var events = await dbContext.ElsaInstanceAuditEvents
+        IQueryable<Models.ElsaInstanceAuditEventEntity> query = dbContext.ElsaInstanceAuditEvents
             .AsNoTracking()
             .Where(x => x.WorkspaceId == workspaceId && x.InstanceId == instanceId)
             .OrderByDescending(x => x.Sequence)
-            .ThenByDescending(x => x.OccurredAt)
-            .ToListAsync(cancellationToken);
+            .ThenByDescending(x => x.OccurredAt);
+        if (limit is > 0)
+            query = query.Take(limit.Value);
+        var events = await query.ToListAsync(cancellationToken);
         return events.Select(x => new ElsaInstanceAuditEventSummary(
             x.Id,
             x.Sequence,

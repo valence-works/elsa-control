@@ -585,6 +585,8 @@ public sealed record ElsaInstance
         _elsaTenantReference = source._elsaTenantReference;
         _lastOperationId = source._lastOperationId;
         _deletedAt = deletedAt;
+        CreatedAt = source.CreatedAt;
+        UpdatedAt = source.UpdatedAt;
     }
 
     public Guid Id { get; }
@@ -652,6 +654,10 @@ public sealed record ElsaInstance
             ? value
             : throw new ArgumentOutOfRangeException(nameof(Version), "Version must be positive.");
     }
+
+    public DateTimeOffset CreatedAt { get; init; }
+
+    public DateTimeOffset UpdatedAt { get; init; }
 
     public ElsaInstanceIdentityBinding? IdentityBinding
     {

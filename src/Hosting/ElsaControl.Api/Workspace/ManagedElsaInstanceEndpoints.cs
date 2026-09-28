@@ -551,6 +551,30 @@ public static class ManagedElsaInstanceEndpoints
             }
         }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource);
 
+        group.MapGet("/{instanceId:guid}/operations", async (
+            Guid workspaceId,
+            Guid instanceId,
+            int? page,
+            int? pageSize,
+            IElsaInstanceLifecycleStore lifecycle,
+            IManagedElsaInstanceApiStore queries,
+            CancellationToken cancellationToken) =>
+        {
+            if (await lifecycle.GetInstanceAsync(workspaceId, instanceId, cancellationToken) is null)
+                return Results.NotFound();
+            var currentPage = Math.Max(page ?? 1, 1);
+            var currentPageSize = Math.Clamp(pageSize ?? 50, 1, 100);
+            var offset = (long)(currentPage - 1) * currentPageSize;
+            var pageResult = await queries.ListOperationsAsync(
+                workspaceId, instanceId, currentPage, currentPageSize, cancellationToken);
+            return Results.Ok(new ManagedElsaInstanceOperationListResponse(
+                pageResult.Items.Select(operation => ToOperationResponse(workspaceId, instanceId, operation)).ToList(),
+                currentPage,
+                currentPageSize,
+                pageResult.TotalCount,
+                offset + currentPageSize < pageResult.TotalCount));
+        }).RequireWorkspaceAccess();
+
         group.MapGet("/{instanceId:guid}/operations/{operationId:guid}", async (
             Guid workspaceId,
             Guid instanceId,
@@ -605,14 +629,17 @@ public static class ManagedElsaInstanceEndpoints
         }).RequireWorkspaceAccess();
 
         group.MapGet("/{instanceId:guid}/audit", async (
-            Guid workspaceId, Guid instanceId,
+            Guid workspaceId, Guid instanceId, int? limit,
             IElsaInstanceLifecycleStore lifecycle,
             IManagedElsaInstanceApiStore queries,
             CancellationToken cancellationToken) =>
         {
             if (await lifecycle.GetInstanceAsync(workspaceId, instanceId, cancellationToken) is null)
                 return Results.NotFound();
-            var events = await queries.ListAuditAsync(workspaceId, instanceId, cancellationToken);
+            var currentLimit = limit ?? 100;
+            if (currentLimit < 1 || currentLimit > 500)
+                return Problem("instance.audit-limit-invalid", "Audit limit must be between 1 and 500.", StatusCodes.Status400BadRequest);
+            var events = await queries.ListAuditAsync(workspaceId, instanceId, cancellationToken, currentLimit);
             return Results.Ok(new ManagedElsaInstanceAuditResponse(events.Select(RedactAudit).ToList()));
         }).RequireWorkspaceAccess();
 
@@ -811,6 +838,8 @@ public static class ManagedElsaInstanceEndpoints
             ActiveOperation = activeOperation is null ? null : new ManagedElsaInstanceCurrentOperationResponse(
                 activeOperation.Id, activeOperation.Action, activeOperation.State,
                 activeOperation.AcceptedAt, activeOperation.StartedAt, activeOperation.CompletedAt),
+            CreatedAt = instance.CreatedAt,
+            UpdatedAt = instance.UpdatedAt,
             Links = new Dictionary<string, string>
             {
                 ["self"] = $"/api/workspaces/{workspaceId:D}/instances/{instance.Id:D}",
@@ -969,6 +998,7 @@ public sealed record ManagedElsaInstanceDeleteConfirmationResponse(
     HostedBillingCopyHook BillingNotice);
 public sealed record ManagedElsaInstanceDeleteRequest(Guid DeleteConfirmationId);
 public sealed record ManagedElsaInstanceListResponse(IReadOnlyList<ManagedElsaInstanceResponse> Items, int Page, int PageSize, int TotalCount, bool HasMore);
+public sealed record ManagedElsaInstanceOperationListResponse(IReadOnlyList<ManagedElsaInstanceOperationResponse> Items, int Page, int PageSize, int TotalCount, bool HasMore);
 public sealed record ManagedElsaInstanceOnboardingOptionsResponse(
     IReadOnlyList<ManagedElsaInstanceReleaseOption> Releases,
     ManagedElsaInstanceLaunchProfile LaunchProfile,
@@ -1049,6 +1079,8 @@ public sealed record ManagedElsaInstanceResponse(Guid OrganizationId, Guid Insta
     public string IdentityBindingState { get; init; } = "identity-unavailable";
     public ElsaInstanceIntent? Intent { get; init; }
     public ManagedElsaInstanceCurrentOperationResponse? ActiveOperation { get; init; }
+    public DateTimeOffset CreatedAt { get; init; }
+    public DateTimeOffset UpdatedAt { get; init; }
     public IReadOnlyDictionary<string, string> Links { get; init; } = new Dictionary<string, string>();
 }
 

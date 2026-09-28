@@ -4024,7 +4024,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 entity.PlacementAssignmentId is null ? null : new ElsaPlacementAssignmentReference(entity.PlacementAssignmentId),
                 MapTenant(entity),
                 entity.LastOperationId is null ? null : new ElsaLastOperationId(entity.LastOperationId),
-                entity.DeletedAt);
+                entity.DeletedAt) with
+            {
+                CreatedAt = entity.CreatedAt.ToUniversalTime(),
+                UpdatedAt = entity.UpdatedAt.ToUniversalTime()
+            };
         }
         catch (Exception exception) when (exception is ArgumentException or ArgumentOutOfRangeException or InvalidOperationException or JsonException)
         {
