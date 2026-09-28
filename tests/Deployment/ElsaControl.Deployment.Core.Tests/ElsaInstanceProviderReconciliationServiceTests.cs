@@ -179,6 +179,32 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
         Assert.Empty(store.RecoveryRequests);
         Assert.Equal(3, port.AutoResumeCount);
         Assert.Equal(["azure.recovery.auto-resume-exhausted"], port.Outcomes);
+
+        var parked = new ManagedLifecycleOperationalHealthSnapshot(
+            WorkspaceId,
+            accepted.Instance.Id,
+            accepted.Instance.DesiredLifecycle,
+            result.Projection.ObservedLifecycle,
+            result.Projection.Health,
+            ElsaInstanceProviderObservationKind.Confirmed,
+            new ManagedLifecycleOperationSnapshot(
+                accepted.Operation.Id,
+                ElsaInstanceOperationState.RecoveryRequired,
+                accepted.Operation.AttemptNumber,
+                accepted.Operation.AcceptedAt,
+                diagnosticCode: "azure.recovery.auto-resume-exhausted"));
+        var firstAlert = new ManagedLifecycleOperationalHealthEvaluator(timeProvider: new StaticTimeProvider(Now))
+            .Evaluate(parked);
+        var secondAlert = new ManagedLifecycleOperationalHealthEvaluator(timeProvider: new StaticTimeProvider(Now))
+            .Evaluate(parked);
+        Assert.Equal(ManagedLifecycleOperationalHealthStatus.RecoveryRequired, firstAlert.Status);
+        var first = Assert.Single(
+            firstAlert.Alerts,
+            alert => alert.Code == ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired);
+        var second = Assert.Single(
+            secondAlert.Alerts,
+            alert => alert.Code == ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired);
+        Assert.Equal(first.DedupeIdentity, second.DedupeIdentity);
     }
 
     [Fact]
