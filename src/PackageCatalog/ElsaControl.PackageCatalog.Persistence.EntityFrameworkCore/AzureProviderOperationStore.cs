@@ -903,17 +903,34 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db) :
                 expectedVersion.HasValue && entity.Version != expectedVersion.Value)
                 return null;
 
-            var decision = entity.OrganizationId is not { } organizationId || organizationId == Guid.Empty ||
-                           entity.InstanceId is not { } instanceId || instanceId == Guid.Empty ||
-                           entity.LifecycleAction is not { } lifecycleAction
-                ? new ElsaInstanceCommercialGateDecision(
-                    false,
-                    ElsaInstanceCommercialOperation.BindingRequired,
-                    "The managed-instance provider operation is missing its durable identity binding.")
-                : await commercialGate.EvaluateAsync(
-                    organizationId,
-                    lifecycleAction,
-                    cancellationToken: cancellationToken);
+            if (entity.OrganizationId is not { } organizationId || organizationId == Guid.Empty ||
+                entity.InstanceId is not { } instanceId || instanceId == Guid.Empty ||
+                entity.LifecycleAction is not { } lifecycleAction)
+            {
+                const string missingIdentityCode = "provider.identity-binding-missing";
+                const string missingIdentitySummary =
+                    "The managed-instance provider operation is missing its durable identity binding.";
+                entity.Status = AzureProviderOperationStatus.RecoveryRequired;
+                entity.StatusChangedAt = now;
+                entity.CompletedAt = null;
+                entity.UpdatedAt = now;
+                entity.Version++;
+                entity.CompletionLeaseTokenHash = entity.LeaseTokenHash;
+                entity.CompletionFingerprint = Hash($"{AzureProviderOperationStatus.RecoveryRequired}|{missingIdentityCode}");
+                entity.LeaseTokenHash = null;
+                entity.LeaseExpiresAt = null;
+                entity.WorkerId = null;
+                AddTransition(entity, missingIdentityCode, missingIdentitySummary, now);
+                await db.SaveChangesAsync(cancellationToken);
+                return new AzureProviderOperationAuthorizationResult(
+                    ToModel(entity),
+                    new ElsaInstanceCommercialGateDecision(false, missingIdentityCode, missingIdentitySummary));
+            }
+
+            var decision = await commercialGate.EvaluateAsync(
+                organizationId,
+                lifecycleAction,
+                cancellationToken: cancellationToken);
 
             if (decision.Allowed)
                 return new AzureProviderOperationAuthorizationResult(ToModel(entity), decision);
