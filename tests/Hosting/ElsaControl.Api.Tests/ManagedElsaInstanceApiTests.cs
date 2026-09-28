@@ -51,6 +51,37 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Managed_and_hosted_onboarding_still_resolves_valence_runtime_from_the_signed_catalog()
+    {
+        var app = await PrepareApplicationAsync([], [
+            CatalogEntry("valence-runtime", "3.8", "3.8.4", "stable", "combined", "supported", "paid"),
+            CatalogEntry("valence-runtime", "3.8", "3.8.0-preview.1", "preview", "combined", "preview", "paid", digestMarker: 'f')
+        ]);
+        var client = app.CreateControlIdentityClient(subject: "managed-hosted-catalog-owner");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+
+        var response = await client.GetAsync($"/api/workspaces/{workspaceId}/instances/onboarding-options");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var options = await response.Content.ReadFromJsonAsync<ManagedElsaInstanceOnboardingOptionsResponse>(
+            ControlApiTestApplication.JsonOptions);
+        Assert.NotNull(options);
+        var release = Assert.Single(options.Releases);
+        Assert.Equal("valence-runtime", release.DistributionId);
+        Assert.Equal("3.8", release.ReleaseLine);
+        Assert.Equal("3.8.4", release.Version);
+        Assert.Equal("stable", release.Channel);
+        Assert.Equal("combined", release.TopologyId);
+        var preview = Assert.Single(options.PreviewReleases!);
+        Assert.Equal("valence-runtime", preview.DistributionId);
+        Assert.Equal("3.8.0-preview.1", preview.Version);
+        Assert.Equal("sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", preview.ManifestDigest);
+        Assert.Contains(_fixture.ReleaseCatalog.Queries, query => query.CatalogLifecycle == "supported" && query.RegistryClass == "paid");
+        Assert.Contains(_fixture.ReleaseCatalog.Queries, query => query.CatalogLifecycle == "preview" && query.RegistryClass == "paid");
+    }
+
+    [Fact]
     public async Task Onboarding_options_are_server_owned_and_workspace_scoped()
     {
         var app = await PrepareApplicationAsync([], [

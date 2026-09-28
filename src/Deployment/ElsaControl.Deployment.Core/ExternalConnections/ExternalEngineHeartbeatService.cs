@@ -1,14 +1,12 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text.Json;
-using ElsaControl.RuntimeBuilder.Abstractions.ReleaseCatalog;
 
 namespace ElsaControl.Deployment.Core.ExternalConnections;
 
 public sealed class ExternalEngineHeartbeatService(
     IExternalEngineConnectionStore connections,
     ExternalEngineEnrollmentService enrollment,
-    IGovernedReleaseCatalogStore releaseCatalog,
     TimeProvider timeProvider)
 {
     public const string HeartbeatOperation = "external-engine.heartbeat.submit";
@@ -21,8 +19,6 @@ public sealed class ExternalEngineHeartbeatService(
     private static readonly TimeSpan MaximumObservationAge = ExternalEngineEnrollmentDefaults.MaximumProofAge;
     private static readonly HashSet<string> AllowedCapabilities =
         new([StatusCapability, StudioCapability], StringComparer.Ordinal);
-    private static readonly HashSet<string> SupportedOssDistributions =
-        new(["elsa-oss"], StringComparer.OrdinalIgnoreCase);
 
     public async Task<ExternalEngineHeartbeatResult?> SubmitAsync(
         ExternalEngineHeartbeatRequest request,
@@ -84,7 +80,7 @@ public sealed class ExternalEngineHeartbeatService(
             return new(ExternalEngineHeartbeatStatus.InvalidReport, connection);
 
         var acceptedCapabilities = report.Capabilities.Order(StringComparer.Ordinal).ToArray();
-        var evidence = await ClassifyReleaseEvidenceAsync(report, cancellationToken);
+        var evidence = ClassifyReleaseEvidence(report);
         var status = report.RuntimeHealth != ExternalEngineRuntimeHealth.Unhealthy
             ? ExternalEngineConnectionStatus.Connected
             : ExternalEngineConnectionStatus.Degraded;
@@ -104,7 +100,8 @@ public sealed class ExternalEngineHeartbeatService(
             StudioDestinationCandidate: acceptedCapabilities.Contains(StudioCapability, StringComparer.Ordinal)
                 ? report.StudioDestination
                 : null,
-            acceptedCapabilities);
+            acceptedCapabilities,
+            report.DisplayName);
 
         for (var attempt = 0; attempt < 2; attempt++)
         {
@@ -162,6 +159,8 @@ public sealed class ExternalEngineHeartbeatService(
             writer.WriteString("observedAt", normalized.ObservedAt.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", CultureInfo.InvariantCulture));
             writer.WriteString("connectorProtocol", normalized.ConnectorProtocol);
             writer.WriteString("connectorVersion", normalized.ConnectorVersion);
+            if (normalized.DisplayName is not null)
+                writer.WriteString("displayName", normalized.DisplayName);
             writer.WriteString("runtimeHealth", normalized.RuntimeHealth switch
             {
                 ExternalEngineRuntimeHealth.Unknown => "unknown",
@@ -200,48 +199,20 @@ public sealed class ExternalEngineHeartbeatService(
             writer.WriteString(propertyName, value);
     }
 
-    private async Task<ReleaseEvidence> ClassifyReleaseEvidenceAsync(
-        ExternalEngineHeartbeatReport report,
-        CancellationToken cancellationToken)
+    /// <summary>
+    /// Connector heartbeats are self-attested. Claimed distribution, version,
+    /// runtime kind, and component digests stay on the connection as metadata
+    /// labelled <see cref="ExternalEngineReleaseEvidenceLevel.SelfReported"/>.
+    /// Only Valence-operated managed or Hosted observation may mint
+    /// <see cref="ExternalEngineReleaseEvidenceLevel.VerifiedManifest"/> or
+    /// higher.
+    /// </summary>
+    private static ReleaseEvidence ClassifyReleaseEvidence(ExternalEngineHeartbeatReport report)
     {
         if (report.ObservedDistribution is null || report.ObservedVersion is null)
             return new(ExternalEngineReleaseEvidenceLevel.None, null);
 
-        var candidates = await releaseCatalog.QueryAsync(
-            new GovernedReleaseCatalogQuery(
-                DistributionId: report.ObservedDistribution,
-                ReleaseVersion: report.ObservedVersion,
-                RuntimeKind: report.RuntimeKind),
-            cancellationToken);
-        if (candidates.Count == 0)
-            return new(ExternalEngineReleaseEvidenceLevel.SelfReported, null);
-
-        var matched = candidates.FirstOrDefault(candidate => ComponentsMatch(candidate.Topology.Components, report.Components));
-        if (matched is null)
-            return new(ExternalEngineReleaseEvidenceLevel.SelfReported, null);
-        if (string.Equals(report.ObservedDistribution, "valence-runtime", StringComparison.OrdinalIgnoreCase))
-            return new(ExternalEngineReleaseEvidenceLevel.VerifiedManifest, matched.ManifestDigest);
-
-        var supported = SupportedOssDistributions.Contains(report.ObservedDistribution)
-            ? candidates.FirstOrDefault(candidate =>
-            ComponentsMatch(candidate.Topology.Components, report.Components)
-            && string.Equals(candidate.CatalogLifecycle, "supported", StringComparison.OrdinalIgnoreCase))
-            : null;
-        return supported is null
-            ? new(ExternalEngineReleaseEvidenceLevel.SelfReported, null)
-            : new(ExternalEngineReleaseEvidenceLevel.SupportedRelease, supported.ManifestDigest);
-    }
-
-    private static bool ComponentsMatch(
-        IReadOnlyList<GovernedReleaseComponent> catalog,
-        IReadOnlyList<ExternalEngineComponentObservation> observed)
-    {
-        if (catalog.Count == 0 || catalog.Count != observed.Count)
-            return false;
-        var observedById = observed.ToDictionary(x => x.Id, x => x.ImageDigest, StringComparer.OrdinalIgnoreCase);
-        return catalog.All(component =>
-            observedById.TryGetValue(component.Id, out var digest)
-            && string.Equals(digest, component.ImageDigest, StringComparison.OrdinalIgnoreCase));
+        return new(ExternalEngineReleaseEvidenceLevel.SelfReported, null);
     }
 
     private static bool IsValidObservation(ExternalEngineHeartbeatReport report, DateTimeOffset now) =>
@@ -259,6 +230,7 @@ public sealed class ExternalEngineHeartbeatService(
         var runtimeKind = Required(report.RuntimeKind, 64, nameof(report.RuntimeKind));
         var distribution = Optional(report.ObservedDistribution, 128, nameof(report.ObservedDistribution));
         var version = Optional(report.ObservedVersion, 128, nameof(report.ObservedVersion));
+        var displayName = Optional(report.DisplayName, 80, nameof(report.DisplayName));
         if ((distribution is null) != (version is null))
             throw new ArgumentException("Observed distribution and version must be supplied together.", nameof(report));
 
@@ -294,7 +266,8 @@ public sealed class ExternalEngineHeartbeatService(
             ObservedVersion = version,
             StudioDestination = NormalizeStudioDestination(report.StudioDestination),
             Capabilities = capabilities,
-            Components = components
+            Components = components,
+            DisplayName = displayName
         };
     }
 

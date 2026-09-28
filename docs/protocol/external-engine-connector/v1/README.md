@@ -54,7 +54,7 @@ Each vector:
 ## How a connector must use these vectors
 
 1. Rebuild each `canonicalPayloadHex` with the same length-prefixed UTF-8 field encoding (`uint32be` length then bytes; domain first).
-2. For heartbeat, also rebuild `reportCanonicalPayloadUtf8` with the protocol-v1 property order and compare both the JSON bytes and the proof digest.
+2. For heartbeat, also rebuild `reportCanonicalPayloadUtf8` with the protocol-v1 property order and compare both the JSON bytes and the proof digest. Optional `displayName` is omitted when absent and written immediately after `connectorVersion` when present. `heartbeat.valid` stays byte-identical to the original report; `heartbeat.valid-display-name` covers the present case.
 3. Verify each `signatureBase64Url` with the published current public key and SHA-256 / P-256 / IEEE P1363.
 4. Assert `expected.signatureValid`. Invalid vectors are well-formed 64-byte signatures that must not verify.
 
