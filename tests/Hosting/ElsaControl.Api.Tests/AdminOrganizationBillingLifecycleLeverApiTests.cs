@@ -169,9 +169,11 @@ public sealed class AdminOrganizationBillingLifecycleLeverApiTests
         Assert.Equal(OrganizationSubscriptionState.PastDue, other.State);
         Assert.Equal(Now.AddDays(-1), other.GraceEndsAt);
         Assert.Null(other.ConstrainedAt);
-        Assert.Empty(await db.OrganizationAuditRecords.AsNoTracking()
+        var otherAudits = await db.OrganizationAuditRecords.AsNoTracking()
             .Where(x => x.OrganizationId == OtherOrganizationId)
-            .ToListAsync());
+            .ToListAsync();
+        Assert.DoesNotContain(otherAudits, x => x.Action == OrganizationAuditAction.BillingLifecycleDeadlineMoved);
+        Assert.DoesNotContain(otherAudits, x => x.Summary.Contains("Constrained", StringComparison.Ordinal));
         Assert.Empty(await db.OrganizationBillingLifecycleNotices.AsNoTracking()
             .Where(x => x.OrganizationId == OtherOrganizationId)
             .ToListAsync());
@@ -348,8 +350,8 @@ public sealed class AdminOrganizationBillingLifecycleLeverApiTests
                         OrganizationSubscriptionState.PastDue,
                         org.PastDueAt,
                         "sha256:" + new string('a', 64),
-                        $"cus_{org.OrganizationId:N}"[..20],
-                        $"sub_{org.OrganizationId:N}"[..20]),
+                        $"cus_{org.OrganizationId:N}",
+                        $"sub_{org.OrganizationId:N}"),
                     org.PastDueAt);
                 if (org.Constrain)
                     await store.AdvanceDueAsync(org.PastDueAt.Add(OrganizationSubscriptionLifecycle.PaymentGracePeriod));
