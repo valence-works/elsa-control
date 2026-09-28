@@ -12,6 +12,9 @@ namespace ElsaControl.Deployment.Azure;
 public sealed class AzureProviderExecutor
 {
     private static readonly TimeSpan DefaultLeaseDuration = TimeSpan.FromMinutes(15);
+    private const string IdentityBindingMissingCode = "provider.identity-binding-missing";
+    private const string IdentityBindingMissingSummary =
+        "The managed-instance provider operation is missing its durable identity binding.";
     private readonly IAzureProviderOperationStore _store;
     private readonly IAzureProviderRunner _runner;
     private readonly TimeProvider _timeProvider;
@@ -385,6 +388,15 @@ public sealed class AzureProviderExecutor
             return Result(operation, AzureProviderExecutionOutcome.Failed, "azure.operation.terminal", "The Azure operation is already terminal and requires a new idempotency key.");
         if (operation.Status == AzureProviderOperationStatus.Running)
             return Result(operation, AzureProviderExecutionOutcome.InProgress, "azure.operation.in-progress", "The Azure operation is already owned by another worker.");
+        if (operation.Status == AzureProviderOperationStatus.RecoveryRequired &&
+            IsIdentityBindingMissing(operation))
+        {
+            return Result(
+                operation,
+                AzureProviderExecutionOutcome.RecoveryRequired,
+                IdentityBindingMissingCode,
+                IdentityBindingMissingSummary);
+        }
 
         var leaseToken = Guid.NewGuid().ToString("N");
         var claimed = operation.Status == AzureProviderOperationStatus.RecoveryRequired
@@ -637,26 +649,24 @@ public sealed class AzureProviderExecutor
         string leaseToken,
         CancellationToken cancellationToken)
     {
-        if (operation.OrganizationId is not { } organizationId || organizationId == Guid.Empty ||
-            operation.InstanceId is not { } instanceId || instanceId == Guid.Empty ||
-            operation.LifecycleAction is not { } lifecycleAction)
+        if (IsIdentityBindingMissing(operation))
         {
-            var bindingHeld = await _store.FinalizeAsync(
+            var bindingMissing = await _store.FinalizeAsync(
                 operation.WorkspaceId,
                 operation.Id,
                 leaseToken,
-                AzureProviderOperationStatus.EntitlementHeld,
-                ElsaInstanceCommercialOperation.BindingRequired,
+                AzureProviderOperationStatus.RecoveryRequired,
+                IdentityBindingMissingCode,
                 _timeProvider.GetUtcNow(),
                 operation.Version,
                 cancellationToken);
-            if (bindingHeld is null)
+            if (bindingMissing is null)
                 return await GetConcurrentResultAsync(operation);
             return Result(
-                bindingHeld,
-                AzureProviderExecutionOutcome.InProgress,
-                ElsaInstanceCommercialOperation.BindingRequired,
-                "The managed-instance provider operation is missing its durable identity binding.");
+                bindingMissing,
+                AzureProviderExecutionOutcome.RecoveryRequired,
+                IdentityBindingMissingCode,
+                IdentityBindingMissingSummary);
         }
 
         if (operation.Action == AzureProviderOperationAction.Delete)
@@ -692,8 +702,8 @@ public sealed class AzureProviderExecutor
         }
 
         var decision = await _commercialGate.EvaluateAsync(
-            organizationId,
-            lifecycleAction,
+            operation.OrganizationId!.Value,
+            operation.LifecycleAction!.Value,
             cancellationToken: cancellationToken);
         if (decision.Allowed)
             return null;
@@ -1470,6 +1480,11 @@ public sealed class AzureProviderExecutor
                 Result(operation, AzureProviderExecutionOutcome.RecoveryRequired, "azure.operation.recovery-required", "The Azure operation requires explicit provider recovery."),
             _ => Result(operation, AzureProviderExecutionOutcome.InProgress, inProgressCode, inProgressMessage)
         };
+
+    private static bool IsIdentityBindingMissing(AzureProviderOperation operation) =>
+        operation.OrganizationId is not { } organizationId || organizationId == Guid.Empty ||
+        operation.InstanceId is not { } instanceId || instanceId == Guid.Empty ||
+        operation.LifecycleAction is not { };
 
     private static bool IsSha256Digest(string? value) =>
         value is not null && value.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) &&

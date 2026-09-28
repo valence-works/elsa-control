@@ -128,6 +128,258 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
     }
 
     [Fact]
+    public async Task Accepted_handoff_sequence_never_reports_stale()
+    {
+        var create = Lifecycle(
+            Guid.NewGuid(),
+            ElsaInstanceOperationState.RecoveryRequired,
+            AzureManagedElsaProvisioningProgressProjector.ProviderSubmissionAccepted);
+        var instances = new InstanceStore { Topology = Topology([create], create.Id) };
+        var clock = new FixedTimeProvider(AcceptedAt.AddSeconds(5));
+
+        var missingProvider = Assert.IsType<ManagedElsaProvisioningProgress>(
+            await Reader(instances, new ProviderStore(), clock).ReadAsync(WorkspaceId, InstanceId));
+        var accepted = Assert.IsType<ManagedElsaProvisioningProgress>(
+            await Reader(
+                    instances,
+                    new ProviderStore
+                    {
+                        Snapshot = new AzureManagedElsaProvisioningOperationSnapshot(
+                            Provider(AzureProviderOperationStatus.Accepted, AzureProviderOperationPhase.Planned),
+                            [])
+                    },
+                    clock)
+                .ReadAsync(WorkspaceId, InstanceId));
+        var queued = Assert.IsType<ManagedElsaProvisioningProgress>(
+            await Reader(
+                    instances,
+                    new ProviderStore
+                    {
+                        Snapshot = new AzureManagedElsaProvisioningOperationSnapshot(
+                            Provider(AzureProviderOperationStatus.Queued, AzureProviderOperationPhase.Planned),
+                            [])
+                    },
+                    clock)
+                .ReadAsync(WorkspaceId, InstanceId));
+        var running = Assert.IsType<ManagedElsaProvisioningProgress>(
+            await Reader(
+                    instances,
+                    new ProviderStore
+                    {
+                        Snapshot = new AzureManagedElsaProvisioningOperationSnapshot(
+                            Provider(AzureProviderOperationStatus.Running, AzureProviderOperationPhase.WorkloadSubmitted),
+                            [Transition(1, AzureProviderOperationPhase.WorkloadSubmitted)])
+                    },
+                    clock)
+                .ReadAsync(WorkspaceId, InstanceId));
+        var succeededBeforeReady = Assert.IsType<ManagedElsaProvisioningProgress>(
+            await Reader(
+                    instances,
+                    new ProviderStore
+                    {
+                        Snapshot = new AzureManagedElsaProvisioningOperationSnapshot(
+                            Provider(AzureProviderOperationStatus.Succeeded, AzureProviderOperationPhase.TrafficPromoted),
+                            [Transition(1, AzureProviderOperationPhase.TrafficPromoted)])
+                    },
+                    clock)
+                .ReadAsync(WorkspaceId, InstanceId));
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Queued, missingProvider.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Active, accepted.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.RequestAccepted, accepted.CurrentStage);
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Active, queued.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.RequestAccepted, queued.CurrentStage);
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Active, running.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Active, succeededBeforeReady.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.TrafficRouting, succeededBeforeReady.CurrentStage);
+        Assert.All(
+            new[] { missingProvider, accepted, queued, running, succeededBeforeReady },
+            snapshot => Assert.NotEqual(ManagedElsaProvisioningProgressStates.Stale, snapshot.State));
+    }
+
+    [Theory]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderSubmissionAccepted, "queued")]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderReconciliationInProgress, "queued")]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderReconciliationHealthUnknown, "active")]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderReconciliationUnavailable, "active")]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderReconciliationUnknown, "active")]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderReconciliationAmbiguous, "stale")]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderReconciliationCorrelationMismatch, "stale")]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderReconciliationRetrySafe, "stale")]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderSubmissionUncertain, "stale")]
+    [InlineData("provider.not-a-real-reason", "stale")]
+    public async Task Reader_passes_the_current_run_reason_into_the_projector(
+        string recoveryReason,
+        string expectedState)
+    {
+        var create = Lifecycle(Guid.NewGuid(), ElsaInstanceOperationState.RecoveryRequired, recoveryReason);
+        var reader = Reader(
+            new InstanceStore { Topology = Topology([create], create.Id) },
+            new ProviderStore());
+
+        var result = Assert.IsType<ManagedElsaProvisioningProgress>(await reader.ReadAsync(WorkspaceId, InstanceId));
+
+        Assert.Equal(expectedState, result.State);
+    }
+
+    [Fact]
+    public async Task Reader_uses_store_written_uncertain_failure_code_as_stale()
+    {
+        var create = new ElsaInstanceLifecycleTopologyOperation(
+            Guid.NewGuid(),
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            1,
+            1,
+            AcceptedAt,
+            AcceptedAt.AddSeconds(1),
+            null,
+            null,
+            "provider.submission.uncertain",
+            null,
+            null,
+            null);
+        var reader = Reader(
+            new InstanceStore { Topology = Topology([create], create.Id) },
+            new ProviderStore());
+
+        var result = Assert.IsType<ManagedElsaProvisioningProgress>(await reader.ReadAsync(WorkspaceId, InstanceId));
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Stale, result.State);
+        Assert.Equal(ManagedElsaProvisioningProgressDiagnostics.RequiresAttention, result.DiagnosticCode);
+    }
+
+    [Fact]
+    public async Task Waiting_create_names_the_blocking_delete_and_is_never_clock_stale()
+    {
+        var organizationId = Guid.Parse("66666666-6666-6666-6666-666666666666");
+        var delete = new ElsaInstanceLifecycleTopologyOperation(
+            Guid.Parse("77777777-7777-7777-7777-777777777777"),
+            ElsaInstanceOperationAction.Delete,
+            ElsaInstanceOperationState.Accepted,
+            1,
+            1,
+            AcceptedAt.AddMinutes(9),
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            OrganizationId: organizationId);
+        var create = new ElsaInstanceLifecycleTopologyOperation(
+            Guid.NewGuid(),
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.WaitingForPriorOperation,
+            1,
+            1,
+            AcceptedAt,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            OrganizationId: organizationId,
+            BlockingOperationId: delete.Id);
+        var reader = Reader(
+            new InstanceStore { Topology = Topology([create, delete], create.Id) },
+            new ProviderStore(),
+            new FixedTimeProvider(AcceptedAt.AddMinutes(10)));
+
+        var result = Assert.IsType<ManagedElsaProvisioningProgress>(await reader.ReadAsync(WorkspaceId, InstanceId));
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.WaitingForPriorOperation, result.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.WaitingForDelete, result.CurrentStage);
+        Assert.Equal(delete.Id, result.BlockingOperationId);
+        Assert.Null(result.StaleReason);
+    }
+
+    [Fact]
+    public async Task Reader_still_projects_the_create_when_a_delete_is_waiting_on_it()
+    {
+        var organizationId = Guid.Parse("66666666-6666-6666-6666-666666666666");
+        var create = new ElsaInstanceLifecycleTopologyOperation(
+            Guid.Parse("77777777-7777-7777-7777-777777777777"),
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            1,
+            1,
+            AcceptedAt,
+            AcceptedAt.AddSeconds(1),
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            RecoveryReason: AzureManagedElsaProvisioningProgressProjector.ProviderSubmissionAccepted,
+            OrganizationId: organizationId);
+        var delete = new ElsaInstanceLifecycleTopologyOperation(
+            Guid.NewGuid(),
+            ElsaInstanceOperationAction.Delete,
+            ElsaInstanceOperationState.WaitingForPriorOperation,
+            1,
+            1,
+            AcceptedAt,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            OrganizationId: organizationId,
+            BlockingOperationId: create.Id);
+        var reader = Reader(
+            new InstanceStore { Topology = Topology([delete, create], delete.Id) },
+            new ProviderStore
+            {
+                Snapshot = new AzureManagedElsaProvisioningOperationSnapshot(
+                    Provider(AzureProviderOperationStatus.Running, AzureProviderOperationPhase.FoundationSubmitted),
+                    [])
+            },
+            new FixedTimeProvider(AcceptedAt.AddMinutes(15)));
+
+        var result = Assert.IsType<ManagedElsaProvisioningProgress>(await reader.ReadAsync(WorkspaceId, InstanceId));
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Active, result.State);
+        Assert.NotEqual(ManagedElsaProvisioningProgressStates.Stale, result.State);
+        Assert.Null(result.StaleReason);
+    }
+
+    [Fact]
+    public async Task Reader_fails_closed_when_the_blocker_id_is_unresolvable()
+    {
+        var create = new ElsaInstanceLifecycleTopologyOperation(
+            Guid.NewGuid(),
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.WaitingForPriorOperation,
+            1,
+            1,
+            AcceptedAt,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            OrganizationId: Guid.Parse("66666666-6666-6666-6666-666666666666"),
+            BlockingOperationId: Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"));
+        var reader = Reader(
+            new InstanceStore { Topology = Topology([create], create.Id) },
+            new ProviderStore());
+
+        var result = Assert.IsType<ManagedElsaProvisioningProgress>(await reader.ReadAsync(WorkspaceId, InstanceId));
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Stale, result.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStaleReasons.BlockingOperationUnresolvable, result.StaleReason);
+    }
+
+    [Fact]
     public async Task Unknown_and_non_monotonic_provider_mappings_emit_protected_warning_events()
     {
         var lifecycle = Lifecycle(Guid.NewGuid(), ElsaInstanceOperationState.Running);
@@ -156,13 +408,20 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
 
     private static AzureManagedElsaProvisioningProgressReader Reader(
         IManagedElsaInstanceApiStore instances,
-        IAzureManagedElsaProvisioningOperationStore providers) =>
-        new(instances, providers, NullLogger<AzureManagedElsaProvisioningProgressReader>.Instance);
+        IAzureManagedElsaProvisioningOperationStore providers,
+        TimeProvider? timeProvider = null) =>
+        new(instances, providers, NullLogger<AzureManagedElsaProvisioningProgressReader>.Instance, timeProvider ?? new FixedTimeProvider(AcceptedAt));
 
-    private static AzureProviderOperation Provider(AzureProviderOperationPhase phase) =>
+    private static AzureProviderOperation Provider(
+        AzureProviderOperationPhase phase) =>
+        Provider(AzureProviderOperationStatus.Running, phase);
+
+    private static AzureProviderOperation Provider(
+        AzureProviderOperationStatus status,
+        AzureProviderOperationPhase phase) =>
         new(Guid.NewGuid(), WorkspaceId, "safe-target", AzureProviderOperationAction.Reconcile, "safe-idempotency", "hash",
             "provider-operation", "plan", "template", "3.8.1", "3.8", "topology", "isolated", "westeurope",
-            "image", "digest", null, null, AzureProviderOperationStatus.Running, phase, 1, 1, 1, new(), null,
+            "image", "digest", null, null, status, phase, 1, 1, 1, new(), null,
             AzureProviderHealth.Unknown, [], null, null, null, AcceptedAt, AcceptedAt, null,
             InstanceId: InstanceId, LifecycleAction: ElsaInstanceOperationAction.Create);
 
@@ -177,7 +436,8 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
 
     private static ElsaInstanceLifecycleTopologyOperation Lifecycle(
         Guid id,
-        ElsaInstanceOperationState state) =>
+        ElsaInstanceOperationState state,
+        string? recoveryReason = null) =>
         new(
             id,
             ElsaInstanceOperationAction.Create,
@@ -191,7 +451,8 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
             null,
             null,
             null,
-            null);
+            null,
+            RecoveryReason: recoveryReason);
 
     private sealed class ProviderStore : IAzureManagedElsaProvisioningOperationStore
     {
@@ -289,5 +550,10 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
             EventIds.Add(eventId.Id);
             Messages.Add(formatter(state, exception));
         }
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now.ToUniversalTime();
     }
 }

@@ -281,6 +281,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var operation = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == accepted.Operation.Id);
         var run = await db.DeploymentRuns.SingleAsync(x => x.Id == operation.DeploymentRunId);
         run.Status = WorkspaceDeploymentRunStatus.RecoveryRequired;
+        run.RecoveryReason = "provider.submission.accepted";
         await db.SaveChangesAsync();
         db.ChangeTracker.Clear();
 
@@ -290,6 +291,30 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var topologyOperation = Assert.Single(topology!.Operations);
         Assert.Equal(operation.DeploymentRunId, topologyOperation.DeploymentRunId);
         Assert.Equal(WorkspaceDeploymentRunStatus.RecoveryRequired, topologyOperation.RunStatus);
+        Assert.Equal("provider.submission.accepted", topologyOperation.RecoveryReason);
+    }
+
+    [Fact]
+    public async Task Lifecycle_topology_resolves_waiting_blocker_id_in_the_same_organization_and_instance()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted, _, deletion) = await QueueRecoveryBlockedDeleteAsync(
+            db, "Topology blocker workspace", "topology-blocker-delete");
+        db.ChangeTracker.Clear();
+
+        var topology = await new EfCoreManagedElsaInstanceApiStore(db)
+            .GetLifecycleTopologyAsync(workspace.Id, accepted.Instance.Id);
+
+        var waiting = Assert.Single(topology!.Operations, operation =>
+            operation.State == ElsaInstanceOperationState.WaitingForPriorOperation);
+        Assert.Equal(deletion.Operation.Id, waiting.Id);
+        Assert.Equal(accepted.Operation.Id, waiting.BlockingOperationId);
+        Assert.Equal(accepted.Instance.OrganizationId, waiting.OrganizationId);
+        Assert.All(topology.Operations, operation =>
+            Assert.Equal(accepted.Instance.OrganizationId, operation.OrganizationId));
     }
 
     [Fact]
@@ -2083,6 +2108,39 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         currentOperation = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
         Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, currentOperation.State);
         Assert.Equal(runId, currentOperation.DeploymentRunId);
+    }
+
+    [Fact]
+    public async Task Lifecycle_authorization_skips_a_delete_in_a_constrained_organization()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Delete authorization skip");
+        await CompleteManagedRunAsync(db, accepted.Operation.Id, accepted.Instance.Id);
+        var current = await CreateStore(db).GetInstanceAsync(workspace.Id, accepted.Instance.Id);
+        var deletion = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now.AddMinutes(2)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, current!.Version, "authorize-delete-skip", Now.AddMinutes(2)));
+        var entitlement = await db.OrganizationEntitlementSnapshots.SingleAsync(x => x.OrganizationId == workspace.OrganizationId);
+        entitlement.SubscriptionState = OrganizationSubscriptionState.Constrained;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now.AddMinutes(3)));
+        var decision = await store.AuthorizeProviderSubmissionAsync(
+            workspace.Id, accepted.Instance.Id, deletion.Operation.Id, Now.AddMinutes(3));
+
+        Assert.True(decision.Allowed);
+        Assert.Equal("commercial.allowed", decision.Code);
+        var stored = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == deletion.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationAction.Delete, stored.Action);
+        Assert.NotEqual(ElsaInstanceOperationState.EntitlementHeld, stored.State);
+        Assert.Equal(0, await db.ElsaInstanceAuditEvents.CountAsync(x =>
+            x.OperationId == deletion.Operation.Id && x.EventType == "lifecycle.entitlement-held"));
     }
 
     [Fact]

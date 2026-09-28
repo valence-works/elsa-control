@@ -106,6 +106,30 @@ public sealed class ElsaInstanceCommercialGateTests
         var denied = await gate.EvaluateAsync(constrained.OrganizationId, ElsaInstanceOperationAction.Create, 0);
         Assert.False(denied.Allowed);
         Assert.Equal(ElsaInstanceCommercialOperation.LifecycleConstrained, denied.Code);
+        Assert.Equal(ManagedElsaProvisioningProgressCopy.EntitlementHeldCreate, denied.Summary);
+    }
+
+    [Theory]
+    [InlineData(ElsaInstanceOperationAction.Reconcile)]
+    [InlineData(ElsaInstanceOperationAction.UpdateIntent)]
+    [InlineData(ElsaInstanceOperationAction.Start)]
+    [InlineData(ElsaInstanceOperationAction.Restart)]
+    [InlineData(ElsaInstanceOperationAction.ApproveMinorUpgrade)]
+    [InlineData(ElsaInstanceOperationAction.MajorMigration)]
+    [InlineData(ElsaInstanceOperationAction.Retry)]
+    [InlineData(ElsaInstanceOperationAction.Recover)]
+    public async Task Constrained_hold_uses_change_copy_for_existing_engine_mutations(ElsaInstanceOperationAction action)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateContext(connection);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = await CreateWorkspaceAsync(db, OrganizationSubscriptionState.Constrained, managedHostingEnabled: true);
+        var denied = await new EfCoreElsaInstanceCommercialGate(db).EvaluateAsync(workspace.OrganizationId, action);
+
+        Assert.False(denied.Allowed);
+        Assert.Equal(ElsaInstanceCommercialOperation.LifecycleConstrained, denied.Code);
+        Assert.Equal(ManagedElsaProvisioningProgressCopy.EntitlementHeldChange, denied.Summary);
     }
 
     [Fact]

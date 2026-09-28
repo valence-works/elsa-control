@@ -1,3 +1,4 @@
+using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -6,6 +7,9 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 
 public sealed class AzureProviderOperationMigrationTests
 {
+    private const string PreviousSqliteMigration = "20260917224000_CapStripeHostedInstances";
+    private const string SqliteMigration = "20260928023000_AddAzureProviderOperationStatusChangedAt";
+
     [Fact]
     public async Task Sqlite_migration_creates_durable_operation_tables_and_indexes()
     {
@@ -45,6 +49,7 @@ public sealed class AzureProviderOperationMigrationTests
         Assert.Contains("ProviderScopeFingerprint", columns);
         Assert.Contains("SqlWorkflowPackageVersion", columns);
         Assert.Contains("SqlQuartzPackageVersion", columns);
+        Assert.Contains("StatusChangedAt", columns);
         Assert.Contains("AzureProviderResourceAssignments", tables);
         Assert.Contains("AzureProviderAssignmentRebinds", tables);
         Assert.Contains("AzureProviderRecoveryObservations", tables);
@@ -88,5 +93,65 @@ public sealed class AzureProviderOperationMigrationTests
         Assert.Contains("RecordDigest", observationColumns);
         Assert.Contains("ObservedLifecycleAttemptNumber", observationColumns);
         Assert.Contains("ObservedInstanceVersion", observationColumns);
+    }
+
+    [Fact]
+    public async Task Sqlite_backfills_StatusChangedAt_from_UpdatedAt_for_preexisting_rows()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .Options);
+
+        await db.Database.MigrateAsync(PreviousSqliteMigration);
+        var workspaceId = Guid.NewGuid();
+        db.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Pre-existing status-changed workspace" });
+        await db.SaveChangesAsync();
+
+        var operationId = Guid.NewGuid();
+        var createdAt = new DateTimeOffset(2026, 9, 28, 1, 0, 0, TimeSpan.Zero).UtcTicks;
+        var updatedAt = new DateTimeOffset(2026, 9, 28, 1, 23, 0, TimeSpan.Zero).UtcTicks;
+        Assert.NotEqual(createdAt, updatedAt);
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO "AzureProviderOperations" (
+                "Id", "WorkspaceId", "TargetKey", "Action", "IdempotencyKey", "RequestHash", "OperationIdentity",
+                "PlanFingerprint", "TemplateFingerprint", "ElsaVersion", "ReleaseLine", "Topology", "Isolation",
+                "Location", "ImageRepository", "ImageDigest", "SecretReferencesJson", "Status", "Phase",
+                "CheckpointSequence", "AttemptNumber", "Version", "Health", "DiagnosticsJson", "ManagedHandoff",
+                "CreatedAt", "UpdatedAt")
+            VALUES (
+                {operationId}, {workspaceId}, {"preexisting-target"}, {"Reconcile"}, {"preexisting-idempotency"},
+                {"request-hash"}, {"operation-identity"}, {"plan-fingerprint"}, {"template-fingerprint"},
+                {"3.8.1"}, {"3.8"}, {"topology"}, {"isolated"}, {"westeurope"}, {"provider/image"},
+                {"sha256:provider-image"}, {"{}"}, {"Succeeded"}, {"HealthVerified"}, {6}, {1}, {9},
+                {"Healthy"}, {"[]"}, {0}, {createdAt}, {updatedAt})
+            """);
+
+        await db.Database.MigrateAsync(SqliteMigration);
+
+        var statusChangedAt = await db.Database.SqlQueryRaw<long>(
+            """SELECT "StatusChangedAt" AS Value FROM "AzureProviderOperations" """).SingleAsync();
+        Assert.Equal(updatedAt, statusChangedAt);
+        Assert.NotEqual(createdAt, statusChangedAt);
+    }
+
+    [Fact]
+    public async Task Sqlite_down_migration_drops_StatusChangedAt()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .Options);
+
+        await db.Database.MigrateAsync();
+        Assert.Contains("StatusChangedAt", await db.Database.SqlQueryRaw<string>(
+            "SELECT name AS Value FROM pragma_table_info('AzureProviderOperations')").ToListAsync());
+
+        await db.Database.MigrateAsync(PreviousSqliteMigration);
+
+        Assert.DoesNotContain("StatusChangedAt", await db.Database.SqlQueryRaw<string>(
+            "SELECT name AS Value FROM pragma_table_info('AzureProviderOperations')").ToListAsync());
     }
 }

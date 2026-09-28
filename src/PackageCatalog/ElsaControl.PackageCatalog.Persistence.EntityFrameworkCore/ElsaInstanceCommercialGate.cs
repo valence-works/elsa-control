@@ -45,7 +45,9 @@ public sealed class EfCoreElsaInstanceCommercialGate(CatalogDbContext db, TimePr
             OrganizationSubscriptionState.Suspended or
             OrganizationSubscriptionState.Retained or
             OrganizationSubscriptionState.Deleted)
-            return Deny(ElsaInstanceCommercialOperation.LifecycleConstrained, "The organization subscription does not permit managed-instance changes.");
+            return Deny(
+                ElsaInstanceCommercialOperation.LifecycleConstrained,
+                ManagedElsaProvisioningProgressCopy.ForHold(action));
 
         var provider = entitlement.SubscriptionId is { } subscriptionId
             ? await db.OrganizationSubscriptions.AsNoTracking()

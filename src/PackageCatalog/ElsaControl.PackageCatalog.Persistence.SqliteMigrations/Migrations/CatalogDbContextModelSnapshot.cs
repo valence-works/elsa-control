@@ -1555,6 +1555,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("TEXT");
 
+                    b.Property<long>("StatusChangedAt")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("TargetKey")
                         .IsRequired()
                         .HasMaxLength(128)

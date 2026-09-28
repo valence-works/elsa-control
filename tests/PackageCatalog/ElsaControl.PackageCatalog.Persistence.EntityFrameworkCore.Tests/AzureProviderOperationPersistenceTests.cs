@@ -714,6 +714,90 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
     }
 
     [Fact]
+    public async Task Missing_organization_identity_is_recovery_required_not_entitlement_held()
+    {
+        await AuthorizeMissingIdentityAsync(
+            clearOrganization: true,
+            action: AzureProviderOperationAction.Reconcile,
+            lifecycleAction: ElsaInstanceOperationAction.Reconcile);
+    }
+
+    [Fact]
+    public async Task Missing_instance_identity_is_recovery_required_not_entitlement_held()
+    {
+        await AuthorizeMissingIdentityAsync(
+            clearInstance: true,
+            action: AzureProviderOperationAction.Reconcile,
+            lifecycleAction: ElsaInstanceOperationAction.Reconcile);
+    }
+
+    [Fact]
+    public async Task Missing_lifecycle_identity_on_delete_is_recovery_required_not_entitlement_held()
+    {
+        await AuthorizeMissingIdentityAsync(
+            clearLifecycleAction: true,
+            action: AzureProviderOperationAction.Delete,
+            lifecycleAction: ElsaInstanceOperationAction.Delete);
+    }
+
+    [Fact]
+    public async Task Azure_subscription_bind_binding_required_still_holds_a_fully_bound_operation()
+    {
+        var now = DateTimeOffset.UtcNow;
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var instanceId = Guid.NewGuid();
+        var assignment = await Assignment(store, _organizationId, instanceId, now);
+        var subscription = OrganizationSubscriptionLifecycle.CreateTrial(
+            _organizationId, BillingProviderNames.AzureBound, now);
+        db.OrganizationSubscriptions.Add(subscription);
+        db.OrganizationEntitlementSnapshots.Add(new OrganizationEntitlementSnapshot
+        {
+            OrganizationId = _organizationId,
+            SubscriptionId = subscription.Id,
+            SubscriptionState = OrganizationSubscriptionState.Active,
+            ManagedHostingEnabled = true,
+            MaxInstances = int.MaxValue,
+            SyncedAt = now,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await db.SaveChangesAsync();
+        var operation = await store.CreateOrGetAsync(Request() with
+        {
+            TargetKey = "azure-bind-required",
+            IdempotencyKey = "azure-bind-required",
+            OrganizationId = _organizationId,
+            InstanceId = instanceId,
+            LifecycleAction = ElsaInstanceOperationAction.Reconcile,
+            ProviderAssignmentId = assignment.Id
+        }, now);
+        var claimed = Assert.IsType<AzureProviderOperation>(await store.ClaimAsync(
+            _workspaceId, operation.Id, "worker", "lease", TimeSpan.FromMinutes(1), now));
+
+        var authorization = await store.AuthorizeAsync(
+            _workspaceId,
+            operation.Id,
+            "lease",
+            new EfCoreElsaInstanceCommercialGate(db),
+            now,
+            claimed.Version);
+
+        Assert.NotNull(authorization);
+        Assert.False(authorization!.Decision.Allowed);
+        Assert.Equal(ElsaInstanceCommercialOperation.BindingRequired, authorization.Decision.Code);
+        Assert.Equal(
+            "An active Azure subscription bind is required for this organization.",
+            authorization.Decision.Summary);
+        Assert.Equal(AzureProviderOperationStatus.EntitlementHeld, authorization.Operation.Status);
+        Assert.NotEqual(AzureProviderOperationStatus.RecoveryRequired, authorization.Operation.Status);
+        Assert.NotEqual("provider.identity-binding-missing", authorization.Decision.Code);
+        Assert.Contains(
+            await store.ListTransitionsAsync(_workspaceId, operation.Id),
+            transition => transition.Code == ElsaInstanceCommercialOperation.BindingRequired);
+    }
+
+    [Fact]
     public async Task Lost_commit_acknowledgement_denied_authorization_returns_original_result_without_duplicate_transition()
     {
         var now = DateTimeOffset.UtcNow;
@@ -1056,6 +1140,34 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
 
         var transitions = await store.ListTransitionsAsync(_workspaceId, operation.Id);
         Assert.Equal([operation.Version, claimed.Version, checkpoint.Version], transitions.Select(x => x.Sequence));
+    }
+
+    [Fact]
+    public async Task StatusChangedAt_moves_only_when_status_changes()
+    {
+        var now = DateTimeOffset.Parse("2026-09-21T10:00:00Z");
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var created = await store.CreateOrGetAsync(Request(), now);
+        Assert.Equal(now, created.StatusChangedAt);
+        Assert.Equal(now, created.CreatedAt);
+
+        var claimed = Assert.IsType<AzureProviderOperation>(await store.ClaimAsync(
+            _workspaceId, created.Id, "worker", "lease", TimeSpan.FromMinutes(30), now.AddSeconds(5)));
+        Assert.Equal(now.AddSeconds(5), claimed.StatusChangedAt);
+        Assert.Equal(AzureProviderOperationStatus.Running, claimed.Status);
+
+        var heartbeat = Assert.IsType<AzureProviderOperation>(await store.HeartbeatAsync(
+            _workspaceId, created.Id, "lease", TimeSpan.FromMinutes(30), now.AddMinutes(2), claimed.Version));
+        Assert.Equal(now.AddSeconds(5), heartbeat.StatusChangedAt);
+        Assert.Equal(now.AddMinutes(2), heartbeat.UpdatedAt);
+        Assert.Equal(AzureProviderOperationStatus.Running, heartbeat.Status);
+
+        var finalized = Assert.IsType<AzureProviderOperation>(await store.FinalizeAsync(
+            _workspaceId, created.Id, "lease", AzureProviderOperationStatus.Succeeded, "operation.succeeded",
+            now.AddMinutes(8), heartbeat.Version));
+        Assert.Equal(now.AddMinutes(8), finalized.StatusChangedAt);
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, finalized.Status);
     }
 
     [Fact]
@@ -1555,6 +1667,68 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
                 "westeurope"),
             now);
 
+    private async Task AuthorizeMissingIdentityAsync(
+        bool clearOrganization = false,
+        bool clearInstance = false,
+        bool clearLifecycleAction = false,
+        AzureProviderOperationAction action = AzureProviderOperationAction.Reconcile,
+        ElsaInstanceOperationAction lifecycleAction = ElsaInstanceOperationAction.Reconcile)
+    {
+        var now = DateTimeOffset.UtcNow;
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var organizationId = Guid.NewGuid();
+        var instanceId = Guid.NewGuid();
+        var assignment = await Assignment(store, organizationId, instanceId, now);
+        var operation = await store.CreateOrGetAsync(Request() with
+        {
+            Action = action,
+            TargetKey = $"missing-identity-{action}",
+            IdempotencyKey = $"missing-identity-{action}",
+            OrganizationId = organizationId,
+            InstanceId = instanceId,
+            LifecycleAction = lifecycleAction,
+            ProviderAssignmentId = assignment.Id
+        }, now);
+        var claimed = Assert.IsType<AzureProviderOperation>(await store.ClaimAsync(
+            _workspaceId, operation.Id, "worker", "lease", TimeSpan.FromMinutes(1), now));
+
+        var entity = await db.AzureProviderOperations.SingleAsync(x => x.Id == operation.Id);
+        if (clearOrganization)
+            entity.OrganizationId = null;
+        if (clearInstance)
+            entity.InstanceId = null;
+        if (clearLifecycleAction)
+            entity.LifecycleAction = null;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var authorization = await store.AuthorizeAsync(
+            _workspaceId,
+            operation.Id,
+            "lease",
+            new NeverCalledCommercialGate(),
+            now,
+            claimed.Version);
+
+        Assert.NotNull(authorization);
+        Assert.False(authorization!.Decision.Allowed);
+        Assert.Equal("provider.identity-binding-missing", authorization.Decision.Code);
+        Assert.Equal(AzureProviderOperationStatus.RecoveryRequired, authorization.Operation.Status);
+        Assert.NotEqual(AzureProviderOperationStatus.EntitlementHeld, authorization.Operation.Status);
+        Assert.NotEqual(ElsaInstanceCommercialOperation.BindingRequired, authorization.Decision.Code);
+        Assert.Null(authorization.Operation.CompletedAt);
+        Assert.Null(authorization.Operation.WorkerId);
+        Assert.Contains(
+            await store.ListTransitionsAsync(_workspaceId, operation.Id),
+            transition => transition.Code == "provider.identity-binding-missing");
+        Assert.Null(await store.ClaimAsync(
+            _workspaceId, operation.Id, "worker-retry", "lease-retry", TimeSpan.FromMinutes(1), now.AddSeconds(1)));
+        Assert.DoesNotContain(
+            await store.ListRunnableAsync(now.AddSeconds(1), 16),
+            runnable => runnable.Id == operation.Id);
+    }
+
     private AzureProviderOperationRequest Request() => new(
         _workspaceId, "workload-a", AzureProviderOperationAction.Reconcile, "request-1",
         new('a', 64), new('b', 64), "3.8.0", "3.8", "combined", "Dedicated", "westeurope",
@@ -1571,6 +1745,16 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
                 false,
                 ElsaInstanceCommercialOperation.LifecycleConstrained,
                 "The organization subscription does not permit managed-instance changes."));
+    }
+
+    private sealed class NeverCalledCommercialGate : IElsaInstanceCommercialGate
+    {
+        public Task<ElsaInstanceCommercialGateDecision> EvaluateAsync(
+            Guid organizationId,
+            ElsaInstanceOperationAction action,
+            int? activeInstanceCount = null,
+            CancellationToken cancellationToken = default) =>
+            throw new Xunit.Sdk.XunitException("The commercial gate must not run when provider identity is missing.");
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
