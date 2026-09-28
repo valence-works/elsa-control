@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -18,27 +19,29 @@ namespace ElsaControl.Api.Tests;
 
 public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedElsaInstanceOverviewApiTests.Fixture>
 {
-    private static readonly string[] NeverIncludedFields =
-    [
-        "desiredStateRevisionId",
-        "resolvedPlan",
-        "planReference",
-        "currentDeployment",
-        "deploymentRunId",
-        "identityBinding",
-        "identityBindingState",
-        "audience",
-        "redirectUri",
-        "links",
-        "dedupeIdentity",
-        "actorAccountId",
-        "operatorSubject",
-        "requestKeyHash",
-        "migrationId",
-        "revisionId",
-        "runId",
-        "planId"
-    ];
+    private static readonly FrozenDictionary<string, FrozenSet<string>> ExactCustomerDtoProperties =
+        new Dictionary<string, FrozenSet<string>>(StringComparer.Ordinal)
+        {
+            ["overview"] = Frozen(["summary", "health", "release", "policy", "components", "activeOperation", "lastOperation", "allowedActions"]),
+            ["overview.summary"] = Frozen(["instanceId", "name", "slug", "desiredLifecycle", "observedLifecycle", "createdAt", "updatedAt", "version", "canOpen", "unavailableReason"]),
+            ["overview.health"] = Frozen(["status", "diagnosticCode", "evaluatedAt", "alerts"]),
+            ["overview.health.alerts"] = Frozen(["code", "severity"]),
+            ["overview.release"] = Frozen(["distributionId", "releaseLine", "version", "channel"]),
+            ["overview.policy"] = Frozen(["patchUpdates", "minorUpdates", "majorMigrations"]),
+            ["overview.components"] = Frozen(["componentId", "digest"]),
+            ["overview.activeOperation"] = Frozen(["operationId", "action", "state", "acceptedAt", "startedAt", "progress"]),
+            ["overview.activeOperation.progress"] = Frozen(["phase", "attemptedStep", "attemptNumber", "attemptStartedAt"]),
+            ["overview.lastOperation"] = Frozen(["action", "state", "completedAt", "failureCode"]),
+            ["overview.allowedActions"] = Frozen(["restart", "applyRelease", "open"]),
+            ["overview.allowedActions.restart"] = Frozen(["allowed", "reasonCode"]),
+            ["overview.allowedActions.applyRelease"] = Frozen(["allowed", "reasonCode"]),
+            ["overview.allowedActions.open"] = Frozen(["allowed", "reasonCode"]),
+            ["activity"] = Frozen(["items", "hasMore"]),
+            ["activity.items"] = Frozen(["sequence", "eventType", "occurredAt", "action", "priorState", "newState", "diagnosticCode", "actorKind"]),
+            ["releases"] = Frozen(["items"]),
+            ["releases.items"] = Frozen(["releaseLine", "version", "channel", "changeKind"]),
+            ["accepted"] = Frozen(["operationId", "action", "state", "acceptedAt"])
+        }.ToFrozenDictionary(StringComparer.Ordinal);
 
     private readonly Fixture _fixture;
 
@@ -69,7 +72,7 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         Assert.True(overview.AllowedActions.ApplyRelease.Allowed);
         Assert.False(overview.AllowedActions.Open.Allowed);
         Assert.Equal("handoff-unavailable", overview.AllowedActions.Open.ReasonCode);
-        AssertNoNeverIncludedFields(json);
+        AssertExactCustomerDtoShape(json, "overview");
     }
 
     [Fact]
@@ -110,12 +113,14 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             ],
             false);
         var releases = new ManagedElsaInstanceAvailableReleasesResponse(
-            [new ManagedElsaInstanceAvailableReleaseResponse("3.8", "3.8.5", "stable", false, "patch")]);
+            [new ManagedElsaInstanceAvailableReleaseResponse("3.8", "3.8.5", "stable", "patch")]);
         var accepted = new ManagedElsaInstanceOverviewOperationResponse(
             Guid.NewGuid(), ElsaInstanceOperationAction.Restart, ElsaInstanceOperationState.Accepted, DateTimeOffset.UtcNow);
 
-        foreach (var payload in new object[] { overview, activity, releases, accepted })
-            AssertNoNeverIncludedFields(JsonSerializer.Serialize(payload, ControlApiTestApplication.JsonOptions));
+        AssertExactCustomerDtoShape(JsonSerializer.Serialize(overview, ControlApiTestApplication.JsonOptions), "overview");
+        AssertExactCustomerDtoShape(JsonSerializer.Serialize(activity, ControlApiTestApplication.JsonOptions), "activity");
+        AssertExactCustomerDtoShape(JsonSerializer.Serialize(releases, ControlApiTestApplication.JsonOptions), "releases");
+        AssertExactCustomerDtoShape(JsonSerializer.Serialize(accepted, ControlApiTestApplication.JsonOptions), "accepted");
     }
 
     [Fact]
@@ -177,22 +182,29 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, "overview-releases-runtime");
         _fixture.ReleaseCatalog.SetEntries(
         [
+            CatalogEntry("valence-runtime", "3.8", "3.8.3", "stable", "combined", "supported", "paid", '0'),
             CatalogEntry("valence-runtime", "3.8", "3.8.4", "stable", "combined", "supported", "paid", 'a'),
             CatalogEntry("valence-runtime", "3.8", "3.8.5", "stable", "combined", "supported", "paid", 'b'),
             CatalogEntry("valence-runtime", "3.9", "3.9.0", "stable", "combined", "supported", "paid", 'c'),
+            CatalogEntry("valence-runtime", "3.7", "3.7.9", "stable", "combined", "supported", "paid", 'g'),
             CatalogEntry("valence-runtime", "4.0", "4.0.0", "stable", "combined", "supported", "paid", 'd'),
-            CatalogEntry("valence-runtime", "3.8", "3.8.6-preview.1", "preview", "combined", "preview", "paid", 'e')
+            CatalogEntry("valence-runtime", "3.8", "3.8.6-preview.1", "preview", "combined", "preview", "paid", 'e'),
+            CatalogEntry("valence-runtime", "3.8", "3.8.7", "preview", "combined", "supported", "paid", 'f')
         ]);
 
         var releases = await client.GetControlJsonAsync<ManagedElsaInstanceAvailableReleasesResponse>(
             $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/available-releases");
 
         Assert.NotNull(releases);
-        Assert.Equal(["3.9.0", "3.8.5", "3.8.4"], releases!.Items.Select(item => item.Version).ToArray());
+        Assert.Equal(["3.9.0", "3.8.5"], releases!.Items.Select(item => item.Version).ToArray());
         Assert.Equal("minor", Assert.Single(releases.Items, item => item.Version == "3.9.0").ChangeKind);
         Assert.Equal("patch", Assert.Single(releases.Items, item => item.Version == "3.8.5").ChangeKind);
+        Assert.DoesNotContain(releases.Items, item => item.Version == "3.8.4");
+        Assert.DoesNotContain(releases.Items, item => item.Version == "3.8.3");
+        Assert.DoesNotContain(releases.Items, item => item.Version.StartsWith("3.7.", StringComparison.Ordinal));
         Assert.DoesNotContain(releases.Items, item => item.Version.StartsWith("4.", StringComparison.Ordinal));
         Assert.DoesNotContain(releases.Items, item => item.Version.Contains("preview", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(releases.Items, item => item.Version == "3.8.7");
     }
 
     [Fact]
@@ -221,7 +233,7 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         Assert.Equal(HttpStatusCode.BadRequest, zero.StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, tooLarge.StatusCode);
         Assert.Contains("instance.activity-limit-invalid", await zero.Content.ReadAsStringAsync(), StringComparison.Ordinal);
-        AssertNoNeverIncludedFields(JsonSerializer.Serialize(defaultPage, ControlApiTestApplication.JsonOptions));
+        AssertExactCustomerDtoShape(JsonSerializer.Serialize(defaultPage, ControlApiTestApplication.JsonOptions), "activity");
     }
 
     [Fact]
@@ -230,14 +242,30 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         var app = await PrepareApplicationAsync();
         var owner = app.CreateTrustedWorkspaceClient("overview-mutate-owner");
         var (workspaceId, created) = await CreateReadyInstanceAsync(app, owner, "overview-mutate-runtime");
+        _fixture.ReleaseCatalog.SetEntries(
+        [
+            CatalogEntry("valence-runtime", "3.8", "3.8.3", "stable", "combined", "supported", "paid", '0'),
+            CatalogEntry("valence-runtime", "3.8", "3.8.4", "stable", "combined", "supported", "paid", 'a'),
+            CatalogEntry("valence-runtime", "3.8", "3.8.5", "stable", "combined", "supported", "paid", 'b')
+        ]);
         await app.AddWorkspaceMemberAsync(workspaceId, "overview-mutate-reader", WorkspaceRole.Reader);
         using var reader = app.CreateTrustedWorkspaceClient("overview-mutate-reader");
         var restartPath = $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/restart";
         var applyPath = $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/apply-release";
 
         using var missingKey = await owner.SendAsync(Mutation(HttpMethod.Post, restartPath, created.Instance.ETag, null));
+        using var invalidRestartKey = await owner.SendAsync(Mutation(HttpMethod.Post, restartPath, created.Instance.ETag, "not a valid key"));
+        using var invalidApplyKey = await owner.SendAsync(Mutation(
+            HttpMethod.Post, applyPath, created.Instance.ETag, "not a valid key",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.5")));
         using var missingMatch = await owner.SendAsync(Mutation(HttpMethod.Post, restartPath, null, "overview-restart"));
+        using var applyMissingMatch = await owner.SendAsync(Mutation(
+            HttpMethod.Post, applyPath, null, "overview-apply-match",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.5")));
         using var stale = await owner.SendAsync(Mutation(HttpMethod.Post, restartPath, "\"999\"", "overview-stale"));
+        using var applyStale = await owner.SendAsync(Mutation(
+            HttpMethod.Post, applyPath, "\"999\"", "overview-apply-stale",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.5")));
         using var readerRestart = await reader.SendAsync(Mutation(HttpMethod.Post, restartPath, created.Instance.ETag, "overview-reader-restart"));
         using var readerApply = await reader.SendAsync(Mutation(
             HttpMethod.Post, applyPath, created.Instance.ETag, "overview-reader-apply",
@@ -245,16 +273,44 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         using var unknownRelease = await owner.SendAsync(Mutation(
             HttpMethod.Post, applyPath, created.Instance.ETag, "overview-unknown-release",
             new ManagedElsaInstanceApplyReleaseRequest("9.9.9")));
+        using var currentRelease = await owner.SendAsync(Mutation(
+            HttpMethod.Post, applyPath, created.Instance.ETag, "overview-current-release",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.4")));
+        using var olderRelease = await owner.SendAsync(Mutation(
+            HttpMethod.Post, applyPath, created.Instance.ETag, "overview-older-release",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.3")));
+        using var extraField = await owner.SendAsync(Mutation(
+            HttpMethod.Post, applyPath, created.Instance.ETag, "overview-extra-field",
+            new Dictionary<string, string> { ["version"] = "3.8.5", ["channel"] = "preview" }));
+        using var emptyObject = await owner.SendAsync(Mutation(
+            HttpMethod.Post, applyPath, created.Instance.ETag, "overview-empty-object",
+            new Dictionary<string, string>()));
+        using var missingBody = await owner.SendAsync(Mutation(HttpMethod.Post, applyPath, created.Instance.ETag, "overview-missing-body"));
 
         Assert.Equal(HttpStatusCode.BadRequest, missingKey.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, invalidRestartKey.StatusCode);
+        Assert.Contains("instance.idempotency-key-invalid", await invalidRestartKey.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.BadRequest, invalidApplyKey.StatusCode);
+        Assert.Contains("instance.idempotency-key-invalid", await invalidApplyKey.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Equal((HttpStatusCode)428, missingMatch.StatusCode);
+        Assert.Equal((HttpStatusCode)428, applyMissingMatch.StatusCode);
         Assert.Equal(HttpStatusCode.PreconditionFailed, stale.StatusCode);
+        Assert.Equal(HttpStatusCode.PreconditionFailed, applyStale.StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, readerRestart.StatusCode);
         Assert.Contains("Workspace role does not allow", await readerRestart.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Equal(HttpStatusCode.Forbidden, readerApply.StatusCode);
         Assert.Contains("Workspace role does not allow", await readerApply.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Equal(HttpStatusCode.UnprocessableEntity, unknownRelease.StatusCode);
         Assert.Contains("instance.release-not-available", await unknownRelease.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.Conflict, currentRelease.StatusCode);
+        Assert.Contains("instance.release-already-current", await currentRelease.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, olderRelease.StatusCode);
+        Assert.Contains("instance.release-not-available", await olderRelease.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.BadRequest, extraField.StatusCode);
+        Assert.Contains("request.unknown-field", await extraField.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.BadRequest, emptyObject.StatusCode);
+        Assert.Contains("instance.apply-release-invalid", await emptyObject.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.BadRequest, missingBody.StatusCode);
         var readerOverview = await reader.GetControlJsonAsync<ManagedElsaInstanceOverviewResponse>(
             $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
         Assert.False(readerOverview!.AllowedActions.Restart.Allowed);
@@ -290,12 +346,12 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
 
         Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
         Assert.NotNull(firstBody);
-        Assert.Equal(ElsaInstanceOperationAction.UpdateIntent, firstBody!.Action);
+        Assert.Equal(ElsaInstanceOperationAction.ApproveMinorUpgrade, firstBody!.Action);
         Assert.Equal(HttpStatusCode.Accepted, replay.StatusCode);
         Assert.Equal(firstBody.OperationId, replayBody!.OperationId);
         Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
         Assert.Contains("instance.idempotency-conflict", await conflict.Content.ReadAsStringAsync(), StringComparison.Ordinal);
-        AssertNoNeverIncludedFields(JsonSerializer.Serialize(firstBody, ControlApiTestApplication.JsonOptions));
+        AssertExactCustomerDtoShape(JsonSerializer.Serialize(firstBody, ControlApiTestApplication.JsonOptions), "accepted");
     }
 
     [Fact]
@@ -314,15 +370,30 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             HttpMethod.Post, restartPath, created.Instance.ETag, "overview-source-admin-restart"));
         var body = await restart.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>();
         using var replay = await sourceAdmin.SendAsync(Mutation(
-            HttpMethod.Post, restartPath, created.Instance.ETag, "overview-source-admin-restart"));
-        var replayBody = await replay.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>();
-        using var conflict = await sourceAdmin.SendAsync(Mutation(
             HttpMethod.Post, restartPath, "\"999\"", "overview-source-admin-restart"));
+        var replayBody = await replay.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>();
+        _fixture.ReleaseCatalog.SetEntries(
+        [
+            CatalogEntry("valence-runtime", "3.8", "3.8.4", "stable", "combined", "supported", "paid", 'a'),
+            CatalogEntry("valence-runtime", "3.8", "3.8.5", "stable", "combined", "supported", "paid", 'b')
+        ]);
+        using var conflict = await sourceAdmin.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/apply-release",
+            created.Instance.ETag,
+            "overview-source-admin-restart",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.5")));
         using var crossOrg = await other.SendAsync(Mutation(
             HttpMethod.Post,
             $"/api/workspaces/{otherWorkspaceId:D}/instances/{created.Instance.InstanceId:D}/restart",
             created.Instance.ETag,
             "overview-cross-org-restart"));
+        using var crossOrgApply = await other.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{otherWorkspaceId:D}/instances/{created.Instance.InstanceId:D}/apply-release",
+            created.Instance.ETag,
+            "overview-cross-org-apply",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.5")));
 
         Assert.Equal(HttpStatusCode.Accepted, restart.StatusCode);
         Assert.Equal(ElsaInstanceOperationAction.Restart, body!.Action);
@@ -331,6 +402,83 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
         Assert.Contains("instance.idempotency-conflict", await conflict.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Equal(HttpStatusCode.NotFound, crossOrg.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, crossOrgApply.StatusCode);
+    }
+
+    [Fact]
+    public async Task Minor_apply_replays_the_same_operation_and_a_restart_key_cannot_apply()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-minor-owner");
+        var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, "overview-minor-runtime");
+        _fixture.ReleaseCatalog.SetEntries(
+        [
+            CatalogEntry("valence-runtime", "3.8", "3.8.4", "stable", "combined", "supported", "paid", 'a'),
+            CatalogEntry("valence-runtime", "3.9", "3.9.0", "stable", "combined", "supported", "paid", 'c')
+        ]);
+        var applyPath = $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/apply-release";
+        var restartPath = $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/restart";
+
+        using var first = await client.SendAsync(Mutation(
+            HttpMethod.Post, applyPath, created.Instance.ETag, "overview-minor-key",
+            new ManagedElsaInstanceApplyReleaseRequest("3.9.0")));
+        var firstBody = await first.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>();
+        using var replay = await client.SendAsync(Mutation(
+            HttpMethod.Post, applyPath, "\"999\"", "overview-minor-key",
+            new ManagedElsaInstanceApplyReleaseRequest("3.9.0")));
+        var replayBody = await replay.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>();
+
+        var (otherWorkspaceId, otherCreated) = await CreateReadyInstanceAsync(app, client, "overview-restart-key-runtime");
+        using var restart = await client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{otherWorkspaceId:D}/instances/{otherCreated.Instance.InstanceId:D}/restart",
+            otherCreated.Instance.ETag,
+            "overview-shared-key"));
+        var restartBody = await restart.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>();
+        _fixture.ReleaseCatalog.SetEntries(
+        [
+            CatalogEntry("valence-runtime", "3.8", "3.8.4", "stable", "combined", "supported", "paid", 'a'),
+            CatalogEntry("valence-runtime", "3.8", "3.8.5", "stable", "combined", "supported", "paid", 'b')
+        ]);
+        using var applyWithRestartKey = await client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{otherWorkspaceId:D}/instances/{otherCreated.Instance.InstanceId:D}/apply-release",
+            otherCreated.Instance.ETag,
+            "overview-shared-key",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.5")));
+
+        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        Assert.Equal(ElsaInstanceOperationAction.ApproveMinorUpgrade, firstBody!.Action);
+        Assert.Equal(HttpStatusCode.Accepted, replay.StatusCode);
+        Assert.Equal(firstBody.OperationId, replayBody!.OperationId);
+        Assert.Equal(HttpStatusCode.Accepted, restart.StatusCode);
+        Assert.Equal(ElsaInstanceOperationAction.Restart, restartBody!.Action);
+        Assert.Equal(HttpStatusCode.Conflict, applyWithRestartKey.StatusCode);
+        Assert.Contains("instance.idempotency-conflict", await applyWithRestartKey.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Last_operation_is_the_most_recent_completed_operation()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-last-op-owner");
+        var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, "overview-last-op-runtime");
+        using var restart = await client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/restart",
+            created.Instance.ETag,
+            "overview-last-op-restart"));
+        Assert.Equal(HttpStatusCode.Accepted, restart.StatusCode);
+
+        var overview = await client.GetControlJsonAsync<ManagedElsaInstanceOverviewResponse>(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+
+        Assert.NotNull(overview!.ActiveOperation);
+        Assert.Equal(ElsaInstanceOperationAction.Restart, overview.ActiveOperation!.Action);
+        Assert.NotNull(overview.LastOperation);
+        Assert.Equal(ElsaInstanceOperationAction.Create, overview.LastOperation!.Action);
+        Assert.Equal(ElsaInstanceOperationState.Succeeded, overview.LastOperation.State);
+        Assert.NotNull(overview.LastOperation.CompletedAt);
     }
 
     [Fact]
@@ -373,8 +521,27 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         var created = await createdResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
         Assert.Equal(HttpStatusCode.Accepted, createdResponse.StatusCode);
 
+        await MarkOperationSucceededAsync(app, created!.Operation.Id);
+        await MarkInstanceReadyAsync(app, created.Instance.InstanceId);
+        catalog.SetEntries(
+        [
+            CatalogEntry("valence-runtime", "3.8", "3.8.4", "stable", "combined", "supported", "paid"),
+            CatalogEntry("valence-runtime", "3.8", "3.8.5", "stable", "combined", "supported", "paid", 'b')
+        ]);
+
         using var overview = await client.GetAsync(
-            $"/api/workspaces/{workspaceId:D}/instances/{created!.Instance.InstanceId:D}/overview");
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        using var restart = await client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/restart",
+            created.Instance.ETag,
+            "bff-overview-restart"));
+        using var apply = await client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/apply-release",
+            created.Instance.ETag,
+            "bff-overview-restart",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.5")));
         using var operatorDetail = await client.GetAsync(
             $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}");
         using var operatorAudit = await client.GetAsync(
@@ -384,10 +551,18 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         var body = await overview.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewResponse>();
         Assert.Equal(created.Instance.InstanceId, body!.Summary.InstanceId);
         Assert.True(overview.Headers.ETag?.ToString()?.StartsWith('\"'));
+        Assert.Equal(HttpStatusCode.Accepted, restart.StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, apply.StatusCode);
+        Assert.Contains("instance.idempotency-conflict", await apply.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Equal(HttpStatusCode.Forbidden, operatorDetail.StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, operatorAudit.StatusCode);
         Assert.Contains("cloud-bff.denied", await operatorDetail.Content.ReadAsStringAsync(), StringComparison.Ordinal);
-        AssertNoNeverIncludedFields(await overview.Content.ReadAsStringAsync());
+        AssertExactCustomerDtoShape(await overview.Content.ReadAsStringAsync(), "overview");
+        AssertExactCustomerDtoShape(
+            JsonSerializer.Serialize(
+                (await restart.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>())!,
+                ControlApiTestApplication.JsonOptions),
+            "accepted");
     }
 
     private async Task<ControlApiTestApplication> PrepareApplicationAsync()
@@ -503,36 +678,43 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             """);
     }
 
-    private static void AssertNoNeverIncludedFields(string json)
+    private static FrozenSet<string> Frozen(params string[] values) =>
+        values.ToFrozenSet(StringComparer.Ordinal);
+
+    private static void AssertExactCustomerDtoShape(string json, string rootName)
     {
         using var document = JsonDocument.Parse(json);
-        AssertNoNeverIncludedFields(document.RootElement);
+        AssertExactCustomerDtoShape(document.RootElement, rootName);
     }
 
-    private static void AssertNoNeverIncludedFields(JsonElement element)
+    private static void AssertExactCustomerDtoShape(JsonElement element, string path)
     {
+        if (!ExactCustomerDtoProperties.TryGetValue(path, out var expected))
+            Assert.Fail($"No exact customer DTO property set registered for '{path}'.");
+
+        if (element.ValueKind == JsonValueKind.Null)
+            return;
+
         if (element.ValueKind == JsonValueKind.Array)
         {
             foreach (var item in element.EnumerateArray())
-                AssertNoNeverIncludedFields(item);
+                AssertExactCustomerDtoShape(item, path);
             return;
         }
 
-        if (element.ValueKind != JsonValueKind.Object)
-            return;
-
+        Assert.Equal(JsonValueKind.Object, element.ValueKind);
+        var actual = element.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal).ToArray();
+        Assert.Equal(expected.Order(StringComparer.Ordinal), actual);
         foreach (var property in element.EnumerateObject())
         {
-            if (NeverIncludedFields.Contains(property.Name, StringComparer.OrdinalIgnoreCase))
-                Assert.Fail($"Customer DTO serialized forbidden field '{property.Name}'.");
-            if (property.NameEquals("summary") && property.Value.ValueKind == JsonValueKind.String)
-                Assert.Fail("Customer activity DTO serialized free-text summary.");
-            AssertNoNeverIncludedFields(property.Value);
+            var childPath = $"{path}.{property.Name}";
+            if (ExactCustomerDtoProperties.ContainsKey(childPath))
+                AssertExactCustomerDtoShape(property.Value, childPath);
         }
     }
 
     private static ElsaInstanceIntent Intent() => new(
-        new ElsaReleaseIntent("valence-runtime", "3.8", channel: "stable"),
+        new ElsaReleaseIntent("valence-runtime", "3.8", requestedVersion: "3.8.4", channel: "stable"),
         new ElsaApplicationIntent("combined", "starter",
             new Dictionary<string, ElsaFeatureOverride> { ["replicas"] = ElsaFeatureOverride.FromNumber(3) },
             "approved"),

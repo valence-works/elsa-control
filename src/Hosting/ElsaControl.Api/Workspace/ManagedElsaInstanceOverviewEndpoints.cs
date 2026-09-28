@@ -1,4 +1,8 @@
 using System.Collections.Frozen;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
@@ -18,9 +22,13 @@ public static class ManagedElsaInstanceOverviewEndpoints
 {
     internal const string RequiresAttentionCode = "health.requires-attention";
     internal const string ReleaseNotAvailableCode = "instance.release-not-available";
+    internal const string ReleaseAlreadyCurrentCode = "instance.release-already-current";
     internal const string PermissionRequiredCode = "instance.permission-required";
     internal const string OperationActiveCode = "instance.operation-active";
     internal const string ActivityLimitInvalidCode = "instance.activity-limit-invalid";
+    internal const string UnknownFieldCode = "request.unknown-field";
+    internal const string ApplyReleaseInvalidCode = "instance.apply-release-invalid";
+    internal const string RestartReason = "Restart";
     internal const int DefaultActivityLimit = 25;
     internal const int MaxActivityLimit = 100;
     internal const int MaxAvailableReleases = 20;
@@ -81,8 +89,8 @@ public static class ManagedElsaInstanceOverviewEndpoints
             var activeOperations = await queries.GetActiveOperationsAsync(workspaceId, [instance.Id], cancellationToken);
             var activeOperation = activeOperations.GetValueOrDefault(instance.Id);
             var lastPage = await queries.ListOperationsAsync(
-                workspaceId, instance.Id, page: 1, pageSize: 1, cancellationToken, access.OrganizationId);
-            var lastOperation = lastPage.Items.Count > 0 ? lastPage.Items[0] : null;
+                workspaceId, instance.Id, page: 1, pageSize: 100, cancellationToken, access.OrganizationId);
+            var lastOperation = lastPage.Items.FirstOrDefault(operation => operation.CompletedAt is not null);
             var snapshot = await operationalStore.GetSnapshotAsync(workspaceId, instanceId, cancellationToken)
                 ?? new ManagedLifecycleOperationalHealthSnapshot(
                     workspaceId,
@@ -168,63 +176,167 @@ public static class ManagedElsaInstanceOverviewEndpoints
             IElsaInstanceCommercialGate commercialGate,
             ElsaInstanceLifecycleService lifecycle,
             IElsaInstanceLifecycleStore store,
+            IManagedElsaInstanceApiStore queries,
             CancellationToken cancellationToken) =>
         {
-            var prepared = await PrepareMutationAsync(
-                context, workspaceId, instanceId, store, commercialGate,
-                ElsaInstanceOperationAction.Restart, cancellationToken);
-            if (prepared.Error is not null)
-                return prepared.Error;
-            try
-            {
-                var accepted = await lifecycle.RestartAsync(
-                    new ElsaInstanceLifecycleRequest(
-                        WorkspaceId: workspaceId,
-                        InstanceId: instanceId,
-                        ExpectedVersion: prepared.ExpectedVersion,
-                        IdempotencyKey: prepared.IdempotencyKey,
-                        Reason: "Restart",
-                        ActorAccountId: prepared.Access!.AccountId),
-                    cancellationToken);
-                return AcceptedOperation(accepted);
-            }
-            catch (ElsaInstanceLifecycleConflictException exception)
-            {
-                return ManagedElsaInstanceEndpoints.ConflictProblem(exception);
-            }
-            catch (KeyNotFoundException)
-            {
-                return Results.NotFound();
-            }
-            catch (ArgumentException)
-            {
-                return ManagedElsaInstanceEndpoints.Problem(
-                    "instance.operation-invalid",
-                    "The requested restart is invalid.",
-                    StatusCodes.Status422UnprocessableEntity);
-            }
+            return await ExecuteCustomerMutationAsync(
+                context, workspaceId, instanceId, store, queries, commercialGate, lifecycle,
+                catalog: null, version: null, cancellationToken);
         }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff();
 
         group.MapPost("/{instanceId:guid}/apply-release", async (
             Guid workspaceId,
             Guid instanceId,
-            ManagedElsaInstanceApplyReleaseRequest request,
             HttpContext context,
             IElsaInstanceCommercialGate commercialGate,
             IGovernedReleaseCatalogStore catalog,
             ElsaInstanceLifecycleService lifecycle,
             IElsaInstanceLifecycleStore store,
+            IManagedElsaInstanceApiStore queries,
             CancellationToken cancellationToken) =>
         {
-            var prepared = await PrepareMutationAsync(
-                context, workspaceId, instanceId, store, commercialGate,
-                ElsaInstanceOperationAction.UpdateIntent, cancellationToken);
-            if (prepared.Error is not null)
-                return prepared.Error;
-            var instance = prepared.Instance!;
-            var selected = (await ListAvailableReleasesAsync(catalog, instance, cancellationToken))
+            var body = await ReadApplyReleaseRequestAsync(context);
+            if (body.Error is not null)
+                return body.Error;
+            return await ExecuteCustomerMutationAsync(
+                context, workspaceId, instanceId, store, queries, commercialGate, lifecycle,
+                catalog, body.Version, cancellationToken);
+        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff();
+
+        return group;
+    }
+
+    internal static async Task<IReadOnlyList<ManagedElsaInstanceAvailableReleaseResponse>> ListAvailableReleasesAsync(
+        IGovernedReleaseCatalogStore catalog,
+        ElsaInstance instance,
+        CancellationToken cancellationToken)
+    {
+        var instanceChannel = instance.Intent.Release.Channel;
+        var entries = await catalog.QueryAsync(new GovernedReleaseCatalogQuery(
+            DistributionId: instance.Intent.Release.DistributionId,
+            CatalogLifecycle: "supported",
+            RegistryClass: "paid",
+            Channel: instanceChannel,
+            TopologyId: instance.Intent.Application.TopologyId), cancellationToken);
+        var currentVersion = CurrentReleaseVersion(instance);
+        if (!TryReadMajor(instance.Intent.Release.ReleaseLine, out var currentMajor))
+            return [];
+
+        return entries
+            .Where(entry =>
+                string.Equals(entry.CatalogLifecycle, "supported", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(entry.RegistryClass, "paid", StringComparison.OrdinalIgnoreCase) &&
+                IsCustomerChannel(entry.Distribution.Channel, instanceChannel) &&
+                TryReadMajor(entry.Distribution.ReleaseLine, out var major) &&
+                major == currentMajor &&
+                ReleaseVersionComparer.Instance.Compare(entry.Distribution.ReleaseVersion, currentVersion) > 0)
+            .Select(entry =>
+            {
+                var sameLine = string.Equals(
+                    entry.Distribution.ReleaseLine, instance.Intent.Release.ReleaseLine, StringComparison.OrdinalIgnoreCase);
+                return new ManagedElsaInstanceAvailableReleaseResponse(
+                    entry.Distribution.ReleaseLine,
+                    entry.Distribution.ReleaseVersion,
+                    entry.Distribution.Channel,
+                    sameLine ? "patch" : "minor");
+            })
+            .GroupBy(release => release.Version, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .OrderByDescending(release => release.Version, ReleaseVersionComparer.Instance)
+            .ThenBy(release => release.ReleaseLine, StringComparer.OrdinalIgnoreCase)
+            .Take(MaxAvailableReleases)
+            .ToList();
+    }
+
+    private static async Task<IResult> ExecuteCustomerMutationAsync(
+        HttpContext context,
+        Guid workspaceId,
+        Guid instanceId,
+        IElsaInstanceLifecycleStore store,
+        IManagedElsaInstanceApiStore queries,
+        IElsaInstanceCommercialGate commercialGate,
+        ElsaInstanceLifecycleService lifecycle,
+        IGovernedReleaseCatalogStore? catalog,
+        string? version,
+        CancellationToken cancellationToken)
+    {
+        var isApply = version is not null;
+        var keyResult = ManagedElsaInstanceEndpoints.ReadIdempotencyKey(context);
+        if (keyResult.State == IdempotencyKeyState.Missing)
+            return ManagedElsaInstanceEndpoints.Problem(
+                "instance.idempotency-key-required",
+                "Idempotency-Key is required for instance operations.",
+                StatusCodes.Status400BadRequest);
+        if (keyResult.State == IdempotencyKeyState.Invalid)
+            return ManagedElsaInstanceEndpoints.Problem(
+                "instance.idempotency-key-invalid",
+                "Idempotency-Key must be a safe token of at most 128 characters.",
+                StatusCodes.Status400BadRequest);
+
+        var instance = await store.GetInstanceAsync(workspaceId, instanceId, cancellationToken);
+        if (instance is null)
+            return Results.NotFound();
+
+        var access = context.GetWorkspaceAccess();
+        var existing = await store.FindOperationByKeyAsync(
+            workspaceId,
+            keyResult.Value!,
+            instanceId,
+            action: null,
+            idempotencyScope: CustomerOverviewScope(instanceId),
+            cancellationToken: cancellationToken);
+        if (existing is not null)
+        {
+            if (await IsSameCustomerRequestAsync(
+                    existing, isApply, version, workspaceId, instanceId, access.OrganizationId, queries, cancellationToken))
+                return AcceptedOperation(existing);
+            return ManagedElsaInstanceEndpoints.Problem(
+                "instance.idempotency-conflict",
+                "The request conflicts with the current instance state.",
+                StatusCodes.Status409Conflict);
+        }
+
+        var expectedVersion = ManagedElsaInstanceEndpoints.ReadIfMatch(context.Request);
+        if (expectedVersion is null)
+            return ManagedElsaInstanceEndpoints.Problem(
+                "instance.if-match-required",
+                "A strong If-Match header is required for instance operations.",
+                StatusCodes.Status428PreconditionRequired);
+
+        var commercialAction = isApply
+            ? ElsaInstanceOperationAction.UpdateIntent
+            : ElsaInstanceOperationAction.Restart;
+        var commercialDecision = await commercialGate.EvaluateAsync(
+            access.OrganizationId, commercialAction, cancellationToken: cancellationToken);
+        if (!commercialDecision.Allowed)
+            return ManagedElsaInstanceEndpoints.Problem(
+                commercialDecision.Code, commercialDecision.Summary, StatusCodes.Status422UnprocessableEntity);
+
+        try
+        {
+            if (!isApply)
+            {
+                var accepted = await lifecycle.RestartAsync(
+                    new ElsaInstanceLifecycleRequest(
+                        WorkspaceId: workspaceId,
+                        InstanceId: instanceId,
+                        ExpectedVersion: expectedVersion.Value,
+                        IdempotencyKey: keyResult.Value!,
+                        Reason: RestartReason,
+                        ActorAccountId: access.AccountId),
+                    cancellationToken);
+                return AcceptedOperation(accepted.Operation);
+            }
+
+            if (string.Equals(version, CurrentReleaseVersion(instance), StringComparison.OrdinalIgnoreCase))
+                return ManagedElsaInstanceEndpoints.Problem(
+                    ReleaseAlreadyCurrentCode,
+                    "The selected release is already current.",
+                    StatusCodes.Status409Conflict);
+
+            var selected = (await ListAvailableReleasesAsync(catalog!, instance, cancellationToken))
                 .FirstOrDefault(release =>
-                    string.Equals(release.Version, request.Version?.Trim(), StringComparison.OrdinalIgnoreCase));
+                    string.Equals(release.Version, version, StringComparison.OrdinalIgnoreCase));
             if (selected is null)
                 return ManagedElsaInstanceEndpoints.Problem(
                     ReleaseNotAvailableCode,
@@ -237,135 +349,140 @@ public static class ManagedElsaInstanceOverviewEndpoints
                     distributionId: instance.Intent.Release.DistributionId,
                     releaseLine: selected.ReleaseLine,
                     requestedVersion: selected.Version,
-                    channel: selected.Channel,
+                    channel: instance.Intent.Release.Channel,
                     patchUpdates: instance.Intent.Release.PatchUpdates,
                     minorUpdates: instance.Intent.Release.MinorUpdates,
                     majorMigrations: instance.Intent.Release.MajorMigrations)
             };
-            var update = new ElsaInstanceIntentUpdateRequest(
-                WorkspaceId: workspaceId,
-                InstanceId: instanceId,
-                Intent: nextIntent,
-                ExpectedVersion: prepared.ExpectedVersion,
-                IdempotencyKey: prepared.IdempotencyKey,
-                Reason: $"Apply release {selected.Version}",
-                ActorAccountId: prepared.Access!.AccountId);
-            try
-            {
-                var accepted = selected.ChangeKind == "minor"
-                    ? await lifecycle.ApproveMinorUpgradeAsync(update, cancellationToken)
-                    : await lifecycle.UpdateIntentAsync(update, cancellationToken);
-                return AcceptedOperation(accepted);
-            }
-            catch (ElsaInstanceLifecycleConflictException exception)
-            {
-                return ManagedElsaInstanceEndpoints.ConflictProblem(exception);
-            }
-            catch (KeyNotFoundException)
-            {
-                return Results.NotFound();
-            }
-            catch (ArgumentException)
-            {
-                return ManagedElsaInstanceEndpoints.Problem(
-                    "instance.operation-invalid",
-                    "The requested release change is invalid.",
-                    StatusCodes.Status422UnprocessableEntity);
-            }
-        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff();
-
-        return group;
+            var acceptedApply = await lifecycle.ApproveMinorUpgradeAsync(
+                new ElsaInstanceIntentUpdateRequest(
+                    WorkspaceId: workspaceId,
+                    InstanceId: instanceId,
+                    Intent: nextIntent,
+                    ExpectedVersion: expectedVersion.Value,
+                    IdempotencyKey: keyResult.Value!,
+                    Reason: ApplyReleaseReason(selected.Version),
+                    ActorAccountId: access.AccountId),
+                cancellationToken);
+            return AcceptedOperation(acceptedApply.Operation);
+        }
+        catch (ElsaInstanceLifecycleConflictException exception)
+        {
+            return ManagedElsaInstanceEndpoints.ConflictProblem(exception);
+        }
+        catch (KeyNotFoundException)
+        {
+            return Results.NotFound();
+        }
+        catch (ArgumentException)
+        {
+            return ManagedElsaInstanceEndpoints.Problem(
+                "instance.operation-invalid",
+                isApply ? "The requested release change is invalid." : "The requested restart is invalid.",
+                StatusCodes.Status422UnprocessableEntity);
+        }
     }
 
-    internal static async Task<IReadOnlyList<ManagedElsaInstanceAvailableReleaseResponse>> ListAvailableReleasesAsync(
-        IGovernedReleaseCatalogStore catalog,
-        ElsaInstance instance,
-        CancellationToken cancellationToken)
+    private static async Task<(IResult? Error, string Version)> ReadApplyReleaseRequestAsync(HttpContext context)
     {
-        var entries = await catalog.QueryAsync(new GovernedReleaseCatalogQuery(
-            DistributionId: instance.Intent.Release.DistributionId,
-            CatalogLifecycle: "supported",
-            RegistryClass: "paid",
-            TopologyId: instance.Intent.Application.TopologyId), cancellationToken);
-        var currentVersion = instance.CurrentResolvedRelease?.Version
-            ?? instance.Intent.Release.RequestedVersion
-            ?? instance.Intent.Release.ReleaseLine;
-        if (!TryReadMajor(instance.Intent.Release.ReleaseLine, out var currentMajor))
-            return [];
+        try
+        {
+            using var document = await JsonDocument.ParseAsync(context.Request.Body);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+                return (ManagedElsaInstanceEndpoints.Problem(
+                    ApplyReleaseInvalidCode,
+                    "Apply-release requires a JSON object with a version.",
+                    StatusCodes.Status400BadRequest), "");
 
-        return entries
-            .Where(entry =>
-                string.Equals(entry.CatalogLifecycle, "supported", StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(entry.RegistryClass, "paid", StringComparison.OrdinalIgnoreCase) &&
-                TryReadMajor(entry.Distribution.ReleaseLine, out var major) &&
-                major == currentMajor)
-            .Select(entry =>
+            string? version = null;
+            foreach (var property in document.RootElement.EnumerateObject())
             {
-                var sameLine = string.Equals(
-                    entry.Distribution.ReleaseLine, instance.Intent.Release.ReleaseLine, StringComparison.OrdinalIgnoreCase);
-                return new ManagedElsaInstanceAvailableReleaseResponse(
-                    entry.Distribution.ReleaseLine,
-                    entry.Distribution.ReleaseVersion,
-                    entry.Distribution.Channel,
-                    string.Equals(entry.Distribution.ReleaseVersion, currentVersion, StringComparison.OrdinalIgnoreCase),
-                    sameLine ? "patch" : "minor");
-            })
-            .GroupBy(release => release.Version, StringComparer.OrdinalIgnoreCase)
-            .Select(group => group.First())
-            .OrderByDescending(release => release.Version, ReleaseVersionComparer.Instance)
-            .ThenBy(release => release.ReleaseLine, StringComparer.OrdinalIgnoreCase)
-            .Take(MaxAvailableReleases)
-            .ToList();
+                if (!property.NameEquals("version"))
+                    return (ManagedElsaInstanceEndpoints.Problem(
+                        UnknownFieldCode,
+                        "Apply-release accepts only a version.",
+                        StatusCodes.Status400BadRequest), "");
+                if (property.Value.ValueKind != JsonValueKind.String)
+                    return (ManagedElsaInstanceEndpoints.Problem(
+                        ApplyReleaseInvalidCode,
+                        "Apply-release requires a version.",
+                        StatusCodes.Status400BadRequest), "");
+                version = property.Value.GetString();
+            }
+
+            var normalized = version?.Trim();
+            if (string.IsNullOrWhiteSpace(normalized))
+                return (ManagedElsaInstanceEndpoints.Problem(
+                    ApplyReleaseInvalidCode,
+                    "Apply-release requires a version.",
+                    StatusCodes.Status400BadRequest), "");
+            return (null, normalized);
+        }
+        catch (JsonException)
+        {
+            return (ManagedElsaInstanceEndpoints.Problem(
+                ApplyReleaseInvalidCode,
+                "Apply-release requires a JSON object with a version.",
+                StatusCodes.Status400BadRequest), "");
+        }
     }
 
-    private static async Task<PreparedMutation> PrepareMutationAsync(
-        HttpContext context,
+    private static async Task<bool> IsSameCustomerRequestAsync(
+        ElsaInstanceOperation existing,
+        bool isApply,
+        string? version,
         Guid workspaceId,
         Guid instanceId,
-        IElsaInstanceLifecycleStore store,
-        IElsaInstanceCommercialGate commercialGate,
-        ElsaInstanceOperationAction action,
+        Guid organizationId,
+        IManagedElsaInstanceApiStore queries,
         CancellationToken cancellationToken)
     {
-        var keyResult = ManagedElsaInstanceEndpoints.ReadIdempotencyKey(context);
-        if (keyResult.State == IdempotencyKeyState.Missing)
-            return PreparedMutation.Fail(ManagedElsaInstanceEndpoints.Problem(
-                "instance.idempotency-key-required",
-                "Idempotency-Key is required for instance operations.",
-                StatusCodes.Status400BadRequest));
-        if (keyResult.State == IdempotencyKeyState.Invalid)
-            return PreparedMutation.Fail(ManagedElsaInstanceEndpoints.Problem(
-                "instance.idempotency-key-invalid",
-                "Idempotency-Key must be a safe token of at most 128 characters.",
-                StatusCodes.Status400BadRequest));
-        var expectedVersion = ManagedElsaInstanceEndpoints.ReadIfMatch(context.Request);
-        if (expectedVersion is null)
-            return PreparedMutation.Fail(ManagedElsaInstanceEndpoints.Problem(
-                "instance.if-match-required",
-                "A strong If-Match header is required for instance operations.",
-                StatusCodes.Status428PreconditionRequired));
+        if (!isApply)
+            return existing.Action == ElsaInstanceOperationAction.Restart;
+        if (existing.Action is not (ElsaInstanceOperationAction.ApproveMinorUpgrade or ElsaInstanceOperationAction.UpdateIntent) ||
+            version is null)
+            return false;
 
-        var instance = await store.GetInstanceAsync(workspaceId, instanceId, cancellationToken);
-        if (instance is null)
-            return PreparedMutation.Fail(Results.NotFound());
-
-        var access = context.GetWorkspaceAccess();
-        var commercialDecision = await commercialGate.EvaluateAsync(
-            access.OrganizationId, action, cancellationToken: cancellationToken);
-        if (!commercialDecision.Allowed)
-            return PreparedMutation.Fail(ManagedElsaInstanceEndpoints.Problem(
-                commercialDecision.Code, commercialDecision.Summary, StatusCodes.Status422UnprocessableEntity));
-
-        return new PreparedMutation(null, instance, access, keyResult.Value!, expectedVersion.Value);
+        var events = await queries.ListAuditAsync(
+            workspaceId, instanceId, cancellationToken, 100, organizationId);
+        var accepted = events.FirstOrDefault(item =>
+            item.OperationId == existing.Id &&
+            string.Equals(item.EventType, "lifecycle.accepted", StringComparison.Ordinal));
+        return accepted?.Summary is not null &&
+               string.Equals(accepted.Summary, HashReason(ApplyReleaseReason(version)), StringComparison.Ordinal);
     }
 
-    private static IResult AcceptedOperation(ElsaInstanceLifecycleAcceptance accepted) =>
+    internal static string CustomerOverviewScope(Guid instanceId) => $"instance/{instanceId:D}/operations";
+
+    internal static string ApplyReleaseReason(string version) => $"Apply release {version}";
+
+    internal static string CurrentReleaseVersion(ElsaInstance instance) =>
+        instance.CurrentResolvedRelease?.Version
+        ?? instance.Intent.Release.RequestedVersion
+        ?? instance.Intent.Release.ReleaseLine;
+
+    internal static bool IsCustomerChannel(string channel, string instanceChannel) =>
+        string.Equals(channel, instanceChannel, StringComparison.OrdinalIgnoreCase) &&
+        !IsPreviewChannel(channel);
+
+    internal static bool IsPreviewChannel(string channel) =>
+        channel.Contains("preview", StringComparison.OrdinalIgnoreCase) ||
+        channel.Contains("nightly", StringComparison.OrdinalIgnoreCase) ||
+        channel.Equals("beta", StringComparison.OrdinalIgnoreCase) ||
+        channel.Equals("alpha", StringComparison.OrdinalIgnoreCase) ||
+        channel.Contains(".rc", StringComparison.OrdinalIgnoreCase) ||
+        channel.StartsWith("rc", StringComparison.OrdinalIgnoreCase);
+
+    private static string HashReason(string reason) =>
+        "reason.sha256." + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(reason)));
+
+    private static IResult AcceptedOperation(ElsaInstanceOperation operation) =>
         Results.Json(
             new ManagedElsaInstanceOverviewOperationResponse(
-                accepted.Operation.Id,
-                accepted.Operation.Action,
-                accepted.Operation.State,
-                accepted.Operation.AcceptedAt),
+                operation.Id,
+                operation.Action,
+                operation.State,
+                operation.AcceptedAt),
             statusCode: StatusCodes.Status202Accepted);
 
     internal static string StrongETag(int version) => $"\"{version}\"";
@@ -377,16 +494,6 @@ public static class ManagedElsaInstanceOverviewEndpoints
     {
         var firstPart = releaseLine.Split('.', 2)[0];
         return int.TryParse(firstPart, out major);
-    }
-
-    private sealed record PreparedMutation(
-        IResult? Error,
-        ElsaInstance? Instance = null,
-        WorkspaceAccess? Access = null,
-        string IdempotencyKey = "",
-        int ExpectedVersion = 0)
-    {
-        public static PreparedMutation Fail(IResult error) => new(error);
     }
 }
 
@@ -581,6 +688,7 @@ internal sealed class ReleaseVersionComparer : IComparer<string>
     }
 }
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ManagedElsaInstanceApplyReleaseRequest(string? Version);
 
 public sealed record ManagedElsaInstanceOverviewResponse(
@@ -666,7 +774,6 @@ public sealed record ManagedElsaInstanceAvailableReleaseResponse(
     string ReleaseLine,
     string Version,
     string Channel,
-    bool IsCurrent,
     string ChangeKind);
 
 public sealed record ManagedElsaInstanceActivityResponse(
