@@ -6,7 +6,8 @@ namespace ElsaControl.Deployment.Core.Instances;
 public sealed class ElsaInstanceProviderReconciliationService(
     IElsaInstanceProviderReconciliationStore store,
     IElsaInstanceProviderReconciliationPort provider,
-    TimeProvider? timeProvider = null) : IElsaInstanceProviderReconciliationService
+    TimeProvider? timeProvider = null,
+    ElsaInstanceLifecycleService? lifecycle = null) : IElsaInstanceProviderReconciliationService
 {
     public const string ConvergedCode = "provider.reconciliation.converged";
     public const string UnknownCode = "provider.reconciliation.unknown";
@@ -144,6 +145,8 @@ public sealed class ElsaInstanceProviderReconciliationService(
                 retryEvidence?.Reference,
                 retryEvidence?.Digest,
                 projection.At), cancellationToken);
+            if (retryEvidence?.AutoResume == true && result.RetrySafe && lifecycle is not null)
+                await TryAutoResumeAsync(instance, operation, result, cancellationToken);
             if (result.Projection.OperationState != operation.State)
                 telemetry.RecordTransition(
                     instance.DesiredLifecycle,
@@ -179,6 +182,35 @@ public sealed class ElsaInstanceProviderReconciliationService(
                 null,
                 "provider.reconciliation.failed");
             throw;
+        }
+    }
+
+    private async Task TryAutoResumeAsync(
+        ElsaInstance instance,
+        ElsaInstanceOperation operation,
+        ElsaInstanceProviderReconciliationResult result,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await lifecycle!.RecoverAsync(
+                new ElsaInstanceLifecycleRequest(
+                    instance.WorkspaceId,
+                    instance.Id,
+                    result.Projection.InstanceVersion,
+                    $"auto-resume.{operation.Id:N}.{operation.AttemptNumber}",
+                    "auto-resume",
+                    ActorAccountId: null,
+                    ExpectedOperationId: operation.Id),
+                cancellationToken);
+        }
+        catch (ElsaInstanceLifecycleConflictException)
+        {
+            // Another recover won the compare-and-set, or the cap/guard rejected it.
+        }
+        catch (InvalidOperationException)
+        {
+            // The existing recover guard is unchanged; a missing proof stays parked.
         }
     }
 

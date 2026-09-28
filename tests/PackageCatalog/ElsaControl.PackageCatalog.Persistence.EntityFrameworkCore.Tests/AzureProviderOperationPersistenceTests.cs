@@ -1190,6 +1190,47 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
     }
 
     [Fact]
+    public async Task Attempted_step_timestamp_is_written_ahead_and_arm_clock_does_not_bump_version()
+    {
+        var now = DateTimeOffset.Parse("2026-09-24T00:33:00Z");
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var created = await store.CreateOrGetAsync(Request(), now);
+        var claimed = Assert.IsType<AzureProviderOperation>(await store.ClaimAsync(
+            _workspaceId, created.Id, "worker", "lease", TimeSpan.FromMinutes(30), now.AddSeconds(5)));
+
+        var foundation = Assert.IsType<AzureProviderOperation>(await store.CheckpointAsync(
+            _workspaceId, created.Id, "lease",
+            new(AzureProviderOperationPhase.FoundationSubmitted, "azure.step.attempted",
+                "The Azure lifecycle step was marked before its remote call.", new(), null,
+                AzureProviderHealth.Unknown, [], AttemptedStep: AzureProviderRunnerStep.Foundation),
+            now.AddMinutes(1), claimed.Version));
+        Assert.Equal(AzureProviderRunnerStep.Foundation, foundation.AttemptedStep);
+        Assert.Equal(now.AddMinutes(1), foundation.AttemptedStepStartedAt);
+
+        var workload = Assert.IsType<AzureProviderOperation>(await store.CheckpointAsync(
+            _workspaceId, created.Id, "lease",
+            new(AzureProviderOperationPhase.FoundationReady, "azure.step.attempted",
+                "The Azure lifecycle step was marked before its remote call.", new(), null,
+                AzureProviderHealth.Unknown, [], AttemptedStep: AzureProviderRunnerStep.Workload),
+            now.AddMinutes(8), foundation.Version));
+        Assert.Equal(AzureProviderRunnerStep.Workload, workload.AttemptedStep);
+        Assert.Equal(now.AddMinutes(8), workload.AttemptedStepStartedAt);
+        Assert.Equal(foundation.Version + 1, workload.Version);
+
+        await store.RecordArmObservationClockAsync(_workspaceId, created.Id, now.AddMinutes(9), 60);
+        var afterClock = await store.GetAsync(_workspaceId, created.Id);
+        Assert.Equal(now.AddMinutes(9), afterClock!.LastArmObservedAt);
+        Assert.Equal(60, afterClock.ArmObservationBackoffSeconds);
+        Assert.Equal(workload.Version, afterClock.Version);
+
+        var incremented = Assert.IsType<AzureProviderOperation>(
+            await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id));
+        Assert.Equal(1, incremented.AutoResumeCount);
+        Assert.Equal(workload.Version, incremented.Version);
+    }
+
+    [Fact]
     public async Task Checkpoints_with_distinct_codes_preserve_distinct_transitions()
     {
         var now = DateTimeOffset.UtcNow;

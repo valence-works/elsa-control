@@ -254,9 +254,14 @@ public sealed class AzureElsaInstanceProvider(
                 !string.Equals(retainedPlan.Fingerprint, operation.PlanFingerprint, StringComparison.Ordinal))
                 return null;
 
+            if (!AzureNamedDeploymentFreshness.IsArmReadDue(
+                    _timeProvider.GetUtcNow(), operation.LastArmObservedAt, operation.ArmObservationBackoffSeconds))
+                return null;
+
             var observed = await _recoveryObserver.ObserveAsync(
                 new AzureProviderRecoveryRequest(operation, retainedPlan, assignment, _providerScope), cancellationToken);
             observed.Validate();
+            await RecordArmObservationClockAsync(operation, observed, cancellationToken);
             if (observed.Kind != AzureProviderRecoveryObservationKind.Confirmed || observed.CompletedStep is null)
                 return null;
 
@@ -295,7 +300,12 @@ public sealed class AzureElsaInstanceProvider(
                 AzureProviderRecoveryObservationRecord.ComputePostconditionFingerprint(observed, resourceFingerprint),
                 _timeProvider.GetUtcNow());
             var receipt = await _recoveryObservationStore.CreateOrGetAsync(record, cancellationToken);
-            return new ElsaInstanceProviderRetryEvidence(receipt.Reference, receipt.Digest);
+            var autoResume = AzureNamedDeploymentFreshness.IsConfirmedCompletedResume(
+                    operation.AttemptedStep, observed.CompletedStep.Value) &&
+                operation.AutoResumeCount < AzureNamedDeploymentFreshness.MaximumAutoResumes;
+            if (autoResume)
+                await operationStore.IncrementAutoResumeCountAsync(operation.WorkspaceId, operation.Id, cancellationToken);
+            return new ElsaInstanceProviderRetryEvidence(receipt.Reference, receipt.Digest, autoResume);
         }
         catch (OperationCanceledException)
         {
@@ -305,6 +315,22 @@ public sealed class AzureElsaInstanceProvider(
         {
             return null;
         }
+    }
+
+    private Task RecordArmObservationClockAsync(
+        AzureProviderOperation operation,
+        AzureProviderRecoveryObservation observed,
+        CancellationToken cancellationToken)
+    {
+        var backoff = observed.Kind == AzureProviderRecoveryObservationKind.InProgress
+            ? AzureNamedDeploymentFreshness.NextBackoffSeconds(operation.ArmObservationBackoffSeconds)
+            : AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds;
+        return operationStore.RecordArmObservationClockAsync(
+            operation.WorkspaceId,
+            operation.Id,
+            _timeProvider.GetUtcNow(),
+            backoff,
+            cancellationToken);
     }
 
     public async Task<ElsaInstanceProviderRecoveryResult> RecoverAsync(

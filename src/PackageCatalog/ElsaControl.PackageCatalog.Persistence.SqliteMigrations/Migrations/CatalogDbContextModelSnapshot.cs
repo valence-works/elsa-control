@@ -1350,12 +1350,21 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("TEXT");
 
+                    b.Property<int>("ArmObservationBackoffSeconds")
+                        .HasColumnType("INTEGER");
+
                     b.Property<int>("AttemptNumber")
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("AttemptedStep")
                         .HasMaxLength(64)
                         .HasColumnType("TEXT");
+
+                    b.Property<long?>("AttemptedStepStartedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("AutoResumeCount")
+                        .HasColumnType("INTEGER");
 
                     b.Property<int?>("CapacityCpuMillicores")
                         .HasColumnType("INTEGER");
@@ -1446,6 +1455,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<string>("KeyVaultUri")
                         .HasMaxLength(2048)
                         .HasColumnType("TEXT");
+
+                    b.Property<long?>("LastArmObservedAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<long?>("LeaseExpiresAt")
                         .HasColumnType("INTEGER");

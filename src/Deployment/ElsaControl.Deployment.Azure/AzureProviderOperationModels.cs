@@ -179,7 +179,11 @@ public sealed record AzureProviderOperation(
     AzureWorkloadCapacity? Capacity = null,
     bool ManagedHandoff = false,
     bool ManagedHandoffStudioGrants = false,
-    DateTimeOffset? StatusChangedAt = null)
+    DateTimeOffset? StatusChangedAt = null,
+    DateTimeOffset? AttemptedStepStartedAt = null,
+    DateTimeOffset? LastArmObservedAt = null,
+    int AutoResumeCount = 0,
+    int ArmObservationBackoffSeconds = 0)
 {
     [JsonIgnore]
     public IReadOnlyDictionary<string, string> SafeSecretReferences => SecretReferences ?? EmptySecretReferences;

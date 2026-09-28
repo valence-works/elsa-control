@@ -759,7 +759,11 @@ internal static class ManagedElsaInstanceOverviewProjection
                 AcceptedAt: activeOperation.AcceptedAt,
                 StartedAt: activeOperation.StartedAt)
             {
-                Progress = new ManagedElsaInstanceOverviewProgressResponse()
+                Progress = new ManagedElsaInstanceOverviewProgressResponse
+                {
+                    AttemptNumber = activeOperation.AttemptNumber,
+                    AttemptStartedAt = activeOperation.StartedAt
+                }
             },
             lastOperation is null ? null : new ManagedElsaInstanceOverviewLastOperationResponse(
                 lastOperation.Action,

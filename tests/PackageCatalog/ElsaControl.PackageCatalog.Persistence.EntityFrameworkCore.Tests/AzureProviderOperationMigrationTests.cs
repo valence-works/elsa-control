@@ -51,6 +51,10 @@ public sealed class AzureProviderOperationMigrationTests
         Assert.Contains("SqlQuartzPackageVersion", columns);
         Assert.Contains("StatusChangedAt", columns);
         Assert.Contains("ManagedHandoffStudioGrants", columns);
+        Assert.Contains("AttemptedStepStartedAt", columns);
+        Assert.Contains("LastArmObservedAt", columns);
+        Assert.Contains("AutoResumeCount", columns);
+        Assert.Contains("ArmObservationBackoffSeconds", columns);
         var instanceColumns = await db.Database.SqlQueryRaw<string>(
             "SELECT name AS Value FROM pragma_table_info('ElsaInstances')").ToListAsync();
         Assert.Contains("CurrentDeploymentStudioGrants", instanceColumns);

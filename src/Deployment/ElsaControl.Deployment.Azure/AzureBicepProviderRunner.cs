@@ -138,7 +138,9 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             var observesSeedSecrets = AzureProviderRecoveryObservationSupport.IsSeedSecretsEligible(operation);
             var observesAcrPull = AzureProviderRecoveryObservationSupport.IsAcrPullEligible(operation);
             var observesFoundation = AzureProviderRecoveryObservationSupport.IsFoundationOnlyEligible(operation);
-            if (sqlRecoveryStep is null && !observesSeedSecrets && !observesAcrPull && !observesFoundation)
+            var observesWorkload = AzureProviderRecoveryObservationSupport.IsWorkloadEligible(operation);
+            if (sqlRecoveryStep is null && !observesSeedSecrets && !observesAcrPull && !observesFoundation &&
+                !observesWorkload)
                 return RecoveryObservationUnsupported(request);
 
             var assignment = request.Assignment;
@@ -148,7 +150,9 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             var command = new AzureProviderRunnerCommand(
                 sqlRecoveryStep ?? (observesSeedSecrets
                     ? AzureProviderRunnerStep.SeedSecrets
-                    : observesAcrPull ? AzureProviderRunnerStep.AcrPull : AzureProviderRunnerStep.Foundation),
+                    : observesAcrPull ? AzureProviderRunnerStep.AcrPull
+                    : observesWorkload ? AzureProviderRunnerStep.Workload
+                    : AzureProviderRunnerStep.Foundation),
                 request.Plan,
                 operation.Resources,
                 operation.Resources.StableTrafficRevisionName,
@@ -175,6 +179,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                     ? await ObserveSeedSecretsAsync(request, command, cancellationToken)
                 : observesAcrPull
                     ? await ObserveAcrPullAsync(request, command, cancellationToken)
+                : observesWorkload
+                    ? await ObserveWorkloadAsync(request, command, cancellationToken)
                     : await ObserveFoundationAsync(request, command, cancellationToken);
         }
         catch (OperationCanceledException)
@@ -268,6 +274,121 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             null,
             "azure.recovery.foundation-observed",
             "The retained Azure foundation completion was observed without mutation.");
+    }
+
+    private async Task<AzureProviderRecoveryObservation> ObserveWorkloadAsync(
+        AzureProviderRecoveryRequest request,
+        AzureProviderRunnerCommand command,
+        CancellationToken cancellationToken)
+    {
+        var operation = request.Operation;
+        var assignment = request.Assignment!;
+        if (!string.Equals(operation.Resources.ResourceGroupName, assignment.ResourceGroupName, StringComparison.Ordinal) ||
+            RequireRegistry(operation.Resources) is not null)
+            return RecoveryObservationAmbiguous(request);
+
+        var groupExists = await ExecuteAzAsync(command,
+            ["group", "exists", "--subscription", _scope.SubscriptionId, "--name", ResourceGroupName(command),
+                "--output", "tsv", "--only-show-errors"],
+            ParseBooleanAsync,
+            cancellationToken);
+        if (!groupExists.Succeeded || groupExists.Value is null || !groupExists.Value.Value)
+            return RecoveryObservationInProgress(request);
+
+        var tags = await ExecuteAzAsync(command,
+            ["group", "show", "--subscription", _scope.SubscriptionId, "--name", ResourceGroupName(command),
+                "--query", "tags", "--output", "json", "--only-show-errors"],
+            ParseTagsAsync,
+            cancellationToken);
+        if (!tags.Succeeded || tags.Value is null || !OwnsGroup(tags.Value.Value, request.Plan.WorkloadName))
+            return RecoveryObservationAmbiguous(request);
+
+        var deploymentName = WorkloadDeploymentName(command);
+        var poll = await ExecuteAzAsync(command,
+            ["deployment", "group", "show", "--subscription", _scope.SubscriptionId,
+                "--resource-group", ResourceGroupName(command), "--name", deploymentName,
+                "--query", "{state:properties.provisioningState,timestamp:properties.timestamp,outputs:properties.outputs}",
+                "--output", "json", "--only-show-errors"],
+            ParseDeploymentPollAsync,
+            cancellationToken);
+        if (!poll.Succeeded || poll.Value is null)
+            return RecoveryObservationAmbiguous(request);
+
+        var observed = poll.Value.Value;
+        if (string.IsNullOrWhiteSpace(observed.State))
+            return RecoveryObservationAmbiguous(request);
+        if (!IsTerminalDeploymentState(observed.State))
+            return RecoveryObservationInProgress(
+                request,
+                "azure.recovery.workload-in-progress",
+                "The retained Azure workload deployment is still running.");
+
+        var baseline = AzureNamedDeploymentFreshness.FreshnessBaseline(
+            operation.AttemptedStepStartedAt, operation.StatusChangedAt, operation.UpdatedAt);
+        if (!AzureNamedDeploymentFreshness.IsFresh(observed.Timestamp, baseline) ||
+            !AzureNamedDeploymentFreshness.MatchesPlanFingerprint(
+                observed.Outputs?.String("planFingerprint"), request.Plan.Fingerprint))
+            return RecoveryObservationAmbiguous(request);
+
+        if (!string.Equals(observed.State, "Succeeded", StringComparison.OrdinalIgnoreCase))
+            return new(
+                AzureProviderRecoveryObservationKind.Ambiguous,
+                null,
+                operation.Resources,
+                AzureProviderHealth.Unknown,
+                null,
+                "azure.deployment.failed",
+                "Azure reported the workload deployment as failed or canceled.");
+
+        if (observed.Outputs is null)
+            return RecoveryObservationInProgress(
+                request,
+                "azure.recovery.workload-outputs-unavailable",
+                "The retained Azure workload outputs are not yet available for recovery observation.");
+
+        var revision = await ExecuteAzAsync(command,
+            ["containerapp", "show", "--subscription", _scope.SubscriptionId, "--resource-group", ResourceGroupName(command),
+                "--name", AppName(command), "--query", "properties.latestRevisionName", "--output", "tsv",
+                "--only-show-errors"],
+            ParseStringAsync,
+            cancellationToken);
+        if (!revision.Succeeded || string.IsNullOrWhiteSpace(revision.Value?.Value))
+            return RecoveryObservationInProgress(
+                request,
+                "azure.recovery.workload-revision-unavailable",
+                "The retained Azure workload revision is not yet available for recovery observation.");
+
+        var suffix = WorkloadRevisionSuffix(revision.Value.Value, AppName(command));
+        AzureProviderResourceReferences resources;
+        try
+        {
+            resources = ProjectWorkload(
+                command, observed.Outputs, operation.Resources, request.Plan, deploymentName, suffix, null);
+        }
+        catch (ArgumentException)
+        {
+            return RecoveryObservationAmbiguous(
+                request,
+                "azure.recovery.workload-outputs-invalid",
+                "The retained Azure workload outputs do not match the governed recovery boundary.");
+        }
+
+        return new(
+            AzureProviderRecoveryObservationKind.Confirmed,
+            AzureProviderRunnerStep.Workload,
+            resources,
+            AzureProviderHealth.Unknown,
+            resources.WorkloadResourceId is null ? null : observed.Outputs.String("containerAppEndpoint"),
+            "azure.recovery.workload-observed",
+            "The retained Azure workload completion was observed without mutation.");
+    }
+
+    private static string WorkloadRevisionSuffix(string latestRevisionName, string appName)
+    {
+        var prefix = appName + "--";
+        return latestRevisionName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            ? latestRevisionName[prefix.Length..]
+            : latestRevisionName;
     }
 
     private async Task<AzureProviderRecoveryObservation> ObserveAcrPullAsync(

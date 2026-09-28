@@ -1072,6 +1072,8 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             entity.AttemptedStep == checkpoint.AttemptedStep &&
             lastTransitionCode == checkpoint.Code)
             return ToModel(entity);
+        if (entity.AttemptedStep != checkpoint.AttemptedStep)
+            entity.AttemptedStepStartedAt = now;
         entity.Phase = checkpoint.Phase; entity.AttemptedStep = checkpoint.AttemptedStep;
         entity.CheckpointSequence++; entity.Version++; entity.UpdatedAt = now;
         entity.ResourceGroupName = resources.ResourceGroupName; entity.FoundationDeploymentId = resources.FoundationDeploymentId;
@@ -1213,6 +1215,52 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
                 .ToListAsync(cancellationToken))
             .Select(ToTransition)
             .ToList();
+    }
+
+    public async Task RecordArmObservationClockAsync(
+        Guid workspaceId,
+        Guid operationId,
+        DateTimeOffset observedAt,
+        int backoffSeconds,
+        CancellationToken cancellationToken = default)
+    {
+        var entity = await db.AzureProviderOperations.SingleOrDefaultAsync(
+            x => x.WorkspaceId == workspaceId && x.Id == operationId, cancellationToken);
+        if (entity is null)
+            return;
+        entity.LastArmObservedAt = observedAt;
+        entity.ArmObservationBackoffSeconds = backoffSeconds;
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            db.ChangeTracker.Clear();
+        }
+    }
+
+    public async Task<AzureProviderOperation?> IncrementAutoResumeCountAsync(
+        Guid workspaceId,
+        Guid operationId,
+        CancellationToken cancellationToken = default)
+    {
+        var entity = await db.AzureProviderOperations.SingleOrDefaultAsync(
+            x => x.WorkspaceId == workspaceId && x.Id == operationId, cancellationToken);
+        if (entity is null)
+            return null;
+        entity.AutoResumeCount++;
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            db.ChangeTracker.Clear();
+            return null;
+        }
+
+        return ToModel(entity);
     }
 
     private async Task<AzureProviderOperation?> FindByKeyAsync(AzureProviderOperationRequest request, CancellationToken cancellationToken) =>
@@ -1608,7 +1656,11 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             capacity,
             x.ManagedHandoff,
             x.ManagedHandoffStudioGrants,
-            x.StatusChangedAt);
+            StatusChangedAt: x.StatusChangedAt,
+            AttemptedStepStartedAt: x.AttemptedStepStartedAt,
+            LastArmObservedAt: x.LastArmObservedAt,
+            AutoResumeCount: x.AutoResumeCount,
+            ArmObservationBackoffSeconds: x.ArmObservationBackoffSeconds);
     }
 
     /// <summary>

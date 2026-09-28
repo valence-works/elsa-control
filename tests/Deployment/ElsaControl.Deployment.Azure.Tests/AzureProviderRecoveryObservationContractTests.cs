@@ -173,6 +173,11 @@ public sealed class AzureProviderRecoveryObservationContractTests
             AzureProviderOperationPhase.FoundationReady,
             AzureProviderRunnerStep.SqlBootstrap,
             AzureProviderOperationPhase.FoundationReady));
+        Assert.True(AzureProviderRecoveryObservationSupport.IsCompatibleBoundary(
+            AzureProviderRunnerStep.Workload,
+            AzureProviderOperationPhase.FoundationReady,
+            AzureProviderRunnerStep.Workload,
+            AzureProviderOperationPhase.WorkloadReady));
         Assert.False(AzureProviderRecoveryObservationSupport.IsCompatibleBoundary(
             AzureProviderRunnerStep.Workload,
             AzureProviderOperationPhase.WorkloadSubmitted,

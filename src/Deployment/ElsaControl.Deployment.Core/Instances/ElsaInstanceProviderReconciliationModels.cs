@@ -69,12 +69,12 @@ public static class ElsaInstanceProviderRecoveryObservationReference
 
 /// <summary>
 /// Opaque, safe evidence that a new provider apply would not duplicate uncertain
-/// work. Its presence is advisory to a later retry decision; reconciliation never
-/// turns it into an automatic retry.
+/// work. Confirmed-completed evidence may request an automatic resume. Retry-safe
+/// evidence that would re-run a mutation stays manual.
 /// </summary>
 public sealed record ElsaInstanceProviderRetryEvidence
 {
-    public ElsaInstanceProviderRetryEvidence(string reference, string digest)
+    public ElsaInstanceProviderRetryEvidence(string reference, string digest, bool autoResume = false)
     {
         var isOpaqueObservation = ElsaInstanceProviderRecoveryObservationReference.TryParse(
             reference, out _, out var referenceDigest);
@@ -84,11 +84,14 @@ public sealed record ElsaInstanceProviderRetryEvidence
         Digest = RequireDigest(digest);
         if (isOpaqueObservation && !string.Equals(referenceDigest, Digest, StringComparison.Ordinal))
             throw new ArgumentException("Retry evidence digest does not match the observation reference.", nameof(digest));
+        AutoResume = autoResume;
     }
 
     public string Reference { get; }
 
     public string Digest { get; }
+
+    public bool AutoResume { get; }
 
     private static string RequireToken(string value, string parameterName)
     {

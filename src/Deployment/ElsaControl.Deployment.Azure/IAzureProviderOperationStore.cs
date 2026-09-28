@@ -78,4 +78,23 @@ public interface IAzureProviderOperationStore
     Task<AzureProviderOperation?> FinalizeAsync(Guid workspaceId, Guid operationId, string leaseToken, AzureProviderOperationStatus status, string code, DateTimeOffset now, long? expectedVersion = null, CancellationToken cancellationToken = default);
     Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<AzureProviderOperationTransition>> ListTransitionsAsync(Guid workspaceId, Guid operationId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Records the last ARM observation clock without creating recovery evidence or
+    /// bumping the provider version. Used to rate-limit <c>deployment group show</c>.
+    /// </summary>
+    Task RecordArmObservationClockAsync(
+        Guid workspaceId,
+        Guid operationId,
+        DateTimeOffset observedAt,
+        int backoffSeconds,
+        CancellationToken cancellationToken = default) =>
+        Task.CompletedTask;
+
+    /// <summary>Increments the automatic resume cap without requiring a running lease.</summary>
+    Task<AzureProviderOperation?> IncrementAutoResumeCountAsync(
+        Guid workspaceId,
+        Guid operationId,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<AzureProviderOperation?>(null);
 }

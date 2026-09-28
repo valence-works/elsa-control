@@ -81,6 +81,75 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
     }
 
     [Fact]
+    public async Task Confirmed_completed_retry_evidence_auto_resumes_without_an_admin_recover()
+    {
+        var (store, accepted) = await RecoveryTargetAsync();
+        var observation = new ElsaInstanceProviderObservation(
+            ElsaInstanceProviderObservationKind.Confirmed,
+            ElsaObservedLifecycle.Provisioning,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "observation-late-success",
+            OpaqueEvidence(autoResume: true));
+        var lifecycle = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+
+        var result = await new ElsaInstanceProviderReconciliationService(
+                store, new RecordingPort(observation), new StaticTimeProvider(Now), lifecycle)
+            .ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+
+        Assert.True(result.RetrySafe);
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, result.Projection.OperationState);
+        var resumed = Assert.Single(store.Operations);
+        Assert.Equal(accepted.Operation.Id, resumed.Id);
+        Assert.Equal(ElsaInstanceOperationState.Queued, resumed.State);
+        Assert.Equal(accepted.Operation.AttemptNumber + 1, resumed.AttemptNumber);
+        var recovery = Assert.Single(store.RecoveryRequests);
+        Assert.Equal(accepted.Operation.Id, recovery.OperationId);
+        Assert.Equal($"auto-resume.{accepted.Operation.Id:N}.{accepted.Operation.AttemptNumber}", recovery.IdempotencyKey);
+    }
+
+    [Fact]
+    public async Task Manual_retry_safe_evidence_does_not_auto_resume()
+    {
+        var (store, accepted) = await RecoveryTargetAsync();
+        var observation = new ElsaInstanceProviderObservation(
+            ElsaInstanceProviderObservationKind.Unknown,
+            ElsaObservedLifecycle.Unknown,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "observation-manual-retry",
+            OpaqueEvidence(autoResume: false));
+        var lifecycle = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+
+        var result = await new ElsaInstanceProviderReconciliationService(
+                store, new RecordingPort(observation), new StaticTimeProvider(Now), lifecycle)
+            .ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+
+        Assert.True(result.RetrySafe);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, Assert.Single(store.Operations).State);
+        Assert.Equal(accepted.Operation.AttemptNumber, Assert.Single(store.Operations).AttemptNumber);
+        Assert.Empty(store.RecoveryRequests);
+    }
+
+    [Fact]
+    public async Task Auto_resume_is_a_no_op_when_lifecycle_is_not_wired()
+    {
+        var (store, accepted) = await RecoveryTargetAsync();
+        var observation = new ElsaInstanceProviderObservation(
+            ElsaInstanceProviderObservationKind.Confirmed,
+            ElsaObservedLifecycle.Provisioning,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "observation-unwired",
+            OpaqueEvidence(autoResume: true));
+
+        var result = await Service(store, new RecordingPort(observation))
+            .ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+
+        Assert.True(result.RetrySafe);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, Assert.Single(store.Operations).State);
+        Assert.Empty(store.RecoveryRequests);
+    }
+
+    [Fact]
     public async Task Confirmed_healthy_running_state_converges_deterministically()
     {
         var (store, accepted) = await RecoveryTargetAsync();
@@ -409,6 +478,17 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
         Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, result.Outcome);
         Assert.Equal(ElsaInstanceProviderReconciliationService.CorrelationMismatchCode, result.DiagnosticCode);
         Assert.Equal(ElsaObservedLifecycle.Unknown, result.Projection.ObservedLifecycle);
+    }
+
+    private static ElsaInstanceProviderRetryEvidence OpaqueEvidence(bool autoResume)
+    {
+        var digest = "sha256:" + new string('a', 64);
+        return new(
+            ElsaInstanceProviderRecoveryObservationReference.Create(
+                Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                digest),
+            digest,
+            autoResume);
     }
 
     private static ElsaInstanceProviderReconciliationService Service(
