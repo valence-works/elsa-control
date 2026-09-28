@@ -196,10 +196,10 @@ public sealed record ExternalEngineIdentityRotationStoreResult(
         new(identity);
 
     public static ExternalEngineIdentityRotationStoreResult Failed() =>
-        new(Identity: null, RunnerConflict: false);
+        new ExternalEngineIdentityRotationStoreResult(null, false, null);
 
     public static ExternalEngineIdentityRotationStoreResult DeniedByRunner(TimeSpan retryAfter) =>
-        new(Identity: null, RunnerConflict: true, RetryAfter: retryAfter);
+        new ExternalEngineIdentityRotationStoreResult(null, true, retryAfter);
 }
 
 public enum ExternalEngineEnrollmentStoreRedeemFailure
