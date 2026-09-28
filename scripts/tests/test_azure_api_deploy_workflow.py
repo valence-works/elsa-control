@@ -387,6 +387,7 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
 
         production_enabled, _, _ = run_check(
             TARGET_ENVIRONMENT="production",
+            AZURE_ENV_NAME="valence-control-staging",
             STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="true",
         )
         self.assertNotEqual(0, production_enabled.returncode)
@@ -431,6 +432,8 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
 
         staging_ok, output, github_env = run_check(
             TARGET_ENVIRONMENT="test",
+            AZURE_ENV_NAME="valence-control-staging",
+            AZURE_RESOURCE_GROUP="rg-valence-control-staging",
             STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="true",
             STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS=f" {rehearsal} ",
             STAGING_SMOKE_OWNER_ORGANIZATION_ID=smoke,
@@ -1292,6 +1295,54 @@ else:
             self.assertEqual({}, json.loads(store.read_text()))
             self.assertEqual("", call_log.read_text())
             self.assertNotIn(rehearsal, refused.stdout + refused.stderr)
+
+            staging_env = os.environ.copy()
+            staging_env.update(
+                {
+                    "PATH": f"{temp_path}{os.pathsep}{staging_env['PATH']}",
+                    "AZ_CALL_LOG": str(call_log),
+                    "SETTINGS_STORE": str(store),
+                    "AZURE_RESOURCE_GROUP": "rg-valence-control-staging",
+                    "AZURE_WEBAPP_NAME": "test-api",
+                    "TARGET_ENVIRONMENT": "test",
+                    "AZURE_ENV_NAME": "valence-control-staging",
+                    "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED": "true",
+                    "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS": rehearsal,
+                    "STAGING_SMOKE_OWNER_ORGANIZATION_ID": smoke,
+                }
+            )
+            store.write_text(json.dumps({}))
+            call_log.write_text("")
+            real_staging = subprocess.run(
+                [str(helper)],
+                env=staging_env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            self.assertEqual(0, real_staging.returncode, real_staging.stdout + real_staging.stderr)
+            self.assertEqual(
+                {enabled_name: "true", f"{prefix}0": rehearsal},
+                json.loads(store.read_text()),
+            )
+            self.assertNotIn(rehearsal, real_staging.stdout + real_staging.stderr)
+
+            staging_env["TARGET_ENVIRONMENT"] = "production"
+            store.write_text(json.dumps({}))
+            call_log.write_text("")
+            production_with_staging_name = subprocess.run(
+                [str(helper)],
+                env=staging_env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            self.assertNotEqual(0, production_with_staging_name.returncode)
+            self.assertIn("must be unset", production_with_staging_name.stdout + production_with_staging_name.stderr)
+            self.assertEqual({}, json.loads(store.read_text()))
+            self.assertEqual("", call_log.read_text())
 
     @staticmethod
     def _parse_kv(text: str) -> dict[str, str]:

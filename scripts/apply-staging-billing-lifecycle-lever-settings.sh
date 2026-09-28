@@ -8,11 +8,22 @@ set -euo pipefail
 ENABLED_NAME='Billing__StagingLifecycleLever__Enabled'
 PREFIX='Billing__StagingLifecycleLever__AllowedOrganizationIds__'
 TARGET_ENVIRONMENT="${TARGET_ENVIRONMENT:-}"
+AZURE_ENV_NAME="${AZURE_ENV_NAME:-}"
 ENABLED_RAW="${STAGING_BILLING_LIFECYCLE_LEVER_ENABLED:-}"
 ALLOWLIST="${STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS:-}"
 SMOKE_OWNER_ORG_ID="${STAGING_SMOKE_OWNER_ORGANIZATION_ID:-}"
 RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:?AZURE_RESOURCE_GROUP is required.}"
 WEBAPP_NAME="${AZURE_WEBAPP_NAME:?AZURE_WEBAPP_NAME is required.}"
+
+# The workflow keys on TARGET_ENVIRONMENT (the GitHub environment / dispatch
+# input: test). Staging's Azure env name is valence-control-staging, not test.
+is_test_deploy_target() {
+  if [ -n "$TARGET_ENVIRONMENT" ]; then
+    [ "$TARGET_ENVIRONMENT" = "test" ]
+  else
+    [ "$AZURE_ENV_NAME" = "valence-control-staging" ]
+  fi
+}
 
 lever_guid_pattern='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 
@@ -31,8 +42,8 @@ if [ -n "$ENABLED_RAW" ]; then
   esac
 fi
 
-if { [ "$enabled" = true ] || [ -n "$ALLOWLIST" ]; } && [ "$TARGET_ENVIRONMENT" != "test" ]; then
-  echo "::error::STAGING_BILLING_LIFECYCLE_LEVER_ENABLED and STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS must be unset for ${TARGET_ENVIRONMENT:-unknown}; production ships the lever off."
+if { [ "$enabled" = true ] || [ -n "$ALLOWLIST" ]; } && ! is_test_deploy_target; then
+  echo "::error::STAGING_BILLING_LIFECYCLE_LEVER_ENABLED and STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS must be unset for ${TARGET_ENVIRONMENT:-${AZURE_ENV_NAME:-unknown}}; production ships the lever off."
   exit 1
 fi
 
@@ -126,12 +137,12 @@ if [ "$after_count" != "$expected_after" ]; then
   echo "::error::Staging billing lifecycle lever app setting count after deploy was ${after_count}; expected ${expected_after}."
   exit 1
 fi
-if [ "$TARGET_ENVIRONMENT" != "test" ] && [ "$after_count" != "0" ]; then
+if ! is_test_deploy_target && [ "$after_count" != "0" ]; then
   echo "::error::Staging billing lifecycle lever app setting count after deploy was ${after_count}; production must stay off."
   exit 1
 fi
 
-if [ "$TARGET_ENVIRONMENT" = "test" ] && [ "$expected_count" -gt 0 ]; then
+if is_test_deploy_target && [ "$expected_count" -gt 0 ]; then
   if [ -z "$SMOKE_OWNER_ORG_ID" ]; then
     echo "::error::STAGING_SMOKE_OWNER_ORGANIZATION_ID must be set so live staging billing lifecycle lever settings can be checked against the Hosted smoke owner organization."
     exit 1

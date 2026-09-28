@@ -135,7 +135,16 @@ fi
 if [[ "${STAGING_BILLING_LIFECYCLE_LEVER_ENABLED,,}" == "false" ]]; then
   STAGING_BILLING_LIFECYCLE_LEVER_ENABLED=""
 fi
-if [[ ( "${STAGING_BILLING_LIFECYCLE_LEVER_ENABLED,,}" == "true" || -n "$STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS" ) && "$ENVIRONMENT_NAME" != "test" ]]; then
+# Prefer TARGET_ENVIRONMENT (the workflow's GitHub environment / dispatch input).
+# Direct invocation also accepts the staging Azure env name valence-control-staging.
+is_staging_billing_lever_target() {
+  if [[ -n "${TARGET_ENVIRONMENT:-}" ]]; then
+    [[ "$TARGET_ENVIRONMENT" == "test" ]]
+  else
+    [[ "$ENVIRONMENT_NAME" == "test" || "$ENVIRONMENT_NAME" == "valence-control-staging" ]]
+  fi
+}
+if [[ ( "${STAGING_BILLING_LIFECYCLE_LEVER_ENABLED,,}" == "true" || -n "$STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS" ) ]] && ! is_staging_billing_lever_target; then
   echo "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED and STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS are only permitted for the test (staging) environment." >&2
   exit 1
 fi
