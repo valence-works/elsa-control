@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using ElsaControl.Deployment.Abstractions.Instances;
 
 namespace ElsaControl.Deployment.Core.Instances;
@@ -26,7 +27,12 @@ public sealed record ManagedElsaProvisioningProgress(
     DateTimeOffset? CompletedAt,
     string? DiagnosticCode,
     IReadOnlyList<ManagedElsaProvisioningStage> Stages,
-    IReadOnlyList<ManagedElsaProvisioningActivity> Activity);
+    IReadOnlyList<ManagedElsaProvisioningActivity> Activity,
+    // Internal only: never serialized. A waiting snapshot carries the blocker
+    // identity and stage so stale can propagate one level without leaking IDs.
+    [property: JsonIgnore] Guid? BlockingOperationId = null,
+    [property: JsonIgnore] string? BlockingOperationStage = null,
+    [property: JsonIgnore] string? StaleReason = null);
 
 /// <summary>A stable customer-facing provisioning stage.</summary>
 public sealed record ManagedElsaProvisioningStage(
@@ -48,6 +54,8 @@ public static class ManagedElsaProvisioningProgressStates
 {
     public const string Queued = "queued";
     public const string Active = "active";
+    public const string WaitingForPriorOperation = "waiting-for-prior-operation";
+    public const string EntitlementHeld = "entitlement-held";
     public const string Stale = "stale";
     public const string Ready = "ready";
     public const string Failed = "failed";
@@ -64,6 +72,11 @@ public static class ManagedElsaProvisioningProgressStages
     public const string HealthVerification = "health-verification";
     public const string TrafficRouting = "traffic-routing";
     public const string Ready = "ready";
+    /// <summary>Distinct current-stage value; not part of the seven-step pipeline.</summary>
+    public const string WaitingForPriorOperation = "waiting-for-prior-operation";
+    public const string WaitingForDelete = "waiting-for-delete";
+    public const string WaitingForUpdate = "waiting-for-update";
+    public const string EntitlementHeld = "entitlement-held";
 
     public static IReadOnlyList<string> Ordered { get; } =
     [
@@ -103,4 +116,11 @@ public static class ManagedElsaProvisioningProgressDiagnostics
     public const string Failed = "provisioning.failed";
     public const string Cancelled = "provisioning.cancelled";
     public const string HistoryUnavailable = "provisioning.history-unavailable";
+}
+
+/// <summary>Internal stale-classification reasons. Not customer labels.</summary>
+public static class ManagedElsaProvisioningProgressStaleReasons
+{
+    public const string BlockingOperationStale = "blocking-operation-stale";
+    public const string BlockingOperationUnresolvable = "blocking-operation-unresolvable";
 }

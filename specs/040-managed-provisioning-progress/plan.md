@@ -79,7 +79,9 @@ The projector maps:
 
 | Customer stage | Durable source phases |
 |---|---|
-| `request-accepted` | lifecycle Create accepted, waiting, queued, entitlement-held, or provider `Planned` |
+| `request-accepted` | lifecycle Create accepted or queued, or provider `Planned` |
+| `waiting-for-prior-operation` / `waiting-for-delete` / `waiting-for-update` | lifecycle `WaitingForPriorOperation` (distinct from queued; includes blocker kind when known) |
+| `entitlement-held` | lifecycle `EntitlementHeld` (distinct from queued; capability-only) |
 | `hosting-foundation` | `FoundationSubmitted`, `FoundationObserved` |
 | `configuration` | `AcrPullObserved`, `SeedSecretsObserved`, `SqlFirewallReady`, `SqlBootstrapReady`, `FoundationReady` |
 | `runtime-deployment` | `WorkloadSubmitted`, `WorkloadReady` |
@@ -95,7 +97,7 @@ Known later stages imply earlier stages completed. Repeated phases are deduplica
 | Transient uncertainty | `provider.reconciliation.unavailable`, `provider.reconciliation.unknown` | `active` at the last known stage (never moves backwards) until the progress bound. |
 | Definite problem | `provider.reconciliation.ambiguous`, `provider.reconciliation.correlation-mismatch`, `provider.reconciliation.retry-safe`, `provider.submission.uncertain`, any FailureCode, any other or unrecognised reason | `stale` immediately. |
 
-While Create has not finished, 10 minutes with no provider `Status` change makes the snapshot `stale`. The clock uses `StatusChangedAt` (set only when `Status` changes; backfilled from `UpdatedAt`) or Create `AcceptedAt` when there is no provider row. Heartbeats, run `UpdatedAt`, reason-write time, and later provider `UpdatedAt` writes do not reset it. The bound is inclusive (exactly 10:00 is `stale`), is skipped while the provider is `Running`, and is skipped once Create has finished. It covers Accepted/Queued, no provider row, and Succeeded-before-Ready. Terminal failure blocks the last known stage with a stable customer diagnostic code. Long-running `Running` work belongs to #601, not this leaf.
+While Create has not finished, 10 minutes with no provider `Status` change makes the snapshot `stale`. The clock uses `StatusChangedAt` (set only when `Status` changes; backfilled from `UpdatedAt`) or lifecycle `AcceptedAt` when there is no provider row. Heartbeats, run `UpdatedAt`, reason-write time, and later provider `UpdatedAt` writes do not reset it. The bound is inclusive (exactly 10:00 is `stale`), is skipped while the provider is `Running`, and is skipped once Create has finished. With no provider row it applies only to Accepted/Queued for any operation kind, including Delete, plus the RecoveryRequired hand-off. Lifecycle `WaitingForPriorOperation` and `EntitlementHeld` are exempt and appear as their own snapshot state/stage. A waiting snapshot carries the blocking operation's id and stage internally, resolves that id in the same organization and instance, follows one level only, and becomes `stale` with reason `blocking-operation-stale` when the blocker is stale, foreign, mismatched, or unresolvable. It also covers provider Accepted/Queued and Succeeded-before-Ready. Terminal failure blocks the last known stage with a stable customer diagnostic code. Long-running `Running` work belongs to #601, not this leaf.
 
 ### Cloud adoption
 

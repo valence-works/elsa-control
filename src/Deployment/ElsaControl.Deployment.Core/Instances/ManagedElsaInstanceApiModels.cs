@@ -123,7 +123,12 @@ public sealed record ElsaInstanceLifecycleTopologyOperation(
     // Used by the provisioning projector to classify RecoveryRequired. Not
     // serialized: RecoveryReason can be a legacy free-form run message and is
     // not part of the customer or Admin topology contracts.
-    [property: JsonIgnore] string? RecoveryReason = null);
+    [property: JsonIgnore] string? RecoveryReason = null,
+    Guid OrganizationId = default,
+    // Set only for WaitingForPriorOperation. The projector resolves this id
+    // inside the same organization and instance, one level, and fails closed
+    // when it is foreign, mismatched, or missing.
+    Guid? BlockingOperationId = null);
 
 public sealed record ElsaInstanceLifecycleTopologyOutbox(
     Guid Id,

@@ -295,6 +295,29 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
+    public async Task Lifecycle_topology_resolves_waiting_blocker_id_in_the_same_organization_and_instance()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted, _, deletion) = await QueueRecoveryBlockedDeleteAsync(
+            db, "Topology blocker workspace", "topology-blocker-delete");
+        db.ChangeTracker.Clear();
+
+        var topology = await new EfCoreManagedElsaInstanceApiStore(db)
+            .GetLifecycleTopologyAsync(workspace.Id, accepted.Instance.Id);
+
+        var waiting = Assert.Single(topology!.Operations, operation =>
+            operation.State == ElsaInstanceOperationState.WaitingForPriorOperation);
+        Assert.Equal(deletion.Operation.Id, waiting.Id);
+        Assert.Equal(accepted.Operation.Id, waiting.BlockingOperationId);
+        Assert.Equal(accepted.Instance.OrganizationId, waiting.OrganizationId);
+        Assert.All(topology.Operations, operation =>
+            Assert.Equal(accepted.Instance.OrganizationId, operation.OrganizationId));
+    }
+
+    [Fact]
     public async Task Lifecycle_topology_does_not_read_run_status_from_another_workspace()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

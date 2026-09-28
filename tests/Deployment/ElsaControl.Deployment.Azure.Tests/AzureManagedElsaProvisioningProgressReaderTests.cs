@@ -250,6 +250,83 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
     }
 
     [Fact]
+    public async Task Waiting_create_names_the_blocking_delete_and_is_never_clock_stale()
+    {
+        var organizationId = Guid.Parse("66666666-6666-6666-6666-666666666666");
+        var delete = new ElsaInstanceLifecycleTopologyOperation(
+            Guid.Parse("77777777-7777-7777-7777-777777777777"),
+            ElsaInstanceOperationAction.Delete,
+            ElsaInstanceOperationState.Accepted,
+            1,
+            1,
+            AcceptedAt,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            OrganizationId: organizationId);
+        var create = new ElsaInstanceLifecycleTopologyOperation(
+            Guid.NewGuid(),
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.WaitingForPriorOperation,
+            1,
+            1,
+            AcceptedAt,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            OrganizationId: organizationId,
+            BlockingOperationId: delete.Id);
+        var reader = Reader(
+            new InstanceStore { Topology = Topology([create, delete], create.Id) },
+            new ProviderStore(),
+            new FixedTimeProvider(AcceptedAt.AddMinutes(10)));
+
+        var result = Assert.IsType<ManagedElsaProvisioningProgress>(await reader.ReadAsync(WorkspaceId, InstanceId));
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.WaitingForPriorOperation, result.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.WaitingForDelete, result.CurrentStage);
+        Assert.Equal(delete.Id, result.BlockingOperationId);
+        Assert.Null(result.StaleReason);
+    }
+
+    [Fact]
+    public async Task Reader_fails_closed_when_the_blocker_id_is_unresolvable()
+    {
+        var create = new ElsaInstanceLifecycleTopologyOperation(
+            Guid.NewGuid(),
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.WaitingForPriorOperation,
+            1,
+            1,
+            AcceptedAt,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            OrganizationId: Guid.Parse("66666666-6666-6666-6666-666666666666"),
+            BlockingOperationId: Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"));
+        var reader = Reader(
+            new InstanceStore { Topology = Topology([create], create.Id) },
+            new ProviderStore());
+
+        var result = Assert.IsType<ManagedElsaProvisioningProgress>(await reader.ReadAsync(WorkspaceId, InstanceId));
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Stale, result.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStaleReasons.BlockingOperationUnresolvable, result.StaleReason);
+    }
+
+    [Fact]
     public async Task Unknown_and_non_monotonic_provider_mappings_emit_protected_warning_events()
     {
         var lifecycle = Lifecycle(Guid.NewGuid(), ElsaInstanceOperationState.Running);

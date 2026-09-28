@@ -49,7 +49,7 @@ The endpoint uses the established workspace authorization boundary and is explic
 
 ### Stable values
 
-Overall state: `queued`, `active`, `stale`, `ready`, `failed`, `unavailable`.
+Overall state: `queued`, `active`, `waiting-for-prior-operation`, `entitlement-held`, `stale`, `ready`, `failed`, `unavailable`.
 
 Stage code, in fixed order: `request-accepted`, `hosting-foundation`, `configuration`, `runtime-deployment`, `health-verification`, `traffic-routing`, `ready`.
 

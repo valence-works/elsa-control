@@ -215,6 +215,7 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
                     .Select(x => new
                     {
                         x.Id,
+                        x.OrganizationId,
                         x.Version,
                         x.DesiredLifecycle,
                         x.ObservedLifecycle,
@@ -227,6 +228,7 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
                 var operations = await dbContext.ElsaInstanceOperations
                     .AsNoTracking()
                     .Where(x => x.WorkspaceId == workspaceId &&
+                                x.OrganizationId == instance.OrganizationId &&
                                 x.InstanceId == instanceId &&
                                 BlockingOperationStates.Contains(x.State))
                     .OrderBy(x => x.AcceptedAt)
@@ -235,6 +237,7 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
                     .Select(x => new
                     {
                         x.Id,
+                        x.OrganizationId,
                         x.Action,
                         x.State,
                         x.ExpectedVersion,
@@ -313,8 +316,27 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
                         operation.DeploymentRunId is { } recoveryRunId &&
                         runStatuses.TryGetValue(recoveryRunId, out var recoveryRun)
                             ? recoveryRun.RecoveryReason
-                            : null);
+                            : null,
+                        operation.OrganizationId);
                 }).ToList();
+                operationSnapshots = operationSnapshots
+                    .Select(operation =>
+                    {
+                        if (operation.State != ElsaInstanceOperationState.WaitingForPriorOperation)
+                            return operation;
+
+                        var predecessor = operationSnapshots
+                            .Where(candidate =>
+                                candidate.Id != operation.Id &&
+                                candidate.OrganizationId == operation.OrganizationId)
+                            .OrderByDescending(candidate =>
+                                candidate.State != ElsaInstanceOperationState.WaitingForPriorOperation)
+                            .ThenBy(candidate => candidate.AcceptedAt)
+                            .ThenBy(candidate => candidate.Id)
+                            .FirstOrDefault();
+                        return operation with { BlockingOperationId = predecessor?.Id };
+                    })
+                    .ToList();
 
                 return new ElsaInstanceLifecycleTopologySnapshot(
                     instance.Id,

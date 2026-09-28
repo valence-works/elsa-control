@@ -13,7 +13,8 @@ public sealed record AzureManagedElsaProvisioningProgressProjectionInput(
     AzureProviderOperation? ProviderOperation,
     IReadOnlyList<AzureProviderOperationTransition>? Transitions = null,
     bool HistoryUnavailable = false,
-    string? RecoveryReason = null);
+    string? RecoveryReason = null,
+    bool ResolveBlockingOperation = true);
 
 [Flags]
 internal enum AzureManagedElsaProvisioningMappingAnomaly
@@ -88,9 +89,7 @@ public static class AzureManagedElsaProvisioningProgressProjector
         var clock = timeProvider ?? TimeProvider.System;
         var now = clock.GetUtcNow();
 
-        var lifecycle = input.LifecycleOperation is { Action: ElsaInstanceOperationAction.Create }
-            ? input.LifecycleOperation
-            : null;
+        var lifecycle = input.LifecycleOperation;
         var provider = input.ProviderOperation;
         var events = (input.Transitions ?? Array.Empty<AzureProviderOperationTransition>())
             .OrderBy(transition => transition.Sequence)
@@ -144,7 +143,44 @@ public static class AzureManagedElsaProvisioningProgressProjector
             (hasFailureCode || reasonGroup == RecoveryReasonGroup.DefiniteProblem);
         var providerAcceptedOrQueued = provider?.Status is AzureProviderOperationStatus.Accepted
             or AzureProviderOperationStatus.Queued;
-        var providerProgressStale = !lifecycleTerminal &&
+        Guid? blockingOperationId = null;
+        string? blockingOperationStage = null;
+        string? staleReason = null;
+        string? waitingStage = null;
+        var inheritedBlockerStale = false;
+        if (lifecycleState == ElsaInstanceOperationState.WaitingForPriorOperation &&
+            input.ResolveBlockingOperation)
+        {
+            if (!TryResolveBlockingOperation(input, lifecycle, out var blocker))
+            {
+                inheritedBlockerStale = true;
+                staleReason = ManagedElsaProvisioningProgressStaleReasons.BlockingOperationUnresolvable;
+            }
+            else
+            {
+                var blockerProgress = Project(
+                    input with
+                    {
+                        LifecycleOperation = blocker,
+                        ProviderOperation = null,
+                        Transitions = null,
+                        RecoveryReason = blocker.RecoveryReason,
+                        ResolveBlockingOperation = false
+                    },
+                    clock);
+                blockingOperationId = blocker.Id;
+                blockingOperationStage = blockerProgress.CurrentStage;
+                waitingStage = WaitingStage(blocker.Action);
+                if (blockerProgress.State == ManagedElsaProvisioningProgressStates.Stale)
+                {
+                    inheritedBlockerStale = true;
+                    staleReason = ManagedElsaProvisioningProgressStaleReasons.BlockingOperationStale;
+                }
+            }
+        }
+
+        var providerProgressStale = !inheritedBlockerStale &&
+            !lifecycleTerminal &&
             HasExceededProviderProgressBound(now, lifecycle, provider);
 
         // Lifecycle terminal state is authoritative whenever it is available.
@@ -180,13 +216,16 @@ public static class AzureManagedElsaProvisioningProgressProjector
         }
         else if ((!lifecycleTerminal && provider?.Status == AzureProviderOperationStatus.RecoveryRequired) ||
                  definiteProblem ||
-                 providerProgressStale)
+                 providerProgressStale ||
+                 inheritedBlockerStale)
         {
             // Immediate stale: provider RecoveryRequired, any FailureCode, uncertain /
-            // ambiguous / correlation-mismatch / retry-safe / unrecognised reasons.
-            // The 10-minute bound is inclusive and uses StatusChangedAt only
-            // (or Create AcceptedAt when no provider row exists). Heartbeats,
-            // UpdatedAt, and reason-write time do not reset it. Skipped while Running.
+            // ambiguous / correlation-mismatch / retry-safe / unrecognised reasons,
+            // an unresolvable or stale blocker, or the inclusive 10-minute bound.
+            // The bound uses StatusChangedAt (or lifecycle AcceptedAt when no
+            // provider row exists). Heartbeats, UpdatedAt, and reason-write time
+            // do not reset it. Skipped while Running, WaitingForPriorOperation,
+            // and EntitlementHeld. Applies to any Accepted/Queued operation kind.
             state = ManagedElsaProvisioningProgressStates.Stale;
             diagnosticCode = ManagedElsaProvisioningProgressDiagnostics.RequiresAttention;
             blocked = true;
@@ -195,15 +234,24 @@ public static class AzureManagedElsaProvisioningProgressProjector
         {
             return Unavailable();
         }
+        else if (lifecycleState == ElsaInstanceOperationState.WaitingForPriorOperation)
+        {
+            state = ManagedElsaProvisioningProgressStates.WaitingForPriorOperation;
+            waitingStage ??= WaitingStage(null);
+            knownStage ??= 0;
+        }
+        else if (lifecycleState == ElsaInstanceOperationState.EntitlementHeld)
+        {
+            state = ManagedElsaProvisioningProgressStates.EntitlementHeld;
+            knownStage ??= 0;
+        }
         else if (provider is null && (healthyContinuation || transientUncertainty ||
                  lifecycleState is ElsaInstanceOperationState.Accepted or
-                 ElsaInstanceOperationState.WaitingForPriorOperation or
-                 ElsaInstanceOperationState.Queued or ElsaInstanceOperationState.EntitlementHeld))
+                 ElsaInstanceOperationState.Queued))
         {
             state = healthyContinuation ||
                     lifecycleState is ElsaInstanceOperationState.Accepted or
-                    ElsaInstanceOperationState.WaitingForPriorOperation or
-                    ElsaInstanceOperationState.Queued or ElsaInstanceOperationState.EntitlementHeld
+                    ElsaInstanceOperationState.Queued
                 ? ManagedElsaProvisioningProgressStates.Queued
                 : ManagedElsaProvisioningProgressStates.Active;
             knownStage ??= 0;
@@ -301,6 +349,12 @@ public static class AzureManagedElsaProvisioningProgressProjector
             lastUpdatedAt);
 
         var currentStage = allReady || knownStage is null ? null : StageAt(knownStage.Value);
+        if (state == ManagedElsaProvisioningProgressStates.WaitingForPriorOperation)
+            currentStage = waitingStage ?? ManagedElsaProvisioningProgressStages.WaitingForPriorOperation;
+        else if (state == ManagedElsaProvisioningProgressStates.EntitlementHeld)
+            currentStage = ManagedElsaProvisioningProgressStages.EntitlementHeld;
+        else if (inheritedBlockerStale && blockingOperationStage is not null)
+            currentStage = blockingOperationStage;
         return new ManagedElsaProvisioningProgress(
             state,
             Provider,
@@ -310,7 +364,10 @@ public static class AzureManagedElsaProvisioningProgressProjector
             completedAt,
             diagnosticCode,
             stages,
-            activity);
+            activity,
+            blockingOperationId,
+            blockingOperationStage,
+            staleReason);
     }
 
     private static ManagedElsaProvisioningProgress Unavailable(
@@ -520,16 +577,22 @@ public static class AzureManagedElsaProvisioningProgressProjector
     /// Succeeded-before-Ready row does not inherit a CreatedAt older than 10
     /// minutes). Heartbeats, run <c>UpdatedAt</c>, reason-write time, and later
     /// provider <c>UpdatedAt</c> writes do not reset it. With no provider row,
-    /// Create <c>AcceptedAt</c> is used. The clock is skipped while the provider
-    /// is <c>Running</c> and once Create has finished. Inclusive: elapsed ==
-    /// 10:00 is stale. It covers Accepted, Queued, no provider row, and
-    /// Succeeded-before-Ready.
+    /// lifecycle <c>AcceptedAt</c> is used and the clock applies only to
+    /// Accepted/Queued (any operation kind, including Delete) and the
+    /// RecoveryRequired hand-off. Lifecycle <c>WaitingForPriorOperation</c> and
+    /// <c>EntitlementHeld</c> are exempt and have no clock of their own. The
+    /// clock is skipped while the provider is <c>Running</c> and once Create has
+    /// finished. Inclusive: elapsed == 10:00 is stale. It covers Accepted,
+    /// Queued, and Succeeded-before-Ready.
     /// </summary>
     private static bool HasExceededProviderProgressBound(
         DateTimeOffset now,
         ElsaInstanceLifecycleTopologyOperation? lifecycle,
         AzureProviderOperation? provider)
     {
+        if (lifecycle?.State is ElsaInstanceOperationState.WaitingForPriorOperation
+            or ElsaInstanceOperationState.EntitlementHeld)
+            return false;
         if (provider?.Status == AzureProviderOperationStatus.Running)
             return false;
         if (provider?.Status is AzureProviderOperationStatus.Failed or
@@ -542,6 +605,11 @@ public static class AzureManagedElsaProvisioningProgressProjector
                 AzureProviderOperationStatus.Queued or
                 AzureProviderOperationStatus.Succeeded))
             return false;
+        if (provider is null &&
+            lifecycle?.State is not (ElsaInstanceOperationState.Accepted or
+                ElsaInstanceOperationState.Queued or
+                ElsaInstanceOperationState.RecoveryRequired))
+            return false;
 
         var clockStart = provider is not null
             ? (provider.StatusChangedAt ?? provider.CreatedAt)
@@ -549,6 +617,39 @@ public static class AzureManagedElsaProvisioningProgressProjector
         return clockStart is { } origin &&
                now - origin.ToUniversalTime() >= ProviderProgressStaleAfter;
     }
+
+    private static bool TryResolveBlockingOperation(
+        AzureManagedElsaProvisioningProgressProjectionInput input,
+        ElsaInstanceLifecycleTopologyOperation? waiting,
+        out ElsaInstanceLifecycleTopologyOperation blocker)
+    {
+        blocker = null!;
+        if (waiting is null ||
+            waiting.BlockingOperationId is not { } blockerId ||
+            blockerId == Guid.Empty ||
+            blockerId == waiting.Id)
+            return false;
+
+        var candidate = input.Topology?.Operations
+            .FirstOrDefault(operation => operation.Id == blockerId);
+        if (candidate is null)
+            return false;
+        if (waiting.OrganizationId != Guid.Empty &&
+            candidate.OrganizationId != waiting.OrganizationId)
+            return false;
+
+        blocker = candidate;
+        return true;
+    }
+
+    private static string WaitingStage(ElsaInstanceOperationAction? blockerAction) =>
+        blockerAction switch
+        {
+            ElsaInstanceOperationAction.Delete => ManagedElsaProvisioningProgressStages.WaitingForDelete,
+            ElsaInstanceOperationAction.Create => ManagedElsaProvisioningProgressStages.WaitingForPriorOperation,
+            null => ManagedElsaProvisioningProgressStages.WaitingForPriorOperation,
+            _ => ManagedElsaProvisioningProgressStages.WaitingForUpdate
+        };
 
     private enum RecoveryReasonGroup
     {
