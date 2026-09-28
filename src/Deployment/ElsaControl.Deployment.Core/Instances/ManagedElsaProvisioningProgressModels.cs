@@ -131,6 +131,14 @@ public static class ManagedElsaProvisioningProgressStaleReasons
 /// </summary>
 public static class ManagedElsaProvisioningProgressCopy
 {
-    public const string EntitlementHeld =
+    public const string EntitlementHeldCreate =
+        "New engines aren't available right now. Resolve this on elsacloud.app.";
+
+    public const string EntitlementHeldChange =
         "New changes to this engine aren't available right now. Resolve this on elsacloud.app.";
+
+    public static string ForHold(ElsaInstanceOperationAction action) =>
+        action == ElsaInstanceOperationAction.Create
+            ? EntitlementHeldCreate
+            : EntitlementHeldChange;
 }

@@ -135,8 +135,9 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         var response = await client.GetAsync($"/api/workspaces/{workspaceId}/instances/onboarding-options");
 
         Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
-        Assert.Contains(ElsaInstanceCommercialOperation.LifecycleConstrained,
-            await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains(ElsaInstanceCommercialOperation.LifecycleConstrained, body, StringComparison.Ordinal);
+        Assert.Contains(ManagedElsaProvisioningProgressCopy.EntitlementHeldCreate, body, StringComparison.Ordinal);
         Assert.Null(_fixture.ReleaseCatalog.Query);
     }
 
@@ -533,7 +534,9 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         var createResponse = await client.SendAsync(create);
 
         Assert.Equal(HttpStatusCode.UnprocessableEntity, createResponse.StatusCode);
-        Assert.Contains(ElsaInstanceCommercialOperation.LifecycleConstrained, await createResponse.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        var createBody = await createResponse.Content.ReadAsStringAsync();
+        Assert.Contains(ElsaInstanceCommercialOperation.LifecycleConstrained, createBody, StringComparison.Ordinal);
+        Assert.Contains(ManagedElsaProvisioningProgressCopy.EntitlementHeldCreate, createBody, StringComparison.Ordinal);
 
         await SetSubscriptionStateAsync(app, workspaceId, OrganizationSubscriptionState.Active);
         var created = await CreateCanonicalInstanceAsync(client, workspaceId, "denied-patch-runtime");
@@ -549,7 +552,9 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         var patchResponse = await client.SendAsync(patch);
 
         Assert.Equal(HttpStatusCode.UnprocessableEntity, patchResponse.StatusCode);
-        Assert.Contains(ElsaInstanceCommercialOperation.LifecycleConstrained, await patchResponse.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        var patchBody = await patchResponse.Content.ReadAsStringAsync();
+        Assert.Contains(ElsaInstanceCommercialOperation.LifecycleConstrained, patchBody, StringComparison.Ordinal);
+        Assert.Contains(ManagedElsaProvisioningProgressCopy.EntitlementHeldChange, patchBody, StringComparison.Ordinal);
     }
 
     [Fact]

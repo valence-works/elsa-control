@@ -852,7 +852,8 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
             "traffic.routing",
             "traffic.routed",
             "engine.ready",
-            ManagedElsaProvisioningProgressCopy.EntitlementHeld
+            ManagedElsaProvisioningProgressCopy.EntitlementHeldCreate,
+            ManagedElsaProvisioningProgressCopy.EntitlementHeldChange
         ];
 
         Assert.All(tokens, token =>
