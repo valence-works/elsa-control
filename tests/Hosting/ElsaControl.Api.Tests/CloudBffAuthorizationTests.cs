@@ -107,6 +107,7 @@ public sealed class CloudBffAuthorizationTests
             "hosted.instances.create.v1",
             "hosted.instances.status.v1",
             "hosted.instances.provisioning-progress.v1",
+            "hosted.instances.overview.v1",
             "hosted.studio.handoff.issue.v1",
             "hosted.instances.quota-problem.v1",
             "hosted.instances.confirmed-delete.v1",
@@ -205,7 +206,10 @@ public sealed class CloudBffAuthorizationTests
             "GET /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/pairing",
             "GET /api/workspaces/{workspaceId:guid}/instances/",
             "GET /api/workspaces/{workspaceId:guid}/instances/onboarding-options",
+            "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/activity",
+            "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/available-releases",
             "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete-operations/{operationId:guid}",
+            "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/overview",
             "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/provisioning-progress",
             "PATCH /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}",
             "POST /api/cloud/bootstrap",
@@ -217,8 +221,10 @@ public sealed class CloudBffAuthorizationTests
             "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/disconnect",
             "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/repair",
             "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/studio-destination/confirm",
+            "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/apply-release",
             "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete",
             "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete-confirmations",
+            "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/restart",
             "POST /api/workspaces/{workspaceId:guid}/instances/"
         };
         Assert.Equal(expected.Order(StringComparer.Ordinal), allowed);

@@ -703,9 +703,24 @@ public static class ElsaInstanceStateMachine
         };
     }
 
+    /// <summary>
+    /// Restart (and the customer apply-release gate that shares it) is valid only
+    /// while the instance is Ready, Degraded or Stopped and is not deleting.
+    /// </summary>
+    public static bool CanRestart(ElsaInstance instance)
+    {
+        ArgumentNullException.ThrowIfNull(instance);
+        if (instance.ObservedLifecycle == ElsaObservedLifecycle.Deleted ||
+            instance.Intent.DesiredLifecycle == ElsaDesiredLifecycle.Deleting)
+            return false;
+        return instance.ObservedLifecycle is ElsaObservedLifecycle.Ready
+            or ElsaObservedLifecycle.Degraded
+            or ElsaObservedLifecycle.Stopped;
+    }
+
     private static ElsaInstance RequestRestart(ElsaInstance instance)
     {
-        if (instance.ObservedLifecycle is not (ElsaObservedLifecycle.Ready or ElsaObservedLifecycle.Degraded or ElsaObservedLifecycle.Stopped))
+        if (!CanRestart(instance))
             throw new ElsaInstanceStateConflictException(ElsaInstanceStateConflictReason.InvalidState);
         var observed = instance.ObservedLifecycle == ElsaObservedLifecycle.Stopped
             ? ElsaObservedLifecycle.Provisioning
