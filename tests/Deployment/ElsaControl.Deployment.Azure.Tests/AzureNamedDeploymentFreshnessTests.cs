@@ -37,9 +37,13 @@ public sealed class AzureNamedDeploymentFreshnessTests
         Assert.Equal(updatedAt, AzureNamedDeploymentFreshness.FreshnessBaseline(null, null, updatedAt));
         Assert.True(AzureNamedDeploymentFreshness.IsFresh(
             armSucceeded, AzureNamedDeploymentFreshness.FreshnessBaseline(null, statusChangedAt, updatedAt)));
+        Assert.True(AzureNamedDeploymentFreshness.IsFresh(
+            armSucceeded,
+            AzureNamedDeploymentFreshness.FreshnessBaseline(null, armSucceeded + AzureNamedDeploymentFreshness.TimestampSkew, updatedAt)));
         Assert.False(AzureNamedDeploymentFreshness.IsFresh(
             armSucceeded,
-            AzureNamedDeploymentFreshness.FreshnessBaseline(null, armSucceeded + TimeSpan.FromSeconds(1), updatedAt)));
+            AzureNamedDeploymentFreshness.FreshnessBaseline(
+                null, armSucceeded + AzureNamedDeploymentFreshness.TimestampSkew + TimeSpan.FromSeconds(1), updatedAt)));
     }
 
     [Fact]

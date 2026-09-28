@@ -3384,7 +3384,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
 
     private string WorkloadObserveOutputs(string? planFingerprint = null) => $$"""
         {
-          "planFingerprint": { "value": "{{planFingerprint ?? "abc123uniquestr"}}" },
+          "planFingerprint": { "value": "{{planFingerprint ?? "abc123unique1"}}" },
           "containerAppId": { "value": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/proof-rg/providers/Microsoft.App/containerApps/proof-app" },
           "containerAppEndpoint": { "value": "https://proof-app.hash.azurecontainerapps.io" }
         }
