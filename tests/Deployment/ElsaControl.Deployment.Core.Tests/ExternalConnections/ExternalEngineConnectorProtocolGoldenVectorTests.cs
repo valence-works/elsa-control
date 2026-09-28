@@ -42,6 +42,22 @@ public sealed class ExternalEngineConnectorProtocolGoldenVectorTests
             $"\"maximumProofFutureSkewSeconds\": {(int)ExternalEngineEnrollmentDefaults.MaximumProofFutureSkew.TotalSeconds}",
             generated,
             StringComparison.Ordinal);
+        Assert.Contains(
+            $"\"defaultHeartbeatIntervalSeconds\": {(int)ExternalEngineHeartbeatService.DefaultHeartbeatInterval.TotalSeconds}",
+            generated,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"\"maximumHeartbeatIntervalSeconds\": {(int)ExternalEngineHeartbeatService.MaxHeartbeatInterval.TotalSeconds}",
+            generated,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"\"runnerLeaseTtlSeconds\": {(int)ExternalEngineHeartbeatService.RunnerLeaseTtl.TotalSeconds}",
+            generated,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"\"freshnessWindowSeconds\": {(int)ExternalEngineHeartbeatService.FreshnessWindow.TotalSeconds}",
+            generated,
+            StringComparison.Ordinal);
         Assert.Contains("\"testOnly\": true", generated, StringComparison.Ordinal);
         Assert.Contains("TEST ONLY", generated, StringComparison.Ordinal);
     }
@@ -54,20 +70,25 @@ public sealed class ExternalEngineConnectorProtocolGoldenVectorTests
         var heartbeat = document.RootElement.GetProperty("vectors").EnumerateArray()
             .Single(vector => vector.GetProperty("id").GetString() == "heartbeat.valid");
 
+        Assert.Contains("\"runnerId\":\"AAAAAAAAAAAAAAAAAAAAAA\"", heartbeat.GetProperty("reportCanonicalPayloadUtf8").GetString(), StringComparison.Ordinal);
         Assert.Equal(
-            "lv-I-PKdau9NK9KBH6y_lxB0lXkpUFiZRNkXxeLS6pA",
-            heartbeat.GetProperty("payloadDigest").GetString());
-        Assert.Equal(
-            "{\"sequence\":1,\"observedAt\":\"2026-09-17T10:00:00.0000000Z\",\"connectorProtocol\":\"1\",\"connectorVersion\":\"1.4.0\",\"runtimeHealth\":\"healthy\",\"runtimeKind\":\"server\",\"observedDistribution\":\"valence-runtime\",\"observedVersion\":\"3.8.1\",\"studioDestination\":\"https://studio.example.test/elsa/\",\"capabilities\":[\"connection.status\",\"studio.open\"],\"components\":[{\"id\":\"runtime\",\"imageDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},{\"id\":\"worker\",\"imageDigest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]}",
+            "{\"sequence\":1,\"observedAt\":\"2026-09-17T10:00:00.0000000Z\",\"connectorProtocol\":\"1\",\"connectorVersion\":\"1.4.0\",\"runnerId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"runtimeHealth\":\"healthy\",\"runtimeKind\":\"server\",\"observedDistribution\":\"valence-runtime\",\"observedVersion\":\"3.8.1\",\"studioDestination\":\"https://studio.example.test/elsa/\",\"capabilities\":[\"connection.status\",\"studio.open\"],\"components\":[{\"id\":\"runtime\",\"imageDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},{\"id\":\"worker\",\"imageDigest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]}",
             heartbeat.GetProperty("reportCanonicalPayloadUtf8").GetString());
         Assert.DoesNotContain("displayName", heartbeat.GetProperty("reportCanonicalPayloadUtf8").GetString(), StringComparison.Ordinal);
 
         var named = document.RootElement.GetProperty("vectors").EnumerateArray()
             .Single(vector => vector.GetProperty("id").GetString() == "heartbeat.valid-display-name");
-        Assert.Contains("\"displayName\":\"Acme Orders Engine\"", named.GetProperty("reportCanonicalPayloadUtf8").GetString(), StringComparison.Ordinal);
+        Assert.Contains("\"runnerId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"displayName\":\"Acme Orders Engine\"", named.GetProperty("reportCanonicalPayloadUtf8").GetString(), StringComparison.Ordinal);
         Assert.StartsWith(
-            "{\"sequence\":1,\"observedAt\":\"2026-09-17T10:00:00.0000000Z\",\"connectorProtocol\":\"1\",\"connectorVersion\":\"1.4.0\",\"displayName\":\"Acme Orders Engine\",\"runtimeHealth\":\"healthy\"",
+            "{\"sequence\":1,\"observedAt\":\"2026-09-17T10:00:00.0000000Z\",\"connectorProtocol\":\"1\",\"connectorVersion\":\"1.4.0\",\"runnerId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"displayName\":\"Acme Orders Engine\",\"runtimeHealth\":\"healthy\"",
             named.GetProperty("reportCanonicalPayloadUtf8").GetString(),
+            StringComparison.Ordinal);
+
+        var escaped = document.RootElement.GetProperty("vectors").EnumerateArray()
+            .Single(vector => vector.GetProperty("id").GetString() == "heartbeat.valid-non-ascii-display-name");
+        Assert.Contains(
+            "\"displayName\":\"Caf\\u00E9 \\u0026 \\u03C0\"",
+            escaped.GetProperty("reportCanonicalPayloadUtf8").GetString(),
             StringComparison.Ordinal);
     }
 

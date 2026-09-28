@@ -77,7 +77,9 @@ public sealed record ExternalEngineConnection(
     DateTimeOffset? StudioDestinationConfirmedAt = null,
     Guid? StudioDestinationConfirmedByAccountId = null,
     ExternalEngineConnectorCompatibilityStatus ConnectorCompatibilityStatus = ExternalEngineConnectorCompatibilityStatus.Unknown,
-    DateTimeOffset? ConnectorCompatibilityObservedAt = null)
+    DateTimeOffset? ConnectorCompatibilityObservedAt = null,
+    string? ActiveRunnerId = null,
+    DateTimeOffset? RunnerLeaseExpiresAt = null)
 {
     public const string OwnershipMode = "CustomerOperated";
 }
@@ -193,6 +195,7 @@ public sealed record ExternalEngineHeartbeatReport(
     string? StudioDestination,
     IReadOnlyList<string> Capabilities,
     IReadOnlyList<ExternalEngineComponentObservation> Components,
+    string RunnerId,
     string? DisplayName = null);
 
 public sealed record ExternalEngineHeartbeatRequest(
@@ -214,7 +217,9 @@ public sealed record ExternalEngineHeartbeatProjection(
     string? ReleaseEvidenceReference,
     string? StudioDestinationCandidate,
     IReadOnlyList<string> Capabilities,
-    string? DisplayName = null);
+    string? DisplayName = null,
+    string? RunnerId = null,
+    bool ResetSequenceBaseline = false);
 
 public enum ExternalEngineStudioDestinationConfirmationStatus
 {
@@ -236,7 +241,8 @@ public enum ExternalEngineHeartbeatStoreStatus
     OutOfOrder,
     RateLimited,
     Revoked,
-    ScopeMismatch
+    ScopeMismatch,
+    RunnerConflict
 }
 
 public sealed record ExternalEngineHeartbeatStoreResult(
@@ -254,7 +260,8 @@ public enum ExternalEngineHeartbeatStatus
     RateLimited,
     Revoked,
     Conflict,
-    UnsupportedProtocol
+    UnsupportedProtocol,
+    RunnerConflict
 }
 
 public sealed record ExternalEngineHeartbeatResult(

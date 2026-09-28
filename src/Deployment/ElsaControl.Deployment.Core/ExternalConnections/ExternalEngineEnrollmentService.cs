@@ -166,7 +166,8 @@ public sealed class ExternalEngineEnrollmentService(
         string thumbprint;
         try
         {
-            digest = ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(request.NewPublicKey, request.Overlap);
+            digest = ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(
+                request.NewPublicKey, request.Overlap, request.RunnerId);
             thumbprint = ExternalEngineEnrollmentProtocol.PublicKeyThumbprint(request.NewPublicKey);
         }
         catch (Exception exception) when (exception is ArgumentException or CryptographicException or FormatException)
@@ -196,9 +197,13 @@ public sealed class ExternalEngineEnrollmentService(
             thumbprint,
             now,
             now.Add(request.Overlap),
+            request.RunnerId,
             cancellationToken);
-        if (updated is not null)
-            return ExternalEngineConnectorKeyRotationResult.Success(updated);
+        if (updated.RunnerConflict)
+            return ExternalEngineConnectorKeyRotationResult.DeniedByRunner(
+                updated.RetryAfter ?? TimeSpan.FromSeconds(1));
+        if (updated.Identity is not null)
+            return ExternalEngineConnectorKeyRotationResult.Success(updated.Identity);
 
         var failure = await ClassifyIdentityMutationFailureAsync(
             request.Proof,

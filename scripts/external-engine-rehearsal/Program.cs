@@ -119,9 +119,10 @@ internal static class Rehearsal
             var overlap = TimeSpan.FromMinutes(1);
             var rotation = new ExternalEngineConnectorKeyRotationRequest(
                 CreateProof(bundle, identity, ExternalEngineEnrollmentDefaults.RotationOperation,
-                    ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap), currentKey),
+                    ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap, "AAAAAAAAAAAAAAAAAAAAAA"), currentKey),
                 nextPublicKey,
-                overlap);
+                overlap,
+                "AAAAAAAAAAAAAAAAAAAAAA");
             using var rotatedResponse = await client.PostAsJsonAsync(
                 RuntimePath(bundle.ConnectionId, "identity/rotate"), rotation, Json);
             if (rotatedResponse.StatusCode != HttpStatusCode.OK)
@@ -223,7 +224,8 @@ internal static class Rehearsal
             options.RuntimeVersion,
             options.StudioUrl,
             capabilities,
-            []);
+            [],
+            "AAAAAAAAAAAAAAAAAAAAAA");
     }
 
     internal static void ValidateMode(Options options, PairingBundle bundle, DateTimeOffset now)

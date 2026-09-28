@@ -297,12 +297,13 @@ public sealed class ExternalEngineConnectionServiceTests
             CancellationToken cancellationToken = default) =>
             inner.FindIdentityAsync(organizationId, workspaceId, connectionId, identityId, cancellationToken);
 
-        public Task<ExternalEngineConnectorIdentity?> TryRotateIdentityAsync(
+        public Task<ExternalEngineIdentityRotationStoreResult> TryRotateIdentityAsync(
             ExternalEngineConnectorIdentity expectedIdentity,
             string newPublicKey,
             string newPublicKeyThumbprint,
             DateTimeOffset rotatedAt,
             DateTimeOffset previousKeyValidUntil,
+            string runnerId,
             CancellationToken cancellationToken = default) =>
             inner.TryRotateIdentityAsync(
                 expectedIdentity,
@@ -310,6 +311,7 @@ public sealed class ExternalEngineConnectionServiceTests
                 newPublicKeyThumbprint,
                 rotatedAt,
                 previousKeyValidUntil,
+                runnerId,
                 cancellationToken);
 
         public async Task<bool> TryRevokeIdentityAsync(
@@ -328,6 +330,7 @@ public sealed class ExternalEngineConnectionServiceTests
                     ExternalEngineEnrollmentProtocol.PublicKeyThumbprint(publicKey),
                     revokedAt,
                     revokedAt.AddMinutes(1),
+                    "AAAAAAAAAAAAAAAAAAAAAA",
                     cancellationToken);
                 return false;
             }

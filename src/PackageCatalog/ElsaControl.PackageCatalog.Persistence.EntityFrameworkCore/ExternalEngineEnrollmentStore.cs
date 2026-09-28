@@ -202,15 +202,17 @@ public sealed class EfCoreExternalEngineEnrollmentStore(CatalogDbContext dbConte
         return entity is null ? null : ToDomain(entity);
     }
 
-    public async Task<ExternalEngineConnectorIdentity?> TryRotateIdentityAsync(
+    public async Task<ExternalEngineIdentityRotationStoreResult> TryRotateIdentityAsync(
         ExternalEngineConnectorIdentity expectedIdentity,
         string newPublicKey,
         string newPublicKeyThumbprint,
         DateTimeOffset rotatedAt,
         DateTimeOffset previousKeyValidUntil,
+        string runnerId,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(expectedIdentity);
+        var requiredRunnerId = ExternalEngineEnrollmentProtocol.RequiredRunnerId(runnerId);
         var normalizedRotatedAt = rotatedAt.ToUniversalTime();
         var normalizedPreviousKeyValidUntil = previousKeyValidUntil.ToUniversalTime();
         if (normalizedPreviousKeyValidUntil <= normalizedRotatedAt
@@ -245,7 +247,29 @@ public sealed class EfCoreExternalEngineEnrollmentStore(CatalogDbContext dbConte
                     if (entity is null || entity.RevokedAt is not null
                         || entity.KeyVersion != expectedIdentity.KeyVersion
                         || entity.PreviousKeyValidUntil > normalizedRotatedAt)
-                        return null;
+                        return ExternalEngineIdentityRotationStoreResult.Failed();
+
+                    var connection = await dbContext.ExternalEngineConnections.SingleOrDefaultAsync(
+                        x => x.OrganizationId == expectedIdentity.OrganizationId
+                             && x.WorkspaceId == expectedIdentity.WorkspaceId
+                             && x.Id == expectedIdentity.ConnectionId,
+                        cancellationToken);
+                    if (connection is not null)
+                    {
+                        var leaseLive = connection.ActiveRunnerId is not null
+                                        && connection.RunnerLeaseExpiresAt is { } expires
+                                        && expires > normalizedRotatedAt;
+                        if (!leaseLive
+                            || !string.Equals(connection.ActiveRunnerId, requiredRunnerId, StringComparison.Ordinal))
+                        {
+                            var remaining = (connection.RunnerLeaseExpiresAt ?? normalizedRotatedAt) - normalizedRotatedAt;
+                            if (remaining > ExternalEngineHeartbeatService.RunnerLeaseTtl)
+                                remaining = ExternalEngineHeartbeatService.RunnerLeaseTtl;
+                            if (remaining <= TimeSpan.Zero)
+                                remaining = TimeSpan.FromSeconds(1);
+                            return ExternalEngineIdentityRotationStoreResult.DeniedByRunner(remaining);
+                        }
+                    }
 
                     entity.PreviousKeyVersion = entity.KeyVersion;
                     entity.PreviousPublicKey = entity.PublicKey;
@@ -265,24 +289,25 @@ public sealed class EfCoreExternalEngineEnrollmentStore(CatalogDbContext dbConte
                         ExternalEngineEnrollmentAuditReason.None,
                         normalizedRotatedAt);
                     await dbContext.SaveChangesAsync(cancellationToken);
-                    return ToDomain(entity);
+                    return ExternalEngineIdentityRotationStoreResult.Success(ToDomain(entity));
                 },
                 async (result, attemptCancellationToken) =>
-                    result is not null
+                    result.Succeeded
+                    && result.Identity is { } rotated
                     && await dbContext.ExternalEngineConnectorIdentities.AsNoTracking().AnyAsync(
-                        x => x.OrganizationId == result.OrganizationId
-                             && x.WorkspaceId == result.WorkspaceId
-                             && x.ConnectionId == result.ConnectionId
-                             && x.Id == result.Id
-                             && x.KeyVersion == result.KeyVersion
-                             && x.PublicKeyThumbprint == result.PublicKeyThumbprint,
+                        x => x.OrganizationId == rotated.OrganizationId
+                             && x.WorkspaceId == rotated.WorkspaceId
+                             && x.ConnectionId == rotated.ConnectionId
+                             && x.Id == rotated.Id
+                             && x.KeyVersion == rotated.KeyVersion
+                             && x.PublicKeyThumbprint == rotated.PublicKeyThumbprint,
                         attemptCancellationToken),
                 cancellationToken);
         }
         catch (DbUpdateConcurrencyException)
         {
             dbContext.ChangeTracker.Clear();
-            return null;
+            return ExternalEngineIdentityRotationStoreResult.Failed();
         }
     }
 
