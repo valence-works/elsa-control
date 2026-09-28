@@ -35,6 +35,39 @@ def cross_referenced_pr(number: int) -> dict[str, Any]:
     }
 
 
+def canonical_pr_client(
+    *comment_bodies: str, pull_requests: dict[str, issue_bus.CommandResult] | None = None
+) -> tuple[issue_bus.GhClient, list[str]]:
+    """Client whose issue #401 has only canonical ``pr:`` comments and no timeline links.
+
+    ``pull_requests`` maps ``"<owner>/<repo>#<number>"`` to the ``gh pr view`` result.
+    """
+
+    calls: list[str] = []
+    pull_requests = pull_requests or {}
+
+    def runner(*command: str, **kwargs: Any) -> issue_bus.CommandResult:
+        rendered = " ".join(command)
+        calls.append(rendered)
+        if "/issues/401/timeline" in rendered:
+            return issue_bus.CommandResult("[[]]", "", 0)
+        if "/issues/401/comments?" in rendered:
+            return issue_bus.CommandResult(json.dumps([[{"body": body} for body in comment_bodies]]), "", 0)
+        if "/issues/401" in rendered:
+            return issue_bus.CommandResult(json.dumps({"number": 401, "state": "open", "labels": [], "assignees": []}), "", 0)
+        if command[:2] == ("pr", "view"):
+            key = f"{command[command.index('--repo') + 1]}#{command[2]}"
+            if key in pull_requests:
+                return pull_requests[key]
+        return issue_bus.CommandResult("{}", "", 0)
+
+    return issue_bus.GhClient("valence-works/elsa-control", runner=runner), calls
+
+
+def pr_state(state: str) -> issue_bus.CommandResult:
+    return issue_bus.CommandResult(json.dumps({"state": state, "closingIssuesReferences": []}), "", 0)
+
+
 def expired_claim() -> dict[str, str]:
     return {
         "id": "expired",
@@ -382,6 +415,93 @@ class GhClientAdapterTests(unittest.TestCase):
         with self.assertRaises(issue_bus.GhError):
             client.linked_open_prs(401)
 
+    def test_canonical_pr_comment_resolves_open_pr_in_allowlisted_repository(self) -> None:
+        client, calls = canonical_pr_client(
+            "pr: https://github.com/valence-works/elsa-cloud/pull/75",
+            pull_requests={"valence-works/elsa-cloud#75": pr_state("OPEN")},
+        )
+
+        linked = client.linked_open_prs(401)
+
+        self.assertEqual([(pr["repository"], pr["number"]) for pr in linked], [("valence-works/elsa-cloud", 75)])
+        self.assertIn("pr view 75 --repo valence-works/elsa-cloud --json state,closingIssuesReferences", calls)
+
+    def test_canonical_pr_comment_ignores_closed_or_merged_pr_in_allowlisted_repository(self) -> None:
+        for state in ("CLOSED", "MERGED"):
+            with self.subTest(state=state):
+                client, _ = canonical_pr_client(
+                    "pr: valence-works/elsa-production-image#72",
+                    pull_requests={"valence-works/elsa-production-image#72": pr_state(state)},
+                )
+
+                self.assertEqual(client.linked_open_prs(401), ())
+
+    def test_same_pr_number_in_two_repositories_counts_as_two_linked_prs(self) -> None:
+        client, _ = canonical_pr_client(
+            "pr: valence-works/elsa-control#75",
+            "pr: https://github.com/valence-works/elsa-cloud/pull/75",
+            pull_requests={
+                "valence-works/elsa-control#75": pr_state("OPEN"),
+                "valence-works/elsa-cloud#75": pr_state("OPEN"),
+            },
+        )
+
+        linked = client.linked_open_prs(401)
+
+        self.assertEqual(
+            sorted(pr["repository"] for pr in linked),
+            ["valence-works/elsa-cloud", "valence-works/elsa-control"],
+        )
+
+    def test_canonical_pr_comment_outside_allowlist_fails_closed_without_reading_pr(self) -> None:
+        for reference in (
+            "https://github.com/valence-works/elsa-studio/pull/12",
+            "someone-else/elsa-cloud#12",
+        ):
+            with self.subTest(reference=reference):
+                client, calls = canonical_pr_client(f"pr: {reference}")
+
+                with self.assertRaisesRegex(issue_bus.GhError, "not an allowlisted PR repository"):
+                    client.linked_open_prs(401)
+                self.assertFalse(any(call.startswith("pr view") for call in calls))
+
+    def test_unreadable_allowlisted_pr_fails_closed_with_clear_message(self) -> None:
+        for stderr in ("HTTP 403: Resource not accessible by integration", "HTTP 404: Not Found"):
+            with self.subTest(stderr=stderr):
+                client, _ = canonical_pr_client(
+                    "pr: https://github.com/valence-works/elsa-production-image/pull/72",
+                    pull_requests={"valence-works/elsa-production-image#72": issue_bus.CommandResult("", stderr, 1)},
+                )
+
+                with self.assertRaisesRegex(
+                    issue_bus.GhError, r"unable to read pull request valence-works/elsa-production-image#72"
+                ) as raised:
+                    client.linked_open_prs(401)
+                self.assertIn(stderr, str(raised.exception))
+
+    def test_malformed_canonical_pr_comment_fails_closed(self) -> None:
+        for body in (
+            "pr: https://github.com/valence-works/elsa-cloud/pull/abc",
+            "pr: https://github.com/valence-works/elsa-cloud/issues/75",
+            "pr: see the image PR",
+        ):
+            with self.subTest(body=body):
+                client, _ = canonical_pr_client(body)
+
+                with self.assertRaisesRegex(issue_bus.GhError, "does not contain one readable pull request reference"):
+                    client.linked_open_prs(401)
+
+    def test_drift_reports_open_cross_repository_pr_through_same_resolver(self) -> None:
+        client, _ = canonical_pr_client(
+            "pr: https://github.com/valence-works/elsa-cloud/pull/75",
+            pull_requests={"valence-works/elsa-cloud#75": pr_state("OPEN")},
+        )
+        row = {"labels": [{"name": "ready-for-agent"}], "status": "Ready", "agent State": "Agent Ready"}
+
+        result = issue_bus.IssueBus(client, output=lambda _: None)._drift_project_row(401, row)
+
+        self.assertIn("ready-linked-open-pr", {finding["code"] for finding in result["findings"]})
+
 
 class FakeClient:
     def __init__(self, *, linked: list[dict[str, Any]] | None = None) -> None:
@@ -689,6 +809,13 @@ class IssueBusTests(unittest.TestCase):
         self.assertFalse(bus.claim(401, "codex"))
         self.assertTrue(any("linked open pull request" in line for line in output))
         self.assertTrue(any("conflicting worker lane" in line for line in output))
+
+    def test_preflight_names_repository_of_cross_repository_linked_pr(self) -> None:
+        client = FakeClient(linked=[{"number": 75, "repository": "valence-works/elsa-cloud", "state": "OPEN"}])
+        bus, output = self.run_bus(client)
+
+        self.assertFalse(bus.claim(401, "codex"))
+        self.assertTrue(any("linked open pull request exists (valence-works/elsa-cloud#75)" in line for line in output))
 
     def test_revalidates_non_claim_invariants_before_assignment(self) -> None:
         client = FakeClient()
