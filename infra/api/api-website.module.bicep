@@ -44,7 +44,9 @@ param api_egress_subnet_id string = ''
 @description('Comma-separated organization GUIDs allowed to create or repair external-engine pairings. Empty refuses every organization. Staging only; production must stay empty.')
 param pairingallowedorganizationids_value string = ''
 
-var pairingAllowedOrganizationIds = empty(pairingallowedorganizationids_value) ? [] : split(pairingallowedorganizationids_value, ',')
+var pairingAllowedOrganizationIds = empty(pairingallowedorganizationids_value)
+  ? []
+  : filter(map(split(pairingallowedorganizationids_value, ','), id => trim(id)), id => !empty(id))
 
 var pairingAllowlistSettings = [for (organizationId, i) in pairingAllowedOrganizationIds: {
   name: 'ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__${i}'

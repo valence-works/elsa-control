@@ -129,6 +129,10 @@ jobs:
               echo "::error::EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS must be unset for ${TARGET_ENVIRONMENT}; production ships an empty pairing allowlist."
               exit 1
             fi
+            if [[ "$pairing_allowlist_raw" =~ (^|,)[[:space:]]*(,|$) ]]; then
+              echo "::error::EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS contains an empty organization id."
+              exit 1
+            fi
             IFS=',' read -r -a pairing_entries <<< "$pairing_allowlist_raw"
             for entry in "${pairing_entries[@]}"; do
               trimmed="${entry#"${entry%%[![:space:]]*}"}"
@@ -147,7 +151,15 @@ jobs:
               pairing_normalized+="$trimmed"
               pairing_allowlist_count=$((pairing_allowlist_count + 1))
             done
-            EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS="$pairing_normalized"
+          fi
+          if [ -n "${GITHUB_OUTPUT:-}" ]; then
+            {
+              printf 'pairing_allowlist_count=%s\n' "$pairing_allowlist_count"
+              printf 'pairing_allowlist=%s\n' "$pairing_normalized"
+            } >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "${GITHUB_ENV:-}" ]; then
+            printf 'EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS=%s\n' "$pairing_normalized" >> "$GITHUB_ENV"
           fi
 
           smoke_owner_org_id="${STAGING_SMOKE_OWNER_ORGANIZATION_ID:-}"
@@ -660,6 +672,7 @@ jobs:
           BUILDER_CLIENT_API_KEY: ${{ env.DEPLOY_MODE == 'infra' && secrets.BUILDER_CLIENT_API_KEY || '' }}
           CONTROL_ENTRA_CLIENT_SECRET: ${{ env.DEPLOY_MODE == 'infra' && secrets.CONTROL_ENTRA_CLIENT_SECRET || '' }}
           APPLICATION_BUILD_NUMBER: ${{ github.run_number }}
+          EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ steps.deployment-config.outputs.pairing_allowlist }}
         shell: bash
         run: |
           set -euo pipefail
@@ -816,47 +829,20 @@ jobs:
             fi
             pairing_before_count="${pairing_before_count:-0}"
           fi
-          pairing_settings=()
-          pairing_expected_count=0
-          if [ "${TARGET_ENVIRONMENT:-}" = "test" ] && [ -n "${EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS:-}" ]; then
-            IFS=',' read -r -a pairing_entries <<< "${EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS}"
-            for entry in "${pairing_entries[@]}"; do
-              trimmed="${entry#"${entry%%[![:space:]]*}"}"
-              trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
-              pairing_settings+=("${pairing_allowlist_prefix}${pairing_expected_count}=${trimmed}")
-              pairing_expected_count=$((pairing_expected_count + 1))
-            done
-          fi
           if [ "$DEPLOY_MODE" = "infra" ]; then
             az webapp config appsettings set \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_WEBAPP_NAME" \
               --settings Application__BuildNumber="$application_build_number" "${cloud_account_settings[@]}" \
-                ${pairing_settings[@]+"${pairing_settings[@]}"} \
               --output none
           else
             az webapp config appsettings set \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_WEBAPP_NAME" \
               --settings AZURE_TOKEN_CREDENTIALS=prod Application__BuildNumber="$application_build_number" "${cloud_account_settings[@]}" \
-                ${pairing_settings[@]+"${pairing_settings[@]}"} \
               --output none
           fi
-          pairing_after_count="$(az webapp config appsettings list \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --name "$AZURE_WEBAPP_NAME" \
-            --query "[?starts_with(name, '${pairing_allowlist_prefix}')] | length(@)" \
-            --output tsv \
-            --only-show-errors)"
-          if [ "${TARGET_ENVIRONMENT:-}" != "test" ] && [ "$pairing_after_count" != "0" ]; then
-            echo "::error::Pairing allowlist app setting count after deploy was ${pairing_after_count}; production must stay empty."
-            exit 1
-          fi
-          if [ "${TARGET_ENVIRONMENT:-}" = "test" ] && [ "$DEPLOY_MODE" = "infra" ] && [ "$pairing_after_count" != "$pairing_expected_count" ]; then
-            echo "::error::Pairing allowlist app setting count after deploy was ${pairing_after_count}; expected ${pairing_expected_count}."
-            exit 1
-          fi
-          echo "Pairing allowlist app setting count: before=${pairing_before_count} after=${pairing_after_count}."
+          PAIRING_BEFORE_COUNT="$pairing_before_count" scripts/apply-external-engine-pairing-settings.sh
 
           az webapp restart \
             --resource-group "$AZURE_RESOURCE_GROUP" \

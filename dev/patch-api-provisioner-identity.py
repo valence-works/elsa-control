@@ -107,8 +107,9 @@ def patch_module(content: str) -> str:
         "production must stay empty.')"
     )
     pairing_vars = (
-        "var pairingAllowedOrganizationIds = empty(pairingallowedorganizationids_value) "
-        "? [] : split(pairingallowedorganizationids_value, ',')\n"
+        "var pairingAllowedOrganizationIds = empty(pairingallowedorganizationids_value)\n"
+        "  ? []\n"
+        "  : filter(map(split(pairingallowedorganizationids_value, ','), id => trim(id)), id => !empty(id))\n"
         "\n"
         "var pairingAllowlistSettings = [for (organizationId, i) in pairingAllowedOrganizationIds: {\n"
         "  name: 'ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__${i}'\n"

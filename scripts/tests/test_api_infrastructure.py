@@ -141,7 +141,9 @@ class ApiInfrastructureTests(unittest.TestCase):
         pairing_parameter = re.compile(
             r"\n@description\('Comma-separated organization GUIDs allowed to create or repair.*?"
             r"\nparam pairingallowedorganizationids_value string = ''\n"
-            r"\nvar pairingAllowedOrganizationIds = empty\(pairingallowedorganizationids_value\) \? \[\] : split\(pairingallowedorganizationids_value, ','\)\n"
+            r"\nvar pairingAllowedOrganizationIds = empty\(pairingallowedorganizationids_value\)\n"
+            r"  \? \[\]\n"
+            r"  : filter\(map\(split\(pairingallowedorganizationids_value, ','\), id => trim\(id\)\), id => !empty\(id\)\)\n"
             r"\nvar pairingAllowlistSettings = \[for \(organizationId, i\) in pairingAllowedOrganizationIds: \{\n"
             r"  name: 'ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__\$\{i\}'\n"
             r"  value: organizationId\n"
@@ -272,6 +274,46 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertEqual(settings["ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__0"], first)
         self.assertEqual(settings["ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__1"], second)
 
+    def test_bicep_module_drops_empty_pairing_allowlist_entries(self) -> None:
+        first = "11111111-1111-1111-1111-111111111111"
+        second = "22222222-2222-2222-2222-222222222222"
+        cases = (
+            f"{first},",
+            f"{first},,{second}",
+            f" {first} , {second} ",
+            f"{first},   ,{second}",
+            "  ,  ",
+            "   ",
+        )
+        expected = (
+            {f"ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__0": first},
+            {
+                "ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__0": first,
+                "ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__1": second,
+            },
+            {
+                "ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__0": first,
+                "ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__1": second,
+            },
+            {
+                "ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__0": first,
+                "ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__1": second,
+            },
+            {},
+            {},
+        )
+        for raw, wanted in zip(cases, expected, strict=True):
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as temporary:
+                webapp = self.webapp(
+                    self.snapshot(Path(temporary), "", pairing_allowed_organization_ids=raw)
+                )
+                settings = {
+                    setting["name"]: setting["value"]
+                    for setting in webapp["properties"]["siteConfig"]["appSettings"]
+                    if setting["name"].startswith("ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__")
+                }
+                self.assertEqual(settings, wanted)
+
     def test_bicep_module_evaluates_only_supplied_provisioner_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             webapp = self.webapp(self.snapshot(Path(temporary), PROVISIONER_ID))
@@ -297,6 +339,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("param pairingallowedorganizationids_value string = ''", module)
         self.assertIn("ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__", module)
         self.assertIn("pairingAllowlistSettings", module)
+        self.assertIn("filter(map(split(pairingallowedorganizationids_value, ','), id => trim(id)), id => !empty(id))", module)
         self.assertIn("virtualNetworkSubnetId: empty(api_egress_subnet_id) ? null : api_egress_subnet_id", module)
         self.assertIn("      vnetRouteAllEnabled: !empty(api_egress_subnet_id)", module)
         self.assertRegex(

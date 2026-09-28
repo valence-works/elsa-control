@@ -127,6 +127,11 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertIn("AZURE_API_EGRESS_SUBNET_ID: ${{ vars.AZURE_API_EGRESS_SUBNET_ID }}", self.source)
         self.assertIn("EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ vars.EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS }}", self.source)
         self.assertIn("STAGING_SMOKE_OWNER_ORGANIZATION_ID: ${{ vars.STAGING_SMOKE_OWNER_ORGANIZATION_ID }}", self.source)
+        self.assertIn(
+            "EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ steps.deployment-config.outputs.pairing_allowlist }}",
+            self.source,
+        )
+        self.assertIn("scripts/apply-external-engine-pairing-settings.sh", self.source)
 
     def test_cloud_account_issuer_accepts_exact_supabase_projects_only(self) -> None:
         check_start = self.source.index(
@@ -243,21 +248,31 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
             "AZURE_WEBAPP_NAME": "test-api",
         }
 
-        def run_check(**extra: str) -> subprocess.CompletedProcess[str]:
-            with tempfile.NamedTemporaryFile() as output:
+        def run_check(**extra: str) -> tuple[subprocess.CompletedProcess[str], str, str]:
+            with tempfile.NamedTemporaryFile() as output, tempfile.NamedTemporaryFile() as github_env:
                 environment = os.environ.copy()
                 environment.update(base)
                 environment.update(extra)
                 environment["GITHUB_OUTPUT"] = output.name
-                return subprocess.run(
+                environment["GITHUB_ENV"] = github_env.name
+                result = subprocess.run(
                     ["bash", "-c", check_script],
                     env=environment,
                     capture_output=True,
                     text=True,
                     check=False,
                 )
+                return result, Path(output.name).read_text(), Path(github_env.name).read_text()
 
-        production_set = run_check(
+        staging_stripe = {
+            "ELSA_CLOUD_STAGING_ORIGIN": "https://staging.example.test",
+            "STRIPE_HOSTED_PRICE_ID": "price_test",
+            "STRIPE_TEST_SECRET_KEY": "sk_test_fixture",
+            "STRIPE_TEST_WEBHOOK_SIGNING_SECRET": "whsec_fixture",
+        }
+        second = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+
+        production_set, _, _ = run_check(
             TARGET_ENVIRONMENT="production",
             EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS=rehearsal,
         )
@@ -265,17 +280,14 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertIn("must be unset", production_set.stdout + production_set.stderr)
         self.assertNotIn(rehearsal, production_set.stdout + production_set.stderr)
 
-        production_empty = run_check(TARGET_ENVIRONMENT="production", EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS="")
+        production_empty, _, _ = run_check(TARGET_ENVIRONMENT="production", EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS="")
         self.assertEqual(0, production_empty.returncode, production_empty.stderr)
 
-        staging_includes_smoke = run_check(
+        staging_includes_smoke, _, _ = run_check(
             TARGET_ENVIRONMENT="test",
             EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS=f"{rehearsal},{smoke}",
             STAGING_SMOKE_OWNER_ORGANIZATION_ID=smoke,
-            ELSA_CLOUD_STAGING_ORIGIN="https://staging.example.test",
-            STRIPE_HOSTED_PRICE_ID="price_test",
-            STRIPE_TEST_SECRET_KEY="sk_test_fixture",
-            STRIPE_TEST_WEBHOOK_SIGNING_SECRET="whsec_fixture",
+            **staging_stripe,
         )
         self.assertNotEqual(0, staging_includes_smoke.returncode)
         combined = staging_includes_smoke.stdout + staging_includes_smoke.stderr
@@ -283,35 +295,49 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertNotIn(rehearsal, combined)
         self.assertNotIn(smoke, combined)
 
-        staging_missing_smoke_id = run_check(
+        staging_missing_smoke_id, _, _ = run_check(
             TARGET_ENVIRONMENT="test",
             EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS=rehearsal,
             STAGING_SMOKE_OWNER_ORGANIZATION_ID="",
-            ELSA_CLOUD_STAGING_ORIGIN="https://staging.example.test",
-            STRIPE_HOSTED_PRICE_ID="price_test",
-            STRIPE_TEST_SECRET_KEY="sk_test_fixture",
-            STRIPE_TEST_WEBHOOK_SIGNING_SECRET="whsec_fixture",
+            **staging_stripe,
         )
         self.assertNotEqual(0, staging_missing_smoke_id.returncode)
         self.assertIn("STAGING_SMOKE_OWNER_ORGANIZATION_ID", staging_missing_smoke_id.stdout + staging_missing_smoke_id.stderr)
 
-        staging_ok = run_check(
+        for raw in (f"{rehearsal},", f"{rehearsal},,{second}", f"{rehearsal},   ,{second}", "   ", " , "):
+            with self.subTest(raw=raw):
+                rejected, _, _ = run_check(
+                    TARGET_ENVIRONMENT="test",
+                    EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS=raw,
+                    STAGING_SMOKE_OWNER_ORGANIZATION_ID=smoke,
+                    **staging_stripe,
+                )
+                self.assertNotEqual(0, rejected.returncode)
+                self.assertIn("empty organization id", rejected.stdout + rejected.stderr)
+                self.assertNotIn(rehearsal, rejected.stdout + rejected.stderr)
+                self.assertNotIn(second, rejected.stdout + rejected.stderr)
+
+        staging_ok, output, github_env = run_check(
             TARGET_ENVIRONMENT="test",
-            EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS=rehearsal,
+            EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS=f" {rehearsal} , {second} ",
             STAGING_SMOKE_OWNER_ORGANIZATION_ID=smoke,
-            ELSA_CLOUD_STAGING_ORIGIN="https://staging.example.test",
-            STRIPE_HOSTED_PRICE_ID="price_test",
-            STRIPE_TEST_SECRET_KEY="sk_test_fixture",
-            STRIPE_TEST_WEBHOOK_SIGNING_SECRET="whsec_fixture",
+            **staging_stripe,
         )
         self.assertEqual(0, staging_ok.returncode, staging_ok.stdout + staging_ok.stderr)
         self.assertIn("organization id(s).", staging_ok.stdout)
         self.assertNotIn(rehearsal, staging_ok.stdout + staging_ok.stderr)
+        self.assertNotIn(second, staging_ok.stdout + staging_ok.stderr)
+        self.assertIn(f"pairing_allowlist={rehearsal},{second}", output)
+        self.assertIn("pairing_allowlist_count=2", output)
+        self.assertIn(f"EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS={rehearsal},{second}", github_env)
 
         self.assertIn('pairing_allowlist_prefix=', self.source)
-        self.assertIn("Pairing allowlist app setting count: before=", self.source)
+        helper = (ROOT / "scripts" / "apply-external-engine-pairing-settings.sh").read_text()
+        self.assertIn("Pairing allowlist app setting count: before=", helper)
         self.assertNotIn("echo \"$EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS\"", self.source)
         self.assertNotIn("echo '${EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS}'", self.source)
+        self.assertNotIn("echo \"$EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS\"", helper)
+        self.assertNotIn("echo '${EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS}'", helper)
 
     def test_staging_infra_requires_a_provisioner_identity(self) -> None:
         check_start = self.source.index("        run: |\n", self.source.index("      - name: Check deployment configuration"))
@@ -371,7 +397,14 @@ case "$*" in
   *"webapp sitecontainers show"*) printf '%s\\n' "${RUNTIME_READBACK:?}" ;;
   *"webapp config show"*) printf '%s\\n' "${RUNTIME_READBACK:?}" ;;
   *"webapp config appsettings set"*) exit 0 ;;
-  *"webapp config appsettings list"*) printf '%s\\n' "0" ;;
+  *"webapp config appsettings delete"*) exit 0 ;;
+  *"webapp config appsettings list"*)
+    case "$*" in
+      *"].name"*|*" ].name"*) ;;
+      *"].value"*|*" ].value"*) ;;
+      *) printf '%s\\n' "0" ;;
+    esac
+    ;;
   *"webapp restart"*) exit 0 ;;
   *) exit 1 ;;
 esac
@@ -825,6 +858,124 @@ printf '%s' "${HEALTH_STATUS:-200}"
             ).returncode,
             0,
         )
+
+    def test_pairing_settings_helper_prunes_stale_entries_and_refuses_a_live_smoke_org(self) -> None:
+        script = ROOT / "scripts" / "apply-external-engine-pairing-settings.sh"
+        self.assertTrue(script.is_file())
+        rehearsal = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        leftover = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        smoke = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        prefix = "ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            store = temp_path / "settings.json"
+            call_log = temp_path / "az-calls"
+            fake_az = temp_path / "az"
+            fake_az.write_text(
+                """#!/usr/bin/env python3
+import json, os, sys
+open(os.environ["AZ_CALL_LOG"], "a", encoding="utf-8").write(" ".join(sys.argv[1:]) + "\\n")
+store_path = os.environ["SETTINGS_STORE"]
+store = json.loads(store_path.read_text() if False else open(store_path, encoding="utf-8").read())
+joined = " ".join(sys.argv[1:])
+prefix = "ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__"
+items = {name: value for name, value in store.items() if name.startswith(prefix)}
+if "appsettings list" in joined:
+    if "].name" in joined:
+        print("\\n".join(items))
+    elif "].value" in joined:
+        print("\\n".join(items.values()))
+    else:
+        print(len(items))
+elif "appsettings delete" in joined:
+    args = sys.argv[1:]
+    names = []
+    for item in args[args.index("--setting-names") + 1:]:
+        if item.startswith("--"):
+            break
+        names.append(item)
+    for name in names:
+        store.pop(name, None)
+    open(store_path, "w", encoding="utf-8").write(json.dumps(store))
+elif "appsettings set" in joined:
+    args = sys.argv[1:]
+    values = []
+    for item in args[args.index("--settings") + 1:]:
+        if item.startswith("--"):
+            break
+        values.append(item)
+    for item in values:
+        name, value = item.split("=", 1)
+        store[name] = value
+    open(store_path, "w", encoding="utf-8").write(json.dumps(store))
+else:
+    sys.exit(1)
+"""
+            )
+            fake_az.chmod(0o755)
+
+            def run_helper(allowlist: str, initial: dict[str, str]) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
+                store.write_text(json.dumps(initial))
+                call_log.write_text("")
+                environment = os.environ.copy()
+                environment.update(
+                    {
+                        "PATH": f"{temp_path}:{environment['PATH']}",
+                        "AZ_CALL_LOG": str(call_log),
+                        "SETTINGS_STORE": str(store),
+                        "AZURE_RESOURCE_GROUP": "test-rg",
+                        "AZURE_WEBAPP_NAME": "test-api",
+                        "TARGET_ENVIRONMENT": "test",
+                        "EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS": allowlist,
+                        "STAGING_SMOKE_OWNER_ORGANIZATION_ID": smoke,
+                    }
+                )
+                result = subprocess.run(
+                    [str(script)],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                return result, json.loads(store.read_text())
+
+            shortened, shortened_store = run_helper(
+                rehearsal,
+                {f"{prefix}0": rehearsal, f"{prefix}1": leftover},
+            )
+            self.assertEqual(0, shortened.returncode, shortened.stdout + shortened.stderr)
+            self.assertEqual({f"{prefix}0": rehearsal}, shortened_store)
+            self.assertIn("Deleted 1 stale pairing allowlist app setting(s).", shortened.stdout)
+            self.assertIn("before=", shortened.stdout)
+            self.assertNotIn(rehearsal, shortened.stdout + shortened.stderr)
+            self.assertNotIn(leftover, shortened.stdout + shortened.stderr)
+            self.assertIn("appsettings delete", call_log.read_text())
+
+            cleared, cleared_store = run_helper(
+                "",
+                {f"{prefix}0": leftover, f"{prefix}1": rehearsal},
+            )
+            self.assertEqual(0, cleared.returncode, cleared.stdout + cleared.stderr)
+            self.assertEqual({}, cleared_store)
+            self.assertIn("Deleted 2 stale pairing allowlist app setting(s).", cleared.stdout)
+            self.assertNotIn(rehearsal, cleared.stdout + cleared.stderr)
+            self.assertNotIn(leftover, cleared.stdout + cleared.stderr)
+
+            stale_handset, stale_store = run_helper(
+                rehearsal,
+                {f"{prefix}0": leftover},
+            )
+            self.assertEqual(0, stale_handset.returncode, stale_handset.stdout + stale_handset.stderr)
+            self.assertEqual({f"{prefix}0": rehearsal}, stale_store)
+            self.assertNotIn(leftover, stale_store.values())
+
+            live_smoke, live_store = run_helper(smoke, {})
+            self.assertNotEqual(0, live_smoke.returncode)
+            self.assertIn("Live pairing allowlist includes the staging Hosted smoke owner organization", live_smoke.stdout + live_smoke.stderr)
+            self.assertNotIn(smoke, live_smoke.stdout + live_smoke.stderr)
+            self.assertEqual({f"{prefix}0": smoke}, live_store)
 
 
 if __name__ == "__main__":

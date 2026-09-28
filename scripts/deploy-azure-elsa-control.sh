@@ -124,6 +124,10 @@ if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
   echo "Image tag has an invalid container tag format." >&2
   exit 1
 fi
+if [[ -n "$EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS" && "$ENVIRONMENT_NAME" != "test" ]]; then
+  echo "EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS is only permitted for the test (staging) environment." >&2
+  exit 1
+fi
 if [[ -n "$CLOUD_ACCOUNT_ISSUER" ]]; then
   if [[ ! "$CLOUD_ACCOUNT_ISSUER" =~ ^https://[a-z0-9]{20}\.supabase\.co/auth/v1$ ]]; then
     echo "CLOUD_ACCOUNT_ISSUER must be an exact Supabase Auth issuer URL." >&2

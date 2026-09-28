@@ -49,6 +49,21 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         self.assertNotIn("SQL_ADMINISTRATOR_PASSWORD", self.source)
         self.assertNotIn("containerRegistryLoginServer", self.source)
 
+    def test_refuses_a_pairing_allowlist_unless_the_target_is_staging(self) -> None:
+        environment = self.environment()
+        environment["EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        result = subprocess.run(
+            [str(DEPLOY_SCRIPT), "--environment", "prod"],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("only permitted for the test (staging) environment", result.stderr)
+        self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
+
     def test_rejects_non_supabase_cloud_issuer_before_azure_mutation(self) -> None:
         environment = self.environment()
         environment["CLOUD_ACCOUNT_ISSUER"] = "https://example.invalid/auth/v1"
