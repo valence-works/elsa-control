@@ -1303,35 +1303,22 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
     {
         if (!AzureProviderOperationValidation.IsSafeCode(reasonCode))
             return;
+        _ = occurredAt;
         var entity = await db.AzureProviderOperations.SingleOrDefaultAsync(
             x => x.WorkspaceId == workspaceId && x.Id == operationId, cancellationToken);
         if (entity is null)
             return;
+        // Outcome codes stay on LastObservationReasonCode only. Transition
+        // Sequence is coupled to Version via AddTransition; inserting at
+        // max(Sequence)+1 without bumping Version steals the next
+        // ClaimRecoveryAsync slot and rolls the unique (OperationId, Sequence)
+        // index back forever.
         entity.LastObservationReasonCode = reasonCode;
-        var nextSequence = await db.AzureProviderOperationTransitions
-            .Where(x => x.OperationId == operationId)
-            .Select(x => (long?)x.Sequence)
-            .MaxAsync(cancellationToken) ?? 0;
-        db.AzureProviderOperationTransitions.Add(new AzureProviderOperationTransitionEntity
-        {
-            Id = Guid.NewGuid(),
-            OperationId = operationId,
-            Sequence = nextSequence + 1,
-            Status = entity.Status,
-            Phase = entity.Phase,
-            Code = reasonCode,
-            Message = reasonCode,
-            OccurredAt = occurredAt.ToUniversalTime()
-        });
         try
         {
             await db.SaveChangesAsync(cancellationToken);
         }
         catch (DbUpdateConcurrencyException)
-        {
-            db.ChangeTracker.Clear();
-        }
-        catch (DbUpdateException)
         {
             db.ChangeTracker.Clear();
         }

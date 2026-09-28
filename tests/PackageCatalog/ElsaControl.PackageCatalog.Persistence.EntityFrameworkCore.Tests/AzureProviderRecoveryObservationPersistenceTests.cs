@@ -407,6 +407,50 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
         Assert.Equal(2, await db.AzureProviderRecoveryObservations.CountAsync());
     }
 
+    [Fact]
+    public async Task Identical_recovery_reconcile_does_not_bump_instance_version_or_add_an_observation_row()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+
+        var fixture = await SeedProviderObservationAsync(db);
+        var observationStore = (IAzureProviderRecoveryObservationStore)fixture.OperationStore;
+        await AddLifecycleRunAsync(db, fixture);
+        var lifecycleStore = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance,
+            new FixedTimeProvider(fixture.Observation.ObservedAt.AddMinutes(1)),
+            recoveryObservationStore: observationStore);
+        var target = Assert.IsType<ElsaInstanceProviderReconciliationTarget>(
+            await lifecycleStore.GetTargetAsync(fixture.Workspace.Id, fixture.LifecycleOperationId));
+        var observation = fixture.Observation with { ObservedInstanceVersion = target.Instance.Version };
+        var receipt = await observationStore.CreateOrGetAsync(observation);
+        var fingerprint = new string('7', 64);
+        await lifecycleStore.CommitAsync(new(
+            fixture.Workspace.Id, fixture.InstanceId, fixture.LifecycleOperationId,
+            target.Instance.Version, target.Operation.AttemptNumber, target.ReconciliationVersion,
+            fingerprint, target.Instance, target.Operation,
+            ElsaInstanceProviderReconciliationService.RetrySafeCode, true,
+            receipt.Reference, receipt.Digest, observation.ObservedAt.AddMinutes(1)));
+        var afterFirst = Assert.IsType<ElsaInstance>(
+            await lifecycleStore.GetInstanceAsync(fixture.Workspace.Id, fixture.InstanceId));
+        Assert.Equal(observation.ObservedInstanceVersion + 1, afterFirst.Version);
+        Assert.Equal(1, await db.AzureProviderRecoveryObservations.CountAsync());
+
+        var replay = await lifecycleStore.CommitAsync(new(
+            fixture.Workspace.Id, fixture.InstanceId, fixture.LifecycleOperationId,
+            afterFirst.Version, target.Operation.AttemptNumber, target.ReconciliationVersion + 1,
+            fingerprint, target.Instance, target.Operation,
+            ElsaInstanceProviderReconciliationService.RetrySafeCode, true,
+            receipt.Reference, receipt.Digest, observation.ObservedAt.AddMinutes(2)));
+        Assert.True(replay.Replayed);
+        var afterReplay = Assert.IsType<ElsaInstance>(
+            await lifecycleStore.GetInstanceAsync(fixture.Workspace.Id, fixture.InstanceId));
+        Assert.Equal(afterFirst.Version, afterReplay.Version);
+        Assert.Equal(1, await db.AzureProviderRecoveryObservations.CountAsync());
+    }
+
     [Theory]
     [InlineData(true, false, 0)]
     [InlineData(false, false, 0)]

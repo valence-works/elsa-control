@@ -837,22 +837,33 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         await using var db = CreateMigratedContext(connection);
         await db.Database.MigrateAsync();
         var workspace = await CreateWorkspaceAsync(db, "Recovery ledger workspace");
-        var service = new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now));
-        var created = await service.CreateAsync(new ElsaInstanceCreateRequest(
+        var created = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now))
+            .CreateAsync(new ElsaInstanceCreateRequest(
             workspace.OrganizationId, workspace.Id, "Managed Elsa", "recovery-ledger-elsa",
             CreateIntent(), "create-recovery-ledger"));
 
         await MarkRecoveryRequiredAsync(db, created.Operation.Id, "a");
         var beforeA = await CreateStore(db).GetInstanceAsync(workspace.Id, created.Instance.Id);
-        var recoveredA = await service.RecoverAsync(new ElsaInstanceLifecycleRequest(
+        var recoveredA = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now.AddMinutes(1)))
+            .RecoverAsync(new ElsaInstanceLifecycleRequest(
             workspace.Id, created.Instance.Id, beforeA!.Version, "recovery-key-a"));
         Assert.Equal(2, recoveredA.Operation.AttemptNumber);
+        db.ChangeTracker.Clear();
+        var startedAtAttempt2 = (await db.ElsaInstanceOperations.SingleAsync()).StartedAt;
+        Assert.Equal(Now.AddMinutes(1), startedAtAttempt2);
 
         await MarkRecoveryRequiredAsync(db, created.Operation.Id, "b");
         var beforeB = await CreateStore(db).GetInstanceAsync(workspace.Id, created.Instance.Id);
-        var recoveredB = await service.RecoverAsync(new ElsaInstanceLifecycleRequest(
+        var recoveredB = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now.AddMinutes(2)))
+            .RecoverAsync(new ElsaInstanceLifecycleRequest(
             workspace.Id, created.Instance.Id, beforeB!.Version, "recovery-key-b"));
         Assert.Equal(3, recoveredB.Operation.AttemptNumber);
+        db.ChangeTracker.Clear();
+        var startedAtAttempt3 = (await db.ElsaInstanceOperations.SingleAsync()).StartedAt;
+        Assert.Equal(Now.AddMinutes(2), startedAtAttempt3);
+        Assert.True(startedAtAttempt3 > startedAtAttempt2);
+
+        var service = new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now.AddMinutes(2)));
 
         var replayA = await service.RecoverAsync(new ElsaInstanceLifecycleRequest(
             workspace.Id, created.Instance.Id, beforeA.Version, "recovery-key-a"));

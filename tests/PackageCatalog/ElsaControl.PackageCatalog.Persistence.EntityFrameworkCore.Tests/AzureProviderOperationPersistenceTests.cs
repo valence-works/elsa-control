@@ -1243,25 +1243,88 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
         Assert.Equal(AzureLateSuccessCodes.AutoResumeAccepted, afterOutcome!.LastObservationReasonCode);
         Assert.Equal(workload.Version, afterOutcome.Version);
         var transitions = await store.ListTransitionsAsync(_workspaceId, created.Id);
-        Assert.Contains(transitions, transition => transition.Code == AzureLateSuccessCodes.AutoResumeAccepted);
+        Assert.DoesNotContain(transitions, transition => transition.Code == AzureLateSuccessCodes.AutoResumeAccepted);
+    }
+
+    [Fact]
+    public async Task Auto_resume_outcome_does_not_steal_the_claim_recovery_sequence()
+    {
+        var now = DateTimeOffset.UtcNow;
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var operation = await store.CreateOrGetAsync(Request(), now);
+        var claimed = Assert.IsType<AzureProviderOperation>(await store.ClaimAsync(
+            _workspaceId, operation.Id, "worker", "lease", TimeSpan.FromMinutes(1), now));
+        var parked = Assert.IsType<AzureProviderOperation>(await store.FinalizeAsync(
+            _workspaceId, operation.Id, "lease", AzureProviderOperationStatus.RecoveryRequired,
+            "azure.operation.recovery-required", now.AddSeconds(5), claimed.Version));
+
+        await store.RecordAutoResumeOutcomeAsync(
+            _workspaceId, operation.Id, AzureLateSuccessCodes.AutoResumeAccepted, now.AddSeconds(6));
+        var afterOutcome = await store.GetAsync(_workspaceId, operation.Id);
+        Assert.Equal(parked.Version, afterOutcome!.Version);
+        Assert.DoesNotContain(
+            await store.ListTransitionsAsync(_workspaceId, operation.Id),
+            transition => transition.Code == AzureLateSuccessCodes.AutoResumeAccepted);
+
+        var recovered = Assert.IsType<AzureProviderOperation>(await store.ClaimRecoveryAsync(
+            _workspaceId, operation.Id, "worker", "resume-lease", TimeSpan.FromMinutes(1),
+            now.AddSeconds(7), afterOutcome.Version));
+        Assert.Equal(AzureProviderOperationStatus.Running, recovered.Status);
+        Assert.Equal(parked.Version + 1, recovered.Version);
+        Assert.Contains(
+            await store.ListTransitionsAsync(_workspaceId, operation.Id),
+            transition => transition.Code == "operation.recovery.claimed");
+    }
+
+    [Fact]
+    public async Task Exhausted_auto_resume_outcome_still_allows_manual_claim_recovery()
+    {
+        var now = DateTimeOffset.UtcNow;
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var operation = await store.CreateOrGetAsync(Request(), now);
+        var claimed = Assert.IsType<AzureProviderOperation>(await store.ClaimAsync(
+            _workspaceId, operation.Id, "worker", "lease", TimeSpan.FromMinutes(1), now));
+        for (var expected = 0; expected < AzureNamedDeploymentFreshness.MaximumAutoResumes; expected++)
+            Assert.NotNull(await store.IncrementAutoResumeCountAsync(_workspaceId, operation.Id, expected));
+        var parked = Assert.IsType<AzureProviderOperation>(await store.FinalizeAsync(
+            _workspaceId, operation.Id, "lease", AzureProviderOperationStatus.RecoveryRequired,
+            "azure.operation.recovery-required", now.AddSeconds(5), claimed.Version));
+
+        await store.RecordAutoResumeOutcomeAsync(
+            _workspaceId, operation.Id, AzureLateSuccessCodes.AutoResumeExhausted, now.AddSeconds(6));
+        var afterOutcome = await store.GetAsync(_workspaceId, operation.Id);
+        Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes, afterOutcome!.AutoResumeCount);
+        Assert.Equal(parked.Version, afterOutcome.Version);
+
+        var recovered = Assert.IsType<AzureProviderOperation>(await store.ClaimRecoveryAsync(
+            _workspaceId, operation.Id, "worker", "manual-recover-lease", TimeSpan.FromMinutes(1),
+            now.AddSeconds(7), afterOutcome.Version));
+        Assert.Equal(AzureProviderOperationStatus.Running, recovered.Status);
+        Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes, recovered.AutoResumeCount);
     }
 
     [Fact]
     public async Task Concurrent_auto_resume_claims_at_count_two_produce_exactly_one_increment()
     {
-        using var db = CreateContext();
-        var store = new AzureProviderOperationStore(db);
-        var created = await store.CreateOrGetAsync(Request(), DateTimeOffset.Parse("2026-09-24T00:33:00Z"));
-        Assert.NotNull(await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id, 0));
-        Assert.NotNull(await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id, 1));
+        var created = await new AzureProviderOperationStore(CreateContext())
+            .CreateOrGetAsync(Request(), DateTimeOffset.Parse("2026-09-24T00:33:00Z"));
+        using var setup = CreateContext();
+        var setupStore = new AzureProviderOperationStore(setup);
+        Assert.NotNull(await setupStore.IncrementAutoResumeCountAsync(_workspaceId, created.Id, 0));
+        Assert.NotNull(await setupStore.IncrementAutoResumeCountAsync(_workspaceId, created.Id, 1));
 
+        using var firstDb = CreateContext();
+        using var secondDb = CreateContext();
         var claims = await Task.WhenAll(
-            store.IncrementAutoResumeCountAsync(_workspaceId, created.Id, 2),
-            store.IncrementAutoResumeCountAsync(_workspaceId, created.Id, 2));
+            new AzureProviderOperationStore(firstDb).IncrementAutoResumeCountAsync(_workspaceId, created.Id, 2),
+            new AzureProviderOperationStore(secondDb).IncrementAutoResumeCountAsync(_workspaceId, created.Id, 2));
 
         Assert.Single(claims, claimed => claimed is not null);
         Assert.Single(claims, claimed => claimed is null);
-        var after = await store.GetAsync(_workspaceId, created.Id);
+        using var verify = CreateContext();
+        var after = await new AzureProviderOperationStore(verify).GetAsync(_workspaceId, created.Id);
         Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes, after!.AutoResumeCount);
     }
 

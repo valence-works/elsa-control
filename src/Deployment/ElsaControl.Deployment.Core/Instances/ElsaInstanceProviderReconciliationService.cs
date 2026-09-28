@@ -19,6 +19,8 @@ public sealed class ElsaInstanceProviderReconciliationService(
     public const string UnavailableCode = "provider.reconciliation.unavailable";
     public const string RetrySafeCode = "provider.reconciliation.retry-safe";
     public const string CorrelationMismatchCode = "provider.reconciliation.correlation-mismatch";
+    public const string AutoResumeExhaustedCode = "azure.recovery.auto-resume-exhausted";
+    public const string AutoResumeClaimConflictCode = "azure.recovery.auto-resume.claim-conflict";
 
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
 
@@ -146,7 +148,7 @@ public sealed class ElsaInstanceProviderReconciliationService(
                 retryEvidence?.Digest,
                 projection.At), cancellationToken);
             if (retryEvidence?.AutoResume == true && result.RetrySafe && lifecycle is not null)
-                await TryAutoResumeAsync(instance, operation, result, cancellationToken);
+                await TryAutoResumeAsync(instance, operation, result, retryEvidence, cancellationToken);
             if (result.Projection.OperationState != operation.State)
                 telemetry.RecordTransition(
                     instance.DesiredLifecycle,
@@ -189,6 +191,7 @@ public sealed class ElsaInstanceProviderReconciliationService(
         ElsaInstance instance,
         ElsaInstanceOperation operation,
         ElsaInstanceProviderReconciliationResult result,
+        ElsaInstanceProviderRetryEvidence retryEvidence,
         CancellationToken cancellationToken)
     {
         var autoResume = provider as IElsaInstanceProviderAutoResumePort;
@@ -196,12 +199,19 @@ public sealed class ElsaInstanceProviderReconciliationService(
         if (autoResume is not null)
         {
             var claimed = await autoResume.TryChargeAutoResumeAsync(
-                instance.WorkspaceId, instance.Id, operation.Id, cancellationToken);
+                instance.WorkspaceId, instance.Id, operation.Id,
+                retryEvidence.ObservedAutoResumeCount, cancellationToken);
             if (claimed is null)
             {
+                var currentCount = await autoResume.GetAutoResumeCountAsync(
+                    instance.WorkspaceId, instance.Id, operation.Id, cancellationToken)
+                    ?? retryEvidence.ObservedAutoResumeCount;
                 await autoResume.RecordAutoResumeOutcomeAsync(
                     instance.WorkspaceId, instance.Id, operation.Id,
-                    "azure.recovery.auto-resume-exhausted", cancellationToken);
+                    currentCount >= IElsaInstanceProviderAutoResumePort.MaximumAutoResumes
+                        ? AutoResumeExhaustedCode
+                        : AutoResumeClaimConflictCode,
+                    cancellationToken);
                 return;
             }
 

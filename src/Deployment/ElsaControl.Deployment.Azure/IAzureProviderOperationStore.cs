@@ -117,8 +117,10 @@ public interface IAzureProviderOperationStore
         Task.FromResult<AzureProviderOperation?>(null);
 
     /// <summary>
-    /// Appends a version-neutral auto-resume outcome so operators can see each
-    /// attempt. Does not bump the provider concurrency token.
+    /// Records an operator-visible auto-resume outcome on
+    /// <c>LastObservationReasonCode</c> only. Transition rows stay coupled to
+    /// <c>Version</c>; writing an out-of-band sequence would collide with the
+    /// next <see cref="ClaimRecoveryAsync"/>.
     /// </summary>
     Task RecordAutoResumeOutcomeAsync(
         Guid workspaceId,

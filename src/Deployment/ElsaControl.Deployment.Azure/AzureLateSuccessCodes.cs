@@ -9,6 +9,7 @@ public static class AzureLateSuccessCodes
     public const string DeploymentFailed = "azure.deployment.failed";
     public const string DeploymentCanceled = "azure.deployment.canceled";
     public const string AutoResumeExhausted = "azure.recovery.auto-resume-exhausted";
+    public const string AutoResumeClaimConflict = "azure.recovery.auto-resume.claim-conflict";
     public const string AutoResumeAccepted = "azure.recovery.auto-resume.accepted";
     public const string AutoResumeConflict = "azure.recovery.auto-resume.conflict";
     public const string AutoResumeRejected = "azure.recovery.auto-resume.rejected";
@@ -21,5 +22,6 @@ public static class AzureLateSuccessCodes
 
     public static bool IsOperatorVisible(string? code) =>
         code is DeploymentFailed or DeploymentCanceled or AutoResumeExhausted
-            or AutoResumeAccepted or AutoResumeConflict or AutoResumeRejected;
+            or AutoResumeClaimConflict or AutoResumeAccepted or AutoResumeConflict
+            or AutoResumeRejected;
 }

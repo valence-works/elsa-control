@@ -288,6 +288,7 @@ public sealed class AzureElsaInstanceProviderTests
         Assert.Equal(ElsaObservedLifecycle.Provisioning, observation.ObservedLifecycle);
         Assert.NotNull(observation.RetryEvidence);
         Assert.True(observation.RetryEvidence.AutoResume);
+        Assert.Equal(0, observation.RetryEvidence.ObservedAutoResumeCount);
         Assert.Equal(1, fixture.Observer.Calls);
         Assert.Equal(1, fixture.ObservationStore.CreateCalls);
         Assert.Equal(1, fixture.OperationStore.ArmClockCalls);
@@ -306,12 +307,14 @@ public sealed class AzureElsaInstanceProviderTests
             phase: AzureProviderOperationPhase.FoundationReady);
 
         Assert.Equal(1, await fixture.Provider.TryChargeAutoResumeAsync(
-            fixture.Request.WorkspaceId, fixture.Request.InstanceId, fixture.Request.OperationId));
+            fixture.Request.WorkspaceId, fixture.Request.InstanceId, fixture.Request.OperationId, 0));
         Assert.Equal(2, await fixture.Provider.TryChargeAutoResumeAsync(
-            fixture.Request.WorkspaceId, fixture.Request.InstanceId, fixture.Request.OperationId));
+            fixture.Request.WorkspaceId, fixture.Request.InstanceId, fixture.Request.OperationId, 1));
         Assert.Equal(3, await fixture.Provider.TryChargeAutoResumeAsync(
-            fixture.Request.WorkspaceId, fixture.Request.InstanceId, fixture.Request.OperationId));
+            fixture.Request.WorkspaceId, fixture.Request.InstanceId, fixture.Request.OperationId, 2));
         Assert.Null(await fixture.Provider.TryChargeAutoResumeAsync(
+            fixture.Request.WorkspaceId, fixture.Request.InstanceId, fixture.Request.OperationId, 3));
+        Assert.Equal(3, await fixture.Provider.GetAutoResumeCountAsync(
             fixture.Request.WorkspaceId, fixture.Request.InstanceId, fixture.Request.OperationId));
         Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes, fixture.OperationStore.Current!.AutoResumeCount);
 
@@ -416,13 +419,44 @@ public sealed class AzureElsaInstanceProviderTests
 
         var observation = await fixture.Provider.ObserveAsync(fixture.Request);
 
-        Assert.NotNull(observation.RetryEvidence);
-        Assert.False(observation.RetryEvidence.AutoResume);
+        Assert.Null(observation.RetryEvidence);
         Assert.Equal(AzureLateSuccessCodes.AutoResumeExhausted, observation.ReasonCode);
-        Assert.Equal(1, fixture.Observer.Calls);
-        Assert.Equal(1, fixture.ObservationStore.CreateCalls);
+        Assert.Equal(0, fixture.Observer.Calls);
+        Assert.Equal(0, fixture.ObservationStore.CreateCalls);
+        Assert.Equal(0, fixture.OperationStore.ArmClockCalls);
         Assert.Equal(0, fixture.OperationStore.AutoResumeIncrements);
         Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes, fixture.OperationStore.Current!.AutoResumeCount);
+    }
+
+    [Fact]
+    public async Task Recovery_required_identical_arm_reads_reuse_the_receipt_without_a_new_row()
+    {
+        var now = DateTimeOffset.Parse("2026-09-24T00:48:18Z");
+        var fixture = await CreateObserveFixtureAsync(
+            ConfirmedObservation(AzureProviderRunnerStep.Workload),
+            attemptedStep: AzureProviderRunnerStep.Workload,
+            phase: AzureProviderOperationPhase.FoundationReady,
+            now: now);
+
+        var first = await fixture.Provider.ObserveAsync(fixture.Request);
+        Assert.NotNull(first.RetryEvidence);
+        Assert.Equal(1, fixture.ObservationStore.CreateCalls);
+
+        fixture.OperationStore.Current = fixture.OperationStore.Current! with
+        {
+            LastArmObservedAt = now.AddSeconds(-120),
+            ArmObservationBackoffSeconds = AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds
+        };
+        var second = await fixture.Provider.ObserveAsync(
+            fixture.Request with { InstanceVersion = fixture.Request.InstanceVersion + 1 });
+
+        Assert.NotNull(second.RetryEvidence);
+        Assert.Equal(first.RetryEvidence!.Reference, second.RetryEvidence.Reference);
+        Assert.Equal(first.RetryEvidence.Digest, second.RetryEvidence.Digest);
+        Assert.True(second.RetryEvidence.AutoResume);
+        Assert.Equal(2, fixture.Observer.Calls);
+        Assert.Equal(1, fixture.ObservationStore.CreateCalls);
+        Assert.Equal(2, fixture.OperationStore.ArmClockCalls);
     }
 
     [Fact]

@@ -202,7 +202,7 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
                 ElsaObservedLifecycle.Provisioning,
                 ElsaInstanceProviderHealthGate.Unknown,
                 "observation-concurrent-cap",
-                OpaqueEvidence(autoResume: true)),
+                OpaqueEvidence(autoResume: true, observedAutoResumeCount: 2)),
             initialCount: 2,
             claimBarrier: barrier);
         var service = new ElsaInstanceProviderReconciliationService(
@@ -220,6 +220,37 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
         Assert.Contains("azure.recovery.auto-resume.accepted", port.Outcomes);
         Assert.Contains("azure.recovery.auto-resume-exhausted", port.Outcomes);
         Assert.Equal(ElsaInstanceOperationState.Queued, Assert.Single(store.Operations).State);
+    }
+
+    [Fact]
+    public async Task Lost_auto_resume_claim_below_the_cap_is_claim_conflict_not_exhausted()
+    {
+        var (store, accepted) = await RecoveryTargetAsync();
+        var lifecycle = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var barrier = new Barrier(2);
+        var port = new ChargingPort(
+            new ElsaInstanceProviderObservation(
+                ElsaInstanceProviderObservationKind.Confirmed,
+                ElsaObservedLifecycle.Provisioning,
+                ElsaInstanceProviderHealthGate.Unknown,
+                "observation-claim-conflict",
+                OpaqueEvidence(autoResume: true, observedAutoResumeCount: 0)),
+            initialCount: 0,
+            claimBarrier: barrier);
+        var service = new ElsaInstanceProviderReconciliationService(
+            store, port, new StaticTimeProvider(Now), lifecycle);
+
+        var results = await Task.WhenAll(
+            Task.Run(() => CaptureAsync(() => service.ReconcileAsync(WorkspaceId, accepted.Operation.Id))),
+            Task.Run(() => CaptureAsync(() => service.ReconcileAsync(WorkspaceId, accepted.Operation.Id))));
+
+        Assert.Equal(2, results.Count(x => x.Result is not null));
+        Assert.Equal(1, port.AutoResumeCount);
+        Assert.Equal(2, port.ChargeCalls);
+        Assert.Single(store.RecoveryRequests);
+        Assert.Contains("azure.recovery.auto-resume.accepted", port.Outcomes);
+        Assert.Contains(ElsaInstanceProviderReconciliationService.AutoResumeClaimConflictCode, port.Outcomes);
+        Assert.DoesNotContain(ElsaInstanceProviderReconciliationService.AutoResumeExhaustedCode, port.Outcomes);
     }
 
     [Fact]
@@ -649,7 +680,9 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
         Assert.Equal(ElsaObservedLifecycle.Unknown, result.Projection.ObservedLifecycle);
     }
 
-    private static ElsaInstanceProviderRetryEvidence OpaqueEvidence(bool autoResume)
+    private static ElsaInstanceProviderRetryEvidence OpaqueEvidence(
+        bool autoResume,
+        int observedAutoResumeCount = 0)
     {
         var digest = "sha256:" + new string('a', 64);
         return new(
@@ -657,7 +690,8 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
                 Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
                 digest),
             digest,
-            autoResume);
+            autoResume,
+            observedAutoResumeCount);
     }
 
     private static ElsaInstanceProviderReconciliationService Service(
@@ -757,17 +791,29 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
             Guid workspaceId,
             Guid instanceId,
             Guid lifecycleOperationId,
+            int expectedCount,
             CancellationToken cancellationToken = default)
         {
             claimBarrier?.SignalAndWait(cancellationToken);
             lock (_gate)
             {
                 ChargeCalls++;
-                if (AutoResumeCount >= 3)
+                if (AutoResumeCount != expectedCount ||
+                    AutoResumeCount >= IElsaInstanceProviderAutoResumePort.MaximumAutoResumes)
                     return Task.FromResult<int?>(null);
                 AutoResumeCount++;
                 return Task.FromResult<int?>(AutoResumeCount);
             }
+        }
+
+        public Task<int?> GetAutoResumeCountAsync(
+            Guid workspaceId,
+            Guid instanceId,
+            Guid lifecycleOperationId,
+            CancellationToken cancellationToken = default)
+        {
+            lock (_gate)
+                return Task.FromResult<int?>(AutoResumeCount);
         }
 
         public Task RecordAutoResumeOutcomeAsync(

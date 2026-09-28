@@ -19,11 +19,26 @@ public interface IElsaInstanceProviderReconciliationPort
 /// </summary>
 public interface IElsaInstanceProviderAutoResumePort
 {
+    public const int MaximumAutoResumes = 3;
+
     /// <summary>
-    /// Claims one automatic resume slot. Returns the new count when the claim
+    /// Claims one automatic resume slot when the stored count still equals
+    /// <paramref name="expectedCount"/>. Returns the new count when the claim
     /// succeeded, or null when the cap is exhausted or the compare-and-set lost.
     /// </summary>
     Task<int?> TryChargeAutoResumeAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        Guid lifecycleOperationId,
+        int expectedCount,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reads the persisted auto-resume count after a lost claim so the
+    /// reconciler can label exhausted versus claim-conflict. Must not be used
+    /// as the expected count for the claim itself.
+    /// </summary>
+    Task<int?> GetAutoResumeCountAsync(
         Guid workspaceId,
         Guid instanceId,
         Guid lifecycleOperationId,

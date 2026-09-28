@@ -74,7 +74,11 @@ public static class ElsaInstanceProviderRecoveryObservationReference
 /// </summary>
 public sealed record ElsaInstanceProviderRetryEvidence
 {
-    public ElsaInstanceProviderRetryEvidence(string reference, string digest, bool autoResume = false)
+    public ElsaInstanceProviderRetryEvidence(
+        string reference,
+        string digest,
+        bool autoResume = false,
+        int observedAutoResumeCount = 0)
     {
         var isOpaqueObservation = ElsaInstanceProviderRecoveryObservationReference.TryParse(
             reference, out _, out var referenceDigest);
@@ -84,7 +88,10 @@ public sealed record ElsaInstanceProviderRetryEvidence
         Digest = RequireDigest(digest);
         if (isOpaqueObservation && !string.Equals(referenceDigest, Digest, StringComparison.Ordinal))
             throw new ArgumentException("Retry evidence digest does not match the observation reference.", nameof(digest));
+        if (observedAutoResumeCount < 0)
+            throw new ArgumentOutOfRangeException(nameof(observedAutoResumeCount), "Observed auto-resume count cannot be negative.");
         AutoResume = autoResume;
+        ObservedAutoResumeCount = observedAutoResumeCount;
     }
 
     public string Reference { get; }
@@ -92,6 +99,14 @@ public sealed record ElsaInstanceProviderRetryEvidence
     public string Digest { get; }
 
     public bool AutoResume { get; }
+
+    /// <summary>
+    /// Auto-resume slots observed on the tick that produced this evidence.
+    /// Carried for the claim compare-and-set only; not part of the evidence
+    /// fingerprint, so two ticks that saw different counts can still share a
+    /// receipt.
+    /// </summary>
+    public int ObservedAutoResumeCount { get; }
 
     private static string RequireToken(string value, string parameterName)
     {

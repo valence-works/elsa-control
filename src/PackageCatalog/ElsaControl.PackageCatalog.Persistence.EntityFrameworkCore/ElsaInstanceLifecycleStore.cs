@@ -2636,6 +2636,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             await dbContext.ElsaInstanceRecoveryRequests.AddAsync(recovery, cancellationToken);
             existingOperation.FailureCode = null;
             existingOperation.FailureSummary = null;
+            existingOperation.StartedAt = requestedAt.ToUniversalTime();
             if (existingOperation.DeploymentRunId is { } deploymentRunId)
             {
                 var run = await dbContext.DeploymentRuns

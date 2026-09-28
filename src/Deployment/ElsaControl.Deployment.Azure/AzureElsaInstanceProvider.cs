@@ -263,9 +263,13 @@ public sealed class AzureElsaInstanceProvider(
                 !string.Equals(retainedPlan.Fingerprint, operation.PlanFingerprint, StringComparison.Ordinal))
                 return null;
 
+            if (operation.AutoResumeCount >= AzureNamedDeploymentFreshness.MaximumAutoResumes)
+                return await ReuseLastRecordedEvidenceAsync(
+                    request, operation, AzureLateSuccessCodes.AutoResumeExhausted, cancellationToken);
+
             if (!AzureNamedDeploymentFreshness.IsArmReadDue(
                     _timeProvider.GetUtcNow(), operation.LastArmObservedAt, operation.ArmObservationBackoffSeconds))
-                return await ReuseLastRecordedEvidenceAsync(request, operation, cancellationToken);
+                return await ReuseLastRecordedEvidenceAsync(request, operation, cancellationToken: cancellationToken);
 
             var observed = await _recoveryObserver.ObserveAsync(
                 new AzureProviderRecoveryRequest(operation, retainedPlan, assignment, _providerScope), cancellationToken);
@@ -284,6 +288,26 @@ public sealed class AzureElsaInstanceProvider(
                     operation.AttemptedStep, operation.Phase, observed.CompletedStep.Value, observedPhase))
                 return new RecoveryObservationResult(null, reasonCode);
             var resourceFingerprint = AzureProviderRecoveryObservationRecord.ComputeResourceFingerprint(observed.Resources);
+            var postconditionFingerprint = AzureProviderRecoveryObservationRecord.ComputePostconditionFingerprint(
+                observed, resourceFingerprint);
+            var latest = await _recoveryObservationStore.GetLatestReceiptForAttemptAsync(
+                request.WorkspaceId,
+                request.OperationId,
+                request.AttemptNumber,
+                operation.Id,
+                cancellationToken);
+            if (latest is not null &&
+                string.Equals(latest.Observation.PostconditionFingerprint, postconditionFingerprint, StringComparison.Ordinal))
+            {
+                return new RecoveryObservationResult(
+                    new ElsaInstanceProviderRetryEvidence(
+                        latest.Reference,
+                        latest.Digest,
+                        eligibleAutoResume,
+                        operation.AutoResumeCount),
+                    reasonCode);
+            }
+
             var record = new AzureProviderRecoveryObservationRecord(
                 organizationId,
                 request.WorkspaceId,
@@ -311,12 +335,15 @@ public sealed class AzureElsaInstanceProvider(
                 observedPhase,
                 observed.Health,
                 resourceFingerprint,
-                AzureProviderRecoveryObservationRecord.ComputePostconditionFingerprint(observed, resourceFingerprint),
+                postconditionFingerprint,
                 _timeProvider.GetUtcNow());
             var receipt = await _recoveryObservationStore.CreateOrGetAsync(record, cancellationToken);
-            var autoResume = eligibleAutoResume;
             return new RecoveryObservationResult(
-                new ElsaInstanceProviderRetryEvidence(receipt.Reference, receipt.Digest, autoResume),
+                new ElsaInstanceProviderRetryEvidence(
+                    receipt.Reference,
+                    receipt.Digest,
+                    eligibleAutoResume,
+                    operation.AutoResumeCount),
                 reasonCode);
         }
         catch (OperationCanceledException)
@@ -332,7 +359,8 @@ public sealed class AzureElsaInstanceProvider(
     private async Task<RecoveryObservationResult> ReuseLastRecordedEvidenceAsync(
         ElsaInstanceProviderReconciliationRequest request,
         AzureProviderOperation operation,
-        CancellationToken cancellationToken)
+        string? reasonCode = null,
+        CancellationToken cancellationToken = default)
     {
         var receipt = await _recoveryObservationStore!.GetLatestReceiptForAttemptAsync(
             request.WorkspaceId,
@@ -342,8 +370,14 @@ public sealed class AzureElsaInstanceProvider(
             cancellationToken);
         var evidence = receipt is null
             ? null
-            : new ElsaInstanceProviderRetryEvidence(receipt.Reference, receipt.Digest, autoResume: false);
-        return new RecoveryObservationResult(evidence, operation.LastObservationReasonCode);
+            : new ElsaInstanceProviderRetryEvidence(
+                receipt.Reference,
+                receipt.Digest,
+                autoResume: false,
+                operation.AutoResumeCount);
+        return new RecoveryObservationResult(
+            evidence,
+            reasonCode ?? operation.LastObservationReasonCode);
     }
 
     private static string? ResolveObservationReason(
@@ -385,14 +419,25 @@ public sealed class AzureElsaInstanceProvider(
         Guid workspaceId,
         Guid instanceId,
         Guid lifecycleOperationId,
+        int expectedCount,
         CancellationToken cancellationToken = default)
     {
         var operation = await TryGetCorrelatedReconcileAsync(workspaceId, instanceId, lifecycleOperationId, cancellationToken);
         if (operation is null)
             return null;
         var charged = await operationStore.IncrementAutoResumeCountAsync(
-            workspaceId, operation.Id, operation.AutoResumeCount, cancellationToken);
+            workspaceId, operation.Id, expectedCount, cancellationToken);
         return charged?.AutoResumeCount;
+    }
+
+    public async Task<int?> GetAutoResumeCountAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        Guid lifecycleOperationId,
+        CancellationToken cancellationToken = default)
+    {
+        var operation = await TryGetCorrelatedReconcileAsync(workspaceId, instanceId, lifecycleOperationId, cancellationToken);
+        return operation?.AutoResumeCount;
     }
 
     public async Task RecordAutoResumeOutcomeAsync(
