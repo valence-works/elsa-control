@@ -24,8 +24,7 @@ public sealed class AddAzureProviderOperationStatusChangedAt : Migration
             """);
     }
 
-    protected override void Down(MigrationBuilder migrationBuilder) =>
-        migrationBuilder.DropColumn(
-            name: "StatusChangedAt",
-            table: "AzureProviderOperations");
+    // SQLite cannot DropColumn. Leaving StatusChangedAt in place is safe: the
+    // column is unused by older models and rebuilds would risk wiping indexes.
+    protected override void Down(MigrationBuilder migrationBuilder) { }
 }
