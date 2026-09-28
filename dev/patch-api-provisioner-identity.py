@@ -120,6 +120,48 @@ def patch_module(content: str) -> str:
         content, pairing_parameter, f"{egress_parameter}\n",
         f"{egress_parameter}\n\n{pairing_description}\n{pairing_parameter}\n\n{pairing_vars}",
         "egress parameter anchor for the pairing allowlist")
+
+    lever_enabled_parameter = "param stagingbillingleverenabled_value bool = false"
+    lever_allowlist_parameter = "param stagingbillingleverallowedorganizationids_value string = ''"
+    lever_enabled_description = (
+        "@description('When true, emit Billing:StagingLifecycleLever:Enabled. "
+        "Staging only; production must stay false.')"
+    )
+    lever_allowlist_description = (
+        "@description('Comma-separated organization GUIDs the staging billing "
+        "lifecycle lever may target. Empty refuses every organization. Staging "
+        "only; production must stay empty.')"
+    )
+    lever_vars = (
+        "var stagingBillingLeverAllowedOrganizationIds = empty(stagingbillingleverallowedorganizationids_value)\n"
+        "  ? []\n"
+        "  : filter(map(split(stagingbillingleverallowedorganizationids_value, ','), id => trim(id)), id => !empty(id))\n"
+        "\n"
+        "var stagingBillingLeverEnabledSettings = stagingbillingleverenabled_value ? [\n"
+        "  {\n"
+        "    name: 'Billing__StagingLifecycleLever__Enabled'\n"
+        "    value: 'true'\n"
+        "  }\n"
+        "] : []\n"
+        "\n"
+        "var stagingBillingLeverAllowlistSettings = [for (organizationId, i) in stagingBillingLeverAllowedOrganizationIds: {\n"
+        "  name: 'Billing__StagingLifecycleLever__AllowedOrganizationIds__${i}'\n"
+        "  value: organizationId\n"
+        "}]\n"
+        "\n"
+        "var stagingBillingLeverSettings = concat(stagingBillingLeverEnabledSettings, stagingBillingLeverAllowlistSettings)\n"
+    )
+    lever_block = (
+        f"{lever_enabled_description}\n{lever_enabled_parameter}\n\n"
+        f"{lever_allowlist_description}\n{lever_allowlist_parameter}\n\n"
+        f"{lever_vars}"
+    )
+    content = replace_once(
+        content,
+        lever_enabled_parameter,
+        pairing_vars,
+        f"{pairing_vars}\n{lever_block}",
+        "pairing allowlist anchor for the staging billing lifecycle lever")
     egress_properties = lines(
         "    keyVaultReferenceIdentity: api_identity_outputs_id",
         "    // Regional VNet integration for one static egress (#310); empty keeps the platform pool.",
@@ -180,7 +222,9 @@ def patch_module(content: str) -> str:
         pairing_settings,
         "generated appSettings array open for the pairing allowlist",
     )
-    pairing_settings_close = "        ],\n        pairingAllowlistSettings)"
+    pairing_settings_close = (
+        "        ],\n        pairingAllowlistSettings,\n        stagingBillingLeverSettings)"
+    )
     content = replace_once(
         content,
         pairing_settings_close,
@@ -214,6 +258,10 @@ def patch_parameter_template(parameters: str) -> str:
     # deployment helper passes the approved issuer directly to the module.
     cloud_block = "param cloudaccountissuer_value = ''\n"
     pairing_block = "param pairingallowedorganizationids_value = ''\n"
+    lever_block = (
+        "param stagingbillingleverenabled_value = false\n"
+        "param stagingbillingleverallowedorganizationids_value = ''\n"
+    )
     parameters = replace_once(
         parameters, "provisioner_identity_outputs_id", anchor, anchor + provisioner_block,
         "generated API identity parameter anchor in the parameter template")
@@ -233,6 +281,13 @@ def patch_parameter_template(parameters: str) -> str:
         cloud_block,
         cloud_block + pairing_block,
         "Cloud issuer parameter anchor for the pairing allowlist",
+    )
+    parameters = replace_once(
+        parameters,
+        "stagingbillingleverenabled_value",
+        pairing_block,
+        pairing_block + lever_block,
+        "pairing allowlist parameter anchor for the staging billing lifecycle lever",
     )
     return parameters
 

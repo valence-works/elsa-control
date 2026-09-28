@@ -22,6 +22,8 @@ EXPECTED_CLOUD_ACCOUNT_ISSUER="${EXPECTED_CLOUD_ACCOUNT_ISSUER:-}"
 AZURE_PROVISIONER_IDENTITY_ID="${AZURE_PROVISIONER_IDENTITY_ID:-}"
 AZURE_API_EGRESS_SUBNET_ID="${AZURE_API_EGRESS_SUBNET_ID:-}"
 EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS="${EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS:-}"
+STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="${STAGING_BILLING_LIFECYCLE_LEVER_ENABLED:-}"
+STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS="${STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS:-}"
 APPLICATION_BUILD_NUMBER="${APPLICATION_BUILD_NUMBER:-}"
 WHAT_IF=false
 BASE_ONLY=false
@@ -58,6 +60,8 @@ Optional environment variables:
   AZURE_PROVISIONER_IDENTITY_ID
   AZURE_API_EGRESS_SUBNET_ID
   EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS
+  STAGING_BILLING_LIFECYCLE_LEVER_ENABLED
+  STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS
   APPLICATION_BUILD_NUMBER
   DOCKER_PLATFORM
 
@@ -126,6 +130,22 @@ if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
 fi
 if [[ -n "$EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS" && "$ENVIRONMENT_NAME" != "test" ]]; then
   echo "EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS is only permitted for the test (staging) environment." >&2
+  exit 1
+fi
+if [[ "${STAGING_BILLING_LIFECYCLE_LEVER_ENABLED,,}" == "false" ]]; then
+  STAGING_BILLING_LIFECYCLE_LEVER_ENABLED=""
+fi
+# Prefer TARGET_ENVIRONMENT (the workflow's GitHub environment / dispatch input).
+# Direct invocation also accepts the staging Azure env name valence-control-staging.
+is_staging_billing_lever_target() {
+  if [[ -n "${TARGET_ENVIRONMENT:-}" ]]; then
+    [[ "$TARGET_ENVIRONMENT" == "test" ]]
+  else
+    [[ "$ENVIRONMENT_NAME" == "test" || "$ENVIRONMENT_NAME" == "valence-control-staging" ]]
+  fi
+}
+if [[ ( "${STAGING_BILLING_LIFECYCLE_LEVER_ENABLED,,}" == "true" || -n "$STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS" ) ]] && ! is_staging_billing_lever_target; then
+  echo "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED and STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS are only permitted for the test (staging) environment." >&2
   exit 1
 fi
 if [[ -n "$CLOUD_ACCOUNT_ISSUER" ]]; then
@@ -263,6 +283,7 @@ export ADMIN_API_KEY BUILDER_CLIENT_API_KEY
 export CONTROL_ENTRA_TENANT_ID CONTROL_ENTRA_CLIENT_ID CONTROL_ENTRA_CLIENT_SECRET
 export CLOUD_ACCOUNT_ISSUER AZURE_PROVISIONER_IDENTITY_ID AZURE_API_EGRESS_SUBNET_ID
 export EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS
+export STAGING_BILLING_LIFECYCLE_LEVER_ENABLED STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS
 
 OUTPUTS="$(az deployment sub show \
   --name "$BASE_DEPLOYMENT_NAME" \
@@ -336,6 +357,8 @@ print(json.dumps({
     "provisioner_identity_outputs_id": os.environ["AZURE_PROVISIONER_IDENTITY_ID"],
     "api_egress_subnet_id": os.environ["AZURE_API_EGRESS_SUBNET_ID"],
     "pairingallowedorganizationids_value": os.environ["EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS"],
+    "stagingbillingleverenabled_value": os.environ.get("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED", "").lower() == "true",
+    "stagingbillingleverallowedorganizationids_value": os.environ.get("STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS", ""),
 }))
 PY
 )"

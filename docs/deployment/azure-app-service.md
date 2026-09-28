@@ -360,6 +360,29 @@ connections.
   smoke owner (elsa-cloud staging smoke/harness); the owner email and subject
   live in elsa-cloud, not this repository.
 
+### Staging billing lifecycle lever
+
+Control can move `GraceEndsAt` or `ConstrainedAt` into the past on a staging
+allowlisted organization and then run the normal lifecycle advancer for that
+organization alone. The lever stays off unless both of these are true:
+
+- The deploy pipeline set `Billing:StagingLifecycleLever:Enabled` and
+  `Billing:StagingLifecycleLever:AllowedOrganizationIds`. Those settings are
+  emitted only from `stagingbillingleverenabled_value` and
+  `stagingbillingleverallowedorganizationids_value`, which default to off and
+  empty.
+- Control's configured Stripe secret key starts with `sk_test_`. The prefix is
+  compared only; the key is never logged.
+
+Set the **`test` GitHub environment** variables
+`STAGING_BILLING_LIFECYCLE_LEVER_ENABLED` and
+`STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS`. The Azure Control API Deploy
+workflow passes them only for `test` and fails if either variable is set for
+any other target. The Hosted smoke owner organization
+(`STAGING_SMOKE_OWNER_ORGANIZATION_ID`) must not appear on the lever
+allowlist. List an organization only when its contact address is a harness
+mailbox, never a real person.
+
 ### Multi-tenant Microsoft Entra sign-in (guided design partners)
 
 Control can accept work or school sign-ins from customer Microsoft Entra tenants, so a

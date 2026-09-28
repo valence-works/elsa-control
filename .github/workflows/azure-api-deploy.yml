@@ -66,6 +66,8 @@ jobs:
       # Guid.NewGuid() on first Cloud sign-in, so its id is recorded on `test`
       # as STAGING_SMOKE_OWNER_ORGANIZATION_ID rather than as a source constant.
       EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ vars.EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS }}
+      STAGING_BILLING_LIFECYCLE_LEVER_ENABLED: ${{ vars.STAGING_BILLING_LIFECYCLE_LEVER_ENABLED }}
+      STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS: ${{ vars.STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS }}
       STAGING_SMOKE_OWNER_ORGANIZATION_ID: ${{ vars.STAGING_SMOKE_OWNER_ORGANIZATION_ID }}
       CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
       EXPECTED_CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
@@ -162,10 +164,67 @@ jobs:
             printf 'EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS=%s\n' "$pairing_normalized" >> "$GITHUB_ENV"
           fi
 
+          lever_enabled_raw="${STAGING_BILLING_LIFECYCLE_LEVER_ENABLED:-}"
+          lever_allowlist_raw="${STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS:-}"
+          lever_allowlist_count=0
+          lever_normalized=""
+          lever_enabled=""
+          if [ -n "$lever_enabled_raw" ] || [ -n "$lever_allowlist_raw" ]; then
+            if [ "$TARGET_ENVIRONMENT" != "test" ]; then
+              echo "::error::STAGING_BILLING_LIFECYCLE_LEVER_ENABLED and STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS must be unset for ${TARGET_ENVIRONMENT}; production ships the lever off."
+              exit 1
+            fi
+          fi
+          if [ -n "$lever_enabled_raw" ]; then
+            case "${lever_enabled_raw,,}" in
+              true) lever_enabled=true ;;
+              false) lever_enabled="" ;;
+              *)
+                echo "::error::STAGING_BILLING_LIFECYCLE_LEVER_ENABLED must be true or false."
+                exit 1
+                ;;
+            esac
+          fi
+          if [ -n "$lever_allowlist_raw" ]; then
+            if [[ "$lever_allowlist_raw" =~ (^|,)[[:space:]]*(,|$) ]]; then
+              echo "::error::STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS contains an empty organization id."
+              exit 1
+            fi
+            IFS=',' read -r -a lever_entries <<< "$lever_allowlist_raw"
+            for entry in "${lever_entries[@]}"; do
+              trimmed="${entry#"${entry%%[![:space:]]*}"}"
+              trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+              if [ -z "$trimmed" ]; then
+                echo "::error::STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS contains an empty organization id."
+                exit 1
+              fi
+              if [[ ! "$trimmed" =~ $pairing_guid_pattern ]] || [ "$trimmed" = "00000000-0000-0000-0000-000000000000" ]; then
+                echo "::error::STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS contains an entry that is not a GUID organization id."
+                exit 1
+              fi
+              if [ -n "$lever_normalized" ]; then
+                lever_normalized+=","
+              fi
+              lever_normalized+="$trimmed"
+              lever_allowlist_count=$((lever_allowlist_count + 1))
+            done
+          fi
+          if [ -n "${GITHUB_OUTPUT:-}" ]; then
+            {
+              printf 'staging_billing_lever_enabled=%s\n' "$lever_enabled"
+              printf 'staging_billing_lever_allowlist_count=%s\n' "$lever_allowlist_count"
+              printf 'staging_billing_lever_allowlist=%s\n' "$lever_normalized"
+            } >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "${GITHUB_ENV:-}" ]; then
+            printf 'STAGING_BILLING_LIFECYCLE_LEVER_ENABLED=%s\n' "$lever_enabled" >> "$GITHUB_ENV"
+            printf 'STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS=%s\n' "$lever_normalized" >> "$GITHUB_ENV"
+          fi
+
           smoke_owner_org_id="${STAGING_SMOKE_OWNER_ORGANIZATION_ID:-}"
-          if [ "$TARGET_ENVIRONMENT" = "test" ] && [ "$pairing_allowlist_count" -gt 0 ]; then
+          if [ "$TARGET_ENVIRONMENT" = "test" ] && { [ "$pairing_allowlist_count" -gt 0 ] || [ "$lever_allowlist_count" -gt 0 ]; }; then
             if [ -z "$smoke_owner_org_id" ]; then
-              echo "::error::STAGING_SMOKE_OWNER_ORGANIZATION_ID must be set on the test environment so the pairing allowlist can be checked against the Hosted smoke owner organization."
+              echo "::error::STAGING_SMOKE_OWNER_ORGANIZATION_ID must be set on the test environment so the pairing and staging billing lifecycle lever allowlists can be checked against the Hosted smoke owner organization."
               exit 1
             fi
             if [[ ! "$smoke_owner_org_id" =~ $pairing_guid_pattern ]] || [ "$smoke_owner_org_id" = "00000000-0000-0000-0000-000000000000" ]; then
@@ -176,8 +235,13 @@ jobs:
               echo "::error::EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS must not include the staging Hosted smoke owner organization."
               exit 1
             fi
+            if [[ ",${lever_normalized,,}," == *",${smoke_owner_org_id,,},"* ]]; then
+              echo "::error::STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS must not include the staging Hosted smoke owner organization."
+              exit 1
+            fi
           fi
           echo "External-engine pairing allowlist: ${pairing_allowlist_count} organization id(s)."
+          echo "Staging billing lifecycle lever: enabled=${lever_enabled}; allowlist=${lever_allowlist_count} organization id(s)."
 
           required=(
             AZURE_CLIENT_ID
@@ -673,6 +737,8 @@ jobs:
           CONTROL_ENTRA_CLIENT_SECRET: ${{ env.DEPLOY_MODE == 'infra' && secrets.CONTROL_ENTRA_CLIENT_SECRET || '' }}
           APPLICATION_BUILD_NUMBER: ${{ github.run_number }}
           EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ steps.deployment-config.outputs.pairing_allowlist }}
+          STAGING_BILLING_LIFECYCLE_LEVER_ENABLED: ${{ steps.deployment-config.outputs.staging_billing_lever_enabled }}
+          STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS: ${{ steps.deployment-config.outputs.staging_billing_lever_allowlist }}
         shell: bash
         run: |
           set -euo pipefail
@@ -843,6 +909,7 @@ jobs:
               --output none
           fi
           PAIRING_BEFORE_COUNT="$pairing_before_count" scripts/apply-external-engine-pairing-settings.sh
+          scripts/apply-staging-billing-lifecycle-lever-settings.sh
 
           az webapp restart \
             --resource-group "$AZURE_RESOURCE_GROUP" \

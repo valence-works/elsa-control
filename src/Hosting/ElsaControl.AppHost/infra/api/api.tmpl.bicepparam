@@ -24,5 +24,7 @@ param elsa_control_outputs_planid = '{{ .Env.ELSA_CONTROL_PLANID }}'
 param entraclientid_value = '{{ parameter "entraClientId" }}'
 param cloudaccountissuer_value = ''
 param pairingallowedorganizationids_value = ''
+param stagingbillingleverenabled_value = false
+param stagingbillingleverallowedorganizationids_value = ''
 param entraclientsecret_value = '{{ securedParameter "entraClientSecret" }}'
 param entratenantid_value = '{{ parameter "entraTenantId" }}'

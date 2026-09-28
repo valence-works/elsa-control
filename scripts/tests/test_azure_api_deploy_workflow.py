@@ -126,12 +126,19 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertIn("AZURE_PROVISIONER_IDENTITY_ID: ${{ vars.AZURE_PROVISIONER_IDENTITY_ID }}", self.source)
         self.assertIn("AZURE_API_EGRESS_SUBNET_ID: ${{ vars.AZURE_API_EGRESS_SUBNET_ID }}", self.source)
         self.assertIn("EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ vars.EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS }}", self.source)
+        self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED: ${{ vars.STAGING_BILLING_LIFECYCLE_LEVER_ENABLED }}", self.source)
+        self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS: ${{ vars.STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS }}", self.source)
         self.assertIn("STAGING_SMOKE_OWNER_ORGANIZATION_ID: ${{ vars.STAGING_SMOKE_OWNER_ORGANIZATION_ID }}", self.source)
         self.assertIn(
             "EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ steps.deployment-config.outputs.pairing_allowlist }}",
             self.source,
         )
         self.assertIn("scripts/apply-external-engine-pairing-settings.sh", self.source)
+        self.assertIn("scripts/apply-staging-billing-lifecycle-lever-settings.sh", self.source)
+        self.assertIn(
+            "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS: ${{ steps.deployment-config.outputs.staging_billing_lever_allowlist }}",
+            self.source,
+        )
 
     def test_cloud_account_issuer_accepts_exact_supabase_projects_only(self) -> None:
         check_start = self.source.index(
@@ -142,86 +149,88 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         check_script = dedent(self.source[check_start + len("        run: |\n") : check_end])
         check_script = check_script.replace("${{ github.event_name }}", "workflow_dispatch")
 
-        base_environment = os.environ.copy()
-        base_environment.update(
-            {
-                "DEPLOY_MODE": "app",
-                "AZURE_CLIENT_ID": "00000000-0000-0000-0000-000000000001",
-                "AZURE_TENANT_ID": "00000000-0000-0000-0000-000000000002",
-                "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
-                "AZURE_CONTAINER_REGISTRY_ENDPOINT": "test.azurecr.io",
-                "AZURE_ENV_NAME": "test",
-                "AZURE_LOCATION": "westeurope",
-                "AZURE_RESOURCE_GROUP": "rg-test",
-                "AZURE_WEBAPP_NAME": "test-api",
-                "TARGET_ENVIRONMENT": "production",
-            }
-        )
-
-        for issuer in (
-            "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1",
-            "https://abcdefghijklmnopqrst.supabase.co/auth/v1",
-        ):
-            with self.subTest(issuer=issuer), tempfile.NamedTemporaryFile() as output:
-                environment = base_environment | {
-                    "CLOUD_ACCOUNT_ISSUER": issuer,
-                    "EXPECTED_CLOUD_ACCOUNT_ISSUER": issuer,
-                    "GITHUB_OUTPUT": output.name,
+        with tempfile.NamedTemporaryFile() as github_env:
+            base_environment = os.environ.copy()
+            base_environment.update(
+                {
+                    "DEPLOY_MODE": "app",
+                    "AZURE_CLIENT_ID": "00000000-0000-0000-0000-000000000001",
+                    "AZURE_TENANT_ID": "00000000-0000-0000-0000-000000000002",
+                    "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
+                    "AZURE_CONTAINER_REGISTRY_ENDPOINT": "test.azurecr.io",
+                    "AZURE_ENV_NAME": "test",
+                    "AZURE_LOCATION": "westeurope",
+                    "AZURE_RESOURCE_GROUP": "rg-test",
+                    "AZURE_WEBAPP_NAME": "test-api",
+                    "TARGET_ENVIRONMENT": "production",
+                    "GITHUB_ENV": github_env.name,
                 }
-                result = subprocess.run(
+            )
+
+            for issuer in (
+                "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1",
+                "https://abcdefghijklmnopqrst.supabase.co/auth/v1",
+            ):
+                with self.subTest(issuer=issuer), tempfile.NamedTemporaryFile() as output:
+                    environment = base_environment | {
+                        "CLOUD_ACCOUNT_ISSUER": issuer,
+                        "EXPECTED_CLOUD_ACCOUNT_ISSUER": issuer,
+                        "GITHUB_OUTPUT": output.name,
+                    }
+                    result = subprocess.run(
+                        ["bash", "-c", check_script],
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(0, result.returncode, result.stderr)
+
+            with tempfile.NamedTemporaryFile() as output:
+                rejected = subprocess.run(
                     ["bash", "-c", check_script],
-                    env=environment,
+                    env=base_environment
+                    | {
+                        "CLOUD_ACCOUNT_ISSUER": "https://abcdefghijklmnopqrst.supabase.co/auth/v1/extra",
+                        "GITHUB_OUTPUT": output.name,
+                    },
                     capture_output=True,
                     text=True,
                     check=False,
                 )
-                self.assertEqual(0, result.returncode, result.stderr)
+            self.assertNotEqual(0, rejected.returncode)
+            self.assertIn("exact Supabase Auth issuer", rejected.stdout + rejected.stderr)
 
-        with tempfile.NamedTemporaryFile() as output:
-            rejected = subprocess.run(
-                ["bash", "-c", check_script],
-                env=base_environment
-                | {
-                    "CLOUD_ACCOUNT_ISSUER": "https://abcdefghijklmnopqrst.supabase.co/auth/v1/extra",
-                    "GITHUB_OUTPUT": output.name,
-                },
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        self.assertNotEqual(0, rejected.returncode)
-        self.assertIn("exact Supabase Auth issuer", rejected.stdout + rejected.stderr)
+            with tempfile.NamedTemporaryFile() as output:
+                mismatched = subprocess.run(
+                    ["bash", "-c", check_script],
+                    env=base_environment
+                    | {
+                        "CLOUD_ACCOUNT_ISSUER": "https://abcdefghijklmnopqrst.supabase.co/auth/v1",
+                        "EXPECTED_CLOUD_ACCOUNT_ISSUER": "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1",
+                        "GITHUB_OUTPUT": output.name,
+                    },
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            self.assertNotEqual(0, mismatched.returncode)
+            self.assertIn("approved environment issuer", mismatched.stdout + mismatched.stderr)
 
-        with tempfile.NamedTemporaryFile() as output:
-            mismatched = subprocess.run(
-                ["bash", "-c", check_script],
-                env=base_environment
-                | {
-                    "CLOUD_ACCOUNT_ISSUER": "https://abcdefghijklmnopqrst.supabase.co/auth/v1",
-                    "EXPECTED_CLOUD_ACCOUNT_ISSUER": "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1",
-                    "GITHUB_OUTPUT": output.name,
-                },
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        self.assertNotEqual(0, mismatched.returncode)
-        self.assertIn("approved environment issuer", mismatched.stdout + mismatched.stderr)
-
-        with tempfile.NamedTemporaryFile() as output:
-            disabled = subprocess.run(
-                ["bash", "-c", check_script],
-                env=base_environment
-                | {
-                    "CLOUD_ACCOUNT_ISSUER": "",
-                    "EXPECTED_CLOUD_ACCOUNT_ISSUER": "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1",
-                    "GITHUB_OUTPUT": output.name,
-                },
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        self.assertEqual(0, disabled.returncode, disabled.stderr)
+            with tempfile.NamedTemporaryFile() as output:
+                disabled = subprocess.run(
+                    ["bash", "-c", check_script],
+                    env=base_environment
+                    | {
+                        "CLOUD_ACCOUNT_ISSUER": "",
+                        "EXPECTED_CLOUD_ACCOUNT_ISSUER": "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1",
+                        "GITHUB_OUTPUT": output.name,
+                    },
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            self.assertEqual(0, disabled.returncode, disabled.stderr)
 
     def _deployment_config_script(self) -> str:
         check_start = self.source.index(
@@ -339,6 +348,118 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertNotIn("echo \"$EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS\"", helper)
         self.assertNotIn("echo '${EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS}'", helper)
 
+    def test_staging_billing_lifecycle_lever_is_staging_only_and_excludes_the_smoke_owner_org(self) -> None:
+        check_script = self._deployment_config_script()
+        rehearsal = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        smoke = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        base = {
+            "DEPLOY_MODE": "app",
+            "AZURE_CLIENT_ID": "00000000-0000-0000-0000-000000000001",
+            "AZURE_TENANT_ID": "00000000-0000-0000-0000-000000000002",
+            "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
+            "AZURE_CONTAINER_REGISTRY_ENDPOINT": "test.azurecr.io",
+            "AZURE_ENV_NAME": "test",
+            "AZURE_LOCATION": "westeurope",
+            "AZURE_RESOURCE_GROUP": "rg-test",
+            "AZURE_WEBAPP_NAME": "test-api",
+        }
+
+        def run_check(**extra: str) -> tuple[subprocess.CompletedProcess[str], str, str]:
+            with tempfile.NamedTemporaryFile() as output, tempfile.NamedTemporaryFile() as github_env:
+                environment = os.environ.copy()
+                environment.update(base)
+                environment.update(extra)
+                environment["GITHUB_OUTPUT"] = output.name
+                environment["GITHUB_ENV"] = github_env.name
+                result = subprocess.run(
+                    ["bash", "-c", check_script],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                return result, Path(output.name).read_text(), Path(github_env.name).read_text()
+
+        staging_stripe = {
+            "ELSA_CLOUD_STAGING_ORIGIN": "https://staging.example.test",
+            "STRIPE_HOSTED_PRICE_ID": "price_test",
+            "STRIPE_TEST_SECRET_KEY": "sk_test_fixture",
+            "STRIPE_TEST_WEBHOOK_SIGNING_SECRET": "whsec_fixture",
+        }
+
+        production_enabled, _, _ = run_check(
+            TARGET_ENVIRONMENT="production",
+            AZURE_ENV_NAME="valence-control-staging",
+            STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="true",
+        )
+        self.assertNotEqual(0, production_enabled.returncode)
+        self.assertIn("must be unset", production_enabled.stdout + production_enabled.stderr)
+
+        production_allowlist, _, _ = run_check(
+            TARGET_ENVIRONMENT="production",
+            STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS=rehearsal,
+        )
+        self.assertNotEqual(0, production_allowlist.returncode)
+        self.assertIn("must be unset", production_allowlist.stdout + production_allowlist.stderr)
+        self.assertNotIn(rehearsal, production_allowlist.stdout + production_allowlist.stderr)
+
+        production_false, _, _ = run_check(
+            TARGET_ENVIRONMENT="production",
+            STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="false",
+        )
+        self.assertNotEqual(0, production_false.returncode)
+        self.assertIn("must be unset", production_false.stdout + production_false.stderr)
+
+        production_empty, production_output, production_env = run_check(
+            TARGET_ENVIRONMENT="production",
+            STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="",
+            STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS="",
+        )
+        self.assertEqual(0, production_empty.returncode, production_empty.stderr)
+        self.assertRegex(production_output, r"(?m)^staging_billing_lever_enabled=$")
+        self.assertRegex(production_output, r"(?m)^staging_billing_lever_allowlist=$")
+        self.assertRegex(production_output, r"(?m)^staging_billing_lever_allowlist_count=0$")
+        self.assertNotIn("staging_billing_lever_enabled=false", production_output)
+        self.assertNotIn("staging_billing_lever_enabled=true", production_output)
+        self.assertRegex(production_env, r"(?m)^STAGING_BILLING_LIFECYCLE_LEVER_ENABLED=$")
+        self.assertRegex(production_env, r"(?m)^STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS=$")
+        self.assertNotIn("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED=false", production_env)
+        self.assertNotIn("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED=true", production_env)
+
+        staging_includes_smoke, _, _ = run_check(
+            TARGET_ENVIRONMENT="test",
+            STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="true",
+            STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS=f"{rehearsal},{smoke}",
+            STAGING_SMOKE_OWNER_ORGANIZATION_ID=smoke,
+            **staging_stripe,
+        )
+        self.assertNotEqual(0, staging_includes_smoke.returncode)
+        combined = staging_includes_smoke.stdout + staging_includes_smoke.stderr
+        self.assertIn("must not include the staging Hosted smoke owner organization", combined)
+        self.assertNotIn(rehearsal, combined)
+        self.assertNotIn(smoke, combined)
+
+        staging_ok, output, github_env = run_check(
+            TARGET_ENVIRONMENT="test",
+            AZURE_ENV_NAME="valence-control-staging",
+            AZURE_RESOURCE_GROUP="rg-valence-control-staging",
+            STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="true",
+            STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS=f" {rehearsal} ",
+            STAGING_SMOKE_OWNER_ORGANIZATION_ID=smoke,
+            **staging_stripe,
+        )
+        self.assertEqual(0, staging_ok.returncode, staging_ok.stdout + staging_ok.stderr)
+        self.assertNotIn(rehearsal, staging_ok.stdout + staging_ok.stderr)
+        self.assertIn("staging_billing_lever_enabled=true", output)
+        self.assertIn(f"staging_billing_lever_allowlist={rehearsal}", output)
+        self.assertIn("staging_billing_lever_allowlist_count=1", output)
+        self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED=true", github_env)
+        self.assertIn(f"STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS={rehearsal}", github_env)
+        helper = (ROOT / "scripts" / "apply-staging-billing-lifecycle-lever-settings.sh").read_text()
+        self.assertIn("Staging billing lifecycle lever app setting count: before=", helper)
+        self.assertNotIn("echo \"$STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS\"", self.source)
+        self.assertNotIn("echo \"$STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS\"", helper)
+
     def test_staging_infra_requires_a_provisioner_identity(self) -> None:
         check_start = self.source.index("        run: |\n", self.source.index("      - name: Check deployment configuration"))
         check_end = self.source.index("\n      - name:", check_start)
@@ -360,8 +481,9 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
             "STRIPE_HOSTED_PRICE_ID": "price_test", "STRIPE_TEST_SECRET_KEY": "sk_test_fixture",
             "STRIPE_TEST_WEBHOOK_SIGNING_SECRET": "whsec_fixture",
         }
-        with tempfile.NamedTemporaryFile() as output:
+        with tempfile.NamedTemporaryFile() as output, tempfile.NamedTemporaryFile() as github_env:
             environment["GITHUB_OUTPUT"] = output.name
+            environment["GITHUB_ENV"] = github_env.name
             missing = subprocess.run(["bash", "-c", check_script], env=environment,
                                      capture_output=True, text=True, check=False)
             self.assertNotEqual(0, missing.returncode)
@@ -976,6 +1098,387 @@ else:
             self.assertIn("Live pairing allowlist includes the staging Hosted smoke owner organization", live_smoke.stdout + live_smoke.stderr)
             self.assertNotIn(smoke, live_smoke.stdout + live_smoke.stderr)
             self.assertEqual({f"{prefix}0": smoke}, live_store)
+
+    def test_production_config_output_does_not_apply_lever_settings(self) -> None:
+        check_script = self._deployment_config_script()
+        rehearsal = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        smoke = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        helper = ROOT / "scripts" / "apply-staging-billing-lifecycle-lever-settings.sh"
+        deploy = ROOT / "scripts" / "deploy-azure-elsa-control.sh"
+        enabled_name = "Billing__StagingLifecycleLever__Enabled"
+        prefix = "Billing__StagingLifecycleLever__AllowedOrganizationIds__"
+        base = {
+            "DEPLOY_MODE": "app",
+            "AZURE_CLIENT_ID": "00000000-0000-0000-0000-000000000001",
+            "AZURE_TENANT_ID": "00000000-0000-0000-0000-000000000002",
+            "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
+            "AZURE_CONTAINER_REGISTRY_ENDPOINT": "test.azurecr.io",
+            "AZURE_ENV_NAME": "prod",
+            "AZURE_LOCATION": "westeurope",
+            "AZURE_RESOURCE_GROUP": "rg-prod",
+            "AZURE_WEBAPP_NAME": "prod-api",
+            "TARGET_ENVIRONMENT": "production",
+        }
+
+        with tempfile.NamedTemporaryFile() as output, tempfile.NamedTemporaryFile() as github_env:
+            environment = os.environ.copy()
+            environment.update(base)
+            environment.pop("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED", None)
+            environment.pop("STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS", None)
+            environment["GITHUB_OUTPUT"] = output.name
+            environment["GITHUB_ENV"] = github_env.name
+            config = subprocess.run(
+                ["bash", "-c", check_script],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, config.returncode, config.stdout + config.stderr)
+            emitted = self._parse_kv(Path(output.name).read_text())
+
+        self.assertEqual("", emitted.get("staging_billing_lever_enabled", "missing"))
+        self.assertEqual("", emitted.get("staging_billing_lever_allowlist", "missing"))
+        self.assertEqual("0", emitted.get("staging_billing_lever_allowlist_count", "missing"))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            store, call_log, fake_az = self._write_lever_fake_az(temp_path)
+            store.write_text(json.dumps({}))
+            helper_env = os.environ.copy()
+            helper_env.update(
+                {
+                    "PATH": f"{temp_path}{os.pathsep}{helper_env['PATH']}",
+                    "AZ_CALL_LOG": str(call_log),
+                    "SETTINGS_STORE": str(store),
+                    "AZURE_RESOURCE_GROUP": "prod-rg",
+                    "AZURE_WEBAPP_NAME": "prod-api",
+                    "TARGET_ENVIRONMENT": "production",
+                    "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED": emitted["staging_billing_lever_enabled"],
+                    "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS": emitted["staging_billing_lever_allowlist"],
+                    "STAGING_SMOKE_OWNER_ORGANIZATION_ID": smoke,
+                }
+            )
+            helper_result = subprocess.run(
+                [str(helper)],
+                env=helper_env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            self.assertEqual(0, helper_result.returncode, helper_result.stdout + helper_result.stderr)
+            self.assertEqual({}, json.loads(store.read_text()))
+            self.assertNotIn("appsettings set", call_log.read_text())
+            self.assertNotIn(enabled_name, helper_result.stdout + helper_result.stderr)
+
+            deploy_log = temp_path / "deploy-az-calls"
+            (temp_path / "az").write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "printf '%s\\n' \"$*\" >> \"${AZ_CALL_LOG:?}\"\n"
+                "case \"$*\" in\n"
+                "  'account set --subscription '*) exit 0 ;;\n"
+                "  'deployment sub what-if '*) exit 0 ;;\n"
+                "  *) exit 41 ;;\n"
+                "esac\n"
+            )
+            (temp_path / "az").chmod(0o755)
+            deploy_env = os.environ.copy()
+            for name in (
+                "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED",
+                "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS",
+                "TARGET_ENVIRONMENT",
+            ):
+                deploy_env.pop(name, None)
+            deploy_env.update(
+                {
+                    "PATH": f"{temp_path}{os.pathsep}{deploy_env['PATH']}",
+                    "AZ_CALL_LOG": str(deploy_log),
+                    "ADMIN_API_KEY": "test-only-admin-key",
+                    "BUILDER_CLIENT_API_KEY": "test-only-builder-key",
+                    "CONTROL_ENTRA_TENANT_ID": "00000000-0000-0000-0000-000000000001",
+                    "CONTROL_ENTRA_CLIENT_ID": "00000000-0000-0000-0000-000000000002",
+                    "CONTROL_ENTRA_CLIENT_SECRET": "test-only-client-secret",
+                    "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
+                    "TARGET_ENVIRONMENT": "production",
+                    "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED": emitted["staging_billing_lever_enabled"],
+                    "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS": emitted["staging_billing_lever_allowlist"],
+                }
+            )
+            deploy_result = subprocess.run(
+                [str(deploy), "--environment", "prod", "--what-if"],
+                cwd=ROOT,
+                env=deploy_env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, deploy_result.returncode, deploy_result.stdout + deploy_result.stderr)
+            self.assertIn("deployment sub what-if", deploy_log.read_text())
+            self.assertNotIn("stagingbillinglever", deploy_log.read_text())
+            self.assertNotIn(rehearsal, helper_result.stdout + helper_result.stderr + deploy_result.stdout + deploy_result.stderr)
+
+        with tempfile.NamedTemporaryFile() as output, tempfile.NamedTemporaryFile() as github_env:
+            environment = os.environ.copy()
+            environment.update(base)
+            environment.update(
+                {
+                    "TARGET_ENVIRONMENT": "test",
+                    "AZURE_ENV_NAME": "test",
+                    "AZURE_RESOURCE_GROUP": "rg-test",
+                    "AZURE_WEBAPP_NAME": "test-api",
+                    "ELSA_CLOUD_STAGING_ORIGIN": "https://staging.example.test",
+                    "STRIPE_HOSTED_PRICE_ID": "price_test",
+                    "STRIPE_TEST_SECRET_KEY": "sk_test_fixture",
+                    "STRIPE_TEST_WEBHOOK_SIGNING_SECRET": "whsec_fixture",
+                }
+            )
+            environment.pop("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED", None)
+            environment.pop("STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS", None)
+            environment["GITHUB_OUTPUT"] = output.name
+            environment["GITHUB_ENV"] = github_env.name
+            staging_config = subprocess.run(
+                ["bash", "-c", check_script],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, staging_config.returncode, staging_config.stdout + staging_config.stderr)
+            staging_emitted = self._parse_kv(Path(output.name).read_text())
+
+        self.assertEqual("", staging_emitted.get("staging_billing_lever_enabled", "missing"))
+        self.assertEqual("", staging_emitted.get("staging_billing_lever_allowlist", "missing"))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            store, call_log, _ = self._write_lever_fake_az(temp_path)
+            store.write_text(json.dumps({enabled_name: "true", f"{prefix}0": rehearsal}))
+            helper_env = os.environ.copy()
+            helper_env.update(
+                {
+                    "PATH": f"{temp_path}{os.pathsep}{helper_env['PATH']}",
+                    "AZ_CALL_LOG": str(call_log),
+                    "SETTINGS_STORE": str(store),
+                    "AZURE_RESOURCE_GROUP": "rg-test",
+                    "AZURE_WEBAPP_NAME": "test-api",
+                    "TARGET_ENVIRONMENT": "test",
+                    "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED": staging_emitted["staging_billing_lever_enabled"],
+                    "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS": staging_emitted["staging_billing_lever_allowlist"],
+                    "STAGING_SMOKE_OWNER_ORGANIZATION_ID": smoke,
+                }
+            )
+            stale_result = subprocess.run(
+                [str(helper)],
+                env=helper_env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            self.assertEqual(0, stale_result.returncode, stale_result.stdout + stale_result.stderr)
+            self.assertEqual({}, json.loads(store.read_text()))
+            self.assertIn("appsettings delete", call_log.read_text())
+            self.assertNotIn("appsettings set", call_log.read_text())
+            self.assertNotIn(rehearsal, stale_result.stdout + stale_result.stderr)
+
+        for raw_enabled in ("false", "FALSE"):
+            with self.subTest(raw_enabled=raw_enabled), tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                store, call_log, _ = self._write_lever_fake_az(temp_path)
+                store.write_text(json.dumps({f"{prefix}0": rehearsal, enabled_name: "true"}))
+                helper_env = os.environ.copy()
+                helper_env.update(
+                    {
+                        "PATH": f"{temp_path}{os.pathsep}{helper_env['PATH']}",
+                        "AZ_CALL_LOG": str(call_log),
+                        "SETTINGS_STORE": str(store),
+                        "AZURE_RESOURCE_GROUP": "prod-rg",
+                        "AZURE_WEBAPP_NAME": "prod-api",
+                        "TARGET_ENVIRONMENT": "production",
+                        "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED": raw_enabled,
+                        "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS": "",
+                    }
+                )
+                result = subprocess.run(
+                    [str(helper)],
+                    env=helper_env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertEqual({}, json.loads(store.read_text()))
+                self.assertNotIn("appsettings set", call_log.read_text())
+
+    def test_lever_helper_applies_on_test_and_refuses_when_production_is_enabled(self) -> None:
+        rehearsal = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        smoke = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        helper = ROOT / "scripts" / "apply-staging-billing-lifecycle-lever-settings.sh"
+        enabled_name = "Billing__StagingLifecycleLever__Enabled"
+        prefix = "Billing__StagingLifecycleLever__AllowedOrganizationIds__"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            store, call_log, _ = self._write_lever_fake_az(temp_path)
+
+            def run_helper(target: str, enabled: str, allowlist: str, initial: dict[str, str]) -> subprocess.CompletedProcess[str]:
+                store.write_text(json.dumps(initial))
+                call_log.write_text("")
+                environment = os.environ.copy()
+                environment.update(
+                    {
+                        "PATH": f"{temp_path}{os.pathsep}{environment['PATH']}",
+                        "AZ_CALL_LOG": str(call_log),
+                        "SETTINGS_STORE": str(store),
+                        "AZURE_RESOURCE_GROUP": "test-rg",
+                        "AZURE_WEBAPP_NAME": "test-api",
+                        "TARGET_ENVIRONMENT": target,
+                        "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED": enabled,
+                        "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS": allowlist,
+                        "STAGING_SMOKE_OWNER_ORGANIZATION_ID": smoke,
+                    }
+                )
+                return subprocess.run(
+                    [str(helper)],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+
+            applied = run_helper("test", "true", rehearsal, {})
+            self.assertEqual(0, applied.returncode, applied.stdout + applied.stderr)
+            self.assertEqual(
+                {enabled_name: "true", f"{prefix}0": rehearsal},
+                json.loads(store.read_text()),
+            )
+            self.assertIn("appsettings set", call_log.read_text())
+            self.assertNotIn(rehearsal, applied.stdout + applied.stderr)
+
+            stale_cleared = run_helper("test", "", "", {enabled_name: "true", f"{prefix}0": rehearsal})
+            self.assertEqual(0, stale_cleared.returncode, stale_cleared.stdout + stale_cleared.stderr)
+            self.assertEqual({}, json.loads(store.read_text()))
+            self.assertIn("appsettings delete", call_log.read_text())
+            self.assertNotIn("appsettings set", call_log.read_text())
+
+            refused = run_helper("production", "true", rehearsal, {})
+            self.assertNotEqual(0, refused.returncode)
+            self.assertIn("must be unset", refused.stdout + refused.stderr)
+            self.assertEqual({}, json.loads(store.read_text()))
+            self.assertEqual("", call_log.read_text())
+            self.assertNotIn(rehearsal, refused.stdout + refused.stderr)
+
+            staging_env = os.environ.copy()
+            staging_env.update(
+                {
+                    "PATH": f"{temp_path}{os.pathsep}{staging_env['PATH']}",
+                    "AZ_CALL_LOG": str(call_log),
+                    "SETTINGS_STORE": str(store),
+                    "AZURE_RESOURCE_GROUP": "rg-valence-control-staging",
+                    "AZURE_WEBAPP_NAME": "test-api",
+                    "TARGET_ENVIRONMENT": "test",
+                    "AZURE_ENV_NAME": "valence-control-staging",
+                    "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED": "true",
+                    "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS": rehearsal,
+                    "STAGING_SMOKE_OWNER_ORGANIZATION_ID": smoke,
+                }
+            )
+            store.write_text(json.dumps({}))
+            call_log.write_text("")
+            real_staging = subprocess.run(
+                [str(helper)],
+                env=staging_env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            self.assertEqual(0, real_staging.returncode, real_staging.stdout + real_staging.stderr)
+            self.assertEqual(
+                {enabled_name: "true", f"{prefix}0": rehearsal},
+                json.loads(store.read_text()),
+            )
+            self.assertNotIn(rehearsal, real_staging.stdout + real_staging.stderr)
+
+            staging_env["TARGET_ENVIRONMENT"] = "production"
+            store.write_text(json.dumps({}))
+            call_log.write_text("")
+            production_with_staging_name = subprocess.run(
+                [str(helper)],
+                env=staging_env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            self.assertNotEqual(0, production_with_staging_name.returncode)
+            self.assertIn("must be unset", production_with_staging_name.stdout + production_with_staging_name.stderr)
+            self.assertEqual({}, json.loads(store.read_text()))
+            self.assertEqual("", call_log.read_text())
+
+    @staticmethod
+    def _parse_kv(text: str) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for line in text.splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            values[key] = value
+        return values
+
+    @staticmethod
+    def _write_lever_fake_az(temp_path: Path) -> tuple[Path, Path, Path]:
+        store = temp_path / "settings.json"
+        call_log = temp_path / "az-calls"
+        fake_az = temp_path / "az"
+        fake_az.write_text(
+            """#!/usr/bin/env python3
+import json, os, sys
+open(os.environ["AZ_CALL_LOG"], "a", encoding="utf-8").write(" ".join(sys.argv[1:]) + "\\n")
+store_path = os.environ["SETTINGS_STORE"]
+store = json.loads(open(store_path, encoding="utf-8").read())
+joined = " ".join(sys.argv[1:])
+prefix = "Billing__StagingLifecycleLever__AllowedOrganizationIds__"
+enabled = "Billing__StagingLifecycleLever__Enabled"
+items = {name: value for name, value in store.items() if name.startswith(prefix) or name == enabled}
+if "appsettings list" in joined:
+    if "].name" in joined:
+        print("\\n".join(items))
+    elif "].value" in joined:
+        print("\\n".join(items.values()))
+    else:
+        print(len(items))
+elif "appsettings delete" in joined:
+    args = sys.argv[1:]
+    names = []
+    for item in args[args.index("--setting-names") + 1:]:
+        if item.startswith("--"):
+            break
+        names.append(item)
+    for name in names:
+        store.pop(name, None)
+    open(store_path, "w", encoding="utf-8").write(json.dumps(store))
+elif "appsettings set" in joined:
+    args = sys.argv[1:]
+    values = []
+    for item in args[args.index("--settings") + 1:]:
+        if item.startswith("--"):
+            break
+        values.append(item)
+    for item in values:
+        name, value = item.split("=", 1)
+        store[name] = value
+    open(store_path, "w", encoding="utf-8").write(json.dumps(store))
+else:
+    sys.exit(1)
+"""
+        )
+        fake_az.chmod(0o755)
+        return store, call_log, fake_az
 
 
 if __name__ == "__main__":

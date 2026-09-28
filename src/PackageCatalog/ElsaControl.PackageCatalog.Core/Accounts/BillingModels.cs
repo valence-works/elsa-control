@@ -214,6 +214,12 @@ public interface IOrganizationBillingLifecycleStore
         DateTimeOffset now,
         CancellationToken cancellationToken = default);
 
+    Task<OrganizationBillingLifecycleAdvance?> AdvanceOneAsync(
+        Guid organizationId,
+        Guid subscriptionId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default);
+
     Task<OrganizationBillingLifecycleAdvance?> RequestDeletionAsync(
         Guid organizationId,
         DateTimeOffset requestedAt,
@@ -226,6 +232,49 @@ public interface IOrganizationBillingLifecycleStore
 
     Task<OrganizationBillingCleanupResult> CompleteCleanupAsync(
         OrganizationBillingCleanupCompletion completion,
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Staging-only deadline the operator lever may move into the past. Commercial
+/// state is never written here; the normal advancer owns the transition.
+/// </summary>
+public enum OrganizationBillingLifecycleDeadline
+{
+    GraceEndsAt = 0,
+    ConstrainedAt = 1
+}
+
+public enum OrganizationBillingLifecycleDeadlineMoveOutcome
+{
+    Moved,
+    AlreadyDue,
+    OrganizationNotFound,
+    SubscriptionNotFound,
+    DeadlineNotApplicable
+}
+
+public sealed record OrganizationBillingLifecycleDeadlineMove(
+    OrganizationBillingLifecycleDeadlineMoveOutcome Outcome,
+    Guid OrganizationId,
+    Guid? SubscriptionId = null,
+    OrganizationBillingLifecycleDeadline? Deadline = null,
+    DateTimeOffset? PreviousDeadlineAt = null,
+    DateTimeOffset? DeadlineAt = null,
+    OrganizationSubscriptionState? State = null);
+
+/// <summary>
+/// Moves only <see cref="OrganizationSubscription.GraceEndsAt"/> or
+/// <see cref="OrganizationSubscription.ConstrainedAt"/>. It must not write
+/// subscription state, entitlements, notices, or engine rows.
+/// </summary>
+public interface IOrganizationBillingLifecycleDeadlineStore
+{
+    Task<OrganizationBillingLifecycleDeadlineMove> MoveDeadlineAsync(
+        Guid organizationId,
+        OrganizationBillingLifecycleDeadline deadline,
+        DateTimeOffset now,
+        string? operatorSubject,
         CancellationToken cancellationToken = default);
 }
 

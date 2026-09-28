@@ -283,6 +283,9 @@ builder.Services.Configure<StripeBillingOptions>(
     builder.Configuration.GetSection(StripeBillingOptions.ConfigurationSection));
 builder.Services.Configure<OrganizationBillingLifecycleWorkerOptions>(
     builder.Configuration.GetSection(OrganizationBillingLifecycleWorkerOptions.ConfigurationSection));
+builder.Services.Configure<StagingBillingLifecycleLeverOptions>(
+    builder.Configuration.GetSection(StagingBillingLifecycleLeverOptions.ConfigurationSection));
+builder.Services.AddHostedService<StagingBillingLifecycleLeverConfigurationValidator>();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<AdminApiKeyValidator>();
 builder.Services.AddSingleton<BuilderClientApiKeyValidator>();
@@ -345,6 +348,9 @@ builder.Services.AddScoped<IOrganizationBillingStore>(services =>
     services.GetRequiredService<OrganizationBillingStore>());
 builder.Services.AddScoped<IOrganizationBillingLifecycleStore>(services =>
     services.GetRequiredService<OrganizationBillingStore>());
+builder.Services.AddScoped<IOrganizationBillingLifecycleDeadlineStore>(services =>
+    services.GetRequiredService<OrganizationBillingStore>());
+builder.Services.AddScoped<StagingBillingLifecycleLever>();
 builder.Services.AddScoped<IOrganizationInternalEntitlementStore>(services =>
     services.GetRequiredService<OrganizationBillingStore>());
 builder.Services.AddScoped<OrganizationInternalEntitlementService>();
@@ -774,6 +780,7 @@ app.MapAdminManagedElsaRecoveryEndpoints();
 app.MapAdminOrganizationEndpoints();
 app.MapAdminOrganizationInternalEntitlementEndpoints();
 app.MapAdminOrganizationAzureBoundEntitlementEndpoints();
+app.MapAdminOrganizationBillingLifecycleLeverEndpoints();
 app.MapAdminReleaseCatalogEndpoints();
 app.MapConsoleLogStreaming();
 if (adminConsoleAssetsExist)

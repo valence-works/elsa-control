@@ -22,6 +22,7 @@ class DeployAzureElsaControlTests(unittest.TestCase):
     @staticmethod
     def environment() -> dict[str, str]:
         environment = os.environ.copy()
+        environment.pop("TARGET_ENVIRONMENT", None)
         environment.update(
             {
                 "ADMIN_API_KEY": "test-only-admin-key",
@@ -43,6 +44,10 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         self.assertIn("--template-file infra/api/api-website.module.bicep", self.source)
         self.assertIn("pairingallowedorganizationids_value", self.source)
         self.assertIn("EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS", self.source)
+        self.assertIn("stagingbillingleverenabled_value", self.source)
+        self.assertIn("stagingbillingleverallowedorganizationids_value", self.source)
+        self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED", self.source)
+        self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS", self.source)
         self.assertIn("IMAGE=\"$IMAGE_REPOSITORY@$IMAGE_DIGEST\"", self.source)
         self.assertIn("AZURE_CONTAINER_REGISTRY_ENDPOINT", self.source)
         self.assertIn("CONTROL_SQL_SQLSERVERFQDN", self.source)
@@ -63,6 +68,117 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("only permitted for the test (staging) environment", result.stderr)
         self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
+
+    def test_refuses_the_staging_billing_lifecycle_lever_unless_the_target_is_staging(self) -> None:
+        environment = self.environment()
+        environment["STAGING_BILLING_LIFECYCLE_LEVER_ENABLED"] = "true"
+        environment["STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        result = subprocess.run(
+            [str(DEPLOY_SCRIPT), "--environment", "prod"],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("only permitted for the test (staging) environment", result.stderr)
+        self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
+
+    def test_allows_the_real_staging_azure_env_name_for_the_lever(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            call_log = temporary_path / "az-calls"
+            fake_az = temporary_path / "az"
+            fake_az.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "printf '%s\\n' \"$*\" >> \"${AZ_CALL_LOG:?}\"\n"
+                "case \"$*\" in\n"
+                "  'account set --subscription '*) exit 0 ;;\n"
+                "  'deployment sub what-if '*) exit 0 ;;\n"
+                "  *) exit 41 ;;\n"
+                "esac\n"
+            )
+            fake_az.chmod(0o755)
+
+            environment = self.environment()
+            environment["PATH"] = f"{temporary_path}{os.pathsep}{environment['PATH']}"
+            environment["AZ_CALL_LOG"] = str(call_log)
+            environment["STAGING_BILLING_LIFECYCLE_LEVER_ENABLED"] = "true"
+            environment["STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            result = subprocess.run(
+                [str(DEPLOY_SCRIPT), "--environment", "valence-control-staging", "--what-if"],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("deployment sub what-if", call_log.read_text())
+            self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
+
+            environment["TARGET_ENVIRONMENT"] = "production"
+            refused = subprocess.run(
+                [str(DEPLOY_SCRIPT), "--environment", "valence-control-staging"],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(0, refused.returncode)
+            self.assertIn("only permitted for the test (staging) environment", refused.stderr)
+            self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", refused.stdout + refused.stderr)
+
+            environment["TARGET_ENVIRONMENT"] = "test"
+            allowed = subprocess.run(
+                [str(DEPLOY_SCRIPT), "--environment", "valence-control-staging", "--what-if"],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, allowed.returncode, allowed.stdout + allowed.stderr)
+
+    def test_treats_a_false_or_empty_lever_flag_as_unset_on_production(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            call_log = temporary_path / "az-calls"
+            fake_az = temporary_path / "az"
+            fake_az.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "printf '%s\\n' \"$*\" >> \"${AZ_CALL_LOG:?}\"\n"
+                "case \"$*\" in\n"
+                "  'account set --subscription '*) exit 0 ;;\n"
+                "  'deployment sub what-if '*) exit 0 ;;\n"
+                "  *) exit 41 ;;\n"
+                "esac\n"
+            )
+            fake_az.chmod(0o755)
+
+            for enabled in ("", "false", "FALSE"):
+                with self.subTest(enabled=enabled):
+                    environment = self.environment()
+                    environment["PATH"] = f"{temporary_path}{os.pathsep}{environment['PATH']}"
+                    environment["AZ_CALL_LOG"] = str(call_log)
+                    environment["STAGING_BILLING_LIFECYCLE_LEVER_ENABLED"] = enabled
+                    environment["STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS"] = ""
+                    call_log.write_text("")
+                    result = subprocess.run(
+                        [str(DEPLOY_SCRIPT), "--environment", "prod", "--what-if"],
+                        cwd=ROOT,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertIn("deployment sub what-if", call_log.read_text())
+                    self.assertNotIn("stagingbillinglever", call_log.read_text())
 
     def test_rejects_non_supabase_cloud_issuer_before_azure_mutation(self) -> None:
         environment = self.environment()

@@ -19,6 +19,8 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 
 public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options) : DbContext(options)
 {
+    private readonly HashSet<(Guid SubscriptionId, string Property)> _lifecycleDeadlineOverrides = [];
+
     public DbSet<PackageSource> PackageSources => Set<PackageSource>();
     public DbSet<Package> Packages => Set<Package>();
     public DbSet<PackageVersion> PackageVersions => Set<PackageVersion>();
@@ -233,20 +235,51 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
 
     public override int SaveChanges(bool acceptAllChangesOnSuccess)
     {
-        PrepareForSave();
-        return base.SaveChanges(acceptAllChangesOnSuccess);
+        try
+        {
+            PrepareForSave();
+            return base.SaveChanges(acceptAllChangesOnSuccess);
+        }
+        finally
+        {
+            ClearLifecycleDeadlineOverrides();
+        }
     }
 
     public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default) =>
         SaveChangesAsync(acceptAllChangesOnSuccess: true, cancellationToken);
 
-    public override Task<int> SaveChangesAsync(
+    public override async Task<int> SaveChangesAsync(
         bool acceptAllChangesOnSuccess,
         CancellationToken cancellationToken = default)
     {
-        PrepareForSave();
-        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        try
+        {
+            PrepareForSave();
+            return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        }
+        finally
+        {
+            ClearLifecycleDeadlineOverrides();
+        }
     }
+
+    /// <summary>
+    /// Permits one earlier rewrite of a bind-once grace or constraint deadline.
+    /// Staging operator leverage is the only caller; commercial state stays unchanged.
+    /// </summary>
+    internal void PermitLifecycleDeadlineOverride(Guid subscriptionId, string propertyName)
+    {
+        if (subscriptionId == Guid.Empty)
+            throw new ArgumentException("Subscription ID is required.", nameof(subscriptionId));
+        ArgumentException.ThrowIfNullOrWhiteSpace(propertyName);
+        if (propertyName is not (nameof(OrganizationSubscription.GraceEndsAt) or nameof(OrganizationSubscription.ConstrainedAt)))
+            throw new ArgumentException("Only GraceEndsAt or ConstrainedAt may be overridden.", nameof(propertyName));
+
+        _lifecycleDeadlineOverrides.Add((subscriptionId, propertyName));
+    }
+
+    internal void ClearLifecycleDeadlineOverrides() => _lifecycleDeadlineOverrides.Clear();
 
     /// <summary>
     /// Runs the persistence guards over the changes detected once, at the start of the pass. With automatic detection on,
@@ -515,7 +548,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             throw new InvalidOperationException($"Subscription {propertyName} cannot be replaced or removed.");
     }
 
-    private static void EnsureLifecycleTimestamp(
+    private void EnsureLifecycleTimestamp(
         EntityEntry<OrganizationSubscription> entry,
         string propertyName,
         DateTimeOffset? currentValue,
@@ -528,6 +561,8 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         var originalValue = entry.Property<DateTimeOffset?>(propertyName).OriginalValue;
         if (originalValue is not null)
         {
+            if (AllowsLifecycleDeadlineOverride(entry, propertyName, originalValue, currentValue))
+                return;
             if (currentValue is null || currentValue.Value.ToUniversalTime() != originalValue.Value.ToUniversalTime())
                 throw new InvalidOperationException($"Subscription {propertyName} is bind-once.");
             return;
@@ -542,7 +577,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             throw new InvalidOperationException($"Subscription {propertyName} must match its lifecycle event.");
     }
 
-    private static void EnsureDerivedLifecycleDeadline(
+    private void EnsureDerivedLifecycleDeadline(
         EntityEntry<OrganizationSubscription> entry,
         string propertyName,
         DateTimeOffset? currentValue,
@@ -552,6 +587,8 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         var originalValue = entry.Property<DateTimeOffset?>(propertyName).OriginalValue;
         if (originalValue is not null)
         {
+            if (AllowsLifecycleDeadlineOverride(entry, propertyName, originalValue, currentValue))
+                return;
             if (currentValue is null || currentValue.Value.ToUniversalTime() != originalValue.Value.ToUniversalTime())
                 throw new InvalidOperationException($"Subscription {propertyName} is bind-once.");
             return;
@@ -563,6 +600,16 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             currentValue.Value.ToUniversalTime() != lifecycleTimestamp.Value.ToUniversalTime().Add(period))
             throw new InvalidOperationException($"Subscription {propertyName} must match its lifecycle event.");
     }
+
+    private bool AllowsLifecycleDeadlineOverride(
+        EntityEntry<OrganizationSubscription> entry,
+        string propertyName,
+        DateTimeOffset? originalValue,
+        DateTimeOffset? currentValue) =>
+        originalValue is not null &&
+        currentValue is not null &&
+        _lifecycleDeadlineOverrides.Contains((entry.Entity.Id, propertyName)) &&
+        currentValue.Value.ToUniversalTime() < originalValue.Value.ToUniversalTime();
 
     private static DateTimeOffset? NormalizeOptionalTimestamp(DateTimeOffset? value, string name)
     {

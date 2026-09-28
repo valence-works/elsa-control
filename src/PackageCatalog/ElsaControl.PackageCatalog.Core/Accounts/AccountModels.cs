@@ -203,7 +203,8 @@ public enum OrganizationAuditAction
     BillingLifecycleNoticeIssued,
     BillingCleanupRequested,
     BillingCleanupCompleted,
-    AzureSubscriptionBindChanged
+    AzureSubscriptionBindChanged,
+    BillingLifecycleDeadlineMoved
 }
 
 public enum WorkspaceKind
