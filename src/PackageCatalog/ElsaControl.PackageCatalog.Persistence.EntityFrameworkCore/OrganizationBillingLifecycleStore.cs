@@ -84,12 +84,23 @@ public sealed partial class OrganizationBillingStore
         return await RequestDeletionCoreAsync(organizationId, RequireUtc(requestedAt, nameof(requestedAt)), cancellationToken, 0);
     }
 
-    private async Task<OrganizationBillingLifecycleAdvance?> AdvanceOneAsync(
+    public async Task<OrganizationBillingLifecycleAdvance?> AdvanceOneAsync(
         Guid organizationId,
         Guid subscriptionId,
         DateTimeOffset now,
-        CancellationToken cancellationToken) =>
-        await AdvanceOneCoreAsync(organizationId, subscriptionId, now, cancellationToken, attempt: 0);
+        CancellationToken cancellationToken = default)
+    {
+        if (organizationId == Guid.Empty)
+            throw new ArgumentException("Organization ID is required.", nameof(organizationId));
+        if (subscriptionId == Guid.Empty)
+            throw new ArgumentException("Subscription ID is required.", nameof(subscriptionId));
+        return await AdvanceOneCoreAsync(
+            organizationId,
+            subscriptionId,
+            RequireUtc(now, nameof(now)),
+            cancellationToken,
+            attempt: 0);
+    }
 
     private async Task<OrganizationBillingLifecycleAdvance?> AdvanceOneCoreAsync(
         Guid organizationId,

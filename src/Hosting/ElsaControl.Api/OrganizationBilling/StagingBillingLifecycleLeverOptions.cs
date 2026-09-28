@@ -8,7 +8,7 @@ public static class StagingBillingLifecycleLeverDefaults
     public const string DisabledCode = "billing.staging-lifecycle-lever.disabled";
     public const string OrganizationNotAllowedCode = "billing.staging-lifecycle-lever.organization-not-allowed";
     public const string DeadlineNotApplicableCode = "billing.staging-lifecycle-lever.deadline-not-applicable";
-    public const string SyntheticCustomerReference = "synthetic";
+    public const string StripeTestSecretKeyPrefix = "sk_test_";
 }
 
 public sealed class StagingBillingLifecycleLeverOptions
@@ -16,31 +16,21 @@ public sealed class StagingBillingLifecycleLeverOptions
     public const string ConfigurationSection = StagingBillingLifecycleLeverDefaults.ConfigurationSection;
 
     /// <summary>
-    /// Master switch. Off by default. Staging sets this true; production ships false
-    /// and the lever also refuses the Production environment even if misconfigured.
+    /// Master switch. Off by default. Staging may set this true through the
+    /// deploy pipeline; committed appsettings files must keep it false.
     /// </summary>
     public bool Enabled { get; set; }
 
     /// <summary>
-    /// Organization ids the lever may target when they are not harness-marked
-    /// with <see cref="SyntheticCustomerReference"/>. Empty by default.
+    /// Organization ids the lever may target. Empty by default. The lever is
+    /// allowlist-only; there is no synthetic-marker fallback.
     /// </summary>
     public string[] AllowedOrganizationIds { get; init; } = [];
 
-    /// <summary>
-    /// Exact <c>Organization.CustomerReference</c> that marks a harness-created
-    /// organization. Defaults to <c>synthetic</c>.
-    /// </summary>
-    public string SyntheticCustomerReference { get; init; } =
-        StagingBillingLifecycleLeverDefaults.SyntheticCustomerReference;
-
-    public bool AllowsOrganization(Guid organizationId, string? customerReference)
+    public bool AllowsOrganization(Guid organizationId)
     {
         if (!Enabled || organizationId == Guid.Empty)
             return false;
-
-        if (IsSynthetic(customerReference))
-            return true;
 
         foreach (var value in AllowedOrganizationIds)
         {
@@ -51,18 +41,8 @@ public sealed class StagingBillingLifecycleLeverOptions
         return false;
     }
 
-    public bool IsSynthetic(string? customerReference) =>
-        !string.IsNullOrWhiteSpace(SyntheticCustomerReference) &&
-        string.Equals(customerReference, SyntheticCustomerReference, StringComparison.Ordinal);
-
     internal IEnumerable<string> Validate()
     {
-        if (!IsSafeMarker(SyntheticCustomerReference))
-        {
-            yield return
-                $"{ConfigurationSection}:SyntheticCustomerReference must be a non-empty token without whitespace.";
-        }
-
         var values = AllowedOrganizationIds ?? [];
         for (var index = 0; index < values.Length; index++)
         {
@@ -84,13 +64,6 @@ public sealed class StagingBillingLifecycleLeverOptions
 
         return Guid.TryParse(value, out organizationId) && organizationId != Guid.Empty;
     }
-
-    private static bool IsSafeMarker(string? value) =>
-        !string.IsNullOrWhiteSpace(value) &&
-        string.Equals(value, value.Trim(), StringComparison.Ordinal) &&
-        !value.Any(char.IsWhiteSpace) &&
-        value.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_') &&
-        value.Length <= 64;
 }
 
 public sealed class StagingBillingLifecycleLeverConfigurationValidator(
@@ -98,6 +71,9 @@ public sealed class StagingBillingLifecycleLeverConfigurationValidator(
 {
     public Task StartAsync(CancellationToken cancellationToken)
     {
+        if (!options.Value.Enabled)
+            return Task.CompletedTask;
+
         var errors = options.Value.Validate().ToArray();
         if (errors.Length > 0)
             throw new InvalidOperationException(

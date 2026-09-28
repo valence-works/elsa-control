@@ -56,6 +56,8 @@ def parameter_file(
     provisioner_id: str,
     egress_subnet_id: str = "",
     pairing_allowed_organization_ids: str = "",
+    staging_billing_lever_enabled: bool = False,
+    staging_billing_lever_allowed_organization_ids: str = "",
 ) -> str:
     """Return a synthetic, non-secret parameter file for Bicep snapshot evaluation."""
 
@@ -82,9 +84,11 @@ def parameter_file(
         "provisioner_identity_outputs_id": provisioner_id,
         "api_egress_subnet_id": egress_subnet_id,
         "pairingallowedorganizationids_value": pairing_allowed_organization_ids,
+        "stagingbillingleverallowedorganizationids_value": staging_billing_lever_allowed_organization_ids,
     }
     lines = [f"using '{using_path}'", ""]
     lines.extend(f"param {name} = '{value}'" for name, value in values.items())
+    lines.append(f"param stagingbillingleverenabled_value = {'true' if staging_billing_lever_enabled else 'false'}")
     return "\n".join(lines) + "\n"
 
 
@@ -108,6 +112,8 @@ class ApiInfrastructureTests(unittest.TestCase):
         )
         self.assertEqual(settings["Authentication__Admin__AllowAuthenticatedCustomerSession"], "false")
         self.assertFalse(any(name.startswith("ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__") for name in settings))
+        self.assertNotIn("Billing__StagingLifecycleLever__Enabled", settings)
+        self.assertFalse(any(name.startswith("Billing__StagingLifecycleLever__AllowedOrganizationIds__") for name in settings))
 
     @staticmethod
     def generated_api_module() -> str:
@@ -151,8 +157,18 @@ class ApiInfrastructureTests(unittest.TestCase):
             re.DOTALL,
         )
         generated = pairing_parameter.sub("", generated, count=1)
+        lever_parameter = re.compile(
+            r"\n@description\('When true, emit Billing:StagingLifecycleLever:Enabled\..*?"
+            r"\nvar stagingBillingLeverSettings = concat\(stagingBillingLeverEnabledSettings, stagingBillingLeverAllowlistSettings\)\n",
+            re.DOTALL,
+        )
+        generated = lever_parameter.sub("", generated, count=1)
         generated = generated.replace("      appSettings: concat(\n        [", "      appSettings: [", 1)
-        generated = generated.replace("        ],\n        pairingAllowlistSettings)", "      ]", 1)
+        generated = generated.replace(
+            "        ],\n        pairingAllowlistSettings,\n        stagingBillingLeverSettings)",
+            "      ]",
+            1,
+        )
         egress_parameter = re.compile(
             r"\n@description\('Optional resource ID of the delegated App Service integration subnet.*?"
             r"\nparam api_egress_subnet_id string = ''\n",
@@ -191,6 +207,8 @@ class ApiInfrastructureTests(unittest.TestCase):
         provisioner_id: str,
         egress_subnet_id: str = "",
         pairing_allowed_organization_ids: str = "",
+        staging_billing_lever_enabled: bool = False,
+        staging_billing_lever_allowed_organization_ids: str = "",
     ) -> dict:
         """Evaluate the actual module with Bicep's offline deployment snapshot."""
 
@@ -205,6 +223,8 @@ class ApiInfrastructureTests(unittest.TestCase):
                 provisioner_id,
                 egress_subnet_id,
                 pairing_allowed_organization_ids,
+                staging_billing_lever_enabled,
+                staging_billing_lever_allowed_organization_ids,
             )
         )
         result = subprocess.run(
@@ -274,6 +294,27 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertEqual(settings["ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__0"], first)
         self.assertEqual(settings["ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__1"], second)
 
+    def test_bicep_module_emits_staging_billing_lever_settings_only_when_set(self) -> None:
+        first = "11111111-1111-1111-1111-111111111111"
+        second = "22222222-2222-2222-2222-222222222222"
+        with tempfile.TemporaryDirectory() as temporary:
+            off = self.webapp(self.snapshot(Path(temporary), ""))
+            on = self.webapp(
+                self.snapshot(
+                    Path(temporary),
+                    "",
+                    staging_billing_lever_enabled=True,
+                    staging_billing_lever_allowed_organization_ids=f"{first},{second}",
+                )
+            )
+        off_settings = {setting["name"]: setting["value"] for setting in off["properties"]["siteConfig"]["appSettings"]}
+        on_settings = {setting["name"]: setting["value"] for setting in on["properties"]["siteConfig"]["appSettings"]}
+        self.assertNotIn("Billing__StagingLifecycleLever__Enabled", off_settings)
+        self.assertFalse(any(name.startswith("Billing__StagingLifecycleLever__AllowedOrganizationIds__") for name in off_settings))
+        self.assertEqual(on_settings["Billing__StagingLifecycleLever__Enabled"], "true")
+        self.assertEqual(on_settings["Billing__StagingLifecycleLever__AllowedOrganizationIds__0"], first)
+        self.assertEqual(on_settings["Billing__StagingLifecycleLever__AllowedOrganizationIds__1"], second)
+
     def test_bicep_module_drops_empty_pairing_allowlist_entries(self) -> None:
         first = "11111111-1111-1111-1111-111111111111"
         second = "22222222-2222-2222-2222-222222222222"
@@ -340,6 +381,11 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__", module)
         self.assertIn("pairingAllowlistSettings", module)
         self.assertIn("filter(map(split(pairingallowedorganizationids_value, ','), id => trim(id)), id => !empty(id))", module)
+        self.assertIn("param stagingbillingleverenabled_value bool = false", module)
+        self.assertIn("param stagingbillingleverallowedorganizationids_value string = ''", module)
+        self.assertIn("Billing__StagingLifecycleLever__Enabled", module)
+        self.assertIn("Billing__StagingLifecycleLever__AllowedOrganizationIds__", module)
+        self.assertIn("stagingBillingLeverSettings", module)
         self.assertIn("virtualNetworkSubnetId: empty(api_egress_subnet_id) ? null : api_egress_subnet_id", module)
         self.assertIn("      vnetRouteAllEnabled: !empty(api_egress_subnet_id)", module)
         self.assertRegex(
@@ -356,8 +402,12 @@ class ApiInfrastructureTests(unittest.TestCase):
         )
         self.assertIn("param cloudaccountissuer_value = ''", parameters)
         self.assertIn("param pairingallowedorganizationids_value = ''", parameters)
+        self.assertIn("param stagingbillingleverenabled_value = false", parameters)
+        self.assertIn("param stagingbillingleverallowedorganizationids_value = ''", parameters)
         self.assertNotIn(".Env.CLOUD_ACCOUNT_ISSUER", parameters)
         self.assertNotIn(".Env.EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS", parameters)
+        self.assertNotIn(".Env.STAGING_BILLING_LIFECYCLE_LEVER_ENABLED", parameters)
+        self.assertNotIn(".Env.STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS", parameters)
         self.assertIn("same Microsoft Entra tenant", module)
         self.assertIn("userAssignedIdentities: union(", module)
         self.assertIn("empty(provisioner_identity_outputs_id)", module)
@@ -394,6 +444,8 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("AZURE_PROVISIONER_IDENTITY_ID", documentation)
         self.assertIn("AZURE_API_EGRESS_SUBNET_ID", documentation)
         self.assertIn("EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS", documentation)
+        self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED", documentation)
+        self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS", documentation)
         self.assertIn("STAGING_SMOKE_OWNER_ORGANIZATION_ID", documentation)
         self.assertIn("`test` GitHub environment", documentation)
         self.assertIn("same Microsoft Entra tenant", documentation)
@@ -427,12 +479,16 @@ class ApiInfrastructureTests(unittest.TestCase):
         provisioner_block = re.compile(r'\{\{ if index \.Env "AZURE_PROVISIONER_IDENTITY_ID" \}\}.*?\{\{ end \}\}\n', re.DOTALL)
         egress_block = re.compile(r'\{\{ if index \.Env "AZURE_API_EGRESS_SUBNET_ID" \}\}.*?\{\{ end \}\}\n', re.DOTALL)
         regenerated = template.replace("param pairingallowedorganizationids_value = ''\n", "", 1)
+        regenerated = regenerated.replace("param stagingbillingleverenabled_value = false\n", "", 1)
+        regenerated = regenerated.replace("param stagingbillingleverallowedorganizationids_value = ''\n", "", 1)
         regenerated = regenerated.replace("param cloudaccountissuer_value = ''\n", "", 1)
         regenerated = egress_block.sub("", provisioner_block.sub("", regenerated, count=1), count=1)
         self.assertNotIn("provisioner_identity_outputs_id", regenerated)
         self.assertNotIn("api_egress_subnet_id", regenerated)
         self.assertNotIn("cloudaccountissuer_value", regenerated)
         self.assertNotIn("pairingallowedorganizationids_value", regenerated)
+        self.assertNotIn("stagingbillingleverenabled_value", regenerated)
+        self.assertNotIn("stagingbillingleverallowedorganizationids_value", regenerated)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             module_fixture = root / "infra" / "api" / "api-website.module.bicep"
@@ -448,6 +504,8 @@ class ApiInfrastructureTests(unittest.TestCase):
             self.assertEqual(1, template_fixture.read_text().count("param provisioner_identity_outputs_id = ''"))
             self.assertEqual(1, template_fixture.read_text().count("param cloudaccountissuer_value = ''"))
             self.assertEqual(1, template_fixture.read_text().count("param pairingallowedorganizationids_value = ''"))
+            self.assertEqual(1, template_fixture.read_text().count("param stagingbillingleverenabled_value = false"))
+            self.assertEqual(1, template_fixture.read_text().count("param stagingbillingleverallowedorganizationids_value = ''"))
 
     def test_regeneration_rejects_unknown_catalog_authentication_without_partial_write(self) -> None:
         generated = self.generated_api_module().replace("Active Directory Default", "Unexpected Authentication")

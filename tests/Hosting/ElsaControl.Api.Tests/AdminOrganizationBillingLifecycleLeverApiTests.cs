@@ -20,63 +20,98 @@ public sealed class AdminOrganizationBillingLifecycleLeverApiTests
     private static readonly Guid OtherOrganizationId = Guid.Parse("20000000-0000-0000-0000-000000000099");
     private const string BffClientId = "elsa-cloud-bff";
     private const string BffScope = CloudBffDefaults.DefaultScope;
+    private const string TestSecretKey = "sk_test_harness";
+    private const string LiveSecretKey = "sk_live_harness";
 
     [Fact]
-    public async Task Flag_off_refuses_even_for_a_synthetic_org_and_writes_nothing()
+    public async Task Flag_off_refuses_even_for_an_allowlisted_org_and_writes_nothing()
     {
-        await using var app = CreateApp(enabled: false);
-        var organizationId = await SeedPastDueAsync(app, synthetic: true);
+        await using var app = CreateApp(enabled: false, allowlisted: AllowlistedOrganizationId);
+        await SeedPastDueAsync(app, AllowlistedOrganizationId);
 
-        var response = await PostAsync(Operator(app), organizationId);
+        var response = await PostAsync(Operator(app), AllowlistedOrganizationId);
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         Assert.Equal(StagingBillingLifecycleLeverDefaults.DisabledCode, await ProblemCodeAsync(response));
-        await AssertLeverDidNotRunAsync(app, organizationId, OrganizationSubscriptionState.PastDue);
+        await AssertLeverDidNotRunAsync(app, AllowlistedOrganizationId, OrganizationSubscriptionState.PastDue);
     }
 
     [Fact]
-    public async Task Synthetic_org_moves_grace_and_runs_the_normal_advancer()
+    public async Task Allowlisted_org_with_a_stripe_test_key_moves_grace_and_runs_the_normal_advancer()
     {
-        await using var app = CreateApp(enabled: true);
-        var organizationId = await SeedPastDueAsync(app, synthetic: true);
+        await using var app = CreateApp(enabled: true, allowlisted: AllowlistedOrganizationId);
+        await SeedPastDueAsync(app, AllowlistedOrganizationId);
 
-        var response = await PostAsync(Operator(app), organizationId);
+        var response = await PostAsync(Operator(app), AllowlistedOrganizationId);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadControlJsonAsync<AdminBillingLifecycleDeadlineAdvanceResponse>();
         Assert.NotNull(body);
-        Assert.Equal(organizationId, body.OrganizationId);
+        Assert.Equal(AllowlistedOrganizationId, body.OrganizationId);
         Assert.Equal(OrganizationBillingLifecycleDeadline.GraceEndsAt, body.Deadline);
         Assert.Equal(OrganizationSubscriptionState.PastDue, body.PreviousState);
         Assert.Equal(OrganizationSubscriptionState.Constrained, body.CurrentState);
         Assert.True(body.Advanced);
         Assert.True(body.NoticeCreated);
         Assert.Equal(Now, body.DeadlineAt);
-        await AssertAdvancedAsync(app, organizationId, OrganizationSubscriptionState.Constrained);
-        await AssertLeverAuditAsync(app, organizationId);
+        await AssertAdvancedAsync(app, AllowlistedOrganizationId, OrganizationSubscriptionState.Constrained);
+        await AssertLeverAuditAsync(app, AllowlistedOrganizationId);
         await AssertNoEngineWritesAsync(app);
     }
 
     [Fact]
-    public async Task Allowlisted_org_moves_grace_and_runs_the_normal_advancer()
+    public async Task Flag_on_with_a_live_stripe_key_is_disabled()
     {
-        await using var app = CreateApp(enabled: true, allowlisted: AllowlistedOrganizationId);
-        var organizationId = await SeedPastDueAsync(app, synthetic: false, organizationId: AllowlistedOrganizationId);
+        await using var app = CreateApp(
+            enabled: true,
+            allowlisted: AllowlistedOrganizationId,
+            stripeSecretKey: LiveSecretKey);
+        await SeedPastDueAsync(app, AllowlistedOrganizationId);
 
-        var response = await PostAsync(Operator(app), organizationId);
+        var response = await PostAsync(Operator(app), AllowlistedOrganizationId);
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var body = await response.Content.ReadControlJsonAsync<AdminBillingLifecycleDeadlineAdvanceResponse>();
-        Assert.Equal(OrganizationSubscriptionState.Constrained, body!.CurrentState);
-        await AssertAdvancedAsync(app, organizationId, OrganizationSubscriptionState.Constrained);
-        await AssertLeverAuditAsync(app, organizationId);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(StagingBillingLifecycleLeverDefaults.DisabledCode, await ProblemCodeAsync(response));
+        await AssertLeverDidNotRunAsync(app, AllowlistedOrganizationId, OrganizationSubscriptionState.PastDue);
+        Assert.DoesNotContain(LiveSecretKey, await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Flag_on_when_billing_is_not_configured_is_disabled()
+    {
+        await using var app = CreateApp(
+            enabled: true,
+            allowlisted: AllowlistedOrganizationId,
+            stripeEnabled: false,
+            stripeSecretKey: null);
+        await SeedPastDueAsync(app, AllowlistedOrganizationId);
+
+        var response = await PostAsync(Operator(app), AllowlistedOrganizationId);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(StagingBillingLifecycleLeverDefaults.DisabledCode, await ProblemCodeAsync(response));
+        await AssertLeverDidNotRunAsync(app, AllowlistedOrganizationId, OrganizationSubscriptionState.PastDue);
     }
 
     [Fact]
     public async Task Non_allowlisted_org_is_refused_without_writes()
     {
         await using var app = CreateApp(enabled: true, allowlisted: AllowlistedOrganizationId);
-        var organizationId = await SeedPastDueAsync(app, synthetic: false, organizationId: OtherOrganizationId);
+        await SeedPastDueAsync(app, OtherOrganizationId);
+
+        var response = await PostAsync(Operator(app), OtherOrganizationId);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(StagingBillingLifecycleLeverDefaults.OrganizationNotAllowedCode, await ProblemCodeAsync(response));
+        await AssertLeverDidNotRunAsync(app, OtherOrganizationId, OrganizationSubscriptionState.PastDue);
+    }
+
+    [Fact]
+    public async Task Synthetic_customer_reference_is_not_a_gate()
+    {
+        await using var app = CreateApp(enabled: true, allowlisted: AllowlistedOrganizationId);
+        var organizationId = Guid.NewGuid();
+        await SeedPastDueAsync(app, organizationId, customerReference: "synthetic");
 
         var response = await PostAsync(Operator(app), organizationId);
 
@@ -86,26 +121,108 @@ public sealed class AdminOrganizationBillingLifecycleLeverApiTests
     }
 
     [Fact]
+    public async Task Second_call_after_a_successful_advance_is_conflict_and_writes_nothing()
+    {
+        await using var app = CreateApp(enabled: true, allowlisted: AllowlistedOrganizationId);
+        await SeedPastDueAsync(app, AllowlistedOrganizationId);
+
+        var first = await PostAsync(Operator(app), AllowlistedOrganizationId);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        await AssertAdvancedAsync(app, AllowlistedOrganizationId, OrganizationSubscriptionState.Constrained);
+
+        var second = await PostAsync(Operator(app), AllowlistedOrganizationId);
+
+        Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
+        Assert.Equal(StagingBillingLifecycleLeverDefaults.DeadlineNotApplicableCode, await ProblemCodeAsync(second));
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var subscription = await db.OrganizationSubscriptions.AsNoTracking()
+            .SingleAsync(x => x.OrganizationId == AllowlistedOrganizationId);
+        Assert.Equal(OrganizationSubscriptionState.Constrained, subscription.State);
+        Assert.Equal(Now, subscription.GraceEndsAt);
+        Assert.Equal(Now, subscription.ConstrainedAt);
+        Assert.Equal(
+            1,
+            await db.OrganizationAuditRecords.AsNoTracking()
+                .CountAsync(x =>
+                    x.OrganizationId == AllowlistedOrganizationId &&
+                    x.Action == OrganizationAuditAction.BillingLifecycleDeadlineMoved));
+    }
+
+    [Fact]
+    public async Task Other_due_orgs_stay_untouched()
+    {
+        await using var app = CreateApp(enabled: true, allowlisted: AllowlistedOrganizationId);
+        await SeedOrgsAsync(
+            app,
+            new SeedOrg(AllowlistedOrganizationId, Now),
+            new SeedOrg(OtherOrganizationId, Now.AddDays(-8)));
+
+        var response = await PostAsync(Operator(app), AllowlistedOrganizationId);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        await AssertAdvancedAsync(app, AllowlistedOrganizationId, OrganizationSubscriptionState.Constrained);
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var other = await db.OrganizationSubscriptions.AsNoTracking()
+            .SingleAsync(x => x.OrganizationId == OtherOrganizationId);
+        Assert.Equal(OrganizationSubscriptionState.PastDue, other.State);
+        Assert.Equal(Now.AddDays(-1), other.GraceEndsAt);
+        Assert.Null(other.ConstrainedAt);
+        Assert.Empty(await db.OrganizationAuditRecords.AsNoTracking()
+            .Where(x => x.OrganizationId == OtherOrganizationId)
+            .ToListAsync());
+        Assert.Empty(await db.OrganizationBillingLifecycleNotices.AsNoTracking()
+            .Where(x => x.OrganizationId == OtherOrganizationId)
+            .ToListAsync());
+    }
+
+    [Fact]
+    public async Task Historical_constrained_at_is_refused_without_rewrite()
+    {
+        await using var app = CreateApp(enabled: true, allowlisted: AllowlistedOrganizationId);
+        await SeedConstrainedAsync(app, AllowlistedOrganizationId, constrainedAt: Now.Subtract(OrganizationSubscriptionLifecycle.ConstraintPeriod));
+
+        var response = await PostAsync(
+            Operator(app),
+            AllowlistedOrganizationId,
+            new AdminBillingLifecycleDeadlineAdvanceRequest(OrganizationBillingLifecycleDeadline.ConstrainedAt));
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(StagingBillingLifecycleLeverDefaults.DeadlineNotApplicableCode, await ProblemCodeAsync(response));
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var subscription = await db.OrganizationSubscriptions.AsNoTracking()
+            .SingleAsync(x => x.OrganizationId == AllowlistedOrganizationId);
+        Assert.Equal(OrganizationSubscriptionState.Constrained, subscription.State);
+        Assert.Equal(Now.Subtract(OrganizationSubscriptionLifecycle.ConstraintPeriod), subscription.ConstrainedAt);
+        Assert.Empty(await db.OrganizationAuditRecords.AsNoTracking()
+            .Where(x => x.Action == OrganizationAuditAction.BillingLifecycleDeadlineMoved)
+            .ToListAsync());
+    }
+
+    [Fact]
     public async Task Cloud_bff_caller_is_denied_and_the_route_is_not_allowlisted()
     {
         await using var app = CreateApp(
             enabled: true,
+            allowlisted: AllowlistedOrganizationId,
             additionalConfiguration: new Dictionary<string, string?>
             {
                 [$"{CloudBffOptions.ConfigurationSection}:Enabled"] = "true",
                 [$"{CloudBffOptions.ConfigurationSection}:ClientId"] = BffClientId,
                 [$"{CloudBffOptions.ConfigurationSection}:Scope"] = BffScope
             });
-        var organizationId = await SeedPastDueAsync(app, synthetic: true);
+        await SeedPastDueAsync(app, AllowlistedOrganizationId);
         var bff = app.CreateControlIdentityClient(
             subject: "bff-user",
             claims: new Dictionary<string, string> { ["azp"] = BffClientId, ["scp"] = BffScope });
 
-        var response = await PostAsync(bff, organizationId);
+        var response = await PostAsync(bff, AllowlistedOrganizationId);
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         Assert.Equal("cloud-bff.denied", await ProblemCodeAsync(response));
-        await AssertLeverDidNotRunAsync(app, organizationId, OrganizationSubscriptionState.PastDue);
+        await AssertLeverDidNotRunAsync(app, AllowlistedOrganizationId, OrganizationSubscriptionState.PastDue);
 
         var allowed = app.Services.GetRequiredService<EndpointDataSource>().Endpoints
             .OfType<RouteEndpoint>()
@@ -121,45 +238,48 @@ public sealed class AdminOrganizationBillingLifecycleLeverApiTests
     [Fact]
     public async Task Anonymous_and_customer_callers_are_denied_without_writes()
     {
-        await using var app = CreateApp(enabled: true);
-        var organizationId = await SeedPastDueAsync(app, synthetic: true);
+        await using var app = CreateApp(enabled: true, allowlisted: AllowlistedOrganizationId);
+        await SeedPastDueAsync(app, AllowlistedOrganizationId);
 
-        var anonymous = await PostAsync(app.CreateClient(), organizationId);
+        var anonymous = await PostAsync(app.CreateClient(), AllowlistedOrganizationId);
         var customer = app.CreateClient(new() { AllowAutoRedirect = false });
         app.AddControlSessionCookie(customer, subject: "customer-user", expiresUtc: Now.AddHours(2));
         customer.DefaultRequestHeaders.Add("Origin", "http://localhost");
-        var customerResponse = await PostAsync(customer, organizationId);
+        var customerResponse = await PostAsync(customer, AllowlistedOrganizationId);
 
         Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, customerResponse.StatusCode);
-        await AssertLeverDidNotRunAsync(app, organizationId, OrganizationSubscriptionState.PastDue);
+        await AssertLeverDidNotRunAsync(app, AllowlistedOrganizationId, OrganizationSubscriptionState.PastDue);
     }
 
     [Fact]
     public async Task Constrained_deadline_is_refused_while_the_subscription_is_still_in_grace()
     {
-        await using var app = CreateApp(enabled: true);
-        var organizationId = await SeedPastDueAsync(app, synthetic: true);
+        await using var app = CreateApp(enabled: true, allowlisted: AllowlistedOrganizationId);
+        await SeedPastDueAsync(app, AllowlistedOrganizationId);
 
         var response = await PostAsync(
             Operator(app),
-            organizationId,
+            AllowlistedOrganizationId,
             new AdminBillingLifecycleDeadlineAdvanceRequest(OrganizationBillingLifecycleDeadline.ConstrainedAt));
 
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
         Assert.Equal(StagingBillingLifecycleLeverDefaults.DeadlineNotApplicableCode, await ProblemCodeAsync(response));
-        await AssertLeverDidNotRunAsync(app, organizationId, OrganizationSubscriptionState.PastDue);
+        await AssertLeverDidNotRunAsync(app, AllowlistedOrganizationId, OrganizationSubscriptionState.PastDue);
     }
 
     private static ControlApiTestApplication CreateApp(
         bool enabled,
         Guid? allowlisted = null,
+        bool stripeEnabled = true,
+        string? stripeSecretKey = TestSecretKey,
         IReadOnlyDictionary<string, string?>? additionalConfiguration = null)
     {
         var configuration = new Dictionary<string, string?>
         {
             [$"{StagingBillingLifecycleLeverOptions.ConfigurationSection}:Enabled"] = enabled ? "true" : "false",
-            [$"{StagingBillingLifecycleLeverOptions.ConfigurationSection}:SyntheticCustomerReference"] = "synthetic"
+            ["Billing:Stripe:Enabled"] = stripeEnabled ? "true" : "false",
+            ["Billing:Stripe:SecretKey"] = stripeSecretKey
         };
         if (allowlisted is { } organizationId)
             configuration[$"{StagingBillingLifecycleLeverOptions.ConfigurationSection}:AllowedOrganizationIds:0"] = organizationId.ToString("D");
@@ -192,38 +312,55 @@ public sealed class AdminOrganizationBillingLifecycleLeverApiTests
             request ?? new AdminBillingLifecycleDeadlineAdvanceRequest(OrganizationBillingLifecycleDeadline.GraceEndsAt),
             ControlApiTestApplication.JsonOptions);
 
-    private static async Task<Guid> SeedPastDueAsync(
+    private static Task SeedPastDueAsync(
         ControlApiTestApplication app,
-        bool synthetic,
-        Guid? organizationId = null)
-    {
-        var id = organizationId ?? Guid.NewGuid();
-        await app.SeedAsync(async db =>
+        Guid organizationId,
+        DateTimeOffset? pastDueAt = null,
+        string? customerReference = null) =>
+        SeedOrgsAsync(app, new SeedOrg(organizationId, pastDueAt ?? Now, customerReference, constrain: false));
+
+    private static Task SeedConstrainedAsync(
+        ControlApiTestApplication app,
+        Guid organizationId,
+        DateTimeOffset constrainedAt) =>
+        SeedOrgsAsync(app, new SeedOrg(organizationId, constrainedAt.Subtract(OrganizationSubscriptionLifecycle.PaymentGracePeriod), constrain: true));
+
+    private static Task SeedOrgsAsync(ControlApiTestApplication app, params SeedOrg[] orgs) =>
+        app.SeedAsync(async db =>
         {
-            db.Organizations.Add(new Organization
-            {
-                Id = id,
-                Name = "Harness org",
-                CustomerReference = synthetic ? "synthetic" : null
-            });
-            await db.SaveChangesAsync();
             var store = new OrganizationBillingStore(db);
-            await store.StartTrialAsync(id, BillingProviderNames.Stripe, Now.AddDays(-14));
-            await store.ConsumeAsync(
-                new BillingProviderEvent(
-                    id,
-                    BillingProviderNames.Stripe,
-                    "evt_past_due",
-                    "customer.subscription.updated",
-                    OrganizationSubscriptionState.PastDue,
-                    Now,
-                    "sha256:" + new string('a', 64),
-                    "cus_harness",
-                    "sub_harness"),
-                Now);
+            foreach (var org in orgs)
+            {
+                db.Organizations.Add(new Organization
+                {
+                    Id = org.OrganizationId,
+                    Name = "Harness org",
+                    CustomerReference = org.CustomerReference
+                });
+                await db.SaveChangesAsync();
+                await store.StartTrialAsync(org.OrganizationId, BillingProviderNames.Stripe, org.PastDueAt.AddDays(-14));
+                await store.ConsumeAsync(
+                    new BillingProviderEvent(
+                        org.OrganizationId,
+                        BillingProviderNames.Stripe,
+                        $"evt_past_due_{org.OrganizationId:N}",
+                        "customer.subscription.updated",
+                        OrganizationSubscriptionState.PastDue,
+                        org.PastDueAt,
+                        "sha256:" + new string('a', 64),
+                        $"cus_{org.OrganizationId:N}"[..20],
+                        $"sub_{org.OrganizationId:N}"[..20]),
+                    org.PastDueAt);
+                if (org.Constrain)
+                    await store.AdvanceDueAsync(org.PastDueAt.Add(OrganizationSubscriptionLifecycle.PaymentGracePeriod));
+            }
         });
-        return id;
-    }
+
+    private sealed record SeedOrg(
+        Guid OrganizationId,
+        DateTimeOffset PastDueAt,
+        string? CustomerReference = null,
+        bool Constrain = false);
 
     private static async Task AssertAdvancedAsync(
         ControlApiTestApplication app,

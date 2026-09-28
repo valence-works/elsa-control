@@ -87,6 +87,33 @@ public sealed class OrganizationBillingLifecycleDeadlineStoreTests
     }
 
     [Fact]
+    public async Task Already_due_constrained_at_is_refused_without_rewrite()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        await fixture.BecomePastDueAsync();
+        await fixture.Store.AdvanceDueAsync((await fixture.SubscriptionAsync()).GraceEndsAt!.Value);
+        fixture.Db.ChangeTracker.Clear();
+        var constrained = await fixture.SubscriptionAsync();
+        var original = constrained.ConstrainedAt;
+        Assert.Equal(OrganizationSubscriptionState.Constrained, constrained.State);
+        Assert.NotNull(original);
+
+        var move = await fixture.Store.MoveDeadlineAsync(
+            fixture.OrganizationId,
+            OrganizationBillingLifecycleDeadline.ConstrainedAt,
+            original.Value.Add(OrganizationSubscriptionLifecycle.ConstraintPeriod),
+            "operator");
+        fixture.Db.ChangeTracker.Clear();
+
+        Assert.Equal(OrganizationBillingLifecycleDeadlineMoveOutcome.DeadlineNotApplicable, move.Outcome);
+        Assert.Equal(original, (await fixture.SubscriptionAsync()).ConstrainedAt);
+        Assert.Equal(OrganizationSubscriptionState.Constrained, (await fixture.SubscriptionAsync()).State);
+        Assert.Empty(await fixture.Db.OrganizationAuditRecords.AsNoTracking()
+            .Where(x => x.Action == OrganizationAuditAction.BillingLifecycleDeadlineMoved)
+            .ToListAsync());
+    }
+
+    [Fact]
     public async Task Unpermitted_deadline_rewrite_is_still_bind_once()
     {
         await using var fixture = await Fixture.CreateAsync();

@@ -53,6 +53,30 @@ var pairingAllowlistSettings = [for (organizationId, i) in pairingAllowedOrganiz
   value: organizationId
 }]
 
+@description('When true, emit Billing:StagingLifecycleLever:Enabled. Staging only; production must stay false.')
+param stagingbillingleverenabled_value bool = false
+
+@description('Comma-separated organization GUIDs the staging billing lifecycle lever may target. Empty refuses every organization. Staging only; production must stay empty.')
+param stagingbillingleverallowedorganizationids_value string = ''
+
+var stagingBillingLeverAllowedOrganizationIds = empty(stagingbillingleverallowedorganizationids_value)
+  ? []
+  : filter(map(split(stagingbillingleverallowedorganizationids_value, ','), id => trim(id)), id => !empty(id))
+
+var stagingBillingLeverEnabledSettings = stagingbillingleverenabled_value ? [
+  {
+    name: 'Billing__StagingLifecycleLever__Enabled'
+    value: 'true'
+  }
+] : []
+
+var stagingBillingLeverAllowlistSettings = [for (organizationId, i) in stagingBillingLeverAllowedOrganizationIds: {
+  name: 'Billing__StagingLifecycleLever__AllowedOrganizationIds__${i}'
+  value: organizationId
+}]
+
+var stagingBillingLeverSettings = concat(stagingBillingLeverEnabledSettings, stagingBillingLeverAllowlistSettings)
+
 resource mainContainer 'Microsoft.Web/sites/sitecontainers@2025-03-01' = {
   name: 'main'
   properties: {
@@ -231,7 +255,8 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
           value: 'elsa-control'
         }
         ],
-        pairingAllowlistSettings)
+        pairingAllowlistSettings,
+        stagingBillingLeverSettings)
     }
   }
   identity: {

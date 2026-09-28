@@ -214,6 +214,12 @@ public interface IOrganizationBillingLifecycleStore
         DateTimeOffset now,
         CancellationToken cancellationToken = default);
 
+    Task<OrganizationBillingLifecycleAdvance?> AdvanceOneAsync(
+        Guid organizationId,
+        Guid subscriptionId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default);
+
     Task<OrganizationBillingLifecycleAdvance?> RequestDeletionAsync(
         Guid organizationId,
         DateTimeOffset requestedAt,

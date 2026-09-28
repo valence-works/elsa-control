@@ -53,6 +53,22 @@ public sealed class OrganizationBillingService(
         CancellationToken cancellationToken = default) =>
         LifecycleStore.AdvanceDueAsync(_timeProvider.GetUtcNow(), cancellationToken);
 
+    public Task<OrganizationBillingLifecycleAdvance?> AdvanceOneAsync(
+        Guid organizationId,
+        Guid subscriptionId,
+        CancellationToken cancellationToken = default)
+    {
+        if (organizationId == Guid.Empty)
+            throw new ArgumentException("Organization ID is required.", nameof(organizationId));
+        if (subscriptionId == Guid.Empty)
+            throw new ArgumentException("Subscription ID is required.", nameof(subscriptionId));
+        return LifecycleStore.AdvanceOneAsync(
+            organizationId,
+            subscriptionId,
+            _timeProvider.GetUtcNow(),
+            cancellationToken);
+    }
+
     public Task<OrganizationBillingLifecycleAdvance?> RequestDeletionAsync(
         Guid organizationId,
         CancellationToken cancellationToken = default)

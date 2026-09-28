@@ -8,8 +8,9 @@ namespace ElsaControl.Api.Admin.Organizations;
 
 /// <summary>
 /// Staging-only operator lever that moves a billing grace or constraint deadline
-/// into the past and then runs the normal lifecycle advancer. It is never Cloud
-/// BFF allowlisted and cannot write commercial or engine state itself.
+/// into the past and then runs the normal lifecycle advancer for that
+/// organization alone. It is never Cloud BFF allowlisted and cannot write
+/// commercial or engine state itself.
 /// </summary>
 public static class AdminOrganizationBillingLifecycleLeverEndpoints
 {
@@ -64,7 +65,7 @@ public static class AdminOrganizationBillingLifecycleLeverEndpoints
             StatusCodes.Status403Forbidden),
         StagingBillingLifecycleLeverOutcome.OrganizationNotAllowed => Problem(
             StagingBillingLifecycleLeverDefaults.OrganizationNotAllowedCode,
-            "The organization is not harness-created or staging-allowlisted.",
+            "The organization is not on the staging billing lifecycle lever allowlist.",
             StatusCodes.Status403Forbidden),
         StagingBillingLifecycleLeverOutcome.OrganizationNotFound => Problem(
             "organization.not-found",
@@ -84,8 +85,7 @@ public static class AdminOrganizationBillingLifecycleLeverEndpoints
     private static AdminBillingLifecycleDeadlineAdvanceResponse ToResponse(StagingBillingLifecycleLeverResult result)
     {
         var move = result.Move!;
-        var advance = result.Advances?
-            .LastOrDefault(x => x.OrganizationId == move.OrganizationId && x.SubscriptionId == move.SubscriptionId);
+        var advance = result.Advance;
         return new AdminBillingLifecycleDeadlineAdvanceResponse(
             move.OrganizationId,
             move.SubscriptionId!.Value,

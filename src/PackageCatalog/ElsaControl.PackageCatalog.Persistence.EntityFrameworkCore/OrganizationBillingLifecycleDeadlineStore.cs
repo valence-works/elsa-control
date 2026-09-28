@@ -107,7 +107,9 @@ public sealed partial class OrganizationBillingStore : IOrganizationBillingLifec
                     return false;
                 previous = constrainedAt.ToUniversalTime();
                 dueAt = previous.Add(OrganizationSubscriptionLifecycle.ConstraintPeriod);
-                next = dueAt <= now ? previous : now.Subtract(OrganizationSubscriptionLifecycle.ConstraintPeriod);
+                if (dueAt <= now)
+                    return false;
+                next = now.Subtract(OrganizationSubscriptionLifecycle.ConstraintPeriod);
                 return next <= previous;
             default:
                 return false;

@@ -126,12 +126,19 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertIn("AZURE_PROVISIONER_IDENTITY_ID: ${{ vars.AZURE_PROVISIONER_IDENTITY_ID }}", self.source)
         self.assertIn("AZURE_API_EGRESS_SUBNET_ID: ${{ vars.AZURE_API_EGRESS_SUBNET_ID }}", self.source)
         self.assertIn("EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ vars.EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS }}", self.source)
+        self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED: ${{ vars.STAGING_BILLING_LIFECYCLE_LEVER_ENABLED }}", self.source)
+        self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS: ${{ vars.STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS }}", self.source)
         self.assertIn("STAGING_SMOKE_OWNER_ORGANIZATION_ID: ${{ vars.STAGING_SMOKE_OWNER_ORGANIZATION_ID }}", self.source)
         self.assertIn(
             "EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ steps.deployment-config.outputs.pairing_allowlist }}",
             self.source,
         )
         self.assertIn("scripts/apply-external-engine-pairing-settings.sh", self.source)
+        self.assertIn("scripts/apply-staging-billing-lifecycle-lever-settings.sh", self.source)
+        self.assertIn(
+            "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS: ${{ steps.deployment-config.outputs.staging_billing_lever_allowlist }}",
+            self.source,
+        )
 
     def test_cloud_account_issuer_accepts_exact_supabase_projects_only(self) -> None:
         check_start = self.source.index(
@@ -338,6 +345,99 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertNotIn("echo '${EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS}'", self.source)
         self.assertNotIn("echo \"$EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS\"", helper)
         self.assertNotIn("echo '${EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS}'", helper)
+
+    def test_staging_billing_lifecycle_lever_is_staging_only_and_excludes_the_smoke_owner_org(self) -> None:
+        check_script = self._deployment_config_script()
+        rehearsal = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        smoke = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        base = {
+            "DEPLOY_MODE": "app",
+            "AZURE_CLIENT_ID": "00000000-0000-0000-0000-000000000001",
+            "AZURE_TENANT_ID": "00000000-0000-0000-0000-000000000002",
+            "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
+            "AZURE_CONTAINER_REGISTRY_ENDPOINT": "test.azurecr.io",
+            "AZURE_ENV_NAME": "test",
+            "AZURE_LOCATION": "westeurope",
+            "AZURE_RESOURCE_GROUP": "rg-test",
+            "AZURE_WEBAPP_NAME": "test-api",
+        }
+
+        def run_check(**extra: str) -> tuple[subprocess.CompletedProcess[str], str, str]:
+            with tempfile.NamedTemporaryFile() as output, tempfile.NamedTemporaryFile() as github_env:
+                environment = os.environ.copy()
+                environment.update(base)
+                environment.update(extra)
+                environment["GITHUB_OUTPUT"] = output.name
+                environment["GITHUB_ENV"] = github_env.name
+                result = subprocess.run(
+                    ["bash", "-c", check_script],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                return result, Path(output.name).read_text(), Path(github_env.name).read_text()
+
+        staging_stripe = {
+            "ELSA_CLOUD_STAGING_ORIGIN": "https://staging.example.test",
+            "STRIPE_HOSTED_PRICE_ID": "price_test",
+            "STRIPE_TEST_SECRET_KEY": "sk_test_fixture",
+            "STRIPE_TEST_WEBHOOK_SIGNING_SECRET": "whsec_fixture",
+        }
+
+        production_enabled, _, _ = run_check(
+            TARGET_ENVIRONMENT="production",
+            STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="true",
+        )
+        self.assertNotEqual(0, production_enabled.returncode)
+        self.assertIn("must be unset", production_enabled.stdout + production_enabled.stderr)
+
+        production_allowlist, _, _ = run_check(
+            TARGET_ENVIRONMENT="production",
+            STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS=rehearsal,
+        )
+        self.assertNotEqual(0, production_allowlist.returncode)
+        self.assertIn("must be unset", production_allowlist.stdout + production_allowlist.stderr)
+        self.assertNotIn(rehearsal, production_allowlist.stdout + production_allowlist.stderr)
+
+        production_empty, _, _ = run_check(
+            TARGET_ENVIRONMENT="production",
+            STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="",
+            STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS="",
+        )
+        self.assertEqual(0, production_empty.returncode, production_empty.stderr)
+
+        staging_includes_smoke, _, _ = run_check(
+            TARGET_ENVIRONMENT="test",
+            STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="true",
+            STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS=f"{rehearsal},{smoke}",
+            STAGING_SMOKE_OWNER_ORGANIZATION_ID=smoke,
+            **staging_stripe,
+        )
+        self.assertNotEqual(0, staging_includes_smoke.returncode)
+        combined = staging_includes_smoke.stdout + staging_includes_smoke.stderr
+        self.assertIn("must not include the staging Hosted smoke owner organization", combined)
+        self.assertNotIn(rehearsal, combined)
+        self.assertNotIn(smoke, combined)
+
+        staging_ok, output, github_env = run_check(
+            TARGET_ENVIRONMENT="test",
+            STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="true",
+            STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS=f" {rehearsal} ",
+            STAGING_SMOKE_OWNER_ORGANIZATION_ID=smoke,
+            **staging_stripe,
+        )
+        self.assertEqual(0, staging_ok.returncode, staging_ok.stdout + staging_ok.stderr)
+        self.assertNotIn(rehearsal, staging_ok.stdout + staging_ok.stderr)
+        self.assertIn("staging_billing_lever_enabled=true", output)
+        self.assertIn(f"staging_billing_lever_allowlist={rehearsal}", output)
+        self.assertIn("staging_billing_lever_allowlist_count=1", output)
+        self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED=true", github_env)
+        self.assertIn(f"STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS={rehearsal}", github_env)
+        helper = (ROOT / "scripts" / "apply-staging-billing-lifecycle-lever-settings.sh").read_text()
+        self.assertIn("Staging billing lifecycle lever app setting count: before=", helper)
+        self.assertNotIn("echo \"$STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS\"", self.source)
+        self.assertNotIn("echo \"$STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS\"", helper)
 
     def test_staging_infra_requires_a_provisioner_identity(self) -> None:
         check_start = self.source.index("        run: |\n", self.source.index("      - name: Check deployment configuration"))

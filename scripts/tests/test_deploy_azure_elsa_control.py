@@ -43,6 +43,10 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         self.assertIn("--template-file infra/api/api-website.module.bicep", self.source)
         self.assertIn("pairingallowedorganizationids_value", self.source)
         self.assertIn("EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS", self.source)
+        self.assertIn("stagingbillingleverenabled_value", self.source)
+        self.assertIn("stagingbillingleverallowedorganizationids_value", self.source)
+        self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED", self.source)
+        self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS", self.source)
         self.assertIn("IMAGE=\"$IMAGE_REPOSITORY@$IMAGE_DIGEST\"", self.source)
         self.assertIn("AZURE_CONTAINER_REGISTRY_ENDPOINT", self.source)
         self.assertIn("CONTROL_SQL_SQLSERVERFQDN", self.source)
@@ -52,6 +56,22 @@ class DeployAzureElsaControlTests(unittest.TestCase):
     def test_refuses_a_pairing_allowlist_unless_the_target_is_staging(self) -> None:
         environment = self.environment()
         environment["EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        result = subprocess.run(
+            [str(DEPLOY_SCRIPT), "--environment", "prod"],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("only permitted for the test (staging) environment", result.stderr)
+        self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
+
+    def test_refuses_the_staging_billing_lifecycle_lever_unless_the_target_is_staging(self) -> None:
+        environment = self.environment()
+        environment["STAGING_BILLING_LIFECYCLE_LEVER_ENABLED"] = "true"
+        environment["STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         result = subprocess.run(
             [str(DEPLOY_SCRIPT), "--environment", "prod"],
             cwd=ROOT,
