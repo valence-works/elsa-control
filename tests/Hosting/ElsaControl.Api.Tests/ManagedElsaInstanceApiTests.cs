@@ -741,7 +741,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         var middleBody = await middle.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
         await MarkOperationSucceededAsync(app, middleBody!.Operation.Id);
         var newest = await SendOperationAsync(
-            client, workspaceId, instanceId, created.Instance.ETag, "operations-list-newest",
+            client, workspaceId, instanceId, middleBody.Instance.ETag, "operations-list-newest",
             new(ElsaInstanceOperationAction.Reconcile));
         Assert.Equal(HttpStatusCode.Accepted, newest.StatusCode);
         var newestBody = await newest.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
@@ -835,14 +835,16 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         var created = await CreateCanonicalInstanceAsync(client, workspaceId, "audit-limit-runtime");
         var instanceId = created.Instance.InstanceId;
         await MarkOperationSucceededAsync(app, created.Operation.Id);
+        var etag = created.Instance.ETag;
         for (var index = 0; index < 4; index++)
         {
             var accepted = await SendOperationAsync(
-                client, workspaceId, instanceId, created.Instance.ETag, $"audit-limit-{index}",
+                client, workspaceId, instanceId, etag, $"audit-limit-{index}",
                 new(ElsaInstanceOperationAction.Reconcile));
             Assert.Equal(HttpStatusCode.Accepted, accepted.StatusCode);
             var body = await accepted.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
-            await MarkOperationSucceededAsync(app, body!.Operation.Id);
+            etag = body!.Instance.ETag;
+            await MarkOperationSucceededAsync(app, body.Operation.Id);
         }
 
         var defaultPage = await client.GetControlJsonAsync<ManagedElsaInstanceAuditResponse>(
