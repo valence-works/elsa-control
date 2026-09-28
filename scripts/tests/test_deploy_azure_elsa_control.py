@@ -84,6 +84,43 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         self.assertIn("only permitted for the test (staging) environment", result.stderr)
         self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
 
+    def test_treats_a_false_or_empty_lever_flag_as_unset_on_production(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            call_log = temporary_path / "az-calls"
+            fake_az = temporary_path / "az"
+            fake_az.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "printf '%s\\n' \"$*\" >> \"${AZ_CALL_LOG:?}\"\n"
+                "case \"$*\" in\n"
+                "  'account set --subscription '*) exit 0 ;;\n"
+                "  'deployment sub what-if '*) exit 0 ;;\n"
+                "  *) exit 41 ;;\n"
+                "esac\n"
+            )
+            fake_az.chmod(0o755)
+
+            for enabled in ("", "false", "FALSE"):
+                with self.subTest(enabled=enabled):
+                    environment = self.environment()
+                    environment["PATH"] = f"{temporary_path}{os.pathsep}{environment['PATH']}"
+                    environment["AZ_CALL_LOG"] = str(call_log)
+                    environment["STAGING_BILLING_LIFECYCLE_LEVER_ENABLED"] = enabled
+                    environment["STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS"] = ""
+                    call_log.write_text("")
+                    result = subprocess.run(
+                        [str(DEPLOY_SCRIPT), "--environment", "prod", "--what-if"],
+                        cwd=ROOT,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertIn("deployment sub what-if", call_log.read_text())
+                    self.assertNotIn("stagingbillinglever", call_log.read_text())
+
     def test_rejects_non_supabase_cloud_issuer_before_azure_mutation(self) -> None:
         environment = self.environment()
         environment["CLOUD_ACCOUNT_ISSUER"] = "https://example.invalid/auth/v1"

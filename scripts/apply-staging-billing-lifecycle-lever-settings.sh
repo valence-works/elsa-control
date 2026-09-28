@@ -16,23 +16,24 @@ WEBAPP_NAME="${AZURE_WEBAPP_NAME:?AZURE_WEBAPP_NAME is required.}"
 
 lever_guid_pattern='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 
-if [ -n "$ENABLED_RAW" ] || [ -n "$ALLOWLIST" ]; then
-  if [ "$TARGET_ENVIRONMENT" != "test" ]; then
-    echo "::error::STAGING_BILLING_LIFECYCLE_LEVER_ENABLED and STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS must be unset for ${TARGET_ENVIRONMENT:-unknown}; production ships the lever off."
-    exit 1
-  fi
-fi
-
 enabled=false
 if [ -n "$ENABLED_RAW" ]; then
   case "${ENABLED_RAW,,}" in
     true) enabled=true ;;
-    false) enabled=false ;;
+    false)
+      ENABLED_RAW=""
+      enabled=false
+      ;;
     *)
       echo "::error::STAGING_BILLING_LIFECYCLE_LEVER_ENABLED must be true or false."
       exit 1
       ;;
   esac
+fi
+
+if { [ "$enabled" = true ] || [ -n "$ALLOWLIST" ]; } && [ "$TARGET_ENVIRONMENT" != "test" ]; then
+  echo "::error::STAGING_BILLING_LIFECYCLE_LEVER_ENABLED and STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS must be unset for ${TARGET_ENVIRONMENT:-unknown}; production ships the lever off."
+  exit 1
 fi
 
 expected_ids=()

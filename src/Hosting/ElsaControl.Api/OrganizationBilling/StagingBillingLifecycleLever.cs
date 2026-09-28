@@ -49,12 +49,8 @@ public sealed class StagingBillingLifecycleLever(
 
         if (!options.Value.Enabled || !IsStripeTestMode(stripeOptions.Value))
         {
-            if (options.Value.Enabled)
-            {
-                logger.LogWarning(
-                    "The staging billing lifecycle lever is disabled because a required staging signal is missing.");
-            }
-
+            logger.LogWarning(
+                "The staging billing lifecycle lever is disabled because a required staging signal is missing.");
             return new StagingBillingLifecycleLeverResult(StagingBillingLifecycleLeverOutcome.Disabled);
         }
 

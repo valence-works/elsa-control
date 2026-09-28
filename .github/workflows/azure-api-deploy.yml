@@ -168,7 +168,7 @@ jobs:
           lever_allowlist_raw="${STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS:-}"
           lever_allowlist_count=0
           lever_normalized=""
-          lever_enabled=false
+          lever_enabled=""
           if [ -n "$lever_enabled_raw" ] || [ -n "$lever_allowlist_raw" ]; then
             if [ "$TARGET_ENVIRONMENT" != "test" ]; then
               echo "::error::STAGING_BILLING_LIFECYCLE_LEVER_ENABLED and STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS must be unset for ${TARGET_ENVIRONMENT}; production ships the lever off."
@@ -178,7 +178,7 @@ jobs:
           if [ -n "$lever_enabled_raw" ]; then
             case "${lever_enabled_raw,,}" in
               true) lever_enabled=true ;;
-              false) lever_enabled=false ;;
+              false) lever_enabled="" ;;
               *)
                 echo "::error::STAGING_BILLING_LIFECYCLE_LEVER_ENABLED must be true or false."
                 exit 1

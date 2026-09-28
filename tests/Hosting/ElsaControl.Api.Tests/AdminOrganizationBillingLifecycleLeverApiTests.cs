@@ -22,6 +22,7 @@ public sealed class AdminOrganizationBillingLifecycleLeverApiTests
     private const string BffScope = CloudBffDefaults.DefaultScope;
     private const string TestSecretKey = "sk_test_harness";
     private const string LiveSecretKey = "sk_live_harness";
+    private const string RestrictedTestSecretKey = "rk_test_harness";
 
     [Fact]
     public async Task Flag_off_refuses_even_for_an_allowlisted_org_and_writes_nothing()
@@ -83,6 +84,40 @@ public sealed class AdminOrganizationBillingLifecycleLeverApiTests
             enabled: true,
             allowlisted: AllowlistedOrganizationId,
             stripeEnabled: false,
+            stripeSecretKey: null);
+        await SeedPastDueAsync(app, AllowlistedOrganizationId);
+
+        var response = await PostAsync(Operator(app), AllowlistedOrganizationId);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(StagingBillingLifecycleLeverDefaults.DisabledCode, await ProblemCodeAsync(response));
+        await AssertLeverDidNotRunAsync(app, AllowlistedOrganizationId, OrganizationSubscriptionState.PastDue);
+    }
+
+    [Fact]
+    public async Task Flag_on_with_a_restricted_test_key_is_disabled()
+    {
+        await using var app = CreateApp(
+            enabled: true,
+            allowlisted: AllowlistedOrganizationId,
+            stripeSecretKey: RestrictedTestSecretKey);
+        await SeedPastDueAsync(app, AllowlistedOrganizationId);
+
+        var response = await PostAsync(Operator(app), AllowlistedOrganizationId);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(StagingBillingLifecycleLeverDefaults.DisabledCode, await ProblemCodeAsync(response));
+        await AssertLeverDidNotRunAsync(app, AllowlistedOrganizationId, OrganizationSubscriptionState.PastDue);
+        Assert.DoesNotContain(RestrictedTestSecretKey, await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Flag_on_with_a_missing_stripe_key_is_disabled()
+    {
+        await using var app = CreateApp(
+            enabled: true,
+            allowlisted: AllowlistedOrganizationId,
+            stripeEnabled: true,
             stripeSecretKey: null);
         await SeedPastDueAsync(app, AllowlistedOrganizationId);
 
