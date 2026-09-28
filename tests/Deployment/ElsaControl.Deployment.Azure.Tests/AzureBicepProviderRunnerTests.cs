@@ -26,8 +26,15 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     private static bool IsDeploymentSubmission(string[] args) =>
         args is ["deployment", "group", "create", ..] && args.Contains("--no-wait");
 
-    private static bool IsDeploymentShow(string[] args, string query) =>
-        args is ["deployment", "group", "show", ..] && args.Contains("--name") && args.Contains(query);
+    private static bool IsDeploymentPoll(string[] args) =>
+        args is ["deployment", "group", "show", ..] && args.Contains("--name") &&
+        args.Any(argument => argument.Contains("properties.provisioningState", StringComparison.Ordinal));
+
+    private const string FreshDeploymentTimestamp = "2100-01-01T00:00:00+00:00";
+    private const string StaleDeploymentTimestamp = "2020-01-01T00:00:00+00:00";
+
+    private static string DeploymentPoll(string state, string? outputs = null, string timestamp = FreshDeploymentTimestamp) =>
+        $$"""{"state":"{{state}}","timestamp":"{{timestamp}}","outputs":{{outputs ?? "null"}}}""";
 
     private static bool IsDeploymentReplayObservation(string[] args) =>
         args is ["deployment", "group", "list", ..] && args.Any(argument => argument.StartsWith("[?name=='", StringComparison.Ordinal) &&
@@ -505,7 +512,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         Assert.True(result.Outcome == AzureProviderRunnerOutcome.Completed, $"{result.Code}: {result.Message}");
         var submission = Assert.Single(process.Calls, call => call.Contains("deployment") && call.Contains("create"));
         Assert.DoesNotContain("properties.outputs", submission);
-        Assert.Equal(3, process.Calls.Count(call => IsDeploymentShow(call, "properties.provisioningState")));
+        Assert.Equal(3, process.Calls.Count(IsDeploymentPoll));
         Assert.Single(process.Calls.Where(call => call.Contains("deployment")).Select(DeploymentNameOf).Distinct());
     }
 
@@ -525,12 +532,33 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Workload_deployment_that_stays_running_past_a_poll_window_completes_when_it_succeeds()
+    {
+        // The observed production case: a workload deployment resumed a suspended environment for 15m20s.
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "0");
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "0");
+        process.Deployment(WorkloadOutputs(), "Accepted", "Running", "Running", "Succeeded");
+        process.Success(args => args.Contains("sql") && args.Contains("server") && args.Contains("list"), "1");
+        process.Success(args => args.Contains("ad-admin") && args.Contains("list"), "[{\"login\":\"proof-bootstrap\",\"sid\":\"11111111-1111-1111-1111-111111111111\"}]");
+        process.Success(args => args.Contains("ad-only-auth") && args.Contains("enable"));
+        var clock = new SteppingTimeProvider(TimeSpan.FromMinutes(6));
+
+        var result = await new AzureBicepProviderRunner(_fixture.Options, _fixture.Scope, process, timeProvider: clock)
+            .RunAsync(_fixture.Command(AzureProviderRunnerStep.Workload, RegistryReadyResources()));
+
+        Assert.True(result.Outcome == AzureProviderRunnerOutcome.Completed, $"{result.Code}: {result.Message}");
+        Assert.True(clock.Elapsed > _fixture.Options.CommandTimeout, $"Only {clock.Elapsed} elapsed.");
+        Assert.Single(process.Calls, call => IsDeploymentSubmission(call) && call.Contains("deployWorkload=true"));
+    }
+
+    [Fact]
     public async Task Foundation_deployment_still_running_at_its_wait_limit_is_uncertain_and_never_cancelled_or_resubmitted()
     {
         var process = NewFoundationProcess();
         process.Success(IsDeploymentSubmission);
-        process.Success(args => IsDeploymentShow(args, "properties.provisioningState"), "Running");
-        process.Success(args => IsDeploymentShow(args, "properties.provisioningState"), "Running");
+        process.Success(IsDeploymentPoll, DeploymentPoll("Running"));
+        process.Success(IsDeploymentPoll, DeploymentPoll("Running"));
         var options = _fixture.Options with { FoundationDeploymentTimeout = TimeSpan.FromMinutes(20) };
 
         var result = await new AzureBicepProviderRunner(options, _fixture.Scope, process, timeProvider: new SteppingTimeProvider(TimeSpan.FromMinutes(10)))
@@ -544,6 +572,27 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         Assert.DoesNotContain(process.Calls, call => call.Contains("cancel") || call.Contains("delete"));
     }
 
+    [Fact]
+    public async Task Workload_deployment_is_bounded_by_its_own_wait_limit()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "0");
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "0");
+        process.Success(IsDeploymentSubmission);
+        process.Success(IsDeploymentPoll, DeploymentPoll("Running"));
+        var options = _fixture.Options with
+        {
+            FoundationDeploymentTimeout = TimeSpan.FromHours(6),
+            WorkloadDeploymentTimeout = TimeSpan.FromMinutes(5)
+        };
+
+        var result = await new AzureBicepProviderRunner(options, _fixture.Scope, process, timeProvider: new SteppingTimeProvider(TimeSpan.FromMinutes(5)))
+            .RunAsync(_fixture.Command(AzureProviderRunnerStep.Workload, RegistryReadyResources()));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal("azure.deployment.wait-exceeded", result.Code);
+    }
+
     [Theory]
     [InlineData("Failed")]
     [InlineData("Canceled")]
@@ -551,8 +600,8 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     {
         var process = NewFoundationProcess();
         process.Success(IsDeploymentSubmission);
-        process.Success(args => IsDeploymentShow(args, "properties.provisioningState"), "Running");
-        process.Success(args => IsDeploymentShow(args, "properties.provisioningState"), state);
+        process.Success(IsDeploymentPoll, DeploymentPoll("Running"));
+        process.Success(IsDeploymentPoll, DeploymentPoll(state));
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Foundation));
 
@@ -563,46 +612,106 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
-    public async Task Transient_deployment_state_read_failures_do_not_end_the_wait()
+    public async Task Failed_read_of_a_succeeded_deployment_and_its_outputs_is_retried_until_it_completes()
     {
         var process = NewFoundationProcess();
         process.Success(IsDeploymentSubmission);
-        process.Failure(args => IsDeploymentShow(args, "properties.provisioningState"));
-        process.Status(args => IsDeploymentShow(args, "properties.provisioningState"), AzureCommandProcessStatus.TimedOut, AzureCommandProcessFailureKind.TimedOut);
-        process.Success(args => IsDeploymentShow(args, "properties.provisioningState"), "Succeeded");
-        process.Success(args => IsDeploymentShow(args, "properties.outputs"), FoundationOutputs());
+        process.Success(IsDeploymentPoll, DeploymentPoll("Running"));
+        process.Failure(IsDeploymentPoll);
+        process.Status(IsDeploymentPoll, AzureCommandProcessStatus.TimedOut, AzureCommandProcessFailureKind.TimedOut);
+        process.Success(IsDeploymentPoll, "not json");
+        process.Failure(IsDeploymentPoll);
+        process.Success(IsDeploymentPoll, DeploymentPoll("Succeeded", FoundationOutputs()));
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Foundation));
 
         Assert.True(result.Outcome == AzureProviderRunnerOutcome.Completed, $"{result.Code}: {result.Message}");
+        Assert.Single(process.Calls, IsDeploymentSubmission);
     }
 
     [Fact]
-    public async Task Persistent_deployment_state_read_failures_end_the_wait_as_uncertain()
+    public async Task Persistent_deployment_read_failures_are_tolerated_until_the_wait_limit()
     {
         var process = NewFoundationProcess();
         process.Success(IsDeploymentSubmission);
-        for (var attempt = 0; attempt < 3; attempt++)
-            process.Failure(args => IsDeploymentShow(args, "properties.provisioningState"));
+        for (var poll = 0; poll < 6; poll++)
+            process.Failure(IsDeploymentPoll);
+        var options = _fixture.Options with { FoundationDeploymentTimeout = TimeSpan.FromMinutes(60) };
+
+        var result = await new AzureBicepProviderRunner(options, _fixture.Scope, process, timeProvider: new SteppingTimeProvider(TimeSpan.FromMinutes(10)))
+            .RunAsync(_fixture.Command(AzureProviderRunnerStep.Foundation));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal("azure.deployment.wait-exceeded", result.Code);
+        Assert.Equal(6, process.Calls.Count(IsDeploymentPoll));
+        Assert.Single(process.Calls, IsDeploymentSubmission);
+    }
+
+    [Fact]
+    public async Task Cancelled_deployment_read_ends_the_wait_immediately()
+    {
+        var process = NewFoundationProcess();
+        process.Success(IsDeploymentSubmission);
+        process.Status(IsDeploymentPoll, AzureCommandProcessStatus.Cancelled, AzureCommandProcessFailureKind.Cancelled);
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Foundation));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal("azure.step.cancelled", result.Code);
+    }
+
+    [Theory]
+    [InlineData("Failed")]
+    [InlineData("Succeeded")]
+    public async Task Terminal_record_older_than_the_resubmission_is_not_read_as_its_result(string staleState)
+    {
+        var process = NewFoundationProcess();
+        process.Success(IsDeploymentReplayObservation, $"[\"{staleState}\"]");
+        process.Success(IsDeploymentSubmission);
+        process.Success(IsDeploymentPoll, DeploymentPoll(staleState, "{}", StaleDeploymentTimestamp));
+        process.Success(IsDeploymentPoll, DeploymentPoll("Running"));
+        process.Success(IsDeploymentPoll, DeploymentPoll("Succeeded", FoundationOutputs()));
+
+        var result = await _fixture.Runner(process).RunAsync(ReplayedFoundation());
+
+        Assert.True(result.Outcome == AzureProviderRunnerOutcome.Completed, $"{result.Code}: {result.Message}");
+        Assert.Equal(3, process.Calls.Count(IsDeploymentPoll));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Ambiguous_submission_attaches_to_the_deployment_Azure_accepted(bool timedOut)
+    {
+        var process = NewFoundationProcess();
+        if (timedOut)
+            process.Status(IsDeploymentSubmission, AzureCommandProcessStatus.TimedOut, AzureCommandProcessFailureKind.TimedOut);
+        else
+            process.Failure(IsDeploymentSubmission);
+        process.Success(IsDeploymentReplayObservation, "[\"Running\"]");
+        process.Success(IsDeploymentPoll, DeploymentPoll("Succeeded", FoundationOutputs()));
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Foundation));
+
+        Assert.True(result.Outcome == AzureProviderRunnerOutcome.Completed, $"{result.Code}: {result.Message}");
+        Assert.Single(process.Calls, IsDeploymentSubmission);
+    }
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("[\"Failed\"]")]
+    public async Task Ambiguous_submission_without_an_in_flight_deployment_is_uncertain_without_resubmitting(string existing)
+    {
+        var process = NewFoundationProcess();
+        process.Status(IsDeploymentSubmission, AzureCommandProcessStatus.TimedOut, AzureCommandProcessFailureKind.TimedOut);
+        process.Success(IsDeploymentReplayObservation, existing);
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Foundation));
 
         Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
         Assert.Equal("azure.step.uncertain", result.Code);
         Assert.Single(process.Calls, IsDeploymentSubmission);
-    }
-
-    [Fact]
-    public async Task Cancelled_deployment_state_read_ends_the_wait_immediately()
-    {
-        var process = NewFoundationProcess();
-        process.Success(IsDeploymentSubmission);
-        process.Status(args => IsDeploymentShow(args, "properties.provisioningState"), AzureCommandProcessStatus.Cancelled, AzureCommandProcessFailureKind.Cancelled);
-
-        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Foundation));
-
-        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
-        Assert.Equal("azure.step.cancelled", result.Code);
+        Assert.DoesNotContain(process.Calls, IsDeploymentPoll);
     }
 
     [Theory]
@@ -612,8 +721,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     {
         var process = NewFoundationProcess();
         process.Success(IsDeploymentReplayObservation, $"[\"{state}\"]");
-        process.Success(args => IsDeploymentShow(args, "properties.provisioningState"), "Succeeded");
-        process.Success(args => IsDeploymentShow(args, "properties.outputs"), FoundationOutputs());
+        process.Success(IsDeploymentPoll, DeploymentPoll("Succeeded", FoundationOutputs()));
 
         var result = await _fixture.Runner(process).RunAsync(ReplayedFoundation());
 
@@ -647,29 +755,6 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
 
         Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
         Assert.DoesNotContain(process.Calls, IsDeploymentSubmission);
-    }
-
-    [Fact]
-    public async Task Workload_deployment_is_submitted_without_waiting_and_bounded_by_its_own_wait_limit()
-    {
-        var process = new FakeCommandProcess();
-        process.Success(args => args.Contains("resource") && args.Contains("list"), "0");
-        process.Success(args => args.Contains("resource") && args.Contains("list"), "0");
-        process.Success(IsDeploymentSubmission);
-        process.Success(args => IsDeploymentShow(args, "properties.provisioningState"), "Running");
-        process.Success(args => IsDeploymentShow(args, "properties.provisioningState"), "Running");
-        var options = _fixture.Options with
-        {
-            FoundationDeploymentTimeout = TimeSpan.FromHours(6),
-            WorkloadDeploymentTimeout = TimeSpan.FromMinutes(5)
-        };
-
-        var result = await new AzureBicepProviderRunner(options, _fixture.Scope, process, timeProvider: new SteppingTimeProvider(TimeSpan.FromMinutes(5)))
-            .RunAsync(_fixture.Command(AzureProviderRunnerStep.Workload, RegistryReadyResources()));
-
-        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
-        Assert.Equal("azure.deployment.wait-exceeded", result.Code);
-        Assert.Contains(process.Calls, call => IsDeploymentSubmission(call) && call.Contains("deployWorkload=true"));
     }
 
     private static FakeCommandProcess NewFoundationProcess()
@@ -3431,7 +3516,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
                 ObservationAttempts = observationAttempts,
                 CleanupObservationAttempts = cleanupObservationAttempts,
                 ObservationDelay = TimeSpan.Zero,
-                DeploymentPollInterval = TimeSpan.Zero
+                DeploymentPollInterval = TimeSpan.FromMilliseconds(1)
             };
         }
 
@@ -3514,13 +3599,13 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
 
         public void Success(Func<string[], bool> matcher, string output = "", Action? after = null) => _responses.Enqueue(new(matcher, AzureCommandProcessStatus.Succeeded, output, after));
         public void Failure(Func<string[], bool> matcher, string output = "") => _responses.Enqueue(new(matcher, AzureCommandProcessStatus.Failed, output, null));
-        /// <summary>Scripts a no-wait ARM submission, its provisioning-state polls (Succeeded by default) and its outputs read.</summary>
+        /// <summary>Scripts a no-wait ARM submission and its polls; the last state (Succeeded by default) carries the outputs.</summary>
         public void Deployment(string outputs, params string[] states)
         {
             Success(IsDeploymentSubmission);
-            foreach (var state in states is [] ? ["Succeeded"] : states)
-                Success(args => IsDeploymentShow(args, "properties.provisioningState"), state);
-            Success(args => IsDeploymentShow(args, "properties.outputs"), outputs);
+            string[] polls = states is [] ? ["Succeeded"] : states;
+            for (var index = 0; index < polls.Length; index++)
+                Success(IsDeploymentPoll, DeploymentPoll(polls[index], index == polls.Length - 1 ? outputs : null));
         }
 
         public void SqlBatchError(Func<string[], bool> matcher) => _responses.Enqueue(new(matcher, AzureCommandProcessStatus.Succeeded, "", null, SimulateSqlBatchError: true));

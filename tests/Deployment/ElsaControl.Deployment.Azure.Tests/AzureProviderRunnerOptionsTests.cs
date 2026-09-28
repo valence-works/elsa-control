@@ -49,7 +49,7 @@ public sealed class AzureProviderRunnerOptionsTests : IDisposable
     [InlineData(nameof(AzureProviderRunnerOptions.FoundationDeploymentTimeout), 361)]
     [InlineData(nameof(AzureProviderRunnerOptions.WorkloadDeploymentTimeout), 0)]
     [InlineData(nameof(AzureProviderRunnerOptions.WorkloadDeploymentTimeout), 361)]
-    [InlineData(nameof(AzureProviderRunnerOptions.DeploymentPollInterval), -1)]
+    [InlineData(nameof(AzureProviderRunnerOptions.DeploymentPollInterval), 0)]
     [InlineData(nameof(AzureProviderRunnerOptions.DeploymentPollInterval), 6)]
     public void Rejects_deployment_tracking_bounds_outside_the_governed_range(string option, int minutes)
     {

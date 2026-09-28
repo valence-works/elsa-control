@@ -162,9 +162,12 @@ public sealed record AzureProviderRunnerOptions
     /// has been observed to take longer than the 15-minute command timeout.
     /// </summary>
     public TimeSpan FoundationDeploymentTimeout { get; init; } = TimeSpan.FromMinutes(90);
-    /// <summary>How long the workload step tracks its submitted ARM deployment.</summary>
-    public TimeSpan WorkloadDeploymentTimeout { get; init; } = TimeSpan.FromMinutes(30);
-    /// <summary>Delay between provisioning-state polls of a submitted ARM deployment.</summary>
+    /// <summary>
+    /// How long the workload step tracks its submitted ARM deployment. A workload deployment
+    /// against a suspended Container Apps environment has been observed at 15m20s.
+    /// </summary>
+    public TimeSpan WorkloadDeploymentTimeout { get; init; } = TimeSpan.FromMinutes(60);
+    /// <summary>Delay between provisioning-state polls of a submitted ARM deployment. Must be positive.</summary>
     public TimeSpan DeploymentPollInterval { get; init; } = TimeSpan.FromSeconds(15);
     public int MaximumOutputCharacters { get; init; } = 1_048_576;
     public int ObservationAttempts { get; init; } = 60;
@@ -305,8 +308,8 @@ public sealed record AzureProviderRunnerOptions
             throw new ArgumentOutOfRangeException(nameof(FoundationDeploymentTimeout), "The foundation deployment wait must be positive and no longer than six hours.");
         if (WorkloadDeploymentTimeout <= TimeSpan.Zero || WorkloadDeploymentTimeout > TimeSpan.FromHours(6))
             throw new ArgumentOutOfRangeException(nameof(WorkloadDeploymentTimeout), "The workload deployment wait must be positive and no longer than six hours.");
-        if (DeploymentPollInterval < TimeSpan.Zero || DeploymentPollInterval > TimeSpan.FromMinutes(5))
-            throw new ArgumentOutOfRangeException(nameof(DeploymentPollInterval), "The deployment poll interval must be between zero and five minutes.");
+        if (DeploymentPollInterval <= TimeSpan.Zero || DeploymentPollInterval > TimeSpan.FromMinutes(5))
+            throw new ArgumentOutOfRangeException(nameof(DeploymentPollInterval), "The deployment poll interval must be positive and no longer than five minutes.");
         if (MaximumOutputCharacters is < 1024 or > 16_777_216)
             throw new ArgumentOutOfRangeException(nameof(MaximumOutputCharacters), "The command output cap is outside the governed range.");
         if (ObservationAttempts is < 1 or > 120)

@@ -129,7 +129,7 @@ on that lifecycle state alone. Provider `Accepted`/`Running` remains pending; pr
 alone is insufficient: the lifecycle must still reach the healthy or confirmed-deleted state.
 The runner's command timeout defaults to 15 minutes and bounds each Azure CLI command. Foundation
 and workload ARM deployments are submitted without waiting and polled by name under their own
-`FoundationDeploymentTimeout` (default 90 minutes) and `WorkloadDeploymentTimeout` (default 30
+`FoundationDeploymentTimeout` (default 90 minutes) and `WorkloadDeploymentTimeout` (default 60
 minutes); see [the runner composition](../product/azure-provider-runner.md#long-running-arm-deployments).
 The harness's overall bound is separate. A local command timeout or wait limit does not establish
 that Azure stopped working.

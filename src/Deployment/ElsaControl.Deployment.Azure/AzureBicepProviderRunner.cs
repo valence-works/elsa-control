@@ -25,7 +25,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private const string SqlConnectionSecretName = "sql-connection";
     private const string SigningKeySecretName = "identity-signing-key";
     private const string AdminPasswordSecretName = "admin-password";
-    private const int MaximumConsecutiveDeploymentObservationFailures = 3;
+    /// <summary>Allowance for clock skew between Control and ARM when rejecting a previous same-name deployment record.</summary>
+    private static readonly TimeSpan DeploymentTimestampSkew = TimeSpan.FromMinutes(1);
     private static readonly HashSet<string> TerminalDeploymentStates = new(["Succeeded", "Failed", "Canceled"], StringComparer.OrdinalIgnoreCase);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -2413,9 +2414,11 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
 
     /// <summary>
     /// Submits a resource-group ARM deployment without holding a CLI process for its lifetime, then
-    /// tracks it by its deterministic name with short polls. A replayed step attaches to a deployment
-    /// that is still in flight instead of resubmitting it. The local wait limit never cancels the
-    /// remote deployment: it ends the step as Uncertain so recovery observes the same named deployment.
+    /// tracks it by its deterministic name with short polls that read state, timestamp and outputs
+    /// together. A replayed step, or a submission whose result is ambiguous, attaches to a deployment
+    /// that is still in flight instead of resubmitting it. Transient read failures are tolerated until
+    /// the step's wait limit; the limit never cancels the remote deployment but ends the step as
+    /// Uncertain so an explicit recover replays it and attaches to the same named deployment.
     /// </summary>
     private async Task<(DeploymentOutputs? Outputs, AzureProviderRunnerResult? Error)> DeployAndAwaitAsync(
         AzureProviderRunnerCommand command,
@@ -2430,67 +2433,75 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         var inFlight = false;
         if (command.IsStepReplay)
         {
-            var existing = await ExecuteAzAsync(command,
-                ["deployment", "group", "list", ..deploymentScope,
-                    "--query", $"[?name=='{deploymentName}'].properties.provisioningState", "--output", "json", "--only-show-errors"],
-                ParseStringArrayAsync,
-                cancellationToken);
+            var existing = await ListDeploymentStatesAsync(command, deploymentScope, deploymentName, cancellationToken);
             if (!existing.Succeeded || existing.Value is null)
                 return (null, ProcessFailure(command, phase, existing, resources, mutation: true));
-            inFlight = existing.Value.Value is [var existingState] && !IsTerminalDeploymentState(existingState);
+            inFlight = IsInFlight(existing.Value.Value);
         }
 
+        // A terminal record older than this submission belongs to a previous same-name deployment.
+        DateTimeOffset? submittedAfter = null;
         if (!inFlight)
         {
+            submittedAfter = _timeProvider.GetUtcNow() - DeploymentTimestampSkew;
             EnsureMutationAuthority(command);
             var submitted = await ExecuteAzAsync<AzureCommandNoOutput>(command, submitArguments, static _ => AzureCommandNoOutput.Instance, cancellationToken);
             if (!submitted.Succeeded)
-                return (null, ProcessFailure(command, phase, submitted, resources, mutation: true));
+            {
+                // ARM may have accepted the PUT before the command failed: attach instead of parking it.
+                if (!IsTransientObservationFailure(submitted))
+                    return (null, ProcessFailure(command, phase, submitted, resources, mutation: true));
+                var probe = await ListDeploymentStatesAsync(command, deploymentScope, deploymentName, cancellationToken);
+                if (!probe.Succeeded || probe.Value is null || !IsInFlight(probe.Value.Value))
+                    return (null, ProcessFailure(command, phase, submitted, resources, mutation: true));
+            }
         }
 
         var deadline = _timeProvider.GetUtcNow() + waitLimit;
-        var failedObservations = 0;
         while (true)
         {
-            var state = await ExecuteAzAsync(command,
+            var poll = await ExecuteAzAsync(command,
                 ["deployment", "group", "show", ..deploymentScope, "--name", deploymentName,
-                    "--query", "properties.provisioningState", "--output", "tsv", "--only-show-errors"],
-                ParseStringAsync,
+                    "--query", "{state:properties.provisioningState,timestamp:properties.timestamp,outputs:properties.outputs}",
+                    "--output", "json", "--only-show-errors"],
+                ParseDeploymentPollAsync,
                 cancellationToken);
-            if (state.Succeeded)
+            if (poll.Succeeded && poll.Value is not null)
             {
-                failedObservations = 0;
-                if (string.Equals(state.Value?.Value, "Succeeded", StringComparison.OrdinalIgnoreCase))
-                    break;
-                if (IsTerminalDeploymentState(state.Value?.Value))
+                var observed = poll.Value.Value;
+                var current = submittedAfter is null || observed.Timestamp >= submittedAfter;
+                if (current && string.Equals(observed.State, "Succeeded", StringComparison.OrdinalIgnoreCase) && observed.Outputs is not null)
+                    return (observed.Outputs, null);
+                if (current && IsTerminalDeploymentState(observed.State) && !string.Equals(observed.State, "Succeeded", StringComparison.OrdinalIgnoreCase))
                     return (null, Uncertain(command, phase, "azure.deployment.failed",
                         "Azure reported the deployment as failed or canceled, so its partial result requires recovery.", resources));
             }
-            else if (!IsTransientObservationFailure(state) || ++failedObservations >= MaximumConsecutiveDeploymentObservationFailures)
+            else if (!IsTransientObservationFailure(poll))
             {
-                return (null, ProcessFailure(command, phase, state, resources, mutation: true));
+                return (null, ProcessFailure(command, phase, poll, resources, mutation: true));
             }
 
             if (_timeProvider.GetUtcNow() >= deadline)
                 return (null, Uncertain(command, phase, "azure.deployment.wait-exceeded",
-                    "The Azure deployment was still running when its configured wait limit elapsed. It was neither cancelled nor resubmitted.", resources));
+                    "The Azure deployment was not observed to finish within its configured wait limit. It was neither cancelled nor resubmitted.", resources));
             await Task.Delay(_options.DeploymentPollInterval, _timeProvider, cancellationToken);
         }
-
-        var outputs = await ExecuteAzAsync(command,
-            ["deployment", "group", "show", ..deploymentScope, "--name", deploymentName,
-                "--query", "properties.outputs", "--output", "json", "--only-show-errors"],
-            ParseDeploymentOutputsAsync,
-            cancellationToken);
-        return outputs.Succeeded && outputs.Value is not null
-            ? (outputs.Value.Value, null)
-            : (null, ProcessFailure(command, phase, outputs, resources, mutation: true));
     }
+
+    private Task<AzureCommandProcessResult<SafeValue<IReadOnlyList<string>>>> ListDeploymentStatesAsync(
+        AzureProviderRunnerCommand command, string[] deploymentScope, string deploymentName, CancellationToken cancellationToken) =>
+        ExecuteAzAsync(command,
+            ["deployment", "group", "list", ..deploymentScope,
+                "--query", $"[?name=='{deploymentName}'].properties.provisioningState", "--output", "json", "--only-show-errors"],
+            ParseStringArrayAsync,
+            cancellationToken);
+
+    private static bool IsInFlight(IReadOnlyList<string> states) => states is [var state] && !IsTerminalDeploymentState(state);
 
     private static bool IsTerminalDeploymentState(string? state) =>
         state is not null && TerminalDeploymentStates.Contains(state);
 
-    /// <summary>A plain failed or timed-out read may be retried; cancellation and unproven termination may not.</summary>
+    /// <summary>A plain failed or timed-out command may be retried or probed; cancellation and unproven termination may not.</summary>
     private static bool IsTransientObservationFailure<T>(AzureCommandProcessResult<T> result)
         where T : AzureCommandSafeOutput =>
         result.Status is AzureCommandProcessStatus.Failed or AzureCommandProcessStatus.TimedOut &&
@@ -2846,6 +2857,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
 
     private static SafeValue<T> ParseJson<T>(ReadOnlyMemory<char> output) => new(JsonSerializer.Deserialize<T>(output.Span, JsonOptions) ?? throw new JsonException());
     private static SafeValue<DeploymentOutputs> ParseDeploymentOutputsAsync(ReadOnlyMemory<char> output) => ParseJson<DeploymentOutputs>(output);
+    private static SafeValue<DeploymentPoll> ParseDeploymentPollAsync(ReadOnlyMemory<char> output) => ParseJson<DeploymentPoll>(output);
     private static SafeValue<IReadOnlyDictionary<string, string>> ParseTagsAsync(ReadOnlyMemory<char> output) => new(new ReadOnlyDictionary<string, string>(ParseJson<Dictionary<string, string>>(output).Value));
     private static SafeValue<IReadOnlyList<RoleAssignment>> ParseRoleAssignmentsAsync(ReadOnlyMemory<char> output) => new(ParseJson<List<RoleAssignment>>(output).Value);
     private static SafeValue<IReadOnlyList<AzureResource>> ParseResourcesAsync(ReadOnlyMemory<char> output) => new(ParseJson<List<AzureResource>>(output).Value);
@@ -2968,6 +2980,13 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
 
             return value.GetString();
         }
+    }
+
+    private sealed class DeploymentPoll
+    {
+        public string? State { get; set; }
+        public DateTimeOffset? Timestamp { get; set; }
+        public DeploymentOutputs? Outputs { get; set; }
     }
 
     private sealed class OutputValue
