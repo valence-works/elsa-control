@@ -166,7 +166,8 @@ public sealed class ExternalEngineEnrollmentService(
         string thumbprint;
         try
         {
-            digest = ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(request.NewPublicKey, request.Overlap);
+            digest = ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(
+                request.NewPublicKey, request.Overlap, request.RunnerId);
             thumbprint = ExternalEngineEnrollmentProtocol.PublicKeyThumbprint(request.NewPublicKey);
         }
         catch (Exception exception) when (exception is ArgumentException or CryptographicException or FormatException)

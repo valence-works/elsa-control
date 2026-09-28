@@ -43,7 +43,7 @@ public static class ExternalEngineEnrollmentProtocol
         return Base64UrlEncode(SHA256.HashData(nonceBytes));
     }
 
-    public static string CreateRotationPayloadDigest(string newPublicKey, TimeSpan overlap)
+    public static string CreateRotationPayloadDigest(string newPublicKey, TimeSpan overlap, string runnerId)
     {
         if (overlap <= TimeSpan.Zero || overlap > ExternalEngineEnrollmentDefaults.MaximumRotationOverlap)
             throw new ArgumentOutOfRangeException(nameof(overlap), "Connector key overlap must be between one tick and five minutes.");
@@ -51,8 +51,16 @@ public static class ExternalEngineEnrollmentProtocol
         var payload = EncodeCanonical(
             RotationDomain,
             PublicKeyThumbprint(newPublicKey),
-            overlap.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            overlap.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            RequiredRunnerId(runnerId));
         return Base64UrlEncode(SHA256.HashData(payload));
+    }
+
+    public static string RequiredRunnerId(string? value)
+    {
+        if (!TryDecodeBounded(value, 16, 32, out _))
+            throw new ArgumentException("Runner ID must be unpadded base64url of 16 to 32 random bytes.", nameof(value));
+        return value!;
     }
 
     public static string CreateRevocationPayloadDigest() =>

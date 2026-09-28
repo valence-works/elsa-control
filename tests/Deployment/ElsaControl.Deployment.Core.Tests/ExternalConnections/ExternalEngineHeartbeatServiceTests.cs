@@ -58,23 +58,22 @@ public sealed class ExternalEngineHeartbeatServiceTests
         var canonical = Encoding.UTF8.GetString(ExternalEngineHeartbeatService.CreateCanonicalPayload(report));
 
         Assert.Equal(
-            "{\"sequence\":1,\"observedAt\":\"2026-09-17T10:00:00.0000000Z\",\"connectorProtocol\":\"1\",\"connectorVersion\":\"1.4.0\",\"runtimeHealth\":\"healthy\",\"runtimeKind\":\"server\",\"observedDistribution\":\"valence-runtime\",\"observedVersion\":\"3.8.1\",\"studioDestination\":\"https://studio.example.test/elsa/\",\"capabilities\":[\"connection.status\",\"studio.open\"],\"components\":[{\"id\":\"runtime\",\"imageDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},{\"id\":\"worker\",\"imageDigest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]}",
+            "{\"sequence\":1,\"observedAt\":\"2026-09-17T10:00:00.0000000Z\",\"connectorProtocol\":\"1\",\"connectorVersion\":\"1.4.0\",\"runnerId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"runtimeHealth\":\"healthy\",\"runtimeKind\":\"server\",\"observedDistribution\":\"valence-runtime\",\"observedVersion\":\"3.8.1\",\"studioDestination\":\"https://studio.example.test/elsa/\",\"capabilities\":[\"connection.status\",\"studio.open\"],\"components\":[{\"id\":\"runtime\",\"imageDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},{\"id\":\"worker\",\"imageDigest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]}",
             canonical);
-        Assert.Equal("lv-I-PKdau9NK9KBH6y_lxB0lXkpUFiZRNkXxeLS6pA", ExternalEngineHeartbeatService.CreatePayloadDigest(report));
     }
 
     [Fact]
     public void Optional_display_name_is_omitted_from_canonical_bytes_unless_present()
     {
         var absent = Report(1);
-        var present = Report(1) with { DisplayName = "  Acme Orders Engine  " };
+        var present = Report(1) with { DisplayName = "Acme Orders Engine" };
 
         Assert.Equal(
             Encoding.UTF8.GetString(ExternalEngineHeartbeatService.CreateCanonicalPayload(absent)),
             Encoding.UTF8.GetString(ExternalEngineHeartbeatService.CreateCanonicalPayload(Report(1))));
         Assert.DoesNotContain("displayName", Encoding.UTF8.GetString(ExternalEngineHeartbeatService.CreateCanonicalPayload(absent)), StringComparison.Ordinal);
         Assert.Equal(
-            "{\"sequence\":1,\"observedAt\":\"2026-09-17T10:00:00.0000000Z\",\"connectorProtocol\":\"1\",\"connectorVersion\":\"1.4.0\",\"displayName\":\"Acme Orders Engine\",\"runtimeHealth\":\"healthy\",\"runtimeKind\":\"server\",\"observedDistribution\":\"valence-runtime\",\"observedVersion\":\"3.8.1\",\"studioDestination\":\"https://studio.example.test/elsa/\",\"capabilities\":[\"connection.status\"],\"components\":[]}",
+            "{\"sequence\":1,\"observedAt\":\"2026-09-17T10:00:00.0000000Z\",\"connectorProtocol\":\"1\",\"connectorVersion\":\"1.4.0\",\"runnerId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"displayName\":\"Acme Orders Engine\",\"runtimeHealth\":\"healthy\",\"runtimeKind\":\"server\",\"observedDistribution\":\"valence-runtime\",\"observedVersion\":\"3.8.1\",\"studioDestination\":\"https://studio.example.test/elsa/\",\"capabilities\":[\"connection.status\"],\"components\":[]}",
             Encoding.UTF8.GetString(ExternalEngineHeartbeatService.CreateCanonicalPayload(present)));
     }
 
@@ -110,19 +109,23 @@ public sealed class ExternalEngineHeartbeatServiceTests
     [Theory]
     [InlineData("")]
     [InlineData("   ")]
-    public async Task Blank_host_display_name_is_treated_as_absent(string displayName)
+    [InlineData(" Acme")]
+    [InlineData("Acme ")]
+    public void Untrimmed_or_blank_host_display_name_is_rejected(string displayName)
     {
-        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        var fixture = await Fixture.CreateAsync(key);
-        var result = await fixture.Service.SubmitAsync(fixture.Request(Report(1) with { DisplayName = displayName }, key));
-
-        Assert.Equal(ExternalEngineHeartbeatStatus.Accepted, result!.Status);
-        Assert.Equal("Engine", result.Connection!.DisplayName);
+        var report = Report(1) with { DisplayName = displayName };
+        Assert.Throws<ArgumentException>(() => ExternalEngineHeartbeatService.CreateCanonicalPayload(report));
     }
 
     [Theory]
     [InlineData("Acme\nOrders")]
     [InlineData("Acme\tOrders")]
+    [InlineData("Acme\u202EOrders")]
+    [InlineData("Acme\u2066Orders")]
+    [InlineData("Acme\u200BOrders")]
+    [InlineData("Acme\uFEFFOrders")]
+    [InlineData("Acme\u2028Orders")]
+    [InlineData("Acme\u2029Orders")]
     public void Invalid_host_display_name_is_rejected(string displayName)
     {
         var report = Report(1) with { DisplayName = displayName };
@@ -146,6 +149,33 @@ public sealed class ExternalEngineHeartbeatServiceTests
         var result = await fixture.Service.SubmitAsync(fixture.Request(Report(1) with { DisplayName = displayName }, key));
 
         Assert.Equal(displayName, result!.Connection!.DisplayName);
+    }
+
+    [Fact]
+    public void Display_name_length_is_counted_in_unicode_code_points_after_nfc()
+    {
+        var composed = "é";
+        var decomposed = "e\u0301";
+        Assert.Equal(
+            Encoding.UTF8.GetString(ExternalEngineHeartbeatService.CreateCanonicalPayload(Report(1) with { DisplayName = composed })),
+            Encoding.UTF8.GetString(ExternalEngineHeartbeatService.CreateCanonicalPayload(Report(1) with { DisplayName = decomposed })));
+
+        var eightySupplementary = string.Concat(Enumerable.Repeat("😀", 80));
+        Assert.Equal(
+            eightySupplementary,
+            ExternalEngineHeartbeatService.NormalizeHostDisplayName(eightySupplementary));
+        Assert.Throws<ArgumentException>(() =>
+            ExternalEngineHeartbeatService.NormalizeHostDisplayName(string.Concat(Enumerable.Repeat("😀", 81))));
+    }
+
+    [Fact]
+    public void Non_ascii_display_name_uses_javascript_encoder_default_escapes()
+    {
+        var report = Report(1) with { DisplayName = "Café & π" };
+        Assert.Contains(
+            "\"displayName\":\"Caf\\u00E9 \\u0026 \\u03C0\"",
+            Encoding.UTF8.GetString(ExternalEngineHeartbeatService.CreateCanonicalPayload(report)),
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -306,11 +336,122 @@ public sealed class ExternalEngineHeartbeatServiceTests
         Assert.Equal(5, fixture.Store.Connection.LastHeartbeatSequence);
     }
 
+    [Fact]
+    public async Task First_heartbeat_takes_the_runner_lease_without_a_change_audit()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var fixture = await Fixture.CreateAsync(key);
+
+        var result = await fixture.Service.SubmitAsync(fixture.Request(Report(1), key));
+
+        Assert.Equal(ExternalEngineHeartbeatStatus.Accepted, result!.Status);
+        Assert.Equal(ExternalEngineTestRunners.Alpha, result.Connection!.ActiveRunnerId);
+        Assert.Equal(Now.Add(ExternalEngineHeartbeatService.RunnerLeaseTtl), result.Connection.RunnerLeaseExpiresAt);
+        Assert.DoesNotContain(ExternalEngineHeartbeatService.RunnerChangedAuditAction, fixture.Store.Audits);
+    }
+
+    [Fact]
+    public async Task Takeover_is_blocked_while_another_runner_holds_a_live_lease()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var fixture = await Fixture.CreateAsync(key);
+        var first = await fixture.Service.SubmitAsync(fixture.Request(Report(1), key));
+        Assert.Equal(ExternalEngineHeartbeatStatus.Accepted, first!.Status);
+        var acceptedSequence = first.Connection!.LastHeartbeatSequence;
+        var acceptedLease = first.Connection.RunnerLeaseExpiresAt;
+
+        fixture.Time.Advance(TimeSpan.FromSeconds(6));
+        var blocked = await fixture.Service.SubmitAsync(
+            fixture.Request(Report(2, runnerId: ExternalEngineTestRunners.Bravo), key));
+
+        Assert.Equal(ExternalEngineHeartbeatStatus.RunnerConflict, blocked!.Status);
+        Assert.Equal(TimeSpan.FromSeconds(9), blocked.RetryAfter);
+        Assert.Equal(acceptedSequence, fixture.Store.Connection.LastHeartbeatSequence);
+        Assert.Equal(ExternalEngineTestRunners.Alpha, fixture.Store.Connection.ActiveRunnerId);
+        Assert.Equal(acceptedLease, fixture.Store.Connection.RunnerLeaseExpiresAt);
+        Assert.DoesNotContain(ExternalEngineHeartbeatService.RunnerChangedAuditAction, fixture.Store.Audits);
+    }
+
+    [Fact]
+    public async Task Takeover_after_expiry_resets_the_sequence_baseline_and_is_audited()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var fixture = await Fixture.CreateAsync(key);
+        Assert.True((await fixture.Service.SubmitAsync(fixture.Request(Report(9), key)))!.Accepted);
+
+        fixture.Time.Advance(ExternalEngineHeartbeatService.RunnerLeaseTtl);
+        var takeover = await fixture.Service.SubmitAsync(
+            fixture.Request(Report(1, runnerId: ExternalEngineTestRunners.Bravo), key));
+
+        Assert.Equal(ExternalEngineHeartbeatStatus.Accepted, takeover!.Status);
+        Assert.Equal(ExternalEngineTestRunners.Bravo, takeover.Connection!.ActiveRunnerId);
+        Assert.Equal(1, takeover.Connection.LastHeartbeatSequence);
+        Assert.Equal(Now.Add(ExternalEngineHeartbeatService.RunnerLeaseTtl * 2), takeover.Connection.RunnerLeaseExpiresAt);
+        Assert.Contains(ExternalEngineHeartbeatService.RunnerChangedAuditAction, fixture.Store.Audits);
+    }
+
+    [Fact]
+    public async Task Two_runners_racing_leave_the_first_holder_and_409_the_second()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var fixture = await Fixture.CreateAsync(key);
+        fixture.Store.InjectConcurrentSequence(3, ExternalEngineTestRunners.Bravo);
+
+        var raced = await fixture.Service.SubmitAsync(fixture.Request(Report(2), key));
+
+        Assert.Equal(ExternalEngineHeartbeatStatus.RunnerConflict, raced!.Status);
+        Assert.Equal(ExternalEngineTestRunners.Bravo, fixture.Store.Connection.ActiveRunnerId);
+        Assert.Equal(3, fixture.Store.Connection.LastHeartbeatSequence);
+        Assert.False(fixture.Store.AppliedAfterConcurrent);
+    }
+
+    [Fact]
+    public async Task Rejected_heartbeat_does_not_renew_or_take_the_runner_lease()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var fixture = await Fixture.CreateAsync(key);
+        var first = await fixture.Service.SubmitAsync(fixture.Request(Report(1), key));
+        var lease = first!.Connection!.RunnerLeaseExpiresAt;
+        Assert.Equal(ExternalEngineTestRunners.Alpha, first.Connection.ActiveRunnerId);
+
+        fixture.Time.Advance(TimeSpan.FromSeconds(6));
+        var invalid = await fixture.Service.SubmitAsync(
+            fixture.Request(Report(2, capabilities: ["engine.delete"]), key));
+        Assert.Equal(ExternalEngineHeartbeatStatus.InvalidReport, invalid!.Status);
+        Assert.Equal(lease, fixture.Store.Connection.RunnerLeaseExpiresAt);
+        Assert.Equal(1, fixture.Store.Connection.LastHeartbeatSequence);
+
+        var outOfOrder = await fixture.Service.SubmitAsync(fixture.Request(Report(1), key));
+        Assert.Equal(ExternalEngineHeartbeatStatus.OutOfOrder, outOfOrder!.Status);
+        Assert.Equal(lease, fixture.Store.Connection.RunnerLeaseExpiresAt);
+
+        var otherRunner = await fixture.Service.SubmitAsync(
+            fixture.Request(Report(2, runnerId: ExternalEngineTestRunners.Bravo), key));
+        Assert.Equal(ExternalEngineHeartbeatStatus.RunnerConflict, otherRunner!.Status);
+        Assert.Equal(lease, fixture.Store.Connection.RunnerLeaseExpiresAt);
+        Assert.Equal(ExternalEngineTestRunners.Alpha, fixture.Store.Connection.ActiveRunnerId);
+    }
+
+    [Fact]
+    public async Task Host_label_replacement_is_audited_without_the_label_text()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var fixture = await Fixture.CreateAsync(key);
+
+        var result = await fixture.Service.SubmitAsync(
+            fixture.Request(Report(1) with { DisplayName = "Acme Orders Engine" }, key));
+
+        Assert.Equal("Acme Orders Engine", result!.Connection!.DisplayName);
+        Assert.Contains(ExternalEngineHeartbeatService.LabelChangedAuditAction, fixture.Store.Audits);
+        Assert.All(fixture.Store.Audits, action => Assert.DoesNotContain("Acme", action, StringComparison.Ordinal));
+    }
+
     private static ExternalEngineHeartbeatReport Report(
         long sequence,
         string distribution = "valence-runtime",
         IReadOnlyList<ExternalEngineComponentObservation>? components = null,
-        IReadOnlyList<string>? capabilities = null) =>
+        IReadOnlyList<string>? capabilities = null,
+        string? runnerId = null) =>
         new(
             sequence,
             Now,
@@ -322,7 +463,8 @@ public sealed class ExternalEngineHeartbeatServiceTests
             "3.8.1",
             "https://studio.example.test/elsa/",
             capabilities ?? [ExternalEngineHeartbeatService.StatusCapability],
-            components ?? []);
+            components ?? [],
+            runnerId ?? ExternalEngineTestRunners.Alpha);
 
     private sealed class Fixture(
         MutableTimeProvider time,
@@ -399,9 +541,16 @@ public sealed class ExternalEngineHeartbeatServiceTests
     private sealed class RecordingConnectionStore(ExternalEngineConnection connection) : IExternalEngineConnectionStore
     {
         private long? _concurrentSequence;
+        private string? _concurrentRunnerId;
         public ExternalEngineConnection Connection { get; private set; } = connection;
+        public List<string> Audits { get; } = [];
+        public bool AppliedAfterConcurrent { get; private set; }
 
-        public void InjectConcurrentSequence(long sequence) => _concurrentSequence = sequence;
+        public void InjectConcurrentSequence(long sequence, string? runnerId = null)
+        {
+            _concurrentSequence = sequence;
+            _concurrentRunnerId = runnerId;
+        }
 
         public Task<IReadOnlyList<ExternalEngineConnection>> ListAsync(Guid organizationId, Guid workspaceId, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<ExternalEngineConnection>>([Connection]);
@@ -420,6 +569,8 @@ public sealed class ExternalEngineHeartbeatServiceTests
             if (_concurrentSequence is { } concurrentSequence)
             {
                 _concurrentSequence = null;
+                var concurrentRunner = _concurrentRunnerId;
+                _concurrentRunnerId = null;
                 Connection = Connection with
                 {
                     Status = ExternalEngineConnectionStatus.Connected,
@@ -427,6 +578,10 @@ public sealed class ExternalEngineHeartbeatServiceTests
                     LastAuthenticatedAt = receivedAt.Subtract(TimeSpan.FromSeconds(6)),
                     LastHeartbeatSequence = concurrentSequence,
                     LastHeartbeatObservedAt = projection.ObservedAt,
+                    ActiveRunnerId = concurrentRunner ?? Connection.ActiveRunnerId,
+                    RunnerLeaseExpiresAt = concurrentRunner is null
+                        ? Connection.RunnerLeaseExpiresAt
+                        : receivedAt.Add(ExternalEngineHeartbeatService.RunnerLeaseTtl),
                     UpdatedAt = receivedAt,
                     Version = Connection.Version + 1
                 };
@@ -436,7 +591,17 @@ public sealed class ExternalEngineHeartbeatServiceTests
                 return Task.FromResult(new ExternalEngineHeartbeatStoreResult(ExternalEngineHeartbeatStoreStatus.Concurrent, Connection));
             if (identityId != Connection.ActiveIdentityId)
                 return Task.FromResult(new ExternalEngineHeartbeatStoreResult(ExternalEngineHeartbeatStoreStatus.ScopeMismatch, Connection));
-            if (Connection.LastHeartbeatSequence is not null && projection.Sequence <= Connection.LastHeartbeatSequence)
+            if (ExternalEngineHeartbeatService.HasLiveRunnerLease(Connection, receivedAt)
+                && !string.Equals(Connection.ActiveRunnerId, projection.RunnerId, StringComparison.Ordinal))
+            {
+                return Task.FromResult(new ExternalEngineHeartbeatStoreResult(
+                    ExternalEngineHeartbeatStoreStatus.RunnerConflict,
+                    Connection,
+                    ExternalEngineHeartbeatService.RemainingLease(Connection, receivedAt)));
+            }
+            if (!projection.ResetSequenceBaseline
+                && Connection.LastHeartbeatSequence is not null
+                && projection.Sequence <= Connection.LastHeartbeatSequence)
                 return Task.FromResult(new ExternalEngineHeartbeatStoreResult(ExternalEngineHeartbeatStoreStatus.OutOfOrder, Connection));
             if (Connection.LastAuthenticatedAt is { } last && receivedAt - last < minimumInterval)
                 return Task.FromResult(new ExternalEngineHeartbeatStoreResult(ExternalEngineHeartbeatStoreStatus.RateLimited, Connection, minimumInterval - (receivedAt - last)));
@@ -446,6 +611,8 @@ public sealed class ExternalEngineHeartbeatServiceTests
                 : null;
             var candidateChanged = !string.Equals(
                 Connection.StudioDestinationCandidate, studioCandidate, StringComparison.Ordinal);
+            var previousRunnerId = Connection.ActiveRunnerId;
+            var previousDisplayName = Connection.DisplayName;
             Connection = Connection with
             {
                 Status = projection.Status,
@@ -473,9 +640,20 @@ public sealed class ExternalEngineHeartbeatServiceTests
                 CapabilitiesObservedAt = receivedAt,
                 LastHeartbeatSequence = projection.Sequence,
                 LastHeartbeatObservedAt = projection.ObservedAt,
+                ActiveRunnerId = projection.RunnerId ?? Connection.ActiveRunnerId,
+                RunnerLeaseExpiresAt = projection.RunnerId is null
+                    ? Connection.RunnerLeaseExpiresAt
+                    : receivedAt.Add(ExternalEngineHeartbeatService.RunnerLeaseTtl),
                 UpdatedAt = receivedAt,
                 Version = Connection.Version + 1
             };
+            if (previousRunnerId is not null
+                && !string.Equals(previousRunnerId, Connection.ActiveRunnerId, StringComparison.Ordinal))
+                Audits.Add(ExternalEngineHeartbeatService.RunnerChangedAuditAction);
+            if (projection.DisplayName is not null
+                && !string.Equals(previousDisplayName, projection.DisplayName, StringComparison.Ordinal))
+                Audits.Add(ExternalEngineHeartbeatService.LabelChangedAuditAction);
+            AppliedAfterConcurrent = true;
             return Task.FromResult(new ExternalEngineHeartbeatStoreResult(ExternalEngineHeartbeatStoreStatus.Applied, Connection));
         }
 

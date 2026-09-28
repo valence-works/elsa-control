@@ -225,6 +225,25 @@ public sealed class ExternalEngineConnectionService(
             return null;
         if (connection.ActiveIdentityId != proof.IdentityId)
             return ExternalEngineConnectorKeyRotationResult.Denied(ExternalEngineConnectorProofFailure.ScopeMismatch);
+
+        var now = timeProvider.GetUtcNow();
+        string runnerId;
+        try
+        {
+            runnerId = ExternalEngineEnrollmentProtocol.RequiredRunnerId(request.RunnerId);
+        }
+        catch (ArgumentException)
+        {
+            return ExternalEngineConnectorKeyRotationResult.Denied(ExternalEngineConnectorProofFailure.InvalidRequest);
+        }
+
+        if (!ExternalEngineHeartbeatService.HasLiveRunnerLease(connection, now)
+            || !string.Equals(connection.ActiveRunnerId, runnerId, StringComparison.Ordinal))
+        {
+            return ExternalEngineConnectorKeyRotationResult.DeniedByRunner(
+                ExternalEngineHeartbeatService.RemainingLease(connection, now));
+        }
+
         return await enrollment.RotateConnectorKeyAsync(request, cancellationToken);
     }
 

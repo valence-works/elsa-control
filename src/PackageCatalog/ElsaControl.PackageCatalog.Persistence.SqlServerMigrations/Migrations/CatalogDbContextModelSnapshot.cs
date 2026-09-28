@@ -3952,7 +3952,7 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         {
                             t.HasTrigger("TR_ExternalEngineConnectionAuditEvents_AppendOnly");
 
-                            t.HasCheckConstraint("CK_ExternalEngineConnectionAuditEvents_Action", "Action IN ('Created', 'PairingIssued', 'RepairStarted', 'IdentityEnrolled', 'HeartbeatConnected', 'HeartbeatDegraded', 'HeartbeatRecovered', 'StudioDestinationConfirmed', 'Disconnected')");
+                            t.HasCheckConstraint("CK_ExternalEngineConnectionAuditEvents_Action", "Action IN ('Created', 'PairingIssued', 'RepairStarted', 'IdentityEnrolled', 'HeartbeatConnected', 'HeartbeatDegraded', 'HeartbeatRecovered', 'StudioDestinationConfirmed', 'Disconnected', 'external-engine.runner-changed', 'external-engine.label-changed')");
                         });
 
                     b.HasAnnotation("SqlServer:UseSqlOutputClause", false);
@@ -3980,6 +3980,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
 
                     b.Property<Guid?>("ActiveIdentityId")
                         .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ActiveRunnerId")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
 
                     b.Property<long?>("CapabilitiesObservedAt")
                         .HasColumnType("bigint");
@@ -4069,6 +4073,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<long?>("RevokedAt")
                         .HasColumnType("bigint");
 
+                    b.Property<long?>("RunnerLeaseExpiresAt")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("RuntimeHealth")
                         .IsRequired()
                         .HasMaxLength(32)
@@ -4127,6 +4134,8 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                             t.HasCheckConstraint("CK_ExternalEngineConnections_Reachability", "ConnectorReachability IN ('Unknown', 'Reachable', 'Unreachable')");
 
                             t.HasCheckConstraint("CK_ExternalEngineConnections_RevokedState", "(Status = 'Revoked' AND RevokedAt IS NOT NULL) OR (Status <> 'Revoked' AND RevokedAt IS NULL)");
+
+                            t.HasCheckConstraint("CK_ExternalEngineConnections_RunnerLease", "(ActiveRunnerId IS NULL AND RunnerLeaseExpiresAt IS NULL) OR (ActiveRunnerId IS NOT NULL AND RunnerLeaseExpiresAt IS NOT NULL)");
 
                             t.HasCheckConstraint("CK_ExternalEngineConnections_RuntimeHealth", "RuntimeHealth IN ('Unknown', 'Healthy', 'Unhealthy')");
 

@@ -16,6 +16,9 @@ namespace ElsaControl.Api.Tests;
 
 public sealed class ExternalEngineConnectionApiTests
 {
+    private const string RunnerId = "AAAAAAAAAAAAAAAAAAAAAA";
+    private const string OtherRunnerId = "AQEBAQEBAQEBAQEBAQEBAQ";
+
     [Fact]
     public async Task Pairing_is_idempotent_and_list_read_progress_never_echo_the_challenge()
     {
@@ -231,7 +234,8 @@ public sealed class ExternalEngineConnectionApiTests
             "3.8.1",
             "https://studio.example.test/elsa/",
             [ExternalEngineHeartbeatService.StatusCapability, ExternalEngineHeartbeatService.StudioCapability],
-            []);
+            [],
+            RunnerId);
         var heartbeatProof = Proof(
             identity,
             context.Workspaces.Single().OrganizationId,
@@ -394,11 +398,11 @@ public sealed class ExternalEngineConnectionApiTests
             pairing.Connection.Id,
             pairing.Enrollment.Audience,
             ExternalEngineEnrollmentDefaults.RotationOperation,
-            ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap),
+            ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap, RunnerId),
             currentKey);
         using var rotated = await owner.PostControlJsonAsync(
             $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/identity/rotate",
-            new ExternalEngineConnectorKeyRotationRequest(rotationProof, nextPublicKey, overlap));
+            new ExternalEngineConnectorKeyRotationRequest(rotationProof, nextPublicKey, overlap, RunnerId));
         Assert.Equal(HttpStatusCode.OK, rotated.StatusCode);
         var rotatedIdentity = await rotated.Content.ReadControlJsonAsync<ExternalEngineConnectorIdentityResponse>();
         Assert.Equal(2, rotatedIdentity!.KeyVersion);
@@ -487,7 +491,8 @@ public sealed class ExternalEngineConnectionApiTests
             "3.8.1",
             "https://studio.example.test/elsa/",
             [ExternalEngineHeartbeatService.StatusCapability],
-            [new ExternalEngineComponentObservation("runtime", imageDigest)]);
+            [new ExternalEngineComponentObservation("runtime", imageDigest)],
+            RunnerId);
         var proof = Proof(
             identity!,
             workspace.OrganizationId,
@@ -542,6 +547,7 @@ public sealed class ExternalEngineConnectionApiTests
             null,
             [ExternalEngineHeartbeatService.StatusCapability],
             [],
+            RunnerId,
             "Acme Orders Engine");
         var proof = Proof(
             identity!,
@@ -562,6 +568,155 @@ public sealed class ExternalEngineConnectionApiTests
         Assert.Equal(ExternalEngineReleaseEvidenceLevel.SelfReported, connected.ReleaseEvidenceLevel);
         Assert.Null(connected.ReleaseEvidenceReference);
         Assert.Equal("elsa-oss", connected.ObservedDistribution);
+    }
+
+    [Fact]
+    public async Task Invalid_host_display_name_returns_400_without_echoing_the_value()
+    {
+        await using var app = new ControlApiTestApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var owner = app.CreateTrustedWorkspaceClient("connector-display-name-400-owner");
+        var context = await owner.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces");
+        var workspace = Assert.Single(context!.Workspaces);
+        using var created = await CreateAsync(owner, workspace.Id, "Pairing label", "display-name-400-engine");
+        var pairing = (await created.Content.ReadControlJsonAsync<ExternalEnginePairingAttemptResponse>())!;
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var redemption = Redemption(pairing, workspace.OrganizationId, workspace.Id, key);
+        using var redeemed = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/enrollment/redeem", redemption);
+        var identity = await redeemed.Content.ReadControlJsonAsync<ExternalEngineConnectorIdentityResponse>();
+        Assert.NotNull(identity);
+
+        const string leaked = "LEAK-ME-DISPLAY-NAME";
+        var report = new ExternalEngineHeartbeatReport(
+            1,
+            DateTimeOffset.UtcNow,
+            ExternalEngineHeartbeatService.CurrentProtocol,
+            "1.4.0",
+            ExternalEngineRuntimeHealth.Healthy,
+            "server",
+            "elsa-oss",
+            "3.8.4",
+            null,
+            [ExternalEngineHeartbeatService.StatusCapability],
+            [],
+            RunnerId,
+            leaked + "\n");
+        var unsigned = new ExternalEngineConnectorProof(
+            identity!.IdentityId,
+            workspace.OrganizationId,
+            workspace.Id,
+            pairing.Connection.Id,
+            pairing.Enrollment.Audience,
+            identity.KeyVersion,
+            ExternalEngineHeartbeatService.HeartbeatOperation,
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            DateTimeOffset.UtcNow,
+            ExternalEngineEnrollmentProtocol.Base64UrlEncode(RandomNumberGenerator.GetBytes(16)),
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        using var heartbeat = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/heartbeat",
+            new ExternalEngineHeartbeatRequest(unsigned, report));
+
+        Assert.Equal(HttpStatusCode.BadRequest, heartbeat.StatusCode);
+        var body = await heartbeat.Content.ReadAsStringAsync();
+        Assert.Contains("external-engine.heartbeat.invalid", body, StringComparison.Ordinal);
+        Assert.DoesNotContain(leaked, body, StringComparison.Ordinal);
+        Assert.DoesNotContain(leaked + "\\n", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Second_runner_heartbeat_and_rotation_are_conflicted_while_the_lease_is_live()
+    {
+        await using var app = new ControlApiTestApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var owner = app.CreateTrustedWorkspaceClient("connector-runner-lease-owner");
+        var context = await owner.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces");
+        var workspace = Assert.Single(context!.Workspaces);
+        using var created = await CreateAsync(owner, workspace.Id, "Lease engine", "runner-lease-engine");
+        var pairing = (await created.Content.ReadControlJsonAsync<ExternalEnginePairingAttemptResponse>())!;
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var redemption = Redemption(pairing, workspace.OrganizationId, workspace.Id, key);
+        using var redeemed = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/enrollment/redeem", redemption);
+        var identity = await redeemed.Content.ReadControlJsonAsync<ExternalEngineConnectorIdentityResponse>();
+        Assert.NotNull(identity);
+
+        var report = new ExternalEngineHeartbeatReport(
+            1,
+            DateTimeOffset.UtcNow,
+            ExternalEngineHeartbeatService.CurrentProtocol,
+            "1.4.0",
+            ExternalEngineRuntimeHealth.Healthy,
+            "server",
+            "elsa-oss",
+            "3.8.4",
+            null,
+            [ExternalEngineHeartbeatService.StatusCapability],
+            [],
+            RunnerId);
+        var proof = Proof(
+            identity!,
+            workspace.OrganizationId,
+            workspace.Id,
+            pairing.Connection.Id,
+            pairing.Enrollment.Audience,
+            ExternalEngineHeartbeatService.HeartbeatOperation,
+            ExternalEngineHeartbeatService.CreatePayloadDigest(report),
+            key);
+        using var heartbeat = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/heartbeat",
+            new ExternalEngineHeartbeatRequest(proof, report));
+        Assert.Equal(HttpStatusCode.OK, heartbeat.StatusCode);
+        var connected = await heartbeat.Content.ReadControlJsonAsync<ExternalEngineConnectionResponse>();
+        Assert.Equal(RunnerId, connected!.ActiveRunnerId);
+        Assert.NotNull(connected.RunnerLeaseExpiresAt);
+
+        var otherReport = report with { Sequence = 2, ObservedAt = DateTimeOffset.UtcNow, RunnerId = OtherRunnerId };
+        var otherProof = Proof(
+            identity!,
+            workspace.OrganizationId,
+            workspace.Id,
+            pairing.Connection.Id,
+            pairing.Enrollment.Audience,
+            ExternalEngineHeartbeatService.HeartbeatOperation,
+            ExternalEngineHeartbeatService.CreatePayloadDigest(otherReport),
+            key);
+        using var conflicted = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/heartbeat",
+            new ExternalEngineHeartbeatRequest(otherProof, otherReport));
+        Assert.Equal(HttpStatusCode.Conflict, conflicted.StatusCode);
+        var conflictBody = await conflicted.Content.ReadAsStringAsync();
+        Assert.Contains("external-engine.heartbeat.runner-conflict", conflictBody, StringComparison.Ordinal);
+        Assert.True(int.TryParse(conflicted.Headers.RetryAfter?.ToString(), out var retryAfterSeconds));
+        Assert.InRange(retryAfterSeconds, 1, 15);
+        var unchanged = await owner.GetControlJsonAsync<ExternalEngineConnectionResponse>(
+            $"/api/workspaces/{workspace.Id:D}/external-engine-connections/{pairing.Connection.Id:D}");
+        Assert.Equal(1, unchanged!.LastHeartbeatSequence);
+        Assert.Equal(RunnerId, unchanged.ActiveRunnerId);
+
+        using var nextKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var nextPublicKey = ExternalEngineEnrollmentProtocol.ExportPublicKey(nextKey);
+        var overlap = TimeSpan.FromMinutes(1);
+        var rotationProof = Proof(
+            identity!,
+            workspace.OrganizationId,
+            workspace.Id,
+            pairing.Connection.Id,
+            pairing.Enrollment.Audience,
+            ExternalEngineEnrollmentDefaults.RotationOperation,
+            ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap, OtherRunnerId),
+            key);
+        using var rotated = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/identity/rotate",
+            new ExternalEngineConnectorKeyRotationRequest(rotationProof, nextPublicKey, overlap, OtherRunnerId));
+        Assert.Equal(HttpStatusCode.Conflict, rotated.StatusCode);
+        Assert.Contains(
+            "external-engine.heartbeat.runner-conflict",
+            await rotated.Content.ReadAsStringAsync(),
+            StringComparison.Ordinal);
+        Assert.True(int.TryParse(rotated.Headers.RetryAfter?.ToString(), out var rotateRetryAfter));
+        Assert.InRange(rotateRetryAfter, 1, 15);
     }
 
     private static ExternalEngineConnectorProof Proof(

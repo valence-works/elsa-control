@@ -38,7 +38,9 @@ public sealed record ExternalEngineConnectionResponse(
     ExternalEngineHeartbeatFreshness HeartbeatFreshness,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    DateTimeOffset? RevokedAt);
+    DateTimeOffset? RevokedAt,
+    string? ActiveRunnerId = null,
+    DateTimeOffset? RunnerLeaseExpiresAt = null);
 
 public sealed record ExternalEnginePairingAttemptResponse(
     ExternalEngineConnectionResponse Connection,

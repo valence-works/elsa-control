@@ -164,19 +164,25 @@ public sealed record ExternalEngineConnectorProofResult(
 public sealed record ExternalEngineConnectorKeyRotationRequest(
     ExternalEngineConnectorProof Proof,
     string NewPublicKey,
-    TimeSpan Overlap);
+    TimeSpan Overlap,
+    string RunnerId);
 
 public sealed record ExternalEngineConnectorKeyRotationResult(
     ExternalEngineConnectorIdentity? Identity,
-    ExternalEngineConnectorProofFailure? Failure)
+    ExternalEngineConnectorProofFailure? Failure,
+    bool RunnerConflict = false,
+    TimeSpan? RetryAfter = null)
 {
-    public bool Succeeded => Identity is not null && Failure is null;
+    public bool Succeeded => Identity is not null && Failure is null && !RunnerConflict;
 
     public static ExternalEngineConnectorKeyRotationResult Success(ExternalEngineConnectorIdentity identity) =>
         new(identity, null);
 
     public static ExternalEngineConnectorKeyRotationResult Denied(ExternalEngineConnectorProofFailure failure) =>
         new(null, failure);
+
+    public static ExternalEngineConnectorKeyRotationResult DeniedByRunner(TimeSpan retryAfter) =>
+        new(null, null, true, retryAfter);
 }
 
 public enum ExternalEngineEnrollmentStoreRedeemFailure

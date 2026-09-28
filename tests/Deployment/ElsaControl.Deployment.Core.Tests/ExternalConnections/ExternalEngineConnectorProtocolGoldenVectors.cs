@@ -114,7 +114,8 @@ internal static class ExternalEngineConnectorProtocolGoldenVectors
             [
                 new("worker", "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
                 new("runtime", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-            ]);
+            ],
+            "AAAAAAAAAAAAAAAAAAAAAA");
         var heartbeatReportBytes = ExternalEngineHeartbeatService.CreateCanonicalPayload(heartbeatReport);
         var heartbeatDigest = ExternalEngineHeartbeatService.CreatePayloadDigest(heartbeatReport);
         var heartbeatProof = Proof(ExternalEngineHeartbeatService.HeartbeatOperation, heartbeatDigest, Repeat(0x11, 32));
@@ -124,8 +125,14 @@ internal static class ExternalEngineConnectorProtocolGoldenVectors
         var namedHeartbeatDigest = ExternalEngineHeartbeatService.CreatePayloadDigest(namedHeartbeatReport);
         var namedHeartbeatProof = Proof(ExternalEngineHeartbeatService.HeartbeatOperation, namedHeartbeatDigest, Repeat(0x44, 32));
         var namedHeartbeatPayload = ExternalEngineEnrollmentProtocol.CreateConnectorProofPayload(namedHeartbeatProof);
+        var escapedHeartbeatReport = heartbeatReport with { DisplayName = "Café & π" };
+        var escapedHeartbeatReportBytes = ExternalEngineHeartbeatService.CreateCanonicalPayload(escapedHeartbeatReport);
+        var escapedHeartbeatDigest = ExternalEngineHeartbeatService.CreatePayloadDigest(escapedHeartbeatReport);
+        var escapedHeartbeatProof = Proof(ExternalEngineHeartbeatService.HeartbeatOperation, escapedHeartbeatDigest, Repeat(0x55, 32));
+        var escapedHeartbeatPayload = ExternalEngineEnrollmentProtocol.CreateConnectorProofPayload(escapedHeartbeatProof);
 
-        var rotationDigest = ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, RotationOverlap);
+        var rotationDigest = ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(
+            nextPublicKey, RotationOverlap, "AAAAAAAAAAAAAAAAAAAAAA");
         var rotateProof = Proof(ExternalEngineEnrollmentDefaults.RotationOperation, rotationDigest, Repeat(0x22, 32));
         var rotatePayload = ExternalEngineEnrollmentProtocol.CreateConnectorProofPayload(rotateProof);
 
@@ -191,6 +198,18 @@ internal static class ExternalEngineConnectorProtocolGoldenVectors
                 committedSignatures,
                 namedHeartbeatReportBytes,
                 namedHeartbeatDigest),
+            Complete(
+                "heartbeat.valid-non-ascii-display-name",
+                "heartbeat",
+                "Valid heartbeat proof whose displayName includes non-ASCII text and an ampersand so JavaScriptEncoder.Default escaping is locked.",
+                ExternalEngineEnrollmentProtocol.ConnectorProofDomain,
+                HeartbeatInputs(escapedHeartbeatProof, escapedHeartbeatReportBytes, escapedHeartbeatDigest),
+                escapedHeartbeatPayload,
+                currentKey,
+                mutateSignature: false,
+                committedSignatures,
+                escapedHeartbeatReportBytes,
+                escapedHeartbeatDigest),
             Complete(
                 "rotate.valid",
                 "rotate",
@@ -333,7 +352,8 @@ internal static class ExternalEngineConnectorProtocolGoldenVectors
             ("nonce", proof.Nonce),
             ("nextPublicKey", nextPublicKey),
             ("nextPublicKeyThumbprint", ExternalEngineEnrollmentProtocol.PublicKeyThumbprint(nextPublicKey)),
-            ("overlapSeconds", (int)RotationOverlap.TotalSeconds));
+            ("overlapSeconds", (int)RotationOverlap.TotalSeconds),
+            ("runnerId", "AAAAAAAAAAAAAAAAAAAAAA"));
 
     private static IReadOnlyDictionary<string, JsonElement> RevokeInputs(
         ExternalEngineConnectorProof proof,

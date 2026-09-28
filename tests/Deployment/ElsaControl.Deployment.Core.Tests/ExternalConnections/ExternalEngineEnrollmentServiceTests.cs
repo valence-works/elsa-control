@@ -384,11 +384,11 @@ public sealed class ExternalEngineEnrollmentServiceTests
         var rotation = SignProof(Proof(identity) with
         {
             Operation = ExternalEngineEnrollmentDefaults.RotationOperation,
-            PayloadDigest = ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap)
+            PayloadDigest = ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap, "AAAAAAAAAAAAAAAAAAAAAA")
         }, currentKey);
 
         var rotated = await fixture.Service.RotateConnectorKeyAsync(
-            new ExternalEngineConnectorKeyRotationRequest(rotation, nextPublicKey, overlap));
+            new ExternalEngineConnectorKeyRotationRequest(rotation, nextPublicKey, overlap, "AAAAAAAAAAAAAAAAAAAAAA"));
 
         Assert.True(rotated.Succeeded);
         Assert.Equal(2, rotated.Identity!.KeyVersion);
@@ -409,12 +409,12 @@ public sealed class ExternalEngineEnrollmentServiceTests
             IssuedAt = fixture.Time.GetUtcNow(),
             Nonce = Challenge(),
             Operation = ExternalEngineEnrollmentDefaults.RotationOperation,
-            PayloadDigest = ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(laterPublicKey, overlap)
+            PayloadDigest = ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(laterPublicKey, overlap, "AAAAAAAAAAAAAAAAAAAAAA")
         }, nextKey);
         Assert.Equal(
             ExternalEngineConnectorProofFailure.InvalidRequest,
             (await fixture.Service.RotateConnectorKeyAsync(
-                new ExternalEngineConnectorKeyRotationRequest(secondRotation, laterPublicKey, overlap))).Failure);
+                new ExternalEngineConnectorKeyRotationRequest(secondRotation, laterPublicKey, overlap, "AAAAAAAAAAAAAAAAAAAAAA"))).Failure);
 
         fixture.Time.Advance(TimeSpan.FromMilliseconds(1));
         var oldAtExpiry = SignProof(Proof(identity) with
