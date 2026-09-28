@@ -722,6 +722,277 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Operations_list_is_paged_newest_first_and_matches_the_advertised_link()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var client = app.CreateTrustedWorkspaceClient("managed-instance-operations-list");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(client, workspaceId, "operations-list-runtime");
+        var instanceId = created.Instance.InstanceId;
+        Assert.Equal(
+            $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations",
+            created.Instance.Links["operations"]);
+        await MarkOperationSucceededAsync(app, created.Operation.Id);
+        var middle = await SendOperationAsync(
+            client, workspaceId, instanceId, created.Instance.ETag, "operations-list-middle",
+            new(ElsaInstanceOperationAction.Reconcile));
+        Assert.Equal(HttpStatusCode.Accepted, middle.StatusCode);
+        var middleBody = await middle.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+        await MarkOperationSucceededAsync(app, middleBody!.Operation.Id);
+        var newest = await SendOperationAsync(
+            client, workspaceId, instanceId, middleBody.Instance.ETag, "operations-list-newest",
+            new(ElsaInstanceOperationAction.Reconcile));
+        Assert.Equal(HttpStatusCode.Accepted, newest.StatusCode);
+        var newestBody = await newest.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+
+        var firstPage = await client.GetControlJsonAsync<ManagedElsaInstanceOperationListResponse>(
+            $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations?page=1&pageSize=1");
+        var secondPage = await client.GetControlJsonAsync<ManagedElsaInstanceOperationListResponse>(
+            $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations?page=2&pageSize=1");
+        var oversized = await client.GetControlJsonAsync<ManagedElsaInstanceOperationListResponse>(
+            $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations?page=1&pageSize=1000");
+
+        Assert.NotNull(firstPage);
+        Assert.Equal(1, firstPage.Page);
+        Assert.Equal(1, firstPage.PageSize);
+        Assert.Equal(3, firstPage.TotalCount);
+        Assert.True(firstPage.HasMore);
+        var newestItem = Assert.Single(firstPage.Items);
+        Assert.Equal(newestBody!.Operation.Id, newestItem.Id);
+        Assert.Equal(ElsaInstanceOperationAction.Reconcile, newestItem.Action);
+        Assert.Equal(
+            $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations/{newestBody.Operation.Id:D}",
+            newestItem.Links["self"]);
+        Assert.Equal(middleBody.Operation.Id, Assert.Single(secondPage!.Items).Id);
+        Assert.Equal(3, oversized!.Items.Count);
+        Assert.Equal(100, oversized.PageSize);
+        Assert.Equal(newestBody.Operation.Id, oversized.Items[0].Id);
+        Assert.Equal(middleBody.Operation.Id, oversized.Items[1].Id);
+        Assert.Equal(created.Operation.Id, oversized.Items[2].Id);
+        Assert.False(oversized.HasMore);
+    }
+
+    [Fact]
+    public async Task Operations_list_requires_workspace_read_access_and_conceals_cross_workspace_instances()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-operations-list-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(owner, workspaceId, "operations-list-scope-runtime");
+        var instanceId = created.Instance.InstanceId;
+        var path = $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations";
+
+        using var anonymous = app.CreateClient();
+        using var unauthenticated = await anonymous.GetAsync(path);
+        using var unknown = await owner.GetAsync($"/api/workspaces/{workspaceId:D}/instances/{Guid.NewGuid():D}/operations");
+        var other = app.CreateTrustedWorkspaceClient("managed-operations-list-other");
+        var otherWorkspaceId = await other.GetDefaultWorkspaceIdAsync();
+        using var crossWorkspace = await other.GetAsync(
+            $"/api/workspaces/{otherWorkspaceId:D}/instances/{instanceId:D}/operations");
+        using var unknownOther = await other.GetAsync(
+            $"/api/workspaces/{otherWorkspaceId:D}/instances/{Guid.NewGuid():D}/operations");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticated.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, crossWorkspace.StatusCode);
+        Assert.Equal(unknownOther.StatusCode, crossWorkspace.StatusCode);
+    }
+
+    [Fact]
+    public async Task Operations_list_authorization_matches_instance_detail()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-operations-auth-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(owner, workspaceId, "operations-auth-runtime");
+        var instanceId = created.Instance.InstanceId;
+        var operationsPath = $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations";
+        var detailPath = $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}";
+
+        await app.AddWorkspaceMemberAsync(workspaceId, "managed-operations-auth-reader", WorkspaceRole.Reader);
+        using var reader = app.CreateTrustedWorkspaceClient("managed-operations-auth-reader");
+        using var readerOperations = await reader.GetAsync(operationsPath);
+        using var readerDetail = await reader.GetAsync(detailPath);
+
+        using var outsider = app.CreateControlIdentityClient(subject: "managed-operations-auth-outsider");
+        using var outsiderOperations = await outsider.GetAsync(operationsPath);
+        using var outsiderDetail = await outsider.GetAsync(detailPath);
+
+        using var bff = app.CreateControlIdentityClient(
+            subject: "managed-operations-auth-bff",
+            claims: new Dictionary<string, string>
+            {
+                ["azp"] = "elsa-cloud-lovable-bff",
+                ["scp"] = CloudBffDefaults.DefaultScope
+            });
+        using var bffOperations = await bff.GetAsync(operationsPath);
+        using var bffDetail = await bff.GetAsync(detailPath);
+
+        var other = app.CreateTrustedWorkspaceClient("managed-operations-auth-other-organization");
+        var otherWorkspaceId = await other.GetDefaultWorkspaceIdAsync();
+        Guid ownerOrganizationId;
+        Guid otherOrganizationId;
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            ownerOrganizationId = await db.Workspaces.Where(x => x.Id == workspaceId)
+                .Select(x => x.OrganizationId).SingleAsync();
+            otherOrganizationId = await db.Workspaces.Where(x => x.Id == otherWorkspaceId)
+                .Select(x => x.OrganizationId).SingleAsync();
+        }
+        using var crossOrgOnOwnerPath = await other.GetAsync(operationsPath);
+        using var crossOrgOnOwnPath = await other.GetAsync(
+            $"/api/workspaces/{otherWorkspaceId:D}/instances/{instanceId:D}/operations");
+        using var crossOrgDetailOnOwnPath = await other.GetAsync(
+            $"/api/workspaces/{otherWorkspaceId:D}/instances/{instanceId:D}");
+
+        Assert.Equal(HttpStatusCode.OK, readerOperations.StatusCode);
+        Assert.Equal(readerDetail.StatusCode, readerOperations.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, outsiderOperations.StatusCode);
+        Assert.Equal(outsiderDetail.StatusCode, outsiderOperations.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, bffOperations.StatusCode);
+        Assert.Equal(bffDetail.StatusCode, bffOperations.StatusCode);
+        Assert.Contains("cloud-bff.denied", await bffOperations.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.NotEqual(Guid.Empty, ownerOrganizationId);
+        Assert.NotEqual(Guid.Empty, otherOrganizationId);
+        Assert.NotEqual(ownerOrganizationId, otherOrganizationId);
+        Assert.Equal(HttpStatusCode.Forbidden, crossOrgOnOwnerPath.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, crossOrgOnOwnPath.StatusCode);
+        Assert.Equal(crossOrgDetailOnOwnPath.StatusCode, crossOrgOnOwnPath.StatusCode);
+    }
+
+    [Fact]
+    public async Task Instance_response_includes_utc_created_and_updated_timestamps()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var client = app.CreateTrustedWorkspaceClient("managed-instance-timestamps");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(client, workspaceId, "timestamp-runtime");
+
+        var detail = await client.GetControlJsonAsync<ManagedElsaInstanceResponse>(
+            $"/api/workspaces/{workspaceId}/instances/{created.Instance.InstanceId}");
+        var list = await client.GetControlJsonAsync<ManagedElsaInstanceListResponse>(
+            $"/api/workspaces/{workspaceId}/instances");
+        var listed = Assert.Single(list!.Items);
+
+        Assert.NotEqual(default, created.Instance.CreatedAt);
+        Assert.NotEqual(default, created.Instance.UpdatedAt);
+        Assert.Equal(TimeSpan.Zero, created.Instance.CreatedAt.Offset);
+        Assert.Equal(TimeSpan.Zero, created.Instance.UpdatedAt.Offset);
+        Assert.Equal(created.Instance.CreatedAt, detail!.CreatedAt);
+        Assert.Equal(created.Instance.UpdatedAt, detail.UpdatedAt);
+        Assert.Equal(created.Instance.CreatedAt, listed.CreatedAt);
+        Assert.Equal(created.Instance.UpdatedAt, listed.UpdatedAt);
+    }
+
+    [Fact]
+    public async Task Legacy_list_includes_utc_created_and_updated_timestamps()
+    {
+        var createdAt = new DateTimeOffset(2026, 3, 4, 5, 6, 7, TimeSpan.Zero);
+        var updatedAt = new DateTimeOffset(2026, 3, 5, 8, 9, 10, TimeSpan.Zero);
+        var app = await PrepareApplicationAsync([
+            Instance(Guid.NewGuid(), "Claims runtime", "claims-runtime") with
+            {
+                CreatedAt = createdAt,
+                UpdatedAt = updatedAt
+            }
+        ]);
+        var client = app.CreateTrustedWorkspaceClient("managed-legacy-timestamps");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+
+        var response = await client.GetAsync($"/api/workspaces/{workspaceId}/managed-elsa/instances");
+        var instances = await response.Content.ReadFromJsonAsync<List<ManagedElsaInstanceResponse>>(
+            ControlApiTestApplication.JsonOptions);
+        var item = Assert.Single(instances!);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(createdAt, item.CreatedAt);
+        Assert.Equal(updatedAt, item.UpdatedAt);
+        Assert.Equal(TimeSpan.Zero, item.CreatedAt.Offset);
+        Assert.Equal(TimeSpan.Zero, item.UpdatedAt.Offset);
+        Assert.NotEqual(default, item.CreatedAt);
+        Assert.NotEqual(default, item.UpdatedAt);
+    }
+
+    [Fact]
+    public async Task Audit_list_is_bounded_newest_first_and_rejects_invalid_limits()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var client = app.CreateTrustedWorkspaceClient("managed-instance-audit-limit");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(client, workspaceId, "audit-limit-runtime");
+        var instanceId = created.Instance.InstanceId;
+        await MarkOperationSucceededAsync(app, created.Operation.Id);
+        var etag = created.Instance.ETag;
+        for (var index = 0; index < 4; index++)
+        {
+            var accepted = await SendOperationAsync(
+                client, workspaceId, instanceId, etag, $"audit-limit-{index}",
+                new(ElsaInstanceOperationAction.Reconcile));
+            Assert.Equal(HttpStatusCode.Accepted, accepted.StatusCode);
+            var body = await accepted.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+            etag = body!.Instance.ETag;
+            await MarkOperationSucceededAsync(app, body.Operation.Id);
+        }
+
+        var defaultPage = await client.GetControlJsonAsync<ManagedElsaInstanceAuditResponse>(
+            $"/api/workspaces/{workspaceId}/instances/{instanceId}/audit");
+        var limited = await client.GetControlJsonAsync<ManagedElsaInstanceAuditResponse>(
+            $"/api/workspaces/{workspaceId}/instances/{instanceId}/audit?limit=2");
+        using var maximum = await client.GetAsync(
+            $"/api/workspaces/{workspaceId}/instances/{instanceId}/audit?limit=500");
+        using var zero = await client.GetAsync(
+            $"/api/workspaces/{workspaceId}/instances/{instanceId}/audit?limit=0");
+        using var negative = await client.GetAsync(
+            $"/api/workspaces/{workspaceId}/instances/{instanceId}/audit?limit=-1");
+        using var tooLarge = await client.GetAsync(
+            $"/api/workspaces/{workspaceId}/instances/{instanceId}/audit?limit=501");
+
+        Assert.True(defaultPage!.Items.Count >= 5);
+        Assert.Equal(2, limited!.Items.Count);
+        Assert.True(limited.Items[0].Sequence > limited.Items[1].Sequence);
+        Assert.Equal(defaultPage.Items[0].Id, limited.Items[0].Id);
+        Assert.Equal(defaultPage.Items[1].Id, limited.Items[1].Id);
+        Assert.Equal(HttpStatusCode.OK, maximum.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, zero.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, negative.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, tooLarge.StatusCode);
+        Assert.Contains("instance.audit-limit-invalid", await zero.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Audit_list_requires_workspace_read_access_and_conceals_cross_workspace_instances()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-audit-limit-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(owner, workspaceId, "audit-limit-scope-runtime");
+        var instanceId = created.Instance.InstanceId;
+        var path = $"/api/workspaces/{workspaceId}/instances/{instanceId}/audit?limit=10";
+
+        using var anonymous = app.CreateClient();
+        using var unauthenticated = await anonymous.GetAsync(path);
+        using var unknown = await owner.GetAsync($"/api/workspaces/{workspaceId}/instances/{Guid.NewGuid()}/audit?limit=10");
+        var other = app.CreateTrustedWorkspaceClient("managed-audit-limit-other");
+        var otherWorkspaceId = await other.GetDefaultWorkspaceIdAsync();
+        using var crossWorkspace = await other.GetAsync(
+            $"/api/workspaces/{otherWorkspaceId}/instances/{instanceId}/audit?limit=10");
+        using var unknownOther = await other.GetAsync(
+            $"/api/workspaces/{otherWorkspaceId}/instances/{Guid.NewGuid()}/audit?limit=10");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticated.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, crossWorkspace.StatusCode);
+        Assert.Equal(unknownOther.StatusCode, crossWorkspace.StatusCode);
+    }
+
+    [Fact]
     public async Task Canonical_mutations_require_idempotency_and_strong_etags()
     {
         var app = await PrepareApplicationAsync([]);
@@ -2852,6 +3123,11 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         public Task<ElsaInstanceOperationSummary?> GetOperationAsync(Guid workspaceId, Guid instanceId, Guid operationId, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
+        public Task<ElsaInstanceOperationPage> ListOperationsAsync(
+            Guid workspaceId, Guid instanceId, int page, int pageSize,
+            CancellationToken cancellationToken = default, Guid organizationId = default) =>
+            throw new NotSupportedException();
+
         public Task<IReadOnlyDictionary<Guid, ElsaInstanceOperationSummary>> GetActiveOperationsAsync(
             Guid workspaceId,
             IReadOnlyCollection<Guid> instanceIds,
@@ -2867,7 +3143,9 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         public Task<IReadOnlyList<ElsaInstanceDeploymentSummary>> ListDeploymentsAsync(Guid workspaceId, Guid instanceId, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
-        public Task<IReadOnlyList<ElsaInstanceAuditEventSummary>> ListAuditAsync(Guid workspaceId, Guid instanceId, CancellationToken cancellationToken = default) =>
+        public Task<IReadOnlyList<ElsaInstanceAuditEventSummary>> ListAuditAsync(
+            Guid workspaceId, Guid instanceId, CancellationToken cancellationToken = default,
+            int? limit = null, Guid organizationId = default) =>
             throw new NotSupportedException();
     }
 

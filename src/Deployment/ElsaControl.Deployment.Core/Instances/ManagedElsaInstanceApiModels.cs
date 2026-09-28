@@ -28,6 +28,14 @@ public interface IManagedElsaInstanceApiStore
         Guid operationId,
         CancellationToken cancellationToken = default);
 
+    Task<ElsaInstanceOperationPage> ListOperationsAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken = default,
+        Guid organizationId = default);
+
     Task<IReadOnlyDictionary<Guid, ElsaInstanceOperationSummary>> GetActiveOperationsAsync(
         Guid workspaceId,
         IReadOnlyCollection<Guid> instanceIds,
@@ -57,10 +65,14 @@ public interface IManagedElsaInstanceApiStore
     Task<IReadOnlyList<ElsaInstanceAuditEventSummary>> ListAuditAsync(
         Guid workspaceId,
         Guid instanceId,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        int? limit = null,
+        Guid organizationId = default);
 }
 
 public sealed record ElsaInstancePage(IReadOnlyList<ElsaInstance> Items, int TotalCount);
+
+public sealed record ElsaInstanceOperationPage(IReadOnlyList<ElsaInstanceOperationSummary> Items, int TotalCount);
 
 public sealed record ElsaInstanceOperationSummary(
     Guid Id,

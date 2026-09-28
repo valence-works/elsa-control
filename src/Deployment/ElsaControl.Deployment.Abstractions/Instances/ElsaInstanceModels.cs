@@ -488,7 +488,9 @@ public sealed record ElsaInstance
         ElsaPlacementAssignmentReference? placementAssignmentReference = null,
         ElsaTenantReference? elsaTenantReference = null,
         ElsaLastOperationId? lastOperationId = null,
-        DateTimeOffset? deletedAt = null)
+        DateTimeOffset? deletedAt = null,
+        DateTimeOffset createdAt = default,
+        DateTimeOffset updatedAt = default)
     {
         ElsaInstanceValue.RequireEnum(observedLifecycle, nameof(observedLifecycle));
         ElsaInstanceValue.RequireEnum(health, nameof(health));
@@ -508,7 +510,11 @@ public sealed record ElsaInstance
         return new ElsaInstance(
             id, organizationId, workspaceId, name, slug, intent!, observedLifecycle, health, version,
             identityBinding, desiredStateRevisionId, resolvedPlanReference, currentResolvedRelease,
-            currentDeploymentReference, placementAssignmentReference, elsaTenantReference, lastOperationId, deletedAt);
+            currentDeploymentReference, placementAssignmentReference, elsaTenantReference, lastOperationId, deletedAt)
+        {
+            CreatedAt = createdAt == default ? default : createdAt.ToUniversalTime(),
+            UpdatedAt = updatedAt == default ? default : updatedAt.ToUniversalTime()
+        };
     }
 
     private ElsaInstance(
@@ -585,6 +591,8 @@ public sealed record ElsaInstance
         _elsaTenantReference = source._elsaTenantReference;
         _lastOperationId = source._lastOperationId;
         _deletedAt = deletedAt;
+        CreatedAt = source.CreatedAt;
+        UpdatedAt = source.UpdatedAt;
     }
 
     public Guid Id { get; }
@@ -652,6 +660,10 @@ public sealed record ElsaInstance
             ? value
             : throw new ArgumentOutOfRangeException(nameof(Version), "Version must be positive.");
     }
+
+    public DateTimeOffset CreatedAt { get; init; }
+
+    public DateTimeOffset UpdatedAt { get; init; }
 
     public ElsaInstanceIdentityBinding? IdentityBinding
     {
@@ -784,7 +796,11 @@ public sealed record ElsaInstance
             PlacementAssignmentReference,
             ElsaTenantReference,
             LastOperationId,
-            DeletedAt);
+            DeletedAt)
+        {
+            CreatedAt = CreatedAt,
+            UpdatedAt = UpdatedAt
+        };
     }
 
     internal ElsaInstance ProjectObservation(
