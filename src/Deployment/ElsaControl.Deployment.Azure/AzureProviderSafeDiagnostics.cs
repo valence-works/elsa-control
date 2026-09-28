@@ -110,6 +110,8 @@ internal static class AzureProviderSafeDiagnostics
         "azure.cleanup.role-scope-invalid",
         "azure.cleanup.role-uncertain",
         "azure.cleanup.vault-uncertain",
+        "azure.deployment.failed",
+        "azure.deployment.wait-exceeded",
         "azure.foundation.output-invalid",
         "azure.foundation.ownership-invalid",
         "azure.foundation.sql-admin-invalid",

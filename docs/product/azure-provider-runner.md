@@ -125,6 +125,72 @@ parked recovery can resume on the new Control build. A placement change is
 never rebound. These gates do not replace the separate two-instance negative
 authentication and confirmed-cleanup acceptance proof tracked in #287.
 
+## Long-running ARM deployments
+
+The foundation and workload steps submit their resource-group ARM deployment
+with `--no-wait`, so no CLI process is held for the deployment's lifetime and
+`CommandTimeout` bounds each individual command only. The runner then tracks the
+deployment by its deterministic name. Every `DeploymentPollInterval` it reads
+the deployment's state, timestamp and outputs together in one
+`deployment group show`, until Azure reports a terminal state or the step's own
+wait limit elapses:
+
+| Setting | Default | Bound |
+|---------|---------|-------|
+| `Deployment:AzureProvider:Runner:FoundationDeploymentTimeout` | 90 minutes | 6 hours |
+| `Deployment:AzureProvider:Runner:WorkloadDeploymentTimeout` | 60 minutes | 6 hours |
+| `Deployment:AzureProvider:Runner:DeploymentPollInterval` | 15 seconds | above zero, at most 5 minutes |
+
+A cold foundation has been observed at 15m29s and a workload deployment against
+a suspended Container Apps environment at 15m20s. Both are just past the
+15-minute command timeout that previously bounded the whole deployment (#564,
+#601). Outcomes:
+
+- `Succeeded`: the outputs read in the same poll are projected and the step
+  completes as before.
+- `Failed` or `Canceled` reported by Azure: the step is `Uncertain` with
+  `azure.deployment.failed`, because a failed deployment can leave partial
+  resources that recovery must observe.
+- Not observed to finish when the wait limit elapses: the step is `Uncertain`
+  with `azure.deployment.wait-exceeded`. The runner never cancels or resubmits
+  the remote deployment.
+- A failed, timed-out or unreadable poll is retried until the wait limit, so a
+  short ARM or identity outage does not end the step early. A cancelled or
+  unproven-terminated read ends it as `Uncertain` immediately.
+- A terminal record whose `timestamp` is older than this submission (allowing
+  one minute of clock skew) belongs to a previous deployment with the same name.
+  It is treated as not yet observed, so a stale `Failed` or old outputs are
+  never read as this attempt's result.
+
+A replayed step (the durable operation already attempted this exact step)
+first lists the named deployment. If it is still in flight, the runner attaches
+to it instead of submitting again. An absent or terminal deployment is
+resubmitted, which is the same idempotent reconcile as before. A submission that
+fails or times out after ARM may have accepted it gets the same probe: an
+in-flight deployment is attached, and otherwise the step is `Uncertain` without
+a second submission. The executor keeps renewing the operation lease while the
+step polls.
+
+After `Uncertain`, the operation is `RecoveryRequired`. For the foundation step,
+recovery observation reads the same named deployment and can confirm it. The
+workload step has no recovery observer, and Admin recover currently refuses a
+workload operation parked this way with 409, so a workload that outlasts its
+wait limit cannot be recovered until #601 lands. That is why the workload wait
+limit defaults to 60 minutes. Automatic pickup of parked operations and workload
+recovery are tracked in #601.
+
+Each poll is itself bounded by `CommandTimeout`, so the effective wait can
+overshoot the step limit by up to one command timeout. The provider worker runs
+operations serially, so a slow deployment delays the queue for up to its wait
+limit. That is accepted at launch concurrency. Releasing the worker between
+polls is a follow-up to #564.
+
+Rollout needs no configuration: the defaults apply. Raise a wait limit only
+when a longer cold start has been observed. To roll back, redeploy the previous
+Control build. Operations parked by this build keep their deterministic
+deployment names, so the previous build's foundation recovery observation still
+reads them. The new settings are ignored by builds that do not know them.
+
 ## Secret-seeding generation guard
 
 The production runner binds every transient secret-resolution request to the

@@ -156,6 +156,19 @@ public sealed record AzureProviderRunnerOptions
     /// </summary>
     public AzureManagedHandoffOptions? ManagedHandoff { get; init; }
     public TimeSpan CommandTimeout { get; init; } = TimeSpan.FromMinutes(15);
+    /// <summary>
+    /// How long the foundation step tracks its submitted ARM deployment. The deployment is
+    /// submitted without holding a CLI process, so this bounds polling only; a cold foundation
+    /// has been observed to take longer than the 15-minute command timeout.
+    /// </summary>
+    public TimeSpan FoundationDeploymentTimeout { get; init; } = TimeSpan.FromMinutes(90);
+    /// <summary>
+    /// How long the workload step tracks its submitted ARM deployment. A workload deployment
+    /// against a suspended Container Apps environment has been observed at 15m20s.
+    /// </summary>
+    public TimeSpan WorkloadDeploymentTimeout { get; init; } = TimeSpan.FromMinutes(60);
+    /// <summary>Delay between provisioning-state polls of a submitted ARM deployment. Must be positive.</summary>
+    public TimeSpan DeploymentPollInterval { get; init; } = TimeSpan.FromSeconds(15);
     public int MaximumOutputCharacters { get; init; } = 1_048_576;
     public int ObservationAttempts { get; init; } = 60;
     /// <summary>
@@ -291,6 +304,12 @@ public sealed record AzureProviderRunnerOptions
         }
         if (CommandTimeout <= TimeSpan.Zero || CommandTimeout > TimeSpan.FromHours(1))
             throw new ArgumentOutOfRangeException(nameof(CommandTimeout), "The command timeout must be positive and no longer than one hour.");
+        if (FoundationDeploymentTimeout <= TimeSpan.Zero || FoundationDeploymentTimeout > TimeSpan.FromHours(6))
+            throw new ArgumentOutOfRangeException(nameof(FoundationDeploymentTimeout), "The foundation deployment wait must be positive and no longer than six hours.");
+        if (WorkloadDeploymentTimeout <= TimeSpan.Zero || WorkloadDeploymentTimeout > TimeSpan.FromHours(6))
+            throw new ArgumentOutOfRangeException(nameof(WorkloadDeploymentTimeout), "The workload deployment wait must be positive and no longer than six hours.");
+        if (DeploymentPollInterval <= TimeSpan.Zero || DeploymentPollInterval > TimeSpan.FromMinutes(5))
+            throw new ArgumentOutOfRangeException(nameof(DeploymentPollInterval), "The deployment poll interval must be positive and no longer than five minutes.");
         if (MaximumOutputCharacters is < 1024 or > 16_777_216)
             throw new ArgumentOutOfRangeException(nameof(MaximumOutputCharacters), "The command output cap is outside the governed range.");
         if (ObservationAttempts is < 1 or > 120)
