@@ -329,6 +329,69 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             ManagedElsaInstanceActivitySeverity.Failed,
             ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
                 ElsaInstanceProviderReconciliationService.HealthFailedCode).Severity);
+        Assert.Equal(
+            ManagedLifecycleOperationalHealthDiagnosticCodes.Failed,
+            ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
+                ElsaInstanceProviderReconciliationService.HealthFailedCode).DiagnosticCode);
+    }
+
+    [Fact]
+    public void Activity_maps_a_terminal_failed_state_as_failed()
+    {
+        var mapped = ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
+            diagnosticCode: null,
+            eventType: "lifecycle.failed",
+            newState: ElsaObservedLifecycle.Failed.ToString());
+
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Failed, mapped.Severity);
+        Assert.Equal(ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, mapped.DiagnosticCode);
+    }
+
+    [Fact]
+    public void Activity_maps_an_unrecognized_operation_failure_code_as_failed()
+    {
+        var mapped = ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
+            diagnosticCode: null,
+            operationFailureCode: "provider.unrecognized-failure");
+
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Failed, mapped.Severity);
+        Assert.Equal(ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, mapped.DiagnosticCode);
+        Assert.Equal(
+            ManagedElsaInstanceActivitySeverity.Informational,
+            ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity("provider.internal.mystery").Severity);
+    }
+
+    [Fact]
+    public async Task Operation_failure_code_submission_uncertain_precedes_failed()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-uncertain-owner");
+        var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, "overview-uncertain-runtime");
+        await SetOperationFailureAsync(
+            app, created.Operation.Id, ElsaInstanceOperationState.Failed,
+            ManagedElsaInstanceOverviewEndpoints.SubmissionUncertainCode);
+        await SeedAuditAsync(
+            app, workspaceId, created.Instance.InstanceId, 20_001, "lifecycle.failed",
+            diagnosticCode: null,
+            operationId: created.Operation.Id,
+            newState: ElsaObservedLifecycle.Failed.ToString());
+
+        var overview = await client.GetControlJsonAsync<ManagedElsaInstanceOverviewResponse>(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        var activity = await client.GetControlJsonAsync<ManagedElsaInstanceActivityResponse>(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/activity");
+
+        Assert.NotNull(overview!.LastOperation);
+        Assert.NotEqual(
+            ManagedLifecycleOperationalHealthDiagnosticCodes.Failed, overview.LastOperation!.FailureCode);
+        Assert.NotEqual(
+            ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, overview.LastOperation.FailureCode);
+        var failedEvent = Assert.Single(activity!.Items, item => item.Sequence == 20_001);
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Warning, failedEvent.Severity);
+        Assert.Equal("Deployment status unclear. We're still confirming the result.", failedEvent.Message);
+        Assert.Null(failedEvent.DiagnosticCode);
+        Assert.NotEqual(ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, failedEvent.DiagnosticCode);
+        Assert.NotEqual(ManagedElsaInstanceActivitySeverity.Failed, failedEvent.Severity);
     }
 
     [Fact]
@@ -915,6 +978,24 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             $"UPDATE ElsaInstanceOperations SET State = {ElsaInstanceOperationState.Succeeded.ToString()}, CompletedAt = {completedAtTicks} WHERE Id = {operationId}");
     }
 
+    private static async Task SetOperationFailureAsync(
+        ControlApiTestApplication app,
+        Guid operationId,
+        ElsaInstanceOperationState state,
+        string failureCode)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var completedAtTicks = DateTimeOffset.UtcNow.UtcTicks;
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstanceOperations
+            SET State = {state.ToString()},
+                FailureCode = {failureCode},
+                CompletedAt = {completedAtTicks}
+            WHERE Id = {operationId}
+            """);
+    }
+
     private static async Task SetLifecycleAsync(
         ControlApiTestApplication app,
         Guid instanceId,
@@ -939,7 +1020,9 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         Guid instanceId,
         long sequence,
         string eventType,
-        string? diagnosticCode)
+        string? diagnosticCode,
+        Guid? operationId = null,
+        string? newState = null)
     {
         await using var scope = app.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
@@ -950,9 +1033,9 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         var id = Guid.NewGuid();
         await db.Database.ExecuteSqlInterpolatedAsync($"""
             INSERT INTO ElsaInstanceAuditEvents
-                (Id, OrganizationId, WorkspaceId, InstanceId, Sequence, EventType, DiagnosticCode, OccurredAt)
+                (Id, OrganizationId, WorkspaceId, InstanceId, Sequence, EventType, DiagnosticCode, OperationId, NewState, OccurredAt)
             VALUES
-                ({id}, {organizationId}, {workspaceId}, {instanceId}, {sequence}, {eventType}, {diagnosticCode}, {occurredAt})
+                ({id}, {organizationId}, {workspaceId}, {instanceId}, {sequence}, {eventType}, {diagnosticCode}, {operationId}, {newState}, {occurredAt})
             """);
     }
 

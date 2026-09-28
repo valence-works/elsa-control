@@ -241,10 +241,10 @@ public static class ManagedElsaInstanceOverviewEndpoints
                 workspaceId, instanceId, cancellationToken, ActivityLookupWindow, access.OrganizationId);
             var operations = await queries.ListOperationsAsync(
                 workspaceId, instanceId, page: 1, pageSize: 100, cancellationToken, access.OrganizationId);
-            var actionByOperationId = operations.Items.ToDictionary(operation => operation.Id, operation => operation.Action);
+            var operationsById = operations.Items.ToDictionary(operation => operation.Id);
             var projected = events
                 .Where(item => CustomerActivityEventTypes.Contains(item.EventType))
-                .Select(item => ManagedElsaInstanceOverviewProjection.ToActivityItem(item, actionByOperationId))
+                .Select(item => ManagedElsaInstanceOverviewProjection.ToActivityItem(item, operationsById))
                 .ToList();
             return Results.Ok(new ManagedElsaInstanceActivityResponse(
                 projected.Take(currentLimit).ToList(),
@@ -581,20 +581,33 @@ public static class ManagedElsaInstanceOverviewEndpoints
     internal static string? CustomerActivityDiagnosticCode(string? code) =>
         ClassifyCustomerActivity(code).DiagnosticCode;
 
-    internal static CustomerActivityClassification ClassifyCustomerActivity(string? code)
+    internal static CustomerActivityClassification ClassifyCustomerActivity(
+        string? diagnosticCode,
+        string? eventType = null,
+        string? newState = null,
+        string? operationFailureCode = null)
     {
-        if (string.IsNullOrWhiteSpace(code) || InformationalActivityCodes.Contains(code))
+        if (IsWarningActivityCode(diagnosticCode) || IsWarningActivityCode(operationFailureCode))
+            return new(null, ManagedElsaInstanceActivitySeverity.Warning, DeploymentStatusUnclearMessage);
+
+        if (IsFailedReasonCode(diagnosticCode) || IsFailedReasonCode(operationFailureCode))
+            return FailedActivity(diagnosticCode ?? operationFailureCode);
+
+        if (IsInformationalActivityCode(diagnosticCode) || IsInformationalActivityCode(operationFailureCode))
         {
-            var informational = string.Equals(code, ElsaInstanceProviderReconciliationService.UnavailableCode, StringComparison.Ordinal)
+            var source = IsInformationalActivityCode(diagnosticCode) ? diagnosticCode : operationFailureCode;
+            var informational = string.Equals(
+                source, ElsaInstanceProviderReconciliationService.UnavailableCode, StringComparison.Ordinal)
                 ? CheckingDeploymentStatusMessage
                 : null;
             return new(null, ManagedElsaInstanceActivitySeverity.Informational, informational);
         }
 
-        if (WarningActivityCodes.Contains(code))
-            return new(null, ManagedElsaInstanceActivitySeverity.Warning, DeploymentStatusUnclearMessage);
+        if (IsTerminalFailed(eventType, newState) || !string.IsNullOrWhiteSpace(operationFailureCode))
+            return FailedActivity(diagnosticCode ?? operationFailureCode);
 
-        if (ActionableActivityCodes.TryGetValue(code, out var mapped))
+        if (!string.IsNullOrWhiteSpace(diagnosticCode) &&
+            ActionableActivityCodes.TryGetValue(diagnosticCode, out var mapped))
         {
             var severity = FailedActivityMappedCodes.Contains(mapped)
                 ? ManagedElsaInstanceActivitySeverity.Failed
@@ -603,6 +616,32 @@ public static class ManagedElsaInstanceOverviewEndpoints
         }
 
         return new(null, ManagedElsaInstanceActivitySeverity.Informational, null);
+    }
+
+    private static bool IsWarningActivityCode(string? code) =>
+        !string.IsNullOrWhiteSpace(code) && WarningActivityCodes.Contains(code);
+
+    private static bool IsInformationalActivityCode(string? code) =>
+        !string.IsNullOrWhiteSpace(code) && InformationalActivityCodes.Contains(code);
+
+    private static bool IsFailedReasonCode(string? code) =>
+        string.Equals(code, ElsaInstanceProviderReconciliationService.FailedCode, StringComparison.Ordinal) ||
+        string.Equals(code, ElsaInstanceProviderReconciliationService.HealthFailedCode, StringComparison.Ordinal) ||
+        string.Equals(code, ManagedLifecycleOperationalHealthDiagnosticCodes.Failed, StringComparison.Ordinal) ||
+        string.Equals(code, ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, StringComparison.Ordinal);
+
+    private static bool IsTerminalFailed(string? eventType, string? newState) =>
+        string.Equals(eventType, "lifecycle.failed", StringComparison.Ordinal) ||
+        string.Equals(newState, ElsaObservedLifecycle.Failed.ToString(), StringComparison.Ordinal);
+
+    private static CustomerActivityClassification FailedActivity(string? code)
+    {
+        if (!string.IsNullOrWhiteSpace(code) && ActionableActivityCodes.TryGetValue(code, out var mapped))
+            return new(mapped, ManagedElsaInstanceActivitySeverity.Failed, null);
+        return new(
+            ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed,
+            ManagedElsaInstanceActivitySeverity.Failed,
+            null);
     }
 
     internal static IEnumerable<string> EnumerateCustomerActivityCopyLabels()
@@ -729,16 +768,22 @@ internal static class ManagedElsaInstanceOverviewProjection
 
     internal static ManagedElsaInstanceActivityItemResponse ToActivityItem(
         ElsaInstanceAuditEventSummary item,
-        IReadOnlyDictionary<Guid, ElsaInstanceOperationAction> actionByOperationId)
+        IReadOnlyDictionary<Guid, ElsaInstanceOperationSummary> operationsById)
     {
-        var classification = ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(item.DiagnosticCode);
+        var operation = item.OperationId is { } operationId &&
+                        operationsById.TryGetValue(operationId, out var matched)
+            ? matched
+            : null;
+        var classification = ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
+            item.DiagnosticCode,
+            item.EventType,
+            item.NewState,
+            operation?.FailureCode);
         return new(
             item.Sequence,
             item.EventType,
             item.OccurredAt,
-            item.OperationId is { } operationId && actionByOperationId.TryGetValue(operationId, out var action)
-                ? action
-                : null,
+            operation?.Action,
             item.PriorState,
             item.NewState,
             classification.DiagnosticCode,
@@ -789,7 +834,9 @@ internal static class ManagedElsaInstanceOverviewProjection
     }
 
     private static string? CustomerFailureCode(string? failureCode) =>
-        ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(failureCode);
+        ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
+            diagnosticCode: null,
+            operationFailureCode: failureCode).DiagnosticCode;
 }
 
 internal sealed class ReleaseVersionComparer : IComparer<string>
