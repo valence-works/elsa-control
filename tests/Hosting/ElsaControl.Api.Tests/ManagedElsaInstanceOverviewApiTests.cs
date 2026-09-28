@@ -37,7 +37,7 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             ["overview.allowedActions.applyRelease"] = Frozen(["allowed", "reasonCode"]),
             ["overview.allowedActions.open"] = Frozen(["allowed", "reasonCode"]),
             ["activity"] = Frozen(["items", "hasMore"]),
-            ["activity.items"] = Frozen(["sequence", "eventType", "occurredAt", "action", "priorState", "newState", "diagnosticCode", "actorKind"]),
+            ["activity.items"] = Frozen(["sequence", "eventType", "occurredAt", "action", "priorState", "newState", "diagnosticCode", "severity", "message", "actorKind"]),
             ["releases"] = Frozen(["items"]),
             ["releases.items"] = Frozen(["releaseLine", "version", "channel", "changeKind"]),
             ["accepted"] = Frozen(["operationId", "action", "state", "acceptedAt"])
@@ -109,7 +109,8 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             [
                 new ManagedElsaInstanceActivityItemResponse(
                     3, "lifecycle.accepted", DateTimeOffset.UtcNow, ElsaInstanceOperationAction.Create,
-                    "Pending", "Provisioning", "managed.lifecycle.healthy", "customer")
+                    "Pending", "Provisioning", "managed.lifecycle.healthy",
+                    ManagedElsaInstanceActivitySeverity.Informational, null, "customer")
             ],
             false);
         var releases = new ManagedElsaInstanceAvailableReleasesResponse(
@@ -259,6 +260,68 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             ElsaInstanceCommercialOperation.EntitlementRequired,
             ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
                 ElsaInstanceCommercialOperation.EntitlementRequired));
+        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
+            ElsaInstanceProviderReconciliationService.UnavailableCode));
+        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
+            ElsaInstanceProviderReconciliationService.AmbiguousCode));
+        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
+            ElsaInstanceProviderReconciliationService.RetrySafeCode));
+    }
+
+    [Fact]
+    public void Activity_maps_unavailable_as_informational()
+    {
+        var mapped = ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
+            ElsaInstanceProviderReconciliationService.UnavailableCode);
+
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Informational, mapped.Severity);
+        Assert.Null(mapped.DiagnosticCode);
+        Assert.NotEqual(ManagedLifecycleOperationalHealthDiagnosticCodes.Failed, mapped.DiagnosticCode);
+        Assert.NotEqual(ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, mapped.DiagnosticCode);
+    }
+
+    [Fact]
+    public void Activity_maps_ambiguous_as_a_warning_with_status_unclear_copy()
+    {
+        var mapped = ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
+            ElsaInstanceProviderReconciliationService.AmbiguousCode);
+
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Warning, mapped.Severity);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.DeploymentStatusUnclearMessage, mapped.Message);
+        Assert.Equal("Deployment status unclear. Valence Works is checking.", mapped.Message);
+        Assert.Null(mapped.DiagnosticCode);
+        Assert.NotEqual(ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, mapped.DiagnosticCode);
+    }
+
+    [Fact]
+    public void Activity_maps_retry_safe_as_a_warning_with_status_unclear_copy()
+    {
+        var mapped = ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
+            ElsaInstanceProviderReconciliationService.RetrySafeCode);
+
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Warning, mapped.Severity);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.DeploymentStatusUnclearMessage, mapped.Message);
+        Assert.Equal("Deployment status unclear. Valence Works is checking.", mapped.Message);
+        Assert.Null(mapped.DiagnosticCode);
+        Assert.NotEqual(ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, mapped.DiagnosticCode);
+    }
+
+    [Fact]
+    public void Activity_maps_a_failure_code_as_failed()
+    {
+        var mapped = ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
+            ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed);
+
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Failed, mapped.Severity);
+        Assert.Equal(ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, mapped.DiagnosticCode);
+        Assert.Equal(
+            ManagedLifecycleOperationalHealthDiagnosticCodes.Failed,
+            ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
+                ElsaInstanceProviderReconciliationService.FailedCode).DiagnosticCode);
+        Assert.Equal(
+            ManagedElsaInstanceActivitySeverity.Failed,
+            ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
+                ElsaInstanceProviderReconciliationService.FailedCode).Severity);
     }
 
     [Fact]
@@ -282,6 +345,15 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         await SeedAuditAsync(
             app, workspaceId, created.Instance.InstanceId, 10_005, "lifecycle.entitlement-resumed",
             "instance.entitlement-restored");
+        await SeedAuditAsync(
+            app, workspaceId, created.Instance.InstanceId, 10_006, "lifecycle.reconciled",
+            ElsaInstanceProviderReconciliationService.UnavailableCode);
+        await SeedAuditAsync(
+            app, workspaceId, created.Instance.InstanceId, 10_007, "lifecycle.reconciled",
+            ElsaInstanceProviderReconciliationService.AmbiguousCode);
+        await SeedAuditAsync(
+            app, workspaceId, created.Instance.InstanceId, 10_008, "lifecycle.reconciled",
+            ElsaInstanceProviderReconciliationService.RetrySafeCode);
 
         var activity = await client.GetControlJsonAsync<ManagedElsaInstanceActivityResponse>(
             $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/activity");
@@ -291,12 +363,26 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         Assert.Equal(
             ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed,
             Assert.Single(activity.Items, item => item.Sequence == 10_002).DiagnosticCode);
+        Assert.Equal(
+            ManagedElsaInstanceActivitySeverity.Failed,
+            Assert.Single(activity.Items, item => item.Sequence == 10_002).Severity);
         Assert.Null(Assert.Single(activity.Items, item => item.Sequence == 10_003).DiagnosticCode);
         Assert.DoesNotContain(activity.Items, item => item.DiagnosticCode == ManagedElsaInstanceOverviewEndpoints.RequiresAttentionCode);
         Assert.Equal(
             ElsaInstanceCommercialOperation.EntitlementRequired,
             Assert.Single(activity.Items, item => item.EventType == "lifecycle.entitlement-held").DiagnosticCode);
         Assert.Null(Assert.Single(activity.Items, item => item.EventType == "lifecycle.entitlement-resumed").DiagnosticCode);
+        var unavailable = Assert.Single(activity.Items, item => item.Sequence == 10_006);
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Informational, unavailable.Severity);
+        Assert.Null(unavailable.DiagnosticCode);
+        var ambiguous = Assert.Single(activity.Items, item => item.Sequence == 10_007);
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Warning, ambiguous.Severity);
+        Assert.Equal("Deployment status unclear. Valence Works is checking.", ambiguous.Message);
+        Assert.Null(ambiguous.DiagnosticCode);
+        var retrySafe = Assert.Single(activity.Items, item => item.Sequence == 10_008);
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Warning, retrySafe.Severity);
+        Assert.Equal("Deployment status unclear. Valence Works is checking.", retrySafe.Message);
+        Assert.Null(retrySafe.DiagnosticCode);
     }
 
     public static TheoryData<ElsaObservedLifecycle, ElsaDesiredLifecycle, bool, string?> CustomerMutationAvailabilityCases =>

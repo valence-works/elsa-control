@@ -26,6 +26,7 @@ public static class ManagedElsaInstanceOverviewEndpoints
     internal const string PermissionRequiredCode = "instance.permission-required";
     internal const string OperationActiveCode = "instance.operation-active";
     internal const string ActivityLimitInvalidCode = "instance.activity-limit-invalid";
+    internal const string DeploymentStatusUnclearMessage = "Deployment status unclear. Valence Works is checking.";
     internal const string UnknownFieldCode = "request.unknown-field";
     internal const string ApplyReleaseInvalidCode = "instance.apply-release-invalid";
     internal const string RestartReason = "Restart";
@@ -82,11 +83,24 @@ public static class ManagedElsaInstanceOverviewEndpoints
         ManagedLifecycleOperationalHealthDiagnosticCodes.ReconciliationUnknown,
         ElsaInstanceProviderReconciliationService.ConvergedCode,
         ElsaInstanceProviderReconciliationService.InProgressCode,
-        ElsaInstanceProviderReconciliationService.RetrySafeCode,
+        ElsaInstanceProviderReconciliationService.UnavailableCode,
         ElsaInstanceProviderReconciliationService.UnknownCode,
-        ElsaInstanceProviderReconciliationService.AmbiguousCode,
         ElsaInstanceProviderReconciliationService.HealthUnknownCode,
         "instance.entitlement-restored"
+    }.ToFrozenSet(StringComparer.Ordinal);
+
+    private static readonly FrozenSet<string> WarningActivityCodes = new HashSet<string>(StringComparer.Ordinal)
+    {
+        ElsaInstanceProviderReconciliationService.AmbiguousCode,
+        ElsaInstanceProviderReconciliationService.RetrySafeCode
+    }.ToFrozenSet(StringComparer.Ordinal);
+
+    private static readonly FrozenSet<string> FailedActivityMappedCodes = new HashSet<string>(StringComparer.Ordinal)
+    {
+        ManagedLifecycleOperationalHealthDiagnosticCodes.Failed,
+        ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed,
+        ManagedLifecycleOperationalHealthDiagnosticCodes.RunFailed,
+        ManagedLifecycleOperationalHealthDiagnosticCodes.RetryExhausted
     }.ToFrozenSet(StringComparer.Ordinal);
 
     private static readonly FrozenDictionary<string, string> ActionableActivityCodes =
@@ -115,8 +129,6 @@ public static class ManagedElsaInstanceOverviewEndpoints
             [ElsaInstanceProviderReconciliationService.FailedCode] =
                 ManagedLifecycleOperationalHealthDiagnosticCodes.Failed,
             [ElsaInstanceProviderReconciliationService.HealthFailedCode] =
-                ManagedLifecycleOperationalHealthDiagnosticCodes.Failed,
-            [ElsaInstanceProviderReconciliationService.UnavailableCode] =
                 ManagedLifecycleOperationalHealthDiagnosticCodes.Failed,
             [ElsaInstanceProviderReconciliationService.CorrelationMismatchCode] =
                 ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed,
@@ -564,11 +576,26 @@ public static class ManagedElsaInstanceOverviewEndpoints
     internal static string CustomerDiagnosticCode(string? code) =>
         code is not null && CustomerHealthCodes.Contains(code) ? code : RequiresAttentionCode;
 
-    internal static string? CustomerActivityDiagnosticCode(string? code)
+    internal static string? CustomerActivityDiagnosticCode(string? code) =>
+        ClassifyCustomerActivity(code).DiagnosticCode;
+
+    internal static CustomerActivityClassification ClassifyCustomerActivity(string? code)
     {
         if (string.IsNullOrWhiteSpace(code) || InformationalActivityCodes.Contains(code))
-            return null;
-        return ActionableActivityCodes.GetValueOrDefault(code);
+            return new(null, ManagedElsaInstanceActivitySeverity.Informational, null);
+
+        if (WarningActivityCodes.Contains(code))
+            return new(null, ManagedElsaInstanceActivitySeverity.Warning, DeploymentStatusUnclearMessage);
+
+        if (ActionableActivityCodes.TryGetValue(code, out var mapped))
+        {
+            var severity = FailedActivityMappedCodes.Contains(mapped)
+                ? ManagedElsaInstanceActivitySeverity.Failed
+                : ManagedElsaInstanceActivitySeverity.Warning;
+            return new(mapped, severity, null);
+        }
+
+        return new(null, ManagedElsaInstanceActivitySeverity.Informational, null);
     }
 
     internal static string? CustomerMutationDenialCode(ElsaInstance instance)
@@ -679,8 +706,10 @@ internal static class ManagedElsaInstanceOverviewProjection
 
     internal static ManagedElsaInstanceActivityItemResponse ToActivityItem(
         ElsaInstanceAuditEventSummary item,
-        IReadOnlyDictionary<Guid, ElsaInstanceOperationAction> actionByOperationId) =>
-        new(
+        IReadOnlyDictionary<Guid, ElsaInstanceOperationAction> actionByOperationId)
+    {
+        var classification = ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(item.DiagnosticCode);
+        return new(
             item.Sequence,
             item.EventType,
             item.OccurredAt,
@@ -689,8 +718,11 @@ internal static class ManagedElsaInstanceOverviewProjection
                 : null,
             item.PriorState,
             item.NewState,
-            ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(item.DiagnosticCode),
+            classification.DiagnosticCode,
+            classification.Severity,
+            classification.Message,
             item.OperatorSubject is not null ? "support" : item.ActorAccountId is not null ? "customer" : "system");
+    }
 
     internal static string? UnavailableReasonCode(
         bool canOpen,
@@ -870,6 +902,18 @@ public sealed record ManagedElsaInstanceActivityResponse(
     IReadOnlyList<ManagedElsaInstanceActivityItemResponse> Items,
     bool HasMore);
 
+public enum ManagedElsaInstanceActivitySeverity
+{
+    Informational,
+    Warning,
+    Failed
+}
+
+internal sealed record CustomerActivityClassification(
+    string? DiagnosticCode,
+    ManagedElsaInstanceActivitySeverity Severity,
+    string? Message);
+
 public sealed record ManagedElsaInstanceActivityItemResponse(
     long Sequence,
     string EventType,
@@ -878,6 +922,8 @@ public sealed record ManagedElsaInstanceActivityItemResponse(
     string? PriorState,
     string? NewState,
     string? DiagnosticCode,
+    ManagedElsaInstanceActivitySeverity Severity,
+    string? Message,
     string ActorKind);
 
 public sealed record ManagedElsaInstanceOverviewOperationResponse(
