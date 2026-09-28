@@ -556,6 +556,7 @@ public static class ManagedElsaInstanceEndpoints
             Guid instanceId,
             int? page,
             int? pageSize,
+            HttpContext context,
             IElsaInstanceLifecycleStore lifecycle,
             IManagedElsaInstanceApiStore queries,
             CancellationToken cancellationToken) =>
@@ -566,7 +567,8 @@ public static class ManagedElsaInstanceEndpoints
             var currentPageSize = Math.Clamp(pageSize ?? 50, 1, 100);
             var offset = (long)(currentPage - 1) * currentPageSize;
             var pageResult = await queries.ListOperationsAsync(
-                workspaceId, instanceId, currentPage, currentPageSize, cancellationToken);
+                workspaceId, instanceId, currentPage, currentPageSize, cancellationToken,
+                context.GetWorkspaceAccess().OrganizationId);
             return Results.Ok(new ManagedElsaInstanceOperationListResponse(
                 pageResult.Items.Select(operation => ToOperationResponse(workspaceId, instanceId, operation)).ToList(),
                 currentPage,
@@ -630,6 +632,7 @@ public static class ManagedElsaInstanceEndpoints
 
         group.MapGet("/{instanceId:guid}/audit", async (
             Guid workspaceId, Guid instanceId, int? limit,
+            HttpContext context,
             IElsaInstanceLifecycleStore lifecycle,
             IManagedElsaInstanceApiStore queries,
             CancellationToken cancellationToken) =>
@@ -639,7 +642,9 @@ public static class ManagedElsaInstanceEndpoints
             var currentLimit = limit ?? 100;
             if (currentLimit < 1 || currentLimit > 500)
                 return Problem("instance.audit-limit-invalid", "Audit limit must be between 1 and 500.", StatusCodes.Status400BadRequest);
-            var events = await queries.ListAuditAsync(workspaceId, instanceId, cancellationToken, currentLimit);
+            var events = await queries.ListAuditAsync(
+                workspaceId, instanceId, cancellationToken, currentLimit,
+                context.GetWorkspaceAccess().OrganizationId);
             return Results.Ok(new ManagedElsaInstanceAuditResponse(events.Select(RedactAudit).ToList()));
         }).RequireWorkspaceAccess();
 
@@ -902,7 +907,11 @@ public static class ManagedElsaInstanceEndpoints
             ManagedElsaInstanceCustomerProjection.UnavailableReason(
                 canOpen, healthy, controlHandoffEnabled, summary.Audience is not null && summary.CallbackUri is not null,
                 summary.ObservedLifecycle,
-                identityUnavailableReason: "The current instance binding is unavailable."));
+                identityUnavailableReason: "The current instance binding is unavailable."))
+        {
+            CreatedAt = summary.CreatedAt,
+            UpdatedAt = summary.UpdatedAt
+        };
     }
 
     internal static IdempotencyKeyReadResult ReadIdempotencyKey(HttpContext context)

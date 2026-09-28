@@ -34,17 +34,27 @@ public sealed class ManagedElsaInstanceApiStoreReadTests
         db.ChangeTracker.Clear();
 
         var store = new EfCoreManagedElsaInstanceApiStore(db);
-        var firstPage = await store.ListOperationsAsync(workspace.Id, instance.Id, 1, 1);
-        var secondPage = await store.ListOperationsAsync(workspace.Id, instance.Id, 2, 1);
-        var all = await store.ListOperationsAsync(workspace.Id, instance.Id, 1, 100);
-        var otherWorkspace = await store.ListOperationsAsync(other.Id, instance.Id, 1, 100);
+        var firstPage = await store.ListOperationsAsync(
+            workspace.Id, instance.Id, 1, 1, organizationId: workspace.OrganizationId);
+        var secondPage = await store.ListOperationsAsync(
+            workspace.Id, instance.Id, 2, 1, organizationId: workspace.OrganizationId);
+        var all = await store.ListOperationsAsync(
+            workspace.Id, instance.Id, 1, 100, organizationId: workspace.OrganizationId);
+        var otherWorkspace = await store.ListOperationsAsync(
+            other.Id, instance.Id, 1, 100, organizationId: other.OrganizationId);
+        var otherOrganization = await store.ListOperationsAsync(
+            workspace.Id, instance.Id, 1, 100, organizationId: Guid.NewGuid());
 
+        Assert.NotEqual(Guid.Empty, workspace.OrganizationId);
+        Assert.NotEqual(workspace.OrganizationId, other.OrganizationId);
         Assert.Equal(3, firstPage.TotalCount);
         Assert.Equal(newest.Id, Assert.Single(firstPage.Items).Id);
         Assert.Equal(middle.Id, Assert.Single(secondPage.Items).Id);
         Assert.Equal(new[] { newest.Id, middle.Id, oldest.Id }, all.Items.Select(x => x.Id).ToArray());
         Assert.Empty(otherWorkspace.Items);
         Assert.Equal(0, otherWorkspace.TotalCount);
+        Assert.Empty(otherOrganization.Items);
+        Assert.Equal(0, otherOrganization.TotalCount);
     }
 
     [Fact]
@@ -68,13 +78,21 @@ public sealed class ManagedElsaInstanceApiStoreReadTests
         db.ChangeTracker.Clear();
 
         var store = new EfCoreManagedElsaInstanceApiStore(db);
-        var unlimited = await store.ListAuditAsync(workspace.Id, instance.Id);
-        var limited = await store.ListAuditAsync(workspace.Id, instance.Id, limit: 2);
-        var otherWorkspace = await store.ListAuditAsync(other.Id, instance.Id, limit: 10);
+        var unlimited = await store.ListAuditAsync(
+            workspace.Id, instance.Id, organizationId: workspace.OrganizationId);
+        var limited = await store.ListAuditAsync(
+            workspace.Id, instance.Id, limit: 2, organizationId: workspace.OrganizationId);
+        var otherWorkspace = await store.ListAuditAsync(
+            other.Id, instance.Id, limit: 10, organizationId: other.OrganizationId);
+        var otherOrganization = await store.ListAuditAsync(
+            workspace.Id, instance.Id, limit: 10, organizationId: Guid.NewGuid());
 
+        Assert.NotEqual(Guid.Empty, workspace.OrganizationId);
+        Assert.NotEqual(workspace.OrganizationId, other.OrganizationId);
         Assert.Equal(new[] { 3L, 2L, 1L }, unlimited.Select(x => x.Sequence).ToArray());
         Assert.Equal(new[] { 3L, 2L }, limited.Select(x => x.Sequence).ToArray());
         Assert.Empty(otherWorkspace);
+        Assert.Empty(otherOrganization);
     }
 
     private static SqliteConnection OpenConnection()
@@ -91,7 +109,9 @@ public sealed class ManagedElsaInstanceApiStoreReadTests
 
     private static async Task<Workspace> CreateWorkspaceAsync(CatalogDbContext db, string name)
     {
-        var workspace = new Workspace { Name = name };
+        var organization = new Organization { Name = name + " organization" };
+        var workspace = new Workspace { Name = name, OrganizationId = organization.Id, Organization = organization };
+        db.Organizations.Add(organization);
         db.Workspaces.Add(workspace);
         await db.SaveChangesAsync();
         return workspace;

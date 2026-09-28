@@ -244,7 +244,8 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
             Guid instanceId,
             int page,
             int pageSize,
-            CancellationToken cancellationToken = default) =>
+            CancellationToken cancellationToken = default,
+            Guid organizationId = default) =>
             throw new NotSupportedException();
 
         public Task<ElsaInstancePage> ListInstancesAsync(Guid workspaceId, int page, int pageSize, CancellationToken cancellationToken = default) =>
@@ -266,7 +267,8 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<ElsaInstanceAuditEventSummary>> ListAuditAsync(
-            Guid workspaceId, Guid instanceId, CancellationToken cancellationToken = default, int? limit = null) =>
+            Guid workspaceId, Guid instanceId, CancellationToken cancellationToken = default,
+            int? limit = null, Guid organizationId = default) =>
             throw new NotSupportedException();
     }
 

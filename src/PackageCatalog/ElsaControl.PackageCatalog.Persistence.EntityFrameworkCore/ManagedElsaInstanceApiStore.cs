@@ -116,7 +116,8 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
         Guid instanceId,
         int page,
         int pageSize,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Guid organizationId = default)
     {
         if (workspaceId == Guid.Empty || instanceId == Guid.Empty)
             return new ElsaInstanceOperationPage([], 0);
@@ -128,6 +129,8 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
             .AsNoTracking()
             .Where(x => x.WorkspaceId == workspaceId &&
                         x.InstanceId == instanceId);
+        if (organizationId != Guid.Empty)
+            query = query.Where(x => x.OrganizationId == organizationId);
         var totalCount = await query.CountAsync(cancellationToken);
         if (offset >= totalCount)
             return new ElsaInstanceOperationPage([], totalCount);
@@ -139,12 +142,7 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
             .Skip((int)offset)
             .Take(pageSize)
             .ToListAsync(cancellationToken);
-        return new ElsaInstanceOperationPage(
-            operations
-                .Where(x => x.InstanceId is not null)
-                .Select(MapOperation)
-                .ToList(),
-            totalCount);
+        return new ElsaInstanceOperationPage(operations.Select(MapOperation).ToList(), totalCount);
     }
 
     public async Task<IReadOnlyDictionary<Guid, ElsaInstanceOperationSummary>> GetActiveOperationsAsync(
@@ -462,14 +460,18 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
         Guid workspaceId,
         Guid instanceId,
         CancellationToken cancellationToken = default,
-        int? limit = null)
+        int? limit = null,
+        Guid organizationId = default)
     {
         if (workspaceId == Guid.Empty || instanceId == Guid.Empty)
             return [];
 
         IQueryable<Models.ElsaInstanceAuditEventEntity> query = dbContext.ElsaInstanceAuditEvents
             .AsNoTracking()
-            .Where(x => x.WorkspaceId == workspaceId && x.InstanceId == instanceId)
+            .Where(x => x.WorkspaceId == workspaceId && x.InstanceId == instanceId);
+        if (organizationId != Guid.Empty)
+            query = query.Where(x => x.OrganizationId == organizationId);
+        query = query
             .OrderByDescending(x => x.Sequence)
             .ThenByDescending(x => x.OccurredAt);
         if (limit is > 0)

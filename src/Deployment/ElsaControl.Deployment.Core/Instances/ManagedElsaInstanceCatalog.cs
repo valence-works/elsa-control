@@ -18,7 +18,11 @@ public sealed record ManagedElsaInstanceSummary(
     ElsaInstanceHealth Health,
     string? Audience,
     Uri? CallbackUri,
-    int? BindingVersion);
+    int? BindingVersion)
+{
+    public DateTimeOffset CreatedAt { get; init; }
+    public DateTimeOffset UpdatedAt { get; init; }
+}
 
 public interface IManagedElsaInstanceCatalog
 {

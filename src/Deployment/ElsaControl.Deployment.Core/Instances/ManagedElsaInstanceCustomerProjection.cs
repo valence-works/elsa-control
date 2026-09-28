@@ -79,7 +79,9 @@ public static class ManagedElsaInstanceCustomerProjection
             instance.PlacementAssignmentReference,
             instance.ElsaTenantReference,
             instance.LastOperationId,
-            instance.DeletedAt);
+            instance.DeletedAt,
+            instance.CreatedAt,
+            instance.UpdatedAt);
     }
 
     public static string? UnavailableReason(
