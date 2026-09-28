@@ -35,6 +35,33 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         )
         return environment
 
+    @staticmethod
+    def write_fake_az(temporary_path: Path) -> Path:
+        fake_az = temporary_path / "az"
+        fake_az.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "printf '%s\\n' \"$*\" >> \"${AZ_CALL_LOG:?}\"\n"
+            "case \"$*\" in\n"
+            "  'account set --subscription '*) exit 0 ;;\n"
+            "  'deployment sub what-if '*) exit 0 ;;\n"
+            "  'deployment sub create '*) exit 0 ;;\n"
+            "  *) exit 41 ;;\n"
+            "esac\n"
+        )
+        fake_az.chmod(0o755)
+        return fake_az
+
+    def run_deploy(self, environment: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(DEPLOY_SCRIPT), *args],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
     def test_uses_current_subscription_and_api_modules_with_immutable_image(self) -> None:
         self.assertIn("az deployment sub create", self.source)
         self.assertIn("--base-only", self.source)
@@ -48,6 +75,9 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         self.assertIn("stagingbillingleverallowedorganizationids_value", self.source)
         self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED", self.source)
         self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS", self.source)
+        self.assertEqual(1, self.source.count("is_staging_billing_lever_target()"))
+        self.assertIn("EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS\" ]] && ! is_staging_billing_lever_target", self.source)
+        self.assertNotIn("is_staging_pairing_allowlist_target", self.source)
         self.assertIn("IMAGE=\"$IMAGE_REPOSITORY@$IMAGE_DIGEST\"", self.source)
         self.assertIn("AZURE_CONTAINER_REGISTRY_ENDPOINT", self.source)
         self.assertIn("CONTROL_SQL_SQLSERVERFQDN", self.source)
@@ -57,30 +87,79 @@ class DeployAzureElsaControlTests(unittest.TestCase):
     def test_refuses_a_pairing_allowlist_unless_the_target_is_staging(self) -> None:
         environment = self.environment()
         environment["EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-        result = subprocess.run(
-            [str(DEPLOY_SCRIPT), "--environment", "prod"],
-            cwd=ROOT,
-            env=environment,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = self.run_deploy(environment, "--environment", "prod")
         self.assertNotEqual(0, result.returncode)
         self.assertIn("only permitted for the test (staging) environment", result.stderr)
         self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
+
+        production = self.run_deploy(environment, "--environment", "production")
+        self.assertNotEqual(0, production.returncode)
+        self.assertIn("only permitted for the test (staging) environment", production.stderr)
+
+    def test_allows_a_pairing_allowlist_for_the_test_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            call_log = temporary_path / "az-calls"
+            self.write_fake_az(temporary_path)
+            environment = self.environment()
+            environment["PATH"] = f"{temporary_path}{os.pathsep}{environment['PATH']}"
+            environment["AZ_CALL_LOG"] = str(call_log)
+            environment["EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            result = self.run_deploy(environment, "--environment", "test", "--what-if")
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("deployment sub what-if", call_log.read_text())
+            self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
+
+    def test_allows_a_pairing_allowlist_for_the_real_staging_azure_env_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            call_log = temporary_path / "az-calls"
+            self.write_fake_az(temporary_path)
+            environment = self.environment()
+            environment["PATH"] = f"{temporary_path}{os.pathsep}{environment['PATH']}"
+            environment["AZ_CALL_LOG"] = str(call_log)
+            environment["EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            result = self.run_deploy(
+                environment, "--environment", "valence-control-staging", "--what-if"
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("deployment sub what-if", call_log.read_text())
+            self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
+
+            environment["TARGET_ENVIRONMENT"] = "test"
+            workflow_staging = self.run_deploy(
+                environment, "--environment", "valence-control-staging", "--what-if"
+            )
+            self.assertEqual(0, workflow_staging.returncode, workflow_staging.stdout + workflow_staging.stderr)
+
+            environment["TARGET_ENVIRONMENT"] = "production"
+            refused = self.run_deploy(environment, "--environment", "valence-control-staging")
+            self.assertNotEqual(0, refused.returncode)
+            self.assertIn("only permitted for the test (staging) environment", refused.stderr)
+            self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", refused.stdout + refused.stderr)
+
+    def test_empty_pairing_allowlist_is_accepted_for_every_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            call_log = temporary_path / "az-calls"
+            self.write_fake_az(temporary_path)
+
+            for name in ("prod", "production", "test", "valence-control-staging"):
+                with self.subTest(environment=name):
+                    environment = self.environment()
+                    environment["PATH"] = f"{temporary_path}{os.pathsep}{environment['PATH']}"
+                    environment["AZ_CALL_LOG"] = str(call_log)
+                    environment["EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS"] = ""
+                    call_log.write_text("")
+                    result = self.run_deploy(environment, "--environment", name, "--what-if")
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertIn("deployment sub what-if", call_log.read_text())
 
     def test_refuses_the_staging_billing_lifecycle_lever_unless_the_target_is_staging(self) -> None:
         environment = self.environment()
         environment["STAGING_BILLING_LIFECYCLE_LEVER_ENABLED"] = "true"
         environment["STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-        result = subprocess.run(
-            [str(DEPLOY_SCRIPT), "--environment", "prod"],
-            cwd=ROOT,
-            env=environment,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = self.run_deploy(environment, "--environment", "prod")
         self.assertNotEqual(0, result.returncode)
         self.assertIn("only permitted for the test (staging) environment", result.stderr)
         self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
@@ -89,57 +168,29 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)
             call_log = temporary_path / "az-calls"
-            fake_az = temporary_path / "az"
-            fake_az.write_text(
-                "#!/usr/bin/env bash\n"
-                "set -euo pipefail\n"
-                "printf '%s\\n' \"$*\" >> \"${AZ_CALL_LOG:?}\"\n"
-                "case \"$*\" in\n"
-                "  'account set --subscription '*) exit 0 ;;\n"
-                "  'deployment sub what-if '*) exit 0 ;;\n"
-                "  *) exit 41 ;;\n"
-                "esac\n"
-            )
-            fake_az.chmod(0o755)
+            self.write_fake_az(temporary_path)
 
             environment = self.environment()
             environment["PATH"] = f"{temporary_path}{os.pathsep}{environment['PATH']}"
             environment["AZ_CALL_LOG"] = str(call_log)
             environment["STAGING_BILLING_LIFECYCLE_LEVER_ENABLED"] = "true"
             environment["STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-            result = subprocess.run(
-                [str(DEPLOY_SCRIPT), "--environment", "valence-control-staging", "--what-if"],
-                cwd=ROOT,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
+            result = self.run_deploy(
+                environment, "--environment", "valence-control-staging", "--what-if"
             )
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             self.assertIn("deployment sub what-if", call_log.read_text())
             self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
 
             environment["TARGET_ENVIRONMENT"] = "production"
-            refused = subprocess.run(
-                [str(DEPLOY_SCRIPT), "--environment", "valence-control-staging"],
-                cwd=ROOT,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            refused = self.run_deploy(environment, "--environment", "valence-control-staging")
             self.assertNotEqual(0, refused.returncode)
             self.assertIn("only permitted for the test (staging) environment", refused.stderr)
             self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", refused.stdout + refused.stderr)
 
             environment["TARGET_ENVIRONMENT"] = "test"
-            allowed = subprocess.run(
-                [str(DEPLOY_SCRIPT), "--environment", "valence-control-staging", "--what-if"],
-                cwd=ROOT,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
+            allowed = self.run_deploy(
+                environment, "--environment", "valence-control-staging", "--what-if"
             )
             self.assertEqual(0, allowed.returncode, allowed.stdout + allowed.stderr)
 
@@ -147,18 +198,7 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)
             call_log = temporary_path / "az-calls"
-            fake_az = temporary_path / "az"
-            fake_az.write_text(
-                "#!/usr/bin/env bash\n"
-                "set -euo pipefail\n"
-                "printf '%s\\n' \"$*\" >> \"${AZ_CALL_LOG:?}\"\n"
-                "case \"$*\" in\n"
-                "  'account set --subscription '*) exit 0 ;;\n"
-                "  'deployment sub what-if '*) exit 0 ;;\n"
-                "  *) exit 41 ;;\n"
-                "esac\n"
-            )
-            fake_az.chmod(0o755)
+            self.write_fake_az(temporary_path)
 
             for enabled in ("", "false", "FALSE"):
                 with self.subTest(enabled=enabled):
@@ -168,14 +208,7 @@ class DeployAzureElsaControlTests(unittest.TestCase):
                     environment["STAGING_BILLING_LIFECYCLE_LEVER_ENABLED"] = enabled
                     environment["STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS"] = ""
                     call_log.write_text("")
-                    result = subprocess.run(
-                        [str(DEPLOY_SCRIPT), "--environment", "prod", "--what-if"],
-                        cwd=ROOT,
-                        env=environment,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
+                    result = self.run_deploy(environment, "--environment", "prod", "--what-if")
                     self.assertEqual(0, result.returncode, result.stderr)
                     self.assertIn("deployment sub what-if", call_log.read_text())
                     self.assertNotIn("stagingbillinglever", call_log.read_text())
@@ -184,14 +217,7 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         environment = self.environment()
         environment["CLOUD_ACCOUNT_ISSUER"] = "https://example.invalid/auth/v1"
         environment["EXPECTED_CLOUD_ACCOUNT_ISSUER"] = environment["CLOUD_ACCOUNT_ISSUER"]
-        result = subprocess.run(
-            [str(DEPLOY_SCRIPT), "--environment", "test"],
-            cwd=ROOT,
-            env=environment,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = self.run_deploy(environment, "--environment", "test")
         self.assertNotEqual(0, result.returncode)
         self.assertIn("exact Supabase Auth issuer", result.stderr)
 
@@ -199,32 +225,14 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)
             call_log = temporary_path / "az-calls"
-            fake_az = temporary_path / "az"
-            fake_az.write_text(
-                "#!/usr/bin/env bash\n"
-                "set -euo pipefail\n"
-                "printf '%s\\n' \"$*\" >> \"${AZ_CALL_LOG:?}\"\n"
-                "case \"$*\" in\n"
-                "  'account set --subscription '*) exit 0 ;;\n"
-                "  'deployment sub what-if '*) exit 0 ;;\n"
-                "  *) exit 41 ;;\n"
-                "esac\n"
-            )
-            fake_az.chmod(0o755)
+            self.write_fake_az(temporary_path)
             environment = self.environment()
             environment["PATH"] = f"{temporary_path}{os.pathsep}{environment['PATH']}"
             environment["AZ_CALL_LOG"] = str(call_log)
             environment["CLOUD_ACCOUNT_ISSUER"] = "https://abcdefghijklmnopqrst.supabase.co/auth/v1"
             environment["EXPECTED_CLOUD_ACCOUNT_ISSUER"] = environment["CLOUD_ACCOUNT_ISSUER"]
 
-            result = subprocess.run(
-                [str(DEPLOY_SCRIPT), "--environment", "test", "--what-if"],
-                cwd=ROOT,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            result = self.run_deploy(environment, "--environment", "test", "--what-if")
 
             self.assertEqual(0, result.returncode, result.stderr)
             calls = call_log.read_text()
@@ -262,14 +270,7 @@ class DeployAzureElsaControlTests(unittest.TestCase):
             environment["AZ_CALL_LOG"] = str(az_log)
             environment["DOCKER_CALL_LOG"] = str(docker_log)
 
-            result = subprocess.run(
-                [str(DEPLOY_SCRIPT), "--environment", "test"],
-                cwd=ROOT,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            result = self.run_deploy(environment, "--environment", "test")
 
             self.assertNotEqual(0, result.returncode)
             self.assertIn("Missing deployment output: AZURE_CONTAINER_REGISTRY_ENDPOINT", result.stderr)
@@ -279,18 +280,7 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)
             call_log = temporary_path / "az-calls"
-            fake_az = temporary_path / "az"
-            fake_az.write_text(
-                "#!/usr/bin/env bash\n"
-                "set -euo pipefail\n"
-                "printf '%s\\n' \"$*\" >> \"${AZ_CALL_LOG:?}\"\n"
-                "case \"$*\" in\n"
-                "  'account set --subscription '*) exit 0 ;;\n"
-                "  'deployment sub create '*) exit 0 ;;\n"
-                "  *) exit 41 ;;\n"
-                "esac\n"
-            )
-            fake_az.chmod(0o755)
+            self.write_fake_az(temporary_path)
             environment = os.environ.copy()
             for name in (
                 "ADMIN_API_KEY",
@@ -310,14 +300,7 @@ class DeployAzureElsaControlTests(unittest.TestCase):
                 }
             )
 
-            result = subprocess.run(
-                [str(DEPLOY_SCRIPT), "--environment", "test", "--base-only"],
-                cwd=ROOT,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            result = self.run_deploy(environment, "--environment", "test", "--base-only")
 
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn("deployment sub create", call_log.read_text())

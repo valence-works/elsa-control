@@ -128,13 +128,6 @@ if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
   echo "Image tag has an invalid container tag format." >&2
   exit 1
 fi
-if [[ -n "$EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS" && "$ENVIRONMENT_NAME" != "test" ]]; then
-  echo "EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS is only permitted for the test (staging) environment." >&2
-  exit 1
-fi
-if [[ "${STAGING_BILLING_LIFECYCLE_LEVER_ENABLED,,}" == "false" ]]; then
-  STAGING_BILLING_LIFECYCLE_LEVER_ENABLED=""
-fi
 # Prefer TARGET_ENVIRONMENT (the workflow's GitHub environment / dispatch input).
 # Direct invocation also accepts the staging Azure env name valence-control-staging.
 is_staging_billing_lever_target() {
@@ -144,6 +137,13 @@ is_staging_billing_lever_target() {
     [[ "$ENVIRONMENT_NAME" == "test" || "$ENVIRONMENT_NAME" == "valence-control-staging" ]]
   fi
 }
+if [[ -n "$EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS" ]] && ! is_staging_billing_lever_target; then
+  echo "EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS is only permitted for the test (staging) environment." >&2
+  exit 1
+fi
+if [[ "${STAGING_BILLING_LIFECYCLE_LEVER_ENABLED,,}" == "false" ]]; then
+  STAGING_BILLING_LIFECYCLE_LEVER_ENABLED=""
+fi
 if [[ ( "${STAGING_BILLING_LIFECYCLE_LEVER_ENABLED,,}" == "true" || -n "$STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS" ) ]] && ! is_staging_billing_lever_target; then
   echo "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED and STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS are only permitted for the test (staging) environment." >&2
   exit 1
