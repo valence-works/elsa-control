@@ -91,6 +91,25 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
     }
 
     [Fact]
+    public async Task Operation_store_persists_the_admitted_studio_grant_profile()
+    {
+        var now = DateTimeOffset.Parse("2026-09-21T10:00:00Z");
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+
+        var operation = await store.CreateOrGetAsync(Request() with
+        {
+            ManagedHandoff = true,
+            ManagedHandoffStudioGrants = true,
+            Capacity = new AzureWorkloadCapacity(1, 1, 500, 1024)
+        }, now);
+        var restored = await store.GetAsync(_workspaceId, operation.Id);
+
+        Assert.True(operation.ManagedHandoffStudioGrants);
+        Assert.True(restored!.ManagedHandoffStudioGrants);
+    }
+
+    [Fact]
     public async Task Provisioning_lookup_returns_only_the_latest_one_hundred_transitions_in_chronological_order()
     {
         var now = DateTimeOffset.Parse("2026-09-21T10:00:00Z");

@@ -31,6 +31,8 @@ internal sealed class AzureProviderOperationEntity
     public int? CapacityMemoryMiB { get; set; }
     // Whether the deployment configures the runtime handoff; rows retained before it existed never did.
     public bool ManagedHandoff { get; set; }
+    // Whether the admitted runtime image supports the full Studio grant set; old rows default to false.
+    public bool ManagedHandoffStudioGrants { get; set; }
     public string ElsaVersion { get; set; } = "";
     public string ReleaseLine { get; set; } = "";
     public string Topology { get; set; } = "";

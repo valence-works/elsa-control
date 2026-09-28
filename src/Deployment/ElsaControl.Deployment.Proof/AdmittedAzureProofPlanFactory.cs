@@ -46,6 +46,8 @@ public sealed class AdmittedAzureProofPlanFactory(
             admittedResolution.Findings.Any(finding => string.Equals(finding.Severity, "error", StringComparison.OrdinalIgnoreCase)))
             throw PlanFailure("azure.proof.admissionRequired");
 
+        // Proof plans deploy production-registry images: no provider scope, so the translator governs the production
+        // repository, and the runner rejects any proof target scope that names another registry.
         var translation = AzureWorkloadPlanTranslator.Translate(admittedResolution.Plan, target);
         if (translation.Plan is null || translation.Findings.Count != 0)
             throw PlanFailure("azure.proof.planRejected");

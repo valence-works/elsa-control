@@ -1177,6 +1177,7 @@ internal sealed class ElsaInstanceConfiguration : IEntityTypeConfiguration<ElsaI
         builder.Property(x => x.CurrentDeploymentId).HasMaxLength(128);
         builder.Property(x => x.CurrentDeploymentRevisionId).HasMaxLength(128);
         builder.Property(x => x.CurrentDeploymentEndpointUri).HasMaxLength(2048);
+        builder.Property(x => x.CurrentDeploymentStudioGrantsDeploymentId).HasMaxLength(128);
         builder.Property(x => x.PlacementAssignmentId).HasMaxLength(128);
         builder.Property(x => x.ElsaTenantId).HasMaxLength(128);
         builder.Property(x => x.ElsaTenantAudience).HasMaxLength(256);

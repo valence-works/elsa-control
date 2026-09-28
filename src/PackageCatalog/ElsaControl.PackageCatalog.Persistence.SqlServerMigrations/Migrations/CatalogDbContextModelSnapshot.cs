@@ -1482,6 +1482,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<bool>("ManagedHandoff")
                         .HasColumnType("bit");
 
+                    b.Property<bool>("ManagedHandoffStudioGrants")
+                        .HasColumnType("bit");
+
                     b.Property<string>("OperationIdentity")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -2907,6 +2910,13 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         .HasColumnType("bit");
 
                     b.Property<string>("CurrentDeploymentRevisionId")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<bool>("CurrentDeploymentStudioGrants")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("CurrentDeploymentStudioGrantsDeploymentId")
                         .HasMaxLength(128)
                         .HasColumnType("nvarchar(128)");
 

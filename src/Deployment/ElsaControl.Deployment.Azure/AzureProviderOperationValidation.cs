@@ -379,6 +379,7 @@ public static class AzureProviderOperationValidation
         if ((request.ReleaseManifestReference is null) != (request.ReleaseManifestSignatureReference is null)) errors.Add("releaseManifestReferences.incomplete");
         if (request.Capacity is not null && AzureContainerAppsCapacity.Map(request.Capacity) is null) errors.Add("capacity.invalid");
         if (request.ManagedHandoff && request.Capacity is not { MinReplicas: 1, MaxReplicas: 1 }) errors.Add("managedHandoff.replicasUnsupported");
+        if (request.ManagedHandoffStudioGrants && !request.ManagedHandoff) errors.Add("managedHandoff.studioGrantsRequireHandoff");
         ValidateSecretReferences(request.SecretReferences, errors);
 
         BoundedSafe(request.TargetKey, 128, "target", errors);
@@ -432,6 +433,9 @@ public static class AzureProviderOperationValidation
                 normalized.ProviderScopeFingerprint,
                 secretReferences = normalized.SecretReferences
             });
+        // ManagedHandoffStudioGrants is deliberately not hashed. It is derived from the admitted image, which the
+        // manifest and image digests above already bind, and leaving it out keeps a Control build that predates it
+        // able to restore, delete and recover the operations this build writes.
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
             WithManagedHandoff(WithCapacity(canonical, normalized.Capacity), normalized.ManagedHandoff)))).ToLowerInvariant();
     }

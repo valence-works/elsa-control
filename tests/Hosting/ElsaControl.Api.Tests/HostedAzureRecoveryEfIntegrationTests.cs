@@ -39,7 +39,7 @@ public sealed partial class ElsaInstanceProviderReconciliationHostedServiceTests
                 "hosted-recovery-rg",
                 "22222222-2222-2222-2222-222222222222",
                 "registry-rg",
-                "registry",
+                "valenceruntimeimages",
                 "westeurope");
             var instanceId = Guid.NewGuid();
             var workloadName = $"e{instanceId:N}"[..16];

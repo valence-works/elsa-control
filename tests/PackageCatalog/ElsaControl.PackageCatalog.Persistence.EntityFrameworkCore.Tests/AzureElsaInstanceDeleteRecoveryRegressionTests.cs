@@ -26,7 +26,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             "rg-delete-recovery",
             "22222222-2222-2222-2222-222222222222",
             "registry-rg",
-            "registry1",
+            "valenceruntimeimages",
             "westeurope");
         await using var tools = await CreateCleanupToolsAsync(scope, accepted.Instance.Id);
         var runnerOptions = tools.Options;

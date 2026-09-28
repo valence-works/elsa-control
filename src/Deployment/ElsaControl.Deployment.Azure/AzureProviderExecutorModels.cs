@@ -171,7 +171,8 @@ public sealed record AzureProviderRecoveryObservation(
 public sealed record AzureProviderRecoveryRequest(
     AzureProviderOperation Operation,
     AzureWorkloadPlan Plan,
-    AzureProviderResourceAssignment? Assignment = null)
+    AzureProviderResourceAssignment? Assignment = null,
+    AzureProviderTargetScope? ProviderScope = null)
 {
     public void Validate()
     {
@@ -214,7 +215,8 @@ public sealed record AzureProviderRecoveryRequest(
             AzureProviderExecutor.ValidateExecutionRequest(
                 new AzureProviderExecutionRequest(
                     AzureProviderOperationService.CreateOperationRequest(Operation),
-                    Plan));
+                    Plan),
+                ProviderScope);
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
         {

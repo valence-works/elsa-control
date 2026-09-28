@@ -81,8 +81,9 @@ Its claims are:
 | `jti` | Unique one-time redemption identifier. |
 | `iat`, `nbf`, `exp` | One-minute lifetime; maximum configured lifetime is five minutes. |
 
-No workflow definitions, package payloads, credentials, provider tokens or
-runtime API permissions belong in this token.
+No workflow definitions, package payloads, credentials or provider tokens belong in
+this token. The only runtime API permissions it carries are the exact grants described
+under [Runtime grants](#runtime-grants).
 
 ## Authorization boundary
 
@@ -98,6 +99,27 @@ organization/workspace boundary, and requires the `instances.open` permission.
 An instance is openable only while its desired/observed lifecycle and health are
 Running/Ready/Healthy and its identity binding remains valid. Existing workspace
 access is an input to that decision, never a permanent instance identity.
+
+### Runtime grants
+
+A caller who may open the instance also receives runtime API permissions, derived
+from their Control roles when the code is issued and rechecked when it is redeemed.
+The workspace role sets the ceiling; an organization role never raises grants above
+Structured Logs read.
+
+| Workspace role | Organization role | Grants on an image with `managed-elsa-studio-grants-v1` | Grants on an older image |
+|---|---|---|---|
+| Owner | any | The Studio grant set in `contracts/managed-elsa-studio-grants-v1.json` (Structured Logs, dashboard, workflow definition read/write/publish and the designer's descriptor reads) | `read:diagnostics:structured-logs` |
+| Reader or SourceAdmin | Owner or Administrator | `read:diagnostics:structured-logs` | `read:diagnostics:structured-logs` |
+| Reader or SourceAdmin | Member | none | none |
+
+Every row still requires `instances.open`, which only a workspace Owner can grant. An
+organization administrator who needs the designer makes themselves workspace Owner,
+which is an explicit, audited step. Whether the image supports the Studio grant set
+comes from the provider-confirmed current deployment, never from the release that is
+merely selected next. A code issued with the Studio grant set is refused at redemption
+if the caller has since been demoted or the engine is back on an older image, because
+the issued grants no longer fall within what the current roles and image allow.
 
 ## Threats and controls
 

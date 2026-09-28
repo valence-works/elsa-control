@@ -632,7 +632,7 @@ public sealed class AzureElsaInstanceProviderTests
             OperationIdentity = AzureProviderOperationValidation.ComputeOperationIdentity(
                 AzureProviderOperationService.CreateOperationRequest(reconcile))
         };
-        Assert.NotNull(AzureProviderOperationService.TryRestorePlan(reconcile));
+        Assert.NotNull(AzureProviderOperationService.TryRestorePlan(reconcile, providerScope: null));
         var delete = reconcile with
         {
             Id = Guid.NewGuid(),

@@ -233,6 +233,8 @@ public sealed record ElsaInstanceProviderObservation
         // when set keeps their evidence fingerprints stable while distinguishing a configured deployment.
         if (CurrentDeploymentReference?.ManagedHandoff == true)
             canonical += "managed-handoff\n";
+        // StudioGrantsSupported is deliberately not part of the fingerprint: a Control build that predates it must
+        // recompute the same evidence fingerprint for observations this build records.
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 }
