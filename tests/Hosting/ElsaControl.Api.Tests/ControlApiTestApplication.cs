@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using ElsaControl.Api.Authentication;
+using ElsaControl.Api.Workspace;
 using ElsaControl.Deployment.Core.Cockpit;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Packages;
@@ -42,6 +43,9 @@ internal sealed class ControlApiTestApplication : WebApplicationFactory<Program>
     public static JsonSerializerOptions JsonOptions { get; } = CreateJsonOptions();
 
     public string ConnectionString => $"Data Source={_databasePath}";
+
+    public TestExternalEnginePairingAvailability ExternalEnginePairing =>
+        Services.GetRequiredService<TestExternalEnginePairingAvailability>();
 
     protected override void ConfigureWebHost(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
     {
@@ -83,6 +87,10 @@ internal sealed class ControlApiTestApplication : WebApplicationFactory<Program>
                 }));
             services.RemoveAll<IEngineHealthProbe>();
             services.AddSingleton<IEngineHealthProbe, TestEngineHealthProbe>();
+            services.RemoveAll<IExternalEnginePairingAvailability>();
+            services.AddSingleton<TestExternalEnginePairingAvailability>();
+            services.AddSingleton<IExternalEnginePairingAvailability>(services =>
+                services.GetRequiredService<TestExternalEnginePairingAvailability>());
             _configureServices?.Invoke(services);
         });
     }

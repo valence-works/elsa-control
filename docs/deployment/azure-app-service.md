@@ -327,6 +327,25 @@ Wait for the cleanup commands to finish, then verify that the SQL administrator
 matches the original generated identity and that the temporary firewall rule is
 absent before running the full deployment helper.
 
+### External-engine pairing allowlist
+
+Control refuses external-engine pairing create and repair unless the caller's
+organization id is listed in `ElsaControl:ExternalEngines:PairingAllowedOrganizationIds`.
+The default is an empty list, which refuses every organization with HTTP 403
+and problem code `external_engine_pairing_unavailable`. An invalid entry fails
+startup. List, get, pairing progress, disconnect, and connector redeem /
+authenticate / heartbeat / rotate / revoke stay available for existing
+connections.
+
+- Production ships the setting empty. Do not add public or Hosted customer
+  organizations.
+- Staging lists only rehearsal organizations that #101 pairing needs. Set them
+  as App Service settings, for example
+  `ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__0=<rehearsal org id>`.
+- The staging Hosted smoke's synthetic owner organization must **not** be on
+  the staging allowlist. QA's #508 row 23 proves the refusal with that
+  organization; #101 rehearsal setup must use a separate rehearsal org.
+
 ### Multi-tenant Microsoft Entra sign-in (guided design partners)
 
 Control can accept work or school sign-ins from customer Microsoft Entra tenants, so a
