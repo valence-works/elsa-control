@@ -11,6 +11,7 @@ public static class CloudCompatibilityEndpoints
         "hosted.instances.create.v1",
         "hosted.instances.status.v1",
         "hosted.instances.provisioning-progress.v1",
+        "hosted.instances.overview.v1",
         "hosted.studio.handoff.issue.v1",
         "hosted.instances.quota-problem.v1",
         "hosted.instances.confirmed-delete.v1",

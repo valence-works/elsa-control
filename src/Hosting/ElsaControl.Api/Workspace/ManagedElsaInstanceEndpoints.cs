@@ -648,6 +648,7 @@ public static class ManagedElsaInstanceEndpoints
             return Results.Ok(new ManagedElsaInstanceAuditResponse(events.Select(RedactAudit).ToList()));
         }).RequireWorkspaceAccess();
 
+        group.MapManagedElsaInstanceOverviewEndpoints();
         return endpoints;
     }
 
@@ -976,7 +977,7 @@ public static class ManagedElsaInstanceEndpoints
                 ? StatusCodes.Status422UnprocessableEntity
                 : StatusCodes.Status409Conflict;
 
-    private static IResult ConflictProblem(ElsaInstanceLifecycleConflictException exception)
+    internal static IResult ConflictProblem(ElsaInstanceLifecycleConflictException exception)
     {
         var extensions = new Dictionary<string, object?>
         {
