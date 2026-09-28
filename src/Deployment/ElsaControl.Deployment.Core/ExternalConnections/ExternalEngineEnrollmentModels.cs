@@ -10,6 +10,7 @@ public static class ExternalEngineEnrollmentDefaults
     public static readonly TimeSpan DefaultChallengeLifetime = TimeSpan.FromMinutes(10);
     public static readonly TimeSpan MaximumChallengeLifetime = TimeSpan.FromMinutes(15);
     public static readonly TimeSpan MaximumProofAge = TimeSpan.FromMinutes(5);
+    public static readonly TimeSpan MaximumProofFutureSkew = TimeSpan.FromSeconds(30);
     public static readonly TimeSpan MaximumRotationOverlap = TimeSpan.FromMinutes(5);
 
     public static string AudienceFor(Guid connectionId)

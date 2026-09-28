@@ -301,17 +301,52 @@ public sealed class ExternalEngineEnrollmentServiceTests
             IssuedAt = Now.Subtract(ExternalEngineEnrollmentDefaults.MaximumProofAge),
             Nonce = Challenge()
         }, key);
-        var future = SignProof(Proof(identity) with { IssuedAt = Now.AddSeconds(1), Nonce = Challenge() }, key);
+        var nearFuture = SignProof(Proof(identity) with
+        {
+            IssuedAt = Now.Add(ExternalEngineEnrollmentDefaults.MaximumProofFutureSkew),
+            Nonce = Challenge()
+        }, key);
 
         var first = await fixture.Service.VerifyConnectorProofAsync(valid, valid.Operation, valid.PayloadDigest);
         var replay = await fixture.Service.VerifyConnectorProofAsync(valid, valid.Operation, valid.PayloadDigest);
+        var acceptedSkew = await fixture.Service.VerifyConnectorProofAsync(
+            nearFuture, nearFuture.Operation, nearFuture.PayloadDigest);
+        var skewedReplay = await fixture.Service.VerifyConnectorProofAsync(
+            nearFuture, nearFuture.Operation, nearFuture.PayloadDigest);
 
         Assert.True(first.Succeeded);
         Assert.Equal(ExternalEngineConnectorProofFailure.Replay, replay.Failure);
         Assert.Equal(ExternalEngineConnectorProofFailure.Expired,
             (await fixture.Service.VerifyConnectorProofAsync(stale, stale.Operation, stale.PayloadDigest)).Failure);
-        Assert.Equal(ExternalEngineConnectorProofFailure.Future,
-            (await fixture.Service.VerifyConnectorProofAsync(future, future.Operation, future.PayloadDigest)).Failure);
+        Assert.True(acceptedSkew.Succeeded);
+        Assert.Equal(ExternalEngineConnectorProofFailure.Replay, skewedReplay.Failure);
+    }
+
+    [Theory]
+    [InlineData(30_000, true)]
+    [InlineData(30_001, false)]
+    public async Task Connector_proof_future_skew_is_accepted_only_up_to_thirty_seconds(
+        int issuedAtOffsetMilliseconds,
+        bool accepted)
+    {
+        var fixture = new Fixture();
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var identity = (await fixture.Service.RedeemAsync(Redemption(await fixture.Service.IssueAsync(Request()), key))).Identity!;
+        var proof = SignProof(Proof(identity) with
+        {
+            IssuedAt = Now.AddMilliseconds(issuedAtOffsetMilliseconds),
+            Nonce = Challenge()
+        }, key);
+
+        var result = await fixture.Service.VerifyConnectorProofAsync(proof, proof.Operation, proof.PayloadDigest);
+
+        if (accepted)
+        {
+            Assert.True(result.Succeeded);
+            return;
+        }
+
+        Assert.Equal(ExternalEngineConnectorProofFailure.Future, result.Failure);
     }
 
     [Fact]

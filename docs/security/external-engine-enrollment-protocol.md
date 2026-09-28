@@ -78,7 +78,7 @@ Domain: `elsa-control.external-engine-connector.proof.v1`
 10. issued-at Unix milliseconds
 11. nonce
 
-Proof validation requires exact identity, organization, workspace, connection, audience, operation, payload digest, and key-version matches. `issued-at` is the signed Unix-millisecond value. Future timestamps are rejected; a proof is accepted for at most five minutes. The nonce must contain 32 random bytes and is stored only as a SHA-256 hash. It is consumed atomically after the signature is verified and before an operation may mutate state, so replay has one winner across processes.
+Proof validation requires exact identity, organization, workspace, connection, audience, operation, payload digest, and key-version matches. `issued-at` is the signed Unix-millisecond value. A proof is accepted when that timestamp is at most five minutes in the past and at most 30 seconds in the future of Control's clock; timestamps more than 30 seconds ahead are rejected as future. The nonce must contain 32 random bytes and is stored only as a SHA-256 hash. It is consumed atomically after the signature is verified and before an operation may mutate state, so replay has one winner across processes. Heartbeat sequence monotonicity is unchanged and is enforced after proof verification.
 
 The proof validator deliberately does not authorize an HTTP route. The route layer must bind `operation` to its exact method/path semantic and compute the payload digest from the received canonical body; it must never trust caller-provided expected values.
 
@@ -102,7 +102,7 @@ The proof validator deliberately does not authorize an HTTP route. The route lay
 | Captured challenge after pairing | The challenge is consumed; later messages require a current or narrowly overlapping enrolled private key. | #481 must preserve these checks at every runtime route. |
 | Connector private-key exfiltration | Control never receives or stores it. | Customer host security; revoke and re-pair on compromise. |
 | Public-key substitution | Redemption signature covers the public-key thumbprint. | Challenge theft before redemption remains as described above. |
-| Proof replay | Operation, payload, Unix-millisecond timestamp, and nonce are signed; nonce hashes are consumed durably after signature validation, and the five-minute window rejects stale/future proofs. | #481 route tests must prove each route supplies its own operation and canonical payload digest. |
+| Proof replay | Operation, payload, Unix-millisecond timestamp, and nonce are signed; nonce hashes are consumed durably after signature validation. The five-minute past window rejects stale proofs, and more than 30 seconds of future clock skew is rejected. | #481 route tests must prove each route supplies its own operation and canonical payload digest. |
 | Confused deputy | Purpose, audience, organization, workspace, connection, operation, and payload are signed/bound. | Route layer must supply exact expected operation and digest. |
 | Downgrade | Only protocol v1, P-256/SHA-256, fixed signature encoding, the current key, or the immediately previous key strictly inside its overlap are admitted. Rotation and revocation require the current key. | A new algorithm or protocol version requires a separate reviewed transition contract. |
 | Offline connector | No inbound connectivity is required. | #490 documents expiry/reconnect and fresh pairing recovery. |
@@ -124,3 +124,7 @@ The one-time issue result and redemption/proof request types redact challenge, p
 - #489 supplies durable EF storage, migrations, atomic redemption, workspace isolation, and safe audit.
 - #490 supplies timestamp/nonce replay defense, bounded rotation, immediate revocation, durable lifecycle audit, and fresh-pairing recovery without private-key escrow.
 - #481 may expose routes only after the relevant #489/#490 guarantees exist and must use narrow workspace/BFF authorization.
+
+## Interoperability vectors
+
+Canonical redeem, heartbeat, rotate, and revoke byte sequences plus signatures produced by this protocol implementation are committed at [`docs/protocol/external-engine-connector/v1/`](../protocol/external-engine-connector/v1/README.md). `valence-works/elsa-control-connector` consumes that directory so a reimplementation cannot drift from Control.

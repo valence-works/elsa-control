@@ -313,7 +313,7 @@ public sealed class ExternalEngineEnrollmentService(
 
         var now = _timeProvider.GetUtcNow();
         var issuedAt = DateTimeOffset.FromUnixTimeMilliseconds(proof.IssuedAt.ToUniversalTime().ToUnixTimeMilliseconds());
-        if (issuedAt > now)
+        if (issuedAt > now.Add(ExternalEngineEnrollmentDefaults.MaximumProofFutureSkew))
             return await RejectProofAsync(proof, ExternalEngineConnectorProofFailure.Future, cancellationToken);
         if (issuedAt <= now.Subtract(ExternalEngineEnrollmentDefaults.MaximumProofAge))
             return await RejectProofAsync(proof, ExternalEngineConnectorProofFailure.Expired, cancellationToken);
