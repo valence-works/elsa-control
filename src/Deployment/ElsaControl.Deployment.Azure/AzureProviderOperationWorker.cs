@@ -73,7 +73,7 @@ public sealed class AzureProviderOperationWorker(
                 // claim boundary. ExecuteAsync performs this check too, but the worker must not
                 // classify an exception from the asynchronous execution path as an unrestorable
                 // plan after a lease or remote step may already have been started.
-                AzureProviderExecutor.ValidateExecutionRequest(request);
+                AzureProviderExecutor.ValidateExecutionRequest(request, executor.ProviderScope);
                 AzureProviderOperationValidation.ValidateReferences(operation.Resources);
             }
             catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)

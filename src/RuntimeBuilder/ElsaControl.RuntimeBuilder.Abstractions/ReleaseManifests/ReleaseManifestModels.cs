@@ -30,6 +30,12 @@ public static class ReleaseManifestSchema
 public static class ReleaseManifestRuntimeIntegrationCapabilities
 {
     public const string ManagedElsaHandoffV2 = "managed-elsa-handoff-v2";
+
+    /// <summary>
+    /// The image accepts Control's exact owner/admin Studio grants during managed handoff.
+    /// Older handoff-v2 images support only structured-log read and must not receive these grants.
+    /// </summary>
+    public const string ManagedElsaStudioGrantsV1 = "managed-elsa-studio-grants-v1";
 }
 
 public sealed record CommercialReleaseManifest(

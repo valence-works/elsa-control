@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using ElsaControl.Deployment.Abstractions.Instances;
 
 namespace ElsaControl.Deployment.Core.Instances;
@@ -26,7 +27,15 @@ public sealed record ManagedElsaProvisioningProgress(
     DateTimeOffset? CompletedAt,
     string? DiagnosticCode,
     IReadOnlyList<ManagedElsaProvisioningStage> Stages,
-    IReadOnlyList<ManagedElsaProvisioningActivity> Activity);
+    IReadOnlyList<ManagedElsaProvisioningActivity> Activity,
+    // Serialized when present so #646 can render the blocker-stale string.
+    // Omitted when null so a non-waiting snapshot does not grow new keys.
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    Guid? BlockingOperationId = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? BlockingOperationStage = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? StaleReason = null);
 
 /// <summary>A stable customer-facing provisioning stage.</summary>
 public sealed record ManagedElsaProvisioningStage(
@@ -48,6 +57,8 @@ public static class ManagedElsaProvisioningProgressStates
 {
     public const string Queued = "queued";
     public const string Active = "active";
+    public const string WaitingForPriorOperation = "waiting-for-prior-operation";
+    public const string EntitlementHeld = "entitlement-held";
     public const string Stale = "stale";
     public const string Ready = "ready";
     public const string Failed = "failed";
@@ -64,6 +75,11 @@ public static class ManagedElsaProvisioningProgressStages
     public const string HealthVerification = "health-verification";
     public const string TrafficRouting = "traffic-routing";
     public const string Ready = "ready";
+    /// <summary>Distinct current-stage value; not part of the seven-step pipeline.</summary>
+    public const string WaitingForPriorOperation = "waiting-for-prior-operation";
+    public const string WaitingForDelete = "waiting-for-delete";
+    public const string WaitingForUpdate = "waiting-for-update";
+    public const string EntitlementHeld = "entitlement-held";
 
     public static IReadOnlyList<string> Ordered { get; } =
     [
@@ -103,4 +119,29 @@ public static class ManagedElsaProvisioningProgressDiagnostics
     public const string Failed = "provisioning.failed";
     public const string Cancelled = "provisioning.cancelled";
     public const string HistoryUnavailable = "provisioning.history-unavailable";
+}
+
+/// <summary>Internal stale-classification reasons. Not customer labels.</summary>
+public static class ManagedElsaProvisioningProgressStaleReasons
+{
+    public const string BlockingOperationStale = "blocking-operation-stale";
+    public const string BlockingOperationUnresolvable = "blocking-operation-unresolvable";
+}
+
+/// <summary>
+/// Control-side customer copy. Snapshot/BFF still serialize codes, not these
+/// strings. Cloud dashboard wording lives in #646 and must not be copied here.
+/// </summary>
+public static class ManagedElsaProvisioningProgressCopy
+{
+    public const string EntitlementHeldCreate =
+        "New engines aren't available right now. Resolve this on elsacloud.app.";
+
+    public const string EntitlementHeldChange =
+        "New changes to this engine aren't available right now. Resolve this on elsacloud.app.";
+
+    public static string ForHold(ElsaInstanceOperationAction action) =>
+        action == ElsaInstanceOperationAction.Create
+            ? EntitlementHeldCreate
+            : EntitlementHeldChange;
 }

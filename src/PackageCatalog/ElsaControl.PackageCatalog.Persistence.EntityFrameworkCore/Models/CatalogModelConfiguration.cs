@@ -949,6 +949,7 @@ internal sealed class AzureProviderOperationConfiguration : IEntityTypeConfigura
         builder.Property(x => x.CompletionFingerprint).HasMaxLength(64);
         ConfigureDateTime(builder.Property(x => x.CreatedAt));
         ConfigureDateTime(builder.Property(x => x.UpdatedAt));
+        ConfigureDateTime(builder.Property(x => x.StatusChangedAt));
         ConfigureNullableDateTime(builder.Property(x => x.CompletedAt));
         ConfigureNullableDateTime(builder.Property(x => x.LeaseExpiresAt));
         ConfigureNullableDateTime(builder.Property(x => x.HeartbeatAt));
@@ -1176,6 +1177,7 @@ internal sealed class ElsaInstanceConfiguration : IEntityTypeConfiguration<ElsaI
         builder.Property(x => x.CurrentDeploymentId).HasMaxLength(128);
         builder.Property(x => x.CurrentDeploymentRevisionId).HasMaxLength(128);
         builder.Property(x => x.CurrentDeploymentEndpointUri).HasMaxLength(2048);
+        builder.Property(x => x.CurrentDeploymentStudioGrantsDeploymentId).HasMaxLength(128);
         builder.Property(x => x.PlacementAssignmentId).HasMaxLength(128);
         builder.Property(x => x.ElsaTenantId).HasMaxLength(128);
         builder.Property(x => x.ElsaTenantAudience).HasMaxLength(256);

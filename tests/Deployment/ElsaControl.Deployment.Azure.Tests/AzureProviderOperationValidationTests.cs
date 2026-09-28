@@ -430,6 +430,23 @@ public sealed class AzureProviderOperationValidationTests
         Assert.Equal(AzureProviderOperationValidation.ComputeOperationIdentity(request), AzureProviderOperationValidation.ComputeOperationIdentity(handoff));
     }
 
+    [Fact]
+    public void Studio_grant_profile_is_outside_the_request_hash_and_requires_handoff()
+    {
+        var request = PersistedInstanceRequest() with
+        {
+            Capacity = new AzureWorkloadCapacity(1, 1, 500, 1024),
+            ManagedHandoff = true
+        };
+        var capable = request with { ManagedHandoffStudioGrants = true };
+
+        // A Control build that predates the column reads the row as not capable and must still recompute the hash
+        // it was stored with, or it could not delete or recover the engine.
+        Assert.Equal(AzureProviderOperationValidation.ComputeRequestHash(request), AzureProviderOperationValidation.ComputeRequestHash(capable));
+        Assert.Contains("managedHandoff.studioGrantsRequireHandoff", AzureProviderOperationValidation.Validate(
+            capable with { ManagedHandoff = false }));
+    }
+
     [Theory]
     [InlineData(null, null)]
     [InlineData(1, 3)]

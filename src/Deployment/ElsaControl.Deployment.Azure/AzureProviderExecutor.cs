@@ -12,6 +12,9 @@ namespace ElsaControl.Deployment.Azure;
 public sealed class AzureProviderExecutor
 {
     private static readonly TimeSpan DefaultLeaseDuration = TimeSpan.FromMinutes(15);
+    private const string IdentityBindingMissingCode = "provider.identity-binding-missing";
+    private const string IdentityBindingMissingSummary =
+        "The managed-instance provider operation is missing its durable identity binding.";
     private readonly IAzureProviderOperationStore _store;
     private readonly IAzureProviderRunner _runner;
     private readonly TimeProvider _timeProvider;
@@ -21,6 +24,9 @@ public sealed class AzureProviderExecutor
     private readonly IElsaInstanceCommercialGate? _commercialGate;
     private readonly IAzureProviderResourceAssignmentStore? _assignmentStore;
 
+    /// <summary>The provider scope whose registry every executed plan must name exactly; production when absent.</summary>
+    internal AzureProviderTargetScope? ProviderScope { get; }
+
     public AzureProviderExecutor(
         IAzureProviderOperationStore store,
         IAzureProviderRunner runner,
@@ -29,7 +35,8 @@ public sealed class AzureProviderExecutor
         string? workerId = null,
         TimeSpan? heartbeatInterval = null,
         IElsaInstanceCommercialGate? commercialGate = null,
-        IAzureProviderResourceAssignmentStore? assignmentStore = null)
+        IAzureProviderResourceAssignmentStore? assignmentStore = null,
+        AzureProviderTargetScope? providerScope = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _runner = runner ?? throw new ArgumentNullException(nameof(runner));
@@ -44,6 +51,7 @@ public sealed class AzureProviderExecutor
         AzureProviderOperationValidation.ValidateWorkerId(_workerId);
         _commercialGate = commercialGate;
         _assignmentStore = assignmentStore;
+        ProviderScope = providerScope;
     }
 
     /// <summary>
@@ -152,15 +160,15 @@ public sealed class AzureProviderExecutor
         return await ExecuteClaimedAsync(CopySafePlan(plan), claimed, request.LeaseToken, cancellationToken);
     }
 
-    private static bool IsPlanForOperation(AzureProviderOperation operation, AzureWorkloadPlan plan)
+    private bool IsPlanForOperation(AzureProviderOperation operation, AzureWorkloadPlan plan)
     {
         try
         {
-            if (AzureProviderOperationService.TryRestorePlan(operation) is null)
+            if (AzureProviderOperationService.TryRestorePlan(operation, ProviderScope) is null)
                 return false;
             ValidateExecutionRequest(new AzureProviderExecutionRequest(
                 AzureProviderOperationService.CreateOperationRequest(operation),
-                plan));
+                plan), ProviderScope);
             return true;
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
@@ -241,7 +249,7 @@ public sealed class AzureProviderExecutor
         AzureProviderExecutionRequest request,
         CancellationToken cancellationToken = default)
     {
-        ValidateExecutionRequest(request);
+        ValidateExecutionRequest(request, ProviderScope);
         return ExecuteCoreAsync(request with { Plan = CopySafePlan(request.Plan) }, cancellationToken);
     }
 
@@ -259,7 +267,7 @@ public sealed class AzureProviderExecutor
         ArgumentNullException.ThrowIfNull(operation);
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(observation);
-        var recovery = new AzureProviderRecoveryRequest(operation, CopySafePlan(plan));
+        var recovery = new AzureProviderRecoveryRequest(operation, CopySafePlan(plan), ProviderScope: ProviderScope);
         recovery.Validate();
         observation.Validate();
 
@@ -385,6 +393,15 @@ public sealed class AzureProviderExecutor
             return Result(operation, AzureProviderExecutionOutcome.Failed, "azure.operation.terminal", "The Azure operation is already terminal and requires a new idempotency key.");
         if (operation.Status == AzureProviderOperationStatus.Running)
             return Result(operation, AzureProviderExecutionOutcome.InProgress, "azure.operation.in-progress", "The Azure operation is already owned by another worker.");
+        if (operation.Status == AzureProviderOperationStatus.RecoveryRequired &&
+            IsIdentityBindingMissing(operation))
+        {
+            return Result(
+                operation,
+                AzureProviderExecutionOutcome.RecoveryRequired,
+                IdentityBindingMissingCode,
+                IdentityBindingMissingSummary);
+        }
 
         var leaseToken = Guid.NewGuid().ToString("N");
         var claimed = operation.Status == AzureProviderOperationStatus.RecoveryRequired
@@ -637,26 +654,24 @@ public sealed class AzureProviderExecutor
         string leaseToken,
         CancellationToken cancellationToken)
     {
-        if (operation.OrganizationId is not { } organizationId || organizationId == Guid.Empty ||
-            operation.InstanceId is not { } instanceId || instanceId == Guid.Empty ||
-            operation.LifecycleAction is not { } lifecycleAction)
+        if (IsIdentityBindingMissing(operation))
         {
-            var bindingHeld = await _store.FinalizeAsync(
+            var bindingMissing = await _store.FinalizeAsync(
                 operation.WorkspaceId,
                 operation.Id,
                 leaseToken,
-                AzureProviderOperationStatus.EntitlementHeld,
-                ElsaInstanceCommercialOperation.BindingRequired,
+                AzureProviderOperationStatus.RecoveryRequired,
+                IdentityBindingMissingCode,
                 _timeProvider.GetUtcNow(),
                 operation.Version,
                 cancellationToken);
-            if (bindingHeld is null)
+            if (bindingMissing is null)
                 return await GetConcurrentResultAsync(operation);
             return Result(
-                bindingHeld,
-                AzureProviderExecutionOutcome.InProgress,
-                ElsaInstanceCommercialOperation.BindingRequired,
-                "The managed-instance provider operation is missing its durable identity binding.");
+                bindingMissing,
+                AzureProviderExecutionOutcome.RecoveryRequired,
+                IdentityBindingMissingCode,
+                IdentityBindingMissingSummary);
         }
 
         if (operation.Action == AzureProviderOperationAction.Delete)
@@ -692,8 +707,8 @@ public sealed class AzureProviderExecutor
         }
 
         var decision = await _commercialGate.EvaluateAsync(
-            organizationId,
-            lifecycleAction,
+            operation.OrganizationId!.Value,
+            operation.LifecycleAction!.Value,
             cancellationToken: cancellationToken);
         if (decision.Allowed)
             return null;
@@ -1384,7 +1399,7 @@ public sealed class AzureProviderExecutor
         public Exception Cause { get; } = cause;
     }
 
-    internal static void ValidateExecutionRequest(AzureProviderExecutionRequest request)
+    internal static void ValidateExecutionRequest(AzureProviderExecutionRequest request, AzureProviderTargetScope? providerScope)
     {
         if (request is null)
             throw new ArgumentNullException(nameof(request));
@@ -1428,10 +1443,7 @@ public sealed class AzureProviderExecutor
             throw new ArgumentException("The provider plan must include verified release-manifest digests.", nameof(request));
         if (string.IsNullOrWhiteSpace(plan.ImageDigest) || plan.ImageDigest.Length != 64 || !plan.ImageDigest.All(Uri.IsHexDigit))
             throw new ArgumentException("The provider plan image digest must be exactly 64 hexadecimal characters.", nameof(request));
-        if (!string.Equals(
-                plan.ImageRepository,
-                AzureWorkloadPlanTranslator.SupportedRepository,
-                StringComparison.Ordinal))
+        if (!string.Equals(plan.ImageRepository, AzureWorkloadPlanTranslator.GovernedRepository(providerScope), StringComparison.Ordinal))
             throw new ArgumentException("The provider plan image must use the governed Azure repository.", nameof(request));
         if (!AzureProviderOperationValidation.IsSafePackageVersion(plan.SqlWorkflowPackageVersion) ||
             !AzureProviderOperationValidation.IsSafePackageVersion(plan.SqlQuartzPackageVersion))
@@ -1470,6 +1482,11 @@ public sealed class AzureProviderExecutor
                 Result(operation, AzureProviderExecutionOutcome.RecoveryRequired, "azure.operation.recovery-required", "The Azure operation requires explicit provider recovery."),
             _ => Result(operation, AzureProviderExecutionOutcome.InProgress, inProgressCode, inProgressMessage)
         };
+
+    private static bool IsIdentityBindingMissing(AzureProviderOperation operation) =>
+        operation.OrganizationId is not { } organizationId || organizationId == Guid.Empty ||
+        operation.InstanceId is not { } instanceId || instanceId == Guid.Empty ||
+        operation.LifecycleAction is not { };
 
     private static bool IsSha256Digest(string? value) =>
         value is not null && value.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) &&

@@ -135,15 +135,16 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
     }
 
     [Fact]
-    public async Task A_redeploy_without_the_managed_handoff_does_not_inherit_the_previous_handoff()
+    public async Task A_redeploy_without_managed_handoff_does_not_inherit_studio_grants()
     {
         var (store, accepted) = await RecoveryTargetAsync();
         _ = await Service(store, new RecordingPort(Converged(
                 "observation-configured",
-                new("deployment-1", "attempt-1", "https://managed.example.test", managedHandoff: true))))
+                new("deployment-1", "attempt-1", "https://managed.example.test", managedHandoff: true, studioGrantsSupported: true))))
             .ReconcileAsync(WorkspaceId, accepted.Operation.Id);
         var configured = store.Instances.Single();
         Assert.True(configured.CurrentDeploymentReference!.ManagedHandoff);
+        Assert.True(configured.CurrentDeploymentReference.StudioGrantsSupported);
 
         var restarted = await new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now.AddMinutes(1)))
             .RestartAsync(new(WorkspaceId, configured.Id, configured.Version, "redeploy-without-handoff"));
@@ -154,6 +155,7 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
             .ReconcileAsync(WorkspaceId, restarted.Operation.Id);
 
         Assert.False(store.Instances.Single().CurrentDeploymentReference!.ManagedHandoff);
+        Assert.False(store.Instances.Single().CurrentDeploymentReference!.StudioGrantsSupported);
 
         static ElsaInstanceProviderObservation Converged(string correlationId, ElsaCurrentDeploymentReference deployment) => new(
             ElsaInstanceProviderObservationKind.Confirmed,

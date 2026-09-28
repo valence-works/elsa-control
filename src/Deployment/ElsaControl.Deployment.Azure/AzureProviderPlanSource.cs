@@ -15,8 +15,8 @@ public interface IAzureProviderPlanSource
 /// admission evidence produces no plan, causing the worker to leave the operation for explicit
 /// recovery rather than guessing at provider inputs.
 /// </summary>
-public sealed class PersistedAzureProviderPlanSource : IAzureProviderPlanSource
+public sealed class PersistedAzureProviderPlanSource(AzureProviderTargetScope? providerScope = null) : IAzureProviderPlanSource
 {
     public AzureWorkloadPlan? Resolve(AzureProviderOperation operation) =>
-        AzureProviderOperationService.TryRestorePlan(operation);
+        AzureProviderOperationService.TryRestorePlan(operation, providerScope);
 }

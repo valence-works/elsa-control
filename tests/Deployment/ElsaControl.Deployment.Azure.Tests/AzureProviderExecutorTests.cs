@@ -116,7 +116,7 @@ public sealed class AzureProviderExecutorTests
     }
 
     [Fact]
-    public async Task Legacy_unbound_reconcile_is_held_before_any_provider_call()
+    public async Task Legacy_unbound_reconcile_is_recovery_required_before_any_provider_call()
     {
         var store = new FakeOperationStore();
         var runner = new RecordingRunner();
@@ -130,14 +130,14 @@ public sealed class AzureProviderExecutorTests
 
         var result = await executor.ApplyAsync(request, CreatePlan());
 
-        Assert.Equal(AzureProviderExecutionOutcome.InProgress, result.Outcome);
-        Assert.Equal(AzureProviderOperationStatus.EntitlementHeld, result.Operation.Status);
-        Assert.Equal(ElsaInstanceCommercialOperation.BindingRequired, result.Code);
+        Assert.Equal(AzureProviderExecutionOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(AzureProviderOperationStatus.RecoveryRequired, result.Operation.Status);
+        Assert.Equal("provider.identity-binding-missing", result.Code);
         Assert.Empty(runner.Steps);
     }
 
     [Fact]
-    public async Task Legacy_unbound_delete_is_held_before_any_provider_call()
+    public async Task Legacy_unbound_delete_is_recovery_required_before_any_provider_call()
     {
         var store = new FakeOperationStore();
         var runner = new RecordingRunner();
@@ -152,9 +152,36 @@ public sealed class AzureProviderExecutorTests
 
         var result = await executor.DeleteAsync(request, CreatePlan());
 
-        Assert.Equal(AzureProviderExecutionOutcome.InProgress, result.Outcome);
-        Assert.Equal(AzureProviderOperationStatus.EntitlementHeld, result.Operation.Status);
-        Assert.Equal(ElsaInstanceCommercialOperation.BindingRequired, result.Code);
+        Assert.Equal(AzureProviderExecutionOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(AzureProviderOperationStatus.RecoveryRequired, result.Operation.Status);
+        Assert.Equal("provider.identity-binding-missing", result.Code);
+        Assert.Empty(runner.Steps);
+    }
+
+    [Fact]
+    public async Task Legacy_unbound_resend_does_not_claim_recovery()
+    {
+        var store = new FakeOperationStore();
+        var runner = new RecordingRunner();
+        var executor = new AzureProviderExecutor(store, runner, new StaticTimeProvider(Now), TimeSpan.FromMinutes(5));
+        var request = CreateRequest() with
+        {
+            OrganizationId = null,
+            InstanceId = null,
+            LifecycleAction = null
+        };
+
+        var first = await executor.ApplyAsync(request, CreatePlan());
+        var second = await executor.ApplyAsync(request, CreatePlan());
+
+        Assert.Equal(AzureProviderExecutionOutcome.RecoveryRequired, first.Outcome);
+        Assert.Equal(AzureProviderOperationStatus.RecoveryRequired, first.Operation.Status);
+        Assert.Equal("provider.identity-binding-missing", first.Code);
+        Assert.Equal(first.Operation.Id, second.Operation.Id);
+        Assert.Equal(AzureProviderExecutionOutcome.RecoveryRequired, second.Outcome);
+        Assert.Equal(AzureProviderOperationStatus.RecoveryRequired, second.Operation.Status);
+        Assert.Equal("provider.identity-binding-missing", second.Code);
+        Assert.Equal(0, store.RecoveryClaimCount);
         Assert.Empty(runner.Steps);
     }
 
@@ -754,6 +781,27 @@ public sealed class AzureProviderExecutorTests
 
         await Assert.ThrowsAsync<ArgumentException>(() => executor.ApplyAsync(request, plan));
     }
+
+    [Theory]
+    [InlineData("valenceruntimeimages.azurecr.io/runtime-combined")]
+    [InlineData("otherregistry.azurecr.io/runtime-combined")]
+    public async Task Execution_under_a_provider_scope_accepts_only_that_scopes_repository(string repository)
+    {
+        var executor = new AzureProviderExecutor(
+            new FakeOperationStore(), new RecordingRunner(), new StaticTimeProvider(Now), TimeSpan.FromMinutes(5),
+            providerScope: StagingScope());
+        var request = CreateRequest() with { ImageRepository = repository };
+
+        await Assert.ThrowsAsync<ArgumentException>(() => executor.ApplyAsync(request, CreatePlan() with { ImageRepository = repository }));
+    }
+
+    private static AzureProviderTargetScope StagingScope() => new(
+        "11111111-1111-1111-1111-111111111111",
+        "control-staging",
+        "22222222-2222-2222-2222-222222222222",
+        "control-staging-registry",
+        "stagingregistry",
+        "westeurope");
 
     [Fact]
     public async Task Hostile_runner_message_is_not_returned_or_persisted()
