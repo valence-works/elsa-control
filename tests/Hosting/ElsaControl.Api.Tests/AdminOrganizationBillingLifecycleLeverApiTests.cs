@@ -317,13 +317,13 @@ public sealed class AdminOrganizationBillingLifecycleLeverApiTests
         Guid organizationId,
         DateTimeOffset? pastDueAt = null,
         string? customerReference = null) =>
-        SeedOrgsAsync(app, new SeedOrg(organizationId, pastDueAt ?? Now, customerReference, constrain: false));
+        SeedOrgsAsync(app, new SeedOrg(organizationId, pastDueAt ?? Now, customerReference, Constrain: false));
 
     private static Task SeedConstrainedAsync(
         ControlApiTestApplication app,
         Guid organizationId,
         DateTimeOffset constrainedAt) =>
-        SeedOrgsAsync(app, new SeedOrg(organizationId, constrainedAt.Subtract(OrganizationSubscriptionLifecycle.PaymentGracePeriod), constrain: true));
+        SeedOrgsAsync(app, new SeedOrg(organizationId, constrainedAt.Subtract(OrganizationSubscriptionLifecycle.PaymentGracePeriod), Constrain: true));
 
     private static Task SeedOrgsAsync(ControlApiTestApplication app, params SeedOrg[] orgs) =>
         app.SeedAsync(async db =>
