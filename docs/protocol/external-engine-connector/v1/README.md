@@ -31,7 +31,7 @@ Top-level fields:
 | `generatedFrom` | Control assembly that produced the bytes. |
 | `algorithms` | Key, curve, signature encoding, hash, and field canonicalization. |
 | `clock` | Fixed `now` plus Control's proof age and 30-second future-skew window. |
-| `keys` | Test-only current and next P-256 keys. `privateKeyPkcs8Base64Url` is PKCS#8, `publicKeySpkiBase64Url` is DER SubjectPublicKeyInfo. Both are unpadded base64url. |
+| `keys` | Test-only current and next P-256 keys. The object itself is marked `testOnly: true`. `privateKeyPkcs8Base64Url` is PKCS#8, `publicKeySpkiBase64Url` is DER SubjectPublicKeyInfo. Both are unpadded base64url. Never use these keys outside the vectors. |
 | `scope` | Fixed organization, workspace, connection, identity, and challenge identifiers. |
 | `vectors` | One object per signed message. |
 

@@ -15,6 +15,8 @@
     "maximumProofFutureSkewSeconds": 30
   },
   "keys": {
+    "testOnly": true,
+    "description": "TEST ONLY – never use outside these protocol vectors.",
     "current": {
       "privateKeyPkcs8Base64Url": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgydYykJaRoI4JF8JwsNIDz2f6mwypHtPTNm66bghs9eGhRANCAASYBAgiLJ-ViubfEQ4jH71s07S-RRpZfeDLg_U_vud_XBF_KZeRjiqrGv6yreJf269-LBbET1AQ26FUGLsDEOC8",
       "publicKeySpkiBase64Url": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEmAQIIiyflYrm3xEOIx-9bNO0vkUaWX3gy4P1P77nf1wRfymXkY4qqxr-sq3iX9uvfiwWxE9QENuhVBi7AxDgvA",

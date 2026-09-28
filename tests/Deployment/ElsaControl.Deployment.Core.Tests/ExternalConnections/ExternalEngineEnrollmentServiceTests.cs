@@ -322,6 +322,28 @@ public sealed class ExternalEngineEnrollmentServiceTests
         Assert.Equal(ExternalEngineConnectorProofFailure.Replay, skewedReplay.Failure);
     }
 
+    [Fact]
+    public async Task In_memory_nonce_store_rejects_consumed_before_issued_metadata()
+    {
+        var fixture = new Fixture();
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var identity = (await fixture.Service.RedeemAsync(Redemption(await fixture.Service.IssueAsync(Request()), key))).Identity!;
+        var nonce = new ExternalEngineConnectorProofNonce(
+            Guid.NewGuid(),
+            identity.Id,
+            identity.OrganizationId,
+            identity.WorkspaceId,
+            identity.ConnectionId,
+            identity.KeyVersion,
+            ExternalEngineEnrollmentProtocol.HashNonce(Challenge()),
+            Now.AddSeconds(30),
+            Now.Add(ExternalEngineEnrollmentDefaults.MaximumProofAge).AddSeconds(30),
+            Now);
+
+        var error = await Assert.ThrowsAsync<ArgumentException>(() => fixture.Store.TryConsumeAsync(nonce));
+        Assert.Contains("Proof nonce metadata is invalid", error.Message, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(30_000, true)]
     [InlineData(30_001, false)]

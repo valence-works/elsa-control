@@ -12,6 +12,7 @@ internal static class ExternalEngineConnectorProtocolGoldenVectors
     public const string RelativePath = "docs/protocol/external-engine-connector/v1/vectors.json";
     public const string RegenerateEnvironmentVariable = "ELSA_CONTROL_REGENERATE_CONNECTOR_PROTOCOL_VECTORS";
 
+    // TEST ONLY – synthetic PKCS#8 P-256 fixtures for committed protocol vectors. Never use outside this file.
     private const string CurrentPrivateKeyPkcs8 =
         "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgydYykJaRoI4JF8JwsNIDz2f6mwypHtPTNm66bghs9eGhRANCAASYBAgiLJ-ViubfEQ4jH71s07S-RRpZfeDLg_U_vud_XBF_KZeRjiqrGv6yreJf269-LBbET1AQ26FUGLsDEOC8";
     private const string NextPrivateKeyPkcs8 =
@@ -233,8 +234,11 @@ internal static class ExternalEngineConnectorProtocolGoldenVectors
         byte[]? reportCanonicalPayload = null,
         string? payloadDigest = null)
     {
+        var publicKey = ExternalEngineEnrollmentProtocol.ExportPublicKey(currentKey);
         string signature;
-        if (committedSignatures is not null && committedSignatures.TryGetValue(id, out var committed))
+        if (committedSignatures is not null
+            && committedSignatures.TryGetValue(id, out var committed)
+            && ExternalEngineEnrollmentProtocol.Verify(publicKey, payload, committed) == !mutateSignature)
         {
             signature = committed;
         }
@@ -256,10 +260,7 @@ internal static class ExternalEngineConnectorProtocolGoldenVectors
             reportCanonicalPayload is null ? null : Encoding.UTF8.GetString(reportCanonicalPayload),
             payloadDigest,
             signature,
-            new Expected(ExternalEngineEnrollmentProtocol.Verify(
-                ExternalEngineEnrollmentProtocol.ExportPublicKey(currentKey),
-                payload,
-                signature)));
+            new Expected(ExternalEngineEnrollmentProtocol.Verify(publicKey, payload, signature)));
     }
 
     private static IReadOnlyDictionary<string, JsonElement> RedeemInputs(
@@ -379,6 +380,8 @@ internal static class ExternalEngineConnectorProtocolGoldenVectors
             writer.WriteEndObject();
             writer.WritePropertyName("keys");
             writer.WriteStartObject();
+            writer.WriteBoolean("testOnly", true);
+            writer.WriteString("description", "TEST ONLY – never use outside these protocol vectors.");
             WriteKey(writer, "current", document.Keys.Current);
             WriteKey(writer, "next", document.Keys.Next);
             writer.WriteEndObject();

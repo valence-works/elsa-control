@@ -337,6 +337,11 @@ public sealed class ExternalEngineEnrollmentService(
         if (_nonceStore is null)
             return await RejectProofAsync(proof, ExternalEngineConnectorProofFailure.InvalidRequest, cancellationToken);
 
+        // Persist IssuedAt as min(proof issuedAt, now) so a 1–30s-fast connector stays
+        // inside CK_ExternalEngineConnectorProofNonces_Lifetime (ConsumedAt >= IssuedAt).
+        // Expiry stays proof issuedAt + MaximumProofAge so retention still matches the
+        // signed window; the Future/Expired checks above keep ConsumedAt < ExpiresAt.
+        var nonceIssuedAt = issuedAt <= now ? issuedAt : now;
         var consumed = await _nonceStore.TryConsumeAsync(
             new ExternalEngineConnectorProofNonce(
                 Guid.NewGuid(),
@@ -346,7 +351,7 @@ public sealed class ExternalEngineEnrollmentService(
                 identity.ConnectionId,
                 proof.KeyVersion,
                 nonceHash,
-                issuedAt,
+                nonceIssuedAt,
                 issuedAt.Add(ExternalEngineEnrollmentDefaults.MaximumProofAge),
                 now),
             recordSuccessfulNonceAudit,

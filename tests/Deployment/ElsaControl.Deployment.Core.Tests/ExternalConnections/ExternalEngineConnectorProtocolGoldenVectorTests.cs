@@ -11,15 +11,20 @@ public sealed class ExternalEngineConnectorProtocolGoldenVectorTests
         var file = ExternalEngineConnectorProtocolGoldenVectors.CommittedFile(FindRepoRoot());
         var regenerate = IsTruthy(Environment.GetEnvironmentVariable(
             ExternalEngineConnectorProtocolGoldenVectors.RegenerateEnvironmentVariable));
+        if (regenerate && (IsTruthy(Environment.GetEnvironmentVariable("CI")) || IsTruthy(Environment.GetEnvironmentVariable("GITHUB_ACTIONS"))))
+        {
+            Assert.Fail(
+                "Golden-vector regeneration is disabled when CI or GITHUB_ACTIONS is set. " +
+                $"Unset {ExternalEngineConnectorProtocolGoldenVectors.RegenerateEnvironmentVariable}.");
+        }
+
         Assert.True(
             file.Exists || regenerate,
             $"Committed golden vectors are missing at {ExternalEngineConnectorProtocolGoldenVectors.RelativePath}. Regenerate them first.");
 
         var committed = file.Exists ? File.ReadAllText(file.FullName) : null;
-        var generated = regenerate || committed is null
-            ? ExternalEngineConnectorProtocolGoldenVectors.GenerateJson()
-            : ExternalEngineConnectorProtocolGoldenVectors.GenerateJson(
-                ExternalEngineConnectorProtocolGoldenVectors.ReadSignatures(committed));
+        var generated = ExternalEngineConnectorProtocolGoldenVectors.GenerateJson(
+            committed is null ? null : ExternalEngineConnectorProtocolGoldenVectors.ReadSignatures(committed));
 
         if (regenerate)
             File.WriteAllText(file.FullName, generated);
@@ -37,6 +42,8 @@ public sealed class ExternalEngineConnectorProtocolGoldenVectorTests
             $"\"maximumProofFutureSkewSeconds\": {(int)ExternalEngineEnrollmentDefaults.MaximumProofFutureSkew.TotalSeconds}",
             generated,
             StringComparison.Ordinal);
+        Assert.Contains("\"testOnly\": true", generated, StringComparison.Ordinal);
+        Assert.Contains("TEST ONLY", generated, StringComparison.Ordinal);
     }
 
     [Fact]
