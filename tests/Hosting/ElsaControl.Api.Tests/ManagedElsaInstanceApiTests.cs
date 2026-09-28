@@ -2598,6 +2598,28 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.DoesNotContain("provider", json, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Provisioning_progress_serializes_blocker_and_stale_reason_for_cloud()
+    {
+        await using var app = new ControlApiTestApplication(configureServices: services =>
+        {
+            services.RemoveAll<IManagedElsaProvisioningProgressReader>();
+            services.AddScoped<IManagedElsaProvisioningProgressReader, BlockerStaleProgressReader>();
+        });
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var owner = app.CreateTrustedWorkspaceClient("managed-progress-blocker-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+
+        var response = await owner.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{Guid.NewGuid():D}/provisioning-progress");
+        var json = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("\"staleReason\":\"blocking-operation-stale\"", json, StringComparison.Ordinal);
+        Assert.Contains($"\"blockingOperationId\":\"{BlockerStaleProgressReader.BlockerId:D}\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"blockingOperationStage\":\"request-accepted\"", json, StringComparison.Ordinal);
+    }
+
     public sealed class Fixture : IAsyncLifetime
     {
         private readonly FakeManagedElsaInstanceCatalog _instanceCatalog = new();
@@ -3201,6 +3223,29 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
             Guid instanceId,
             CancellationToken cancellationToken = default) =>
             throw new ElsaInstanceLifecycleTopologyChangedException();
+    }
+
+    private sealed class BlockerStaleProgressReader : IManagedElsaProvisioningProgressReader
+    {
+        public static readonly Guid BlockerId = Guid.Parse("77777777-7777-7777-7777-777777777777");
+
+        public Task<ManagedElsaProvisioningProgress?> ReadAsync(
+            Guid workspaceId,
+            Guid instanceId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<ManagedElsaProvisioningProgress?>(new(
+                ManagedElsaProvisioningProgressStates.Stale,
+                "azure",
+                ManagedElsaProvisioningProgressStages.RequestAccepted,
+                DateTimeOffset.Parse("2026-09-21T10:00:00Z"),
+                DateTimeOffset.Parse("2026-09-21T10:10:00Z"),
+                null,
+                ManagedElsaProvisioningProgressDiagnostics.RequiresAttention,
+                [],
+                [],
+                BlockerId,
+                ManagedElsaProvisioningProgressStages.RequestAccepted,
+                ManagedElsaProvisioningProgressStaleReasons.BlockingOperationStale));
     }
 
     private sealed class MissingOutboxTopologyStore : TopologyStoreStub

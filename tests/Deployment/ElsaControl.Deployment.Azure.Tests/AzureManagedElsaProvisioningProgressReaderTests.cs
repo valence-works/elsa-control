@@ -298,6 +298,59 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
     }
 
     [Fact]
+    public async Task Reader_still_projects_the_create_when_a_delete_is_waiting_on_it()
+    {
+        var organizationId = Guid.Parse("66666666-6666-6666-6666-666666666666");
+        var create = new ElsaInstanceLifecycleTopologyOperation(
+            Guid.Parse("77777777-7777-7777-7777-777777777777"),
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            1,
+            1,
+            AcceptedAt,
+            AcceptedAt.AddSeconds(1),
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            RecoveryReason: AzureManagedElsaProvisioningProgressProjector.ProviderSubmissionAccepted,
+            OrganizationId: organizationId);
+        var delete = new ElsaInstanceLifecycleTopologyOperation(
+            Guid.NewGuid(),
+            ElsaInstanceOperationAction.Delete,
+            ElsaInstanceOperationState.WaitingForPriorOperation,
+            1,
+            1,
+            AcceptedAt,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            OrganizationId: organizationId,
+            BlockingOperationId: create.Id);
+        var reader = Reader(
+            new InstanceStore { Topology = Topology([delete, create], delete.Id) },
+            new ProviderStore
+            {
+                Snapshot = new AzureManagedElsaProvisioningOperationSnapshot(
+                    Provider(AzureProviderOperationStatus.Running, AzureProviderOperationPhase.FoundationSubmitted),
+                    [])
+            },
+            new FixedTimeProvider(AcceptedAt.AddMinutes(15)));
+
+        var result = Assert.IsType<ManagedElsaProvisioningProgress>(await reader.ReadAsync(WorkspaceId, InstanceId));
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Active, result.State);
+        Assert.NotEqual(ManagedElsaProvisioningProgressStates.Stale, result.State);
+        Assert.Null(result.StaleReason);
+    }
+
+    [Fact]
     public async Task Reader_fails_closed_when_the_blocker_id_is_unresolvable()
     {
         var create = new ElsaInstanceLifecycleTopologyOperation(

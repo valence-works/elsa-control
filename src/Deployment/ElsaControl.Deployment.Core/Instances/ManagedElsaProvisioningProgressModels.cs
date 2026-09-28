@@ -28,11 +28,14 @@ public sealed record ManagedElsaProvisioningProgress(
     string? DiagnosticCode,
     IReadOnlyList<ManagedElsaProvisioningStage> Stages,
     IReadOnlyList<ManagedElsaProvisioningActivity> Activity,
-    // Internal only: never serialized. A waiting snapshot carries the blocker
-    // identity and stage so stale can propagate one level without leaking IDs.
-    [property: JsonIgnore] Guid? BlockingOperationId = null,
-    [property: JsonIgnore] string? BlockingOperationStage = null,
-    [property: JsonIgnore] string? StaleReason = null);
+    // Serialized when present so #646 can render the blocker-stale string.
+    // Omitted when null so a non-waiting snapshot does not grow new keys.
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    Guid? BlockingOperationId = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? BlockingOperationStage = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? StaleReason = null);
 
 /// <summary>A stable customer-facing provisioning stage.</summary>
 public sealed record ManagedElsaProvisioningStage(

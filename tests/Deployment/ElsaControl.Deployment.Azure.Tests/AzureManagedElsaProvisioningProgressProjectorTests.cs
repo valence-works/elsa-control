@@ -645,6 +645,95 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
     }
 
     [Fact]
+    public void Waiting_delete_stays_not_stale_while_create_blocker_is_still_running()
+    {
+        var organizationId = Guid.Parse("66666666-6666-6666-6666-666666666666");
+        var create = Lifecycle(
+            ElsaInstanceOperationState.RecoveryRequired,
+            failureCode: null,
+            action: ElsaInstanceOperationAction.Create,
+            id: Guid.Parse("77777777-7777-7777-7777-777777777777"),
+            organizationId: organizationId,
+            recoveryReason: AzureManagedElsaProvisioningProgressProjector.ProviderSubmissionAccepted);
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.WaitingForPriorOperation,
+            failureCode: null,
+            action: ElsaInstanceOperationAction.Delete,
+            organizationId: organizationId,
+            blockingOperationId: create.Id,
+            topologyOperations: [create],
+            blockingProvider: Provider(
+                status: AzureProviderOperationStatus.Running,
+                phase: AzureProviderOperationPhase.FoundationSubmitted,
+                createdAt: AcceptedAt,
+                statusChangedAt: AcceptedAt),
+            timeProvider: new FixedTimeProvider(AcceptedAt.AddMinutes(15)));
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.WaitingForPriorOperation, result.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.WaitingForPriorOperation, result.CurrentStage);
+        Assert.Equal(create.Id, result.BlockingOperationId);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.HostingFoundation, result.BlockingOperationStage);
+        Assert.Null(result.StaleReason);
+        Assert.NotEqual(ManagedElsaProvisioningProgressStates.Stale, result.State);
+    }
+
+    [Fact]
+    public void Waiting_delete_is_stale_when_create_blocker_has_no_provider_progress()
+    {
+        var organizationId = Guid.Parse("66666666-6666-6666-6666-666666666666");
+        var create = Lifecycle(
+            ElsaInstanceOperationState.Accepted,
+            failureCode: null,
+            action: ElsaInstanceOperationAction.Create,
+            id: Guid.Parse("77777777-7777-7777-7777-777777777777"),
+            organizationId: organizationId);
+        var waiting = Project(
+            lifecycleState: ElsaInstanceOperationState.WaitingForPriorOperation,
+            failureCode: null,
+            action: ElsaInstanceOperationAction.Delete,
+            organizationId: organizationId,
+            blockingOperationId: create.Id,
+            topologyOperations: [create],
+            timeProvider: new FixedTimeProvider(AcceptedAt.AddMinutes(10)));
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Stale, waiting.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStaleReasons.BlockingOperationStale, waiting.StaleReason);
+        Assert.Equal(create.Id, waiting.BlockingOperationId);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.RequestAccepted, waiting.BlockingOperationStage);
+    }
+
+    [Fact]
+    public void Serialized_waiting_snapshot_exposes_blocker_and_stale_reason()
+    {
+        var organizationId = Guid.Parse("66666666-6666-6666-6666-666666666666");
+        var create = Lifecycle(
+            ElsaInstanceOperationState.Accepted,
+            failureCode: null,
+            action: ElsaInstanceOperationAction.Create,
+            id: Guid.Parse("77777777-7777-7777-7777-777777777777"),
+            organizationId: organizationId);
+        var waiting = Project(
+            lifecycleState: ElsaInstanceOperationState.WaitingForPriorOperation,
+            failureCode: null,
+            action: ElsaInstanceOperationAction.Delete,
+            organizationId: organizationId,
+            blockingOperationId: create.Id,
+            topologyOperations: [create],
+            timeProvider: new FixedTimeProvider(AcceptedAt.AddMinutes(10)));
+
+        var json = JsonSerializer.Serialize(waiting, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.Contains("\"staleReason\":\"blocking-operation-stale\"", json, StringComparison.Ordinal);
+        Assert.Contains($"\"blockingOperationId\":\"{create.Id:D}\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"blockingOperationStage\":\"request-accepted\"", json, StringComparison.Ordinal);
+        var queued = Project(lifecycleState: ElsaInstanceOperationState.Queued, failureCode: null);
+        var queuedJson = JsonSerializer.Serialize(queued, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.DoesNotContain("staleReason", queuedJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("blockingOperationId", queuedJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("blockingOperationStage", queuedJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Delete_is_never_shown_as_entitlement_held_and_keeps_the_ordinary_clock()
     {
         var before = Project(
@@ -814,6 +903,7 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
         var forbidden = new[]
         {
             "failed", "error", "lost", "minute", "minutes", "hour", "hours", "10:00", "ten minute",
+            "soon", "second", "moment", "shortly", "within",
             "subscription", "billing", "payment"
         };
         var allowedFailedTokens = new HashSet<string>(StringComparer.Ordinal)
@@ -895,14 +985,18 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
         Guid? id = null,
         Guid organizationId = default,
         Guid? blockingOperationId = null,
-        IReadOnlyList<ElsaInstanceLifecycleTopologyOperation>? topologyOperations = null) =>
+        IReadOnlyList<ElsaInstanceLifecycleTopologyOperation>? topologyOperations = null,
+        AzureProviderOperation? blockingProvider = null,
+        IReadOnlyList<AzureProviderOperationTransition>? blockingTransitions = null) =>
         AzureManagedElsaProvisioningProgressProjector.Project(
             new AzureManagedElsaProvisioningProgressProjectionInput(
                 Topology(observedLifecycle, topologyOperations),
                 Lifecycle(lifecycleState, completedAt, failureCode, action, id, organizationId, blockingOperationId),
                 provider,
                 transitions,
-                RecoveryReason: recoveryReason),
+                RecoveryReason: recoveryReason,
+                BlockingProviderOperation: blockingProvider,
+                BlockingTransitions: blockingTransitions),
             timeProvider ?? new FixedTimeProvider(AcceptedAt));
 
     private static ElsaInstanceLifecycleTopologySnapshot Topology(
@@ -919,10 +1013,11 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
         Guid? id = null,
         Guid organizationId = default,
         Guid? blockingOperationId = null,
-        DateTimeOffset? acceptedAt = null) =>
+        DateTimeOffset? acceptedAt = null,
+        string? recoveryReason = null) =>
         new(id ?? Guid.Parse("33333333-3333-3333-3333-333333333333"), action, state, 1, 1,
             acceptedAt ?? AcceptedAt, (acceptedAt ?? AcceptedAt).AddSeconds(1), completedAt, null, failureCode, null, null, null,
-            OrganizationId: organizationId, BlockingOperationId: blockingOperationId);
+            RecoveryReason: recoveryReason, OrganizationId: organizationId, BlockingOperationId: blockingOperationId);
 
     private static AzureProviderOperationTransition Transition(
         long sequence,

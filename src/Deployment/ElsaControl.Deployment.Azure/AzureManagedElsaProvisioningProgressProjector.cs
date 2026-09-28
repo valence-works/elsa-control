@@ -14,7 +14,9 @@ public sealed record AzureManagedElsaProvisioningProgressProjectionInput(
     IReadOnlyList<AzureProviderOperationTransition>? Transitions = null,
     bool HistoryUnavailable = false,
     string? RecoveryReason = null,
-    bool ResolveBlockingOperation = true);
+    bool ResolveBlockingOperation = true,
+    AzureProviderOperation? BlockingProviderOperation = null,
+    IReadOnlyList<AzureProviderOperationTransition>? BlockingTransitions = null);
 
 [Flags]
 internal enum AzureManagedElsaProvisioningMappingAnomaly
@@ -162,10 +164,12 @@ public static class AzureManagedElsaProvisioningProgressProjector
                     input with
                     {
                         LifecycleOperation = blocker,
-                        ProviderOperation = null,
-                        Transitions = null,
+                        ProviderOperation = input.BlockingProviderOperation,
+                        Transitions = input.BlockingTransitions,
                         RecoveryReason = blocker.RecoveryReason,
-                        ResolveBlockingOperation = false
+                        ResolveBlockingOperation = false,
+                        BlockingProviderOperation = null,
+                        BlockingTransitions = null
                     },
                     clock);
                 blockingOperationId = blocker.Id;

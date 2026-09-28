@@ -2111,6 +2111,39 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
+    public async Task Lifecycle_authorization_skips_a_delete_in_a_constrained_organization()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Delete authorization skip");
+        await CompleteManagedRunAsync(db, accepted.Operation.Id, accepted.Instance.Id);
+        var current = await CreateStore(db).GetInstanceAsync(workspace.Id, accepted.Instance.Id);
+        var deletion = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now.AddMinutes(2)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, current!.Version, "authorize-delete-skip", Now.AddMinutes(2)));
+        var entitlement = await db.OrganizationEntitlementSnapshots.SingleAsync(x => x.OrganizationId == workspace.OrganizationId);
+        entitlement.SubscriptionState = OrganizationSubscriptionState.Constrained;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now.AddMinutes(3)));
+        var decision = await store.AuthorizeProviderSubmissionAsync(
+            workspace.Id, accepted.Instance.Id, deletion.Operation.Id, Now.AddMinutes(3));
+
+        Assert.True(decision.Allowed);
+        Assert.Equal("commercial.allowed", decision.Code);
+        var stored = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == deletion.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationAction.Delete, stored.Action);
+        Assert.NotEqual(ElsaInstanceOperationState.EntitlementHeld, stored.State);
+        Assert.Equal(0, await db.ElsaInstanceAuditEvents.CountAsync(x =>
+            x.OperationId == deletion.Operation.Id && x.EventType == "lifecycle.entitlement-held"));
+    }
+
+    [Fact]
     public async Task A_lost_acknowledgement_after_entitlement_hold_commit_returns_the_committed_decision()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
