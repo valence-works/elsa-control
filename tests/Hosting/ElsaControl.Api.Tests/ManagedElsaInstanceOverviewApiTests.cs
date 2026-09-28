@@ -2,6 +2,7 @@ using System.Collections.Frozen;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Cloud;
 using ElsaControl.Api.Workspace;
@@ -501,12 +502,22 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             label.Contains("Valence Works is checking", StringComparison.OrdinalIgnoreCase) ||
             label.Contains("Valence Works has been alerted", StringComparison.OrdinalIgnoreCase));
 
-        string[] forbidden = ["failed", "error", "lost", "shortly", "within minutes"];
+        string[] forbidden = ["failed", "error", "lost"];
+        string[] forbiddenTimeEstimates =
+            ["minute", "minutes", "soon", "shortly", "hour", "second", "moment"];
         foreach (var label in labels)
         {
-            var normalized = label.ToLowerInvariant();
             foreach (var term in forbidden)
-                Assert.DoesNotContain(term, normalized);
+                Assert.DoesNotContain(term, label, StringComparison.OrdinalIgnoreCase);
+            foreach (var term in forbiddenTimeEstimates)
+            {
+                Assert.False(
+                    Regex.IsMatch(
+                        label,
+                        $@"\b{Regex.Escape(term)}\b",
+                        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
+                    $"Label '{label}' contains time-estimate wording '{term}'.");
+            }
         }
     }
 
