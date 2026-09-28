@@ -22,6 +22,14 @@ from urllib.parse import quote
 
 DEFAULT_REPOSITORY = "valence-works/elsa-control"
 DEFAULT_PROJECT_NUMBER = 7
+# Repositories whose PRs a canonical ``pr:`` comment may point to. Anything
+# else fails closed so an unreviewed repository can never release or hold a
+# claim.
+LINKED_PR_REPOSITORIES = (
+    "valence-works/elsa-control",
+    "valence-works/elsa-cloud",
+    "valence-works/elsa-production-image",
+)
 LEAF_LABELS = {"type:task", "type:bug", "type:spike"}
 PARENT_LABELS = {"type:feature", "type:epic", "type:program"}
 READY_LABEL = "ready-for-agent"
@@ -125,8 +133,10 @@ class GhClient:
         project_number: int = DEFAULT_PROJECT_NUMBER,
         project_owner: str | None = None,
         runner: Callable[..., CommandResult] | None = None,
+        linked_pr_repositories: Iterable[str] = LINKED_PR_REPOSITORIES,
     ) -> None:
         self.repository = repository
+        self.linked_pr_repositories = {name.casefold() for name in (repository, *linked_pr_repositories)}
         self.project_number = project_number
         self.project_owner = project_owner or repository.split("/", 1)[0]
         self._runner = runner or self._subprocess_runner
@@ -317,7 +327,7 @@ class GhClient:
         if not isinstance(value, list):
             raise GhError("REST issue timeline endpoint returned an unreadable collection")
         events = _flatten_pages(value)
-        candidates: dict[int, Mapping[str, Any]] = {}
+        candidates: dict[tuple[str, int], Mapping[str, Any]] = {}
         for event in events:
             if not isinstance(event, Mapping):
                 raise GhError("REST issue timeline endpoint returned an unreadable event")
@@ -348,7 +358,7 @@ class GhClient:
                 raise GhError("REST cross-reference event has an unreadable source repository")
             pr = self._pull_request(pr_number, source_repository)
             if pr is not None and _closes_issue(pr, self.repository, number):
-                candidates[pr_number] = pr
+                candidates[(source_repository.casefold(), pr_number)] = pr
 
         # A canonical ``pr:`` comment is explicit ownership evidence even
         # when its PR body does not close the issue.
@@ -362,26 +372,35 @@ class GhClient:
             match = PR_URL_PATTERN.fullmatch(raw_reference) or PR_SHORT_REFERENCE_PATTERN.fullmatch(raw_reference)
             if match is None:
                 raise GhError("canonical pr: comment does not contain one readable pull request reference")
-            if match.group("repo").casefold() != self.repository.casefold():
-                raise GhError("canonical pr: comment points outside the configured repository")
+            pr_repository = match.group("repo")
+            if pr_repository.casefold() not in self.linked_pr_repositories:
+                raise GhError(
+                    f"canonical pr: comment points to {pr_repository}, which is not an allowlisted PR repository"
+                )
             pr_number = int(match.group("number"))
-            pr = self._pull_request(pr_number)
+            pr = self._pull_request(pr_number, pr_repository)
             if pr is not None:
-                candidates[pr_number] = pr
+                candidates[(pr_repository.casefold(), pr_number)] = pr
         return tuple(candidates.values())
 
     def _pull_request(self, number: int, repository: str | None = None) -> Mapping[str, Any] | None:
         repository = repository or self.repository
-        value = self.run(
-            "pr",
-            "view",
-            str(number),
-            "--repo",
-            repository,
-            "--json",
-            "state,closingIssuesReferences",
-            json_output=True,
-        )
+        try:
+            value = self.run(
+                "pr",
+                "view",
+                str(number),
+                "--repo",
+                repository,
+                "--json",
+                "state,closingIssuesReferences",
+                json_output=True,
+            )
+        except GhError as exc:
+            raise GhError(
+                f"unable to read pull request {repository}#{number}; it may be missing or the gh identity "
+                f"may lack access to {repository}, so ownership cannot be ruled out ({exc})"
+            ) from exc
         if not isinstance(value, Mapping):
             raise GhError(f"GitHub pull request query returned ambiguous data for {repository}#{number}")
         state = value.get("state")
@@ -555,7 +574,7 @@ class IssueBus:
             if project.item.agent_state != "Agent Ready":
                 failures.append(f"Agent State is {project.item.agent_state!r}, expected 'Agent Ready'")
         if linked_open_prs:
-            numbers = ", ".join(str(pr.get("number")) for pr in linked_open_prs)
+            numbers = ", ".join(_pr_label(pr) for pr in linked_open_prs)
             failures.append(f"linked open pull request exists ({numbers})")
         lanes = sorted(label for label in labels if label.startswith("worker:"))
         conflicting = [lane for lane in lanes if lane != f"worker:{worker}"]
@@ -992,6 +1011,11 @@ def _repository_from_api_url(value: Any) -> str | None:
         return None
     match = REPOSITORY_API_URL_PATTERN.fullmatch(value)
     return match.group("repo") if match is not None else None
+
+
+def _pr_label(pr: Mapping[str, Any]) -> str:
+    repository = pr.get("repository")
+    return f"{repository}#{pr.get('number')}" if isinstance(repository, str) else str(pr.get("number"))
 
 
 def _closes_issue(pr: Mapping[str, Any], repository: str, issue_number: int) -> bool:

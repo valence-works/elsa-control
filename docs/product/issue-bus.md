@@ -76,7 +76,12 @@ cross-reference alone can describe a dependency and does not establish
 ownership. The claim command reads GitHub's `closingIssuesReferences` for
 cross-referenced PRs and fails closed when timeline or closing-reference data
 is unreadable or ambiguous. A canonical `pr:` comment remains an owner signal
-regardless of the PR's closing references. Generic `worker:*` lanes are data,
+regardless of the PR's closing references. A `pr:` link may point to
+`valence-works/elsa-control`, `valence-works/elsa-cloud`, or
+`valence-works/elsa-production-image` (the `LINKED_PR_REPOSITORIES` allowlist
+in `scripts/issue_bus.py`). Open PRs in those repositories count as owning
+PRs; closed or merged ones do not. A link to any other repository, a malformed
+link, or a 403/404 when reading an allowlisted PR fails closed. Generic `worker:*` lanes are data,
 not a hard-coded allow-list; every lane other than the requested lane is
 conflicting.
 
