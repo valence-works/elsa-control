@@ -77,7 +77,9 @@ public static class ExternalEngineConnectionEndpoints
             {
                 return Problem("external-engine.idempotency-conflict", "The request key was already used for another connection request.", StatusCodes.Status409Conflict);
             }
-        }).RequireDeploymentPermission(WorkspaceDeploymentPermissions.ManageSetup).AllowCloudBff();
+        }).RequireDeploymentPermission(WorkspaceDeploymentPermissions.ManageSetup)
+            .RequireExternalEnginePairingAllowed()
+            .AllowCloudBff();
 
         group.MapGet("/{connectionId:guid}/pairing", async (
             Guid workspaceId,
@@ -102,7 +104,9 @@ public static class ExternalEngineConnectionEndpoints
             var access = context.GetWorkspaceAccess();
             var attempt = await service.RepairAsync(access.OrganizationId, workspaceId, connectionId, cancellationToken);
             return attempt is null ? Results.NotFound() : Results.Ok(ToPairingResponse(attempt));
-        }).RequireDeploymentPermission(WorkspaceDeploymentPermissions.ManageSetup).AllowCloudBff();
+        }).RequireDeploymentPermission(WorkspaceDeploymentPermissions.ManageSetup)
+            .RequireExternalEnginePairingAllowed()
+            .AllowCloudBff();
 
         group.MapPost("/{connectionId:guid}/studio-destination/confirm", async (
             Guid workspaceId,

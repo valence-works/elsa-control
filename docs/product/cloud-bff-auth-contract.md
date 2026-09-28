@@ -110,6 +110,20 @@ POST /api/workspaces/{workspaceId}/external-engine-connections/{connectionId}/re
 POST /api/workspaces/{workspaceId}/external-engine-connections/{connectionId}/studio-destination/confirm
 ```
 
+Create and repair pairing are also gated by Control configuration
+`ElsaControl:ExternalEngines:PairingAllowedOrganizationIds` (environment
+`ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__0`, and so on).
+The list is empty by default, which refuses every organization. A signed-in
+caller whose organization is not on the list receives HTTP 403 with problem
+code `external_engine_pairing_unavailable` — the same code the Cloud BFF
+surfaces — after authentication and workspace permission checks, and before
+any challenge or connection record is created. Cloud's own "Coming soon"
+flags remain UX only; this Control list is the real gate. Production ships
+the setting empty. Staging lists only rehearsal organizations. The staging
+Hosted smoke's synthetic owner organization must **not** be on the staging
+allowlist; QA's #508 row 23 proves the refusal with that organization, and
+#101 rehearsal pairing must use a separate rehearsal org.
+
 Every other customer endpoint and every `/api/admin/...` endpoint rejects these
 Cloud tokens. Admin routes continue to require the existing admin API key or
 Control administrator authorization. The allowlist does not change normal
@@ -154,3 +168,8 @@ authentication failure.
   the identity provider when needed.
 - Workspace membership, permission checks, commercial entitlement gates, and
   managed-instance lifecycle validation still run on every allowlisted route.
+- External-engine pairing create and repair additionally require the caller's
+  organization to appear on `ElsaControl:ExternalEngines:PairingAllowedOrganizationIds`.
+  An empty or missing list refuses every organization. A malformed GUID fails
+  Control startup. List, get, disconnect, and connector traffic are not gated
+  by that list.

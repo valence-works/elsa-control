@@ -313,6 +313,10 @@ builder.Services.AddScoped<ExternalEngineEnrollmentService>();
 builder.Services.AddScoped<IExternalEngineConnectionStore, EfCoreExternalEngineConnectionStore>();
 builder.Services.AddScoped<ExternalEngineConnectionService>();
 builder.Services.AddScoped<ExternalEngineHeartbeatService>();
+builder.Services.Configure<ExternalEngineOptions>(
+    builder.Configuration.GetSection(ExternalEngineOptions.ConfigurationSection));
+builder.Services.AddSingleton<IExternalEnginePairingAvailability, ConfiguredExternalEnginePairingAvailability>();
+builder.Services.AddHostedService<ExternalEngineConfigurationValidator>();
 builder.Services.AddScoped<IManagedElsaInstanceCatalog, EfCoreManagedElsaInstanceCatalog>();
 builder.Services.AddScoped<EfCoreManagedElsaInstanceIdentityStore>();
 builder.Services.AddScoped<IManagedElsaInstanceIdentityStore>(services => new ControlHandoffGatedIdentityStore(
