@@ -263,10 +263,10 @@ public sealed class ExternalEngineEnrollmentPersistenceTests : IAsyncLifetime
         var rotation = SignProof(Proof(
             identity,
             ExternalEngineEnrollmentDefaults.RotationOperation,
-            ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap)), currentKey);
+            ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap, "AAAAAAAAAAAAAAAAAAAAAA")), currentKey);
 
         var rotated = await service.RotateConnectorKeyAsync(
-            new ExternalEngineConnectorKeyRotationRequest(rotation, nextPublicKey, overlap));
+            new ExternalEngineConnectorKeyRotationRequest(rotation, nextPublicKey, overlap, "AAAAAAAAAAAAAAAAAAAAAA"));
         var revocation = SignProof(Proof(
             rotated.Identity!,
             ExternalEngineEnrollmentDefaults.RevocationOperation,
@@ -405,8 +405,8 @@ public sealed class ExternalEngineEnrollmentPersistenceTests : IAsyncLifetime
             var proof = SignProof(Proof(
                 identity,
                 ExternalEngineEnrollmentDefaults.RotationOperation,
-                ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(publicKey, overlap)), currentKey);
-            return new ExternalEngineConnectorKeyRotationRequest(proof, publicKey, overlap);
+                ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(publicKey, overlap, "AAAAAAAAAAAAAAAAAAAAAA")), currentKey);
+            return new ExternalEngineConnectorKeyRotationRequest(proof, publicKey, overlap, "AAAAAAAAAAAAAAAAAAAAAA");
         }).ToArray();
 
         var results = await Task.WhenAll(requests.Select(RotateFromNewContextAsync));
@@ -436,9 +436,9 @@ public sealed class ExternalEngineEnrollmentPersistenceTests : IAsyncLifetime
         var rotation = SignProof(Proof(
             identity,
             ExternalEngineEnrollmentDefaults.RotationOperation,
-            ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap)), currentKey);
+            ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap, "AAAAAAAAAAAAAAAAAAAAAA")), currentKey);
         Assert.True((await service.RotateConnectorKeyAsync(
-            new ExternalEngineConnectorKeyRotationRequest(rotation, nextPublicKey, overlap))).Succeeded);
+            new ExternalEngineConnectorKeyRotationRequest(rotation, nextPublicKey, overlap, "AAAAAAAAAAAAAAAAAAAAAA"))).Succeeded);
 
         db.ChangeTracker.Clear();
         await db.GetService<IMigrator>().MigrateAsync(SqliteMigration);
@@ -623,7 +623,7 @@ public sealed class ExternalEngineEnrollmentPersistenceTests : IAsyncLifetime
             "authenticate" => (ExternalEngineConnectionService.AuthenticationOperation,
                 ExternalEngineConnectionService.AuthenticationPayloadDigest()),
             "rotate" => (ExternalEngineEnrollmentDefaults.RotationOperation,
-                ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap)),
+                ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap, "AAAAAAAAAAAAAAAAAAAAAA")),
             "revoke" => (ExternalEngineEnrollmentDefaults.RevocationOperation,
                 ExternalEngineEnrollmentProtocol.CreateRevocationPayloadDigest()),
             _ => throw new ArgumentOutOfRangeException(nameof(operation))
@@ -632,7 +632,7 @@ public sealed class ExternalEngineEnrollmentPersistenceTests : IAsyncLifetime
         return (
             proof,
             operation == "rotate"
-                ? new ExternalEngineConnectorKeyRotationRequest(proof, nextPublicKey, overlap)
+                ? new ExternalEngineConnectorKeyRotationRequest(proof, nextPublicKey, overlap, "AAAAAAAAAAAAAAAAAAAAAA")
                 : null);
     }
 

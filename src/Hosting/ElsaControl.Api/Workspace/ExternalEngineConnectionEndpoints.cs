@@ -221,14 +221,16 @@ public static class ExternalEngineConnectionEndpoints
                         HeartbeatRateLimited(context, result.RetryAfter),
                     { Status: ExternalEngineHeartbeatStatus.Conflict } =>
                         Problem("external-engine.heartbeat.conflict", "The heartbeat raced another connection update; retry with a new proof.", StatusCodes.Status409Conflict),
+                    { Status: ExternalEngineHeartbeatStatus.RunnerConflict } =>
+                        RunnerConflict(context, result.RetryAfter),
                     { Status: ExternalEngineHeartbeatStatus.UnsupportedProtocol } =>
                         Problem("external-engine.heartbeat.unsupported-protocol", "The connector protocol is not supported. Upgrade the connector to resume heartbeat reporting.", StatusCodes.Status426UpgradeRequired),
                     _ => Problem("external-engine.heartbeat.invalid", "The heartbeat report is invalid or unsupported.", StatusCodes.Status400BadRequest)
                 };
             }
-            catch (ArgumentException exception)
+            catch (ArgumentException)
             {
-                return Problem("external-engine.heartbeat.invalid", exception.Message, StatusCodes.Status400BadRequest);
+                return Problem("external-engine.heartbeat.invalid", "The heartbeat report is invalid or unsupported.", StatusCodes.Status400BadRequest);
             }
         })
         .WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(64 * 1024))
@@ -237,6 +239,7 @@ public static class ExternalEngineConnectionEndpoints
         group.MapPost("/identity/rotate", async (
             Guid connectionId,
             ExternalEngineConnectorKeyRotationRequest request,
+            HttpContext context,
             ExternalEngineConnectionService service,
             CancellationToken cancellationToken) =>
         {
@@ -247,6 +250,7 @@ public static class ExternalEngineConnectionEndpoints
             {
                 null => Results.NotFound(),
                 { Succeeded: true } => Results.Ok(ToResponse(result.Identity!)),
+                { RunnerConflict: true } => RunnerConflict(context, result.RetryAfter),
                 _ => RuntimeDenied()
             };
         });
@@ -325,6 +329,24 @@ public static class ExternalEngineConnectionEndpoints
 
     private static IResult RuntimeDenied() =>
         Problem("external-engine.runtime.denied", "The connector proof was not accepted.", StatusCodes.Status401Unauthorized);
+
+    private static IResult RunnerConflict(HttpContext context, TimeSpan? retryAfter)
+    {
+        var ttlSeconds = (int)ExternalEngineHeartbeatService.RunnerLeaseTtl.TotalSeconds;
+        var retryAfterSeconds = Math.Clamp(
+            (int)Math.Ceiling((retryAfter ?? ExternalEngineHeartbeatService.RunnerLeaseTtl).TotalSeconds),
+            1,
+            ttlSeconds);
+        context.Response.Headers.RetryAfter = retryAfterSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return Results.Problem(
+            title: "Another runner holds the live lease for this connection.",
+            statusCode: StatusCodes.Status409Conflict,
+            extensions: new Dictionary<string, object?>
+            {
+                ["code"] = "external-engine.heartbeat.runner-conflict",
+                ["retryAfterSeconds"] = retryAfterSeconds
+            });
+    }
 
     private static IResult HeartbeatRateLimited(HttpContext context, TimeSpan? retryAfter)
     {

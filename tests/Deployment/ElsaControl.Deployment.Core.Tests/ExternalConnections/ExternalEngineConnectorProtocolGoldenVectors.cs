@@ -49,7 +49,12 @@ internal static class ExternalEngineConnectorProtocolGoldenVectors
             Clock: new Clock(
                 FormatTimestamp(Now),
                 (int)ExternalEngineEnrollmentDefaults.MaximumProofAge.TotalSeconds,
-                (int)ExternalEngineEnrollmentDefaults.MaximumProofFutureSkew.TotalSeconds),
+                (int)ExternalEngineEnrollmentDefaults.MaximumProofFutureSkew.TotalSeconds,
+                (int)ExternalEngineHeartbeatService.DefaultHeartbeatInterval.TotalSeconds,
+                (int)ExternalEngineHeartbeatService.MinimumInterval.TotalSeconds,
+                (int)ExternalEngineHeartbeatService.MaxHeartbeatInterval.TotalSeconds,
+                (int)ExternalEngineHeartbeatService.RunnerLeaseTtl.TotalSeconds,
+                (int)ExternalEngineHeartbeatService.FreshnessWindow.TotalSeconds),
             Keys: new Keys(
                 DescribeKey(CurrentPrivateKeyPkcs8, currentPublicKey),
                 DescribeKey(NextPrivateKeyPkcs8, nextPublicKey)),
@@ -114,7 +119,8 @@ internal static class ExternalEngineConnectorProtocolGoldenVectors
             [
                 new("worker", "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
                 new("runtime", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-            ]);
+            ],
+            "AAAAAAAAAAAAAAAAAAAAAA");
         var heartbeatReportBytes = ExternalEngineHeartbeatService.CreateCanonicalPayload(heartbeatReport);
         var heartbeatDigest = ExternalEngineHeartbeatService.CreatePayloadDigest(heartbeatReport);
         var heartbeatProof = Proof(ExternalEngineHeartbeatService.HeartbeatOperation, heartbeatDigest, Repeat(0x11, 32));
@@ -124,8 +130,14 @@ internal static class ExternalEngineConnectorProtocolGoldenVectors
         var namedHeartbeatDigest = ExternalEngineHeartbeatService.CreatePayloadDigest(namedHeartbeatReport);
         var namedHeartbeatProof = Proof(ExternalEngineHeartbeatService.HeartbeatOperation, namedHeartbeatDigest, Repeat(0x44, 32));
         var namedHeartbeatPayload = ExternalEngineEnrollmentProtocol.CreateConnectorProofPayload(namedHeartbeatProof);
+        var escapedHeartbeatReport = heartbeatReport with { DisplayName = "Café & π" };
+        var escapedHeartbeatReportBytes = ExternalEngineHeartbeatService.CreateCanonicalPayload(escapedHeartbeatReport);
+        var escapedHeartbeatDigest = ExternalEngineHeartbeatService.CreatePayloadDigest(escapedHeartbeatReport);
+        var escapedHeartbeatProof = Proof(ExternalEngineHeartbeatService.HeartbeatOperation, escapedHeartbeatDigest, Repeat(0x55, 32));
+        var escapedHeartbeatPayload = ExternalEngineEnrollmentProtocol.CreateConnectorProofPayload(escapedHeartbeatProof);
 
-        var rotationDigest = ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, RotationOverlap);
+        var rotationDigest = ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(
+            nextPublicKey, RotationOverlap, "AAAAAAAAAAAAAAAAAAAAAA");
         var rotateProof = Proof(ExternalEngineEnrollmentDefaults.RotationOperation, rotationDigest, Repeat(0x22, 32));
         var rotatePayload = ExternalEngineEnrollmentProtocol.CreateConnectorProofPayload(rotateProof);
 
@@ -191,6 +203,18 @@ internal static class ExternalEngineConnectorProtocolGoldenVectors
                 committedSignatures,
                 namedHeartbeatReportBytes,
                 namedHeartbeatDigest),
+            Complete(
+                "heartbeat.valid-non-ascii-display-name",
+                "heartbeat",
+                "Valid heartbeat proof whose displayName includes non-ASCII text and an ampersand so JavaScriptEncoder.Default escaping is locked.",
+                ExternalEngineEnrollmentProtocol.ConnectorProofDomain,
+                HeartbeatInputs(escapedHeartbeatProof, escapedHeartbeatReportBytes, escapedHeartbeatDigest),
+                escapedHeartbeatPayload,
+                currentKey,
+                mutateSignature: false,
+                committedSignatures,
+                escapedHeartbeatReportBytes,
+                escapedHeartbeatDigest),
             Complete(
                 "rotate.valid",
                 "rotate",
@@ -333,7 +357,8 @@ internal static class ExternalEngineConnectorProtocolGoldenVectors
             ("nonce", proof.Nonce),
             ("nextPublicKey", nextPublicKey),
             ("nextPublicKeyThumbprint", ExternalEngineEnrollmentProtocol.PublicKeyThumbprint(nextPublicKey)),
-            ("overlapSeconds", (int)RotationOverlap.TotalSeconds));
+            ("overlapSeconds", (int)RotationOverlap.TotalSeconds),
+            ("runnerId", "AAAAAAAAAAAAAAAAAAAAAA"));
 
     private static IReadOnlyDictionary<string, JsonElement> RevokeInputs(
         ExternalEngineConnectorProof proof,
@@ -394,6 +419,11 @@ internal static class ExternalEngineConnectorProtocolGoldenVectors
             writer.WriteString("now", document.Clock.Now);
             writer.WriteNumber("maximumProofAgeSeconds", document.Clock.MaximumProofAgeSeconds);
             writer.WriteNumber("maximumProofFutureSkewSeconds", document.Clock.MaximumProofFutureSkewSeconds);
+            writer.WriteNumber("defaultHeartbeatIntervalSeconds", document.Clock.DefaultHeartbeatIntervalSeconds);
+            writer.WriteNumber("minimumHeartbeatIntervalSeconds", document.Clock.MinimumHeartbeatIntervalSeconds);
+            writer.WriteNumber("maximumHeartbeatIntervalSeconds", document.Clock.MaximumHeartbeatIntervalSeconds);
+            writer.WriteNumber("runnerLeaseTtlSeconds", document.Clock.RunnerLeaseTtlSeconds);
+            writer.WriteNumber("freshnessWindowSeconds", document.Clock.FreshnessWindowSeconds);
             writer.WriteEndObject();
             writer.WritePropertyName("keys");
             writer.WriteStartObject();
@@ -560,7 +590,15 @@ internal static class ExternalEngineConnectorProtocolGoldenVectors
 
     private sealed record Algorithms(string Key, string Curve, string Signature, string Hash, string CanonicalFields);
 
-    private sealed record Clock(string Now, int MaximumProofAgeSeconds, int MaximumProofFutureSkewSeconds);
+    private sealed record Clock(
+        string Now,
+        int MaximumProofAgeSeconds,
+        int MaximumProofFutureSkewSeconds,
+        int DefaultHeartbeatIntervalSeconds,
+        int MinimumHeartbeatIntervalSeconds,
+        int MaximumHeartbeatIntervalSeconds,
+        int RunnerLeaseTtlSeconds,
+        int FreshnessWindowSeconds);
 
     private sealed record Keys(KeyMaterial Current, KeyMaterial Next);
 

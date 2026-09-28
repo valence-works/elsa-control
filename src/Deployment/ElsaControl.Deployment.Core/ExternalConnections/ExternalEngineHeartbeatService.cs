@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 
 namespace ElsaControl.Deployment.Core.ExternalConnections;
@@ -14,7 +16,20 @@ public sealed class ExternalEngineHeartbeatService(
     public const string StatusCapability = "connection.status";
     public const string StudioCapability = "studio.open";
     public static readonly TimeSpan FreshnessWindow = TimeSpan.FromSeconds(90);
+    /// <summary>Rate-limit floor. The connector MUST NOT heartbeat faster than this.</summary>
     public static readonly TimeSpan MinimumInterval = TimeSpan.FromSeconds(5);
+    /// <summary>Normative connector cadence. The connector heartbeats every 15 seconds by default.</summary>
+    public static readonly TimeSpan DefaultHeartbeatInterval = TimeSpan.FromSeconds(15);
+    /// <summary>Normative ceiling. The connector MUST NOT heartbeat less often than this.</summary>
+    public static readonly TimeSpan MaxHeartbeatInterval = TimeSpan.FromSeconds(15);
+    /// <summary>
+    /// Server-constant runner lease TTL: 3× <see cref="MaxHeartbeatInterval"/>.
+    /// Worst-case takeover is TTL plus one max-interval beat, which must stay
+    /// inside <see cref="FreshnessWindow"/> so a clean failover never projects stale.
+    /// </summary>
+    public static readonly TimeSpan RunnerLeaseTtl = TimeSpan.FromSeconds(45);
+    public const string RunnerChangedAuditAction = "external-engine.runner-changed";
+    public const string LabelChangedAuditAction = "external-engine.label-changed";
     private static readonly TimeSpan MaximumFutureSkew = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan MaximumObservationAge = ExternalEngineEnrollmentDefaults.MaximumProofAge;
     private static readonly HashSet<string> AllowedCapabilities =
@@ -46,6 +61,15 @@ public sealed class ExternalEngineHeartbeatService(
         var now = timeProvider.GetUtcNow();
         if (!IsValidObservation(report, now))
             return new(ExternalEngineHeartbeatStatus.InvalidReport);
+
+        if (HasLiveRunnerLease(connection, now)
+            && !string.Equals(connection.ActiveRunnerId, report.RunnerId, StringComparison.Ordinal))
+        {
+            return new(
+                ExternalEngineHeartbeatStatus.RunnerConflict,
+                connection,
+                RetryAfter: RemainingLease(connection, now));
+        }
 
         if (!string.Equals(report.ConnectorProtocol, CurrentProtocol, StringComparison.Ordinal))
         {
@@ -84,6 +108,8 @@ public sealed class ExternalEngineHeartbeatService(
         var status = report.RuntimeHealth != ExternalEngineRuntimeHealth.Unhealthy
             ? ExternalEngineConnectionStatus.Connected
             : ExternalEngineConnectionStatus.Degraded;
+        var takeover = connection.ActiveRunnerId is not null
+            && !string.Equals(connection.ActiveRunnerId, report.RunnerId, StringComparison.Ordinal);
         var projection = new ExternalEngineHeartbeatProjection(
             report.Sequence,
             report.ObservedAt,
@@ -101,7 +127,9 @@ public sealed class ExternalEngineHeartbeatService(
                 ? report.StudioDestination
                 : null,
             acceptedCapabilities,
-            report.DisplayName);
+            report.DisplayName,
+            report.RunnerId,
+            ResetSequenceBaseline: takeover);
 
         for (var attempt = 0; attempt < 2; attempt++)
         {
@@ -121,6 +149,11 @@ public sealed class ExternalEngineHeartbeatService(
                     return new(ExternalEngineHeartbeatStatus.RateLimited, stored.Connection, RetryAfter: stored.RetryAfter);
                 case ExternalEngineHeartbeatStoreStatus.Revoked:
                     return new(ExternalEngineHeartbeatStatus.Revoked, stored.Connection);
+                case ExternalEngineHeartbeatStoreStatus.RunnerConflict:
+                    return new(
+                        ExternalEngineHeartbeatStatus.RunnerConflict,
+                        stored.Connection,
+                        RetryAfter: stored.RetryAfter ?? RemainingLease(stored.Connection ?? connection, now));
                 case ExternalEngineHeartbeatStoreStatus.ScopeMismatch:
                     return new(ExternalEngineHeartbeatStatus.ProofDenied, stored.Connection, ExternalEngineConnectorProofFailure.ScopeMismatch);
                 case ExternalEngineHeartbeatStoreStatus.Concurrent:
@@ -128,6 +161,18 @@ public sealed class ExternalEngineHeartbeatService(
                         proof.OrganizationId, proof.WorkspaceId, proof.ConnectionId, cancellationToken);
                     if (connection is null)
                         return null;
+                    if (HasLiveRunnerLease(connection, now)
+                        && !string.Equals(connection.ActiveRunnerId, report.RunnerId, StringComparison.Ordinal))
+                    {
+                        return new(
+                            ExternalEngineHeartbeatStatus.RunnerConflict,
+                            connection,
+                            RetryAfter: RemainingLease(connection, now));
+                    }
+
+                    takeover = connection.ActiveRunnerId is not null
+                        && !string.Equals(connection.ActiveRunnerId, report.RunnerId, StringComparison.Ordinal);
+                    projection = projection with { ResetSequenceBaseline = takeover };
                     break;
                 default:
                     throw new ArgumentOutOfRangeException();
@@ -146,19 +191,25 @@ public sealed class ExternalEngineHeartbeatService(
     /// Produces the protocol-v1 heartbeat bytes that the connector signs. The fixed property order,
     /// compact UTF-8 JSON encoding, explicit nulls, normalized arrays, and UTC timestamp format are
     /// part of the wire contract and must remain stable for protocol version 1.
+    /// Strings are written with <see cref="Utf8JsonWriter"/> and
+    /// <see cref="JavaScriptEncoder.Default"/>: ASCII letters, digits, space, and a small
+    /// punctuation set stay literal; HTML-sensitive characters including <c>&amp;</c> become
+    /// <c>\u00XX</c> (so <c>&amp;</c> is <c>\u0026</c>); every non-ASCII code point becomes
+    /// <c>\uXXXX</c> (for example <c>é</c> is <c>\u00E9</c> and <c>π</c> is <c>\u03C0</c>).
     /// </summary>
     public static byte[] CreateCanonicalPayload(ExternalEngineHeartbeatReport report)
     {
         ArgumentNullException.ThrowIfNull(report);
         var normalized = Normalize(report);
         using var buffer = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(buffer))
+        using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions { Encoder = JavaScriptEncoder.Default }))
         {
             writer.WriteStartObject();
             writer.WriteNumber("sequence", normalized.Sequence);
             writer.WriteString("observedAt", normalized.ObservedAt.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", CultureInfo.InvariantCulture));
             writer.WriteString("connectorProtocol", normalized.ConnectorProtocol);
             writer.WriteString("connectorVersion", normalized.ConnectorVersion);
+            writer.WriteString("runnerId", normalized.RunnerId);
             if (normalized.DisplayName is not null)
                 writer.WriteString("displayName", normalized.DisplayName);
             writer.WriteString("runtimeHealth", normalized.RuntimeHealth switch
@@ -230,7 +281,8 @@ public sealed class ExternalEngineHeartbeatService(
         var runtimeKind = Required(report.RuntimeKind, 64, nameof(report.RuntimeKind));
         var distribution = Optional(report.ObservedDistribution, 128, nameof(report.ObservedDistribution));
         var version = Optional(report.ObservedVersion, 128, nameof(report.ObservedVersion));
-        var displayName = Optional(report.DisplayName, 80, nameof(report.DisplayName));
+        var displayName = NormalizeHostDisplayName(report.DisplayName);
+        var runnerId = ExternalEngineEnrollmentProtocol.RequiredRunnerId(report.RunnerId);
         if ((distribution is null) != (version is null))
             throw new ArgumentException("Observed distribution and version must be supplied together.", nameof(report));
 
@@ -267,8 +319,62 @@ public sealed class ExternalEngineHeartbeatService(
             StudioDestination = NormalizeStudioDestination(report.StudioDestination),
             Capabilities = capabilities,
             Components = components,
+            RunnerId = runnerId,
             DisplayName = displayName
         };
+    }
+
+    /// <summary>
+    /// Host labels are optional. When present they must already be trimmed, are
+    /// NFC-normalized, then measured in Unicode code points (UTF-32 / Rune
+    /// count). Control, Unicode format (Cf), line/paragraph separator, private-use,
+    /// surrogate, and unassigned runes are rejected. The NFC form is what is
+    /// stored and hashed.
+    /// </summary>
+    public static string? NormalizeHostDisplayName(string? value)
+    {
+        if (value is null)
+            return null;
+        if (value.Length == 0)
+            throw new ArgumentException("DisplayName must be omitted when empty.", nameof(value));
+        if (!string.Equals(value, value.Trim(), StringComparison.Ordinal))
+            throw new ArgumentException("DisplayName must not include leading or trailing whitespace.", nameof(value));
+
+        var normalized = value.Normalize(NormalizationForm.FormC);
+        var codePoints = 0;
+        foreach (var rune in normalized.EnumerateRunes())
+        {
+            codePoints++;
+            if (IsForbiddenDisplayNameRune(rune))
+                throw new ArgumentException("DisplayName must contain 1 to 80 Unicode code points of safe plain text.", nameof(value));
+        }
+
+        if (codePoints is < 1 or > 80)
+            throw new ArgumentException("DisplayName must contain 1 to 80 Unicode code points of safe plain text.", nameof(value));
+        return normalized;
+    }
+
+    private static bool IsForbiddenDisplayNameRune(Rune rune) =>
+        Rune.GetUnicodeCategory(rune) is
+            UnicodeCategory.Control
+            or UnicodeCategory.Format
+            or UnicodeCategory.LineSeparator
+            or UnicodeCategory.ParagraphSeparator
+            or UnicodeCategory.PrivateUse
+            or UnicodeCategory.Surrogate
+            or UnicodeCategory.OtherNotAssigned;
+
+    public static bool HasLiveRunnerLease(ExternalEngineConnection connection, DateTimeOffset now) =>
+        connection.ActiveRunnerId is not null
+        && connection.RunnerLeaseExpiresAt is { } expires
+        && expires > now;
+
+    public static TimeSpan RemainingLease(ExternalEngineConnection connection, DateTimeOffset now)
+    {
+        var remaining = (connection.RunnerLeaseExpiresAt ?? now) - now;
+        if (remaining > RunnerLeaseTtl)
+            remaining = RunnerLeaseTtl;
+        return remaining > TimeSpan.Zero ? remaining : TimeSpan.FromSeconds(1);
     }
 
     private static string? NormalizeStudioDestination(string? value)

@@ -218,23 +218,31 @@ public sealed class ExternalEngineConnectionPersistenceTests : IAsyncLifetime
             "manifest-sha256",
             "https://studio.example.test/",
             [ExternalEngineHeartbeatService.StatusCapability],
-            "Acme Orders Engine");
+            "Acme Orders Engine",
+            "AAAAAAAAAAAAAAAAAAAAAA");
 
         var applied = await store.TryApplyHeartbeatAsync(
             current, projection, identityId, Now.AddMinutes(2), TimeSpan.FromSeconds(5));
 
         Assert.Equal(ExternalEngineHeartbeatStoreStatus.Applied, applied.Status);
         Assert.Equal("Acme Orders Engine", applied.Connection!.DisplayName);
+        Assert.Equal("AAAAAAAAAAAAAAAAAAAAAA", applied.Connection.ActiveRunnerId);
+        Assert.Equal(Now.AddMinutes(2).Add(ExternalEngineHeartbeatService.RunnerLeaseTtl), applied.Connection.RunnerLeaseExpiresAt);
         Assert.Equal(1, applied.Connection.LastHeartbeatSequence);
         Assert.Equal(projection.ObservedAt, applied.Connection.LastHeartbeatObservedAt);
         Assert.Equal("server", applied.Connection.ObservedRuntimeKind);
         Assert.Equal("manifest-sha256", applied.Connection.ReleaseEvidenceReference);
         Assert.Equal([ExternalEngineHeartbeatService.StatusCapability], applied.Connection.Capabilities);
-        Assert.Contains("HeartbeatConnected", await db.ExternalEngineConnectionAuditEvents.Select(x => x.Action).ToListAsync());
+        var connectedActions = await db.ExternalEngineConnectionAuditEvents.Select(x => x.Action).ToListAsync();
+        Assert.Contains("HeartbeatConnected", connectedActions);
+        Assert.Contains(ExternalEngineHeartbeatService.LabelChangedAuditAction, connectedActions);
+        Assert.DoesNotContain(ExternalEngineHeartbeatService.RunnerChangedAuditAction, connectedActions);
+        Assert.All(connectedActions, action => Assert.DoesNotContain("Acme", action, StringComparison.Ordinal));
 
         var outOfOrder = await store.TryApplyHeartbeatAsync(
             applied.Connection, projection, identityId, Now.AddMinutes(2).AddSeconds(6), TimeSpan.FromSeconds(5));
         Assert.Equal(ExternalEngineHeartbeatStoreStatus.OutOfOrder, outOfOrder.Status);
+        Assert.Equal(applied.Connection.RunnerLeaseExpiresAt, outOfOrder.Connection!.RunnerLeaseExpiresAt);
 
         var next = projection with { Sequence = 2, ObservedAt = projection.ObservedAt.AddSeconds(1) };
         var rateLimited = await store.TryApplyHeartbeatAsync(
@@ -257,6 +265,219 @@ public sealed class ExternalEngineConnectionPersistenceTests : IAsyncLifetime
         var persisted = await store.FindAsync(OrganizationId, WorkspaceId, current.Id);
         Assert.Equal(2, persisted!.LastHeartbeatSequence);
         Assert.Equal(Now.AddMinutes(2).AddSeconds(6), persisted.LastAuthenticatedAt);
+    }
+
+    [Fact]
+    public async Task Runner_lease_blocks_a_live_challenger_then_allows_takeover_after_expiry()
+    {
+        await using var db = CreateDbContext();
+        var store = new EfCoreExternalEngineConnectionStore(db);
+        var current = (await store.TryCreateAsync(
+            Connection(Guid.NewGuid(), "Lease engine"), "lease-engine", "digest")).Connection!;
+        var identityId = Guid.NewGuid();
+        db.ExternalEngineConnectorIdentities.Add(new ExternalEngineConnectorIdentityEntity
+        {
+            Id = identityId,
+            OrganizationId = OrganizationId,
+            WorkspaceId = WorkspaceId,
+            ConnectionId = current.Id,
+            Audience = ExternalEngineEnrollmentDefaults.AudienceFor(current.Id),
+            KeyAlgorithm = ExternalEngineEnrollmentDefaults.KeyAlgorithm,
+            KeyVersion = 1,
+            PublicKey = "public-key",
+            PublicKeyThumbprint = "thumbprint",
+            EnrolledAt = Now
+        });
+        await db.SaveChangesAsync();
+        current = (await store.TrySetActiveIdentityAsync(current, identityId, Now.AddMinutes(1)))!;
+        var holder = new ExternalEngineHeartbeatProjection(
+            9,
+            Now.AddMinutes(2),
+            ExternalEngineConnectionStatus.Connected,
+            ExternalEngineRuntimeHealth.Healthy,
+            ExternalEngineConnectorReachability.Reachable,
+            "1",
+            "1.4.0",
+            "elsa-oss",
+            "3.8.1",
+            "server",
+            ExternalEngineReleaseEvidenceLevel.SelfReported,
+            null,
+            null,
+            [ExternalEngineHeartbeatService.StatusCapability],
+            RunnerId: "AAAAAAAAAAAAAAAAAAAAAA");
+        var applied = await store.TryApplyHeartbeatAsync(
+            current, holder, identityId, Now.AddMinutes(2), TimeSpan.FromSeconds(5));
+        Assert.Equal(ExternalEngineHeartbeatStoreStatus.Applied, applied.Status);
+
+        var liveChallenger = holder with
+        {
+            Sequence = 1,
+            ObservedAt = holder.ObservedAt.AddSeconds(6),
+            RunnerId = "AQEBAQEBAQEBAQEBAQEBAQ",
+            ResetSequenceBaseline = true
+        };
+        var blocked = await store.TryApplyHeartbeatAsync(
+            applied.Connection!,
+            liveChallenger,
+            identityId,
+            Now.AddMinutes(2).AddSeconds(6),
+            TimeSpan.FromSeconds(5));
+        Assert.Equal(ExternalEngineHeartbeatStoreStatus.RunnerConflict, blocked.Status);
+        Assert.Equal(9, blocked.Connection!.LastHeartbeatSequence);
+        Assert.Equal("AAAAAAAAAAAAAAAAAAAAAA", blocked.Connection.ActiveRunnerId);
+        Assert.Equal(applied.Connection!.RunnerLeaseExpiresAt, blocked.Connection.RunnerLeaseExpiresAt);
+
+        var takeover = await store.TryApplyHeartbeatAsync(
+            applied.Connection,
+            liveChallenger,
+            identityId,
+            Now.AddMinutes(2).Add(ExternalEngineHeartbeatService.RunnerLeaseTtl),
+            TimeSpan.FromSeconds(5));
+        Assert.Equal(ExternalEngineHeartbeatStoreStatus.Applied, takeover.Status);
+        Assert.Equal(1, takeover.Connection!.LastHeartbeatSequence);
+        Assert.Equal("AQEBAQEBAQEBAQEBAQEBAQ", takeover.Connection.ActiveRunnerId);
+        Assert.Contains(
+            ExternalEngineHeartbeatService.RunnerChangedAuditAction,
+            await db.ExternalEngineConnectionAuditEvents.Select(x => x.Action).ToListAsync());
+    }
+
+    [Fact]
+    public async Task Challenger_one_tick_before_lease_expiry_is_still_blocked()
+    {
+        await using var db = CreateDbContext();
+        var store = new EfCoreExternalEngineConnectionStore(db);
+        var current = (await store.TryCreateAsync(
+            Connection(Guid.NewGuid(), "Pre-expiry lease engine"), "pre-expiry-lease-engine", "digest")).Connection!;
+        var identityId = Guid.NewGuid();
+        db.ExternalEngineConnectorIdentities.Add(new ExternalEngineConnectorIdentityEntity
+        {
+            Id = identityId,
+            OrganizationId = OrganizationId,
+            WorkspaceId = WorkspaceId,
+            ConnectionId = current.Id,
+            Audience = ExternalEngineEnrollmentDefaults.AudienceFor(current.Id),
+            KeyAlgorithm = ExternalEngineEnrollmentDefaults.KeyAlgorithm,
+            KeyVersion = 1,
+            PublicKey = "public-key",
+            PublicKeyThumbprint = "thumbprint",
+            EnrolledAt = Now
+        });
+        await db.SaveChangesAsync();
+        current = (await store.TrySetActiveIdentityAsync(current, identityId, Now.AddMinutes(1)))!;
+        var holder = new ExternalEngineHeartbeatProjection(
+            9,
+            Now.AddMinutes(2),
+            ExternalEngineConnectionStatus.Connected,
+            ExternalEngineRuntimeHealth.Healthy,
+            ExternalEngineConnectorReachability.Reachable,
+            "1",
+            "1.4.0",
+            "elsa-oss",
+            "3.8.1",
+            "server",
+            ExternalEngineReleaseEvidenceLevel.SelfReported,
+            null,
+            null,
+            [ExternalEngineHeartbeatService.StatusCapability],
+            RunnerId: "AAAAAAAAAAAAAAAAAAAAAA");
+        var applied = await store.TryApplyHeartbeatAsync(
+            current, holder, identityId, Now.AddMinutes(2), TimeSpan.FromSeconds(5));
+        Assert.Equal(ExternalEngineHeartbeatStoreStatus.Applied, applied.Status);
+
+        var oneTickBeforeExpiry = Now.AddMinutes(2).Add(ExternalEngineHeartbeatService.RunnerLeaseTtl).AddTicks(-1);
+        var blocked = await store.TryApplyHeartbeatAsync(
+            applied.Connection!,
+            holder with
+            {
+                Sequence = 1,
+                ObservedAt = oneTickBeforeExpiry,
+                RunnerId = "AQEBAQEBAQEBAQEBAQEBAQ",
+                ResetSequenceBaseline = true
+            },
+            identityId,
+            oneTickBeforeExpiry,
+            TimeSpan.FromSeconds(5));
+
+        Assert.Equal(ExternalEngineHeartbeatStoreStatus.RunnerConflict, blocked.Status);
+        Assert.Equal("AAAAAAAAAAAAAAAAAAAAAA", blocked.Connection!.ActiveRunnerId);
+        Assert.Equal(9, blocked.Connection.LastHeartbeatSequence);
+        Assert.DoesNotContain(
+            ExternalEngineHeartbeatService.RunnerChangedAuditAction,
+            await db.ExternalEngineConnectionAuditEvents.Select(x => x.Action).ToListAsync());
+    }
+
+    [Fact]
+    public async Task Two_ef_contexts_racing_after_expiry_leave_one_holder_and_one_conflict()
+    {
+        await using var db = CreateDbContext();
+        var store = new EfCoreExternalEngineConnectionStore(db);
+        var current = (await store.TryCreateAsync(
+            Connection(Guid.NewGuid(), "Race lease engine"), "race-lease-engine", "digest")).Connection!;
+        var identityId = Guid.NewGuid();
+        db.ExternalEngineConnectorIdentities.Add(new ExternalEngineConnectorIdentityEntity
+        {
+            Id = identityId,
+            OrganizationId = OrganizationId,
+            WorkspaceId = WorkspaceId,
+            ConnectionId = current.Id,
+            Audience = ExternalEngineEnrollmentDefaults.AudienceFor(current.Id),
+            KeyAlgorithm = ExternalEngineEnrollmentDefaults.KeyAlgorithm,
+            KeyVersion = 1,
+            PublicKey = "public-key",
+            PublicKeyThumbprint = "thumbprint",
+            EnrolledAt = Now
+        });
+        await db.SaveChangesAsync();
+        current = (await store.TrySetActiveIdentityAsync(current, identityId, Now.AddMinutes(1)))!;
+        var holder = new ExternalEngineHeartbeatProjection(
+            9,
+            Now.AddMinutes(2),
+            ExternalEngineConnectionStatus.Connected,
+            ExternalEngineRuntimeHealth.Healthy,
+            ExternalEngineConnectorReachability.Reachable,
+            "1",
+            "1.4.0",
+            "elsa-oss",
+            "3.8.1",
+            "server",
+            ExternalEngineReleaseEvidenceLevel.SelfReported,
+            null,
+            null,
+            [ExternalEngineHeartbeatService.StatusCapability],
+            RunnerId: "AAAAAAAAAAAAAAAAAAAAAA");
+        var applied = await store.TryApplyHeartbeatAsync(
+            current, holder, identityId, Now.AddMinutes(2), TimeSpan.FromSeconds(5));
+        Assert.Equal(ExternalEngineHeartbeatStoreStatus.Applied, applied.Status);
+        var expected = applied.Connection!;
+        var expiry = Now.AddMinutes(2).Add(ExternalEngineHeartbeatService.RunnerLeaseTtl);
+
+        var firstChallenger = holder with
+        {
+            Sequence = 1,
+            ObservedAt = expiry,
+            RunnerId = "AQEBAQEBAQEBAQEBAQEBAQ",
+            ResetSequenceBaseline = true
+        };
+        var secondChallenger = firstChallenger with { RunnerId = "AgICAgICAgICAgICAgICAg" };
+
+        var raced = await Task.WhenAll(
+            ApplyHeartbeatFromNewContextAsync(expected, firstChallenger, identityId, expiry),
+            ApplyHeartbeatFromNewContextAsync(expected, secondChallenger, identityId, expiry));
+
+        Assert.Single(raced, result => result.Status == ExternalEngineHeartbeatStoreStatus.Applied);
+        Assert.Single(raced, result =>
+            result.Status is ExternalEngineHeartbeatStoreStatus.Concurrent
+                or ExternalEngineHeartbeatStoreStatus.RunnerConflict);
+
+        await using var verify = CreateDbContext();
+        var persisted = await new EfCoreExternalEngineConnectionStore(verify)
+            .FindAsync(OrganizationId, WorkspaceId, current.Id);
+        Assert.NotNull(persisted);
+        Assert.Contains(persisted.ActiveRunnerId, new[] { firstChallenger.RunnerId, secondChallenger.RunnerId });
+        Assert.Equal(1, persisted.LastHeartbeatSequence);
+        Assert.Equal(1, await verify.ExternalEngineConnectionAuditEvents.CountAsync(
+            x => x.Action == ExternalEngineHeartbeatService.RunnerChangedAuditAction));
     }
 
     [Fact]

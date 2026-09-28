@@ -33,6 +33,8 @@ internal sealed class ExternalEngineConnectionEntity
     public long? LastHeartbeatSequence { get; set; }
     public DateTimeOffset? LastHeartbeatObservedAt { get; set; }
     public Guid? ActiveIdentityId { get; set; }
+    public string? ActiveRunnerId { get; set; }
+    public DateTimeOffset? RunnerLeaseExpiresAt { get; set; }
     public Guid? LastChallengeId { get; set; }
     public string IdempotencyKey { get; set; } = "";
     public string CreateRequestDigest { get; set; } = "";
@@ -79,6 +81,7 @@ internal sealed class ExternalEngineConnectionConfiguration : IEntityTypeConfigu
             table.HasCheckConstraint("CK_ExternalEngineConnections_Version", "Version > 0");
             table.HasCheckConstraint("CK_ExternalEngineConnections_Timestamps", "UpdatedAt >= CreatedAt AND (RevokedAt IS NULL OR RevokedAt >= CreatedAt)");
             table.HasCheckConstraint("CK_ExternalEngineConnections_RevokedState", "(Status = 'Revoked' AND RevokedAt IS NOT NULL) OR (Status <> 'Revoked' AND RevokedAt IS NULL)");
+            table.HasCheckConstraint("CK_ExternalEngineConnections_RunnerLease", "(ActiveRunnerId IS NULL AND RunnerLeaseExpiresAt IS NULL) OR (ActiveRunnerId IS NOT NULL AND RunnerLeaseExpiresAt IS NOT NULL)");
         });
         builder.HasKey(x => x.Id);
         builder.Property(x => x.DisplayName).HasMaxLength(200).IsRequired();
@@ -98,7 +101,9 @@ internal sealed class ExternalEngineConnectionConfiguration : IEntityTypeConfigu
         builder.Property(x => x.ConnectorCompatibilityStatus).HasMaxLength(32).HasDefaultValue("Unknown").IsRequired();
         builder.Property(x => x.IdempotencyKey).HasMaxLength(128).IsRequired();
         builder.Property(x => x.CreateRequestDigest).HasMaxLength(64).IsRequired();
+        builder.Property(x => x.ActiveRunnerId).HasMaxLength(64);
         builder.Property(x => x.LastAuthenticatedAt).HasNullableUtcTicksConversion();
+        builder.Property(x => x.RunnerLeaseExpiresAt).HasNullableUtcTicksConversion();
         builder.Property(x => x.CapabilitiesObservedAt).HasNullableUtcTicksConversion();
         builder.Property(x => x.LastHeartbeatObservedAt).HasNullableUtcTicksConversion();
         builder.Property(x => x.StudioDestinationConfirmedAt).HasNullableUtcTicksConversion();
@@ -138,7 +143,7 @@ internal sealed class ExternalEngineConnectionAuditEventConfiguration : IEntityT
     public void Configure(EntityTypeBuilder<ExternalEngineConnectionAuditEventEntity> builder)
     {
         builder.ToTable("ExternalEngineConnectionAuditEvents", table =>
-            table.HasCheckConstraint("CK_ExternalEngineConnectionAuditEvents_Action", "Action IN ('Created', 'PairingIssued', 'RepairStarted', 'IdentityEnrolled', 'HeartbeatConnected', 'HeartbeatDegraded', 'HeartbeatRecovered', 'StudioDestinationConfirmed', 'Disconnected')"));
+            table.HasCheckConstraint("CK_ExternalEngineConnectionAuditEvents_Action", "Action IN ('Created', 'PairingIssued', 'RepairStarted', 'IdentityEnrolled', 'HeartbeatConnected', 'HeartbeatDegraded', 'HeartbeatRecovered', 'StudioDestinationConfirmed', 'Disconnected', 'external-engine.runner-changed', 'external-engine.label-changed')"));
         builder.HasKey(x => x.Id);
         builder.Property(x => x.Action).HasMaxLength(32).IsRequired();
         builder.Property(x => x.OccurredAt).HasUtcTicksConversion();

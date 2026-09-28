@@ -111,6 +111,8 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
             entity.ConnectorCompatibilityStatus = ExternalEngineConnectorCompatibilityStatus.Unknown.ToString();
             entity.ConnectorCompatibilityObservedAt = null;
             entity.CapabilitiesObservedAt = null;
+            entity.ActiveRunnerId = null;
+            entity.RunnerLeaseExpiresAt = null;
             entity.Capabilities.Clear();
         }, cancellationToken);
 
@@ -320,7 +322,17 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
             return new(ExternalEngineHeartbeatStoreStatus.Revoked, ToDomain(entity));
         if (entity.Version != expected.Version)
             return new(ExternalEngineHeartbeatStoreStatus.Concurrent, ToDomain(entity));
-        if (entity.LastHeartbeatSequence is not null && projection.Sequence <= entity.LastHeartbeatSequence)
+        if (HasLiveRunnerLease(entity, receivedAt)
+            && !string.Equals(entity.ActiveRunnerId, projection.RunnerId, StringComparison.Ordinal))
+        {
+            return new(
+                ExternalEngineHeartbeatStoreStatus.RunnerConflict,
+                ToDomain(entity),
+                RemainingLease(entity, receivedAt));
+        }
+        if (!projection.ResetSequenceBaseline
+            && entity.LastHeartbeatSequence is not null
+            && projection.Sequence <= entity.LastHeartbeatSequence)
             return new(ExternalEngineHeartbeatStoreStatus.OutOfOrder, ToDomain(entity));
         if (entity.LastAuthenticatedAt is { } lastReceived && receivedAt - lastReceived < minimumInterval)
             return new(
@@ -329,6 +341,8 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
                 minimumInterval - (receivedAt - lastReceived));
 
         var previousStatus = entity.Status;
+        var previousRunnerId = entity.ActiveRunnerId;
+        var previousDisplayName = entity.DisplayName;
         entity.Status = projection.Status.ToString();
         entity.RuntimeHealth = projection.RuntimeHealth.ToString();
         entity.ConnectorReachability = projection.ConnectorReachability.ToString();
@@ -339,6 +353,11 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
         entity.ConnectorVersion = projection.ConnectorVersion;
         if (projection.DisplayName is not null)
             entity.DisplayName = projection.DisplayName;
+        if (projection.RunnerId is not null)
+        {
+            entity.ActiveRunnerId = projection.RunnerId;
+            entity.RunnerLeaseExpiresAt = receivedAt.ToUniversalTime().Add(ExternalEngineHeartbeatService.RunnerLeaseTtl);
+        }
         entity.ObservedDistribution = projection.ObservedDistribution;
         entity.ObservedVersion = projection.ObservedVersion;
         entity.ObservedRuntimeKind = projection.ObservedRuntimeKind;
@@ -377,6 +396,12 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
         };
         if (action is not null)
             AddAudit(entity, action, receivedAt);
+        if (previousRunnerId is not null
+            && !string.Equals(previousRunnerId, entity.ActiveRunnerId, StringComparison.Ordinal))
+            AddAudit(entity, ExternalEngineHeartbeatService.RunnerChangedAuditAction, receivedAt);
+        if (projection.DisplayName is not null
+            && !string.Equals(previousDisplayName, projection.DisplayName, StringComparison.Ordinal))
+            AddAudit(entity, ExternalEngineHeartbeatService.LabelChangedAuditAction, receivedAt);
 
         try
         {
@@ -494,6 +519,8 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
             LastHeartbeatSequence = value.LastHeartbeatSequence,
             LastHeartbeatObservedAt = value.LastHeartbeatObservedAt,
             ActiveIdentityId = value.ActiveIdentityId,
+            ActiveRunnerId = value.ActiveRunnerId,
+            RunnerLeaseExpiresAt = value.RunnerLeaseExpiresAt?.ToUniversalTime(),
             LastChallengeId = value.LastChallengeId,
             IdempotencyKey = idempotencyKey,
             CreateRequestDigest = requestDigest,
@@ -539,5 +566,20 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
             value.StudioDestinationConfirmedAt,
             value.StudioDestinationConfirmedByAccountId,
             Enum.Parse<ExternalEngineConnectorCompatibilityStatus>(value.ConnectorCompatibilityStatus),
-            value.ConnectorCompatibilityObservedAt);
+            value.ConnectorCompatibilityObservedAt,
+            value.ActiveRunnerId,
+            value.RunnerLeaseExpiresAt);
+
+    private static bool HasLiveRunnerLease(ExternalEngineConnectionEntity entity, DateTimeOffset now) =>
+        entity.ActiveRunnerId is not null
+        && entity.RunnerLeaseExpiresAt is { } expires
+        && expires > now;
+
+    private static TimeSpan RemainingLease(ExternalEngineConnectionEntity entity, DateTimeOffset now)
+    {
+        var remaining = (entity.RunnerLeaseExpiresAt ?? now) - now;
+        if (remaining > ExternalEngineHeartbeatService.RunnerLeaseTtl)
+            remaining = ExternalEngineHeartbeatService.RunnerLeaseTtl;
+        return remaining > TimeSpan.Zero ? remaining : TimeSpan.FromSeconds(1);
+    }
 }

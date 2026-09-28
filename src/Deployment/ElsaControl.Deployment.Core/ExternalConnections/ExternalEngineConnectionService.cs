@@ -225,6 +225,16 @@ public sealed class ExternalEngineConnectionService(
             return null;
         if (connection.ActiveIdentityId != proof.IdentityId)
             return ExternalEngineConnectorKeyRotationResult.Denied(ExternalEngineConnectorProofFailure.ScopeMismatch);
+
+        try
+        {
+            ExternalEngineEnrollmentProtocol.RequiredRunnerId(request.RunnerId);
+        }
+        catch (ArgumentException)
+        {
+            return ExternalEngineConnectorKeyRotationResult.Denied(ExternalEngineConnectorProofFailure.InvalidRequest);
+        }
+
         return await enrollment.RotateConnectorKeyAsync(request, cancellationToken);
     }
 
