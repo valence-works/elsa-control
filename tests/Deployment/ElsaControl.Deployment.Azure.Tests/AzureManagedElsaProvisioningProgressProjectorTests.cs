@@ -128,6 +128,102 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
         Assert.Contains(result.Activity, entry => entry.Status == ManagedElsaProvisioningProgressActivityStatuses.Blocked);
     }
 
+    [Fact]
+    public void Accepted_handoff_without_provider_is_queued()
+    {
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.RecoveryRequired,
+            failureCode: null,
+            recoveryReason: AzureManagedElsaProvisioningProgressProjector.ProviderSubmissionAccepted);
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Queued, result.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.RequestAccepted, result.CurrentStage);
+        Assert.Null(result.DiagnosticCode);
+        Assert.DoesNotContain(result.Activity, entry => entry.Status == ManagedElsaProvisioningProgressActivityStatuses.Blocked);
+    }
+
+    [Theory]
+    [InlineData(null, AzureManagedElsaProvisioningProgressProjector.ProviderSubmissionUncertain)]
+    [InlineData("provider.internal.failure", null)]
+    [InlineData("provider.internal.failure", AzureManagedElsaProvisioningProgressProjector.ProviderSubmissionAccepted)]
+    public void Uncertain_or_failed_recovery_without_provider_stays_stale(string? failureCode, string? recoveryReason)
+    {
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.RecoveryRequired,
+            failureCode: failureCode,
+            recoveryReason: recoveryReason);
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Stale, result.State);
+        Assert.Equal(ManagedElsaProvisioningProgressDiagnostics.RequiresAttention, result.DiagnosticCode);
+        Assert.Contains(result.Activity, entry => entry.Status == ManagedElsaProvisioningProgressActivityStatuses.Blocked);
+    }
+
+    [Theory]
+    [InlineData(AzureProviderOperationStatus.Accepted)]
+    [InlineData(AzureProviderOperationStatus.Queued)]
+    public void Accepted_handoff_with_provider_accepted_or_queued_is_active_at_request_accepted(
+        AzureProviderOperationStatus status)
+    {
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.RecoveryRequired,
+            failureCode: null,
+            recoveryReason: AzureManagedElsaProvisioningProgressProjector.ProviderSubmissionAccepted,
+            provider: Provider(status));
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Active, result.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.RequestAccepted, result.CurrentStage);
+        Assert.Null(result.DiagnosticCode);
+        Assert.DoesNotContain(result.Activity, entry => entry.Status == ManagedElsaProvisioningProgressActivityStatuses.Blocked);
+    }
+
+    [Fact]
+    public void Accepted_handoff_with_provider_succeeded_before_ready_is_active_at_health_verification()
+    {
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.RecoveryRequired,
+            failureCode: null,
+            recoveryReason: AzureManagedElsaProvisioningProgressProjector.ProviderSubmissionAccepted,
+            observedLifecycle: ElsaObservedLifecycle.Provisioning,
+            provider: Provider(AzureProviderOperationStatus.Succeeded, AzureProviderOperationPhase.TrafficPromoted, AcceptedAt.AddMinutes(8)));
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Active, result.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.HealthVerification, result.CurrentStage);
+        Assert.Null(result.DiagnosticCode);
+        Assert.DoesNotContain(result.Activity, entry => entry.Status == ManagedElsaProvisioningProgressActivityStatuses.Blocked);
+    }
+
+    [Theory]
+    [InlineData(AzureProviderOperationStatus.Accepted, 9, 59, ManagedElsaProvisioningProgressStates.Active)]
+    [InlineData(AzureProviderOperationStatus.Queued, 9, 59, ManagedElsaProvisioningProgressStates.Active)]
+    [InlineData(AzureProviderOperationStatus.Accepted, 10, 1, ManagedElsaProvisioningProgressStates.Stale)]
+    [InlineData(AzureProviderOperationStatus.Queued, 10, 1, ManagedElsaProvisioningProgressStates.Stale)]
+    public void Accepted_or_queued_provider_flips_to_stale_just_past_ten_minutes(
+        AzureProviderOperationStatus status,
+        int minutes,
+        int seconds,
+        string expectedState)
+    {
+        var createdAt = AcceptedAt;
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.RecoveryRequired,
+            failureCode: null,
+            recoveryReason: AzureManagedElsaProvisioningProgressProjector.ProviderSubmissionAccepted,
+            provider: Provider(status, createdAt: createdAt),
+            timeProvider: new FixedTimeProvider(createdAt.AddMinutes(minutes).AddSeconds(seconds)));
+
+        Assert.Equal(expectedState, result.State);
+        if (expectedState == ManagedElsaProvisioningProgressStates.Stale)
+        {
+            Assert.Equal(ManagedElsaProvisioningProgressDiagnostics.RequiresAttention, result.DiagnosticCode);
+            Assert.Contains(result.Activity, entry => entry.Status == ManagedElsaProvisioningProgressActivityStatuses.Blocked);
+        }
+        else
+        {
+            Assert.Equal(ManagedElsaProvisioningProgressStages.RequestAccepted, result.CurrentStage);
+            Assert.Null(result.DiagnosticCode);
+        }
+    }
+
     [Theory]
     [InlineData(ElsaInstanceOperationState.Failed, "provisioning.failed")]
     [InlineData(ElsaInstanceOperationState.Cancelled, "provisioning.cancelled")]
@@ -235,22 +331,28 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
         DateTimeOffset? completedAt = null,
         ElsaObservedLifecycle observedLifecycle = ElsaObservedLifecycle.Provisioning,
         AzureProviderOperation? provider = null,
-        IReadOnlyList<AzureProviderOperationTransition>? transitions = null) =>
+        IReadOnlyList<AzureProviderOperationTransition>? transitions = null,
+        string? failureCode = "provider.internal.failure",
+        string? recoveryReason = null,
+        TimeProvider? timeProvider = null) =>
         AzureManagedElsaProvisioningProgressProjector.Project(
             new AzureManagedElsaProvisioningProgressProjectionInput(
                 Topology(observedLifecycle),
-                Lifecycle(lifecycleState, completedAt),
+                Lifecycle(lifecycleState, completedAt, failureCode),
                 provider,
-                transitions));
+                transitions,
+                RecoveryReason: recoveryReason),
+            timeProvider ?? new FixedTimeProvider(AcceptedAt));
 
     private static ElsaInstanceLifecycleTopologySnapshot Topology(ElsaObservedLifecycle observedLifecycle) =>
         new(InstanceId, 1, ElsaDesiredLifecycle.Running, observedLifecycle, null, Array.Empty<ElsaInstanceLifecycleTopologyOperation>());
 
     private static ElsaInstanceLifecycleTopologyOperation Lifecycle(
         ElsaInstanceOperationState state,
-        DateTimeOffset? completedAt = null) =>
+        DateTimeOffset? completedAt = null,
+        string? failureCode = "provider.internal.failure") =>
         new(Guid.Parse("33333333-3333-3333-3333-333333333333"), ElsaInstanceOperationAction.Create, state, 1, 1,
-            AcceptedAt, AcceptedAt.AddSeconds(1), completedAt, null, "provider.internal.failure", null, null, null);
+            AcceptedAt, AcceptedAt.AddSeconds(1), completedAt, null, failureCode, null, null, null);
 
     private static AzureProviderOperationTransition Transition(
         long sequence,
@@ -263,12 +365,18 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
     private static AzureProviderOperation Provider(
         AzureProviderOperationStatus status = AzureProviderOperationStatus.Running,
         AzureProviderOperationPhase phase = AzureProviderOperationPhase.Planned,
-        DateTimeOffset? completedAt = null) =>
+        DateTimeOffset? completedAt = null,
+        DateTimeOffset? createdAt = null) =>
         new(Guid.Parse("55555555-5555-5555-5555-555555555555"), WorkspaceId, "provider-target-key",
             AzureProviderOperationAction.Reconcile, "provider-idempotency-key", "request-hash", "provider-operation-id",
             "plan-fingerprint", "template-fingerprint", "3.8.1", "3.8", "topology", "isolated", "westeurope",
             "provider/image", "sha256:provider-image", null, null, status, phase, 1, 1, 1, new(), "https://provider.example",
             AzureProviderHealth.Healthy, [new AzureProviderDiagnostic("provider.internal.failure", "provider.internal.message")],
-            "worker-id", AcceptedAt.AddMinutes(1), AcceptedAt.AddSeconds(30), AcceptedAt, AcceptedAt.AddMinutes(1), completedAt,
+            "worker-id", AcceptedAt.AddMinutes(1), AcceptedAt.AddSeconds(30), createdAt ?? AcceptedAt, AcceptedAt.AddMinutes(1), completedAt,
             InstanceId: InstanceId, LifecycleAction: ElsaInstanceOperationAction.Create);
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now.ToUniversalTime();
+    }
 }

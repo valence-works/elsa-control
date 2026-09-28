@@ -128,6 +128,73 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
     }
 
     [Fact]
+    public async Task Accepted_handoff_sequence_never_reports_stale()
+    {
+        var create = Lifecycle(Guid.NewGuid(), ElsaInstanceOperationState.RecoveryRequired);
+        var instances = new InstanceStore { Topology = Topology([create], create.Id) };
+        var clock = new FixedTimeProvider(AcceptedAt.AddSeconds(5));
+
+        var missingProvider = Assert.IsType<ManagedElsaProvisioningProgress>(
+            await Reader(instances, new ProviderStore(), clock).ReadAsync(WorkspaceId, InstanceId));
+        var accepted = Assert.IsType<ManagedElsaProvisioningProgress>(
+            await Reader(
+                    instances,
+                    new ProviderStore
+                    {
+                        Snapshot = new AzureManagedElsaProvisioningOperationSnapshot(
+                            Provider(AzureProviderOperationStatus.Accepted, AzureProviderOperationPhase.Planned),
+                            [])
+                    },
+                    clock)
+                .ReadAsync(WorkspaceId, InstanceId));
+        var queued = Assert.IsType<ManagedElsaProvisioningProgress>(
+            await Reader(
+                    instances,
+                    new ProviderStore
+                    {
+                        Snapshot = new AzureManagedElsaProvisioningOperationSnapshot(
+                            Provider(AzureProviderOperationStatus.Queued, AzureProviderOperationPhase.Planned),
+                            [])
+                    },
+                    clock)
+                .ReadAsync(WorkspaceId, InstanceId));
+        var running = Assert.IsType<ManagedElsaProvisioningProgress>(
+            await Reader(
+                    instances,
+                    new ProviderStore
+                    {
+                        Snapshot = new AzureManagedElsaProvisioningOperationSnapshot(
+                            Provider(AzureProviderOperationStatus.Running, AzureProviderOperationPhase.WorkloadSubmitted),
+                            [Transition(1, AzureProviderOperationPhase.WorkloadSubmitted)])
+                    },
+                    clock)
+                .ReadAsync(WorkspaceId, InstanceId));
+        var succeededBeforeReady = Assert.IsType<ManagedElsaProvisioningProgress>(
+            await Reader(
+                    instances,
+                    new ProviderStore
+                    {
+                        Snapshot = new AzureManagedElsaProvisioningOperationSnapshot(
+                            Provider(AzureProviderOperationStatus.Succeeded, AzureProviderOperationPhase.TrafficPromoted),
+                            [Transition(1, AzureProviderOperationPhase.TrafficPromoted)])
+                    },
+                    clock)
+                .ReadAsync(WorkspaceId, InstanceId));
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Queued, missingProvider.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Active, accepted.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.RequestAccepted, accepted.CurrentStage);
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Active, queued.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.RequestAccepted, queued.CurrentStage);
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Active, running.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Active, succeededBeforeReady.State);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.HealthVerification, succeededBeforeReady.CurrentStage);
+        Assert.All(
+            new[] { missingProvider, accepted, queued, running, succeededBeforeReady },
+            snapshot => Assert.NotEqual(ManagedElsaProvisioningProgressStates.Stale, snapshot.State));
+    }
+
+    [Fact]
     public async Task Unknown_and_non_monotonic_provider_mappings_emit_protected_warning_events()
     {
         var lifecycle = Lifecycle(Guid.NewGuid(), ElsaInstanceOperationState.Running);
@@ -156,13 +223,20 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
 
     private static AzureManagedElsaProvisioningProgressReader Reader(
         IManagedElsaInstanceApiStore instances,
-        IAzureManagedElsaProvisioningOperationStore providers) =>
-        new(instances, providers, NullLogger<AzureManagedElsaProvisioningProgressReader>.Instance);
+        IAzureManagedElsaProvisioningOperationStore providers,
+        TimeProvider? timeProvider = null) =>
+        new(instances, providers, NullLogger<AzureManagedElsaProvisioningProgressReader>.Instance, timeProvider ?? new FixedTimeProvider(AcceptedAt));
 
-    private static AzureProviderOperation Provider(AzureProviderOperationPhase phase) =>
+    private static AzureProviderOperation Provider(
+        AzureProviderOperationPhase phase) =>
+        Provider(AzureProviderOperationStatus.Running, phase);
+
+    private static AzureProviderOperation Provider(
+        AzureProviderOperationStatus status,
+        AzureProviderOperationPhase phase) =>
         new(Guid.NewGuid(), WorkspaceId, "safe-target", AzureProviderOperationAction.Reconcile, "safe-idempotency", "hash",
             "provider-operation", "plan", "template", "3.8.1", "3.8", "topology", "isolated", "westeurope",
-            "image", "digest", null, null, AzureProviderOperationStatus.Running, phase, 1, 1, 1, new(), null,
+            "image", "digest", null, null, status, phase, 1, 1, 1, new(), null,
             AzureProviderHealth.Unknown, [], null, null, null, AcceptedAt, AcceptedAt, null,
             InstanceId: InstanceId, LifecycleAction: ElsaInstanceOperationAction.Create);
 
@@ -289,5 +363,10 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
             EventIds.Add(eventId.Id);
             Messages.Add(formatter(state, exception));
         }
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now.ToUniversalTime();
     }
 }

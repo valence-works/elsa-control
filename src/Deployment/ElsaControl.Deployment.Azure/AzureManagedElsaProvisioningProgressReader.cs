@@ -11,9 +11,12 @@ namespace ElsaControl.Deployment.Azure;
 public sealed class AzureManagedElsaProvisioningProgressReader(
     IManagedElsaInstanceApiStore instances,
     IAzureManagedElsaProvisioningOperationStore providerOperations,
-    ILogger<AzureManagedElsaProvisioningProgressReader> logger)
+    ILogger<AzureManagedElsaProvisioningProgressReader> logger,
+    TimeProvider? timeProvider = null)
     : IManagedElsaProvisioningProgressReader
 {
+    private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
+
     public async Task<ManagedElsaProvisioningProgress?> ReadAsync(
         Guid workspaceId,
         Guid instanceId,
@@ -76,22 +79,26 @@ public sealed class AzureManagedElsaProvisioningProgressReader(
                 instanceId);
         }
 
-        return AzureManagedElsaProvisioningProgressProjector.Project(new(
-            topology,
-            lifecycle,
-            providerSnapshot?.Operation,
-            providerSnapshot?.Transitions));
+        return AzureManagedElsaProvisioningProgressProjector.Project(
+            new(
+                topology,
+                lifecycle,
+                providerSnapshot?.Operation,
+                providerSnapshot?.Transitions),
+            _timeProvider);
     }
 
-    private static ManagedElsaProvisioningProgress Unavailable(
+    private ManagedElsaProvisioningProgress Unavailable(
         ElsaInstanceLifecycleTopologySnapshot? topology = null,
         ElsaInstanceLifecycleTopologyOperation? lifecycle = null) =>
-        AzureManagedElsaProvisioningProgressProjector.Project(new(
-            topology,
-            lifecycle,
-            ProviderOperation: null,
-            Transitions: null,
-            HistoryUnavailable: true));
+        AzureManagedElsaProvisioningProgressProjector.Project(
+            new(
+                topology,
+                lifecycle,
+                ProviderOperation: null,
+                Transitions: null,
+                HistoryUnavailable: true),
+            _timeProvider);
 
     private static ElsaInstanceLifecycleTopologyOperation ToTopologyOperation(
         ElsaInstanceOperationSummary operation) =>

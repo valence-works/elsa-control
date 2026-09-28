@@ -12,7 +12,8 @@ public sealed record AzureManagedElsaProvisioningProgressProjectionInput(
     ElsaInstanceLifecycleTopologyOperation? LifecycleOperation,
     AzureProviderOperation? ProviderOperation,
     IReadOnlyList<AzureProviderOperationTransition>? Transitions = null,
-    bool HistoryUnavailable = false);
+    bool HistoryUnavailable = false,
+    string? RecoveryReason = null);
 
 [Flags]
 internal enum AzureManagedElsaProvisioningMappingAnomaly
@@ -30,6 +31,9 @@ internal enum AzureManagedElsaProvisioningMappingAnomaly
 public static class AzureManagedElsaProvisioningProgressProjector
 {
     private const string Provider = "azure";
+    internal const string ProviderSubmissionAccepted = "provider.submission.accepted";
+    internal const string ProviderSubmissionUncertain = "provider.submission.uncertain";
+    internal static readonly TimeSpan ProviderAcceptedOrQueuedStaleAfter = TimeSpan.FromMinutes(10);
 
     internal static AzureManagedElsaProvisioningMappingAnomaly DetectMappingAnomalies(
         AzureProviderOperation? provider,
@@ -67,9 +71,12 @@ public static class AzureManagedElsaProvisioningProgressProjector
     }
 
     public static ManagedElsaProvisioningProgress Project(
-        AzureManagedElsaProvisioningProgressProjectionInput input)
+        AzureManagedElsaProvisioningProgressProjectionInput input,
+        TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(input);
+        var clock = timeProvider ?? TimeProvider.System;
+        var now = clock.GetUtcNow();
 
         var lifecycle = input.LifecycleOperation is { Action: ElsaInstanceOperationAction.Create }
             ? input.LifecycleOperation
@@ -116,6 +123,12 @@ public static class AzureManagedElsaProvisioningProgressProjector
         string? diagnosticCode = null;
         var blocked = false;
         var allReady = false;
+        var acceptedHandoff = IsAcceptedProviderHandoff(lifecycle, input.RecoveryReason);
+        var providerAcceptedOrQueued = provider?.Status is AzureProviderOperationStatus.Accepted
+            or AzureProviderOperationStatus.Queued;
+        var providerAcceptedOrQueuedStale = provider is not null &&
+            providerAcceptedOrQueued &&
+            now - provider.CreatedAt.ToUniversalTime() > ProviderAcceptedOrQueuedStaleAfter;
 
         // Lifecycle terminal state is authoritative whenever it is available.
         if (lifecycleState is ElsaInstanceOperationState.Failed or ElsaInstanceOperationState.Cancelled)
@@ -126,10 +139,15 @@ public static class AzureManagedElsaProvisioningProgressProjector
                 : ManagedElsaProvisioningProgressDiagnostics.Failed;
             blocked = true;
         }
-        else if ((lifecycleState == ElsaInstanceOperationState.RecoveryRequired &&
-                  provider?.Status != AzureProviderOperationStatus.Running) ||
-                 (!lifecycleTerminal && provider?.Status == AzureProviderOperationStatus.RecoveryRequired))
+        else if ((!lifecycleTerminal && provider?.Status == AzureProviderOperationStatus.RecoveryRequired) ||
+                 providerAcceptedOrQueuedStale ||
+                 (lifecycleState == ElsaInstanceOperationState.RecoveryRequired &&
+                  provider?.Status != AzureProviderOperationStatus.Running &&
+                  !acceptedHandoff))
         {
+            // RecoveryRequired after a successful provider hand-off is reconcile-only
+            // work, not a stall. Keep stale for real failures, uncertain submission,
+            // provider RecoveryRequired, and Accepted/Queued work that sat past the bound.
             state = ManagedElsaProvisioningProgressStates.Stale;
             diagnosticCode = ManagedElsaProvisioningProgressDiagnostics.RequiresAttention;
             blocked = true;
@@ -159,9 +177,10 @@ public static class AzureManagedElsaProvisioningProgressProjector
         {
             return Unavailable();
         }
-        else if (provider is null && lifecycleState is ElsaInstanceOperationState.Accepted or
+        else if (provider is null && (acceptedHandoff ||
+                 lifecycleState is ElsaInstanceOperationState.Accepted or
                  ElsaInstanceOperationState.WaitingForPriorOperation or
-                 ElsaInstanceOperationState.Queued or ElsaInstanceOperationState.EntitlementHeld)
+                 ElsaInstanceOperationState.Queued or ElsaInstanceOperationState.EntitlementHeld))
         {
             state = ManagedElsaProvisioningProgressStates.Queued;
             knownStage ??= 0;
@@ -169,6 +188,12 @@ public static class AzureManagedElsaProvisioningProgressProjector
         else if (provider is not null)
         {
             state = ManagedElsaProvisioningProgressStates.Active;
+            if (acceptedHandoff && providerAcceptedOrQueued)
+                knownStage = StageIndex(ManagedElsaProvisioningProgressStages.RequestAccepted);
+            else if (acceptedHandoff &&
+                     provider.Status == AzureProviderOperationStatus.Succeeded &&
+                     !observedReady)
+                knownStage = StageIndex(ManagedElsaProvisioningProgressStages.HealthVerification);
         }
         else
         {
@@ -197,7 +222,7 @@ public static class AzureManagedElsaProvisioningProgressProjector
                 ManagedElsaProvisioningProgressStages.Ready,
                 ManagedElsaProvisioningProgressActivityStatuses.Ready,
                 "engine.ready",
-                (completedAt ?? lastUpdatedAt ?? startedAt ?? DateTimeOffset.UtcNow).ToUniversalTime()));
+                (completedAt ?? lastUpdatedAt ?? startedAt ?? now).ToUniversalTime()));
         }
         else if (blocked)
         {
@@ -212,7 +237,7 @@ public static class AzureManagedElsaProvisioningProgressProjector
                     : diagnosticCode == ManagedElsaProvisioningProgressDiagnostics.Cancelled
                         ? ManagedElsaProvisioningProgressDiagnostics.Cancelled
                         : ManagedElsaProvisioningProgressDiagnostics.Failed,
-                (completedAt ?? lastUpdatedAt ?? startedAt ?? DateTimeOffset.UtcNow).ToUniversalTime()));
+                (completedAt ?? lastUpdatedAt ?? startedAt ?? now).ToUniversalTime()));
         }
 
         var activity = Coalesce(events)
@@ -438,6 +463,20 @@ public static class AzureManagedElsaProvisioningProgressProjector
 
     private static long NextSequence(IEnumerable<MappedActivity> entries) =>
         entries.Select(entry => entry.Sequence).DefaultIfEmpty(0).Max() + 1;
+
+    private static bool IsAcceptedProviderHandoff(
+        ElsaInstanceLifecycleTopologyOperation? lifecycle,
+        string? recoveryReason)
+    {
+        if (lifecycle?.State != ElsaInstanceOperationState.RecoveryRequired)
+            return false;
+        if (!string.IsNullOrEmpty(lifecycle.FailureCode))
+            return false;
+        if (string.Equals(recoveryReason, ProviderSubmissionUncertain, StringComparison.Ordinal))
+            return false;
+        return recoveryReason is null ||
+               string.Equals(recoveryReason, ProviderSubmissionAccepted, StringComparison.Ordinal);
+    }
 
     private static DateTimeOffset? Latest(params object?[] values)
     {

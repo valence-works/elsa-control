@@ -113,8 +113,11 @@ Validation rules:
 | Source condition | Public state | Stage behavior |
 |---|---|---|
 | Create accepted/waiting/queued/entitlement-held and no provider phase | `queued` | `request-accepted` current; later stages pending |
-| Provider accepted/queued/running with known phase | `active` | mapped stage current; earlier complete; later pending |
-| Create recovery-required | `stale` | last known stage blocked; requires-attention diagnostic |
+| Create recovery-required after a successful provider hand-off (`provider.submission.accepted`, null FailureCode) with no provider operation yet | `queued` | `request-accepted` current; later stages pending |
+| Provider accepted/queued/running with known phase, including the accepted hand-off while the provider is Accepted, Queued, or Running | `active` | mapped stage current (`request-accepted` while Accepted/Queued); earlier complete; later pending |
+| Accepted hand-off with provider Succeeded before Ready is confirmed | `active` | `health-verification` current |
+| Provider Accepted/Queued for more than 10 minutes after `CreatedAt` | `stale` | last known stage blocked; requires-attention diagnostic |
+| Create recovery-required with a real FailureCode, `provider.submission.uncertain`, or provider recovery-required | `stale` | last known stage blocked; requires-attention diagnostic |
 | Create succeeded and instance Ready | `ready` | every stage complete |
 | Create failed/cancelled | `failed` | last known stage blocked; safe failure diagnostic |
 | Instance exists but Create/provider history cannot be safely correlated | `unavailable` | known lifecycle remains visible; detailed progress unavailable |

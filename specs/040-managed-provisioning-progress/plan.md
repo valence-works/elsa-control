@@ -87,7 +87,7 @@ The projector maps:
 | `traffic-routing` | `TrafficPromoted` before terminal reconciliation |
 | `ready` | authoritative Create success and Ready observation |
 
-Known later stages imply earlier stages completed. Repeated phases are deduplicated by durable sequence. Unknown phases do not advance the customer stage. Create `RecoveryRequired` becomes a server-declared `stale`/requires-attention outcome rather than indefinite animation. Terminal failure blocks the last known stage with a stable customer diagnostic code.
+Known later stages imply earlier stages completed. Repeated phases are deduplicated by durable sequence. Unknown phases do not advance the customer stage. Create `RecoveryRequired` after a successful provider hand-off (`provider.submission.accepted`, null FailureCode) stays `queued` or `active` until Ready is confirmed. `stale`/requires-attention is reserved for a real FailureCode, `provider.submission.uncertain`, provider `RecoveryRequired`, or a provider operation that remains Accepted/Queued for more than 10 minutes. Terminal failure blocks the last known stage with a stable customer diagnostic code.
 
 ### Cloud adoption
 
