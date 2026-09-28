@@ -866,19 +866,34 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
-    public async Task Recovery_observer_rejects_a_workload_plan_fingerprint_mismatch()
+    public async Task Recovery_observer_rejects_an_unowned_resource_group_even_when_the_name_is_fresh()
     {
         var process = new FakeCommandProcess();
-        ConfigureOwnedWorkloadObservation(
-            process,
-            DeploymentPoll("Succeeded", WorkloadObserveOutputs(new string('f', 64))),
-            includeRevision: false);
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(
+            args => args.Contains("group") && args.Contains("show"),
+            "{\"managed-by\":\"someone-else\",\"owner\":\"foreign\",\"workload-name\":\"proof\",\"sqlBootstrapObjectId\":\"11111111-1111-1111-1111-111111111111\"}");
+        process.Success(IsDeploymentPoll, DeploymentPoll("Succeeded", WorkloadObserveOutputs()));
 
         var observation = await _fixture.Runner(process)
             .ObserveAsync(CreateWorkloadRecoveryRequest());
 
         Assert.Equal(AzureProviderRecoveryObservationKind.Ambiguous, observation.Kind);
         Assert.Null(observation.CompletedStep);
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_confirms_a_fresh_owned_workload_even_when_the_output_fingerprint_differs()
+    {
+        var process = new FakeCommandProcess();
+        ConfigureOwnedWorkloadObservation(process, DeploymentPoll("Succeeded", WorkloadObserveOutputs(new string('f', 64))));
+
+        var observation = await _fixture.Runner(process)
+            .ObserveAsync(CreateWorkloadRecoveryRequest());
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.Confirmed, observation.Kind);
+        Assert.Equal(AzureProviderRunnerStep.Workload, observation.CompletedStep);
         AssertNoProviderMutation(process);
     }
 

@@ -1276,10 +1276,14 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
     public async Task<AzureProviderOperation?> IncrementAutoResumeCountAsync(
         Guid workspaceId,
         Guid operationId,
+        int expectedCount,
         CancellationToken cancellationToken = default)
     {
+        if (expectedCount < 0 || expectedCount >= AzureNamedDeploymentFreshness.MaximumAutoResumes)
+            return null;
         var changed = await db.AzureProviderOperations
             .Where(x => x.WorkspaceId == workspaceId && x.Id == operationId &&
+                        x.AutoResumeCount == expectedCount &&
                         x.AutoResumeCount < AzureNamedDeploymentFreshness.MaximumAutoResumes)
             .ExecuteUpdateAsync(
                 setters => setters.SetProperty(x => x.AutoResumeCount, x => x.AutoResumeCount + 1),

@@ -13,12 +13,17 @@ public interface IElsaInstanceProviderReconciliationPort
 
 /// <summary>
 /// Optional auto-resume accounting for a provider that persists a per-operation
-/// cap. Implementations must charge only when a resume is accepted and must
-/// record each attempt outcome.
+/// cap. Implementations must claim a slot atomically before Recover runs and
+/// must record each attempt outcome. A claimed slot stays charged even when
+/// Recover then loses its compare-and-set.
 /// </summary>
 public interface IElsaInstanceProviderAutoResumePort
 {
-    Task<bool> TryChargeAutoResumeAsync(
+    /// <summary>
+    /// Claims one automatic resume slot. Returns the new count when the claim
+    /// succeeded, or null when the cap is exhausted or the compare-and-set lost.
+    /// </summary>
+    Task<int?> TryChargeAutoResumeAsync(
         Guid workspaceId,
         Guid instanceId,
         Guid lifecycleOperationId,

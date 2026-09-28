@@ -91,9 +91,10 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
             "observation-late-success",
             OpaqueEvidence(autoResume: true));
         var lifecycle = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var port = new ChargingPort(observation);
 
         var result = await new ElsaInstanceProviderReconciliationService(
-                store, new RecordingPort(observation), new StaticTimeProvider(Now), lifecycle)
+                store, port, new StaticTimeProvider(Now), lifecycle)
             .ReconcileAsync(WorkspaceId, accepted.Operation.Id);
 
         Assert.True(result.RetrySafe);
@@ -105,7 +106,146 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
         Assert.Equal(accepted.Operation.AttemptNumber + 1, resumed.AttemptNumber);
         var recovery = Assert.Single(store.RecoveryRequests);
         Assert.Equal(accepted.Operation.Id, recovery.OperationId);
-        Assert.Equal($"auto-resume.{accepted.Operation.Id:N}.{accepted.Operation.AttemptNumber}", recovery.IdempotencyKey);
+        Assert.Equal($"auto-resume.{accepted.Operation.Id:N}.1", recovery.IdempotencyKey);
+        Assert.Equal(1, port.AutoResumeCount);
+        Assert.Equal(["azure.recovery.auto-resume.accepted"], port.Outcomes);
+    }
+
+    [Fact]
+    public async Task Auto_resume_charges_the_slot_before_recover_and_keeps_it_when_recover_conflicts()
+    {
+        var (store, accepted) = await RecoveryTargetAsync();
+        var lifecycle = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var retrySafe = await new ElsaInstanceProviderReconciliationService(
+                store,
+                new RecordingPort(new ElsaInstanceProviderObservation(
+                    ElsaInstanceProviderObservationKind.Confirmed,
+                    ElsaObservedLifecycle.Provisioning,
+                    ElsaInstanceProviderHealthGate.Unknown,
+                    "observation-retry-safe",
+                    OpaqueEvidence(autoResume: false))),
+                new StaticTimeProvider(Now),
+                lifecycle)
+            .ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+        await lifecycle.RecoverAsync(new ElsaInstanceLifecycleRequest(
+            WorkspaceId,
+            accepted.Instance.Id,
+            retrySafe.Projection.InstanceVersion,
+            $"auto-resume.{accepted.Operation.Id:N}.1",
+            "auto-resume",
+            ActorAccountId: null,
+            ExpectedOperationId: accepted.Operation.Id));
+        store.MarkRecoveryRequired(accepted.Operation.Id);
+        var port = new ChargingPort(
+            new ElsaInstanceProviderObservation(
+                ElsaInstanceProviderObservationKind.Confirmed,
+                ElsaObservedLifecycle.Provisioning,
+                ElsaInstanceProviderHealthGate.Unknown,
+                "observation-lost-cas",
+                OpaqueEvidence(autoResume: true)));
+
+        var result = await new ElsaInstanceProviderReconciliationService(
+                store, port, new StaticTimeProvider(Now.AddMinutes(1)), lifecycle)
+            .ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+
+        Assert.True(result.RetrySafe);
+        Assert.Equal(1, port.AutoResumeCount);
+        Assert.Equal(1, port.ChargeCalls);
+        Assert.Equal(["azure.recovery.auto-resume.conflict"], port.Outcomes);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, Assert.Single(store.Operations).State);
+    }
+
+    [Fact]
+    public async Task Auto_resume_at_the_cap_records_exhausted_and_does_not_recover()
+    {
+        var (store, accepted) = await RecoveryTargetAsync();
+        var lifecycle = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var port = new ChargingPort(
+            new ElsaInstanceProviderObservation(
+                ElsaInstanceProviderObservationKind.Confirmed,
+                ElsaObservedLifecycle.Provisioning,
+                ElsaInstanceProviderHealthGate.Unknown,
+                "observation-exhausted",
+                OpaqueEvidence(autoResume: true)),
+            initialCount: 3);
+
+        var result = await new ElsaInstanceProviderReconciliationService(
+                store, port, new StaticTimeProvider(Now), lifecycle)
+            .ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+
+        Assert.True(result.RetrySafe);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, Assert.Single(store.Operations).State);
+        Assert.Equal(accepted.Operation.AttemptNumber, Assert.Single(store.Operations).AttemptNumber);
+        Assert.Empty(store.RecoveryRequests);
+        Assert.Equal(3, port.AutoResumeCount);
+        Assert.Equal(["azure.recovery.auto-resume-exhausted"], port.Outcomes);
+    }
+
+    [Fact]
+    public async Task Concurrent_auto_resume_ticks_at_count_two_produce_exactly_one_resume()
+    {
+        var (store, accepted) = await RecoveryTargetAsync();
+        var lifecycle = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var barrier = new Barrier(2);
+        var port = new ChargingPort(
+            new ElsaInstanceProviderObservation(
+                ElsaInstanceProviderObservationKind.Confirmed,
+                ElsaObservedLifecycle.Provisioning,
+                ElsaInstanceProviderHealthGate.Unknown,
+                "observation-concurrent-cap",
+                OpaqueEvidence(autoResume: true)),
+            initialCount: 2,
+            claimBarrier: barrier);
+        var service = new ElsaInstanceProviderReconciliationService(
+            store, port, new StaticTimeProvider(Now), lifecycle);
+
+        var results = await Task.WhenAll(
+            Task.Run(() => CaptureAsync(() => service.ReconcileAsync(WorkspaceId, accepted.Operation.Id))),
+            Task.Run(() => CaptureAsync(() => service.ReconcileAsync(WorkspaceId, accepted.Operation.Id))));
+
+        Assert.Equal(2, results.Count(x => x.Result is not null));
+        Assert.Equal(3, port.AutoResumeCount);
+        Assert.Equal(2, port.ChargeCalls);
+        Assert.Single(store.RecoveryRequests);
+        Assert.Equal($"auto-resume.{accepted.Operation.Id:N}.3", store.RecoveryRequests.Single().IdempotencyKey);
+        Assert.Contains("azure.recovery.auto-resume.accepted", port.Outcomes);
+        Assert.Contains("azure.recovery.auto-resume-exhausted", port.Outcomes);
+        Assert.Equal(ElsaInstanceOperationState.Queued, Assert.Single(store.Operations).State);
+    }
+
+    [Fact]
+    public async Task Operator_recover_still_works_after_the_auto_resume_cap()
+    {
+        var (store, accepted) = await RecoveryTargetAsync();
+        var observation = new ElsaInstanceProviderObservation(
+            ElsaInstanceProviderObservationKind.Confirmed,
+            ElsaObservedLifecycle.Provisioning,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "observation-manual-after-cap",
+            OpaqueEvidence(autoResume: false));
+        var lifecycle = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var port = new ChargingPort(observation, initialCount: 3);
+
+        var result = await new ElsaInstanceProviderReconciliationService(
+                store, port, new StaticTimeProvider(Now), lifecycle)
+            .ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+
+        Assert.True(result.RetrySafe);
+        Assert.Equal(0, port.ChargeCalls);
+        Assert.Empty(store.RecoveryRequests);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, Assert.Single(store.Operations).State);
+
+        var recovered = await lifecycle.RecoverAsync(new ElsaInstanceLifecycleRequest(
+            WorkspaceId,
+            accepted.Instance.Id,
+            result.Projection.InstanceVersion,
+            "admin-recover-after-cap",
+            "admin-recover",
+            ActorAccountId: Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+            ExpectedOperationId: accepted.Operation.Id));
+
+        Assert.Equal(ElsaInstanceOperationState.Queued, recovered.Operation.State);
+        Assert.Equal(3, port.AutoResumeCount);
     }
 
     [Fact]
@@ -585,6 +725,52 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
         catch (Exception exception)
         {
             return (null, exception);
+        }
+    }
+
+    private sealed class ChargingPort(
+        ElsaInstanceProviderObservation observation,
+        int initialCount = 0,
+        Barrier? claimBarrier = null) : IElsaInstanceProviderReconciliationPort, IElsaInstanceProviderAutoResumePort
+    {
+        private readonly object _gate = new();
+
+        public int AutoResumeCount { get; private set; } = initialCount;
+        public int ChargeCalls { get; private set; }
+        public List<string> Outcomes { get; } = [];
+
+        public Task<ElsaInstanceProviderObservation> ObserveAsync(
+            ElsaInstanceProviderReconciliationRequest request,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(observation.Correlate(request));
+
+        public Task<int?> TryChargeAutoResumeAsync(
+            Guid workspaceId,
+            Guid instanceId,
+            Guid lifecycleOperationId,
+            CancellationToken cancellationToken = default)
+        {
+            claimBarrier?.SignalAndWait(cancellationToken);
+            lock (_gate)
+            {
+                ChargeCalls++;
+                if (AutoResumeCount >= 3)
+                    return Task.FromResult<int?>(null);
+                AutoResumeCount++;
+                return Task.FromResult<int?>(AutoResumeCount);
+            }
+        }
+
+        public Task RecordAutoResumeOutcomeAsync(
+            Guid workspaceId,
+            Guid instanceId,
+            Guid lifecycleOperationId,
+            string outcomeCode,
+            CancellationToken cancellationToken = default)
+        {
+            lock (_gate)
+                Outcomes.Add(outcomeCode);
+            return Task.CompletedTask;
         }
     }
 

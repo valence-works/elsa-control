@@ -325,9 +325,10 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
 
         var baseline = AzureNamedDeploymentFreshness.FreshnessBaseline(
             operation.AttemptedStepStartedAt, operation.StatusChangedAt, operation.UpdatedAt);
-        if (!AzureNamedDeploymentFreshness.IsFresh(observed.Timestamp, baseline) ||
-            !AzureNamedDeploymentFreshness.MatchesPlanFingerprint(
-                observed.Outputs?.String("planFingerprint"), request.Plan.Fingerprint))
+        // Plan binding is the SHA-256 prefix already embedded in the re-derived
+        // deployment name; the template's uniqueString output is not recomputable
+        // and is not a correlation check. Freshness plus OwnsGroup complete the bind.
+        if (!AzureNamedDeploymentFreshness.IsFresh(observed.Timestamp, baseline))
             return RecoveryObservationAmbiguous(request);
 
         if (!string.Equals(observed.State, "Succeeded", StringComparison.OrdinalIgnoreCase))

@@ -192,6 +192,25 @@ public sealed class ElsaInstanceProviderReconciliationService(
         CancellationToken cancellationToken)
     {
         var autoResume = provider as IElsaInstanceProviderAutoResumePort;
+        var claimedCount = 0;
+        if (autoResume is not null)
+        {
+            var claimed = await autoResume.TryChargeAutoResumeAsync(
+                instance.WorkspaceId, instance.Id, operation.Id, cancellationToken);
+            if (claimed is null)
+            {
+                await autoResume.RecordAutoResumeOutcomeAsync(
+                    instance.WorkspaceId, instance.Id, operation.Id,
+                    "azure.recovery.auto-resume-exhausted", cancellationToken);
+                return;
+            }
+
+            claimedCount = claimed.Value;
+        }
+
+        var idempotencyKey = claimedCount > 0
+            ? $"auto-resume.{operation.Id:N}.{claimedCount}"
+            : $"auto-resume.{operation.Id:N}.{operation.AttemptNumber}";
         try
         {
             await lifecycle!.RecoverAsync(
@@ -199,21 +218,11 @@ public sealed class ElsaInstanceProviderReconciliationService(
                     instance.WorkspaceId,
                     instance.Id,
                     result.Projection.InstanceVersion,
-                    $"auto-resume.{operation.Id:N}.{operation.AttemptNumber}",
+                    idempotencyKey,
                     "auto-resume",
                     ActorAccountId: null,
                     ExpectedOperationId: operation.Id),
                 cancellationToken);
-            if (autoResume is not null &&
-                !await autoResume.TryChargeAutoResumeAsync(
-                    instance.WorkspaceId, instance.Id, operation.Id, cancellationToken))
-            {
-                await autoResume.RecordAutoResumeOutcomeAsync(
-                    instance.WorkspaceId, instance.Id, operation.Id,
-                    "azure.recovery.auto-resume-cap-reached", cancellationToken);
-                return;
-            }
-
             if (autoResume is not null)
                 await autoResume.RecordAutoResumeOutcomeAsync(
                     instance.WorkspaceId, instance.Id, operation.Id,

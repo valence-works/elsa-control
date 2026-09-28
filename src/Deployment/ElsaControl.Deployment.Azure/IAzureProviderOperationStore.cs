@@ -105,12 +105,14 @@ public interface IAzureProviderOperationStore
         RecordArmObservationClockAsync(workspaceId, operationId, observedAt, backoffSeconds, cancellationToken);
 
     /// <summary>
-    /// Atomically charges one automatic resume when <c>AutoResumeCount</c> is still
-    /// below the cap. Returns null when the row is missing or already at the cap.
+    /// Atomically claims one automatic resume slot when the stored count still
+    /// equals <paramref name="expectedCount"/> and is below the cap. Returns null
+    /// when the row is missing, the count moved, or the cap is already reached.
     /// </summary>
     Task<AzureProviderOperation?> IncrementAutoResumeCountAsync(
         Guid workspaceId,
         Guid operationId,
+        int expectedCount,
         CancellationToken cancellationToken = default) =>
         Task.FromResult<AzureProviderOperation?>(null);
 

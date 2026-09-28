@@ -14,19 +14,6 @@ public sealed class AzureNamedDeploymentFreshnessTests
     }
 
     [Fact]
-    public void Plan_fingerprint_rejects_a_different_sha256_and_accepts_bicep_unique_string()
-    {
-        var plan = new string('a', 64);
-
-        Assert.True(AzureNamedDeploymentFreshness.MatchesPlanFingerprint(plan, plan));
-        Assert.True(AzureNamedDeploymentFreshness.MatchesPlanFingerprint("abc123unique1", plan));
-        Assert.False(AzureNamedDeploymentFreshness.MatchesPlanFingerprint("abc123uniquestr", plan));
-        Assert.False(AzureNamedDeploymentFreshness.MatchesPlanFingerprint(new string('f', 64), plan));
-        Assert.False(AzureNamedDeploymentFreshness.MatchesPlanFingerprint(null, plan));
-        Assert.False(AzureNamedDeploymentFreshness.MatchesPlanFingerprint("", plan));
-    }
-
-    [Fact]
     public void Parked_row_freshness_falls_back_to_status_changed_at_before_updated_at()
     {
         var armSucceeded = DateTimeOffset.Parse("2026-09-24T00:48:56Z");

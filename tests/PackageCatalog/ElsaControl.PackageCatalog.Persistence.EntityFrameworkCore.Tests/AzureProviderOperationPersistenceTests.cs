@@ -1225,13 +1225,14 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
         Assert.Equal(workload.Version, afterClock.Version);
 
         var incremented = Assert.IsType<AzureProviderOperation>(
-            await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id));
+            await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id, 0));
         Assert.Equal(1, incremented.AutoResumeCount);
         Assert.Equal(workload.Version, incremented.Version);
 
         for (var i = 1; i < AzureNamedDeploymentFreshness.MaximumAutoResumes; i++)
-            Assert.NotNull(await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id));
-        Assert.Null(await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id));
+            Assert.NotNull(await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id, i));
+        Assert.Null(await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id, AzureNamedDeploymentFreshness.MaximumAutoResumes));
+        Assert.Null(await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id, 0));
         var atCap = await store.GetAsync(_workspaceId, created.Id);
         Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes, atCap!.AutoResumeCount);
         Assert.Equal(workload.Version, atCap.Version);
@@ -1243,6 +1244,25 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
         Assert.Equal(workload.Version, afterOutcome.Version);
         var transitions = await store.ListTransitionsAsync(_workspaceId, created.Id);
         Assert.Contains(transitions, transition => transition.Code == AzureLateSuccessCodes.AutoResumeAccepted);
+    }
+
+    [Fact]
+    public async Task Concurrent_auto_resume_claims_at_count_two_produce_exactly_one_increment()
+    {
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var created = await store.CreateOrGetAsync(Request(), DateTimeOffset.Parse("2026-09-24T00:33:00Z"));
+        Assert.NotNull(await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id, 0));
+        Assert.NotNull(await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id, 1));
+
+        var claims = await Task.WhenAll(
+            store.IncrementAutoResumeCountAsync(_workspaceId, created.Id, 2),
+            store.IncrementAutoResumeCountAsync(_workspaceId, created.Id, 2));
+
+        Assert.Single(claims, claimed => claimed is not null);
+        Assert.Single(claims, claimed => claimed is null);
+        var after = await store.GetAsync(_workspaceId, created.Id);
+        Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes, after!.AutoResumeCount);
     }
 
     [Fact]

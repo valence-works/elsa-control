@@ -113,7 +113,7 @@ internal static class AzureProviderSafeDiagnostics
         "azure.deployment.canceled",
         "azure.deployment.failed",
         "azure.deployment.wait-exceeded",
-        "azure.recovery.auto-resume-cap-reached",
+        "azure.recovery.auto-resume-exhausted",
         "azure.recovery.auto-resume.accepted",
         "azure.recovery.auto-resume.conflict",
         "azure.recovery.auto-resume.rejected",

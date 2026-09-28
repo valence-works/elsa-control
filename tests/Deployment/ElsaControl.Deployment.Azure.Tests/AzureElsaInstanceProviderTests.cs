@@ -305,21 +305,21 @@ public sealed class AzureElsaInstanceProviderTests
             attemptedStep: AzureProviderRunnerStep.Workload,
             phase: AzureProviderOperationPhase.FoundationReady);
 
-        Assert.True(await fixture.Provider.TryChargeAutoResumeAsync(
+        Assert.Equal(1, await fixture.Provider.TryChargeAutoResumeAsync(
             fixture.Request.WorkspaceId, fixture.Request.InstanceId, fixture.Request.OperationId));
-        Assert.True(await fixture.Provider.TryChargeAutoResumeAsync(
+        Assert.Equal(2, await fixture.Provider.TryChargeAutoResumeAsync(
             fixture.Request.WorkspaceId, fixture.Request.InstanceId, fixture.Request.OperationId));
-        Assert.True(await fixture.Provider.TryChargeAutoResumeAsync(
+        Assert.Equal(3, await fixture.Provider.TryChargeAutoResumeAsync(
             fixture.Request.WorkspaceId, fixture.Request.InstanceId, fixture.Request.OperationId));
-        Assert.False(await fixture.Provider.TryChargeAutoResumeAsync(
+        Assert.Null(await fixture.Provider.TryChargeAutoResumeAsync(
             fixture.Request.WorkspaceId, fixture.Request.InstanceId, fixture.Request.OperationId));
         Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes, fixture.OperationStore.Current!.AutoResumeCount);
 
         await fixture.Provider.RecordAutoResumeOutcomeAsync(
             fixture.Request.WorkspaceId, fixture.Request.InstanceId, fixture.Request.OperationId,
-            AzureLateSuccessCodes.AutoResumeCapReached);
-        Assert.Equal(AzureLateSuccessCodes.AutoResumeCapReached, fixture.OperationStore.Current.LastObservationReasonCode);
-        Assert.Contains(AzureLateSuccessCodes.AutoResumeCapReached, fixture.OperationStore.AutoResumeOutcomes);
+            AzureLateSuccessCodes.AutoResumeExhausted);
+        Assert.Equal(AzureLateSuccessCodes.AutoResumeExhausted, fixture.OperationStore.Current.LastObservationReasonCode);
+        Assert.Contains(AzureLateSuccessCodes.AutoResumeExhausted, fixture.OperationStore.AutoResumeOutcomes);
     }
 
     [Fact]
@@ -418,7 +418,7 @@ public sealed class AzureElsaInstanceProviderTests
 
         Assert.NotNull(observation.RetryEvidence);
         Assert.False(observation.RetryEvidence.AutoResume);
-        Assert.Equal(AzureLateSuccessCodes.AutoResumeCapReached, observation.ReasonCode);
+        Assert.Equal(AzureLateSuccessCodes.AutoResumeExhausted, observation.ReasonCode);
         Assert.Equal(1, fixture.Observer.Calls);
         Assert.Equal(1, fixture.ObservationStore.CreateCalls);
         Assert.Equal(0, fixture.OperationStore.AutoResumeIncrements);
@@ -1649,9 +1649,15 @@ public sealed class AzureElsaInstanceProviderTests
                 };
             return Task.CompletedTask;
         }
-        public Task<AzureProviderOperation?> IncrementAutoResumeCountAsync(Guid workspaceId, Guid operationId, CancellationToken cancellationToken = default)
+        public Task<AzureProviderOperation?> IncrementAutoResumeCountAsync(
+            Guid workspaceId,
+            Guid operationId,
+            int expectedCount,
+            CancellationToken cancellationToken = default)
         {
-            if (Current is null || Current.AutoResumeCount >= AzureNamedDeploymentFreshness.MaximumAutoResumes)
+            if (Current is null ||
+                Current.AutoResumeCount != expectedCount ||
+                Current.AutoResumeCount >= AzureNamedDeploymentFreshness.MaximumAutoResumes)
                 return Task.FromResult<AzureProviderOperation?>(null);
             AutoResumeIncrements++;
             Current = Current with { AutoResumeCount = Current.AutoResumeCount + 1 };

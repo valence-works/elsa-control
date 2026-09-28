@@ -359,7 +359,7 @@ public sealed class AzureElsaInstanceProvider(
             observed.CompletedStep is not null &&
             !eligibleAutoResume &&
             autoResumeCount >= AzureNamedDeploymentFreshness.MaximumAutoResumes)
-            return AzureLateSuccessCodes.AutoResumeCapReached;
+            return AzureLateSuccessCodes.AutoResumeExhausted;
         return AzureProviderOperationValidation.IsSafeCode(observed.Code) ? observed.Code : null;
     }
 
@@ -381,7 +381,7 @@ public sealed class AzureElsaInstanceProvider(
             cancellationToken);
     }
 
-    public async Task<bool> TryChargeAutoResumeAsync(
+    public async Task<int?> TryChargeAutoResumeAsync(
         Guid workspaceId,
         Guid instanceId,
         Guid lifecycleOperationId,
@@ -389,9 +389,10 @@ public sealed class AzureElsaInstanceProvider(
     {
         var operation = await TryGetCorrelatedReconcileAsync(workspaceId, instanceId, lifecycleOperationId, cancellationToken);
         if (operation is null)
-            return false;
-        var charged = await operationStore.IncrementAutoResumeCountAsync(workspaceId, operation.Id, cancellationToken);
-        return charged is not null;
+            return null;
+        var charged = await operationStore.IncrementAutoResumeCountAsync(
+            workspaceId, operation.Id, operation.AutoResumeCount, cancellationToken);
+        return charged?.AutoResumeCount;
     }
 
     public async Task RecordAutoResumeOutcomeAsync(
