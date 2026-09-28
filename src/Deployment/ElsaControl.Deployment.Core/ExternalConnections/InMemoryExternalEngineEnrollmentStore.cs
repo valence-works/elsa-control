@@ -187,6 +187,11 @@ public sealed class InMemoryExternalEngineEnrollmentStore :
     {
         ArgumentNullException.ThrowIfNull(nonce);
         cancellationToken.ThrowIfCancellationRequested();
+        if (!ExternalEngineEnrollmentProtocol.IsSha256Digest(nonce.NonceHash))
+            throw new ArgumentException("Proof nonce hash must be a SHA-256 digest.", nameof(nonce));
+        if (nonce.Id == Guid.Empty || nonce.IdentityId == Guid.Empty || nonce.KeyVersion <= 0
+            || nonce.IssuedAt >= nonce.ExpiresAt || nonce.ConsumedAt < nonce.IssuedAt || nonce.ConsumedAt >= nonce.ExpiresAt)
+            throw new ArgumentException("Proof nonce metadata is invalid.", nameof(nonce));
         lock (_gate)
         {
             foreach (var expired in _nonces.Where(x => x.Value <= nonce.ConsumedAt).Select(x => x.Key).ToArray())

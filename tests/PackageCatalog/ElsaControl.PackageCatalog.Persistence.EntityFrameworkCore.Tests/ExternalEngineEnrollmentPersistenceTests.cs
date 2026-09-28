@@ -301,6 +301,61 @@ public sealed class ExternalEngineEnrollmentPersistenceTests : IAsyncLifetime
         Assert.Contains(nameof(ExternalEngineEnrollmentAuditAction.IdentityRepaired), actions);
     }
 
+    [Theory]
+    [InlineData("heartbeat", 1_000, true)]
+    [InlineData("heartbeat", 30_000, true)]
+    [InlineData("heartbeat", 30_001, false)]
+    [InlineData("authenticate", 1_000, true)]
+    [InlineData("authenticate", 30_000, true)]
+    [InlineData("authenticate", 30_001, false)]
+    [InlineData("rotate", 1_000, true)]
+    [InlineData("rotate", 30_000, true)]
+    [InlineData("rotate", 30_001, false)]
+    [InlineData("revoke", 1_000, true)]
+    [InlineData("revoke", 30_000, true)]
+    [InlineData("revoke", 30_001, false)]
+    public async Task Future_skewed_proofs_are_accepted_by_the_ef_nonce_store(
+        string operation,
+        int issuedAtOffsetMilliseconds,
+        bool accepted)
+    {
+        await using var db = CreateDbContext();
+        var store = new EfCoreExternalEngineEnrollmentStore(db);
+        var service = new ExternalEngineEnrollmentService(store, new FixedTimeProvider(Now), store, store);
+        using var currentKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var nextKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var connectionId = Guid.NewGuid();
+        var identity = (await service.RedeemAsync(
+            Redemption(await service.IssueAsync(new(OrganizationId, WorkspaceId, connectionId)), currentKey))).Identity!;
+        var issuedAt = Now.AddMilliseconds(issuedAtOffsetMilliseconds);
+        var (proof, request) = SignedOperation(identity, currentKey, nextKey, operation, issuedAt);
+        var first = await ExecuteOperationAsync(service, operation, proof, request);
+        var replay = accepted ? await ExecuteOperationAsync(service, operation, proof, request) : first;
+
+        if (!accepted)
+        {
+            Assert.False(first.Succeeded);
+            Assert.Equal(ExternalEngineConnectorProofFailure.Future, first.Failure);
+            Assert.Equal(0, await db.ExternalEngineConnectorProofNonces.CountAsync());
+            return;
+        }
+
+        Assert.True(first.Succeeded);
+        Assert.Equal(
+            operation switch
+            {
+                "rotate" => ExternalEngineConnectorProofFailure.KeyVersionMismatch,
+                "revoke" => ExternalEngineConnectorProofFailure.Revoked,
+                _ => ExternalEngineConnectorProofFailure.Replay
+            },
+            replay.Failure);
+        db.ChangeTracker.Clear();
+        var nonce = await db.ExternalEngineConnectorProofNonces.SingleAsync();
+        Assert.True(nonce.ConsumedAt >= nonce.IssuedAt);
+        Assert.Equal(Now, nonce.IssuedAt);
+        Assert.Equal(issuedAt.Add(ExternalEngineEnrollmentDefaults.MaximumProofAge), nonce.ExpiresAt);
+    }
+
     [Fact]
     public async Task Repair_rejects_a_pairing_challenge_issued_before_revocation()
     {
@@ -527,6 +582,58 @@ public sealed class ExternalEngineEnrollmentPersistenceTests : IAsyncLifetime
             ExternalEngineEnrollmentProtocol.HashChallenge(unsigned.Challenge),
             ExternalEngineEnrollmentProtocol.PublicKeyThumbprint(unsigned.PublicKey));
         return unsigned with { Signature = ExternalEngineEnrollmentProtocol.Sign(key, payload) };
+    }
+
+    private static async Task<(bool Succeeded, ExternalEngineConnectorProofFailure? Failure)> ExecuteOperationAsync(
+        ExternalEngineEnrollmentService service,
+        string operation,
+        ExternalEngineConnectorProof proof,
+        ExternalEngineConnectorKeyRotationRequest? request)
+    {
+        if (operation == "rotate")
+        {
+            var result = await service.RotateConnectorKeyAsync(request!);
+            return (result.Succeeded, result.Failure);
+        }
+
+        if (operation == "revoke")
+        {
+            var result = await service.RevokeConnectorAsync(proof);
+            return (result.Succeeded, result.Failure);
+        }
+
+        var verified = await service.VerifyConnectorProofAsync(proof, proof.Operation, proof.PayloadDigest);
+        return (verified.Succeeded, verified.Failure);
+    }
+
+    private static (ExternalEngineConnectorProof Proof, ExternalEngineConnectorKeyRotationRequest? Rotation)
+        SignedOperation(
+            ExternalEngineConnectorIdentity identity,
+            ECDsa currentKey,
+            ECDsa nextKey,
+            string operation,
+            DateTimeOffset issuedAt)
+    {
+        var overlap = TimeSpan.FromMinutes(2);
+        var nextPublicKey = ExternalEngineEnrollmentProtocol.ExportPublicKey(nextKey);
+        var (name, digest) = operation switch
+        {
+            "heartbeat" => (ExternalEngineHeartbeatService.HeartbeatOperation,
+                Digest("heartbeat-future-skew")),
+            "authenticate" => (ExternalEngineConnectionService.AuthenticationOperation,
+                ExternalEngineConnectionService.AuthenticationPayloadDigest()),
+            "rotate" => (ExternalEngineEnrollmentDefaults.RotationOperation,
+                ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap)),
+            "revoke" => (ExternalEngineEnrollmentDefaults.RevocationOperation,
+                ExternalEngineEnrollmentProtocol.CreateRevocationPayloadDigest()),
+            _ => throw new ArgumentOutOfRangeException(nameof(operation))
+        };
+        var proof = SignProof(Proof(identity, name, digest) with { IssuedAt = issuedAt }, currentKey);
+        return (
+            proof,
+            operation == "rotate"
+                ? new ExternalEngineConnectorKeyRotationRequest(proof, nextPublicKey, overlap)
+                : null);
     }
 
     private static ExternalEngineConnectorProof Proof(
