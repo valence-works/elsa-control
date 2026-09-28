@@ -281,6 +281,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var operation = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == accepted.Operation.Id);
         var run = await db.DeploymentRuns.SingleAsync(x => x.Id == operation.DeploymentRunId);
         run.Status = WorkspaceDeploymentRunStatus.RecoveryRequired;
+        run.RecoveryReason = "provider.submission.accepted";
         await db.SaveChangesAsync();
         db.ChangeTracker.Clear();
 
@@ -290,6 +291,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var topologyOperation = Assert.Single(topology!.Operations);
         Assert.Equal(operation.DeploymentRunId, topologyOperation.DeploymentRunId);
         Assert.Equal(WorkspaceDeploymentRunStatus.RecoveryRequired, topologyOperation.RunStatus);
+        Assert.Equal("provider.submission.accepted", topologyOperation.RecoveryReason);
     }
 
     [Fact]

@@ -254,14 +254,17 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
                     .Distinct()
                     .ToArray();
                 var runStatuses = deploymentRunIds.Length == 0
-                    ? new Dictionary<Guid, WorkspaceDeploymentRunStatus>()
+                    ? new Dictionary<Guid, (WorkspaceDeploymentRunStatus Status, string? RecoveryReason)>()
                     : await dbContext.DeploymentRuns
                         .AsNoTracking()
                         .Where(run => deploymentRunIds.Contains(run.Id) &&
                                       run.WorkspaceId == workspaceId &&
                                       run.ElsaInstanceId == instanceId)
-                        .Select(run => new { run.Id, run.Status })
-                        .ToDictionaryAsync(run => run.Id, run => run.Status, cancellationToken);
+                        .Select(run => new { run.Id, run.Status, run.RecoveryReason })
+                        .ToDictionaryAsync(
+                            run => run.Id,
+                            run => (run.Status, run.RecoveryReason),
+                            cancellationToken);
                 var operationIds = operations.Select(x => x.Id).ToList();
                 var outboxes = operationIds.Count == 0
                     ? []
@@ -304,8 +307,12 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
                                 outbox.QuarantineCode)
                             : null,
                         operation.DeploymentRunId is { } deploymentRunId &&
-                        runStatuses.TryGetValue(deploymentRunId, out var runStatus)
-                            ? runStatus
+                        runStatuses.TryGetValue(deploymentRunId, out var run)
+                            ? run.Status
+                            : null,
+                        operation.DeploymentRunId is { } recoveryRunId &&
+                        runStatuses.TryGetValue(recoveryRunId, out var recoveryRun)
+                            ? recoveryRun.RecoveryReason
                             : null);
                 }).ToList();
 

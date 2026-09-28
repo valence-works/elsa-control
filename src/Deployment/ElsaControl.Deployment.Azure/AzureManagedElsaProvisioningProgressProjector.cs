@@ -33,7 +33,17 @@ public static class AzureManagedElsaProvisioningProgressProjector
     private const string Provider = "azure";
     internal const string ProviderSubmissionAccepted = "provider.submission.accepted";
     internal const string ProviderSubmissionUncertain = "provider.submission.uncertain";
-    internal static readonly TimeSpan ProviderAcceptedOrQueuedStaleAfter = TimeSpan.FromMinutes(10);
+    internal const string ProviderReconciliationInProgress = ElsaInstanceProviderReconciliationService.InProgressCode;
+    internal const string ProviderReconciliationHealthUnknown = ElsaInstanceProviderReconciliationService.HealthUnknownCode;
+    internal const string ProviderReconciliationUnavailable = ElsaInstanceProviderReconciliationService.UnavailableCode;
+    internal const string ProviderReconciliationUnknown = ElsaInstanceProviderReconciliationService.UnknownCode;
+    internal const string ProviderReconciliationAmbiguous = ElsaInstanceProviderReconciliationService.AmbiguousCode;
+    internal const string ProviderReconciliationCorrelationMismatch = ElsaInstanceProviderReconciliationService.CorrelationMismatchCode;
+    internal const string ProviderReconciliationRetrySafe = ElsaInstanceProviderReconciliationService.RetrySafeCode;
+    /// <summary>
+    /// Inclusive: a snapshot with no provider progress for exactly 10:00 is <c>stale</c>.
+    /// </summary>
+    internal static readonly TimeSpan ProviderProgressStaleAfter = TimeSpan.FromMinutes(10);
 
     internal static AzureManagedElsaProvisioningMappingAnomaly DetectMappingAnomalies(
         AzureProviderOperation? provider,
@@ -123,12 +133,19 @@ public static class AzureManagedElsaProvisioningProgressProjector
         string? diagnosticCode = null;
         var blocked = false;
         var allReady = false;
-        var acceptedHandoff = IsAcceptedProviderHandoff(lifecycle, input.RecoveryReason);
+        var recoveryRequired = lifecycleState == ElsaInstanceOperationState.RecoveryRequired;
+        var hasFailureCode = !string.IsNullOrEmpty(lifecycle?.FailureCode);
+        var reasonGroup = ClassifyRecoveryReason(input.RecoveryReason);
+        var healthyContinuation = recoveryRequired && !hasFailureCode &&
+            reasonGroup == RecoveryReasonGroup.HealthyContinuation;
+        var transientUncertainty = recoveryRequired && !hasFailureCode &&
+            reasonGroup == RecoveryReasonGroup.TransientUncertainty;
+        var definiteProblem = recoveryRequired &&
+            (hasFailureCode || reasonGroup == RecoveryReasonGroup.DefiniteProblem);
         var providerAcceptedOrQueued = provider?.Status is AzureProviderOperationStatus.Accepted
             or AzureProviderOperationStatus.Queued;
-        var providerAcceptedOrQueuedStale = provider is not null &&
-            providerAcceptedOrQueued &&
-            now - provider.CreatedAt.ToUniversalTime() > ProviderAcceptedOrQueuedStaleAfter;
+        var providerProgressStale = !lifecycleTerminal &&
+            HasExceededProviderProgressBound(now, lifecycle, provider, input.Transitions);
 
         // Lifecycle terminal state is authoritative whenever it is available.
         if (lifecycleState is ElsaInstanceOperationState.Failed or ElsaInstanceOperationState.Cancelled)
@@ -139,20 +156,14 @@ public static class AzureManagedElsaProvisioningProgressProjector
                 : ManagedElsaProvisioningProgressDiagnostics.Failed;
             blocked = true;
         }
-        else if ((!lifecycleTerminal && provider?.Status == AzureProviderOperationStatus.RecoveryRequired) ||
-                 providerAcceptedOrQueuedStale ||
-                 (lifecycleState == ElsaInstanceOperationState.RecoveryRequired &&
-                  provider?.Status != AzureProviderOperationStatus.Running &&
-                  !acceptedHandoff))
-        {
-            // RecoveryRequired after a successful provider hand-off is reconcile-only
-            // work, not a stall. Keep stale for real failures, uncertain submission,
-            // provider RecoveryRequired, and Accepted/Queued work that sat past the bound.
-            state = ManagedElsaProvisioningProgressStates.Stale;
-            diagnosticCode = ManagedElsaProvisioningProgressDiagnostics.RequiresAttention;
-            blocked = true;
-        }
         else if (lifecycleState == ElsaInstanceOperationState.Succeeded && observedReady)
+        {
+            // Create has finished. The 10-minute provider-progress bound does not apply.
+            state = ManagedElsaProvisioningProgressStates.Ready;
+            allReady = true;
+            completedAt ??= provider?.CompletedAt?.ToUniversalTime();
+        }
+        else if (!lifecycleTerminal && provider?.Status == AzureProviderOperationStatus.Succeeded && observedReady)
         {
             state = ManagedElsaProvisioningProgressStates.Ready;
             allReady = true;
@@ -167,33 +178,54 @@ public static class AzureManagedElsaProvisioningProgressProjector
             blocked = true;
             completedAt ??= provider.CompletedAt?.ToUniversalTime();
         }
-        else if (!lifecycleTerminal && provider?.Status == AzureProviderOperationStatus.Succeeded && observedReady)
+        else if ((!lifecycleTerminal && provider?.Status == AzureProviderOperationStatus.RecoveryRequired) ||
+                 definiteProblem ||
+                 providerProgressStale)
         {
-            state = ManagedElsaProvisioningProgressStates.Ready;
-            allReady = true;
-            completedAt ??= provider.CompletedAt?.ToUniversalTime();
+            // Immediate stale: provider RecoveryRequired, any FailureCode, uncertain /
+            // ambiguous / correlation-mismatch / retry-safe / unrecognised reasons.
+            // The 10-minute bound is inclusive and uses provider progress only
+            // (heartbeat or status transition), never run UpdatedAt or reason-write time.
+            state = ManagedElsaProvisioningProgressStates.Stale;
+            diagnosticCode = ManagedElsaProvisioningProgressDiagnostics.RequiresAttention;
+            blocked = true;
         }
         else if (lifecycle is null && provider is null)
         {
             return Unavailable();
         }
-        else if (provider is null && (acceptedHandoff ||
+        else if (provider is null && (healthyContinuation || transientUncertainty ||
                  lifecycleState is ElsaInstanceOperationState.Accepted or
                  ElsaInstanceOperationState.WaitingForPriorOperation or
                  ElsaInstanceOperationState.Queued or ElsaInstanceOperationState.EntitlementHeld))
         {
-            state = ManagedElsaProvisioningProgressStates.Queued;
+            state = healthyContinuation ||
+                    lifecycleState is ElsaInstanceOperationState.Accepted or
+                    ElsaInstanceOperationState.WaitingForPriorOperation or
+                    ElsaInstanceOperationState.Queued or ElsaInstanceOperationState.EntitlementHeld
+                ? ManagedElsaProvisioningProgressStates.Queued
+                : ManagedElsaProvisioningProgressStates.Active;
             knownStage ??= 0;
+            if (healthyContinuation &&
+                string.Equals(input.RecoveryReason, ProviderReconciliationHealthUnknown, StringComparison.Ordinal))
+            {
+                state = ManagedElsaProvisioningProgressStates.Active;
+                knownStage = Max(knownStage, StageIndex(ManagedElsaProvisioningProgressStages.HealthVerification));
+            }
         }
         else if (provider is not null)
         {
             state = ManagedElsaProvisioningProgressStates.Active;
-            if (acceptedHandoff && providerAcceptedOrQueued)
-                knownStage = StageIndex(ManagedElsaProvisioningProgressStages.RequestAccepted);
-            else if (acceptedHandoff &&
-                     provider.Status == AzureProviderOperationStatus.Succeeded &&
-                     !observedReady)
-                knownStage = StageIndex(ManagedElsaProvisioningProgressStages.HealthVerification);
+            if (healthyContinuation && providerAcceptedOrQueued)
+                knownStage = Max(knownStage, StageIndex(ManagedElsaProvisioningProgressStages.RequestAccepted));
+            if (healthyContinuation &&
+                (string.Equals(input.RecoveryReason, ProviderReconciliationHealthUnknown, StringComparison.Ordinal) ||
+                 (provider.Status == AzureProviderOperationStatus.Succeeded && !observedReady)))
+            {
+                // Advance to health-verification when that is the current step, but
+                // never move the stage backwards (e.g. TrafficPromoted already seen).
+                knownStage = Max(knownStage, StageIndex(ManagedElsaProvisioningProgressStages.HealthVerification));
+            }
         }
         else
         {
@@ -464,18 +496,63 @@ public static class AzureManagedElsaProvisioningProgressProjector
     private static long NextSequence(IEnumerable<MappedActivity> entries) =>
         entries.Select(entry => entry.Sequence).DefaultIfEmpty(0).Max() + 1;
 
-    private static bool IsAcceptedProviderHandoff(
-        ElsaInstanceLifecycleTopologyOperation? lifecycle,
-        string? recoveryReason)
+    private static RecoveryReasonGroup ClassifyRecoveryReason(string? recoveryReason)
     {
-        if (lifecycle?.State != ElsaInstanceOperationState.RecoveryRequired)
-            return false;
-        if (!string.IsNullOrEmpty(lifecycle.FailureCode))
-            return false;
-        if (string.Equals(recoveryReason, ProviderSubmissionUncertain, StringComparison.Ordinal))
-            return false;
-        return recoveryReason is null ||
-               string.Equals(recoveryReason, ProviderSubmissionAccepted, StringComparison.Ordinal);
+        if (string.Equals(recoveryReason, ProviderSubmissionAccepted, StringComparison.Ordinal) ||
+            string.Equals(recoveryReason, ProviderReconciliationInProgress, StringComparison.Ordinal) ||
+            string.Equals(recoveryReason, ProviderReconciliationHealthUnknown, StringComparison.Ordinal))
+            return RecoveryReasonGroup.HealthyContinuation;
+
+        if (string.Equals(recoveryReason, ProviderReconciliationUnavailable, StringComparison.Ordinal) ||
+            string.Equals(recoveryReason, ProviderReconciliationUnknown, StringComparison.Ordinal))
+            return RecoveryReasonGroup.TransientUncertainty;
+
+        // Uncertain, ambiguous, correlation-mismatch, retry-safe, null, and any
+        // unrecognised reason fail closed to a definite problem.
+        return RecoveryReasonGroup.DefiniteProblem;
+    }
+
+    /// <summary>
+    /// Provider progress is a real provider status change or heartbeat.
+    /// Source, in order of recency: <see cref="AzureProviderOperation.HeartbeatAt"/>,
+    /// the latest <see cref="AzureProviderOperationTransition.OccurredAt"/>, then
+    /// <see cref="AzureProviderOperation.CreatedAt"/> (the initial Accepted write).
+    /// With no provider row, the Create operation's <c>AcceptedAt</c> is used.
+    /// This is not the deployment run's UpdatedAt and not the time RecoveryReason
+    /// was last written — reconcile rewrites that reason about every 5s.
+    /// The bound is inclusive: elapsed == 10:00 is stale. It is skipped once
+    /// Create has finished (Succeeded/Failed/Cancelled).
+    /// </summary>
+    private static bool HasExceededProviderProgressBound(
+        DateTimeOffset now,
+        ElsaInstanceLifecycleTopologyOperation? lifecycle,
+        AzureProviderOperation? provider,
+        IReadOnlyList<AzureProviderOperationTransition>? transitions)
+    {
+        var progressAt = ResolveProviderProgressAt(lifecycle, provider, transitions);
+        return progressAt is { } origin &&
+               now - origin.ToUniversalTime() >= ProviderProgressStaleAfter;
+    }
+
+    private static DateTimeOffset? ResolveProviderProgressAt(
+        ElsaInstanceLifecycleTopologyOperation? lifecycle,
+        AzureProviderOperation? provider,
+        IReadOnlyList<AzureProviderOperationTransition>? transitions)
+    {
+        if (provider is not null)
+            return Latest(
+                provider.HeartbeatAt,
+                provider.CreatedAt,
+                transitions?.Select(transition => transition.OccurredAt).ToArray());
+
+        return lifecycle?.AcceptedAt;
+    }
+
+    private enum RecoveryReasonGroup
+    {
+        HealthyContinuation,
+        TransientUncertainty,
+        DefiniteProblem
     }
 
     private static DateTimeOffset? Latest(params object?[] values)

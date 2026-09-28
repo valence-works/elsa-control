@@ -87,7 +87,15 @@ The projector maps:
 | `traffic-routing` | `TrafficPromoted` before terminal reconciliation |
 | `ready` | authoritative Create success and Ready observation |
 
-Known later stages imply earlier stages completed. Repeated phases are deduplicated by durable sequence. Unknown phases do not advance the customer stage. Create `RecoveryRequired` after a successful provider hand-off (`provider.submission.accepted`, null FailureCode) stays `queued` or `active` until Ready is confirmed. `stale`/requires-attention is reserved for a real FailureCode, `provider.submission.uncertain`, provider `RecoveryRequired`, or a provider operation that remains Accepted/Queued for more than 10 minutes. Terminal failure blocks the last known stage with a stable customer diagnostic code.
+Known later stages imply earlier stages completed. Repeated phases are deduplicated by durable sequence. Unknown phases do not advance the customer stage. The reader passes the current deployment-run recovery reason into the projector; classification uses FailureCode plus that reason (see [the Architect ruling on #638](https://github.com/valence-works/elsa-control/issues/638#issuecomment-5862150160)):
+
+| Group | Current reason (no FailureCode) | Result |
+|---|---|---|
+| Healthy continuation | `provider.submission.accepted`, `provider.reconciliation.in-progress`, `provider.reconciliation.health-unknown` | `queued` or `active` from provider status/stage. `health-unknown` is `active` at `max(known stage, health-verification)`. |
+| Transient uncertainty | `provider.reconciliation.unavailable`, `provider.reconciliation.unknown` | `active` at the last known stage (never moves backwards) until the progress bound. |
+| Definite problem | `provider.reconciliation.ambiguous`, `provider.reconciliation.correlation-mismatch`, `provider.reconciliation.retry-safe`, `provider.submission.uncertain`, any FailureCode, any other or unrecognised reason | `stale` immediately. |
+
+While Create has not finished, 10 minutes with no provider progress (heartbeat or status transition; not run `UpdatedAt` or reason-write time) makes the snapshot `stale`. The bound is inclusive (exactly 10:00 is `stale`) and is skipped once Create has finished. Terminal failure blocks the last known stage with a stable customer diagnostic code. Heartbeats that keep arriving without finishing belong to #601, not this leaf.
 
 ### Cloud adoption
 

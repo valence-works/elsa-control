@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Cockpit;
 using ElsaControl.Deployment.Core.Workspace;
@@ -118,7 +119,11 @@ public sealed record ElsaInstanceLifecycleTopologyOperation(
     string? DeletionDiagnosticCode,
     string? ReconciliationDiagnosticCode,
     ElsaInstanceLifecycleTopologyOutbox? Outbox,
-    WorkspaceDeploymentRunStatus? RunStatus = null);
+    WorkspaceDeploymentRunStatus? RunStatus = null,
+    // Used by the provisioning projector to classify RecoveryRequired. Not
+    // serialized: RecoveryReason can be a legacy free-form run message and is
+    // not part of the customer or Admin topology contracts.
+    [property: JsonIgnore] string? RecoveryReason = null);
 
 public sealed record ElsaInstanceLifecycleTopologyOutbox(
     Guid Id,

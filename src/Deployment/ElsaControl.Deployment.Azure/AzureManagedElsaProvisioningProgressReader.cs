@@ -84,7 +84,8 @@ public sealed class AzureManagedElsaProvisioningProgressReader(
                 topology,
                 lifecycle,
                 providerSnapshot?.Operation,
-                providerSnapshot?.Transitions),
+                providerSnapshot?.Transitions,
+                RecoveryReason: lifecycle?.RecoveryReason),
             _timeProvider);
     }
 

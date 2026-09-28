@@ -130,7 +130,10 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
     [Fact]
     public async Task Accepted_handoff_sequence_never_reports_stale()
     {
-        var create = Lifecycle(Guid.NewGuid(), ElsaInstanceOperationState.RecoveryRequired);
+        var create = Lifecycle(
+            Guid.NewGuid(),
+            ElsaInstanceOperationState.RecoveryRequired,
+            AzureManagedElsaProvisioningProgressProjector.ProviderSubmissionAccepted);
         var instances = new InstanceStore { Topology = Topology([create], create.Id) };
         var clock = new FixedTimeProvider(AcceptedAt.AddSeconds(5));
 
@@ -188,10 +191,63 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
         Assert.Equal(ManagedElsaProvisioningProgressStages.RequestAccepted, queued.CurrentStage);
         Assert.Equal(ManagedElsaProvisioningProgressStates.Active, running.State);
         Assert.Equal(ManagedElsaProvisioningProgressStates.Active, succeededBeforeReady.State);
-        Assert.Equal(ManagedElsaProvisioningProgressStages.HealthVerification, succeededBeforeReady.CurrentStage);
+        Assert.Equal(ManagedElsaProvisioningProgressStages.TrafficRouting, succeededBeforeReady.CurrentStage);
         Assert.All(
             new[] { missingProvider, accepted, queued, running, succeededBeforeReady },
             snapshot => Assert.NotEqual(ManagedElsaProvisioningProgressStates.Stale, snapshot.State));
+    }
+
+    [Theory]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderSubmissionAccepted, "queued")]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderReconciliationInProgress, "queued")]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderReconciliationHealthUnknown, "active")]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderReconciliationUnavailable, "active")]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderReconciliationUnknown, "active")]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderReconciliationAmbiguous, "stale")]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderReconciliationCorrelationMismatch, "stale")]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderReconciliationRetrySafe, "stale")]
+    [InlineData(AzureManagedElsaProvisioningProgressProjector.ProviderSubmissionUncertain, "stale")]
+    [InlineData("provider.not-a-real-reason", "stale")]
+    public async Task Reader_passes_the_current_run_reason_into_the_projector(
+        string recoveryReason,
+        string expectedState)
+    {
+        var create = Lifecycle(Guid.NewGuid(), ElsaInstanceOperationState.RecoveryRequired, recoveryReason);
+        var reader = Reader(
+            new InstanceStore { Topology = Topology([create], create.Id) },
+            new ProviderStore());
+
+        var result = Assert.IsType<ManagedElsaProvisioningProgress>(await reader.ReadAsync(WorkspaceId, InstanceId));
+
+        Assert.Equal(expectedState, result.State);
+        Assert.Equal(recoveryReason, create.RecoveryReason);
+    }
+
+    [Fact]
+    public async Task Reader_uses_store_written_uncertain_failure_code_as_stale()
+    {
+        var create = new ElsaInstanceLifecycleTopologyOperation(
+            Guid.NewGuid(),
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            1,
+            1,
+            AcceptedAt,
+            AcceptedAt.AddSeconds(1),
+            null,
+            null,
+            "provider.submission.uncertain",
+            null,
+            null,
+            null);
+        var reader = Reader(
+            new InstanceStore { Topology = Topology([create], create.Id) },
+            new ProviderStore());
+
+        var result = Assert.IsType<ManagedElsaProvisioningProgress>(await reader.ReadAsync(WorkspaceId, InstanceId));
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Stale, result.State);
+        Assert.Equal(ManagedElsaProvisioningProgressDiagnostics.RequiresAttention, result.DiagnosticCode);
     }
 
     [Fact]
@@ -251,7 +307,8 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
 
     private static ElsaInstanceLifecycleTopologyOperation Lifecycle(
         Guid id,
-        ElsaInstanceOperationState state) =>
+        ElsaInstanceOperationState state,
+        string? recoveryReason = null) =>
         new(
             id,
             ElsaInstanceOperationAction.Create,
@@ -265,7 +322,8 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
             null,
             null,
             null,
-            null);
+            null,
+            RecoveryReason: recoveryReason);
 
     private sealed class ProviderStore : IAzureManagedElsaProvisioningOperationStore
     {

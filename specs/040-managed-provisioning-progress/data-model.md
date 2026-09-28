@@ -113,11 +113,14 @@ Validation rules:
 | Source condition | Public state | Stage behavior |
 |---|---|---|
 | Create accepted/waiting/queued/entitlement-held and no provider phase | `queued` | `request-accepted` current; later stages pending |
-| Create recovery-required after a successful provider hand-off (`provider.submission.accepted`, null FailureCode) with no provider operation yet | `queued` | `request-accepted` current; later stages pending |
-| Provider accepted/queued/running with known phase, including the accepted hand-off while the provider is Accepted, Queued, or Running | `active` | mapped stage current (`request-accepted` while Accepted/Queued); earlier complete; later pending |
-| Accepted hand-off with provider Succeeded before Ready is confirmed | `active` | `health-verification` current |
-| Provider Accepted/Queued for more than 10 minutes after `CreatedAt` | `stale` | last known stage blocked; requires-attention diagnostic |
-| Create recovery-required with a real FailureCode, `provider.submission.uncertain`, or provider recovery-required | `stale` | last known stage blocked; requires-attention diagnostic |
+| Create recovery-required, null FailureCode, current run reason `provider.submission.accepted` or `provider.reconciliation.in-progress`, no provider operation yet | `queued` | `request-accepted` current; later stages pending |
+| Same healthy-continuation reasons with provider Accepted/Queued/Running | `active` | mapped stage current (`request-accepted` while Accepted/Queued); earlier complete; later pending. Stage never moves backwards. |
+| Healthy continuation (`accepted`, `in-progress`, or `provider.reconciliation.health-unknown`) with provider Succeeded before Ready, or `health-unknown` during verification | `active` | `max(known stage, health-verification)` current |
+| Transient uncertainty (`provider.reconciliation.unavailable` or `provider.reconciliation.unknown`), null FailureCode | `active` | last known stage held (never moves backwards) until the progress bound |
+| No provider progress for 10:00 or more while Create has not finished (healthy and transient groups). Progress is the latest provider heartbeat or status-transition `OccurredAt`, else provider `CreatedAt`, else Create `AcceptedAt`. Inclusive: exactly 10:00 is `stale`. Skipped once Create has finished. | `stale` | last known stage blocked; requires-attention diagnostic |
+| Create recovery-required with any FailureCode; current reason `provider.submission.uncertain`, `provider.reconciliation.ambiguous`, `provider.reconciliation.correlation-mismatch`, `provider.reconciliation.retry-safe`, or any unrecognised reason; or provider recovery-required | `stale` | last known stage blocked; requires-attention diagnostic |
+| Healthy continuation with provider Failed/Cancelled | `failed` | last known stage blocked; safe failure diagnostic |
+| Healthy continuation with provider Succeeded and instance Ready | `ready` | every stage complete |
 | Create succeeded and instance Ready | `ready` | every stage complete |
 | Create failed/cancelled | `failed` | last known stage blocked; safe failure diagnostic |
 | Instance exists but Create/provider history cannot be safely correlated | `unavailable` | known lifecycle remains visible; detailed progress unavailable |
