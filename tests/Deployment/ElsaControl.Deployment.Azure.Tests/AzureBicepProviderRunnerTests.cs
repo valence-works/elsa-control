@@ -895,7 +895,25 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
             .ObserveAsync(CreateWorkloadRecoveryRequest());
 
         Assert.Equal(AzureProviderRecoveryObservationKind.Ambiguous, observation.Kind);
-        Assert.Equal("azure.deployment.failed", observation.Code);
+        Assert.Equal(AzureLateSuccessCodes.DeploymentFailed, observation.Code);
+        Assert.Null(observation.CompletedStep);
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_reports_a_canceled_workload_deployment_without_evidence()
+    {
+        var process = new FakeCommandProcess();
+        ConfigureOwnedWorkloadObservation(
+            process,
+            DeploymentPoll("Canceled", WorkloadObserveOutputs()),
+            includeRevision: false);
+
+        var observation = await _fixture.Runner(process)
+            .ObserveAsync(CreateWorkloadRecoveryRequest());
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.Ambiguous, observation.Kind);
+        Assert.Equal(AzureLateSuccessCodes.DeploymentCanceled, observation.Code);
         Assert.Null(observation.CompletedStep);
         AssertNoProviderMutation(process);
     }

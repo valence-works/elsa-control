@@ -217,16 +217,23 @@ public sealed record ElsaInstanceProviderObservation
 
     public bool HasCurrentDeploymentProjection { get; }
 
+    /// <summary>
+    /// Optional operator-visible machine reason for a RecoveryRequired observation.
+    /// Included in the evidence fingerprint only when set so existing rows stay stable.
+    /// </summary>
+    public string? ReasonCode { get; init; }
+
     public ElsaInstanceProviderObservation Correlate(ElsaInstanceProviderReconciliationRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
         if (request.OperationId == Guid.Empty || request.AttemptNumber < 1)
             throw new ArgumentException("Provider reconciliation request identity is invalid.", nameof(request));
-        return HasCurrentDeploymentProjection
-            ? new(Kind, ObservedLifecycle, HealthGate, request.OperationId, request.AttemptNumber,
+        var correlated = HasCurrentDeploymentProjection
+            ? new ElsaInstanceProviderObservation(Kind, ObservedLifecycle, HealthGate, request.OperationId, request.AttemptNumber,
                 CorrelationId, RetryEvidence, CurrentDeploymentReference)
-            : new(Kind, ObservedLifecycle, HealthGate, request.OperationId, request.AttemptNumber,
+            : new ElsaInstanceProviderObservation(Kind, ObservedLifecycle, HealthGate, request.OperationId, request.AttemptNumber,
                 CorrelationId, RetryEvidence);
+        return ReasonCode is null ? correlated : correlated with { ReasonCode = ReasonCode };
     }
 
     internal string ComputeFingerprint()
@@ -238,6 +245,8 @@ public sealed record ElsaInstanceProviderObservation
             canonical += "managed-handoff\n";
         // StudioGrantsSupported is deliberately not part of the fingerprint: a Control build that predates it must
         // recompute the same evidence fingerprint for observations this build records.
+        if (ReasonCode is { Length: > 0 })
+            canonical += ReasonCode + "\n";
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 }

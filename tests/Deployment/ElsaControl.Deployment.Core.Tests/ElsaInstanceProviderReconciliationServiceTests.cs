@@ -109,6 +109,26 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
     }
 
     [Fact]
+    public async Task Operator_visible_reason_is_committed_for_in_progress_recovery()
+    {
+        var (store, accepted) = await RecoveryTargetAsync();
+        var observation = new ElsaInstanceProviderObservation(
+            ElsaInstanceProviderObservationKind.Confirmed,
+            ElsaObservedLifecycle.Provisioning,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "observation-arm-failed")
+        {
+            ReasonCode = "azure.deployment.failed"
+        };
+
+        var result = await Service(store, new RecordingPort(observation)).ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal("azure.deployment.failed", result.DiagnosticCode);
+        Assert.False(result.RetrySafe);
+    }
+
+    [Fact]
     public async Task Manual_retry_safe_evidence_does_not_auto_resume()
     {
         var (store, accepted) = await RecoveryTargetAsync();

@@ -541,7 +541,8 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
             operation.DeploymentRunId,
             operation.FailureCode,
             operation.ReconciledObservedLifecycle,
-            operation.ReconciledHealth);
+            operation.ReconciledHealth,
+            operation.ReconciliationDiagnosticCode);
 
     private static ElsaInstance? TryMapInstance(Models.ElsaInstanceEntity entity)
     {

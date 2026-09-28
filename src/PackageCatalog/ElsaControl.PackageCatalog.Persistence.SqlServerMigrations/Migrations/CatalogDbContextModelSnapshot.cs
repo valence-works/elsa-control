@@ -1475,6 +1475,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<long?>("LastArmObservedAt")
                         .HasColumnType("bigint");
 
+                    b.Property<string>("LastObservationReasonCode")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
                     b.Property<long?>("LeaseExpiresAt")
                         .HasColumnType("bigint");
 

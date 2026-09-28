@@ -501,4 +501,16 @@ public interface IAzureProviderRecoveryObservationStore
     Task<AzureProviderRecoveryObservationRecord?> GetAndValidateForAcceptedRecoveryReplayAsync(
         AzureProviderRecoveryObservationBinding binding,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns the latest recorded receipt for this lifecycle attempt so a
+    /// rate-limited tick can reuse the same retry-safe evidence.
+    /// </summary>
+    Task<AzureProviderRecoveryObservationReceipt?> GetLatestReceiptForAttemptAsync(
+        Guid workspaceId,
+        Guid lifecycleOperationId,
+        int observedLifecycleAttemptNumber,
+        Guid providerOperationId,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<AzureProviderRecoveryObservationReceipt?>(null);
 }

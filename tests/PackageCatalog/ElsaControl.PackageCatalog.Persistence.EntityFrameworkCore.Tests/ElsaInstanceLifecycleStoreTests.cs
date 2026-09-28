@@ -2447,6 +2447,96 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
+    public async Task Auto_resume_through_the_ef_lifecycle_store_requeues_without_an_admin_recover()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "EF auto-resume");
+        var workspaceStore = new DeploymentWorkspaceStore(db);
+        Assert.NotNull(await workspaceStore.ClaimNextQueuedRunAsync("deployment-worker", Now));
+        Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
+            Now.AddMinutes(10), TimeSpan.FromMinutes(5)));
+        db.ChangeTracker.Clear();
+        var lifecycleStore = CreateStore(db);
+        var lifecycle = new ElsaInstanceLifecycleService(lifecycleStore, new FixedTimeProvider(Now.AddMinutes(11)));
+        var reconciliation = new ElsaInstanceProviderReconciliationService(
+            lifecycleStore,
+            new QueueProviderPort(new ElsaInstanceProviderObservation(
+                ElsaInstanceProviderObservationKind.Confirmed,
+                ElsaObservedLifecycle.Provisioning,
+                ElsaInstanceProviderHealthGate.Unknown,
+                "late-success-observation",
+                new ElsaInstanceProviderRetryEvidence(
+                    "https://evidence.example/retry/auto-resume",
+                    "sha256:" + new string('a', 64),
+                    autoResume: true))),
+            new FixedTimeProvider(Now.AddMinutes(11)),
+            lifecycle);
+
+        var reconciled = await reconciliation.ReconcileAsync(workspace.Id, accepted.Operation.Id);
+
+        Assert.True(reconciled.RetrySafe);
+        var operation = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Queued, operation.State);
+        Assert.Equal(accepted.Operation.AttemptNumber + 1, operation.AttemptNumber);
+    }
+
+    [Fact]
+    public async Task Repeated_retry_safe_evidence_does_not_bump_version_and_admin_recover_stays_available()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Stable retry-safe evidence");
+        var workspaceStore = new DeploymentWorkspaceStore(db);
+        Assert.NotNull(await workspaceStore.ClaimNextQueuedRunAsync("deployment-worker", Now));
+        Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
+            Now.AddMinutes(10), TimeSpan.FromMinutes(5)));
+        db.ChangeTracker.Clear();
+        var evidence = new ElsaInstanceProviderRetryEvidence(
+            "https://evidence.example/retry/stable",
+            "sha256:" + new string('b', 64));
+        var observation = new ElsaInstanceProviderObservation(
+            ElsaInstanceProviderObservationKind.Confirmed,
+            ElsaObservedLifecycle.Provisioning,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "stable-retry-safe",
+            evidence);
+        var lifecycleStore = CreateStore(db);
+        var first = await new ElsaInstanceProviderReconciliationService(
+                lifecycleStore,
+                new QueueProviderPort(observation),
+                new FixedTimeProvider(Now.AddMinutes(11)))
+            .ReconcileAsync(workspace.Id, accepted.Operation.Id);
+        Assert.True(first.RetrySafe);
+        var afterFirst = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        var firstVersion = afterFirst.ReconciledInstanceVersion;
+        Assert.Equal(ElsaInstanceProviderReconciliationService.RetrySafeCode, afterFirst.FailureCode);
+
+        db.ChangeTracker.Clear();
+        var second = await new ElsaInstanceProviderReconciliationService(
+                CreateStore(db),
+                new QueueProviderPort(observation),
+                new FixedTimeProvider(Now.AddMinutes(12)))
+            .ReconcileAsync(workspace.Id, accepted.Operation.Id);
+
+        Assert.True(second.RetrySafe);
+        Assert.True(second.Replayed);
+        var afterSecond = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(firstVersion, afterSecond.ReconciledInstanceVersion);
+        Assert.Equal(ElsaInstanceProviderReconciliationService.RetrySafeCode, afterSecond.FailureCode);
+        Assert.Equal(first.Projection.InstanceVersion, second.Projection.InstanceVersion);
+
+        var current = await CreateStore(db).GetInstanceAsync(workspace.Id, accepted.Instance.Id);
+        var recovered = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now.AddMinutes(13)))
+            .RecoverAsync(new(workspace.Id, accepted.Instance.Id, current!.Version, "admin-recover-between-reads"));
+        Assert.Equal(ElsaInstanceOperationState.Queued, recovered.Operation.State);
+    }
+
+    [Fact]
     public async Task Provider_reconciliation_persists_uncertainty_then_converges_and_replays()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

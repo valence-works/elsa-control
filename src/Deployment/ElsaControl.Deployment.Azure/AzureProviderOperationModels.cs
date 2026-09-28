@@ -183,7 +183,8 @@ public sealed record AzureProviderOperation(
     DateTimeOffset? AttemptedStepStartedAt = null,
     DateTimeOffset? LastArmObservedAt = null,
     int AutoResumeCount = 0,
-    int ArmObservationBackoffSeconds = 0)
+    int ArmObservationBackoffSeconds = 0,
+    string? LastObservationReasonCode = null)
 {
     [JsonIgnore]
     public IReadOnlyDictionary<string, string> SafeSecretReferences => SecretReferences ?? EmptySecretReferences;

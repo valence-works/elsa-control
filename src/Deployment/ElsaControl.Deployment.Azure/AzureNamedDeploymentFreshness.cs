@@ -28,8 +28,12 @@ public static class AzureNamedDeploymentFreshness
         attemptedStepStartedAt ?? statusChangedAt ?? updatedAt;
 
     /// <summary>
-    /// Accepts either Control's SHA-256 plan fingerprint or Bicep <c>uniqueString(planInput)</c>.
-    /// A different SHA-256 is a plan mismatch; a missing output is not proof.
+    /// Accepts Control's SHA-256 plan fingerprint. A different SHA-256 is a plan
+    /// mismatch. Legacy Bicep <c>uniqueString(planInput)</c> is a 13-character
+    /// alphanumeric value and is accepted only as a compatibility gate for
+    /// already-submitted templates (including parked f52f20e8). It is not plan
+    /// proof; the binding is the deployment name, freshness timestamp, and
+    /// <c>OwnsGroup</c>.
     /// </summary>
     public static bool MatchesPlanFingerprint(string? outputFingerprint, string planFingerprint)
     {
@@ -39,7 +43,7 @@ public static class AzureNamedDeploymentFreshness
             return true;
         if (outputFingerprint.Length == 64 && outputFingerprint.All(Uri.IsHexDigit))
             return false;
-        return outputFingerprint.Length is > 0 and <= 64 &&
+        return outputFingerprint.Length == 13 &&
                outputFingerprint.All(char.IsAsciiLetterOrDigit);
     }
 

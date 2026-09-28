@@ -337,7 +337,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 operation.Resources,
                 AzureProviderHealth.Unknown,
                 null,
-                "azure.deployment.failed",
+                AzureLateSuccessCodes.DeploymentOutcome(observed.State),
                 "Azure reported the workload deployment as failed or canceled.");
 
         if (observed.Outputs is null)

@@ -1054,6 +1054,35 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
     }
 
     [Fact]
+    public async Task Active_operation_progress_exposes_attempt_fields_without_provider_phase()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-progress-owner");
+        var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, "overview-progress-runtime");
+        using var restart = await client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/restart",
+            created.Instance.ETag,
+            "overview-progress-restart"));
+        Assert.Equal(HttpStatusCode.Accepted, restart.StatusCode);
+
+        using var response = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        var json = await response.Content.ReadAsStringAsync();
+        var overview = JsonSerializer.Deserialize<ManagedElsaInstanceOverviewResponse>(
+            json, ControlApiTestApplication.JsonOptions);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotNull(overview!.ActiveOperation);
+        Assert.NotNull(overview.ActiveOperation!.Progress);
+        Assert.Equal(1, overview.ActiveOperation.Progress!.AttemptNumber);
+        Assert.Equal(overview.ActiveOperation.StartedAt, overview.ActiveOperation.Progress.AttemptStartedAt);
+        Assert.Null(overview.ActiveOperation.Progress.Phase);
+        Assert.Null(overview.ActiveOperation.Progress.AttemptedStep);
+        AssertExactCustomerDtoShape(json, "overview");
+    }
+
+    [Fact]
     public async Task Configured_bff_token_can_read_overview_and_is_still_denied_on_operator_routes()
     {
         var catalog = new MutableReleaseCatalogStore();

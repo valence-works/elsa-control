@@ -19,10 +19,27 @@ public sealed class AzureNamedDeploymentFreshnessTests
         var plan = new string('a', 64);
 
         Assert.True(AzureNamedDeploymentFreshness.MatchesPlanFingerprint(plan, plan));
-        Assert.True(AzureNamedDeploymentFreshness.MatchesPlanFingerprint("abc123uniquestr", plan));
+        Assert.True(AzureNamedDeploymentFreshness.MatchesPlanFingerprint("abc123unique1", plan));
+        Assert.False(AzureNamedDeploymentFreshness.MatchesPlanFingerprint("abc123uniquestr", plan));
         Assert.False(AzureNamedDeploymentFreshness.MatchesPlanFingerprint(new string('f', 64), plan));
         Assert.False(AzureNamedDeploymentFreshness.MatchesPlanFingerprint(null, plan));
         Assert.False(AzureNamedDeploymentFreshness.MatchesPlanFingerprint("", plan));
+    }
+
+    [Fact]
+    public void Parked_row_freshness_falls_back_to_status_changed_at_before_updated_at()
+    {
+        var armSucceeded = DateTimeOffset.Parse("2026-09-24T00:48:56Z");
+        var statusChangedAt = DateTimeOffset.Parse("2026-09-24T00:48:18Z");
+        var updatedAt = DateTimeOffset.Parse("2026-09-27T21:29:00Z");
+
+        Assert.Equal(statusChangedAt, AzureNamedDeploymentFreshness.FreshnessBaseline(null, statusChangedAt, updatedAt));
+        Assert.Equal(updatedAt, AzureNamedDeploymentFreshness.FreshnessBaseline(null, null, updatedAt));
+        Assert.True(AzureNamedDeploymentFreshness.IsFresh(
+            armSucceeded, AzureNamedDeploymentFreshness.FreshnessBaseline(null, statusChangedAt, updatedAt)));
+        Assert.False(AzureNamedDeploymentFreshness.IsFresh(
+            armSucceeded,
+            AzureNamedDeploymentFreshness.FreshnessBaseline(null, armSucceeded + TimeSpan.FromSeconds(1), updatedAt)));
     }
 
     [Fact]

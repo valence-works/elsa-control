@@ -890,7 +890,10 @@ public static class ManagedElsaInstanceEndpoints
             {
                 ["self"] = $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations/{operation.Id:D}",
                 ["instance"] = $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}"
-            });
+            })
+        {
+            ReasonCode = operation.ReasonCode
+        };
 
     internal static ManagedElsaInstanceDeleteOperationResponse ToDeleteOperationResponse(ElsaInstanceOperationSummary operation) =>
         new(operation.Id, operation.State, operation.AcceptedAt, operation.StartedAt, operation.CompletedAt);
@@ -1038,7 +1041,10 @@ public sealed record ManagedElsaInstanceLaunchProfile(
 public sealed record ManagedElsaInstanceAcceptedResponse(ManagedElsaInstanceResponse Instance, ManagedElsaInstanceOperationResponse Operation, IReadOnlyDictionary<string, string> Links);
 public sealed record ManagedElsaInstanceDeleteAcceptedResponse(Guid OperationId, ElsaInstanceOperationState State, DateTimeOffset AcceptedAt, string OperationUrl);
 public sealed record ManagedElsaInstanceDeleteOperationResponse(Guid OperationId, ElsaInstanceOperationState State, DateTimeOffset AcceptedAt, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt);
-public sealed record ManagedElsaInstanceOperationResponse(Guid Id, Guid InstanceId, ElsaInstanceOperationAction Action, ElsaInstanceOperationState State, int ExpectedVersion, int AttemptNumber, DateTimeOffset AcceptedAt, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, string? DesiredStateRevisionId, string? ResolvedPlanId, Guid? DeploymentRunId, string? FailureCode, ElsaObservedLifecycle? ReconciledObservedLifecycle, ElsaInstanceHealth? ReconciledHealth, IReadOnlyDictionary<string, string> Links);
+public sealed record ManagedElsaInstanceOperationResponse(Guid Id, Guid InstanceId, ElsaInstanceOperationAction Action, ElsaInstanceOperationState State, int ExpectedVersion, int AttemptNumber, DateTimeOffset AcceptedAt, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, string? DesiredStateRevisionId, string? ResolvedPlanId, Guid? DeploymentRunId, string? FailureCode, ElsaObservedLifecycle? ReconciledObservedLifecycle, ElsaInstanceHealth? ReconciledHealth, IReadOnlyDictionary<string, string> Links)
+{
+    public string? ReasonCode { get; init; }
+}
 public sealed record ManagedElsaInstanceIdentityBindingResponse(string Audience, string CanonicalCallbackUri, string VerifiedEndpointOrigin, int BindingVersion, DateTimeOffset ChangedAt);
 public sealed record ManagedElsaInstanceRevisionsResponse(IReadOnlyList<ElsaInstanceIntentRevisionSummary> Items);
 public sealed record ManagedElsaInstanceDeploymentsResponse(IReadOnlyList<ElsaInstanceDeploymentSummary> Items);

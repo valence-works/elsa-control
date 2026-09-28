@@ -91,10 +91,38 @@ public interface IAzureProviderOperationStore
         CancellationToken cancellationToken = default) =>
         Task.CompletedTask;
 
-    /// <summary>Increments the automatic resume cap without requiring a running lease.</summary>
+    /// <summary>
+    /// Records the ARM observation clock and an optional operator-visible reason
+    /// without bumping the provider version.
+    /// </summary>
+    Task RecordArmObservationClockAsync(
+        Guid workspaceId,
+        Guid operationId,
+        DateTimeOffset observedAt,
+        int backoffSeconds,
+        string? reasonCode,
+        CancellationToken cancellationToken = default) =>
+        RecordArmObservationClockAsync(workspaceId, operationId, observedAt, backoffSeconds, cancellationToken);
+
+    /// <summary>
+    /// Atomically charges one automatic resume when <c>AutoResumeCount</c> is still
+    /// below the cap. Returns null when the row is missing or already at the cap.
+    /// </summary>
     Task<AzureProviderOperation?> IncrementAutoResumeCountAsync(
         Guid workspaceId,
         Guid operationId,
         CancellationToken cancellationToken = default) =>
         Task.FromResult<AzureProviderOperation?>(null);
+
+    /// <summary>
+    /// Appends a version-neutral auto-resume outcome so operators can see each
+    /// attempt. Does not bump the provider concurrency token.
+    /// </summary>
+    Task RecordAutoResumeOutcomeAsync(
+        Guid workspaceId,
+        Guid operationId,
+        string reasonCode,
+        DateTimeOffset occurredAt,
+        CancellationToken cancellationToken = default) =>
+        Task.CompletedTask;
 }

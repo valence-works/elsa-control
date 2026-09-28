@@ -90,7 +90,8 @@ public sealed record ElsaInstanceOperationSummary(
     Guid? DeploymentRunId,
     string? FailureCode,
     ElsaObservedLifecycle? ReconciledObservedLifecycle,
-    ElsaInstanceHealth? ReconciledHealth);
+    ElsaInstanceHealth? ReconciledHealth,
+    string? ReasonCode = null);
 
 /// <summary>
 /// Safe operator projection of one instance's unfinished lifecycle topology.

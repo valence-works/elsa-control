@@ -191,6 +191,7 @@ public sealed class ElsaInstanceProviderReconciliationService(
         ElsaInstanceProviderReconciliationResult result,
         CancellationToken cancellationToken)
     {
+        var autoResume = provider as IElsaInstanceProviderAutoResumePort;
         try
         {
             await lifecycle!.RecoverAsync(
@@ -203,14 +204,34 @@ public sealed class ElsaInstanceProviderReconciliationService(
                     ActorAccountId: null,
                     ExpectedOperationId: operation.Id),
                 cancellationToken);
+            if (autoResume is not null &&
+                !await autoResume.TryChargeAutoResumeAsync(
+                    instance.WorkspaceId, instance.Id, operation.Id, cancellationToken))
+            {
+                await autoResume.RecordAutoResumeOutcomeAsync(
+                    instance.WorkspaceId, instance.Id, operation.Id,
+                    "azure.recovery.auto-resume-cap-reached", cancellationToken);
+                return;
+            }
+
+            if (autoResume is not null)
+                await autoResume.RecordAutoResumeOutcomeAsync(
+                    instance.WorkspaceId, instance.Id, operation.Id,
+                    "azure.recovery.auto-resume.accepted", cancellationToken);
         }
         catch (ElsaInstanceLifecycleConflictException)
         {
-            // Another recover won the compare-and-set, or the cap/guard rejected it.
+            if (autoResume is not null)
+                await autoResume.RecordAutoResumeOutcomeAsync(
+                    instance.WorkspaceId, instance.Id, operation.Id,
+                    "azure.recovery.auto-resume.conflict", cancellationToken);
         }
         catch (InvalidOperationException)
         {
-            // The existing recover guard is unchanged; a missing proof stays parked.
+            if (autoResume is not null)
+                await autoResume.RecordAutoResumeOutcomeAsync(
+                    instance.WorkspaceId, instance.Id, operation.Id,
+                    "azure.recovery.auto-resume.rejected", cancellationToken);
         }
     }
 
@@ -273,7 +294,7 @@ public sealed class ElsaInstanceProviderReconciliationService(
 
         if (ManagedElsaInstanceCustomerProjection.IsKnownInProgress(observation.ObservedLifecycle))
             return (Project(instance, observation.ObservedLifecycle, ElsaInstanceHealth.Unknown),
-                operation, InProgressCode, now);
+                operation, OperatorVisibleReason(observation.ReasonCode) ?? InProgressCode, now);
 
         if (ManagedElsaInstanceCustomerProjection.IsKnownInProgress(instance.ObservedLifecycle))
             return (Project(instance, instance.ObservedLifecycle, instance.Health),
@@ -301,6 +322,12 @@ public sealed class ElsaInstanceProviderReconciliationService(
             _ => false
         };
     }
+
+    private static string? OperatorVisibleReason(string? reasonCode) =>
+        reasonCode is { Length: > 0 and <= 128 } &&
+        reasonCode.All(x => char.IsAsciiLetterLower(x) || char.IsAsciiDigit(x) || x is '.' or '-')
+            ? reasonCode
+            : null;
 
     private static ElsaInstance Project(
         ElsaInstance instance,

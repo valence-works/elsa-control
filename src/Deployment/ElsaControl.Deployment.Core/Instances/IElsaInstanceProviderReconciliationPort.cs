@@ -10,3 +10,24 @@ public interface IElsaInstanceProviderReconciliationPort
         ElsaInstanceProviderReconciliationRequest request,
         CancellationToken cancellationToken = default);
 }
+
+/// <summary>
+/// Optional auto-resume accounting for a provider that persists a per-operation
+/// cap. Implementations must charge only when a resume is accepted and must
+/// record each attempt outcome.
+/// </summary>
+public interface IElsaInstanceProviderAutoResumePort
+{
+    Task<bool> TryChargeAutoResumeAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        Guid lifecycleOperationId,
+        CancellationToken cancellationToken = default);
+
+    Task RecordAutoResumeOutcomeAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        Guid lifecycleOperationId,
+        string outcomeCode,
+        CancellationToken cancellationToken = default);
+}

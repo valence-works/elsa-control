@@ -1459,6 +1459,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<long?>("LastArmObservedAt")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("LastObservationReasonCode")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
                     b.Property<long?>("LeaseExpiresAt")
                         .HasColumnType("INTEGER");
 

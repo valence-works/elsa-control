@@ -55,6 +55,7 @@ public sealed class AzureProviderOperationMigrationTests
         Assert.Contains("LastArmObservedAt", columns);
         Assert.Contains("AutoResumeCount", columns);
         Assert.Contains("ArmObservationBackoffSeconds", columns);
+        Assert.Contains("LastObservationReasonCode", columns);
         var instanceColumns = await db.Database.SqlQueryRaw<string>(
             "SELECT name AS Value FROM pragma_table_info('ElsaInstances')").ToListAsync();
         Assert.Contains("CurrentDeploymentStudioGrants", instanceColumns);

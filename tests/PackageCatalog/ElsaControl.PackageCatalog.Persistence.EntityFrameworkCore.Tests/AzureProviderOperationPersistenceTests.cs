@@ -1228,6 +1228,21 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
             await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id));
         Assert.Equal(1, incremented.AutoResumeCount);
         Assert.Equal(workload.Version, incremented.Version);
+
+        for (var i = 1; i < AzureNamedDeploymentFreshness.MaximumAutoResumes; i++)
+            Assert.NotNull(await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id));
+        Assert.Null(await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id));
+        var atCap = await store.GetAsync(_workspaceId, created.Id);
+        Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes, atCap!.AutoResumeCount);
+        Assert.Equal(workload.Version, atCap.Version);
+
+        await store.RecordAutoResumeOutcomeAsync(
+            _workspaceId, created.Id, AzureLateSuccessCodes.AutoResumeAccepted, now.AddMinutes(10));
+        var afterOutcome = await store.GetAsync(_workspaceId, created.Id);
+        Assert.Equal(AzureLateSuccessCodes.AutoResumeAccepted, afterOutcome!.LastObservationReasonCode);
+        Assert.Equal(workload.Version, afterOutcome.Version);
+        var transitions = await store.ListTransitionsAsync(_workspaceId, created.Id);
+        Assert.Contains(transitions, transition => transition.Code == AzureLateSuccessCodes.AutoResumeAccepted);
     }
 
     [Fact]

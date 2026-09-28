@@ -955,6 +955,7 @@ internal sealed class AzureProviderOperationConfiguration : IEntityTypeConfigura
         ConfigureNullableDateTime(builder.Property(x => x.HeartbeatAt));
         ConfigureNullableDateTime(builder.Property(x => x.AttemptedStepStartedAt));
         ConfigureNullableDateTime(builder.Property(x => x.LastArmObservedAt));
+        builder.Property(x => x.LastObservationReasonCode).HasMaxLength(128);
         builder.HasIndex(x => new { x.WorkspaceId, x.TargetKey, x.IdempotencyKey }).IsUnique();
         builder.HasIndex(x => new { x.WorkspaceId, x.TargetKey, x.OperationIdentity })
             .IsUnique().HasFilter("Status IN ('Accepted', 'Queued', 'EntitlementHeld', 'Running', 'RecoveryRequired')");
