@@ -35,6 +35,8 @@ command -v jq >/dev/null 2>&1 || fail "JSON validator is unavailable"
 
 if [[ "${TARGET_ENVIRONMENT:-}" == test && "${GITHUB_REF:-}" == refs/heads/candidate/staging ]]; then
   trusted_branch=candidate/staging
+elif [[ "${TARGET_ENVIRONMENT:-}" == test && "${GITHUB_REF:-}" == refs/heads/cursor/staging-control-candidate-rebuild-0d5c ]]; then
+  trusted_branch=cursor/staging-control-candidate-rebuild-0d5c
 elif [[ "${GITHUB_REF:-}" == refs/heads/main ]]; then
   trusted_branch=main
 else

@@ -45,10 +45,12 @@ the production registry and the producer's `main` or version-tag workflow identi
    retrying admission; a healthy old process can briefly retain the prior
    allowlist.
 4. Deploy the matching Control candidate to the staging API/worker using the
-   `candidate/staging` ref, `test` target, and immutable build-then-promote workflow.
-   The workflow refuses this ref for production. Admit the signed manifest through
-   the existing authorized catalog API; a PR check or source inspection alone does
-   not establish admission.
+   current rebuilt candidate ref (`cursor/staging-control-candidate-rebuild-0d5c`
+   for #600), `test` target, and either `app` or the immutable build-then-promote
+   workflow. Keep `candidate/staging` as the rollback ref until this candidate is
+   proven. The workflow refuses these refs for production. Admit the signed
+   manifest through the existing authorized catalog API; a PR check or source
+   inspection alone does not establish admission.
 5. Create or upgrade a staging managed engine through the customer path and verify
    the exact owner/admin Studio dashboard, Workflow Definitions/designer, Structured
    Logs, lower-role denial, and cross-account denial on desktop and 390×844. Record

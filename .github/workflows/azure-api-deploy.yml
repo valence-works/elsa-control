@@ -259,6 +259,13 @@ jobs:
              { [ "$DEPLOY_MODE" = "build" ] || [ "$DEPLOY_MODE" = "promote" ]; }; then
             exit 0
           fi
+          # #600 rebuild: keep candidate/staging as the rollback ref. This branch is the
+          # current staging Control candidate and must accept the CEO test/app deploy path.
+          if [ "${GITHUB_REF:-}" = "refs/heads/cursor/staging-control-candidate-rebuild-0d5c" ] &&
+             [ "$TARGET_ENVIRONMENT" = "test" ] &&
+             { [ "$DEPLOY_MODE" = "app" ] || [ "$DEPLOY_MODE" = "build" ] || [ "$DEPLOY_MODE" = "promote" ]; }; then
+            exit 0
+          fi
           echo "::error::This ref is not approved for the selected Azure environment and deployment mode."
           exit 1
 
