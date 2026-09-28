@@ -587,24 +587,26 @@ public static class ManagedElsaInstanceOverviewEndpoints
         string? newState = null,
         string? operationFailureCode = null)
     {
+        // Precedence: warning set (diagnostic or operation FailureCode); then a real
+        // FailureCode, failed/health-failed, or terminal Failed / lifecycle.failed;
+        // then unavailable informational; everything else informational.
         if (IsWarningActivityCode(diagnosticCode) || IsWarningActivityCode(operationFailureCode))
             return new(null, ManagedElsaInstanceActivitySeverity.Warning, DeploymentStatusUnclearMessage);
 
-        if (IsFailedReasonCode(diagnosticCode) || IsFailedReasonCode(operationFailureCode))
+        if (IsFailedReasonCode(diagnosticCode) ||
+            IsFailedReasonCode(operationFailureCode) ||
+            IsTerminalFailed(eventType, newState) ||
+            !string.IsNullOrWhiteSpace(operationFailureCode))
             return FailedActivity(diagnosticCode ?? operationFailureCode);
 
-        if (IsInformationalActivityCode(diagnosticCode) || IsInformationalActivityCode(operationFailureCode))
+        if (IsInformationalActivityCode(diagnosticCode))
         {
-            var source = IsInformationalActivityCode(diagnosticCode) ? diagnosticCode : operationFailureCode;
             var informational = string.Equals(
-                source, ElsaInstanceProviderReconciliationService.UnavailableCode, StringComparison.Ordinal)
+                diagnosticCode, ElsaInstanceProviderReconciliationService.UnavailableCode, StringComparison.Ordinal)
                 ? CheckingDeploymentStatusMessage
                 : null;
             return new(null, ManagedElsaInstanceActivitySeverity.Informational, informational);
         }
-
-        if (IsTerminalFailed(eventType, newState) || !string.IsNullOrWhiteSpace(operationFailureCode))
-            return FailedActivity(diagnosticCode ?? operationFailureCode);
 
         if (!string.IsNullOrWhiteSpace(diagnosticCode) &&
             ActionableActivityCodes.TryGetValue(diagnosticCode, out var mapped))

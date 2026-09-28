@@ -345,6 +345,29 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
 
         Assert.Equal(ManagedElsaInstanceActivitySeverity.Failed, mapped.Severity);
         Assert.Equal(ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, mapped.DiagnosticCode);
+        Assert.Equal(
+            ManagedElsaInstanceActivitySeverity.Failed,
+            ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
+                diagnosticCode: null,
+                eventType: "lifecycle.failed",
+                newState: ElsaObservedLifecycle.Ready.ToString()).Severity);
+    }
+
+    [Fact]
+    public void Activity_warning_set_precedes_terminal_failed()
+    {
+        // Warning set wins over Failed: a warning FailureCode together with
+        // lifecycle.failed / NewState=Failed stays Warning, not Failed.
+        var mapped = ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
+            diagnosticCode: null,
+            eventType: "lifecycle.failed",
+            newState: ElsaObservedLifecycle.Failed.ToString(),
+            operationFailureCode: ManagedElsaInstanceOverviewEndpoints.SubmissionUncertainCode);
+
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Warning, mapped.Severity);
+        Assert.Equal(ManagedElsaInstanceOverviewEndpoints.DeploymentStatusUnclearMessage, mapped.Message);
+        Assert.Null(mapped.DiagnosticCode);
+        Assert.NotEqual(ManagedElsaInstanceActivitySeverity.Failed, mapped.Severity);
     }
 
     [Fact]
@@ -362,8 +385,37 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
     }
 
     [Fact]
+    public async Task Store_shaped_lifecycle_failed_without_diagnostic_code_is_failed()
+    {
+        // ElsaInstanceLifecycleStore.CreateAuditEventAsync writes lifecycle.failed with
+        // DiagnosticCode = null (the store never writes OperationFailed on that event).
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-store-failed-owner");
+        var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, "overview-store-failed-runtime");
+        await SetOperationFailureAsync(
+            app, created.Operation.Id, ElsaInstanceOperationState.Failed, "run.reservation.conflict");
+        await SeedAuditAsync(
+            app, workspaceId, created.Instance.InstanceId, 21_001, "lifecycle.failed",
+            diagnosticCode: null,
+            operationId: created.Operation.Id,
+            newState: ElsaObservedLifecycle.Ready.ToString());
+
+        var activity = await client.GetControlJsonAsync<ManagedElsaInstanceActivityResponse>(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/activity");
+
+        var failedEvent = Assert.Single(activity!.Items, item => item.Sequence == 21_001);
+        Assert.Equal("lifecycle.failed", failedEvent.EventType);
+        Assert.Null(failedEvent.Message);
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Failed, failedEvent.Severity);
+        Assert.Equal(ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, failedEvent.DiagnosticCode);
+        Assert.NotEqual(ManagedElsaInstanceActivitySeverity.Informational, failedEvent.Severity);
+    }
+
+    [Fact]
     public async Task Operation_failure_code_submission_uncertain_precedes_failed()
     {
+        // Warning set wins: FailureCode = provider.submission.uncertain together with a
+        // store-shaped lifecycle.failed event (null diagnostic, terminal Failed) is Warning.
         var app = await PrepareApplicationAsync();
         var client = app.CreateTrustedWorkspaceClient("overview-uncertain-owner");
         var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, "overview-uncertain-runtime");
