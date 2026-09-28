@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
 using ElsaControl.Deployment.Core.ExternalConnections;
-using ElsaControl.RuntimeBuilder.Abstractions.ReleaseCatalog;
 using Xunit;
 
 namespace ElsaControl.Deployment.Core.Tests.ExternalConnections;
@@ -15,10 +14,10 @@ public sealed class ExternalEngineHeartbeatServiceTests
     private const string ImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     [Fact]
-    public async Task Exact_valence_component_evidence_is_catalog_matched_and_safe_capabilities_replace_the_snapshot()
+    public async Task Connector_claimed_valence_runtime_with_matching_catalog_digests_stays_self_reported()
     {
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        var fixture = await Fixture.CreateAsync(key, [CatalogEntry("valence-runtime", "Supported", ImageDigest)]);
+        var fixture = await Fixture.CreateAsync(key);
         var report = Report(1, components: [new("runtime", ImageDigest)], capabilities:
             [ExternalEngineHeartbeatService.StatusCapability, ExternalEngineHeartbeatService.StudioCapability]);
 
@@ -26,8 +25,10 @@ public sealed class ExternalEngineHeartbeatServiceTests
 
         Assert.NotNull(result);
         Assert.Equal(ExternalEngineHeartbeatStatus.Accepted, result.Status);
-        Assert.Equal(ExternalEngineReleaseEvidenceLevel.VerifiedManifest, result.Connection!.ReleaseEvidenceLevel);
-        Assert.Equal("manifest-sha256", result.Connection.ReleaseEvidenceReference);
+        Assert.Equal(ExternalEngineReleaseEvidenceLevel.SelfReported, result.Connection!.ReleaseEvidenceLevel);
+        Assert.Null(result.Connection.ReleaseEvidenceReference);
+        Assert.Equal("valence-runtime", result.Connection.ObservedDistribution);
+        Assert.Equal("3.8.1", result.Connection.ObservedVersion);
         Assert.Equal("server", result.Connection.ObservedRuntimeKind);
         Assert.Equal(2, result.Connection.Capabilities.Count);
         Assert.Equal("https://studio.example.test/elsa/", result.Connection.StudioDestinationCandidate);
@@ -66,7 +67,7 @@ public sealed class ExternalEngineHeartbeatServiceTests
     public async Task Version_only_or_mismatched_component_evidence_stays_self_reported()
     {
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        var fixture = await Fixture.CreateAsync(key, [CatalogEntry("valence-runtime", "Supported", ImageDigest)]);
+        var fixture = await Fixture.CreateAsync(key);
         var report = Report(1, components:
             [new("runtime", "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")]);
 
@@ -75,26 +76,47 @@ public sealed class ExternalEngineHeartbeatServiceTests
         Assert.Equal(ExternalEngineHeartbeatStatus.Accepted, result!.Status);
         Assert.Equal(ExternalEngineReleaseEvidenceLevel.SelfReported, result.Connection!.ReleaseEvidenceLevel);
         Assert.Null(result.Connection.ReleaseEvidenceReference);
+        Assert.Equal("valence-runtime", result.Connection.ObservedDistribution);
+        Assert.Equal("3.8.1", result.Connection.ObservedVersion);
     }
 
     [Fact]
-    public async Task Supported_non_valence_release_requires_complete_component_evidence_and_supported_catalog_policy()
+    public async Task Connector_claimed_supported_elsa_oss_release_stays_self_reported()
     {
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        var fixture = await Fixture.CreateAsync(key, [CatalogEntry("elsa-oss", "Supported", ImageDigest)]);
+        var fixture = await Fixture.CreateAsync(key);
         var report = Report(1, distribution: "elsa-oss", components: [new("runtime", ImageDigest)]);
 
         var result = await fixture.Service.SubmitAsync(fixture.Request(report, key));
 
-        Assert.Equal(ExternalEngineReleaseEvidenceLevel.SupportedRelease, result!.Connection!.ReleaseEvidenceLevel);
-        Assert.Equal("manifest-sha256", result.Connection.ReleaseEvidenceReference);
+        Assert.Equal(ExternalEngineHeartbeatStatus.Accepted, result!.Status);
+        Assert.Equal(ExternalEngineReleaseEvidenceLevel.SelfReported, result.Connection!.ReleaseEvidenceLevel);
+        Assert.Null(result.Connection.ReleaseEvidenceReference);
+        Assert.Equal("elsa-oss", result.Connection.ObservedDistribution);
+        Assert.Equal("3.8.1", result.Connection.ObservedVersion);
+    }
+
+    [Fact]
+    public async Task Missing_observed_release_identity_stays_none()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var fixture = await Fixture.CreateAsync(key);
+        var report = Report(1) with { ObservedDistribution = null, ObservedVersion = null };
+
+        var result = await fixture.Service.SubmitAsync(fixture.Request(report, key));
+
+        Assert.Equal(ExternalEngineHeartbeatStatus.Accepted, result!.Status);
+        Assert.Equal(ExternalEngineReleaseEvidenceLevel.None, result.Connection!.ReleaseEvidenceLevel);
+        Assert.Null(result.Connection.ReleaseEvidenceReference);
+        Assert.Null(result.Connection.ObservedDistribution);
+        Assert.Null(result.Connection.ObservedVersion);
     }
 
     [Fact]
     public async Task Unsupported_protocol_is_reported_only_after_proof_verification_and_other_invalid_reports_do_not_change_it()
     {
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        var fixture = await Fixture.CreateAsync(key, []);
+        var fixture = await Fixture.CreateAsync(key);
         var unsupportedReport = Report(1) with { ConnectorProtocol = "2" };
         var invalidProofRequest = fixture.Request(unsupportedReport, key);
         var invalidProof = invalidProofRequest with
@@ -140,7 +162,7 @@ public sealed class ExternalEngineHeartbeatServiceTests
     public async Task Proof_replay_and_new_proof_with_old_sequence_do_not_refresh_last_seen()
     {
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        var fixture = await Fixture.CreateAsync(key, []);
+        var fixture = await Fixture.CreateAsync(key);
         var firstRequest = fixture.Request(Report(1), key);
         var first = await fixture.Service.SubmitAsync(firstRequest);
         var acceptedAt = first!.Connection!.LastAuthenticatedAt;
@@ -159,7 +181,7 @@ public sealed class ExternalEngineHeartbeatServiceTests
     public async Task Fresh_connection_projects_stale_then_recovers_with_a_new_heartbeat()
     {
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        var fixture = await Fixture.CreateAsync(key, []);
+        var fixture = await Fixture.CreateAsync(key);
         Assert.Equal(ExternalEngineHeartbeatFreshness.Waiting,
             ExternalEngineConnectionFreshness.Classify(fixture.Store.Connection, fixture.Time.GetUtcNow()));
 
@@ -184,7 +206,7 @@ public sealed class ExternalEngineHeartbeatServiceTests
     public async Task Concurrent_higher_sequence_wins_and_a_later_sequence_retries_against_the_new_version()
     {
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        var fixture = await Fixture.CreateAsync(key, []);
+        var fixture = await Fixture.CreateAsync(key);
         fixture.Store.InjectConcurrentSequence(3);
 
         var superseded = await fixture.Service.SubmitAsync(fixture.Request(Report(2), key));
@@ -217,28 +239,6 @@ public sealed class ExternalEngineHeartbeatServiceTests
             capabilities ?? [ExternalEngineHeartbeatService.StatusCapability],
             components ?? []);
 
-    private static GovernedReleaseCatalogEntry CatalogEntry(string distribution, string lifecycle, string imageDigest) =>
-        new(
-            "1",
-            "manifest-ref",
-            "manifest-sha256",
-            "payload-sha256",
-            "signature-ref",
-            "signature-sha256",
-            "paid",
-            new(distribution, "3", "3.8", "3.8.1", "stable", "released", "community", "repo", "commit", "run"),
-            new(
-                "combined",
-                "1",
-                ["server"],
-                [],
-                [],
-                [new("runtime", "registry.example/runtime@" + imageDigest, imageDigest,
-                    new Dictionary<string, string>(), [], [], [], null)],
-                []),
-            lifecycle,
-            Now);
-
     private sealed class Fixture(
         MutableTimeProvider time,
         RecordingConnectionStore store,
@@ -251,7 +251,7 @@ public sealed class ExternalEngineHeartbeatServiceTests
         public RecordingConnectionStore Store { get; } = store;
         public ExternalEngineHeartbeatService Service { get; } = service;
 
-        public static async Task<Fixture> CreateAsync(ECDsa key, IReadOnlyList<GovernedReleaseCatalogEntry> entries)
+        public static async Task<Fixture> CreateAsync(ECDsa key)
         {
             var time = new MutableTimeProvider(Now);
             var enrollmentStore = new InMemoryExternalEngineEnrollmentStore();
@@ -278,7 +278,7 @@ public sealed class ExternalEngineHeartbeatServiceTests
                 null, null, null, null, null, ExternalEngineReleaseEvidenceLevel.None, null, [], null,
                 redeemed.Identity!.Id, issued.ChallengeId, Now, Now, null, 1);
             var store = new RecordingConnectionStore(connection);
-            var service = new ExternalEngineHeartbeatService(store, enrollment, new StaticCatalog(entries), time);
+            var service = new ExternalEngineHeartbeatService(store, enrollment, time);
             return new(time, store, service, redeemed.Identity);
         }
 
@@ -309,21 +309,6 @@ public sealed class ExternalEngineHeartbeatServiceTests
         private DateTimeOffset _now = now;
         public override DateTimeOffset GetUtcNow() => _now;
         public void Advance(TimeSpan value) => _now = _now.Add(value);
-    }
-
-    private sealed class StaticCatalog(IReadOnlyList<GovernedReleaseCatalogEntry> entries) : IGovernedReleaseCatalogStore
-    {
-        public Task<GovernedReleaseCatalogWriteResult> StoreAsync(
-            IReadOnlyList<GovernedReleaseCatalogEntry> values,
-            CancellationToken cancellationToken = default) => throw new NotSupportedException();
-
-        public Task<IReadOnlyList<GovernedReleaseCatalogEntry>> QueryAsync(
-            GovernedReleaseCatalogQuery query,
-            CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<GovernedReleaseCatalogEntry>>(entries.Where(entry =>
-                (query.DistributionId is null || string.Equals(entry.Distribution.Id, query.DistributionId, StringComparison.OrdinalIgnoreCase))
-                && (query.ReleaseVersion is null || string.Equals(entry.Distribution.ReleaseVersion, query.ReleaseVersion, StringComparison.OrdinalIgnoreCase))
-                && (query.RuntimeKind is null || entry.Topology.RuntimeKinds.Contains(query.RuntimeKind, StringComparer.OrdinalIgnoreCase))).ToArray());
     }
 
     private sealed class RecordingConnectionStore(ExternalEngineConnection connection) : IExternalEngineConnectionStore
