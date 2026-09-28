@@ -353,8 +353,10 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
                 newState: ElsaObservedLifecycle.Ready.ToString()).Severity);
     }
 
-    [Fact]
-    public void Activity_warning_set_precedes_terminal_failed()
+    [Theory]
+    [InlineData(ManagedElsaInstanceOverviewEndpoints.SubmissionUncertainCode)]
+    [InlineData(ElsaInstanceProviderReconciliationService.RetrySafeCode)]
+    public void Activity_warning_failure_code_precedes_terminal_failed(string warningFailureCode)
     {
         // Warning set wins over Failed: a warning FailureCode together with
         // lifecycle.failed / NewState=Failed stays Warning, not Failed.
@@ -362,7 +364,7 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             diagnosticCode: null,
             eventType: "lifecycle.failed",
             newState: ElsaObservedLifecycle.Failed.ToString(),
-            operationFailureCode: ManagedElsaInstanceOverviewEndpoints.SubmissionUncertainCode);
+            operationFailureCode: warningFailureCode);
 
         Assert.Equal(ManagedElsaInstanceActivitySeverity.Warning, mapped.Severity);
         Assert.Equal(ManagedElsaInstanceOverviewEndpoints.DeploymentStatusUnclearMessage, mapped.Message);
@@ -385,30 +387,66 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
     }
 
     [Fact]
-    public async Task Store_shaped_lifecycle_failed_without_diagnostic_code_is_failed()
+    public async Task Store_written_lifecycle_failed_without_diagnostic_code_is_failed()
     {
-        // ElsaInstanceLifecycleStore.CreateAuditEventAsync writes lifecycle.failed with
-        // DiagnosticCode = null (the store never writes OperationFailed on that event).
+        // FailResolutionAsync is the store's MarkFailed path: it writes lifecycle.failed
+        // through CreateAuditEventAsync with DiagnosticCode = null.
         var app = await PrepareApplicationAsync();
-        var client = app.CreateTrustedWorkspaceClient("overview-store-failed-owner");
-        var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, "overview-store-failed-runtime");
-        await SetOperationFailureAsync(
-            app, created.Operation.Id, ElsaInstanceOperationState.Failed, "run.reservation.conflict");
-        await SeedAuditAsync(
-            app, workspaceId, created.Instance.InstanceId, 21_001, "lifecycle.failed",
-            diagnosticCode: null,
-            operationId: created.Operation.Id,
-            newState: ElsaObservedLifecycle.Ready.ToString());
+        var client = app.CreateTrustedWorkspaceClient("overview-mark-failed-owner");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        using (var request = new HttpRequestMessage(HttpMethod.Post, $"/api/workspaces/{workspaceId:D}/instances")
+        {
+            Content = JsonContent.Create(
+                new ManagedElsaInstanceCreateRequest("Claims runtime", "overview-mark-failed-runtime", Intent()),
+                options: ControlApiTestApplication.JsonOptions)
+        })
+        {
+            request.Headers.Add("Idempotency-Key", "create-overview-mark-failed-runtime");
+            using var response = await client.SendAsync(request);
+            Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+            var created = (await response.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>())!;
 
-        var activity = await client.GetControlJsonAsync<ManagedElsaInstanceActivityResponse>(
-            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/activity");
+            ElsaInstanceLifecycleWorkerResult failed;
+            await using (var scope = app.Services.CreateAsyncScope())
+            {
+                var workerStore = scope.ServiceProvider.GetRequiredService<IElsaInstanceLifecycleWorkerStore>();
+                var claimed = await workerStore.TryClaimNextAsync("overview-mark-failed-worker", DateTimeOffset.UtcNow);
+                Assert.NotNull(claimed);
+                Assert.Equal(created.Operation.Id, claimed!.Operation.Id);
+                failed = await workerStore.FailResolutionAsync(new ElsaInstanceLifecycleResolutionFailure(
+                    claimed.Outbox.WorkspaceId,
+                    claimed.Outbox.InstanceId,
+                    claimed.Operation.Id,
+                    claimed.Outbox.Id,
+                    claimed.Outbox.RequestHash,
+                    "overview-mark-failed-worker",
+                    "resolution.failed",
+                    "Lifecycle plan resolution was rejected.",
+                    DateTimeOffset.UtcNow,
+                    claimed.LeaseToken,
+                    claimed.LeaseVersion));
+                Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Failed, failed.Outcome);
 
-        var failedEvent = Assert.Single(activity!.Items, item => item.Sequence == 21_001);
-        Assert.Equal("lifecycle.failed", failedEvent.EventType);
-        Assert.Null(failedEvent.Message);
-        Assert.Equal(ManagedElsaInstanceActivitySeverity.Failed, failedEvent.Severity);
-        Assert.Equal(ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, failedEvent.DiagnosticCode);
-        Assert.NotEqual(ManagedElsaInstanceActivitySeverity.Informational, failedEvent.Severity);
+                var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+                var storeWrittenNullDiagnostics = await db.Database.SqlQuery<int>($"""
+                    SELECT COUNT(*) AS Value FROM ElsaInstanceAuditEvents
+                    WHERE InstanceId = {created.Instance.InstanceId}
+                      AND EventType = {"lifecycle.failed"}
+                      AND DiagnosticCode IS NULL
+                    """).SingleAsync();
+                Assert.Equal(1, storeWrittenNullDiagnostics);
+            }
+
+            var activity = await client.GetControlJsonAsync<ManagedElsaInstanceActivityResponse>(
+                $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/activity");
+
+            var failedEvent = Assert.Single(activity!.Items, item => item.EventType == "lifecycle.failed");
+            Assert.Null(failedEvent.Message);
+            Assert.Equal(ManagedElsaInstanceActivitySeverity.Failed, failedEvent.Severity);
+            Assert.Equal(ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, failedEvent.DiagnosticCode);
+            Assert.NotEqual(ManagedElsaInstanceActivitySeverity.Informational, failedEvent.Severity);
+        }
     }
 
     [Fact]
