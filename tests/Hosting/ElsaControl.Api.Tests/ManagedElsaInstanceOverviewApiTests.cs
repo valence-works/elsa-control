@@ -157,6 +157,7 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             $"/api/workspaces/{otherWorkspaceId:D}/instances/{instanceId:D}/available-releases");
         using var crossWorkspaceActivity = await other.GetAsync(
             $"/api/workspaces/{otherWorkspaceId:D}/instances/{instanceId:D}/activity");
+        using var nonMember = await other.GetAsync(path);
 
         Assert.Equal(HttpStatusCode.OK, readerOverview.StatusCode);
         Assert.NotNull(readerBody);
@@ -172,6 +173,7 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         Assert.Equal(HttpStatusCode.NotFound, crossWorkspaceOverview.StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, crossWorkspaceReleases.StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, crossWorkspaceActivity.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, nonMember.StatusCode);
     }
 
     [Fact]
@@ -234,6 +236,134 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         Assert.Equal(HttpStatusCode.BadRequest, tooLarge.StatusCode);
         Assert.Contains("instance.activity-limit-invalid", await zero.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         AssertExactCustomerDtoShape(JsonSerializer.Serialize(defaultPage, ControlApiTestApplication.JsonOptions), "activity");
+    }
+
+    [Fact]
+    public void Activity_diagnostic_codes_use_an_explicit_allowlist()
+    {
+        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
+            ElsaInstanceProviderReconciliationService.ConvergedCode));
+        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
+            ManagedLifecycleOperationalHealthDiagnosticCodes.Healthy));
+        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode("provider.internal.mystery"));
+        Assert.Null(ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(null));
+        Assert.Equal(
+            ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed,
+            ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
+                ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed));
+        Assert.Equal(
+            ManagedLifecycleOperationalHealthDiagnosticCodes.Failed,
+            ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
+                ElsaInstanceProviderReconciliationService.FailedCode));
+        Assert.Equal(
+            ElsaInstanceCommercialOperation.EntitlementRequired,
+            ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(
+                ElsaInstanceCommercialOperation.EntitlementRequired));
+    }
+
+    [Fact]
+    public async Task Activity_maps_reconcile_and_entitlement_events_without_false_alarms()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-activity-codes-owner");
+        var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, "overview-activity-codes-runtime");
+        await SeedAuditAsync(
+            app, workspaceId, created.Instance.InstanceId, 10_001, "lifecycle.reconciled",
+            ElsaInstanceProviderReconciliationService.ConvergedCode);
+        await SeedAuditAsync(
+            app, workspaceId, created.Instance.InstanceId, 10_002, "lifecycle.failed",
+            ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed);
+        await SeedAuditAsync(
+            app, workspaceId, created.Instance.InstanceId, 10_003, "lifecycle.reconciled",
+            "provider.internal.mystery");
+        await SeedAuditAsync(
+            app, workspaceId, created.Instance.InstanceId, 10_004, "lifecycle.entitlement-held",
+            ElsaInstanceCommercialOperation.EntitlementRequired);
+        await SeedAuditAsync(
+            app, workspaceId, created.Instance.InstanceId, 10_005, "lifecycle.entitlement-resumed",
+            "instance.entitlement-restored");
+
+        var activity = await client.GetControlJsonAsync<ManagedElsaInstanceActivityResponse>(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/activity");
+
+        Assert.NotNull(activity);
+        Assert.Null(Assert.Single(activity!.Items, item => item.Sequence == 10_001).DiagnosticCode);
+        Assert.Equal(
+            ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed,
+            Assert.Single(activity.Items, item => item.Sequence == 10_002).DiagnosticCode);
+        Assert.Null(Assert.Single(activity.Items, item => item.Sequence == 10_003).DiagnosticCode);
+        Assert.DoesNotContain(activity.Items, item => item.DiagnosticCode == ManagedElsaInstanceOverviewEndpoints.RequiresAttentionCode);
+        Assert.Equal(
+            ElsaInstanceCommercialOperation.EntitlementRequired,
+            Assert.Single(activity.Items, item => item.EventType == "lifecycle.entitlement-held").DiagnosticCode);
+        Assert.Null(Assert.Single(activity.Items, item => item.EventType == "lifecycle.entitlement-resumed").DiagnosticCode);
+    }
+
+    public static TheoryData<ElsaObservedLifecycle, ElsaDesiredLifecycle, bool, string?> CustomerMutationAvailabilityCases =>
+        new()
+        {
+            { ElsaObservedLifecycle.Ready, ElsaDesiredLifecycle.Running, true, null },
+            { ElsaObservedLifecycle.Degraded, ElsaDesiredLifecycle.Running, true, null },
+            { ElsaObservedLifecycle.Stopped, ElsaDesiredLifecycle.Stopped, true, null },
+            { ElsaObservedLifecycle.Failed, ElsaDesiredLifecycle.Running, false, ManagedElsaInstanceOverviewEndpoints.InstanceFailedCode },
+            { ElsaObservedLifecycle.Provisioning, ElsaDesiredLifecycle.Running, false, ManagedElsaInstanceOverviewEndpoints.InstanceProvisioningCode },
+            { ElsaObservedLifecycle.Pending, ElsaDesiredLifecycle.Running, false, ManagedElsaInstanceOverviewEndpoints.InstanceProvisioningCode },
+            { ElsaObservedLifecycle.Updating, ElsaDesiredLifecycle.Running, false, ManagedElsaInstanceOverviewEndpoints.InstanceProvisioningCode },
+            { ElsaObservedLifecycle.Stopping, ElsaDesiredLifecycle.Running, false, ManagedElsaInstanceOverviewEndpoints.InstanceProvisioningCode },
+            { ElsaObservedLifecycle.Deleting, ElsaDesiredLifecycle.Deleting, false, ManagedElsaInstanceOverviewEndpoints.InstanceDeletingCode },
+            { ElsaObservedLifecycle.Ready, ElsaDesiredLifecycle.Deleting, false, ManagedElsaInstanceOverviewEndpoints.InstanceDeletingCode },
+            { ElsaObservedLifecycle.Deleted, ElsaDesiredLifecycle.Deleting, false, ManagedElsaInstanceOverviewEndpoints.InstanceDeletingCode },
+            { ElsaObservedLifecycle.Unknown, ElsaDesiredLifecycle.Running, false, ManagedElsaInstanceOverviewEndpoints.InstanceUnknownCode }
+        };
+
+    [Theory]
+    [MemberData(nameof(CustomerMutationAvailabilityCases))]
+    public async Task Allowed_actions_match_the_route_gates_for_each_lifecycle_state(
+        ElsaObservedLifecycle observed,
+        ElsaDesiredLifecycle desired,
+        bool allowed,
+        string? reasonCode)
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-state-owner");
+        var slug = $"st-{observed:D}-{desired:D}-{Guid.NewGuid():N}"[..32].TrimEnd('-');
+        var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, slug);
+        _fixture.ReleaseCatalog.SetEntries(
+        [
+            CatalogEntry("valence-runtime", "3.8", "3.8.4", "stable", "combined", "supported", "paid", 'a'),
+            CatalogEntry("valence-runtime", "3.8", "3.8.5", "stable", "combined", "supported", "paid", 'b')
+        ]);
+        await SetLifecycleAsync(app, created.Instance.InstanceId, observed, desired);
+
+        var overview = await client.GetControlJsonAsync<ManagedElsaInstanceOverviewResponse>(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        using var restart = await client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/restart",
+            created.Instance.ETag,
+            $"state-restart-{slug}"));
+        using var apply = await client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/apply-release",
+            created.Instance.ETag,
+            $"state-apply-{slug}",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.5")));
+
+        Assert.NotNull(overview);
+        Assert.Equal(allowed, overview!.AllowedActions.Restart.Allowed);
+        Assert.Equal(allowed, overview.AllowedActions.ApplyRelease.Allowed);
+        Assert.Equal(reasonCode, overview.AllowedActions.Restart.ReasonCode);
+        Assert.Equal(reasonCode, overview.AllowedActions.ApplyRelease.ReasonCode);
+        if (allowed)
+        {
+            Assert.Equal(HttpStatusCode.Accepted, restart.StatusCode);
+            return;
+        }
+
+        Assert.Equal(HttpStatusCode.Conflict, restart.StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, apply.StatusCode);
+        Assert.Contains(reasonCode!, await restart.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Contains(reasonCode!, await apply.Content.ReadAsStringAsync(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -663,6 +793,47 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         var completedAtTicks = DateTimeOffset.UtcNow.UtcTicks;
         await db.Database.ExecuteSqlInterpolatedAsync(
             $"UPDATE ElsaInstanceOperations SET State = {ElsaInstanceOperationState.Succeeded.ToString()}, CompletedAt = {completedAtTicks} WHERE Id = {operationId}");
+    }
+
+    private static async Task SetLifecycleAsync(
+        ControlApiTestApplication app,
+        Guid instanceId,
+        ElsaObservedLifecycle observed,
+        ElsaDesiredLifecycle desired)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        long? deletedAt = observed == ElsaObservedLifecycle.Deleted ? DateTimeOffset.UtcNow.UtcTicks : null;
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstances
+            SET DesiredLifecycle = {desired.ToString()},
+                ObservedLifecycle = {observed.ToString()},
+                DeletedAt = {deletedAt}
+            WHERE Id = {instanceId}
+            """);
+    }
+
+    private static async Task SeedAuditAsync(
+        ControlApiTestApplication app,
+        Guid workspaceId,
+        Guid instanceId,
+        long sequence,
+        string eventType,
+        string? diagnosticCode)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var organizationId = await db.Workspaces.Where(x => x.Id == workspaceId)
+            .Select(x => x.OrganizationId)
+            .SingleAsync();
+        var occurredAt = DateTimeOffset.UtcNow.UtcTicks;
+        var id = Guid.NewGuid();
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO ElsaInstanceAuditEvents
+                (Id, OrganizationId, WorkspaceId, InstanceId, Sequence, EventType, DiagnosticCode, OccurredAt)
+            VALUES
+                ({id}, {organizationId}, {workspaceId}, {instanceId}, {sequence}, {eventType}, {diagnosticCode}, {occurredAt})
+            """);
     }
 
     private static async Task MarkInstanceReadyAsync(ControlApiTestApplication app, Guid instanceId)

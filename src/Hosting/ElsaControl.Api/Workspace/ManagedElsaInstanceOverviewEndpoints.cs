@@ -29,6 +29,11 @@ public static class ManagedElsaInstanceOverviewEndpoints
     internal const string UnknownFieldCode = "request.unknown-field";
     internal const string ApplyReleaseInvalidCode = "instance.apply-release-invalid";
     internal const string RestartReason = "Restart";
+    internal const string InstanceNotReadyCode = "instance.not-ready";
+    internal const string InstanceDeletingCode = "instance.deleting";
+    internal const string InstanceFailedCode = "instance.failed";
+    internal const string InstanceProvisioningCode = "instance.provisioning";
+    internal const string InstanceUnknownCode = "instance.unknown";
     internal const int DefaultActivityLimit = 25;
     internal const int MaxActivityLimit = 100;
     internal const int MaxAvailableReleases = 20;
@@ -42,7 +47,11 @@ public static class ManagedElsaInstanceOverviewEndpoints
         "lifecycle.deleted",
         "lifecycle.failed",
         "lifecycle.health-changed",
-        "lifecycle.operation-updated"
+        "lifecycle.operation-updated",
+        "lifecycle.entitlement-held",
+        "lifecycle.entitlement-resumed",
+        "lifecycle.deletion-recovery-required",
+        "lifecycle.recovery-superseded-by-delete"
     }.ToFrozenSet(StringComparer.Ordinal);
 
     private static readonly FrozenSet<string> CustomerHealthCodes = new HashSet<string>(StringComparer.Ordinal)
@@ -63,6 +72,65 @@ public static class ManagedElsaInstanceOverviewEndpoints
         ManagedLifecycleOperationalHealthDiagnosticCodes.WorkActive,
         ManagedLifecycleOperationalHealthDiagnosticCodes.RetryExhausted
     }.ToFrozenSet(StringComparer.Ordinal);
+
+    private static readonly FrozenSet<string> InformationalActivityCodes = new HashSet<string>(StringComparer.Ordinal)
+    {
+        ManagedLifecycleOperationalHealthDiagnosticCodes.Healthy,
+        ManagedLifecycleOperationalHealthDiagnosticCodes.WorkActive,
+        ManagedLifecycleOperationalHealthDiagnosticCodes.Unknown,
+        ManagedLifecycleOperationalHealthDiagnosticCodes.ProviderUnknown,
+        ManagedLifecycleOperationalHealthDiagnosticCodes.ReconciliationUnknown,
+        ElsaInstanceProviderReconciliationService.ConvergedCode,
+        ElsaInstanceProviderReconciliationService.InProgressCode,
+        ElsaInstanceProviderReconciliationService.RetrySafeCode,
+        ElsaInstanceProviderReconciliationService.UnknownCode,
+        ElsaInstanceProviderReconciliationService.AmbiguousCode,
+        ElsaInstanceProviderReconciliationService.HealthUnknownCode,
+        "instance.entitlement-restored"
+    }.ToFrozenSet(StringComparer.Ordinal);
+
+    private static readonly FrozenDictionary<string, string> ActionableActivityCodes =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [ManagedLifecycleOperationalHealthDiagnosticCodes.Failed] =
+                ManagedLifecycleOperationalHealthDiagnosticCodes.Failed,
+            [ManagedLifecycleOperationalHealthDiagnosticCodes.Degraded] =
+                ManagedLifecycleOperationalHealthDiagnosticCodes.Degraded,
+            [ManagedLifecycleOperationalHealthDiagnosticCodes.Stale] =
+                ManagedLifecycleOperationalHealthDiagnosticCodes.Stale,
+            [ManagedLifecycleOperationalHealthDiagnosticCodes.StaleWork] =
+                ManagedLifecycleOperationalHealthDiagnosticCodes.StaleWork,
+            [ManagedLifecycleOperationalHealthDiagnosticCodes.ReconciliationStale] =
+                ManagedLifecycleOperationalHealthDiagnosticCodes.ReconciliationStale,
+            [ManagedLifecycleOperationalHealthDiagnosticCodes.UnhealthyEndpoint] =
+                ManagedLifecycleOperationalHealthDiagnosticCodes.UnhealthyEndpoint,
+            [ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired] =
+                ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired,
+            [ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed] =
+                ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed,
+            [ManagedLifecycleOperationalHealthDiagnosticCodes.RunFailed] =
+                ManagedLifecycleOperationalHealthDiagnosticCodes.RunFailed,
+            [ManagedLifecycleOperationalHealthDiagnosticCodes.RetryExhausted] =
+                ManagedLifecycleOperationalHealthDiagnosticCodes.RetryExhausted,
+            [ElsaInstanceProviderReconciliationService.FailedCode] =
+                ManagedLifecycleOperationalHealthDiagnosticCodes.Failed,
+            [ElsaInstanceProviderReconciliationService.HealthFailedCode] =
+                ManagedLifecycleOperationalHealthDiagnosticCodes.Failed,
+            [ElsaInstanceProviderReconciliationService.UnavailableCode] =
+                ManagedLifecycleOperationalHealthDiagnosticCodes.Failed,
+            [ElsaInstanceProviderReconciliationService.CorrelationMismatchCode] =
+                ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed,
+            [ElsaInstanceCommercialOperation.EntitlementRequired] =
+                ElsaInstanceCommercialOperation.EntitlementRequired,
+            [ElsaInstanceCommercialOperation.EntitlementExpired] =
+                ElsaInstanceCommercialOperation.EntitlementExpired,
+            [ElsaInstanceCommercialOperation.SubscriptionStateRequired] =
+                ElsaInstanceCommercialOperation.SubscriptionStateRequired,
+            [ElsaInstanceCommercialOperation.LifecycleConstrained] =
+                ElsaInstanceCommercialOperation.LifecycleConstrained,
+            [ElsaInstanceCommercialOperation.InstanceLimitReached] =
+                ElsaInstanceCommercialOperation.InstanceLimitReached
+        }.ToFrozenDictionary(StringComparer.Ordinal);
 
     internal static RouteGroupBuilder MapManagedElsaInstanceOverviewEndpoints(this RouteGroupBuilder group)
     {
@@ -312,6 +380,12 @@ public static class ManagedElsaInstanceOverviewEndpoints
             return ManagedElsaInstanceEndpoints.Problem(
                 commercialDecision.Code, commercialDecision.Summary, StatusCodes.Status422UnprocessableEntity);
 
+        if (CustomerMutationDenialCode(instance) is { } mutationDenial)
+            return ManagedElsaInstanceEndpoints.Problem(
+                mutationDenial,
+                "The requested operation is not valid for the current instance state.",
+                StatusCodes.Status409Conflict);
+
         try
         {
             if (!isApply)
@@ -490,6 +564,27 @@ public static class ManagedElsaInstanceOverviewEndpoints
     internal static string CustomerDiagnosticCode(string? code) =>
         code is not null && CustomerHealthCodes.Contains(code) ? code : RequiresAttentionCode;
 
+    internal static string? CustomerActivityDiagnosticCode(string? code)
+    {
+        if (string.IsNullOrWhiteSpace(code) || InformationalActivityCodes.Contains(code))
+            return null;
+        return ActionableActivityCodes.GetValueOrDefault(code);
+    }
+
+    internal static string? CustomerMutationDenialCode(ElsaInstance instance)
+    {
+        if (instance.ObservedLifecycle == ElsaObservedLifecycle.Deleted ||
+            instance.Intent.DesiredLifecycle == ElsaDesiredLifecycle.Deleting)
+            return InstanceDeletingCode;
+        if (instance.ObservedLifecycle == ElsaObservedLifecycle.Failed)
+            return InstanceFailedCode;
+        if (ManagedElsaInstanceCustomerProjection.IsKnownInProgress(instance.ObservedLifecycle))
+            return InstanceProvisioningCode;
+        if (instance.ObservedLifecycle == ElsaObservedLifecycle.Unknown)
+            return InstanceUnknownCode;
+        return ElsaInstanceStateMachine.CanRestart(instance) ? null : InstanceNotReadyCode;
+    }
+
     internal static bool TryReadMajor(string releaseLine, out int major)
     {
         var firstPart = releaseLine.Split('.', 2)[0];
@@ -528,6 +623,7 @@ internal static class ManagedElsaInstanceOverviewProjection
         var canMutate = role is WorkspaceRole.Owner or WorkspaceRole.SourceAdmin;
         var hasActiveOperation = activeOperation is not null &&
                                  ElsaInstanceOperationGuard.IsBlocking(activeOperation.State);
+        var mutationDenial = ManagedElsaInstanceOverviewEndpoints.CustomerMutationDenialCode(instance);
 
         return new ManagedElsaInstanceOverviewResponse(
             new ManagedElsaInstanceOverviewSummaryResponse(
@@ -576,8 +672,8 @@ internal static class ManagedElsaInstanceOverviewProjection
                 lastOperation.CompletedAt,
                 CustomerFailureCode(lastOperation.FailureCode)),
             new ManagedElsaInstanceOverviewAllowedActionsResponse(
-                ActionDecision(canMutate, hasActiveOperation, restartGate),
-                ActionDecision(canMutate, hasActiveOperation, applyGate),
+                ActionDecision(canMutate, hasActiveOperation, mutationDenial, restartGate),
+                ActionDecision(canMutate, hasActiveOperation, mutationDenial, applyGate),
                 new ManagedElsaInstanceOverviewActionDecisionResponse(canOpen, canOpen ? null : unavailableReason)));
     }
 
@@ -593,9 +689,7 @@ internal static class ManagedElsaInstanceOverviewProjection
                 : null,
             item.PriorState,
             item.NewState,
-            item.DiagnosticCode is null
-                ? null
-                : ManagedElsaInstanceOverviewEndpoints.CustomerDiagnosticCode(item.DiagnosticCode),
+            ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(item.DiagnosticCode),
             item.OperatorSubject is not null ? "support" : item.ActorAccountId is not null ? "customer" : "system");
 
     internal static string? UnavailableReasonCode(
@@ -625,26 +719,22 @@ internal static class ManagedElsaInstanceOverviewProjection
     private static ManagedElsaInstanceOverviewActionDecisionResponse ActionDecision(
         bool canMutate,
         bool hasActiveOperation,
+        string? mutationDenial,
         ElsaInstanceCommercialGateDecision gate)
     {
         if (!canMutate)
             return new(false, ManagedElsaInstanceOverviewEndpoints.PermissionRequiredCode);
         if (hasActiveOperation)
             return new(false, ManagedElsaInstanceOverviewEndpoints.OperationActiveCode);
+        if (mutationDenial is not null)
+            return new(false, mutationDenial);
         if (!gate.Allowed)
             return new(false, gate.Code);
         return new(true, null);
     }
 
-    private static string? CustomerFailureCode(string? failureCode)
-    {
-        if (failureCode is null)
-            return null;
-        return ManagedLifecycleOperationalHealthDiagnosticCodes.IsSafe(failureCode) &&
-               !failureCode.Contains("provider.", StringComparison.Ordinal)
-            ? failureCode
-            : ManagedElsaInstanceOverviewEndpoints.RequiresAttentionCode;
-    }
+    private static string? CustomerFailureCode(string? failureCode) =>
+        ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(failureCode);
 }
 
 internal sealed class ReleaseVersionComparer : IComparer<string>
