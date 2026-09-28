@@ -374,6 +374,21 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
     }
 
     [Fact]
+    public void Activity_cancelled_operation_is_not_failed()
+    {
+        var mapped = ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
+            diagnosticCode: null,
+            eventType: "lifecycle.failed",
+            newState: ElsaObservedLifecycle.Failed.ToString(),
+            operationFailureCode: ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded,
+            operationState: ElsaInstanceOperationState.Cancelled);
+
+        Assert.NotEqual(ManagedElsaInstanceActivitySeverity.Failed, mapped.Severity);
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Informational, mapped.Severity);
+        Assert.Null(mapped.DiagnosticCode);
+    }
+
+    [Fact]
     public void Activity_maps_an_unrecognized_operation_failure_code_as_failed()
     {
         var mapped = ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
@@ -448,6 +463,110 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             Assert.Equal(ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, failedEvent.DiagnosticCode);
             Assert.NotEqual(ManagedElsaInstanceActivitySeverity.Informational, failedEvent.Severity);
         }
+    }
+
+    [Fact]
+    public async Task Activity_scopes_failure_code_to_the_failed_terminal_row()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-scope-failure-owner");
+
+        var (holdWorkspaceId, holdCreated) = await CreateReadyInstanceAsync(
+            app, client, "overview-scope-hold-runtime");
+        var holdOp = await RestartAsync(client, holdWorkspaceId, holdCreated.Instance.InstanceId, holdCreated.Instance.ETag, "overview-scope-hold");
+        await SeedAuditAsync(
+            app, holdWorkspaceId, holdCreated.Instance.InstanceId, 30_001, "lifecycle.accepted",
+            diagnosticCode: null, operationId: holdOp.OperationId);
+        await SeedAuditAsync(
+            app, holdWorkspaceId, holdCreated.Instance.InstanceId, 30_002, "lifecycle.entitlement-held",
+            ElsaInstanceCommercialOperation.EntitlementRequired, holdOp.OperationId);
+        await SetOperationStateAsync(
+            app, holdOp.OperationId, ElsaInstanceOperationState.EntitlementHeld,
+            ElsaInstanceCommercialOperation.EntitlementRequired, completed: false);
+
+        var holdActivity = await client.GetControlJsonAsync<ManagedElsaInstanceActivityResponse>(
+            $"/api/workspaces/{holdWorkspaceId:D}/instances/{holdCreated.Instance.InstanceId:D}/activity");
+        var holdAccepted = Assert.Single(holdActivity!.Items, item => item.Sequence == 30_001);
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Informational, holdAccepted.Severity);
+        Assert.NotEqual(ManagedElsaInstanceActivitySeverity.Failed, holdAccepted.Severity);
+        var holdRow = Assert.Single(holdActivity.Items, item => item.Sequence == 30_002);
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Warning, holdRow.Severity);
+        Assert.Equal(ElsaInstanceCommercialOperation.EntitlementRequired, holdRow.DiagnosticCode);
+        Assert.NotEqual(ManagedElsaInstanceActivitySeverity.Failed, holdRow.Severity);
+
+        var (cancelWorkspaceId, cancelCreated) = await CreateReadyInstanceAsync(
+            app, client, "overview-scope-cancel-runtime");
+        var cancelOp = await RestartAsync(
+            client, cancelWorkspaceId, cancelCreated.Instance.InstanceId, cancelCreated.Instance.ETag, "overview-scope-cancel");
+        await SeedAuditAsync(
+            app, cancelWorkspaceId, cancelCreated.Instance.InstanceId, 31_001, "lifecycle.accepted",
+            diagnosticCode: null, operationId: cancelOp.OperationId);
+        await SeedAuditAsync(
+            app, cancelWorkspaceId, cancelCreated.Instance.InstanceId, 31_002,
+            "lifecycle.recovery-superseded-by-delete",
+            ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded, cancelOp.OperationId);
+        await SetOperationStateAsync(
+            app, cancelOp.OperationId, ElsaInstanceOperationState.Cancelled,
+            ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded, completed: true);
+
+        var cancelActivity = await client.GetControlJsonAsync<ManagedElsaInstanceActivityResponse>(
+            $"/api/workspaces/{cancelWorkspaceId:D}/instances/{cancelCreated.Instance.InstanceId:D}/activity");
+        Assert.DoesNotContain(cancelActivity!.Items, item =>
+            item.Sequence is 31_001 or 31_002 &&
+            item.Severity == ManagedElsaInstanceActivitySeverity.Failed);
+        var cancelOverview = await client.GetControlJsonAsync<ManagedElsaInstanceOverviewResponse>(
+            $"/api/workspaces/{cancelWorkspaceId:D}/instances/{cancelCreated.Instance.InstanceId:D}/overview");
+        Assert.Equal(ElsaInstanceOperationState.Cancelled, cancelOverview!.LastOperation!.State);
+        Assert.Null(cancelOverview.LastOperation.FailureCode);
+
+        var (failWorkspaceId, failCreated) = await CreateReadyInstanceAsync(
+            app, client, "overview-scope-retry-runtime");
+        var failedOp = await RestartAsync(
+            client, failWorkspaceId, failCreated.Instance.InstanceId, failCreated.Instance.ETag, "overview-scope-fail");
+        await SeedAuditAsync(
+            app, failWorkspaceId, failCreated.Instance.InstanceId, 40_001, "lifecycle.accepted",
+            diagnosticCode: null, operationId: failedOp.OperationId);
+        await SeedAuditAsync(
+            app, failWorkspaceId, failCreated.Instance.InstanceId, 40_002, "lifecycle.reconciled",
+            ElsaInstanceProviderReconciliationService.UnavailableCode, failedOp.OperationId);
+        await SeedAuditAsync(
+            app, failWorkspaceId, failCreated.Instance.InstanceId, 40_003, "lifecycle.failed",
+            diagnosticCode: null, operationId: failedOp.OperationId,
+            newState: ElsaObservedLifecycle.Failed.ToString());
+        await SetOperationStateAsync(
+            app, failedOp.OperationId, ElsaInstanceOperationState.Failed, "resolution.failed", completed: true);
+
+        var failedOverview = await client.GetControlJsonAsync<ManagedElsaInstanceOverviewResponse>(
+            $"/api/workspaces/{failWorkspaceId:D}/instances/{failCreated.Instance.InstanceId:D}/overview");
+        Assert.Equal(ElsaInstanceOperationState.Failed, failedOverview!.LastOperation!.State);
+        Assert.Equal(
+            ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed,
+            failedOverview.LastOperation.FailureCode);
+
+        await SeedAuditAsync(
+            app, failWorkspaceId, failCreated.Instance.InstanceId, 40_004, "lifecycle.accepted",
+            diagnosticCode: null, operationId: failCreated.Operation.Id);
+        await SeedAuditAsync(
+            app, failWorkspaceId, failCreated.Instance.InstanceId, 40_005, "lifecycle.reconciled",
+            ElsaInstanceProviderReconciliationService.UnavailableCode, failCreated.Operation.Id);
+
+        var retryActivity = await client.GetControlJsonAsync<ManagedElsaInstanceActivityResponse>(
+            $"/api/workspaces/{failWorkspaceId:D}/instances/{failCreated.Instance.InstanceId:D}/activity");
+        var priorAccepted = Assert.Single(retryActivity!.Items, item => item.Sequence == 40_001);
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Informational, priorAccepted.Severity);
+        Assert.Null(priorAccepted.Message);
+        var priorChecking = Assert.Single(retryActivity.Items, item => item.Sequence == 40_002);
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Informational, priorChecking.Severity);
+        Assert.Equal("Checking deployment status", priorChecking.Message);
+        var failedRow = Assert.Single(retryActivity.Items, item => item.Sequence == 40_003);
+        Assert.Equal("lifecycle.failed", failedRow.EventType);
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Failed, failedRow.Severity);
+        Assert.Equal(ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, failedRow.DiagnosticCode);
+        var retryAccepted = Assert.Single(retryActivity.Items, item => item.Sequence == 40_004);
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Informational, retryAccepted.Severity);
+        var retryChecking = Assert.Single(retryActivity.Items, item => item.Sequence == 40_005);
+        Assert.Equal(ManagedElsaInstanceActivitySeverity.Informational, retryChecking.Severity);
+        Assert.Equal("Checking deployment status", retryChecking.Message);
     }
 
     [Fact]
@@ -1079,15 +1198,39 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
             $"UPDATE ElsaInstanceOperations SET State = {ElsaInstanceOperationState.Succeeded.ToString()}, CompletedAt = {completedAtTicks} WHERE Id = {operationId}");
     }
 
+    private static async Task<ManagedElsaInstanceOverviewOperationResponse> RestartAsync(
+        HttpClient client,
+        Guid workspaceId,
+        Guid instanceId,
+        string etag,
+        string key)
+    {
+        using var response = await client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/restart",
+            etag,
+            key));
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        return (await response.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>())!;
+    }
+
     private static async Task SetOperationFailureAsync(
         ControlApiTestApplication app,
         Guid operationId,
         ElsaInstanceOperationState state,
-        string failureCode)
+        string failureCode) =>
+        await SetOperationStateAsync(app, operationId, state, failureCode, completed: true);
+
+    private static async Task SetOperationStateAsync(
+        ControlApiTestApplication app,
+        Guid operationId,
+        ElsaInstanceOperationState state,
+        string? failureCode,
+        bool completed)
     {
         await using var scope = app.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
-        var completedAtTicks = DateTimeOffset.UtcNow.UtcTicks;
+        long? completedAtTicks = completed ? DateTimeOffset.UtcNow.UtcTicks : null;
         await db.Database.ExecuteSqlInterpolatedAsync($"""
             UPDATE ElsaInstanceOperations
             SET State = {state.ToString()},

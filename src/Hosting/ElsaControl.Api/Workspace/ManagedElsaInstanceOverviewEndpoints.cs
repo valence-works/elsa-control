@@ -585,18 +585,22 @@ public static class ManagedElsaInstanceOverviewEndpoints
         string? diagnosticCode,
         string? eventType = null,
         string? newState = null,
-        string? operationFailureCode = null)
+        string? operationFailureCode = null,
+        ElsaInstanceOperationState? operationState = null)
     {
-        // Precedence: warning set (diagnostic or operation FailureCode); then a real
-        // FailureCode, failed/health-failed, or terminal Failed / lifecycle.failed;
-        // then unavailable informational; everything else informational.
+        // Precedence: warning set (diagnostic or Failed-terminal FailureCode); then a
+        // real FailureCode / failed / health-failed / lifecycle.failed / terminal Failed
+        // when the operation is Failed (or there is no operation); then informational.
+        // FailureCode is not applied to cancelled, superseded, hold, or earlier rows.
         if (IsWarningActivityCode(diagnosticCode) || IsWarningActivityCode(operationFailureCode))
             return new(null, ManagedElsaInstanceActivitySeverity.Warning, DeploymentStatusUnclearMessage);
 
-        if (IsFailedReasonCode(diagnosticCode) ||
-            IsFailedReasonCode(operationFailureCode) ||
-            IsTerminalFailed(eventType, newState) ||
-            !string.IsNullOrWhiteSpace(operationFailureCode))
+        if (IsFailedReasonCode(diagnosticCode) || IsFailedReasonCode(operationFailureCode))
+            return FailedActivity(diagnosticCode ?? operationFailureCode);
+
+        var allowFailedOperation = operationState is null or ElsaInstanceOperationState.Failed;
+        if (allowFailedOperation &&
+            (IsTerminalFailed(eventType, newState) || !string.IsNullOrWhiteSpace(operationFailureCode)))
             return FailedActivity(diagnosticCode ?? operationFailureCode);
 
         if (IsInformationalActivityCode(diagnosticCode))
@@ -632,7 +636,7 @@ public static class ManagedElsaInstanceOverviewEndpoints
         string.Equals(code, ManagedLifecycleOperationalHealthDiagnosticCodes.Failed, StringComparison.Ordinal) ||
         string.Equals(code, ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed, StringComparison.Ordinal);
 
-    private static bool IsTerminalFailed(string? eventType, string? newState) =>
+    internal static bool IsTerminalFailed(string? eventType, string? newState) =>
         string.Equals(eventType, "lifecycle.failed", StringComparison.Ordinal) ||
         string.Equals(newState, ElsaObservedLifecycle.Failed.ToString(), StringComparison.Ordinal);
 
@@ -761,7 +765,7 @@ internal static class ManagedElsaInstanceOverviewProjection
                 lastOperation.Action,
                 lastOperation.State,
                 lastOperation.CompletedAt,
-                CustomerFailureCode(lastOperation.FailureCode)),
+                CustomerFailureCode(lastOperation)),
             new ManagedElsaInstanceOverviewAllowedActionsResponse(
                 ActionDecision(canMutate, hasActiveOperation, mutationDenial, restartGate),
                 ActionDecision(canMutate, hasActiveOperation, mutationDenial, applyGate),
@@ -780,7 +784,8 @@ internal static class ManagedElsaInstanceOverviewProjection
             item.DiagnosticCode,
             item.EventType,
             item.NewState,
-            operation?.FailureCode);
+            OperationTerminalFailureCode(item, operation),
+            operation?.State);
         return new(
             item.Sequence,
             item.EventType,
@@ -835,10 +840,29 @@ internal static class ManagedElsaInstanceOverviewProjection
         return new(true, null);
     }
 
-    private static string? CustomerFailureCode(string? failureCode) =>
-        ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
+    private static string? OperationTerminalFailureCode(
+        ElsaInstanceAuditEventSummary item,
+        ElsaInstanceOperationSummary? operation)
+    {
+        if (operation is not { State: ElsaInstanceOperationState.Failed })
+            return null;
+        return ManagedElsaInstanceOverviewEndpoints.IsTerminalFailed(item.EventType, item.NewState)
+            ? operation.FailureCode
+            : null;
+    }
+
+    private static string? CustomerFailureCode(ElsaInstanceOperationSummary operation)
+    {
+        if (operation.State != ElsaInstanceOperationState.Failed)
+            return null;
+        var mapped = ManagedElsaInstanceOverviewEndpoints.ClassifyCustomerActivity(
             diagnosticCode: null,
-            operationFailureCode: failureCode).DiagnosticCode;
+            operationFailureCode: operation.FailureCode,
+            operationState: operation.State);
+        return mapped.Severity == ManagedElsaInstanceActivitySeverity.Failed
+            ? mapped.DiagnosticCode
+            : null;
+    }
 }
 
 internal sealed class ReleaseVersionComparer : IComparer<string>
