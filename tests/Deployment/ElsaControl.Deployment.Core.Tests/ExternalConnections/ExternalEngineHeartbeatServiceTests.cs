@@ -117,6 +117,20 @@ public sealed class ExternalEngineHeartbeatServiceTests
         Assert.Throws<ArgumentException>(() => ExternalEngineHeartbeatService.CreateCanonicalPayload(report));
     }
 
+    [Fact]
+    public void Runner_lease_covers_three_max_interval_beats_inside_the_freshness_window()
+    {
+        Assert.True(ExternalEngineHeartbeatService.RunnerLeaseTtl
+            >= 3 * ExternalEngineHeartbeatService.MaxHeartbeatInterval);
+        Assert.True(ExternalEngineHeartbeatService.RunnerLeaseTtl + ExternalEngineHeartbeatService.MaxHeartbeatInterval
+            < ExternalEngineHeartbeatService.FreshnessWindow);
+        Assert.Equal(TimeSpan.FromSeconds(5), ExternalEngineHeartbeatService.MinimumInterval);
+        Assert.Equal(TimeSpan.FromSeconds(15), ExternalEngineHeartbeatService.DefaultHeartbeatInterval);
+        Assert.Equal(TimeSpan.FromSeconds(15), ExternalEngineHeartbeatService.MaxHeartbeatInterval);
+        Assert.Equal(TimeSpan.FromSeconds(45), ExternalEngineHeartbeatService.RunnerLeaseTtl);
+        Assert.Equal(TimeSpan.FromSeconds(90), ExternalEngineHeartbeatService.FreshnessWindow);
+    }
+
     [Theory]
     [InlineData("Acme\nOrders")]
     [InlineData("Acme\tOrders")]
@@ -126,6 +140,16 @@ public sealed class ExternalEngineHeartbeatServiceTests
     [InlineData("Acme\uFEFFOrders")]
     [InlineData("Acme\u2028Orders")]
     [InlineData("Acme\u2029Orders")]
+    [InlineData("Acme\u061COrders")]
+    [InlineData("Acme\u2060Orders")]
+    [InlineData("Acme\u2061Orders")]
+    [InlineData("Acme\u2062Orders")]
+    [InlineData("Acme\u2063Orders")]
+    [InlineData("Acme\u2064Orders")]
+    [InlineData("Acme\U000E0001Orders")]
+    [InlineData("Acme\U000E0020Orders")]
+    [InlineData("Acme\U000E0041Orders")]
+    [InlineData("Acme\U000E007FOrders")]
     public void Invalid_host_display_name_is_rejected(string displayName)
     {
         var report = Report(1) with { DisplayName = displayName };
@@ -365,7 +389,7 @@ public sealed class ExternalEngineHeartbeatServiceTests
             fixture.Request(Report(2, runnerId: ExternalEngineTestRunners.Bravo), key));
 
         Assert.Equal(ExternalEngineHeartbeatStatus.RunnerConflict, blocked!.Status);
-        Assert.Equal(TimeSpan.FromSeconds(9), blocked.RetryAfter);
+        Assert.Equal(ExternalEngineHeartbeatService.RunnerLeaseTtl - TimeSpan.FromSeconds(6), blocked.RetryAfter);
         Assert.Equal(acceptedSequence, fixture.Store.Connection.LastHeartbeatSequence);
         Assert.Equal(ExternalEngineTestRunners.Alpha, fixture.Store.Connection.ActiveRunnerId);
         Assert.Equal(acceptedLease, fixture.Store.Connection.RunnerLeaseExpiresAt);

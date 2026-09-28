@@ -12,7 +12,12 @@
   "clock": {
     "now": "2026-09-17T08:00:00.0000000Z",
     "maximumProofAgeSeconds": 300,
-    "maximumProofFutureSkewSeconds": 30
+    "maximumProofFutureSkewSeconds": 30,
+    "defaultHeartbeatIntervalSeconds": 15,
+    "minimumHeartbeatIntervalSeconds": 5,
+    "maximumHeartbeatIntervalSeconds": 15,
+    "runnerLeaseTtlSeconds": 45,
+    "freshnessWindowSeconds": 90
   },
   "keys": {
     "testOnly": true,

@@ -669,8 +669,9 @@ public sealed class ExternalEngineConnectionApiTests
             new ExternalEngineHeartbeatRequest(proof, report));
         Assert.Equal(HttpStatusCode.OK, heartbeat.StatusCode);
         var connected = await heartbeat.Content.ReadControlJsonAsync<ExternalEngineConnectionResponse>();
-        Assert.Equal(RunnerId, connected!.ActiveRunnerId);
-        Assert.NotNull(connected.RunnerLeaseExpiresAt);
+        Assert.Equal(1, connected!.LastHeartbeatSequence);
+        Assert.DoesNotContain("activeRunnerId", await heartbeat.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("runnerLeaseExpiresAt", await heartbeat.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
 
         var otherReport = report with { Sequence = 2, ObservedAt = DateTimeOffset.UtcNow, RunnerId = OtherRunnerId };
         var otherProof = Proof(
@@ -689,15 +690,33 @@ public sealed class ExternalEngineConnectionApiTests
         var conflictBody = await conflicted.Content.ReadAsStringAsync();
         Assert.Contains("external-engine.heartbeat.runner-conflict", conflictBody, StringComparison.Ordinal);
         Assert.True(int.TryParse(conflicted.Headers.RetryAfter?.ToString(), out var retryAfterSeconds));
-        Assert.InRange(retryAfterSeconds, 1, 15);
+        Assert.InRange(retryAfterSeconds, 1, (int)ExternalEngineHeartbeatService.RunnerLeaseTtl.TotalSeconds);
         var unchanged = await owner.GetControlJsonAsync<ExternalEngineConnectionResponse>(
             $"/api/workspaces/{workspace.Id:D}/external-engine-connections/{pairing.Connection.Id:D}");
         Assert.Equal(1, unchanged!.LastHeartbeatSequence);
-        Assert.Equal(RunnerId, unchanged.ActiveRunnerId);
+        using var unchangedRaw = await owner.GetAsync(
+            $"/api/workspaces/{workspace.Id:D}/external-engine-connections/{pairing.Connection.Id:D}");
+        var unchangedBody = await unchangedRaw.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("activeRunnerId", unchangedBody, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("runnerLeaseExpiresAt", unchangedBody, StringComparison.OrdinalIgnoreCase);
 
         using var nextKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         var nextPublicKey = ExternalEngineEnrollmentProtocol.ExportPublicKey(nextKey);
         var overlap = TimeSpan.FromMinutes(1);
+        var unsignedRotationProof = Proof(
+            identity!,
+            workspace.OrganizationId,
+            workspace.Id,
+            pairing.Connection.Id,
+            pairing.Enrollment.Audience,
+            ExternalEngineEnrollmentDefaults.RotationOperation,
+            ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, overlap, OtherRunnerId),
+            key) with { Signature = "not-a-signature" };
+        using var unsignedRotated = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/identity/rotate",
+            new ExternalEngineConnectorKeyRotationRequest(unsignedRotationProof, nextPublicKey, overlap, OtherRunnerId));
+        Assert.Equal(HttpStatusCode.Unauthorized, unsignedRotated.StatusCode);
+
         var rotationProof = Proof(
             identity!,
             workspace.OrganizationId,
@@ -716,7 +735,7 @@ public sealed class ExternalEngineConnectionApiTests
             await rotated.Content.ReadAsStringAsync(),
             StringComparison.Ordinal);
         Assert.True(int.TryParse(rotated.Headers.RetryAfter?.ToString(), out var rotateRetryAfter));
-        Assert.InRange(rotateRetryAfter, 1, 15);
+        Assert.InRange(rotateRetryAfter, 1, (int)ExternalEngineHeartbeatService.RunnerLeaseTtl.TotalSeconds);
     }
 
     private static ExternalEngineConnectorProof Proof(

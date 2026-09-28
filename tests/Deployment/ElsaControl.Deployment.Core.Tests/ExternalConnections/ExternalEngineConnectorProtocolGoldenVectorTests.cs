@@ -42,6 +42,22 @@ public sealed class ExternalEngineConnectorProtocolGoldenVectorTests
             $"\"maximumProofFutureSkewSeconds\": {(int)ExternalEngineEnrollmentDefaults.MaximumProofFutureSkew.TotalSeconds}",
             generated,
             StringComparison.Ordinal);
+        Assert.Contains(
+            $"\"defaultHeartbeatIntervalSeconds\": {(int)ExternalEngineHeartbeatService.DefaultHeartbeatInterval.TotalSeconds}",
+            generated,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"\"maximumHeartbeatIntervalSeconds\": {(int)ExternalEngineHeartbeatService.MaxHeartbeatInterval.TotalSeconds}",
+            generated,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"\"runnerLeaseTtlSeconds\": {(int)ExternalEngineHeartbeatService.RunnerLeaseTtl.TotalSeconds}",
+            generated,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"\"freshnessWindowSeconds\": {(int)ExternalEngineHeartbeatService.FreshnessWindow.TotalSeconds}",
+            generated,
+            StringComparison.Ordinal);
         Assert.Contains("\"testOnly\": true", generated, StringComparison.Ordinal);
         Assert.Contains("TEST ONLY", generated, StringComparison.Ordinal);
     }

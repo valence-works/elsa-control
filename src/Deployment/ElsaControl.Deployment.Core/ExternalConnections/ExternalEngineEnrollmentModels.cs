@@ -185,6 +185,23 @@ public sealed record ExternalEngineConnectorKeyRotationResult(
         new(null, null, true, retryAfter);
 }
 
+public sealed record ExternalEngineIdentityRotationStoreResult(
+    ExternalEngineConnectorIdentity? Identity,
+    bool RunnerConflict = false,
+    TimeSpan? RetryAfter = null)
+{
+    public bool Succeeded => Identity is not null && !RunnerConflict;
+
+    public static ExternalEngineIdentityRotationStoreResult Success(ExternalEngineConnectorIdentity identity) =>
+        new(identity);
+
+    public static ExternalEngineIdentityRotationStoreResult Failed() =>
+        new(Identity: null, RunnerConflict: false);
+
+    public static ExternalEngineIdentityRotationStoreResult DeniedByRunner(TimeSpan retryAfter) =>
+        new(Identity: null, RunnerConflict: true, RetryAfter: retryAfter);
+}
+
 public enum ExternalEngineEnrollmentStoreRedeemFailure
 {
     Missing,
@@ -236,12 +253,13 @@ public interface IExternalEngineEnrollmentStore
         Guid identityId,
         CancellationToken cancellationToken = default);
 
-    Task<ExternalEngineConnectorIdentity?> TryRotateIdentityAsync(
+    Task<ExternalEngineIdentityRotationStoreResult> TryRotateIdentityAsync(
         ExternalEngineConnectorIdentity expectedIdentity,
         string newPublicKey,
         string newPublicKeyThumbprint,
         DateTimeOffset rotatedAt,
         DateTimeOffset previousKeyValidUntil,
+        string runnerId,
         CancellationToken cancellationToken = default);
 
     Task<bool> TryRevokeIdentityAsync(

@@ -304,9 +304,7 @@ public static class ExternalEngineConnectionEndpoints
             ExternalEngineConnectionFreshness.Classify(value, DateTimeOffset.UtcNow),
             value.CreatedAt,
             value.UpdatedAt,
-            value.RevokedAt,
-            value.ActiveRunnerId,
-            value.RunnerLeaseExpiresAt);
+            value.RevokedAt);
 
     private static ExternalEnginePairingAttemptResponse ToPairingResponse(ExternalEnginePairingAttempt value) =>
         new(
@@ -334,7 +332,11 @@ public static class ExternalEngineConnectionEndpoints
 
     private static IResult RunnerConflict(HttpContext context, TimeSpan? retryAfter)
     {
-        var retryAfterSeconds = Math.Max(1, (int)Math.Ceiling((retryAfter ?? ExternalEngineHeartbeatService.RunnerLeaseTtl).TotalSeconds));
+        var ttlSeconds = (int)ExternalEngineHeartbeatService.RunnerLeaseTtl.TotalSeconds;
+        var retryAfterSeconds = Math.Clamp(
+            (int)Math.Ceiling((retryAfter ?? ExternalEngineHeartbeatService.RunnerLeaseTtl).TotalSeconds),
+            1,
+            ttlSeconds);
         context.Response.Headers.RetryAfter = retryAfterSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
         return Results.Problem(
             title: "Another runner holds the live lease for this connection.",

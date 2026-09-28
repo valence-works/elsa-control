@@ -52,12 +52,14 @@ public sealed class AddExternalEngineRunnerLease : Migration
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// The evidence backfill is intentionally irreversible. Down drops the lease
+    /// pair only and keeps the expanded audit-action constraint so existing
+    /// <c>external-engine.runner-changed</c> / <c>label-changed</c> rows stay
+    /// legal. Restoring the narrower CHECK would fail on those append-only rows.
+    /// </remarks>
     protected override void Down(MigrationBuilder migrationBuilder)
     {
-        migrationBuilder.DropCheckConstraint(
-            name: "CK_ExternalEngineConnectionAuditEvents_Action",
-            table: "ExternalEngineConnectionAuditEvents");
-
         migrationBuilder.DropCheckConstraint(
             name: "CK_ExternalEngineConnections_RunnerLease",
             table: "ExternalEngineConnections");
@@ -69,10 +71,5 @@ public sealed class AddExternalEngineRunnerLease : Migration
         migrationBuilder.DropColumn(
             name: "RunnerLeaseExpiresAt",
             table: "ExternalEngineConnections");
-
-        migrationBuilder.AddCheckConstraint(
-            name: "CK_ExternalEngineConnectionAuditEvents_Action",
-            table: "ExternalEngineConnectionAuditEvents",
-            sql: "Action IN ('Created', 'PairingIssued', 'RepairStarted', 'IdentityEnrolled', 'HeartbeatConnected', 'HeartbeatDegraded', 'HeartbeatRecovered', 'StudioDestinationConfirmed', 'Disconnected')");
     }
 }

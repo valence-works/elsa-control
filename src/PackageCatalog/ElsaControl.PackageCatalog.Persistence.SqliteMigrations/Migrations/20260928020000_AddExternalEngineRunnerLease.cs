@@ -14,10 +14,6 @@ public sealed class AddExternalEngineRunnerLease : Migration
         Action IN ('Created', 'PairingIssued', 'RepairStarted', 'IdentityEnrolled', 'HeartbeatConnected', 'HeartbeatDegraded', 'HeartbeatRecovered', 'StudioDestinationConfirmed', 'Disconnected', 'external-engine.runner-changed', 'external-engine.label-changed')
         """;
 
-    private const string PreviousActions = """
-        Action IN ('Created', 'PairingIssued', 'RepairStarted', 'IdentityEnrolled', 'HeartbeatConnected', 'HeartbeatDegraded', 'HeartbeatRecovered', 'StudioDestinationConfirmed', 'Disconnected')
-        """;
-
     /// <inheritdoc />
     protected override void Up(MigrationBuilder migrationBuilder)
     {
@@ -52,11 +48,14 @@ public sealed class AddExternalEngineRunnerLease : Migration
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// The evidence backfill is intentionally irreversible. Down drops the lease
+    /// columns only and leaves the expanded audit-action list in place so
+    /// existing <c>external-engine.runner-changed</c> / <c>label-changed</c>
+    /// rows do not fail the rebuild.
+    /// </remarks>
     protected override void Down(MigrationBuilder migrationBuilder)
     {
-        RebuildAuditEvents(migrationBuilder, PreviousActions);
-        RestoreAuditTriggers(migrationBuilder);
-
         migrationBuilder.Sql("""
             ALTER TABLE "ExternalEngineConnections" DROP COLUMN "ActiveRunnerId";
             ALTER TABLE "ExternalEngineConnections" DROP COLUMN "RunnerLeaseExpiresAt";

@@ -65,3 +65,13 @@ The private keys are **test fixtures**, not production secrets. They exist so Co
 - Proof `issuedAt` is Unix milliseconds inside the signed proof message.
 - Control accepts `issuedAt` up to 30 seconds ahead of its clock and up to five minutes behind it.
 - Single-use nonce consumption and strictly increasing heartbeat sequence numbers stay in force after signature verification. These vectors cover the signed messages only.
+
+## Heartbeat cadence and runner lease (normative)
+
+These numbers are part of protocol `"1"`. They are also published on the `clock` object in `vectors.json`.
+
+- The connector heartbeats **every 15 seconds by default**.
+- It MAY heartbeat as often as every **5 seconds** (the existing rate-limit floor).
+- It MUST NOT heartbeat less often than every **15 seconds**.
+- Control's runner lease TTL is **45 seconds** (3× the 15-second maximum). A different `runnerId` while that lease is live is rejected with HTTP 409 `external-engine.heartbeat.runner-conflict` and `Retry-After`.
+- Worst-case takeover after expiry is 45 seconds of lease plus one 15-second beat (**60 seconds**), which stays inside the **90-second** freshness window so a clean failover never projects stale.

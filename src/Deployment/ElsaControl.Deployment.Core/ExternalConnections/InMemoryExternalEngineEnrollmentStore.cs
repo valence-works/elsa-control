@@ -126,15 +126,17 @@ public sealed class InMemoryExternalEngineEnrollmentStore :
         }
     }
 
-    public Task<ExternalEngineConnectorIdentity?> TryRotateIdentityAsync(
+    public Task<ExternalEngineIdentityRotationStoreResult> TryRotateIdentityAsync(
         ExternalEngineConnectorIdentity expectedIdentity,
         string newPublicKey,
         string newPublicKeyThumbprint,
         DateTimeOffset rotatedAt,
         DateTimeOffset previousKeyValidUntil,
+        string runnerId,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(expectedIdentity);
+        _ = ExternalEngineEnrollmentProtocol.RequiredRunnerId(runnerId);
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
         {
@@ -143,7 +145,7 @@ public sealed class InMemoryExternalEngineEnrollmentStore :
                 || stored.KeyVersion != expectedIdentity.KeyVersion
                 || stored.RevokedAt is not null
                 || stored.PreviousKeyValidUntil > rotatedAt)
-                return Task.FromResult<ExternalEngineConnectorIdentity?>(null);
+                return Task.FromResult(ExternalEngineIdentityRotationStoreResult.Failed());
 
             var updated = stored with
             {
@@ -157,7 +159,7 @@ public sealed class InMemoryExternalEngineEnrollmentStore :
                 RotatedAt = rotatedAt.ToUniversalTime()
             };
             _identities[stored.Id] = updated;
-            return Task.FromResult<ExternalEngineConnectorIdentity?>(updated);
+            return Task.FromResult(ExternalEngineIdentityRotationStoreResult.Success(updated));
         }
     }
 

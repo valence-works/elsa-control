@@ -16,13 +16,18 @@ public sealed class ExternalEngineHeartbeatService(
     public const string StatusCapability = "connection.status";
     public const string StudioCapability = "studio.open";
     public static readonly TimeSpan FreshnessWindow = TimeSpan.FromSeconds(90);
+    /// <summary>Rate-limit floor. The connector MUST NOT heartbeat faster than this.</summary>
     public static readonly TimeSpan MinimumInterval = TimeSpan.FromSeconds(5);
+    /// <summary>Normative connector cadence. The connector heartbeats every 15 seconds by default.</summary>
+    public static readonly TimeSpan DefaultHeartbeatInterval = TimeSpan.FromSeconds(15);
+    /// <summary>Normative ceiling. The connector MUST NOT heartbeat less often than this.</summary>
+    public static readonly TimeSpan MaxHeartbeatInterval = TimeSpan.FromSeconds(15);
     /// <summary>
-    /// Server-constant runner lease TTL: 3× <see cref="MinimumInterval"/> and
-    /// always shorter than <see cref="FreshnessWindow"/> so a takeover finishes
-    /// before the connection projects stale.
+    /// Server-constant runner lease TTL: 3× <see cref="MaxHeartbeatInterval"/>.
+    /// Worst-case takeover is TTL plus one max-interval beat, which must stay
+    /// inside <see cref="FreshnessWindow"/> so a clean failover never projects stale.
     /// </summary>
-    public static readonly TimeSpan RunnerLeaseTtl = TimeSpan.FromSeconds(15);
+    public static readonly TimeSpan RunnerLeaseTtl = TimeSpan.FromSeconds(45);
     public const string RunnerChangedAuditAction = "external-engine.runner-changed";
     public const string LabelChangedAuditAction = "external-engine.label-changed";
     private static readonly TimeSpan MaximumFutureSkew = TimeSpan.FromMinutes(2);
@@ -322,10 +327,9 @@ public sealed class ExternalEngineHeartbeatService(
     /// <summary>
     /// Host labels are optional. When present they must already be trimmed, are
     /// NFC-normalized, then measured in Unicode code points (UTF-32 / Rune
-    /// count). Control characters, bidi overrides/isolates (U+202A–202E,
-    /// U+2066–2069), zero-width characters (U+200B–200F, U+FEFF), and
-    /// line/paragraph separators (U+2028/2029) are rejected. The NFC form is
-    /// what is stored and hashed.
+    /// count). Control, Unicode format (Cf), line/paragraph separator, private-use,
+    /// surrogate, and unassigned runes are rejected. The NFC form is what is
+    /// stored and hashed.
     /// </summary>
     public static string? NormalizeHostDisplayName(string? value)
     {
@@ -350,15 +354,15 @@ public sealed class ExternalEngineHeartbeatService(
         return normalized;
     }
 
-    private static bool IsForbiddenDisplayNameRune(Rune rune)
-    {
-        var value = rune.Value;
-        return Rune.IsControl(rune)
-            || value is >= 0x202A and <= 0x202E
-            || value is >= 0x2066 and <= 0x2069
-            || value is >= 0x200B and <= 0x200F
-            || value is 0xFEFF or 0x2028 or 0x2029;
-    }
+    private static bool IsForbiddenDisplayNameRune(Rune rune) =>
+        Rune.GetUnicodeCategory(rune) is
+            UnicodeCategory.Control
+            or UnicodeCategory.Format
+            or UnicodeCategory.LineSeparator
+            or UnicodeCategory.ParagraphSeparator
+            or UnicodeCategory.PrivateUse
+            or UnicodeCategory.Surrogate
+            or UnicodeCategory.OtherNotAssigned;
 
     public static bool HasLiveRunnerLease(ExternalEngineConnection connection, DateTimeOffset now) =>
         connection.ActiveRunnerId is not null
@@ -368,6 +372,8 @@ public sealed class ExternalEngineHeartbeatService(
     public static TimeSpan RemainingLease(ExternalEngineConnection connection, DateTimeOffset now)
     {
         var remaining = (connection.RunnerLeaseExpiresAt ?? now) - now;
+        if (remaining > RunnerLeaseTtl)
+            remaining = RunnerLeaseTtl;
         return remaining > TimeSpan.Zero ? remaining : TimeSpan.FromSeconds(1);
     }
 

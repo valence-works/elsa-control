@@ -578,6 +578,8 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
     private static TimeSpan RemainingLease(ExternalEngineConnectionEntity entity, DateTimeOffset now)
     {
         var remaining = (entity.RunnerLeaseExpiresAt ?? now) - now;
+        if (remaining > ExternalEngineHeartbeatService.RunnerLeaseTtl)
+            remaining = ExternalEngineHeartbeatService.RunnerLeaseTtl;
         return remaining > TimeSpan.Zero ? remaining : TimeSpan.FromSeconds(1);
     }
 }
