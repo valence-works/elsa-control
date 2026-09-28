@@ -509,6 +509,59 @@ public sealed class ExternalEngineConnectionApiTests
         Assert.Equal("valence-runtime", connected.ObservedDistribution);
         Assert.Equal("3.8.1", connected.ObservedVersion);
         Assert.Equal("server", connected.ObservedRuntimeKind);
+        Assert.Equal("Customer host", connected.DisplayName);
+    }
+
+    [Fact]
+    public async Task Connector_heartbeat_display_name_replaces_the_pairing_label()
+    {
+        await using var app = new ControlApiTestApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var owner = app.CreateTrustedWorkspaceClient("connector-display-name-owner");
+        var context = await owner.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces");
+        var workspace = Assert.Single(context!.Workspaces);
+        using var created = await CreateAsync(owner, workspace.Id, "Pairing label", "display-name-engine");
+        var pairing = (await created.Content.ReadControlJsonAsync<ExternalEnginePairingAttemptResponse>())!;
+        Assert.Equal("Pairing label", pairing.Connection.DisplayName);
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var redemption = Redemption(pairing, workspace.OrganizationId, workspace.Id, key);
+        using var redeemed = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/enrollment/redeem", redemption);
+        var identity = await redeemed.Content.ReadControlJsonAsync<ExternalEngineConnectorIdentityResponse>();
+        Assert.NotNull(identity);
+
+        var report = new ExternalEngineHeartbeatReport(
+            1,
+            DateTimeOffset.UtcNow,
+            ExternalEngineHeartbeatService.CurrentProtocol,
+            "1.4.0",
+            ExternalEngineRuntimeHealth.Healthy,
+            "server",
+            "elsa-oss",
+            "3.8.4",
+            null,
+            [ExternalEngineHeartbeatService.StatusCapability],
+            [],
+            "Acme Orders Engine");
+        var proof = Proof(
+            identity!,
+            workspace.OrganizationId,
+            workspace.Id,
+            pairing.Connection.Id,
+            pairing.Enrollment.Audience,
+            ExternalEngineHeartbeatService.HeartbeatOperation,
+            ExternalEngineHeartbeatService.CreatePayloadDigest(report),
+            key);
+        using var heartbeat = await owner.PostControlJsonAsync(
+            $"/api/runtime/external-engine-connections/{pairing.Connection.Id:D}/heartbeat",
+            new ExternalEngineHeartbeatRequest(proof, report));
+
+        Assert.Equal(HttpStatusCode.OK, heartbeat.StatusCode);
+        var connected = await heartbeat.Content.ReadControlJsonAsync<ExternalEngineConnectionResponse>();
+        Assert.Equal("Acme Orders Engine", connected!.DisplayName);
+        Assert.Equal(ExternalEngineReleaseEvidenceLevel.SelfReported, connected.ReleaseEvidenceLevel);
+        Assert.Null(connected.ReleaseEvidenceReference);
+        Assert.Equal("elsa-oss", connected.ObservedDistribution);
     }
 
     private static ExternalEngineConnectorProof Proof(

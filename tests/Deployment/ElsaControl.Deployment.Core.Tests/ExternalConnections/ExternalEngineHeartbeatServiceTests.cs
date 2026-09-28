@@ -64,6 +64,91 @@ public sealed class ExternalEngineHeartbeatServiceTests
     }
 
     [Fact]
+    public void Optional_display_name_is_omitted_from_canonical_bytes_unless_present()
+    {
+        var absent = Report(1);
+        var present = Report(1) with { DisplayName = "  Acme Orders Engine  " };
+
+        Assert.Equal(
+            Encoding.UTF8.GetString(ExternalEngineHeartbeatService.CreateCanonicalPayload(absent)),
+            Encoding.UTF8.GetString(ExternalEngineHeartbeatService.CreateCanonicalPayload(Report(1))));
+        Assert.DoesNotContain("displayName", Encoding.UTF8.GetString(ExternalEngineHeartbeatService.CreateCanonicalPayload(absent)), StringComparison.Ordinal);
+        Assert.Equal(
+            "{\"sequence\":1,\"observedAt\":\"2026-09-17T10:00:00.0000000Z\",\"connectorProtocol\":\"1\",\"connectorVersion\":\"1.4.0\",\"displayName\":\"Acme Orders Engine\",\"runtimeHealth\":\"healthy\",\"runtimeKind\":\"server\",\"observedDistribution\":\"valence-runtime\",\"observedVersion\":\"3.8.1\",\"studioDestination\":\"https://studio.example.test/elsa/\",\"capabilities\":[\"connection.status\"],\"components\":[]}",
+            Encoding.UTF8.GetString(ExternalEngineHeartbeatService.CreateCanonicalPayload(present)));
+    }
+
+    [Theory]
+    [InlineData("E")]
+    [InlineData("Acme Orders Engine")]
+    public async Task Host_display_name_replaces_the_pairing_label_and_does_not_change_evidence(string displayName)
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var fixture = await Fixture.CreateAsync(key);
+        Assert.Equal("Engine", fixture.Store.Connection.DisplayName);
+        var report = Report(1, components: [new("runtime", ImageDigest)]) with { DisplayName = displayName };
+
+        var result = await fixture.Service.SubmitAsync(fixture.Request(report, key));
+
+        Assert.Equal(ExternalEngineHeartbeatStatus.Accepted, result!.Status);
+        Assert.Equal(displayName, result.Connection!.DisplayName);
+        Assert.Equal(ExternalEngineReleaseEvidenceLevel.SelfReported, result.Connection.ReleaseEvidenceLevel);
+        Assert.Null(result.Connection.ReleaseEvidenceReference);
+    }
+
+    [Fact]
+    public async Task Absent_host_display_name_leaves_the_pairing_label_unchanged()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var fixture = await Fixture.CreateAsync(key);
+        var result = await fixture.Service.SubmitAsync(fixture.Request(Report(1), key));
+
+        Assert.Equal(ExternalEngineHeartbeatStatus.Accepted, result!.Status);
+        Assert.Equal("Engine", result.Connection!.DisplayName);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Blank_host_display_name_is_treated_as_absent(string displayName)
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var fixture = await Fixture.CreateAsync(key);
+        var result = await fixture.Service.SubmitAsync(fixture.Request(Report(1) with { DisplayName = displayName }, key));
+
+        Assert.Equal(ExternalEngineHeartbeatStatus.Accepted, result!.Status);
+        Assert.Equal("Engine", result.Connection!.DisplayName);
+    }
+
+    [Theory]
+    [InlineData("Acme\nOrders")]
+    [InlineData("Acme\tOrders")]
+    public void Invalid_host_display_name_is_rejected(string displayName)
+    {
+        var report = Report(1) with { DisplayName = displayName };
+        Assert.Throws<ArgumentException>(() => ExternalEngineHeartbeatService.CreateCanonicalPayload(report));
+    }
+
+    [Fact]
+    public void Display_name_longer_than_eighty_characters_is_rejected()
+    {
+        var report = Report(1) with { DisplayName = new string('x', 81) };
+        Assert.Throws<ArgumentException>(() => ExternalEngineHeartbeatService.CreateCanonicalPayload(report));
+    }
+
+    [Fact]
+    public async Task Eighty_character_host_display_name_is_accepted()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var fixture = await Fixture.CreateAsync(key);
+        var displayName = new string('A', 80);
+
+        var result = await fixture.Service.SubmitAsync(fixture.Request(Report(1) with { DisplayName = displayName }, key));
+
+        Assert.Equal(displayName, result!.Connection!.DisplayName);
+    }
+
+    [Fact]
     public async Task Version_only_or_mismatched_component_evidence_stays_self_reported()
     {
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
@@ -369,6 +454,7 @@ public sealed class ExternalEngineHeartbeatServiceTests
                 LastAuthenticatedAt = receivedAt,
                 ConnectorProtocol = projection.ConnectorProtocol,
                 ConnectorVersion = projection.ConnectorVersion,
+                DisplayName = projection.DisplayName ?? Connection.DisplayName,
                 ObservedDistribution = projection.ObservedDistribution,
                 ObservedVersion = projection.ObservedVersion,
                 ObservedRuntimeKind = projection.ObservedRuntimeKind,

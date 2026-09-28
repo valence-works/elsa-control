@@ -189,6 +189,59 @@
       }
     },
     {
+      "id": "heartbeat.valid-display-name",
+      "kind": "heartbeat",
+      "description": "Valid heartbeat proof over the protocol-v1 canonical report with a host displayName.",
+      "domain": "elsa-control.external-engine-connector.proof.v1",
+      "inputs": {
+        "identityId": "50000000-0000-0000-0000-000000000001",
+        "organizationId": "10000000-0000-0000-0000-000000000001",
+        "workspaceId": "20000000-0000-0000-0000-000000000001",
+        "connectionId": "30000000-0000-0000-0000-000000000001",
+        "audience": "urn:elsa:external-engine-connector:30000000-0000-0000-0000-000000000001",
+        "keyVersion": 1,
+        "operation": "external-engine.heartbeat.submit",
+        "payloadDigest": "yzepd3HRTRlUwbjapc-RxPl7anf7Oh_-bdRF0bcj2K4",
+        "issuedAt": "2026-09-17T08:00:00.0000000Z",
+        "issuedAtUnixMilliseconds": 1789632000000,
+        "nonce": "REREREREREREREREREREREREREREREREREREREREREQ",
+        "report": {
+          "sequence": 1,
+          "observedAt": "2026-09-17T10:00:00.0000000Z",
+          "connectorProtocol": "1",
+          "connectorVersion": "1.4.0",
+          "displayName": "Acme Orders Engine",
+          "runtimeHealth": "healthy",
+          "runtimeKind": "server",
+          "observedDistribution": "valence-runtime",
+          "observedVersion": "3.8.1",
+          "studioDestination": "https://studio.example.test/elsa/",
+          "capabilities": [
+            "connection.status",
+            "studio.open"
+          ],
+          "components": [
+            {
+              "id": "runtime",
+              "imageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "id": "worker",
+              "imageDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          ]
+        }
+      },
+      "canonicalPayloadHex": "0000002F656C73612D636F6E74726F6C2E65787465726E616C2D656E67696E652D636F6E6E6563746F722E70726F6F662E76310000002435303030303030302D303030302D303030302D303030302D3030303030303030303030310000002431303030303030302D303030302D303030302D303030302D3030303030303030303030310000002432303030303030302D303030302D303030302D303030302D3030303030303030303030310000002433303030303030302D303030302D303030302D303030302D3030303030303030303030310000004775726E3A656C73613A65787465726E616C2D656E67696E652D636F6E6E6563746F723A33303030303030302D303030302D303030302D303030302D30303030303030303030303100000001310000002065787465726E616C2D656E67696E652E6865617274626561742E7375626D69740000002B797A65706433485254526C5577626A6170632D5278506C37616E66374F685F2D626452463062636A324B340000000D313738393633323030303030300000002B52455245524552455245524552455245524552455245524552455245524552455245524552455245524551",
+      "reportCanonicalPayloadHex": "7B2273657175656E6365223A312C226F627365727665644174223A22323032362D30392D31375431303A30303A30302E303030303030305A222C22636F6E6E6563746F7250726F746F636F6C223A2231222C22636F6E6E6563746F7256657273696F6E223A22312E342E30222C22646973706C61794E616D65223A2241636D65204F726465727320456E67696E65222C2272756E74696D654865616C7468223A226865616C746879222C2272756E74696D654B696E64223A22736572766572222C226F62736572766564446973747269627574696F6E223A2276616C656E63652D72756E74696D65222C226F6273657276656456657273696F6E223A22332E382E31222C2273747564696F44657374696E6174696F6E223A2268747470733A2F2F73747564696F2E6578616D706C652E746573742F656C73612F222C226361706162696C6974696573223A5B22636F6E6E656374696F6E2E737461747573222C2273747564696F2E6F70656E225D2C22636F6D706F6E656E7473223A5B7B226964223A2272756E74696D65222C22696D616765446967657374223A227368613235363A61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161227D2C7B226964223A22776F726B6572222C22696D616765446967657374223A227368613235363A62626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262227D5D7D",
+      "reportCanonicalPayloadUtf8": "{\"sequence\":1,\"observedAt\":\"2026-09-17T10:00:00.0000000Z\",\"connectorProtocol\":\"1\",\"connectorVersion\":\"1.4.0\",\"displayName\":\"Acme Orders Engine\",\"runtimeHealth\":\"healthy\",\"runtimeKind\":\"server\",\"observedDistribution\":\"valence-runtime\",\"observedVersion\":\"3.8.1\",\"studioDestination\":\"https://studio.example.test/elsa/\",\"capabilities\":[\"connection.status\",\"studio.open\"],\"components\":[{\"id\":\"runtime\",\"imageDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},{\"id\":\"worker\",\"imageDigest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]}",
+      "payloadDigest": "yzepd3HRTRlUwbjapc-RxPl7anf7Oh_-bdRF0bcj2K4",
+      "signatureBase64Url": "rWljQy6OZKsnKkiHMtkN4TrJJyn2Ij4rEkDVnEOspxsQuUIpwPWNT62AY9qO1nqymIninoDt6m8UVRN70VcP0Q",
+      "expected": {
+        "signatureValid": true
+      }
+    },
+    {
       "id": "rotate.valid",
       "kind": "rotate",
       "description": "Valid current-key rotation proof bound to the next public key and overlap.",

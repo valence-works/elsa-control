@@ -119,6 +119,11 @@ internal static class ExternalEngineConnectorProtocolGoldenVectors
         var heartbeatDigest = ExternalEngineHeartbeatService.CreatePayloadDigest(heartbeatReport);
         var heartbeatProof = Proof(ExternalEngineHeartbeatService.HeartbeatOperation, heartbeatDigest, Repeat(0x11, 32));
         var heartbeatPayload = ExternalEngineEnrollmentProtocol.CreateConnectorProofPayload(heartbeatProof);
+        var namedHeartbeatReport = heartbeatReport with { DisplayName = "Acme Orders Engine" };
+        var namedHeartbeatReportBytes = ExternalEngineHeartbeatService.CreateCanonicalPayload(namedHeartbeatReport);
+        var namedHeartbeatDigest = ExternalEngineHeartbeatService.CreatePayloadDigest(namedHeartbeatReport);
+        var namedHeartbeatProof = Proof(ExternalEngineHeartbeatService.HeartbeatOperation, namedHeartbeatDigest, Repeat(0x44, 32));
+        var namedHeartbeatPayload = ExternalEngineEnrollmentProtocol.CreateConnectorProofPayload(namedHeartbeatProof);
 
         var rotationDigest = ExternalEngineEnrollmentProtocol.CreateRotationPayloadDigest(nextPublicKey, RotationOverlap);
         var rotateProof = Proof(ExternalEngineEnrollmentDefaults.RotationOperation, rotationDigest, Repeat(0x22, 32));
@@ -174,6 +179,18 @@ internal static class ExternalEngineConnectorProtocolGoldenVectors
                 committedSignatures,
                 heartbeatReportBytes,
                 heartbeatDigest),
+            Complete(
+                "heartbeat.valid-display-name",
+                "heartbeat",
+                "Valid heartbeat proof over the protocol-v1 canonical report with a host displayName.",
+                ExternalEngineEnrollmentProtocol.ConnectorProofDomain,
+                HeartbeatInputs(namedHeartbeatProof, namedHeartbeatReportBytes, namedHeartbeatDigest),
+                namedHeartbeatPayload,
+                currentKey,
+                mutateSignature: false,
+                committedSignatures,
+                namedHeartbeatReportBytes,
+                namedHeartbeatDigest),
             Complete(
                 "rotate.valid",
                 "rotate",

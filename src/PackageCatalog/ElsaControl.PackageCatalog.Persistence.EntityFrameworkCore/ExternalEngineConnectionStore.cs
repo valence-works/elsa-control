@@ -337,6 +337,8 @@ public sealed class EfCoreExternalEngineConnectionStore(CatalogDbContext dbConte
         entity.LastHeartbeatObservedAt = projection.ObservedAt.ToUniversalTime();
         entity.ConnectorProtocol = projection.ConnectorProtocol;
         entity.ConnectorVersion = projection.ConnectorVersion;
+        if (projection.DisplayName is not null)
+            entity.DisplayName = projection.DisplayName;
         entity.ObservedDistribution = projection.ObservedDistribution;
         entity.ObservedVersion = projection.ObservedVersion;
         entity.ObservedRuntimeKind = projection.ObservedRuntimeKind;

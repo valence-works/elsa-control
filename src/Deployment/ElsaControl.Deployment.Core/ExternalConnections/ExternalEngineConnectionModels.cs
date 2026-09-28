@@ -192,7 +192,8 @@ public sealed record ExternalEngineHeartbeatReport(
     string? ObservedVersion,
     string? StudioDestination,
     IReadOnlyList<string> Capabilities,
-    IReadOnlyList<ExternalEngineComponentObservation> Components);
+    IReadOnlyList<ExternalEngineComponentObservation> Components,
+    string? DisplayName = null);
 
 public sealed record ExternalEngineHeartbeatRequest(
     ExternalEngineConnectorProof Proof,
@@ -212,7 +213,8 @@ public sealed record ExternalEngineHeartbeatProjection(
     ExternalEngineReleaseEvidenceLevel ReleaseEvidenceLevel,
     string? ReleaseEvidenceReference,
     string? StudioDestinationCandidate,
-    IReadOnlyList<string> Capabilities);
+    IReadOnlyList<string> Capabilities,
+    string? DisplayName = null);
 
 public enum ExternalEngineStudioDestinationConfirmationStatus
 {

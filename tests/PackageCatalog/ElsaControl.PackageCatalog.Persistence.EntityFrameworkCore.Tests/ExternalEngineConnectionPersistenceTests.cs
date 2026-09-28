@@ -217,13 +217,15 @@ public sealed class ExternalEngineConnectionPersistenceTests : IAsyncLifetime
             ExternalEngineReleaseEvidenceLevel.VerifiedManifest,
             "manifest-sha256",
             "https://studio.example.test/",
-            [ExternalEngineHeartbeatService.StatusCapability]);
+            [ExternalEngineHeartbeatService.StatusCapability],
+            "Acme Orders Engine");
 
         var applied = await store.TryApplyHeartbeatAsync(
             current, projection, identityId, Now.AddMinutes(2), TimeSpan.FromSeconds(5));
 
         Assert.Equal(ExternalEngineHeartbeatStoreStatus.Applied, applied.Status);
-        Assert.Equal(1, applied.Connection!.LastHeartbeatSequence);
+        Assert.Equal("Acme Orders Engine", applied.Connection!.DisplayName);
+        Assert.Equal(1, applied.Connection.LastHeartbeatSequence);
         Assert.Equal(projection.ObservedAt, applied.Connection.LastHeartbeatObservedAt);
         Assert.Equal("server", applied.Connection.ObservedRuntimeKind);
         Assert.Equal("manifest-sha256", applied.Connection.ReleaseEvidenceReference);

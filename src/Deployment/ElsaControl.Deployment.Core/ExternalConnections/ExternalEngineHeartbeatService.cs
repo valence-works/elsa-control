@@ -100,7 +100,8 @@ public sealed class ExternalEngineHeartbeatService(
             StudioDestinationCandidate: acceptedCapabilities.Contains(StudioCapability, StringComparer.Ordinal)
                 ? report.StudioDestination
                 : null,
-            acceptedCapabilities);
+            acceptedCapabilities,
+            report.DisplayName);
 
         for (var attempt = 0; attempt < 2; attempt++)
         {
@@ -158,6 +159,8 @@ public sealed class ExternalEngineHeartbeatService(
             writer.WriteString("observedAt", normalized.ObservedAt.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", CultureInfo.InvariantCulture));
             writer.WriteString("connectorProtocol", normalized.ConnectorProtocol);
             writer.WriteString("connectorVersion", normalized.ConnectorVersion);
+            if (normalized.DisplayName is not null)
+                writer.WriteString("displayName", normalized.DisplayName);
             writer.WriteString("runtimeHealth", normalized.RuntimeHealth switch
             {
                 ExternalEngineRuntimeHealth.Unknown => "unknown",
@@ -227,6 +230,7 @@ public sealed class ExternalEngineHeartbeatService(
         var runtimeKind = Required(report.RuntimeKind, 64, nameof(report.RuntimeKind));
         var distribution = Optional(report.ObservedDistribution, 128, nameof(report.ObservedDistribution));
         var version = Optional(report.ObservedVersion, 128, nameof(report.ObservedVersion));
+        var displayName = Optional(report.DisplayName, 80, nameof(report.DisplayName));
         if ((distribution is null) != (version is null))
             throw new ArgumentException("Observed distribution and version must be supplied together.", nameof(report));
 
@@ -262,7 +266,8 @@ public sealed class ExternalEngineHeartbeatService(
             ObservedVersion = version,
             StudioDestination = NormalizeStudioDestination(report.StudioDestination),
             Capabilities = capabilities,
-            Components = components
+            Components = components,
+            DisplayName = displayName
         };
     }
 
