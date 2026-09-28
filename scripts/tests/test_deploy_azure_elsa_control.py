@@ -41,6 +41,8 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         self.assertIn("--template-file infra/main.bicep", self.source)
         self.assertIn("az deployment group create", self.source)
         self.assertIn("--template-file infra/api/api-website.module.bicep", self.source)
+        self.assertIn("pairingallowedorganizationids_value", self.source)
+        self.assertIn("EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS", self.source)
         self.assertIn("IMAGE=\"$IMAGE_REPOSITORY@$IMAGE_DIGEST\"", self.source)
         self.assertIn("AZURE_CONTAINER_REGISTRY_ENDPOINT", self.source)
         self.assertIn("CONTROL_SQL_SQLSERVERFQDN", self.source)

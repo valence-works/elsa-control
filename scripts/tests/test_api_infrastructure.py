@@ -50,7 +50,13 @@ EGRESS_SUBNET_ID = (
 )
 
 
-def parameter_file(module_path: Path, parameter_directory: Path, provisioner_id: str, egress_subnet_id: str = "") -> str:
+def parameter_file(
+    module_path: Path,
+    parameter_directory: Path,
+    provisioner_id: str,
+    egress_subnet_id: str = "",
+    pairing_allowed_organization_ids: str = "",
+) -> str:
     """Return a synthetic, non-secret parameter file for Bicep snapshot evaluation."""
 
     using_path = os.path.relpath(module_path, start=parameter_directory).replace(os.sep, "/")
@@ -75,6 +81,7 @@ def parameter_file(module_path: Path, parameter_directory: Path, provisioner_id:
         "api_identity_outputs_clientid": API_CLIENT_ID,
         "provisioner_identity_outputs_id": provisioner_id,
         "api_egress_subnet_id": egress_subnet_id,
+        "pairingallowedorganizationids_value": pairing_allowed_organization_ids,
     }
     lines = [f"using '{using_path}'", ""]
     lines.extend(f"param {name} = '{value}'" for name, value in values.items())
@@ -100,6 +107,7 @@ class ApiInfrastructureTests(unittest.TestCase):
             f"Server=tcp:sql.example,1433;Encrypt=True;TrustServerCertificate=False;Authentication=Active Directory Managed Identity;User Id={API_CLIENT_ID};Database=Catalog",
         )
         self.assertEqual(settings["Authentication__Admin__AllowAuthenticatedCustomerSession"], "false")
+        self.assertFalse(any(name.startswith("ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__") for name in settings))
 
     @staticmethod
     def generated_api_module() -> str:
@@ -130,6 +138,19 @@ class ApiInfrastructureTests(unittest.TestCase):
             re.DOTALL,
         )
         generated = optional_parameter.sub("", module, count=1)
+        pairing_parameter = re.compile(
+            r"\n@description\('Comma-separated organization GUIDs allowed to create or repair.*?"
+            r"\nparam pairingallowedorganizationids_value string = ''\n"
+            r"\nvar pairingAllowedOrganizationIds = empty\(pairingallowedorganizationids_value\) \? \[\] : split\(pairingallowedorganizationids_value, ','\)\n"
+            r"\nvar pairingAllowlistSettings = \[for \(organizationId, i\) in pairingAllowedOrganizationIds: \{\n"
+            r"  name: 'ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__\$\{i\}'\n"
+            r"  value: organizationId\n"
+            r"\}\]\n",
+            re.DOTALL,
+        )
+        generated = pairing_parameter.sub("", generated, count=1)
+        generated = generated.replace("      appSettings: concat(\n        [", "      appSettings: [", 1)
+        generated = generated.replace("        ],\n        pairingAllowlistSettings)", "      ]", 1)
         egress_parameter = re.compile(
             r"\n@description\('Optional resource ID of the delegated App Service integration subnet.*?"
             r"\nparam api_egress_subnet_id string = ''\n",
@@ -162,14 +183,28 @@ class ApiInfrastructureTests(unittest.TestCase):
             count=1,
         )
 
-    def snapshot(self, directory: Path, provisioner_id: str, egress_subnet_id: str = "") -> dict:
+    def snapshot(
+        self,
+        directory: Path,
+        provisioner_id: str,
+        egress_subnet_id: str = "",
+        pairing_allowed_organization_ids: str = "",
+    ) -> dict:
         """Evaluate the actual module with Bicep's offline deployment snapshot."""
 
         if shutil.which("az") is None:
             self.fail("Azure CLI is required for offline Bicep snapshot evaluation.")
 
         parameter_path = directory / ("api-with-provisioner.bicepparam" if provisioner_id else "api-default.bicepparam")
-        parameter_path.write_text(parameter_file(API_MODULE, directory, provisioner_id, egress_subnet_id))
+        parameter_path.write_text(
+            parameter_file(
+                API_MODULE,
+                directory,
+                provisioner_id,
+                egress_subnet_id,
+                pairing_allowed_organization_ids,
+            )
+        )
         result = subprocess.run(
             [
                 "az",
@@ -226,6 +261,17 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertEqual(attached["virtualNetworkSubnetId"], EGRESS_SUBNET_ID)
         self.assertTrue(attached["siteConfig"]["vnetRouteAllEnabled"])
 
+    def test_bicep_module_emits_indexed_pairing_allowlist_settings(self) -> None:
+        first = "11111111-1111-1111-1111-111111111111"
+        second = "22222222-2222-2222-2222-222222222222"
+        with tempfile.TemporaryDirectory() as temporary:
+            webapp = self.webapp(
+                self.snapshot(Path(temporary), "", pairing_allowed_organization_ids=f"{first},{second}")
+            )
+        settings = {setting["name"]: setting["value"] for setting in webapp["properties"]["siteConfig"]["appSettings"]}
+        self.assertEqual(settings["ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__0"], first)
+        self.assertEqual(settings["ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__1"], second)
+
     def test_bicep_module_evaluates_only_supplied_provisioner_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             webapp = self.webapp(self.snapshot(Path(temporary), PROVISIONER_ID))
@@ -248,6 +294,9 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("Authentication__CloudAccount__Issuer", module)
         self.assertIn("Authentication__CloudAccount__Audience", module)
         self.assertIn("param api_egress_subnet_id string = ''", module)
+        self.assertIn("param pairingallowedorganizationids_value string = ''", module)
+        self.assertIn("ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__", module)
+        self.assertIn("pairingAllowlistSettings", module)
         self.assertIn("virtualNetworkSubnetId: empty(api_egress_subnet_id) ? null : api_egress_subnet_id", module)
         self.assertIn("      vnetRouteAllEnabled: !empty(api_egress_subnet_id)", module)
         self.assertRegex(
@@ -263,7 +312,9 @@ class ApiInfrastructureTests(unittest.TestCase):
             r"\{\{ else \}\}\s+param provisioner_identity_outputs_id = ''\s+\{\{ end \}\}",
         )
         self.assertIn("param cloudaccountissuer_value = ''", parameters)
+        self.assertIn("param pairingallowedorganizationids_value = ''", parameters)
         self.assertNotIn(".Env.CLOUD_ACCOUNT_ISSUER", parameters)
+        self.assertNotIn(".Env.EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS", parameters)
         self.assertIn("same Microsoft Entra tenant", module)
         self.assertIn("userAssignedIdentities: union(", module)
         self.assertIn("empty(provisioner_identity_outputs_id)", module)
@@ -299,6 +350,9 @@ class ApiInfrastructureTests(unittest.TestCase):
 
         self.assertIn("AZURE_PROVISIONER_IDENTITY_ID", documentation)
         self.assertIn("AZURE_API_EGRESS_SUBNET_ID", documentation)
+        self.assertIn("EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS", documentation)
+        self.assertIn("STAGING_SMOKE_OWNER_ORGANIZATION_ID", documentation)
+        self.assertIn("`test` GitHub environment", documentation)
         self.assertIn("same Microsoft Entra tenant", documentation)
         self.assertIn("restarts the app", documentation)
         self.assertIn("AZURE_CLIENT_ID` remains", documentation)
@@ -329,11 +383,13 @@ class ApiInfrastructureTests(unittest.TestCase):
         template = API_PARAMETERS.read_text()
         provisioner_block = re.compile(r'\{\{ if index \.Env "AZURE_PROVISIONER_IDENTITY_ID" \}\}.*?\{\{ end \}\}\n', re.DOTALL)
         egress_block = re.compile(r'\{\{ if index \.Env "AZURE_API_EGRESS_SUBNET_ID" \}\}.*?\{\{ end \}\}\n', re.DOTALL)
-        regenerated = template.replace("param cloudaccountissuer_value = ''\n", "", 1)
+        regenerated = template.replace("param pairingallowedorganizationids_value = ''\n", "", 1)
+        regenerated = regenerated.replace("param cloudaccountissuer_value = ''\n", "", 1)
         regenerated = egress_block.sub("", provisioner_block.sub("", regenerated, count=1), count=1)
         self.assertNotIn("provisioner_identity_outputs_id", regenerated)
         self.assertNotIn("api_egress_subnet_id", regenerated)
         self.assertNotIn("cloudaccountissuer_value", regenerated)
+        self.assertNotIn("pairingallowedorganizationids_value", regenerated)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             module_fixture = root / "infra" / "api" / "api-website.module.bicep"
@@ -348,6 +404,7 @@ class ApiInfrastructureTests(unittest.TestCase):
             self.assertEqual(template_fixture.read_text(), template)
             self.assertEqual(1, template_fixture.read_text().count("param provisioner_identity_outputs_id = ''"))
             self.assertEqual(1, template_fixture.read_text().count("param cloudaccountissuer_value = ''"))
+            self.assertEqual(1, template_fixture.read_text().count("param pairingallowedorganizationids_value = ''"))
 
     def test_regeneration_rejects_unknown_catalog_authentication_without_partial_write(self) -> None:
         generated = self.generated_api_module().replace("Active Directory Default", "Unexpected Authentication")

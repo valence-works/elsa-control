@@ -125,6 +125,8 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertIn("CONTROL_ENTRA_TENANT_ID", self.source)
         self.assertIn("AZURE_PROVISIONER_IDENTITY_ID: ${{ vars.AZURE_PROVISIONER_IDENTITY_ID }}", self.source)
         self.assertIn("AZURE_API_EGRESS_SUBNET_ID: ${{ vars.AZURE_API_EGRESS_SUBNET_ID }}", self.source)
+        self.assertIn("EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ vars.EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS }}", self.source)
+        self.assertIn("STAGING_SMOKE_OWNER_ORGANIZATION_ID: ${{ vars.STAGING_SMOKE_OWNER_ORGANIZATION_ID }}", self.source)
 
     def test_cloud_account_issuer_accepts_exact_supabase_projects_only(self) -> None:
         check_start = self.source.index(
@@ -216,6 +218,101 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
             )
         self.assertEqual(0, disabled.returncode, disabled.stderr)
 
+    def _deployment_config_script(self) -> str:
+        check_start = self.source.index(
+            "        run: |\n",
+            self.source.index("      - name: Check deployment configuration"),
+        )
+        check_end = self.source.index("\n      - name:", check_start)
+        check_script = dedent(self.source[check_start + len("        run: |\n") : check_end])
+        return check_script.replace("${{ github.event_name }}", "workflow_dispatch")
+
+    def test_pairing_allowlist_is_staging_only_and_excludes_the_smoke_owner_org(self) -> None:
+        check_script = self._deployment_config_script()
+        rehearsal = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        smoke = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        base = {
+            "DEPLOY_MODE": "app",
+            "AZURE_CLIENT_ID": "00000000-0000-0000-0000-000000000001",
+            "AZURE_TENANT_ID": "00000000-0000-0000-0000-000000000002",
+            "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
+            "AZURE_CONTAINER_REGISTRY_ENDPOINT": "test.azurecr.io",
+            "AZURE_ENV_NAME": "test",
+            "AZURE_LOCATION": "westeurope",
+            "AZURE_RESOURCE_GROUP": "rg-test",
+            "AZURE_WEBAPP_NAME": "test-api",
+        }
+
+        def run_check(**extra: str) -> subprocess.CompletedProcess[str]:
+            with tempfile.NamedTemporaryFile() as output:
+                environment = os.environ.copy()
+                environment.update(base)
+                environment.update(extra)
+                environment["GITHUB_OUTPUT"] = output.name
+                return subprocess.run(
+                    ["bash", "-c", check_script],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+        production_set = run_check(
+            TARGET_ENVIRONMENT="production",
+            EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS=rehearsal,
+        )
+        self.assertNotEqual(0, production_set.returncode)
+        self.assertIn("must be unset", production_set.stdout + production_set.stderr)
+        self.assertNotIn(rehearsal, production_set.stdout + production_set.stderr)
+
+        production_empty = run_check(TARGET_ENVIRONMENT="production", EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS="")
+        self.assertEqual(0, production_empty.returncode, production_empty.stderr)
+
+        staging_includes_smoke = run_check(
+            TARGET_ENVIRONMENT="test",
+            EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS=f"{rehearsal},{smoke}",
+            STAGING_SMOKE_OWNER_ORGANIZATION_ID=smoke,
+            ELSA_CLOUD_STAGING_ORIGIN="https://staging.example.test",
+            STRIPE_HOSTED_PRICE_ID="price_test",
+            STRIPE_TEST_SECRET_KEY="sk_test_fixture",
+            STRIPE_TEST_WEBHOOK_SIGNING_SECRET="whsec_fixture",
+        )
+        self.assertNotEqual(0, staging_includes_smoke.returncode)
+        combined = staging_includes_smoke.stdout + staging_includes_smoke.stderr
+        self.assertIn("must not include the staging Hosted smoke owner organization", combined)
+        self.assertNotIn(rehearsal, combined)
+        self.assertNotIn(smoke, combined)
+
+        staging_missing_smoke_id = run_check(
+            TARGET_ENVIRONMENT="test",
+            EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS=rehearsal,
+            STAGING_SMOKE_OWNER_ORGANIZATION_ID="",
+            ELSA_CLOUD_STAGING_ORIGIN="https://staging.example.test",
+            STRIPE_HOSTED_PRICE_ID="price_test",
+            STRIPE_TEST_SECRET_KEY="sk_test_fixture",
+            STRIPE_TEST_WEBHOOK_SIGNING_SECRET="whsec_fixture",
+        )
+        self.assertNotEqual(0, staging_missing_smoke_id.returncode)
+        self.assertIn("STAGING_SMOKE_OWNER_ORGANIZATION_ID", staging_missing_smoke_id.stdout + staging_missing_smoke_id.stderr)
+
+        staging_ok = run_check(
+            TARGET_ENVIRONMENT="test",
+            EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS=rehearsal,
+            STAGING_SMOKE_OWNER_ORGANIZATION_ID=smoke,
+            ELSA_CLOUD_STAGING_ORIGIN="https://staging.example.test",
+            STRIPE_HOSTED_PRICE_ID="price_test",
+            STRIPE_TEST_SECRET_KEY="sk_test_fixture",
+            STRIPE_TEST_WEBHOOK_SIGNING_SECRET="whsec_fixture",
+        )
+        self.assertEqual(0, staging_ok.returncode, staging_ok.stdout + staging_ok.stderr)
+        self.assertIn("organization id(s).", staging_ok.stdout)
+        self.assertNotIn(rehearsal, staging_ok.stdout + staging_ok.stderr)
+
+        self.assertIn('pairing_allowlist_prefix=', self.source)
+        self.assertIn("Pairing allowlist app setting count: before=", self.source)
+        self.assertNotIn("echo \"$EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS\"", self.source)
+        self.assertNotIn("echo '${EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS}'", self.source)
+
     def test_staging_infra_requires_a_provisioner_identity(self) -> None:
         check_start = self.source.index("        run: |\n", self.source.index("      - name: Check deployment configuration"))
         check_end = self.source.index("\n      - name:", check_start)
@@ -274,6 +371,7 @@ case "$*" in
   *"webapp sitecontainers show"*) printf '%s\\n' "${RUNTIME_READBACK:?}" ;;
   *"webapp config show"*) printf '%s\\n' "${RUNTIME_READBACK:?}" ;;
   *"webapp config appsettings set"*) exit 0 ;;
+  *"webapp config appsettings list"*) printf '%s\\n' "0" ;;
   *"webapp restart"*) exit 0 ;;
   *) exit 1 ;;
 esac
