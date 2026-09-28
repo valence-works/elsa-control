@@ -26,7 +26,9 @@ public static class ManagedElsaInstanceOverviewEndpoints
     internal const string PermissionRequiredCode = "instance.permission-required";
     internal const string OperationActiveCode = "instance.operation-active";
     internal const string ActivityLimitInvalidCode = "instance.activity-limit-invalid";
-    internal const string DeploymentStatusUnclearMessage = "Deployment status unclear. Valence Works is checking.";
+    internal const string DeploymentStatusUnclearMessage = "Deployment status unclear. We're still confirming the result.";
+    internal const string CheckingDeploymentStatusMessage = "Checking deployment status";
+    internal const string SubmissionUncertainCode = "provider.submission.uncertain";
     internal const string UnknownFieldCode = "request.unknown-field";
     internal const string ApplyReleaseInvalidCode = "instance.apply-release-invalid";
     internal const string RestartReason = "Restart";
@@ -92,7 +94,9 @@ public static class ManagedElsaInstanceOverviewEndpoints
     private static readonly FrozenSet<string> WarningActivityCodes = new HashSet<string>(StringComparer.Ordinal)
     {
         ElsaInstanceProviderReconciliationService.AmbiguousCode,
-        ElsaInstanceProviderReconciliationService.RetrySafeCode
+        ElsaInstanceProviderReconciliationService.RetrySafeCode,
+        ElsaInstanceProviderReconciliationService.CorrelationMismatchCode,
+        SubmissionUncertainCode
     }.ToFrozenSet(StringComparer.Ordinal);
 
     private static readonly FrozenSet<string> FailedActivityMappedCodes = new HashSet<string>(StringComparer.Ordinal)
@@ -130,8 +134,6 @@ public static class ManagedElsaInstanceOverviewEndpoints
                 ManagedLifecycleOperationalHealthDiagnosticCodes.Failed,
             [ElsaInstanceProviderReconciliationService.HealthFailedCode] =
                 ManagedLifecycleOperationalHealthDiagnosticCodes.Failed,
-            [ElsaInstanceProviderReconciliationService.CorrelationMismatchCode] =
-                ManagedLifecycleOperationalHealthDiagnosticCodes.OperationFailed,
             [ElsaInstanceCommercialOperation.EntitlementRequired] =
                 ElsaInstanceCommercialOperation.EntitlementRequired,
             [ElsaInstanceCommercialOperation.EntitlementExpired] =
@@ -582,7 +584,12 @@ public static class ManagedElsaInstanceOverviewEndpoints
     internal static CustomerActivityClassification ClassifyCustomerActivity(string? code)
     {
         if (string.IsNullOrWhiteSpace(code) || InformationalActivityCodes.Contains(code))
-            return new(null, ManagedElsaInstanceActivitySeverity.Informational, null);
+        {
+            var informational = string.Equals(code, ElsaInstanceProviderReconciliationService.UnavailableCode, StringComparison.Ordinal)
+                ? CheckingDeploymentStatusMessage
+                : null;
+            return new(null, ManagedElsaInstanceActivitySeverity.Informational, informational);
+        }
 
         if (WarningActivityCodes.Contains(code))
             return new(null, ManagedElsaInstanceActivitySeverity.Warning, DeploymentStatusUnclearMessage);
@@ -596,6 +603,22 @@ public static class ManagedElsaInstanceOverviewEndpoints
         }
 
         return new(null, ManagedElsaInstanceActivitySeverity.Informational, null);
+    }
+
+    internal static IEnumerable<string> EnumerateCustomerActivityCopyLabels()
+    {
+        foreach (var code in InformationalActivityCodes
+                     .Concat(WarningActivityCodes)
+                     .Concat(ActionableActivityCodes.Keys)
+                     .Append(null)
+                     .Append("provider.internal.mystery"))
+        {
+            var mapped = ClassifyCustomerActivity(code);
+            if (mapped.Severity is ManagedElsaInstanceActivitySeverity.Informational
+                    or ManagedElsaInstanceActivitySeverity.Warning &&
+                !string.IsNullOrWhiteSpace(mapped.Message))
+                yield return mapped.Message;
+        }
     }
 
     internal static string? CustomerMutationDenialCode(ElsaInstance instance)
