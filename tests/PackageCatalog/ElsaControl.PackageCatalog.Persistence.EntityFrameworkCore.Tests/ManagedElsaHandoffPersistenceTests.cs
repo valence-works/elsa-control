@@ -419,25 +419,26 @@ public sealed class ManagedElsaHandoffPersistenceTests
         var reloaded = await db.ElsaInstances
             .Include(x => x.IdentityBinding)
             .SingleAsync(x => x.Id == instance.Id);
+        Assert.True(reloaded.CurrentDeploymentStudioGrants);
+        Assert.Equal("deployment-managed", reloaded.CurrentDeploymentStudioGrantsDeploymentId);
         var mapped = EfCoreElsaInstanceLifecycleStore.MapInstance(reloaded);
         if (olderBuildWrite == OlderBuildDeploymentWrite.ClearCurrentDeployment)
-        {
             Assert.Null(mapped.CurrentDeploymentReference);
-            Assert.Null(await identities.FindOpenableAsync(instance.OrganizationId, instance.Id));
-        }
         else
         {
             Assert.Equal("deployment-older", mapped.CurrentDeploymentReference?.DeploymentId);
             Assert.True(mapped.CurrentDeploymentReference?.ManagedHandoff);
             Assert.False(mapped.CurrentDeploymentReference?.StudioGrantsSupported);
-            Assert.False((await identities.FindOpenableAsync(instance.OrganizationId, instance.Id))!.StudioGrantsSupported);
         }
 
         reloaded.Name = "After older-build current-deployment write";
         await db.SaveChangesAsync();
         Assert.False(reloaded.CurrentDeploymentStudioGrants);
         Assert.Null(reloaded.CurrentDeploymentStudioGrantsDeploymentId);
-        if (olderBuildWrite == OlderBuildDeploymentWrite.ChangeCurrentDeployment)
+
+        if (olderBuildWrite == OlderBuildDeploymentWrite.ClearCurrentDeployment)
+            Assert.Null(await identities.FindOpenableAsync(instance.OrganizationId, instance.Id));
+        else
             Assert.False((await identities.FindOpenableAsync(instance.OrganizationId, instance.Id))!.StudioGrantsSupported);
     }
 
