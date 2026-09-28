@@ -173,9 +173,11 @@ step polls.
 
 After `Uncertain`, the operation is `RecoveryRequired`. For the foundation step,
 recovery observation reads the same named deployment and can confirm it. The
-workload step has no recovery observer, so it needs an explicit Admin recover.
-That replays the step, which attaches to the named deployment if it is still in
-flight. Automatic pickup of parked operations is tracked in #601.
+workload step has no recovery observer, and Admin recover currently refuses a
+workload operation parked this way with 409, so a workload that outlasts its
+wait limit cannot be recovered until #601 lands. That is why the workload wait
+limit defaults to 60 minutes. Automatic pickup of parked operations and workload
+recovery are tracked in #601.
 
 Each poll is itself bounded by `CommandTimeout`, so the effective wait can
 overshoot the step limit by up to one command timeout. The provider worker runs
