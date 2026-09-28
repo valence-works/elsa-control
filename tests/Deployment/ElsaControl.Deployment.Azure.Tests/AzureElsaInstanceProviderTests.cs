@@ -451,6 +451,89 @@ public sealed class AzureElsaInstanceProviderTests
     }
 
     [Fact]
+    public async Task Operator_forced_reads_reuse_a_current_receipt_within_sixty_seconds()
+    {
+        var now = DateTimeOffset.Parse("2026-09-24T00:48:18Z");
+        var fixture = await CreateObserveFixtureAsync(
+            ConfirmedObservation(AzureProviderRunnerStep.Workload),
+            attemptedStep: AzureProviderRunnerStep.Workload,
+            phase: AzureProviderOperationPhase.FoundationReady,
+            autoResumeCount: AzureNamedDeploymentFreshness.MaximumAutoResumes,
+            now: now);
+
+        var first = await fixture.Provider.ObserveAsync(
+            fixture.Request with { OperatorInitiated = true });
+        var second = await fixture.Provider.ObserveAsync(
+            fixture.Request with { OperatorInitiated = true });
+
+        Assert.NotNull(first.RetryEvidence);
+        Assert.NotNull(second.RetryEvidence);
+        Assert.Equal(first.RetryEvidence!.Reference, second.RetryEvidence!.Reference);
+        Assert.Equal(first.RetryEvidence.Digest, second.RetryEvidence.Digest);
+        Assert.False(second.RetryEvidence.AutoResume);
+        Assert.Equal(1, fixture.Observer.Calls);
+        Assert.Equal(1, fixture.ObservationStore.CreateCalls);
+        Assert.Equal(1, fixture.OperationStore.ArmClockCalls);
+    }
+
+    [Fact]
+    public async Task Operator_forced_read_after_sixty_seconds_reads_arm_again()
+    {
+        var now = DateTimeOffset.Parse("2026-09-24T00:48:18Z");
+        var fixture = await CreateObserveFixtureAsync(
+            ConfirmedObservation(AzureProviderRunnerStep.Workload),
+            attemptedStep: AzureProviderRunnerStep.Workload,
+            phase: AzureProviderOperationPhase.FoundationReady,
+            now: now);
+
+        var first = await fixture.Provider.ObserveAsync(
+            fixture.Request with { OperatorInitiated = true });
+        Assert.Equal(1, fixture.Observer.Calls);
+
+        fixture.OperationStore.Current = fixture.OperationStore.Current! with
+        {
+            LastArmObservedAt = now.AddSeconds(-AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds)
+        };
+        var second = await fixture.Provider.ObserveAsync(
+            fixture.Request with { OperatorInitiated = true });
+
+        Assert.NotNull(first.RetryEvidence);
+        Assert.NotNull(second.RetryEvidence);
+        Assert.Equal(2, fixture.Observer.Calls);
+        Assert.Equal(2, fixture.OperationStore.ArmClockCalls);
+    }
+
+    [Fact]
+    public async Task Automatic_observe_stays_on_the_rate_limit_when_the_operator_floor_has_elapsed()
+    {
+        var now = DateTimeOffset.Parse("2026-09-24T00:48:18Z");
+        var fixture = await CreateObserveFixtureAsync(
+            ConfirmedObservation(AzureProviderRunnerStep.Workload),
+            attemptedStep: AzureProviderRunnerStep.Workload,
+            phase: AzureProviderOperationPhase.FoundationReady,
+            now: now);
+
+        var first = await fixture.Provider.ObserveAsync(fixture.Request);
+        Assert.Equal(1, fixture.Observer.Calls);
+        Assert.NotNull(first.RetryEvidence);
+
+        fixture.OperationStore.Current = fixture.OperationStore.Current! with
+        {
+            LastArmObservedAt = now.AddSeconds(-90),
+            ArmObservationBackoffSeconds = AzureNamedDeploymentFreshness.MaximumArmIntervalSeconds
+        };
+        var automatic = await fixture.Provider.ObserveAsync(fixture.Request);
+        var forced = await fixture.Provider.ObserveAsync(
+            fixture.Request with { OperatorInitiated = true });
+
+        Assert.NotNull(automatic.RetryEvidence);
+        Assert.Equal(first.RetryEvidence!.Reference, automatic.RetryEvidence!.Reference);
+        Assert.NotNull(forced.RetryEvidence);
+        Assert.Equal(2, fixture.Observer.Calls);
+        Assert.Equal(2, fixture.OperationStore.ArmClockCalls);
+    }
+
+    [Fact]
     public async Task Recovery_required_stale_receipt_is_reminted_for_the_current_instance_version()
     {
         var now = DateTimeOffset.Parse("2026-09-24T00:48:18Z");

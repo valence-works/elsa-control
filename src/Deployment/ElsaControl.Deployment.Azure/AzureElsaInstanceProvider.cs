@@ -271,10 +271,17 @@ public sealed class AzureElsaInstanceProvider(
                     request, operation, AzureLateSuccessCodes.AutoResumeExhausted, cancellationToken);
             }
 
-            if (!request.OperatorInitiated &&
-                !AzureNamedDeploymentFreshness.IsArmReadDue(
+            if (request.OperatorInitiated)
+            {
+                var forcedReuse = await TryReuseOperatorForcedReceiptAsync(request, operation, cancellationToken);
+                if (forcedReuse is not null)
+                    return forcedReuse;
+            }
+            else if (!AzureNamedDeploymentFreshness.IsArmReadDue(
                     _timeProvider.GetUtcNow(), operation.LastArmObservedAt, operation.ArmObservationBackoffSeconds))
+            {
                 return await ReuseOrRestampLastEvidenceAsync(request, operation, cancellationToken: cancellationToken);
+            }
 
             var observed = await _recoveryObserver.ObserveAsync(
                 new AzureProviderRecoveryRequest(
@@ -305,7 +312,9 @@ public sealed class AzureElsaInstanceProvider(
                 cancellationToken);
             if (latest is not null &&
                 string.Equals(latest.Observation.PostconditionFingerprint, postconditionFingerprint, StringComparison.Ordinal) &&
-                IsReceiptVersionFresh(latest, request.InstanceVersion))
+                (request.OperatorInitiated
+                    ? latest.Observation.ObservedInstanceVersion == request.InstanceVersion
+                    : IsReceiptVersionFresh(latest, request.InstanceVersion)))
             {
                 return new RecoveryObservationResult(
                     new ElsaInstanceProviderRetryEvidence(
@@ -370,6 +379,35 @@ public sealed class AzureElsaInstanceProvider(
     {
         await operationStore.RecordAutoResumeOutcomeAsync(
             operation.WorkspaceId, operation.Id, AzureLateSuccessCodes.AutoResumeExhausted, cancellationToken);
+    }
+
+    /// <summary>
+    /// Operator Recover may skip the ordinary backoff, but a retrying admin
+    /// Recover still reuses the last forced receipt when that receipt is current
+    /// for this attempt and instance version and the 60-second floor has not
+    /// elapsed. LastArmObservedAt is the floor clock: a restamp does not count.
+    /// </summary>
+    private async Task<RecoveryObservationResult?> TryReuseOperatorForcedReceiptAsync(
+        ElsaInstanceProviderReconciliationRequest request,
+        AzureProviderOperation operation,
+        CancellationToken cancellationToken)
+    {
+        if (AzureNamedDeploymentFreshness.IsOperatorForcedArmReadDue(
+                _timeProvider.GetUtcNow(), operation.LastArmObservedAt))
+            return null;
+
+        var latest = await _recoveryObservationStore!.GetLatestReceiptForAttemptAsync(
+            request.WorkspaceId,
+            request.OperationId,
+            request.AttemptNumber,
+            operation.Id,
+            cancellationToken);
+        if (latest is null ||
+            latest.Observation.ObservedLifecycleAttemptNumber != request.AttemptNumber ||
+            latest.Observation.ObservedInstanceVersion != request.InstanceVersion)
+            return null;
+
+        return ToManualEvidence(latest, operation, operation.LastObservationReasonCode);
     }
 
     private async Task<RecoveryObservationResult> ReuseOrRestampLastEvidenceAsync(

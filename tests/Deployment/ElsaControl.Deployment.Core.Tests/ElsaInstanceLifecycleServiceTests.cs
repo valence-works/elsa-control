@@ -347,6 +347,70 @@ public sealed class ElsaInstanceLifecycleServiceTests
     }
 
     [Fact]
+    public async Task Customer_recover_does_not_force_a_provider_observation()
+    {
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now));
+        var port = new RecordingProviderPort(new(
+            ElsaInstanceProviderObservationKind.Unknown,
+            ElsaObservedLifecycle.Unknown,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "retry-proof-observation",
+            new ElsaInstanceProviderRetryEvidence(
+                "https://evidence.example.test/recovery/retry-proof",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")));
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now), port);
+        var created = await service.CreateAsync(new ElsaInstanceCreateRequest(
+            OrganizationId, WorkspaceId, "Claims", "claims-customer-recover", Intent(), "create-customer-recover"));
+        store.MarkRecoveryRequired(created.Operation.Id);
+        await new ElsaInstanceProviderReconciliationService(store, port, new StaticTimeProvider(Now))
+            .ReconcileAsync(WorkspaceId, created.Operation.Id);
+        var observeCallsAfterReconcile = port.Calls;
+        Assert.True(observeCallsAfterReconcile > 0);
+
+        var first = await service.RecoverAsync(new ElsaInstanceLifecycleRequest(
+            WorkspaceId, created.Instance.Id, store.Instances.Single().Version, "customer-recover-1"));
+        var replay = await service.RecoverAsync(new ElsaInstanceLifecycleRequest(
+            WorkspaceId, created.Instance.Id, first.Instance.Version, "customer-recover-1"));
+
+        Assert.False(first.Replayed);
+        Assert.True(replay.Replayed);
+        Assert.Equal(ElsaInstanceOperationState.Queued, first.Operation.State);
+        Assert.Equal(observeCallsAfterReconcile, port.Calls);
+    }
+
+    [Fact]
+    public async Task Operator_recover_refreshes_provider_observation()
+    {
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now));
+        var port = new RecordingProviderPort(new(
+            ElsaInstanceProviderObservationKind.Unknown,
+            ElsaObservedLifecycle.Unknown,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "retry-proof-observation",
+            new ElsaInstanceProviderRetryEvidence(
+                "https://evidence.example.test/recovery/retry-proof",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")));
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now), port);
+        var created = await service.CreateAsync(new ElsaInstanceCreateRequest(
+            OrganizationId, WorkspaceId, "Claims", "claims-operator-recover", Intent(), "create-operator-recover"));
+        store.MarkRecoveryRequired(created.Operation.Id);
+        await new ElsaInstanceProviderReconciliationService(store, port, new StaticTimeProvider(Now))
+            .ReconcileAsync(WorkspaceId, created.Operation.Id);
+        var observeCallsAfterReconcile = port.Calls;
+
+        var recovered = await service.RecoverAsync(new ElsaInstanceLifecycleRequest(
+            WorkspaceId,
+            created.Instance.Id,
+            store.Instances.Single().Version,
+            "admin-recover-1",
+            "admin-recover",
+            OperatorInitiated: true));
+
+        Assert.Equal(ElsaInstanceOperationState.Queued, recovered.Operation.State);
+        Assert.Equal(observeCallsAfterReconcile + 1, port.Calls);
+    }
+
+    [Fact]
     public async Task Recover_idempotency_key_cannot_collide_with_a_previously_used_normal_key()
     {
         var store = new InMemoryElsaInstanceLifecycleStore();
@@ -841,6 +905,20 @@ public sealed class ElsaInstanceLifecycleServiceTests
         public Task<ElsaInstanceProviderObservation> ObserveAsync(
             ElsaInstanceProviderReconciliationRequest request,
             CancellationToken cancellationToken = default) => Task.FromResult(observation.Correlate(request));
+    }
+
+    private sealed class RecordingProviderPort(ElsaInstanceProviderObservation observation)
+        : IElsaInstanceProviderReconciliationPort
+    {
+        public int Calls { get; private set; }
+
+        public Task<ElsaInstanceProviderObservation> ObserveAsync(
+            ElsaInstanceProviderReconciliationRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            return Task.FromResult(observation.Correlate(request));
+        }
     }
 
     private sealed class DefaultContextLifecycleStore(InMemoryElsaInstanceLifecycleStore inner)

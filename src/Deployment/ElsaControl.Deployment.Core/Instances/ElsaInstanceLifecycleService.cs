@@ -142,7 +142,8 @@ public sealed class ElsaInstanceLifecycleService(
         ElsaInstanceLifecycleRequest request,
         CancellationToken cancellationToken = default)
     {
-        await RefreshOperatorRecoveryEvidenceAsync(request, cancellationToken);
+        if (request.OperatorInitiated)
+            await RefreshOperatorRecoveryEvidenceAsync(request, cancellationToken);
         return await AcceptAsync(request.WorkspaceId, request.InstanceId, ElsaInstanceOperationAction.Recover,
             request.ExpectedVersion, request.IdempotencyKey, null, null, request.Reason, cancellationToken,
             actorAccountId: request.ActorAccountId,

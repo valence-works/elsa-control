@@ -502,19 +502,99 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
         var recoverStack = CreateLateSuccessStack(recoverDb, fixture, recoverObserver, clock);
         var instance = Assert.IsType<ElsaInstance>(
             await recoverStack.LifecycleStore.GetInstanceAsync(fixture.Workspace.Id, fixture.InstanceId));
+        var parked = await recoverDb.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == fixture.LifecycleOperationId);
+        var parkedAttempt = parked.AttemptNumber;
+        var parkedVersion = instance.Version;
+        var recoverAt = clock.GetUtcNow();
         var recovered = await recoverStack.Lifecycle.RecoverAsync(new ElsaInstanceLifecycleRequest(
             fixture.Workspace.Id,
             fixture.InstanceId,
-            instance.Version,
+            parkedVersion,
             "admin-recover-after-cap",
             "admin-recover",
-            ExpectedOperationId: fixture.LifecycleOperationId));
+            ExpectedOperationId: fixture.LifecycleOperationId,
+            OperatorInitiated: true));
 
         Assert.Equal(ElsaInstanceOperationState.Queued, recovered.Operation.State);
+        Assert.Equal(parkedAttempt + 1, recovered.Operation.AttemptNumber);
         Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes,
             (await recoverDb.AzureProviderOperations.AsNoTracking().SingleAsync(x => x.Id == fixture.Operation.Id)).AutoResumeCount);
         Assert.Equal(0, observer.AutomaticCallsAtOrAboveCap);
-        Assert.True(observer.OperatorCalls > 0);
+        Assert.Equal(1, observer.OperatorCalls);
+
+        var recovery = await recoverDb.ElsaInstanceRecoveryRequests.AsNoTracking()
+            .SingleAsync(x => x.IdempotencyKey == "admin-recover-after-cap");
+        Assert.True(ElsaInstanceProviderRecoveryObservationReference.TryParse(
+            recovery.RecoveryObservationReference, out var recordId, out var digest));
+        var receipt = await recoverDb.AzureProviderRecoveryObservations.AsNoTracking()
+            .SingleAsync(x => x.Id == recordId);
+        Assert.Equal(digest, receipt.RecordDigest);
+        Assert.Equal(parkedAttempt, receipt.ObservedLifecycleAttemptNumber);
+        Assert.Equal(parkedVersion, receipt.ObservedInstanceVersion);
+        Assert.Equal(parkedAttempt, recovery.ObservedLifecycleAttemptNumber);
+        Assert.Equal(
+            ElsaInstanceProviderRecoveryObservationReference.Create(receipt.Id, receipt.RecordDigest),
+            recovery.RecoveryObservationReference);
+        Assert.Equal(recoverAt, receipt.ObservedAt);
+        Assert.Equal(recoverAt,
+            (await recoverDb.AzureProviderOperations.AsNoTracking().SingleAsync(x => x.Id == fixture.Operation.Id))
+            .LastArmObservedAt);
+    }
+
+    [Fact]
+    public async Task Customer_recover_after_the_auto_resume_cap_does_not_force_arm()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+
+        var fixture = await SeedProviderObservationAsync(db);
+        await AddLifecycleRunAsync(db, fixture);
+        await PrepareWorkloadLateSuccessAsync(db, fixture);
+        var clock = new MutableTimeProvider(fixture.Observation.ObservedAt.AddMinutes(10));
+        var observer = new CapAwareRecoveryObserver();
+        var (lifecycleStore, _, lifecycle, reconciler) = CreateLateSuccessStack(db, fixture, observer, clock);
+
+        for (var resume = 0; resume < AzureNamedDeploymentFreshness.MaximumAutoResumes; resume++)
+        {
+            clock.Advance(TimeSpan.FromMinutes(2));
+            var resumed = await reconciler.ReconcileAsync(fixture.Workspace.Id, fixture.LifecycleOperationId);
+            Assert.True(resumed.RetrySafe);
+            await ParkLifecycleRecoveryRequiredAsync(db, fixture.LifecycleOperationId);
+        }
+
+        clock.Advance(TimeSpan.FromMinutes(2));
+        var exhausted = await reconciler.ReconcileAsync(fixture.Workspace.Id, fixture.LifecycleOperationId);
+        Assert.True(exhausted.RetrySafe);
+        Assert.Equal(AzureLateSuccessCodes.AutoResumeExhausted, exhausted.DiagnosticCode);
+        Assert.Equal(0, observer.OperatorCalls);
+
+        var instance = Assert.IsType<ElsaInstance>(
+            await lifecycleStore.GetInstanceAsync(fixture.Workspace.Id, fixture.InstanceId));
+        var lastArmObservedAt = (await db.AzureProviderOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == fixture.Operation.Id)).LastArmObservedAt;
+        var first = await lifecycle.RecoverAsync(new ElsaInstanceLifecycleRequest(
+            fixture.Workspace.Id,
+            fixture.InstanceId,
+            instance.Version,
+            "customer-recover-after-cap",
+            "customer-recover"));
+        var replay = await lifecycle.RecoverAsync(new ElsaInstanceLifecycleRequest(
+            fixture.Workspace.Id,
+            fixture.InstanceId,
+            first.Instance.Version,
+            "customer-recover-after-cap",
+            "customer-recover"));
+
+        Assert.Equal(ElsaInstanceOperationState.Queued, first.Operation.State);
+        Assert.True(replay.Replayed);
+        Assert.Equal(0, observer.OperatorCalls);
+        Assert.Equal(0, observer.AutomaticCallsAtOrAboveCap);
+        Assert.Equal(lastArmObservedAt,
+            (await db.AzureProviderOperations.AsNoTracking().SingleAsync(x => x.Id == fixture.Operation.Id))
+            .LastArmObservedAt);
     }
 
     [Fact]
@@ -581,7 +661,8 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
             afterReason.Projection.InstanceVersion,
             "admin-recover-after-reason-change",
             "admin-recover",
-            ExpectedOperationId: fixture.LifecycleOperationId));
+            ExpectedOperationId: fixture.LifecycleOperationId,
+            OperatorInitiated: true));
         Assert.Equal(ElsaInstanceOperationState.Queued, recovered.Operation.State);
         Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes,
             (await db.AzureProviderOperations.AsNoTracking().SingleAsync(x => x.Id == fixture.Operation.Id)).AutoResumeCount);

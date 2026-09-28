@@ -54,6 +54,16 @@ public sealed class AzureNamedDeploymentFreshnessTests
     }
 
     [Fact]
+    public void Operator_forced_arm_read_shares_the_sixty_second_floor()
+    {
+        var now = DateTimeOffset.Parse("2026-09-24T00:48:18Z");
+
+        Assert.True(AzureNamedDeploymentFreshness.IsOperatorForcedArmReadDue(now, null));
+        Assert.False(AzureNamedDeploymentFreshness.IsOperatorForcedArmReadDue(now, now.AddSeconds(-59)));
+        Assert.True(AzureNamedDeploymentFreshness.IsOperatorForcedArmReadDue(now, now.AddSeconds(-60)));
+    }
+
+    [Fact]
     public void Confirmed_completed_resume_requires_the_attempted_step()
     {
         Assert.True(AzureNamedDeploymentFreshness.IsConfirmedCompletedResume(

@@ -282,7 +282,8 @@ public static class AdminManagedElsaRecoveryEndpoints
                         keyResult.Value!,
                         request.Reason,
                         ActorAccountId: null,
-                        ExpectedOperationId: operationId),
+                        ExpectedOperationId: operationId,
+                        OperatorInitiated: true),
                     cancellationToken);
                 var operationUrl = $"/api/admin/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations/{accepted.Operation.Id:D}";
                 context.Response.Headers.ETag = $"\"{accepted.Instance.Version}\"";

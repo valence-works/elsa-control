@@ -39,6 +39,16 @@ public static class AzureNamedDeploymentFreshness
         lastArmObservedAt is null ||
         now >= lastArmObservedAt.Value + TimeSpan.FromSeconds(Math.Max(backoffSeconds, MinimumArmIntervalSeconds));
 
+    /// <summary>
+    /// Operator-forced reads skip the normal backoff, but still share the
+    /// 60-second floor so a retrying admin Recover does not stampede ARM.
+    /// </summary>
+    public static bool IsOperatorForcedArmReadDue(
+        DateTimeOffset now,
+        DateTimeOffset? lastArmObservedAt) =>
+        lastArmObservedAt is null ||
+        now >= lastArmObservedAt.Value + TimeSpan.FromSeconds(MinimumArmIntervalSeconds);
+
     public static bool IsConfirmedCompletedResume(
         AzureProviderRunnerStep? attemptedStep,
         AzureProviderRunnerStep completedStep) =>
