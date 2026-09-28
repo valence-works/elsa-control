@@ -285,6 +285,10 @@ public static class AzureManagedElsaProvisioningProgressProjector
         {
             knownStage = ManagedElsaProvisioningProgressStages.Ordered.Count - 1;
         }
+        else if (state == ManagedElsaProvisioningProgressStates.Stale)
+        {
+            knownStage ??= 0;
+        }
         if (lifecycle is not null && !events.Any(activity => activity.MessageCode == "request.accepted"))
         {
             events.Insert(0, new MappedActivity(

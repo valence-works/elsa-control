@@ -618,12 +618,14 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
     public void Waiting_create_is_never_clock_stale_on_its_own()
     {
         var organizationId = Guid.Parse("66666666-6666-6666-6666-666666666666");
+        var recentDeleteAcceptedAt = AcceptedAt.AddMinutes(24);
         var delete = Lifecycle(
             ElsaInstanceOperationState.Accepted,
             failureCode: null,
             action: ElsaInstanceOperationAction.Delete,
             id: Guid.Parse("77777777-7777-7777-7777-777777777777"),
-            organizationId: organizationId);
+            organizationId: organizationId,
+            acceptedAt: recentDeleteAcceptedAt);
         var result = Project(
             lifecycleState: ElsaInstanceOperationState.WaitingForPriorOperation,
             failureCode: null,
@@ -631,7 +633,7 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
             organizationId: organizationId,
             blockingOperationId: delete.Id,
             topologyOperations: [delete],
-            timeProvider: new FixedTimeProvider(AcceptedAt.AddMinutes(10)));
+            timeProvider: new FixedTimeProvider(AcceptedAt.AddMinutes(25)));
 
         Assert.Equal(ManagedElsaProvisioningProgressStates.WaitingForPriorOperation, result.State);
         Assert.Equal(ManagedElsaProvisioningProgressStages.WaitingForDelete, result.CurrentStage);
@@ -888,9 +890,10 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
         ElsaInstanceOperationAction action = ElsaInstanceOperationAction.Create,
         Guid? id = null,
         Guid organizationId = default,
-        Guid? blockingOperationId = null) =>
+        Guid? blockingOperationId = null,
+        DateTimeOffset? acceptedAt = null) =>
         new(id ?? Guid.Parse("33333333-3333-3333-3333-333333333333"), action, state, 1, 1,
-            AcceptedAt, AcceptedAt.AddSeconds(1), completedAt, null, failureCode, null, null, null,
+            acceptedAt ?? AcceptedAt, (acceptedAt ?? AcceptedAt).AddSeconds(1), completedAt, null, failureCode, null, null, null,
             OrganizationId: organizationId, BlockingOperationId: blockingOperationId);
 
     private static AzureProviderOperationTransition Transition(

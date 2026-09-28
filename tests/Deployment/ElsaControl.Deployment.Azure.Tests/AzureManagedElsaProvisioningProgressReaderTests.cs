@@ -259,7 +259,7 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
             ElsaInstanceOperationState.Accepted,
             1,
             1,
-            AcceptedAt,
+            AcceptedAt.AddMinutes(9),
             null,
             null,
             null,
