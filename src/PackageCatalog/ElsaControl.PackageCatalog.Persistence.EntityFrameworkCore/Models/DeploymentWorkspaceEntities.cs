@@ -108,6 +108,9 @@ internal sealed class ElsaInstanceEntity
     public bool CurrentDeploymentManagedHandoff { get; set; }
     // Set only from the provider-confirmed current deployment, not the next resolved release.
     public bool CurrentDeploymentStudioGrants { get; set; }
+    // The deployment id this Studio-grants flag was written with. An older Control build can
+    // change or clear CurrentDeploymentId without touching the new columns; a mismatch is ignored.
+    public string? CurrentDeploymentStudioGrantsDeploymentId { get; set; }
     public string? PlacementAssignmentId { get; set; }
     public string? ElsaTenantId { get; set; }
     public string? ElsaTenantAudience { get; set; }
@@ -124,6 +127,17 @@ internal sealed class ElsaInstanceEntity
     public List<ElsaInstanceMigrationEntity> Migrations { get; set; } = [];
     public ElsaInstanceIdentityBindingEntity? IdentityBinding { get; set; }
     public ElsaInstanceProvisioningContextEntity? ProvisioningContext { get; set; }
+
+    /// <summary>
+    /// Honour Studio grants only for the current deployment they were written with. An older
+    /// Control build can clear or replace <see cref="CurrentDeploymentId"/> without updating
+    /// the new columns; that leftover combination is diagnostics-only, not a load failure.
+    /// </summary>
+    internal bool CurrentDeploymentHonorsStudioGrants() =>
+        CurrentDeploymentStudioGrants
+        && CurrentDeploymentManagedHandoff
+        && CurrentDeploymentId is not null
+        && string.Equals(CurrentDeploymentStudioGrantsDeploymentId, CurrentDeploymentId, StringComparison.Ordinal);
 }
 
 /// <summary>

@@ -7,9 +7,9 @@ using Microsoft.EntityFrameworkCore.Migrations;
 namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations;
 
 /// <summary>
-/// Records whether a managed engine's admitted image supports the exact Studio grant set. Both columns are additive
-/// and outside every operation, plan and reconciliation hash, so a Control build that predates them still restores,
-/// deletes and recovers the rows this build writes.
+/// Records whether a managed engine's admitted image supports the exact Studio grant set, bound to the
+/// current deployment id. The columns are additive and outside every operation, plan and reconciliation
+/// hash, so a Control build that predates them still restores, deletes and recovers the rows this build writes.
 /// </summary>
 [DbContext(typeof(CatalogDbContext))]
 [Migration("20260928040001_AddManagedStudioGrantCapability")]
@@ -25,6 +25,13 @@ public sealed class AddManagedStudioGrantCapability : Migration
             nullable: false,
             defaultValue: false);
 
+        migrationBuilder.AddColumn<string>(
+            name: "CurrentDeploymentStudioGrantsDeploymentId",
+            table: "ElsaInstances",
+            type: "nvarchar(128)",
+            maxLength: 128,
+            nullable: true);
+
         migrationBuilder.AddColumn<bool>(
             name: "ManagedHandoffStudioGrants",
             table: "AzureProviderOperations",
@@ -38,6 +45,10 @@ public sealed class AddManagedStudioGrantCapability : Migration
     {
         migrationBuilder.DropColumn(
             name: "CurrentDeploymentStudioGrants",
+            table: "ElsaInstances");
+
+        migrationBuilder.DropColumn(
+            name: "CurrentDeploymentStudioGrantsDeploymentId",
             table: "ElsaInstances");
 
         migrationBuilder.DropColumn(

@@ -2898,6 +2898,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<bool>("CurrentDeploymentStudioGrants")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("CurrentDeploymentStudioGrantsDeploymentId")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("CurrentReleaseComponentDigestsJson")
                         .HasMaxLength(65536)
                         .HasColumnType("TEXT");

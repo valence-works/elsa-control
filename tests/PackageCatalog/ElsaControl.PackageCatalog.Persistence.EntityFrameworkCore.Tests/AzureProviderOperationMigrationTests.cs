@@ -54,6 +54,7 @@ public sealed class AzureProviderOperationMigrationTests
         var instanceColumns = await db.Database.SqlQueryRaw<string>(
             "SELECT name AS Value FROM pragma_table_info('ElsaInstances')").ToListAsync();
         Assert.Contains("CurrentDeploymentStudioGrants", instanceColumns);
+        Assert.Contains("CurrentDeploymentStudioGrantsDeploymentId", instanceColumns);
         Assert.Contains("AzureProviderResourceAssignments", tables);
         Assert.Contains("AzureProviderAssignmentRebinds", tables);
         Assert.Contains("AzureProviderRecoveryObservations", tables);

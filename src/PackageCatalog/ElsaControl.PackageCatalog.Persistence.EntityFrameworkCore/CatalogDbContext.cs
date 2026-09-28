@@ -836,6 +836,10 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             ValidateComponentDigests(instance.CurrentReleaseComponentDigestsJson);
             instance.CurrentDeploymentId = OptionalSafeReference(instance.CurrentDeploymentId, nameof(instance.CurrentDeploymentId), 128);
             instance.CurrentDeploymentRevisionId = OptionalSafeReference(instance.CurrentDeploymentRevisionId, nameof(instance.CurrentDeploymentRevisionId), 128);
+            instance.CurrentDeploymentStudioGrantsDeploymentId = OptionalSafeReference(
+                instance.CurrentDeploymentStudioGrantsDeploymentId,
+                nameof(instance.CurrentDeploymentStudioGrantsDeploymentId),
+                128);
             var endpointProperty = entry.Property(x => x.CurrentDeploymentEndpointUri);
             var allowLegacyEndpoint = entry.State == EntityState.Modified && !endpointProperty.IsModified;
             var persistedEndpoint = instance.CurrentDeploymentEndpointUri;
@@ -852,13 +856,24 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
                 {
                     instance.CurrentDeploymentManagedHandoff = false;
                     if (!entry.Property(x => x.CurrentDeploymentStudioGrants).IsModified)
+                    {
                         instance.CurrentDeploymentStudioGrants = false;
+                        instance.CurrentDeploymentStudioGrantsDeploymentId = null;
+                    }
                 }
                 else
                     throw new InvalidOperationException("A managed handoff must belong to a current deployment with an endpoint.");
             }
-            if (instance.CurrentDeploymentStudioGrants && !instance.CurrentDeploymentManagedHandoff)
-                throw new InvalidOperationException("Studio grants must belong to the current managed handoff deployment.");
+            if (instance.CurrentDeploymentStudioGrants || instance.CurrentDeploymentStudioGrantsDeploymentId is not null)
+            {
+                // An older build can leave Studio grants set after it cleared or replaced the
+                // current deployment. Honour the flag only when it still names this deployment.
+                if (!instance.CurrentDeploymentHonorsStudioGrants())
+                {
+                    instance.CurrentDeploymentStudioGrants = false;
+                    instance.CurrentDeploymentStudioGrantsDeploymentId = null;
+                }
+            }
             instance.PlacementAssignmentId = OptionalSafeReference(instance.PlacementAssignmentId, nameof(instance.PlacementAssignmentId), 128);
             instance.ElsaTenantId = OptionalSafeReference(instance.ElsaTenantId, nameof(instance.ElsaTenantId), 128);
             var tenantAudience = OptionalAudience(instance.ElsaTenantAudience, nameof(instance.ElsaTenantAudience));

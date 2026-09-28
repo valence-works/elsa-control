@@ -2916,6 +2916,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<bool>("CurrentDeploymentStudioGrants")
                         .HasColumnType("bit");
 
+                    b.Property<string>("CurrentDeploymentStudioGrantsDeploymentId")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
                     b.Property<string>("CurrentReleaseComponentDigestsJson")
                         .HasMaxLength(65536)
                         .HasColumnType("nvarchar(max)");

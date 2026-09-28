@@ -3590,7 +3590,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         entity.CurrentDeploymentRevisionId = instance.CurrentDeploymentReference?.RevisionId;
         entity.CurrentDeploymentEndpointUri = instance.CurrentDeploymentReference?.EndpointUri;
         entity.CurrentDeploymentManagedHandoff = instance.CurrentDeploymentReference?.ManagedHandoff == true;
-        entity.CurrentDeploymentStudioGrants = instance.CurrentDeploymentReference?.StudioGrantsSupported == true;
+        var studioGrants = instance.CurrentDeploymentReference?.StudioGrantsSupported == true;
+        entity.CurrentDeploymentStudioGrants = studioGrants;
+        entity.CurrentDeploymentStudioGrantsDeploymentId = studioGrants
+            ? instance.CurrentDeploymentReference!.DeploymentId
+            : null;
         entity.PlacementAssignmentId = instance.PlacementAssignmentReference?.AssignmentId;
         entity.ElsaTenantId = instance.ElsaTenantReference?.TenantId;
         entity.ElsaTenantAudience = instance.ElsaTenantReference?.Audience;
@@ -4097,18 +4101,22 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         if (entity.CurrentDeploymentId is null)
         {
             if (entity.CurrentDeploymentRevisionId is not null || entity.CurrentDeploymentEndpointUri is not null ||
-                entity.CurrentDeploymentManagedHandoff || entity.CurrentDeploymentStudioGrants)
+                entity.CurrentDeploymentManagedHandoff)
                 throw new InvalidOperationException();
+            // Leftover Studio-grants columns from an older build that cleared the current
+            // deployment are ignored: they are not part of that build's EF model.
             return null;
         }
         var endpoint = ElsaManagedEndpointOrigin.TryCreate(entity.CurrentDeploymentEndpointUri, out var origin)
             ? origin.Value
             : null;
         // A handoff is only meaningful for the verified origin it was bound to; a legacy-invalid endpoint
-        // therefore drops it rather than failing to load the instance.
+        // therefore drops it rather than failing to load the instance. Studio grants that no longer
+        // belong to this deployment (or that lack a handoff) degrade to diagnostics-only.
+        var managedHandoff = entity.CurrentDeploymentManagedHandoff && endpoint is not null;
         return new ElsaCurrentDeploymentReference(entity.CurrentDeploymentId, entity.CurrentDeploymentRevisionId, endpoint,
-            entity.CurrentDeploymentManagedHandoff && endpoint is not null,
-            entity.CurrentDeploymentStudioGrants && endpoint is not null);
+            managedHandoff,
+            managedHandoff && entity.CurrentDeploymentHonorsStudioGrants());
     }
 
     private static ElsaTenantReference? MapTenant(ElsaInstanceEntity entity)

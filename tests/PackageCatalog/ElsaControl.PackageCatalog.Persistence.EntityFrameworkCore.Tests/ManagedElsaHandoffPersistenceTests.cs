@@ -372,6 +372,75 @@ public sealed class ManagedElsaHandoffPersistenceTests
             Assert.Single(await catalog.ListAsync(instance.WorkspaceId)).CallbackUri?.AbsoluteUri);
     }
 
+    public enum OlderBuildDeploymentWrite { ClearCurrentDeployment, ChangeCurrentDeployment }
+
+    [Theory]
+    [InlineData(OlderBuildDeploymentWrite.ClearCurrentDeployment)]
+    [InlineData(OlderBuildDeploymentWrite.ChangeCurrentDeployment)]
+    public async Task Older_build_deployment_write_loads_and_issues_diagnostics_only_grants(
+        OlderBuildDeploymentWrite olderBuildWrite)
+    {
+        await using var connection = NewConnection();
+        await connection.OpenAsync();
+        await using var db = CreateContext(connection);
+        await db.Database.MigrateAsync();
+        var instance = await SeedInstanceAsync(db);
+        instance.ObservedLifecycle = ElsaObservedLifecycle.Ready;
+        instance.Health = ElsaInstanceHealth.Healthy;
+        instance.CurrentDeploymentManagedHandoff = true;
+        instance.CurrentDeploymentStudioGrants = true;
+        instance.CurrentDeploymentStudioGrantsDeploymentId = instance.CurrentDeploymentId;
+        await db.SaveChangesAsync();
+        var identities = new EfCoreManagedElsaInstanceIdentityStore(db);
+        Assert.True((await identities.BindAsync(instance.OrganizationId, instance.WorkspaceId, instance.Id,
+            "https://managed.example.test", expectedBindingVersion: null, DateTimeOffset.UtcNow)).Succeeded);
+        Assert.True((await identities.FindOpenableAsync(instance.OrganizationId, instance.Id))!.StudioGrantsSupported);
+
+        // An older Control build's EF model does not include the Studio-grants columns, so it
+        // updates only the pre-existing current-deployment fields.
+        if (olderBuildWrite == OlderBuildDeploymentWrite.ClearCurrentDeployment)
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE ElsaInstances
+                SET CurrentDeploymentId = NULL,
+                    CurrentDeploymentRevisionId = NULL,
+                    CurrentDeploymentEndpointUri = NULL,
+                    CurrentDeploymentManagedHandoff = {false}
+                WHERE Id = {instance.Id}
+                """);
+        else
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE ElsaInstances
+                SET CurrentDeploymentId = {"deployment-older"},
+                    CurrentDeploymentRevisionId = {"attempt-2"}
+                WHERE Id = {instance.Id}
+                """);
+        db.ChangeTracker.Clear();
+
+        var reloaded = await db.ElsaInstances
+            .Include(x => x.IdentityBinding)
+            .SingleAsync(x => x.Id == instance.Id);
+        var mapped = EfCoreElsaInstanceLifecycleStore.MapInstance(reloaded);
+        if (olderBuildWrite == OlderBuildDeploymentWrite.ClearCurrentDeployment)
+        {
+            Assert.Null(mapped.CurrentDeploymentReference);
+            Assert.Null(await identities.FindOpenableAsync(instance.OrganizationId, instance.Id));
+        }
+        else
+        {
+            Assert.Equal("deployment-older", mapped.CurrentDeploymentReference?.DeploymentId);
+            Assert.True(mapped.CurrentDeploymentReference?.ManagedHandoff);
+            Assert.False(mapped.CurrentDeploymentReference?.StudioGrantsSupported);
+            Assert.False((await identities.FindOpenableAsync(instance.OrganizationId, instance.Id))!.StudioGrantsSupported);
+        }
+
+        reloaded.Name = "After older-build current-deployment write";
+        await db.SaveChangesAsync();
+        Assert.False(reloaded.CurrentDeploymentStudioGrants);
+        Assert.Null(reloaded.CurrentDeploymentStudioGrantsDeploymentId);
+        if (olderBuildWrite == OlderBuildDeploymentWrite.ChangeCurrentDeployment)
+            Assert.False((await identities.FindOpenableAsync(instance.OrganizationId, instance.Id))!.StudioGrantsSupported);
+    }
+
     [Fact]
     public async Task A_managed_handoff_cannot_be_persisted_without_a_current_deployment_endpoint()
     {

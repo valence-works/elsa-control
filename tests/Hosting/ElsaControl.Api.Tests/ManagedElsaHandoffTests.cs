@@ -273,8 +273,9 @@ public sealed class ManagedElsaHandoffTests
                 instanceId));
             const string deploymentId = "deployment-managed";
             const string endpointUri = "https://managed.example.test";
+            var studioGrantsDeploymentId = studioGrantsSupported ? deploymentId : null;
             await db.Database.ExecuteSqlInterpolatedAsync(
-                $"UPDATE ElsaInstances SET CurrentDeploymentId = {deploymentId}, CurrentDeploymentEndpointUri = {endpointUri}, CurrentDeploymentManagedHandoff = {true}, CurrentDeploymentStudioGrants = {studioGrantsSupported}, DesiredLifecycle = {ElsaDesiredLifecycle.Running.ToString()}, ObservedLifecycle = {ElsaObservedLifecycle.Ready.ToString()}, Health = {ElsaInstanceHealth.Healthy.ToString()} WHERE Id = {instanceId}");
+                $"UPDATE ElsaInstances SET CurrentDeploymentId = {deploymentId}, CurrentDeploymentEndpointUri = {endpointUri}, CurrentDeploymentManagedHandoff = {true}, CurrentDeploymentStudioGrants = {studioGrantsSupported}, CurrentDeploymentStudioGrantsDeploymentId = {studioGrantsDeploymentId}, DesiredLifecycle = {ElsaDesiredLifecycle.Running.ToString()}, ObservedLifecycle = {ElsaObservedLifecycle.Ready.ToString()}, Health = {ElsaInstanceHealth.Healthy.ToString()} WHERE Id = {instanceId}");
             db.ChangeTracker.Clear();
         }
 
@@ -375,7 +376,7 @@ public sealed class ManagedElsaHandoffTests
             // Exercise the strongest deployed Studio capability set; a workspace Reader must still receive none of
             // its dashboard or designer grants, whatever their organization role.
             await db.Database.ExecuteSqlInterpolatedAsync(
-                $"UPDATE ElsaInstances SET CurrentDeploymentStudioGrants = {true} WHERE Id = {setup.InstanceId}");
+                $"UPDATE ElsaInstances SET CurrentDeploymentId = {"deployment-managed"}, CurrentDeploymentStudioGrants = {true}, CurrentDeploymentStudioGrantsDeploymentId = {"deployment-managed"} WHERE Id = {setup.InstanceId}");
         }
 
         using var reader = app.CreateControlIdentityClient(readerSubject);
@@ -459,7 +460,7 @@ public sealed class ManagedElsaHandoffTests
             bind: true);
         await using var app = setup.App;
         await ExecuteSqlAsync(app, db => db.Database.ExecuteSqlInterpolatedAsync(
-            $"UPDATE ElsaInstances SET CurrentDeploymentStudioGrants = {true} WHERE Id = {setup.InstanceId}"));
+            $"UPDATE ElsaInstances SET CurrentDeploymentId = {"deployment-managed"}, CurrentDeploymentStudioGrants = {true}, CurrentDeploymentStudioGrantsDeploymentId = {"deployment-managed"} WHERE Id = {setup.InstanceId}"));
         var request = new ManagedElsaHandoffIssueRequest(
             setup.OrganizationId,
             setup.InstanceId,
