@@ -149,86 +149,88 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         check_script = dedent(self.source[check_start + len("        run: |\n") : check_end])
         check_script = check_script.replace("${{ github.event_name }}", "workflow_dispatch")
 
-        base_environment = os.environ.copy()
-        base_environment.update(
-            {
-                "DEPLOY_MODE": "app",
-                "AZURE_CLIENT_ID": "00000000-0000-0000-0000-000000000001",
-                "AZURE_TENANT_ID": "00000000-0000-0000-0000-000000000002",
-                "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
-                "AZURE_CONTAINER_REGISTRY_ENDPOINT": "test.azurecr.io",
-                "AZURE_ENV_NAME": "test",
-                "AZURE_LOCATION": "westeurope",
-                "AZURE_RESOURCE_GROUP": "rg-test",
-                "AZURE_WEBAPP_NAME": "test-api",
-                "TARGET_ENVIRONMENT": "production",
-            }
-        )
-
-        for issuer in (
-            "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1",
-            "https://abcdefghijklmnopqrst.supabase.co/auth/v1",
-        ):
-            with self.subTest(issuer=issuer), tempfile.NamedTemporaryFile() as output:
-                environment = base_environment | {
-                    "CLOUD_ACCOUNT_ISSUER": issuer,
-                    "EXPECTED_CLOUD_ACCOUNT_ISSUER": issuer,
-                    "GITHUB_OUTPUT": output.name,
+        with tempfile.NamedTemporaryFile() as github_env:
+            base_environment = os.environ.copy()
+            base_environment.update(
+                {
+                    "DEPLOY_MODE": "app",
+                    "AZURE_CLIENT_ID": "00000000-0000-0000-0000-000000000001",
+                    "AZURE_TENANT_ID": "00000000-0000-0000-0000-000000000002",
+                    "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
+                    "AZURE_CONTAINER_REGISTRY_ENDPOINT": "test.azurecr.io",
+                    "AZURE_ENV_NAME": "test",
+                    "AZURE_LOCATION": "westeurope",
+                    "AZURE_RESOURCE_GROUP": "rg-test",
+                    "AZURE_WEBAPP_NAME": "test-api",
+                    "TARGET_ENVIRONMENT": "production",
+                    "GITHUB_ENV": github_env.name,
                 }
-                result = subprocess.run(
+            )
+
+            for issuer in (
+                "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1",
+                "https://abcdefghijklmnopqrst.supabase.co/auth/v1",
+            ):
+                with self.subTest(issuer=issuer), tempfile.NamedTemporaryFile() as output:
+                    environment = base_environment | {
+                        "CLOUD_ACCOUNT_ISSUER": issuer,
+                        "EXPECTED_CLOUD_ACCOUNT_ISSUER": issuer,
+                        "GITHUB_OUTPUT": output.name,
+                    }
+                    result = subprocess.run(
+                        ["bash", "-c", check_script],
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(0, result.returncode, result.stderr)
+
+            with tempfile.NamedTemporaryFile() as output:
+                rejected = subprocess.run(
                     ["bash", "-c", check_script],
-                    env=environment,
+                    env=base_environment
+                    | {
+                        "CLOUD_ACCOUNT_ISSUER": "https://abcdefghijklmnopqrst.supabase.co/auth/v1/extra",
+                        "GITHUB_OUTPUT": output.name,
+                    },
                     capture_output=True,
                     text=True,
                     check=False,
                 )
-                self.assertEqual(0, result.returncode, result.stderr)
+            self.assertNotEqual(0, rejected.returncode)
+            self.assertIn("exact Supabase Auth issuer", rejected.stdout + rejected.stderr)
 
-        with tempfile.NamedTemporaryFile() as output:
-            rejected = subprocess.run(
-                ["bash", "-c", check_script],
-                env=base_environment
-                | {
-                    "CLOUD_ACCOUNT_ISSUER": "https://abcdefghijklmnopqrst.supabase.co/auth/v1/extra",
-                    "GITHUB_OUTPUT": output.name,
-                },
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        self.assertNotEqual(0, rejected.returncode)
-        self.assertIn("exact Supabase Auth issuer", rejected.stdout + rejected.stderr)
+            with tempfile.NamedTemporaryFile() as output:
+                mismatched = subprocess.run(
+                    ["bash", "-c", check_script],
+                    env=base_environment
+                    | {
+                        "CLOUD_ACCOUNT_ISSUER": "https://abcdefghijklmnopqrst.supabase.co/auth/v1",
+                        "EXPECTED_CLOUD_ACCOUNT_ISSUER": "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1",
+                        "GITHUB_OUTPUT": output.name,
+                    },
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            self.assertNotEqual(0, mismatched.returncode)
+            self.assertIn("approved environment issuer", mismatched.stdout + mismatched.stderr)
 
-        with tempfile.NamedTemporaryFile() as output:
-            mismatched = subprocess.run(
-                ["bash", "-c", check_script],
-                env=base_environment
-                | {
-                    "CLOUD_ACCOUNT_ISSUER": "https://abcdefghijklmnopqrst.supabase.co/auth/v1",
-                    "EXPECTED_CLOUD_ACCOUNT_ISSUER": "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1",
-                    "GITHUB_OUTPUT": output.name,
-                },
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        self.assertNotEqual(0, mismatched.returncode)
-        self.assertIn("approved environment issuer", mismatched.stdout + mismatched.stderr)
-
-        with tempfile.NamedTemporaryFile() as output:
-            disabled = subprocess.run(
-                ["bash", "-c", check_script],
-                env=base_environment
-                | {
-                    "CLOUD_ACCOUNT_ISSUER": "",
-                    "EXPECTED_CLOUD_ACCOUNT_ISSUER": "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1",
-                    "GITHUB_OUTPUT": output.name,
-                },
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        self.assertEqual(0, disabled.returncode, disabled.stderr)
+            with tempfile.NamedTemporaryFile() as output:
+                disabled = subprocess.run(
+                    ["bash", "-c", check_script],
+                    env=base_environment
+                    | {
+                        "CLOUD_ACCOUNT_ISSUER": "",
+                        "EXPECTED_CLOUD_ACCOUNT_ISSUER": "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1",
+                        "GITHUB_OUTPUT": output.name,
+                    },
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            self.assertEqual(0, disabled.returncode, disabled.stderr)
 
     def _deployment_config_script(self) -> str:
         check_start = self.source.index(
@@ -401,6 +403,13 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertIn("must be unset", production_allowlist.stdout + production_allowlist.stderr)
         self.assertNotIn(rehearsal, production_allowlist.stdout + production_allowlist.stderr)
 
+        production_false, _, _ = run_check(
+            TARGET_ENVIRONMENT="production",
+            STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="false",
+        )
+        self.assertNotEqual(0, production_false.returncode)
+        self.assertIn("must be unset", production_false.stdout + production_false.stderr)
+
         production_empty, production_output, production_env = run_check(
             TARGET_ENVIRONMENT="production",
             STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="",
@@ -472,8 +481,9 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
             "STRIPE_HOSTED_PRICE_ID": "price_test", "STRIPE_TEST_SECRET_KEY": "sk_test_fixture",
             "STRIPE_TEST_WEBHOOK_SIGNING_SECRET": "whsec_fixture",
         }
-        with tempfile.NamedTemporaryFile() as output:
+        with tempfile.NamedTemporaryFile() as output, tempfile.NamedTemporaryFile() as github_env:
             environment["GITHUB_OUTPUT"] = output.name
+            environment["GITHUB_ENV"] = github_env.name
             missing = subprocess.run(["bash", "-c", check_script], env=environment,
                                      capture_output=True, text=True, check=False)
             self.assertNotEqual(0, missing.returncode)
@@ -1178,6 +1188,7 @@ else:
             for name in (
                 "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED",
                 "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS",
+                "TARGET_ENVIRONMENT",
             ):
                 deploy_env.pop(name, None)
             deploy_env.update(
@@ -1190,6 +1201,7 @@ else:
                     "CONTROL_ENTRA_CLIENT_ID": "00000000-0000-0000-0000-000000000002",
                     "CONTROL_ENTRA_CLIENT_SECRET": "test-only-client-secret",
                     "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
+                    "TARGET_ENVIRONMENT": "production",
                     "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED": emitted["staging_billing_lever_enabled"],
                     "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS": emitted["staging_billing_lever_allowlist"],
                 }
@@ -1206,6 +1218,70 @@ else:
             self.assertIn("deployment sub what-if", deploy_log.read_text())
             self.assertNotIn("stagingbillinglever", deploy_log.read_text())
             self.assertNotIn(rehearsal, helper_result.stdout + helper_result.stderr + deploy_result.stdout + deploy_result.stderr)
+
+        with tempfile.NamedTemporaryFile() as output, tempfile.NamedTemporaryFile() as github_env:
+            environment = os.environ.copy()
+            environment.update(base)
+            environment.update(
+                {
+                    "TARGET_ENVIRONMENT": "test",
+                    "AZURE_ENV_NAME": "test",
+                    "AZURE_RESOURCE_GROUP": "rg-test",
+                    "AZURE_WEBAPP_NAME": "test-api",
+                    "ELSA_CLOUD_STAGING_ORIGIN": "https://staging.example.test",
+                    "STRIPE_HOSTED_PRICE_ID": "price_test",
+                    "STRIPE_TEST_SECRET_KEY": "sk_test_fixture",
+                    "STRIPE_TEST_WEBHOOK_SIGNING_SECRET": "whsec_fixture",
+                }
+            )
+            environment.pop("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED", None)
+            environment.pop("STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS", None)
+            environment["GITHUB_OUTPUT"] = output.name
+            environment["GITHUB_ENV"] = github_env.name
+            staging_config = subprocess.run(
+                ["bash", "-c", check_script],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, staging_config.returncode, staging_config.stdout + staging_config.stderr)
+            staging_emitted = self._parse_kv(Path(output.name).read_text())
+
+        self.assertEqual("", staging_emitted.get("staging_billing_lever_enabled", "missing"))
+        self.assertEqual("", staging_emitted.get("staging_billing_lever_allowlist", "missing"))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            store, call_log, _ = self._write_lever_fake_az(temp_path)
+            store.write_text(json.dumps({enabled_name: "true", f"{prefix}0": rehearsal}))
+            helper_env = os.environ.copy()
+            helper_env.update(
+                {
+                    "PATH": f"{temp_path}{os.pathsep}{helper_env['PATH']}",
+                    "AZ_CALL_LOG": str(call_log),
+                    "SETTINGS_STORE": str(store),
+                    "AZURE_RESOURCE_GROUP": "rg-test",
+                    "AZURE_WEBAPP_NAME": "test-api",
+                    "TARGET_ENVIRONMENT": "test",
+                    "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED": staging_emitted["staging_billing_lever_enabled"],
+                    "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS": staging_emitted["staging_billing_lever_allowlist"],
+                    "STAGING_SMOKE_OWNER_ORGANIZATION_ID": smoke,
+                }
+            )
+            stale_result = subprocess.run(
+                [str(helper)],
+                env=helper_env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            self.assertEqual(0, stale_result.returncode, stale_result.stdout + stale_result.stderr)
+            self.assertEqual({}, json.loads(store.read_text()))
+            self.assertIn("appsettings delete", call_log.read_text())
+            self.assertNotIn("appsettings set", call_log.read_text())
+            self.assertNotIn(rehearsal, stale_result.stdout + stale_result.stderr)
 
         for raw_enabled in ("false", "FALSE"):
             with self.subTest(raw_enabled=raw_enabled), tempfile.TemporaryDirectory() as temp_dir:
