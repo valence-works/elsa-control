@@ -2707,6 +2707,67 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             Now.AddMinutes(12))));
     }
 
+    [Fact]
+    public async Task No_op_reconciliation_does_not_advance_instance_version_or_write_audit()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "No-op reconciliation persistence");
+        var workspaceStore = new DeploymentWorkspaceStore(db);
+        _ = await workspaceStore.ClaimNextQueuedRunAsync("deployment-worker", Now);
+        Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
+            Now.AddMinutes(10), TimeSpan.FromMinutes(5)));
+        db.ChangeTracker.Clear();
+        var port = new QueueProviderPort(
+            new(ElsaInstanceProviderObservationKind.Confirmed, ElsaObservedLifecycle.Provisioning,
+                ElsaInstanceProviderHealthGate.Unknown, "provider-observation-provisioning-1"),
+            new(ElsaInstanceProviderObservationKind.Confirmed, ElsaObservedLifecycle.Provisioning,
+                ElsaInstanceProviderHealthGate.Unknown, "provider-observation-provisioning-2"));
+        var lifecycleStore = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now.AddMinutes(11)));
+        var service = new ElsaInstanceProviderReconciliationService(
+            lifecycleStore, port, new FixedTimeProvider(Now.AddMinutes(11)));
+
+        var first = await service.ReconcileAsync(workspace.Id, accepted.Operation.Id);
+        db.ChangeTracker.Clear();
+        var versionAfterChange = await db.ElsaInstances
+            .Where(x => x.Id == accepted.Instance.Id)
+            .Select(x => x.Version)
+            .SingleAsync();
+        var auditsAfterChange = await db.ElsaInstanceAuditEvents.CountAsync(x =>
+            x.OperationId == accepted.Operation.Id && x.EventType == "lifecycle.reconciled");
+        var historyAfterChange = await db.DeploymentRunHistoryEvents.CountAsync();
+
+        var noOp = await service.ReconcileAsync(workspace.Id, accepted.Operation.Id);
+
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, first.Projection.ObservedLifecycle);
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, noOp.Outcome);
+        Assert.False(noOp.Replayed);
+        Assert.Equal(2, port.Calls);
+        db.ChangeTracker.Clear();
+        var persistedVersion = await db.ElsaInstances
+            .Where(x => x.Id == accepted.Instance.Id)
+            .Select(x => x.Version)
+            .SingleAsync();
+        Assert.Equal(versionAfterChange, persistedVersion);
+        Assert.Equal(versionAfterChange, noOp.Projection.InstanceVersion);
+        Assert.Equal(auditsAfterChange, await db.ElsaInstanceAuditEvents.CountAsync(x =>
+            x.OperationId == accepted.Operation.Id && x.EventType == "lifecycle.reconciled"));
+        Assert.Equal(historyAfterChange, await db.DeploymentRunHistoryEvents.CountAsync());
+
+        var current = await lifecycleStore.GetInstanceAsync(workspace.Id, accepted.Instance.Id);
+        var deletion = await new ElsaInstanceLifecycleService(
+                lifecycleStore, new FixedTimeProvider(Now.AddMinutes(12)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, versionAfterChange,
+                "delete-after-no-op-reconcile", Now.AddMinutes(12)));
+        Assert.Equal(current!.Version, versionAfterChange);
+        Assert.Equal(ElsaInstanceOperationAction.Delete, deletion.Operation.Action);
+        Assert.NotEqual(ElsaInstanceOperationState.Failed, deletion.Operation.State);
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]

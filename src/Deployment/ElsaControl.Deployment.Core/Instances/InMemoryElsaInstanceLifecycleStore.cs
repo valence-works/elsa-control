@@ -359,7 +359,10 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 operation.AttemptNumber != commit.ExpectedAttemptNumber || instance.Version != commit.ExpectedInstanceVersion)
                 throw new ElsaInstanceLifecycleConflictException("Provider reconciliation target changed concurrently.");
 
-            var persistedInstance = WithVersion(commit.Instance, checked(commit.ExpectedInstanceVersion + 1));
+            var noOp = IsNoOpReconciliation(instance, commit.Instance, commit.Operation.State);
+            var persistedInstance = noOp
+                ? instance
+                : WithVersion(commit.Instance, checked(commit.ExpectedInstanceVersion + 1));
             _instances[commit.InstanceId] = persistedInstance;
             _operations[commit.OperationId] = commit.Operation;
             var outcome = commit.Operation.State switch
@@ -420,6 +423,17 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         commit.Instance.Health,
         instanceVersion,
         commit.Operation.State);
+
+    private static bool IsNoOpReconciliation(
+        ElsaInstance current,
+        ElsaInstance projected,
+        ElsaInstanceOperationState commitState) =>
+        commitState == ElsaInstanceOperationState.RecoveryRequired &&
+        current.ObservedLifecycle == projected.ObservedLifecycle &&
+        current.Health == projected.Health &&
+        current.DesiredLifecycle == projected.DesiredLifecycle &&
+        current.DeletedAt == projected.DeletedAt &&
+        Equals(current.CurrentDeploymentReference, projected.CurrentDeploymentReference);
 
     private static ElsaInstance WithVersion(ElsaInstance instance, int version) => ElsaInstance.Hydrate(
         instance.Id,

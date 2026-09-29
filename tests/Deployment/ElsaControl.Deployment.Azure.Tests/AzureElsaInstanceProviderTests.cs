@@ -534,7 +534,7 @@ public sealed class AzureElsaInstanceProviderTests
     }
 
     [Fact]
-    public async Task Recovery_required_stale_receipt_is_reminted_for_the_current_instance_version()
+    public async Task Recovery_required_unchanged_postcondition_reuses_the_receipt_when_instance_version_jumps()
     {
         var now = DateTimeOffset.Parse("2026-09-24T00:48:18Z");
         var fixture = await CreateObserveFixtureAsync(
@@ -552,13 +552,14 @@ public sealed class AzureElsaInstanceProviderTests
             LastArmObservedAt = now.AddSeconds(-120),
             ArmObservationBackoffSeconds = AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds
         };
-        var reminted = await fixture.Provider.ObserveAsync(
+        var reused = await fixture.Provider.ObserveAsync(
             fixture.Request with { InstanceVersion = fixture.Request.InstanceVersion + 2 });
 
-        Assert.NotNull(reminted.RetryEvidence);
+        Assert.NotNull(reused.RetryEvidence);
+        Assert.Equal(first.RetryEvidence!.Reference, reused.RetryEvidence!.Reference);
         Assert.Equal(2, fixture.Observer.Calls);
-        Assert.Equal(2, fixture.ObservationStore.CreateCalls);
-        Assert.Equal(fixture.Request.InstanceVersion + 2, fixture.ObservationStore.LastReceipt!.Observation.ObservedInstanceVersion);
+        Assert.Equal(1, fixture.ObservationStore.CreateCalls);
+        Assert.Equal(fixture.Request.InstanceVersion, fixture.ObservationStore.LastReceipt!.Observation.ObservedInstanceVersion);
     }
 
     [Fact]

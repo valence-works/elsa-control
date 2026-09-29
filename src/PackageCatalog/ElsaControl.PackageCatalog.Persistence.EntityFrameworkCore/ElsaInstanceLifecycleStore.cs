@@ -204,6 +204,13 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 }
 
                 var priorObservedLifecycle = instance.ObservedLifecycle;
+                if (IsNoOpReconciliation(instance, commit.Instance, commit.Operation.State))
+                {
+                    ApplyNoOpReconciliationMetadata(operation, run, commit, instance.Version);
+                    await dbContext.SaveChangesAsync(cancellationToken);
+                    return ReconciliationResult(operation, replayed: false);
+                }
+
                 ApplyAggregate(instance, commit.Instance);
                 if (commit.Operation.State == ElsaInstanceOperationState.Succeeded &&
                     commit.Instance.ObservedLifecycle == ElsaObservedLifecycle.Ready &&
@@ -3639,6 +3646,69 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         // no-op intent update). CatalogDbContext still validates the increment
         // against the tracked original version before saving.
         entity.Version = instance.Version;
+    }
+
+    /// <summary>
+    /// A RecoveryRequired tick that reprints the same customer-visible aggregate
+    /// must not mark the instance modified. CatalogDbContext increments Version
+    /// on every instance save, which made If-Match unusable while reconcile
+    /// polled.
+    /// </summary>
+    private static bool IsNoOpReconciliation(
+        ElsaInstanceEntity current,
+        ElsaInstance projected,
+        ElsaInstanceOperationState commitState)
+    {
+        if (commitState != ElsaInstanceOperationState.RecoveryRequired)
+            return false;
+
+        var projectedDeployment = projected.CurrentDeploymentReference;
+        return current.ObservedLifecycle == projected.ObservedLifecycle &&
+               current.Health == projected.Health &&
+               current.DesiredLifecycle == projected.DesiredLifecycle &&
+               current.DeletedAt == projected.DeletedAt &&
+               string.Equals(current.CurrentDeploymentId, projectedDeployment?.DeploymentId, StringComparison.Ordinal) &&
+               string.Equals(current.CurrentDeploymentRevisionId, projectedDeployment?.RevisionId, StringComparison.Ordinal) &&
+               string.Equals(current.CurrentDeploymentEndpointUri, projectedDeployment?.EndpointUri, StringComparison.Ordinal) &&
+               current.CurrentDeploymentManagedHandoff == (projectedDeployment?.ManagedHandoff == true);
+    }
+
+    private static void ApplyNoOpReconciliationMetadata(
+        ElsaInstanceOperationEntity operation,
+        DeploymentRunEntity run,
+        ElsaInstanceProviderReconciliationCommit commit,
+        int instanceVersion)
+    {
+        var preserveUncertainSubmission = !commit.RetrySafe &&
+            (string.Equals(operation.FailureCode, "provider.submission.uncertain", StringComparison.Ordinal) ||
+             string.Equals(run.RecoveryReason, "provider.submission.uncertain", StringComparison.Ordinal));
+        operation.FailureCode = preserveUncertainSubmission
+            ? "provider.submission.uncertain"
+            : commit.RetrySafe
+                ? ElsaInstanceProviderReconciliationService.RetrySafeCode
+                : null;
+        operation.FailureSummary = null;
+        operation.CompletedAt = null;
+        operation.WorkerId = null;
+        operation.LeaseTokenHash = null;
+        operation.LeaseExpiresAt = null;
+        operation.HeartbeatAt = null;
+        operation.UpdatedAt = commit.ReconciledAt.ToUniversalTime();
+        operation.ReconciliationEvidenceFingerprint = commit.EvidenceFingerprint;
+        operation.ReconciliationDiagnosticCode = commit.DiagnosticCode;
+        operation.ReconciliationRetryEvidenceReference = commit.RetryEvidenceReference ??
+            operation.ReconciliationRetryEvidenceReference;
+        operation.ReconciliationRetryEvidenceDigest = commit.RetryEvidenceDigest ??
+            operation.ReconciliationRetryEvidenceDigest;
+        operation.ReconciledObservedLifecycle = commit.Instance.ObservedLifecycle;
+        operation.ReconciledHealth = commit.Instance.Health;
+        operation.ReconciledInstanceVersion = instanceVersion;
+        operation.ReconciledAt = commit.ReconciledAt.ToUniversalTime();
+        run.RecoveryReason = preserveUncertainSubmission
+            ? "provider.submission.uncertain"
+            : commit.DiagnosticCode;
+        run.WorkerId = null;
+        run.WorkerHeartbeatAt = null;
     }
 
     private static ElsaInstanceOperationEntity ToEntity(
