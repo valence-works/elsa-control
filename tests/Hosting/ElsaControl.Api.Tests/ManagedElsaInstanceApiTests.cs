@@ -2147,6 +2147,36 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Dedicated_delete_retries_once_when_if_match_lags_the_current_version()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-instance-delete-stale-retry");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(owner, workspaceId, "narrow-delete-stale-retry-runtime");
+        using var confirmationResponse = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE ElsaInstances SET Version = Version + 1 WHERE Id = {created.Instance.InstanceId}");
+        }
+
+        using var deletion = await SendDeleteAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "narrow-delete-stale-retry",
+            confirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.Accepted, deletion.StatusCode);
+    }
+
+    [Fact]
     public async Task Dedicated_delete_rechecks_workspace_membership_after_confirmation()
     {
         const string subject = "managed-instance-narrow-delete-revoked-owner";

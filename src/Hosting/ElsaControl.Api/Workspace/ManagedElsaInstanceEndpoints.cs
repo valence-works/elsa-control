@@ -395,24 +395,54 @@ public static class ManagedElsaInstanceEndpoints
                         cancellationToken: cancellationToken);
                 if (deleteRecovery?.Action != ElsaInstanceOperationAction.Delete)
                     deleteRecovery = null;
-                var lifecycleRequest = new ElsaInstanceLifecycleRequest(
-                    workspaceId,
-                    instanceId,
-                    expectedVersion.Value,
-                    keyResult.Value!,
-                    DeleteConfirmationId: request.DeleteConfirmationId,
-                    ActorAccountId: access.AccountId,
-                    ExpectedOperationId: deleteRecovery?.Id);
-                var accepted = deleteRecovery is not null
-                    ? await lifecycle.RecoverDeleteAsync(lifecycleRequest, cancellationToken)
-                    : await lifecycle.DeleteAsync(lifecycleRequest, cancellationToken);
-                var operationUrl = $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/delete-operations/{accepted.Operation.Id:D}";
-                context.Response.Headers.ETag = ETag(accepted.Instance.Version);
-                return Results.Accepted(operationUrl, new ManagedElsaInstanceDeleteAcceptedResponse(
-                    accepted.Operation.Id,
-                    accepted.Operation.State,
-                    accepted.Operation.AcceptedAt,
-                    operationUrl));
+
+                async Task<IResult> AcceptDeleteAsync(int version)
+                {
+                    var lifecycleRequest = new ElsaInstanceLifecycleRequest(
+                        workspaceId,
+                        instanceId,
+                        version,
+                        keyResult.Value!,
+                        DeleteConfirmationId: request.DeleteConfirmationId,
+                        ActorAccountId: access.AccountId,
+                        ExpectedOperationId: deleteRecovery?.Id);
+                    var accepted = deleteRecovery is not null
+                        ? await lifecycle.RecoverDeleteAsync(lifecycleRequest, cancellationToken)
+                        : await lifecycle.DeleteAsync(lifecycleRequest, cancellationToken);
+                    var operationUrl = $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/delete-operations/{accepted.Operation.Id:D}";
+                    context.Response.Headers.ETag = ETag(accepted.Instance.Version);
+                    return Results.Accepted(operationUrl, new ManagedElsaInstanceDeleteAcceptedResponse(
+                        accepted.Operation.Id,
+                        accepted.Operation.State,
+                        accepted.Operation.AcceptedAt,
+                        operationUrl));
+                }
+
+                try
+                {
+                    return await AcceptDeleteAsync(expectedVersion.Value);
+                }
+                catch (ElsaInstanceLifecycleConflictException exception)
+                    when (exception.Reason == ElsaInstanceLifecycleConflictReason.VersionConflict)
+                {
+                    var current = await lifecycleStore.GetInstanceAsync(workspaceId, instanceId, cancellationToken);
+                    if (current is null)
+                        return Results.NotFound();
+                    if (current.Version <= expectedVersion.Value)
+                        return Problem(ConflictCode(exception), "The request conflicts with the current instance state.", StatusCodes.Status412PreconditionFailed);
+                    try
+                    {
+                        return await AcceptDeleteAsync(current.Version);
+                    }
+                    catch (ElsaInstanceLifecycleConflictException retryException)
+                        when (retryException.Reason == ElsaInstanceLifecycleConflictReason.VersionConflict)
+                    {
+                        return Problem(
+                            "instance.version-conflict",
+                            "We couldn't start deleting this engine. Please try again. If it keeps failing, contact support.",
+                            StatusCodes.Status412PreconditionFailed);
+                    }
+                }
             }
             catch (ElsaInstanceLifecycleConflictException exception)
             {
