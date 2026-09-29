@@ -127,7 +127,36 @@ jobs:
         run: dotnet build ElsaControl.sln --configuration Release --no-restore
 
       - name: Test
-        run: dotnet test ElsaControl.sln --configuration Release --no-build --verbosity normal
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A disposable local SQL Server exercises compatibility migrations against real SQL.
+          # Generate and mask its credential; never reuse an environment/customer credential.
+          export MSSQL_SA_PASSWORD="$(openssl rand -hex 24)A!1"
+          echo "::add-mask::$MSSQL_SA_PASSWORD"
+          sql_container="elsa-control-migration-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'docker rm --force --volumes "$sql_container" >/dev/null 2>&1 || true' EXIT
+          docker run --detach --name "$sql_container" \
+            --publish 127.0.0.1::1433 \
+            --env ACCEPT_EULA=Y --env MSSQL_PID=Developer --env MSSQL_SA_PASSWORD \
+            mcr.microsoft.com/mssql/server:2022-latest@sha256:4402d880dd4c34bfa7d8705e56a86cd6c88da80a1f6bbbe741f999e76264a090 >/dev/null
+          sql_ready=false
+          for attempt in $(seq 1 60); do
+            if docker exec "$sql_container" sh -c \
+              'exec /opt/mssql-tools18/bin/sqlcmd -S tcp:127.0.0.1,1433 -U sa -P "$MSSQL_SA_PASSWORD" -C -b -l 3 -Q "SET NOCOUNT ON; SELECT 1;"' >/dev/null 2>&1; then
+              sql_ready=true
+              break
+            fi
+            sleep 3
+          done
+          if [ "$sql_ready" != true ]; then
+            echo "::error::Disposable SQL Server did not pass authenticated readiness."
+            exit 1
+          fi
+          sql_port="$(docker port "$sql_container" 1433/tcp | sed 's/.*://')"
+          export CODEX_664_SQL_CONNECTION="Server=127.0.0.1,$sql_port;Database=master;User ID=sa;Password=$MSSQL_SA_PASSWORD;Encrypt=False;TrustServerCertificate=True"
+          echo "::add-mask::$CODEX_664_SQL_CONNECTION"
+          dotnet test ElsaControl.sln --configuration Release --no-build --verbosity normal
 
   build:
     name: Build and Test

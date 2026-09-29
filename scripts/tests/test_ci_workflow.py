@@ -95,12 +95,19 @@ class CiWorkflowTests(unittest.TestCase):
         for command in (
             'dotnet restore ElsaControl.sln',
             'dotnet build ElsaControl.sln --configuration Release --no-restore',
-            'dotnet test ElsaControl.sln --configuration Release --no-build --verbosity normal',
         ):
             self.assertRegex(
                 dotnet,
                 rf"(?m)^\s+run:\s+{re.escape(command)}\s*$",
             )
+        self.assertRegex(dotnet, r"(?m)^\s+dotnet test ElsaControl\.sln --configuration Release --no-build --verbosity normal\s*$")
+        self.assertIn("--publish 127.0.0.1::1433", dotnet)
+        self.assertIn("export CODEX_664_SQL_CONNECTION=", dotnet)
+        self.assertIn('echo "::add-mask::$MSSQL_SA_PASSWORD"', dotnet)
+        self.assertIn('echo "::add-mask::$CODEX_664_SQL_CONNECTION"', dotnet)
+        self.assertIn('docker rm --force --volumes', dotnet)
+        self.assertIn('sql_ready=false', dotnet)
+        self.assertIn('if [ "$sql_ready" != true ]', dotnet)
         self.assertNotRegex(dotnet, r"(?m)^\s+if:")
         self.assertIn("scripts/validate-api-provider-image.sh", azure)
 
