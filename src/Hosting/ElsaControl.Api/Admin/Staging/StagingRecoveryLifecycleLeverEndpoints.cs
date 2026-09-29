@@ -51,6 +51,13 @@ public static class StagingRecoveryLifecycleLeverEndpoints
                             "The state machine refused the recovery-required transition.",
                             StatusCodes.Status409Conflict);
                     }
+                    catch (InvalidOperationException)
+                    {
+                        return ManagedElsaInstanceEndpoints.Problem(
+                            "instance.invalid-state",
+                            "The state machine refused the recovery-required transition.",
+                            StatusCodes.Status409Conflict);
+                    }
                 })
             .RequireAuthorization(AdminAuthorization.Policy)
             .WithTags("Staging Lifecycle Lever");

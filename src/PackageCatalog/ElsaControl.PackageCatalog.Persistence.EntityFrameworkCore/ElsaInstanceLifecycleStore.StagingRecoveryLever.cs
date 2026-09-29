@@ -141,6 +141,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                             diagnosticCode: StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode,
                             summary: "Provider state must be reconciled before retry."),
                         cancellationToken);
+                    await dbContext.SaveChangesAsync(cancellationToken);
 
                     var fired = await CreateAuditEventAsync(
                         instanceEntity,

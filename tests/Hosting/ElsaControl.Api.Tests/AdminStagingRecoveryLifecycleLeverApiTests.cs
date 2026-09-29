@@ -80,8 +80,9 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
         await SeedReadyInstanceAsync(app, AllowlistedInstanceId);
 
         var response = await PostAsync(Operator(app), AllowlistedInstanceId);
+        if (response.StatusCode != HttpStatusCode.OK)
+            Assert.Fail($"{response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadControlJsonAsync<StagingRecoveryLifecycleLeverResponse>();
         Assert.NotNull(body);
         Assert.Equal(AllowlistedInstanceId, body.InstanceId);
@@ -188,8 +189,9 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
         await SeedReadyInstanceAsync(app, AllowlistedInstanceId, deleted: true);
 
         var response = await PostAsync(Operator(app), AllowlistedInstanceId);
+        if (response.StatusCode != HttpStatusCode.Conflict)
+            Assert.Fail($"{response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
 
-        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
         Assert.Equal("instance.invalid-state", await ProblemCodeAsync(response));
         await AssertLeverDidNotFireAsync(app, AllowlistedInstanceId);
     }
@@ -315,11 +317,13 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
             new AdminBillingLifecycleDeadlineAdvanceRequest(OrganizationBillingLifecycleDeadline.GraceEndsAt),
             ControlApiTestApplication.JsonOptions);
 
-    private static Task SeedReadyInstanceAsync(
+    private static async Task SeedReadyInstanceAsync(
         ControlApiTestApplication app,
         Guid instanceId,
-        bool deleted = false) =>
-        app.SeedAsync(async db =>
+        bool deleted = false)
+    {
+        Guid operationId = Guid.Empty;
+        await app.SeedAsync(async db =>
         {
             var organization = new Organization { Name = "Recovery lever org" };
             db.Organizations.Add(organization);
@@ -352,14 +356,27 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
                             "managed", "westeurope", "dedicated", "standard-small", "public", "managed")),
                     $"create-recovery-lever-{instanceId:N}",
                     instanceId));
-            await db.Database.ExecuteSqlInterpolatedAsync(
-                $"UPDATE ElsaInstanceOperations SET State = {ElsaInstanceOperationState.Succeeded.ToString()} WHERE Id = {created.Operation.Id}");
-            var observed = deleted ? ElsaObservedLifecycle.Deleted : ElsaObservedLifecycle.Ready;
-            var desired = deleted ? ElsaDesiredLifecycle.Deleting : ElsaDesiredLifecycle.Running;
-            await db.Database.ExecuteSqlInterpolatedAsync(
-                $"UPDATE ElsaInstances SET ObservedLifecycle = {observed.ToString()}, DesiredLifecycle = {desired.ToString()}, Health = {ElsaInstanceHealth.Healthy.ToString()} WHERE Id = {instanceId}");
-            db.ChangeTracker.Clear();
+            operationId = created.Operation.Id;
         });
+
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Equal(1, await ExecuteAsync(
+            db,
+            "UPDATE ElsaInstanceOperations SET State = @state WHERE Id = @id",
+            ("@state", ElsaInstanceOperationState.Succeeded.ToString()),
+            ("@id", operationId)));
+        var observed = deleted ? ElsaObservedLifecycle.Deleted : ElsaObservedLifecycle.Ready;
+        var desired = deleted ? ElsaDesiredLifecycle.Deleting : ElsaDesiredLifecycle.Running;
+        Assert.Equal(1, await ExecuteAsync(
+            db,
+            "UPDATE ElsaInstances SET ObservedLifecycle = @observed, DesiredLifecycle = @desired, Health = @health WHERE Id = @id",
+            ("@observed", observed.ToString()),
+            ("@desired", desired.ToString()),
+            ("@health", (deleted ? ElsaInstanceHealth.Unknown : ElsaInstanceHealth.Healthy).ToString()),
+            ("@id", instanceId)));
+        db.ChangeTracker.Clear();
+    }
 
     private static async Task RecoverAndCompleteAsync(
         ControlApiTestApplication app,
@@ -368,6 +385,16 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
         int expectedVersion)
     {
         await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Equal(1, await ExecuteAsync(
+            db,
+            "UPDATE ElsaInstanceOperations SET FailureCode = @code, ReconciliationRetryEvidenceReference = @reference, ReconciliationRetryEvidenceDigest = @digest WHERE InstanceId = @instanceId AND State = @state",
+            ("@code", ElsaInstanceProviderReconciliationService.RetrySafeCode),
+            ("@reference", "https://evidence.example/retry/recovery-lever"),
+            ("@digest", "sha256:" + new string('a', 64)),
+            ("@instanceId", instanceId),
+            ("@state", ElsaInstanceOperationState.RecoveryRequired.ToString())));
+        db.ChangeTracker.Clear();
         var lifecycle = scope.ServiceProvider.GetRequiredService<ElsaInstanceLifecycleService>();
         var recovered = await lifecycle.RecoverAsync(new ElsaInstanceLifecycleRequest(
             workspaceId,
@@ -375,9 +402,11 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
             expectedVersion,
             $"recover-lever-{instanceId:N}"));
         Assert.Equal(ElsaInstanceOperationState.Queued, recovered.Operation.State);
-        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
-        await db.Database.ExecuteSqlInterpolatedAsync(
-            $"UPDATE ElsaInstanceOperations SET State = {ElsaInstanceOperationState.Succeeded.ToString()} WHERE Id = {recovered.Operation.Id}");
+        Assert.Equal(1, await ExecuteAsync(
+            db,
+            "UPDATE ElsaInstanceOperations SET State = @state WHERE Id = @id",
+            ("@state", ElsaInstanceOperationState.Succeeded.ToString()),
+            ("@id", recovered.Operation.Id)));
         db.ChangeTracker.Clear();
     }
 
@@ -451,6 +480,25 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
                 "SELECT COUNT(*) FROM ElsaInstanceAuditEvents WHERE InstanceId = @instanceId AND EventType = @eventType",
                 ("@instanceId", instanceId),
                 ("@eventType", StagingRecoveryLifecycleLeverDefaults.FiredEventType));
+    }
+
+    private static async Task<int> ExecuteAsync(
+        CatalogDbContext db,
+        string sql,
+        params (string Name, object Value)[] parameters)
+    {
+        await db.Database.OpenConnectionAsync();
+        await using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = sql;
+        foreach (var (name, value) in parameters)
+        {
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = name;
+            parameter.Value = value;
+            command.Parameters.Add(parameter);
+        }
+
+        return await command.ExecuteNonQueryAsync();
     }
 
     private static async Task<int> ScalarIntAsync(
