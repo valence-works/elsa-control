@@ -663,9 +663,12 @@ esac
                 runtime_readback: str,
                 candidate_build_number: str = "96",
                 cloud_account_issuer: str = "",
+                target_environment: str | None = "production",
             ) -> subprocess.CompletedProcess[str]:
                 call_log.unlink(missing_ok=True)
                 environment = os.environ.copy()
+                environment.pop("TARGET_ENVIRONMENT", None)
+                environment.pop("MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED", None)
                 environment.update(
                     {
                         "PATH": f"{temp_path}:{environment['PATH']}",
@@ -682,6 +685,8 @@ esac
                         "CLOUD_ACCOUNT_ISSUER": cloud_account_issuer,
                     }
                 )
+                if target_environment is not None:
+                    environment["TARGET_ENVIRONMENT"] = target_environment
                 return subprocess.run(
                     ["bash", "-c", deploy_script],
                     env=environment,
@@ -697,6 +702,15 @@ esac
             self.assertIn("webapp config container set", classic_calls)
             self.assertIn("webapp config show", classic_calls)
             self.assertIn("webapp config appsettings set", classic_calls)
+            self.assertIn("ManagedLifecycleTelemetry__AzureMonitor__Environment=production", classic_calls)
+
+            unset_environment = run_promotion(
+                "classic", f"DOCKER|{candidate_image}", target_environment=None
+            )
+            self.assertEqual(0, unset_environment.returncode, unset_environment.stderr)
+            unset_calls = call_log.read_text()
+            self.assertIn("webapp config appsettings set", unset_calls)
+            self.assertNotIn("ManagedLifecycleTelemetry__AzureMonitor__Environment=", unset_calls)
             self.assertIn("webapp restart", classic_calls)
             # The promoted app keeps the candidate's build number, not the promotion run number.
             self.assertIn("Application__BuildNumber=96", classic_calls)

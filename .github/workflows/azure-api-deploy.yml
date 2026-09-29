@@ -926,9 +926,9 @@ jobs:
             pairing_before_count="${pairing_before_count:-0}"
           fi
           azure_monitor_settings=()
-          if [ "$TARGET_ENVIRONMENT" = "test" ]; then
+          if [ "${TARGET_ENVIRONMENT:-}" = "test" ]; then
             azure_monitor_settings+=("ManagedLifecycleTelemetry__AzureMonitor__Environment=staging")
-          elif [ "$TARGET_ENVIRONMENT" = "production" ]; then
+          elif [ "${TARGET_ENVIRONMENT:-}" = "production" ]; then
             azure_monitor_settings+=("ManagedLifecycleTelemetry__AzureMonitor__Environment=production")
           fi
           if [ -n "${MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED:-}" ]; then
