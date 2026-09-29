@@ -2885,9 +2885,13 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(ElsaObservedLifecycle.Provisioning, inFlight.Projection.ObservedLifecycle);
         Assert.Equal(ElsaInstanceHealth.Unknown, inFlight.Projection.Health);
         Assert.NotEqual(ElsaObservedLifecycle.Ready, inFlight.Projection.ObservedLifecycle);
+        var storedInFlight = await db.ElsaInstances.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Instance.Id);
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, storedInFlight.ObservedLifecycle);
         var inFlightList = Assert.Single(
             (await new EfCoreManagedElsaInstanceApiStore(db).ListInstancesAsync(workspace.Id, 1, 10)).Items);
-        Assert.Equal(ElsaObservedLifecycle.Provisioning, inFlightList.ObservedLifecycle);
+        Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, inFlightList.ObservedLifecycle);
+        Assert.NotEqual(ElsaObservedLifecycle.RecoveryRequired, storedInFlight.ObservedLifecycle);
         Assert.Equal(ElsaInstanceHealth.Unknown, inFlightList.Health);
 
         var assignment = Assert.IsType<AzureProviderResourceAssignment>(await
