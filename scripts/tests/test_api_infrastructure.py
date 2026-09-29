@@ -541,6 +541,9 @@ class ApiInfrastructureTests(unittest.TestCase):
         regenerated = template.replace("param pairingallowedorganizationids_value = ''\n", "", 1)
         regenerated = regenerated.replace("param stagingbillingleverenabled_value = false\n", "", 1)
         regenerated = regenerated.replace("param stagingbillingleverallowedorganizationids_value = ''\n", "", 1)
+        regenerated = regenerated.replace("param stagingrecoveryleverenabled_value = false\n", "", 1)
+        regenerated = regenerated.replace("param stagingrecoveryleverallowedinstanceids_value = ''\n", "", 1)
+        regenerated = regenerated.replace("param stagingsmokeownerinstanceid_value = ''\n", "", 1)
         regenerated = regenerated.replace("param cloudaccountissuer_value = ''\n", "", 1)
         regenerated = egress_block.sub("", provisioner_block.sub("", regenerated, count=1), count=1)
         self.assertNotIn("provisioner_identity_outputs_id", regenerated)
@@ -549,6 +552,9 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertNotIn("pairingallowedorganizationids_value", regenerated)
         self.assertNotIn("stagingbillingleverenabled_value", regenerated)
         self.assertNotIn("stagingbillingleverallowedorganizationids_value", regenerated)
+        self.assertNotIn("stagingrecoveryleverenabled_value", regenerated)
+        self.assertNotIn("stagingrecoveryleverallowedinstanceids_value", regenerated)
+        self.assertNotIn("stagingsmokeownerinstanceid_value", regenerated)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             module_fixture = root / "infra" / "api" / "api-website.module.bicep"
@@ -566,6 +572,9 @@ class ApiInfrastructureTests(unittest.TestCase):
             self.assertEqual(1, template_fixture.read_text().count("param pairingallowedorganizationids_value = ''"))
             self.assertEqual(1, template_fixture.read_text().count("param stagingbillingleverenabled_value = false"))
             self.assertEqual(1, template_fixture.read_text().count("param stagingbillingleverallowedorganizationids_value = ''"))
+            self.assertEqual(1, template_fixture.read_text().count("param stagingrecoveryleverenabled_value = false"))
+            self.assertEqual(1, template_fixture.read_text().count("param stagingrecoveryleverallowedinstanceids_value = ''"))
+            self.assertEqual(1, template_fixture.read_text().count("param stagingsmokeownerinstanceid_value = ''"))
 
     def test_regeneration_rejects_unknown_catalog_authentication_without_partial_write(self) -> None:
         generated = self.generated_api_module().replace("Active Directory Default", "Unexpected Authentication")
