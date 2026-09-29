@@ -47,7 +47,7 @@ public sealed class StagingBillingLifecycleLever(
         if (!Enum.IsDefined(deadline))
             throw new ArgumentOutOfRangeException(nameof(deadline));
 
-        if (!options.Value.Enabled || !IsStripeTestMode(stripeOptions.Value))
+        if (!StagingLifecycleLeverGate.IsArmed(options.Value.Enabled, stripeOptions.Value))
         {
             if (options.Value.Enabled)
             {
@@ -85,15 +85,5 @@ public sealed class StagingBillingLifecycleLever(
             move.SubscriptionId!.Value,
             cancellationToken);
         return new StagingBillingLifecycleLeverResult(StagingBillingLifecycleLeverOutcome.Advanced, move, advance);
-    }
-
-    private static bool IsStripeTestMode(StripeBillingOptions stripe)
-    {
-        if (!stripe.Enabled || string.IsNullOrWhiteSpace(stripe.SecretKey))
-            return false;
-
-        return stripe.SecretKey.StartsWith(
-            StagingBillingLifecycleLeverDefaults.StripeTestSecretKeyPrefix,
-            StringComparison.Ordinal);
     }
 }

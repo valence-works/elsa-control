@@ -383,6 +383,31 @@ any other target. The Hosted smoke owner organization
 allowlist. List an organization only when its contact address is a harness
 mailbox, never a real person.
 
+### Staging recovery lifecycle lever
+
+Control can accept a normal `Reconcile` on a staging allowlisted instance and
+move it to `RecoveryRequired` through the real transition methods. The lever
+stays off unless both of these are true:
+
+- The deploy pipeline set `Staging:RecoveryLifecycleLever:Enabled` and
+  `Staging:RecoveryLifecycleLever:AllowedInstanceIds`. Those settings are
+  emitted only from `stagingrecoveryleverenabled_value` and
+  `stagingrecoveryleverallowedinstanceids_value`, which default to off and
+  empty.
+- Control's configured Stripe secret key starts with `sk_test_`. The prefix is
+  compared only; the key is never logged.
+
+This lever has its own flag and instance allowlist. The billing lever and this
+lever never enable each other. The Hosted smoke owner instance
+(`STAGING_SMOKE_OWNER_INSTANCE_ID`) must not appear on the allowlist.
+
+Set the **`test` GitHub environment** variables
+`STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED`,
+`STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS`, and
+`STAGING_SMOKE_OWNER_INSTANCE_ID`. The Azure Control API Deploy workflow
+passes them only for `test` and fails if any of those variables is set for
+any other target.
+
 ### Multi-tenant Microsoft Entra sign-in (guided design partners)
 
 Control can accept work or school sign-ins from customer Microsoft Entra tenants, so a

@@ -77,6 +77,40 @@ var stagingBillingLeverAllowlistSettings = [for (organizationId, i) in stagingBi
 
 var stagingBillingLeverSettings = concat(stagingBillingLeverEnabledSettings, stagingBillingLeverAllowlistSettings)
 
+@description('When true, emit Staging:RecoveryLifecycleLever:Enabled. Staging only; production must stay false.')
+param stagingrecoveryleverenabled_value bool = false
+
+@description('Comma-separated instance GUIDs the staging recovery lifecycle lever may target. Empty refuses every instance. Staging only; production must stay empty.')
+param stagingrecoveryleverallowedinstanceids_value string = ''
+
+@description('Hosted smoke-owner instance GUID the staging recovery lever must refuse. Staging only; production must stay empty.')
+param stagingsmokeownerinstanceid_value string = ''
+
+var stagingRecoveryLeverAllowedInstanceIds = empty(stagingrecoveryleverallowedinstanceids_value)
+  ? []
+  : filter(map(split(stagingrecoveryleverallowedinstanceids_value, ','), id => trim(id)), id => !empty(id))
+
+var stagingRecoveryLeverEnabledSettings = stagingrecoveryleverenabled_value ? [
+  {
+    name: 'Staging__RecoveryLifecycleLever__Enabled'
+    value: 'true'
+  }
+] : []
+
+var stagingRecoveryLeverSmokeOwnerSettings = empty(stagingsmokeownerinstanceid_value) ? [] : [
+  {
+    name: 'Staging__RecoveryLifecycleLever__SmokeOwnerInstanceId'
+    value: stagingsmokeownerinstanceid_value
+  }
+]
+
+var stagingRecoveryLeverAllowlistSettings = [for (instanceId, i) in stagingRecoveryLeverAllowedInstanceIds: {
+  name: 'Staging__RecoveryLifecycleLever__AllowedInstanceIds__${i}'
+  value: instanceId
+}]
+
+var stagingRecoveryLeverSettings = concat(stagingRecoveryLeverEnabledSettings, stagingRecoveryLeverSmokeOwnerSettings, stagingRecoveryLeverAllowlistSettings)
+
 resource mainContainer 'Microsoft.Web/sites/sitecontainers@2025-03-01' = {
   name: 'main'
   properties: {
@@ -256,7 +290,8 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
         }
         ],
         pairingAllowlistSettings,
-        stagingBillingLeverSettings)
+        stagingBillingLeverSettings,
+        stagingRecoveryLeverSettings)
     }
   }
   identity: {

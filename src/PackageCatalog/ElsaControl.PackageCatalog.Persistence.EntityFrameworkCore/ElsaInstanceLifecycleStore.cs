@@ -34,7 +34,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
     IElsaInstanceProviderReconciliationStore,
     IElsaInstanceDeletionStore,
     IElsaInstanceEntitlementHoldStore,
-    IElsaInstanceHealthMonitorStore
+    IElsaInstanceHealthMonitorStore,
+    IStagingRecoveryLifecycleLeverStore
 {
     private readonly IElsaInstanceLifecycleResolutionInputSource _resolutionInputSource =
         resolutionInputSource ?? throw new ArgumentNullException(nameof(resolutionInputSource));

@@ -75,7 +75,11 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         self.assertIn("stagingbillingleverallowedorganizationids_value", self.source)
         self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED", self.source)
         self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS", self.source)
-        self.assertEqual(1, self.source.count("is_staging_billing_lever_target()"))
+        self.assertIn("STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED", self.source)
+        self.assertIn("STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS", self.source)
+        self.assertIn("STAGING_SMOKE_OWNER_INSTANCE_ID", self.source)
+        self.assertIn("scripts/lib/staging-lever-target.sh", self.source)
+        self.assertEqual(3, self.source.count("is_staging_billing_lever_target"))
         self.assertIn("EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS\" ]] && ! is_staging_billing_lever_target", self.source)
         self.assertNotIn("is_staging_pairing_allowlist_target", self.source)
         self.assertIn("IMAGE=\"$IMAGE_REPOSITORY@$IMAGE_DIGEST\"", self.source)
@@ -193,6 +197,56 @@ class DeployAzureElsaControlTests(unittest.TestCase):
                 environment, "--environment", "valence-control-staging", "--what-if"
             )
             self.assertEqual(0, allowed.returncode, allowed.stdout + allowed.stderr)
+
+    def test_refuses_the_staging_recovery_lifecycle_lever_unless_the_target_is_staging(self) -> None:
+        environment = self.environment()
+        environment["STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED"] = "true"
+        environment["STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        result = self.run_deploy(environment, "--environment", "prod")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("only permitted for the test (staging) environment", result.stderr)
+        self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
+
+        billing_only = self.environment()
+        billing_only["STAGING_BILLING_LIFECYCLE_LEVER_ENABLED"] = "true"
+        billing_only["STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        billing_only.pop("STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED", None)
+        billing_only.pop("STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS", None)
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            call_log = temporary_path / "az-calls"
+            self.write_fake_az(temporary_path)
+            billing_only["PATH"] = f"{temporary_path}{os.pathsep}{billing_only['PATH']}"
+            billing_only["AZ_CALL_LOG"] = str(call_log)
+            allowed = self.run_deploy(billing_only, "--environment", "test", "--what-if")
+            self.assertEqual(0, allowed.returncode, allowed.stdout + allowed.stderr)
+            self.assertNotIn("stagingrecoverylever", call_log.read_text())
+
+    def test_allows_the_real_staging_azure_env_name_for_the_recovery_lever(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            call_log = temporary_path / "az-calls"
+            self.write_fake_az(temporary_path)
+
+            environment = self.environment()
+            environment["PATH"] = f"{temporary_path}{os.pathsep}{environment['PATH']}"
+            environment["AZ_CALL_LOG"] = str(call_log)
+            environment["STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED"] = "true"
+            environment["STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS"] = (
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            )
+            result = self.run_deploy(
+                environment, "--environment", "valence-control-staging", "--what-if"
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("deployment sub what-if", call_log.read_text())
+            self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
+
+            environment["TARGET_ENVIRONMENT"] = "production"
+            refused = self.run_deploy(environment, "--environment", "valence-control-staging")
+            self.assertNotEqual(0, refused.returncode)
+            self.assertIn("only permitted for the test (staging) environment", refused.stderr)
+            self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", refused.stdout + refused.stderr)
 
     def test_treats_a_false_or_empty_lever_flag_as_unset_on_production(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

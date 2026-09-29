@@ -24,6 +24,9 @@ AZURE_API_EGRESS_SUBNET_ID="${AZURE_API_EGRESS_SUBNET_ID:-}"
 EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS="${EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS:-}"
 STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="${STAGING_BILLING_LIFECYCLE_LEVER_ENABLED:-}"
 STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS="${STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS:-}"
+STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED="${STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED:-}"
+STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS="${STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS:-}"
+STAGING_SMOKE_OWNER_INSTANCE_ID="${STAGING_SMOKE_OWNER_INSTANCE_ID:-}"
 APPLICATION_BUILD_NUMBER="${APPLICATION_BUILD_NUMBER:-}"
 WHAT_IF=false
 BASE_ONLY=false
@@ -62,6 +65,9 @@ Optional environment variables:
   EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS
   STAGING_BILLING_LIFECYCLE_LEVER_ENABLED
   STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS
+  STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED
+  STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS
+  STAGING_SMOKE_OWNER_INSTANCE_ID
   APPLICATION_BUILD_NUMBER
   DOCKER_PLATFORM
 
@@ -128,15 +134,10 @@ if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
   echo "Image tag has an invalid container tag format." >&2
   exit 1
 fi
-# Prefer TARGET_ENVIRONMENT (the workflow's GitHub environment / dispatch input).
-# Direct invocation also accepts the staging Azure env name valence-control-staging.
-is_staging_billing_lever_target() {
-  if [[ -n "${TARGET_ENVIRONMENT:-}" ]]; then
-    [[ "$TARGET_ENVIRONMENT" == "test" ]]
-  else
-    [[ "$ENVIRONMENT_NAME" == "test" || "$ENVIRONMENT_NAME" == "valence-control-staging" ]]
-  fi
-}
+# Shared #655 staging-target predicate. AZURE_ENV_NAME / --environment
+# valence-control-staging counts when TARGET_ENVIRONMENT is unset.
+# shellcheck source=scripts/lib/staging-lever-target.sh
+. "$ROOT_DIR/scripts/lib/staging-lever-target.sh"
 if [[ -n "$EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS" ]] && ! is_staging_billing_lever_target; then
   echo "EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS is only permitted for the test (staging) environment." >&2
   exit 1
@@ -144,8 +145,15 @@ fi
 if [[ "${STAGING_BILLING_LIFECYCLE_LEVER_ENABLED,,}" == "false" ]]; then
   STAGING_BILLING_LIFECYCLE_LEVER_ENABLED=""
 fi
+if [[ "${STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED,,}" == "false" ]]; then
+  STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED=""
+fi
 if [[ ( "${STAGING_BILLING_LIFECYCLE_LEVER_ENABLED,,}" == "true" || -n "$STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS" ) ]] && ! is_staging_billing_lever_target; then
   echo "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED and STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS are only permitted for the test (staging) environment." >&2
+  exit 1
+fi
+if [[ ( "${STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED,,}" == "true" || -n "$STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS" || -n "$STAGING_SMOKE_OWNER_INSTANCE_ID" ) ]] && ! is_staging_billing_lever_target; then
+  echo "STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED, STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS, and STAGING_SMOKE_OWNER_INSTANCE_ID are only permitted for the test (staging) environment." >&2
   exit 1
 fi
 if [[ -n "$CLOUD_ACCOUNT_ISSUER" ]]; then
@@ -284,6 +292,7 @@ export CONTROL_ENTRA_TENANT_ID CONTROL_ENTRA_CLIENT_ID CONTROL_ENTRA_CLIENT_SECR
 export CLOUD_ACCOUNT_ISSUER AZURE_PROVISIONER_IDENTITY_ID AZURE_API_EGRESS_SUBNET_ID
 export EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS
 export STAGING_BILLING_LIFECYCLE_LEVER_ENABLED STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS
+export STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS STAGING_SMOKE_OWNER_INSTANCE_ID
 
 OUTPUTS="$(az deployment sub show \
   --name "$BASE_DEPLOYMENT_NAME" \
@@ -359,6 +368,9 @@ print(json.dumps({
     "pairingallowedorganizationids_value": os.environ["EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS"],
     "stagingbillingleverenabled_value": os.environ.get("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED", "").lower() == "true",
     "stagingbillingleverallowedorganizationids_value": os.environ.get("STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS", ""),
+    "stagingrecoveryleverenabled_value": os.environ.get("STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED", "").lower() == "true",
+    "stagingrecoveryleverallowedinstanceids_value": os.environ.get("STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS", ""),
+    "stagingsmokeownerinstanceid_value": os.environ.get("STAGING_SMOKE_OWNER_INSTANCE_ID", ""),
 }))
 PY
 )"
