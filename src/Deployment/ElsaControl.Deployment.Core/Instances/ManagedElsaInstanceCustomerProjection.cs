@@ -6,6 +6,8 @@ namespace ElsaControl.Deployment.Core.Instances;
 /// Customer-facing observed-lifecycle projection. Known in-progress operation
 /// phases stay visible; Unknown is reserved for genuinely indeterminate state.
 /// Lifecycle and endpoint health remain separate observations.
+/// <see cref="ElsaObservedLifecycle.RecoveryRequired"/> is produced only here
+/// and is never stored.
 /// </summary>
 public static class ManagedElsaInstanceCustomerProjection
 {
@@ -16,6 +18,8 @@ public static class ManagedElsaInstanceCustomerProjection
         "This instance failed. Refresh for the latest Control outcome, or recover it when it is safe.";
     public const string UnknownUnavailableReason =
         "Control cannot determine this instance's state. Refresh to retry observation, or recover the instance if it remains unknown.";
+    public const string RecoveryRequiredUnavailableReasonCode = "instance.recovery-required";
+    public const string NeedsAttentionLabel = "Needs attention";
 
     public static ElsaObservedLifecycle ProjectObservedLifecycle(
         ElsaInstance instance,
@@ -24,14 +28,23 @@ public static class ManagedElsaInstanceCustomerProjection
         ArgumentNullException.ThrowIfNull(instance);
         return ProjectObservedLifecycle(
             instance.ObservedLifecycle,
-            activeOperation is null ? null : new ActiveLifecycleOperation(activeOperation.Action, activeOperation.State));
+            activeOperation is null ? null : new ActiveLifecycleOperation(activeOperation.Action, activeOperation.State),
+            instance.DesiredLifecycle);
     }
 
     public static ElsaObservedLifecycle ProjectObservedLifecycle(
         ElsaObservedLifecycle stored,
-        ActiveLifecycleOperation? activeOperation)
+        ActiveLifecycleOperation? activeOperation,
+        ElsaDesiredLifecycle desiredLifecycle = ElsaDesiredLifecycle.Running)
     {
         ElsaInstanceValue.RequireEnum(stored, nameof(stored));
+        ElsaInstanceValue.RequireEnum(desiredLifecycle, nameof(desiredLifecycle));
+        if (HasStoredTerminalPriority(stored) || desiredLifecycle == ElsaDesiredLifecycle.Deleting)
+            return stored;
+
+        if (IsParkedProvisioningRecovery(activeOperation))
+            return ElsaObservedLifecycle.RecoveryRequired;
+
         if (stored != ElsaObservedLifecycle.Unknown)
             return stored;
 
@@ -46,8 +59,7 @@ public static class ManagedElsaInstanceCustomerProjection
             ElsaInstanceOperationState.WaitingForPriorOperation or
             ElsaInstanceOperationState.Queued or
             ElsaInstanceOperationState.EntitlementHeld => ElsaObservedLifecycle.Pending,
-            ElsaInstanceOperationState.Running or
-            ElsaInstanceOperationState.RecoveryRequired => ElsaObservedLifecycle.Provisioning,
+            ElsaInstanceOperationState.Running => ElsaObservedLifecycle.Provisioning,
             _ => ElsaObservedLifecycle.Unknown
         };
     }
@@ -97,6 +109,8 @@ public static class ManagedElsaInstanceCustomerProjection
         ElsaInstanceValue.RequireEnum(observedLifecycle, nameof(observedLifecycle));
         if (!canOpen)
             return unauthorizedReason;
+        if (observedLifecycle == ElsaObservedLifecycle.RecoveryRequired)
+            return GenericUnavailableReason;
         if (observedLifecycle is ElsaObservedLifecycle.Pending or
             ElsaObservedLifecycle.Provisioning or
             ElsaObservedLifecycle.Updating or
@@ -122,6 +136,39 @@ public static class ManagedElsaInstanceCustomerProjection
             or ElsaObservedLifecycle.Stopping
             or ElsaObservedLifecycle.Deleting;
 
+    public static string? CustomerLabel(ElsaObservedLifecycle lifecycle)
+    {
+        ElsaInstanceValue.RequireEnum(lifecycle, nameof(lifecycle));
+        return lifecycle == ElsaObservedLifecycle.RecoveryRequired ? NeedsAttentionLabel : null;
+    }
+
+    public static string? UnavailableReasonCode(
+        bool canOpen,
+        bool healthy,
+        bool handoffConfigured,
+        bool hasIdentity,
+        ElsaObservedLifecycle observedLifecycle)
+    {
+        ElsaInstanceValue.RequireEnum(observedLifecycle, nameof(observedLifecycle));
+        if (!canOpen)
+            return "not-authorized";
+        if (observedLifecycle == ElsaObservedLifecycle.RecoveryRequired)
+            return RecoveryRequiredUnavailableReasonCode;
+        if (IsKnownInProgress(observedLifecycle))
+            return "instance.provisioning";
+        if (observedLifecycle == ElsaObservedLifecycle.Failed)
+            return "instance.failed";
+        if (observedLifecycle == ElsaObservedLifecycle.Unknown)
+            return "instance.unknown";
+        if (!healthy)
+            return "instance.unavailable";
+        if (!handoffConfigured)
+            return "handoff-unavailable";
+        if (!hasIdentity)
+            return "identity-unavailable";
+        return null;
+    }
+
     public static ElsaObservedLifecycle ProjectVerifiedInProgress(ElsaObservedLifecycle current) =>
         current switch
         {
@@ -130,6 +177,15 @@ public static class ManagedElsaInstanceCustomerProjection
             ElsaObservedLifecycle.Provisioning => ElsaObservedLifecycle.Provisioning,
             _ => ElsaObservedLifecycle.Provisioning
         };
+
+    private static bool HasStoredTerminalPriority(ElsaObservedLifecycle stored) =>
+        stored is ElsaObservedLifecycle.Failed
+            or ElsaObservedLifecycle.Deleting
+            or ElsaObservedLifecycle.Deleted;
+
+    private static bool IsParkedProvisioningRecovery(ActiveLifecycleOperation? activeOperation) =>
+        activeOperation is { State: ElsaInstanceOperationState.RecoveryRequired, Action: var action } &&
+        IsProvisioningAction(action);
 
     private static bool IsProvisioningAction(ElsaInstanceOperationAction action) =>
         action is ElsaInstanceOperationAction.Create

@@ -32,7 +32,12 @@ public enum ElsaObservedLifecycle
     Deleting,
     Failed,
     Unknown,
-    Deleted
+    Deleted,
+    /// <summary>
+    /// Customer-projection-only parked state. It is never stored: only
+    /// <c>ManagedElsaInstanceCustomerProjection</c> produces it on the wire.
+    /// </summary>
+    RecoveryRequired
 }
 
 public enum ElsaInstanceHealth

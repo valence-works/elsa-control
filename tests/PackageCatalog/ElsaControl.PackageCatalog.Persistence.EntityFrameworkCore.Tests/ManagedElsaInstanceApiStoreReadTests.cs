@@ -13,6 +13,37 @@ public sealed class ManagedElsaInstanceApiStoreReadTests
     private static readonly DateTimeOffset BaseTime = new(2026, 9, 28, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public async Task Customer_projection_does_not_persist_recovery_required()
+    {
+        await using var connection = OpenConnection();
+        await using var db = CreateContext(connection);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Recovery required projection workspace");
+        var instance = NewInstance(workspace);
+        instance.ObservedLifecycle = ElsaObservedLifecycle.Provisioning;
+        instance.Health = ElsaInstanceHealth.Unknown;
+        db.ElsaInstances.Add(instance);
+        var parked = NewOperation(workspace, instance, BaseTime, ElsaInstanceOperationAction.Create);
+        parked.State = ElsaInstanceOperationState.RecoveryRequired;
+        parked.StartedAt = BaseTime;
+        parked.ReconciliationDiagnosticCode = "azure.recovery.auto-resume-exhausted";
+        instance.LastOperationId = parked.Id.ToString("D");
+        db.ElsaInstanceOperations.Add(parked);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var listed = Assert.Single(
+            (await new EfCoreManagedElsaInstanceApiStore(db).ListInstancesAsync(workspace.Id, 1, 10)).Items);
+        var stored = await db.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == instance.Id);
+
+        Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, listed.ObservedLifecycle);
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, stored.ObservedLifecycle);
+        Assert.NotEqual(ElsaObservedLifecycle.RecoveryRequired, stored.ObservedLifecycle);
+        Assert.Equal(instance.Id, listed.Id);
+        Assert.DoesNotContain("Failed", listed.ObservedLifecycle.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Lists_operations_newest_first_and_pages_within_the_workspace()
     {
         await using var connection = OpenConnection();

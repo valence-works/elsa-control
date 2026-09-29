@@ -15,7 +15,7 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
     [InlineData(ElsaInstanceOperationState.Queued, ElsaObservedLifecycle.Pending)]
     [InlineData(ElsaInstanceOperationState.EntitlementHeld, ElsaObservedLifecycle.Pending)]
     [InlineData(ElsaInstanceOperationState.Running, ElsaObservedLifecycle.Provisioning)]
-    [InlineData(ElsaInstanceOperationState.RecoveryRequired, ElsaObservedLifecycle.Provisioning)]
+    [InlineData(ElsaInstanceOperationState.RecoveryRequired, ElsaObservedLifecycle.RecoveryRequired)]
     public void Active_create_projects_a_known_phase_instead_of_unknown(
         ElsaInstanceOperationState operationState,
         ElsaObservedLifecycle expected)
@@ -33,7 +33,7 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
     }
 
     [Fact]
-    public void Refresh_of_an_active_create_preserves_provisioning_and_does_not_invent_ready()
+    public void Refresh_of_a_parked_create_projects_recovery_required_and_does_not_invent_ready()
     {
         var instance = Instance(ElsaObservedLifecycle.Provisioning);
         var operation = Operation(instance.Id, ElsaInstanceOperationAction.Create, ElsaInstanceOperationState.RecoveryRequired);
@@ -41,10 +41,12 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
         var first = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation);
         var refreshed = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation);
 
-        Assert.Equal(ElsaObservedLifecycle.Provisioning, first);
+        Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, first);
         Assert.Equal(first, refreshed);
+        Assert.NotEqual(ElsaObservedLifecycle.Provisioning, refreshed);
         Assert.NotEqual(ElsaObservedLifecycle.Ready, refreshed);
         Assert.NotEqual(ElsaObservedLifecycle.Failed, refreshed);
+        Assert.False(ManagedElsaInstanceCustomerProjection.IsKnownInProgress(refreshed));
     }
 
     [Fact]
@@ -56,6 +58,10 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
         Assert.Equal(ElsaObservedLifecycle.Ready,
             ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation));
         Assert.Null(ManagedElsaInstanceCustomerProjection.UnavailableReason(
+            canOpen: true, healthy: true, handoffConfigured: true, hasIdentity: true,
+            ElsaObservedLifecycle.Ready));
+        Assert.Null(ManagedElsaInstanceCustomerProjection.CustomerLabel(ElsaObservedLifecycle.Ready));
+        Assert.Null(ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
             canOpen: true, healthy: true, handoffConfigured: true, hasIdentity: true,
             ElsaObservedLifecycle.Ready));
     }
@@ -133,9 +139,263 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
         Assert.DoesNotContain("Ready", ManagedElsaInstanceCustomerProjection.ProvisioningUnavailableReason, StringComparison.Ordinal);
     }
 
+    public static TheoryData<ElsaObservedLifecycle> AllStoredLifecycles
+    {
+        get
+        {
+            var data = new TheoryData<ElsaObservedLifecycle>();
+            foreach (var stored in Enum.GetValues<ElsaObservedLifecycle>())
+                data.Add(stored);
+            return data;
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(AllStoredLifecycles))]
+    public void Parked_restart_wins_over_stored_lifecycle_except_terminal_priority(
+        ElsaObservedLifecycle stored)
+    {
+        AssertParkedRecoveryOverride(stored, ElsaInstanceOperationAction.Restart);
+    }
+
+    [Theory]
+    [MemberData(nameof(AllStoredLifecycles))]
+    public void Parked_update_intent_wins_over_stored_lifecycle_except_terminal_priority(
+        ElsaObservedLifecycle stored)
+    {
+        AssertParkedRecoveryOverride(stored, ElsaInstanceOperationAction.UpdateIntent);
+    }
+
+    [Theory]
+    [InlineData(ElsaObservedLifecycle.Failed)]
+    [InlineData(ElsaObservedLifecycle.Deleting)]
+    [InlineData(ElsaObservedLifecycle.Deleted)]
+    public void Stored_terminal_lifecycle_keeps_priority_over_recovery_required(
+        ElsaObservedLifecycle stored)
+    {
+        var instance = Instance(stored);
+        var operation = Operation(instance.Id, ElsaInstanceOperationAction.Restart, ElsaInstanceOperationState.RecoveryRequired);
+
+        Assert.Equal(stored, ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation));
+        Assert.NotEqual(ElsaObservedLifecycle.RecoveryRequired,
+            ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation));
+    }
+
+    [Theory]
+    [MemberData(nameof(AllStoredLifecycles))]
+    public void Desired_deleting_keeps_priority_over_recovery_required(ElsaObservedLifecycle stored)
+    {
+        if (stored is ElsaObservedLifecycle.Deleted or ElsaObservedLifecycle.RecoveryRequired)
+            return;
+
+        var instance = Instance(stored, desired: ElsaDesiredLifecycle.Deleting);
+        var operation = Operation(instance.Id, ElsaInstanceOperationAction.Restart, ElsaInstanceOperationState.RecoveryRequired);
+
+        Assert.Equal(stored, ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation));
+        Assert.NotEqual(ElsaObservedLifecycle.RecoveryRequired,
+            ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation));
+    }
+
+    [Fact]
+    public void Running_still_maps_to_provisioning_and_is_in_progress()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Unknown);
+        var operation = Operation(instance.Id, ElsaInstanceOperationAction.Create, ElsaInstanceOperationState.Running);
+
+        var projected = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation);
+
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, projected);
+        Assert.True(ManagedElsaInstanceCustomerProjection.IsKnownInProgress(projected));
+        Assert.Equal("instance.provisioning",
+            ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
+                canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false, projected));
+    }
+
+    [Theory]
+    [InlineData("azure.recovery.auto-resume-exhausted")]
+    [InlineData("azure.deployment.failed")]
+    [InlineData("azure.deployment.wait-exceeded")]
+    public void Recovery_required_reason_codes_project_the_same_non_progress_state(string reasonCode)
+    {
+        var instance = Instance(ElsaObservedLifecycle.Unknown);
+        var operation = Operation(
+            instance.Id,
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            reasonCode);
+
+        var projected = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation);
+        var applied = ManagedElsaInstanceCustomerProjection.Apply(instance, operation);
+        var reason = ManagedElsaInstanceCustomerProjection.UnavailableReason(
+            canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false, projected);
+        var reasonCodeOnWire = ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
+            canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false, projected);
+
+        Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, projected);
+        Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, applied.ObservedLifecycle);
+        Assert.Equal(instance.Id, applied.Id);
+        Assert.False(ManagedElsaInstanceCustomerProjection.IsKnownInProgress(projected));
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.NeedsAttentionLabel,
+            ManagedElsaInstanceCustomerProjection.CustomerLabel(projected));
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReasonCode, reasonCodeOnWire);
+        Assert.Equal("instance.recovery-required", reasonCodeOnWire);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.GenericUnavailableReason, reason);
+        Assert.DoesNotContain("Failed", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("Failed", reasonCodeOnWire, StringComparison.Ordinal);
+        Assert.DoesNotContain(reasonCode, reason, StringComparison.Ordinal);
+        Assert.DoesNotContain(reasonCode, reasonCodeOnWire, StringComparison.Ordinal);
+        Assert.DoesNotContain("provisioned", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            "Setup didn't finish",
+            ManagedElsaInstanceCustomerProjection.GenericUnavailableReason,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Needs_attention_label_is_only_for_recovery_required_and_never_says_failed()
+    {
+        foreach (var lifecycle in Enum.GetValues<ElsaObservedLifecycle>())
+        {
+            var label = ManagedElsaInstanceCustomerProjection.CustomerLabel(lifecycle);
+            if (lifecycle == ElsaObservedLifecycle.RecoveryRequired)
+            {
+                Assert.Equal(ManagedElsaInstanceCustomerProjection.NeedsAttentionLabel, label);
+                Assert.Equal("Needs attention", label);
+                Assert.DoesNotContain("Failed", label, StringComparison.OrdinalIgnoreCase);
+                continue;
+            }
+
+            Assert.Null(label);
+        }
+    }
+
+    [Fact]
+    public void Recovery_required_is_not_in_progress_and_does_not_use_failed_copy()
+    {
+        Assert.False(ManagedElsaInstanceCustomerProjection.IsKnownInProgress(ElsaObservedLifecycle.RecoveryRequired));
+        Assert.NotEqual(
+            ManagedElsaInstanceCustomerProjection.FailedUnavailableReason,
+            ManagedElsaInstanceCustomerProjection.UnavailableReason(
+                canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false,
+                ElsaObservedLifecycle.RecoveryRequired));
+        Assert.NotEqual(
+            ManagedElsaInstanceCustomerProjection.ProvisioningUnavailableReason,
+            ManagedElsaInstanceCustomerProjection.UnavailableReason(
+                canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false,
+                ElsaObservedLifecycle.RecoveryRequired));
+        Assert.DoesNotContain(
+            "Failed",
+            ManagedElsaInstanceCustomerProjection.UnavailableReason(
+                canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false,
+                ElsaObservedLifecycle.RecoveryRequired),
+            StringComparison.Ordinal);
+    }
+
+    public static TheoryData<ElsaObservedLifecycle, bool, string?> CustomerStateContractCases =>
+        new()
+        {
+            { ElsaObservedLifecycle.Pending, true, "instance.provisioning" },
+            { ElsaObservedLifecycle.Provisioning, true, "instance.provisioning" },
+            { ElsaObservedLifecycle.Updating, true, "instance.provisioning" },
+            { ElsaObservedLifecycle.Stopping, true, "instance.provisioning" },
+            { ElsaObservedLifecycle.Deleting, true, "instance.provisioning" },
+            { ElsaObservedLifecycle.Ready, false, "instance.unavailable" },
+            { ElsaObservedLifecycle.Degraded, false, "instance.unavailable" },
+            { ElsaObservedLifecycle.Stopped, false, "instance.unavailable" },
+            { ElsaObservedLifecycle.Failed, false, "instance.failed" },
+            { ElsaObservedLifecycle.Unknown, false, "instance.unknown" },
+            { ElsaObservedLifecycle.Deleted, false, "instance.unavailable" },
+            { ElsaObservedLifecycle.RecoveryRequired, false, "instance.recovery-required" }
+        };
+
+    [Theory]
+    [MemberData(nameof(CustomerStateContractCases))]
+    public void Each_customer_state_has_a_stable_progress_and_reason_contract(
+        ElsaObservedLifecycle lifecycle,
+        bool inProgress,
+        string? reasonCode)
+    {
+        Assert.Equal(inProgress, ManagedElsaInstanceCustomerProjection.IsKnownInProgress(lifecycle));
+        Assert.Equal(reasonCode, ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
+            canOpen: true, healthy: false, handoffConfigured: true, hasIdentity: true, lifecycle));
+        if (lifecycle == ElsaObservedLifecycle.RecoveryRequired)
+        {
+            Assert.Equal("Needs attention", ManagedElsaInstanceCustomerProjection.CustomerLabel(lifecycle));
+            Assert.DoesNotContain("Failed", ManagedElsaInstanceCustomerProjection.CustomerLabel(lifecycle), StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Null(ManagedElsaInstanceCustomerProjection.CustomerLabel(lifecycle));
+        }
+    }
+
+    [Fact]
+    public void Entitlement_held_still_wins_over_a_recovery_required_projection()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Unknown);
+        var held = Operation(instance.Id, ElsaInstanceOperationAction.Create, ElsaInstanceOperationState.EntitlementHeld);
+
+        var projected = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, held);
+
+        Assert.Equal(ElsaObservedLifecycle.Pending, projected);
+        Assert.True(ManagedElsaInstanceCustomerProjection.IsKnownInProgress(projected));
+        Assert.NotEqual(ElsaObservedLifecycle.RecoveryRequired, projected);
+        Assert.Equal("instance.provisioning",
+            ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
+                canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false, projected));
+    }
+
+    [Theory]
+    [MemberData(nameof(AllStoredLifecycles))]
+    public void Recovery_required_is_never_a_persisted_state_machine_target(ElsaObservedLifecycle stored)
+    {
+        if (stored == ElsaObservedLifecycle.RecoveryRequired)
+            return;
+
+        Assert.False(ElsaInstanceStateMachine.CanTransition(stored, ElsaObservedLifecycle.RecoveryRequired));
+    }
+
+    [Fact]
+    public void Delete_stays_available_because_recovery_required_is_not_failed_or_deleting()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Provisioning);
+        var operation = Operation(instance.Id, ElsaInstanceOperationAction.Restart, ElsaInstanceOperationState.RecoveryRequired);
+        var projected = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation);
+
+        Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, projected);
+        Assert.NotEqual(ElsaObservedLifecycle.Failed, projected);
+        Assert.NotEqual(ElsaObservedLifecycle.Deleting, projected);
+        Assert.NotEqual(ElsaObservedLifecycle.Deleted, projected);
+        Assert.False(ManagedElsaInstanceCustomerProjection.IsKnownInProgress(projected));
+        Assert.Equal(ElsaDesiredLifecycle.Running, instance.DesiredLifecycle);
+    }
+
+    private static void AssertParkedRecoveryOverride(
+        ElsaObservedLifecycle stored,
+        ElsaInstanceOperationAction action)
+    {
+        var instance = Instance(stored);
+        var operation = Operation(instance.Id, action, ElsaInstanceOperationState.RecoveryRequired);
+        var projected = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation);
+
+        if (stored is ElsaObservedLifecycle.Failed
+            or ElsaObservedLifecycle.Deleting
+            or ElsaObservedLifecycle.Deleted)
+        {
+            Assert.Equal(stored, projected);
+            return;
+        }
+
+        Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, projected);
+        Assert.False(ManagedElsaInstanceCustomerProjection.IsKnownInProgress(projected));
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.NeedsAttentionLabel,
+            ManagedElsaInstanceCustomerProjection.CustomerLabel(projected));
+    }
+
     private static ElsaInstance Instance(
         ElsaObservedLifecycle observed,
-        ElsaInstanceHealth health = ElsaInstanceHealth.Unknown) =>
+        ElsaInstanceHealth health = ElsaInstanceHealth.Unknown,
+        ElsaDesiredLifecycle desired = ElsaDesiredLifecycle.Running) =>
         ElsaInstance.Hydrate(
             Guid.Parse("30000000-0000-0000-0000-000000000001"),
             OrganizationId,
@@ -145,15 +405,18 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
             new(
                 new("commercial", "5.0", "5.0.1"),
                 new("server-studio"),
-                new("managed", "westeurope", "dedicated", "standard-small", "public", "managed")),
+                new("managed", "westeurope", "dedicated", "standard-small", "public", "managed"),
+                observed == ElsaObservedLifecycle.Deleted ? ElsaDesiredLifecycle.Deleting : desired),
             observed,
             health,
-            4);
+            4,
+            deletedAt: observed == ElsaObservedLifecycle.Deleted ? Now : null);
 
     private static ElsaInstanceOperationSummary Operation(
         Guid instanceId,
         ElsaInstanceOperationAction action,
-        ElsaInstanceOperationState state) =>
+        ElsaInstanceOperationState state,
+        string? reasonCode = null) =>
         new(
             Guid.Parse("40000000-0000-0000-0000-000000000001"),
             instanceId,
@@ -169,5 +432,6 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
             null,
             state == ElsaInstanceOperationState.Failed ? "provider.reconciliation.failed" : null,
             null,
-            null);
+            null,
+            reasonCode);
 }

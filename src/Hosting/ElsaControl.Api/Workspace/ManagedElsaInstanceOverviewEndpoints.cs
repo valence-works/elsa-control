@@ -37,6 +37,8 @@ public static class ManagedElsaInstanceOverviewEndpoints
     internal const string InstanceFailedCode = "instance.failed";
     internal const string InstanceProvisioningCode = "instance.provisioning";
     internal const string InstanceUnknownCode = "instance.unknown";
+    internal const string InstanceRecoveryRequiredCode =
+        ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReasonCode;
     internal const int DefaultActivityLimit = 25;
     internal const int MaxActivityLimit = 100;
     internal const int MaxAvailableReleases = 20;
@@ -713,7 +715,7 @@ internal static class ManagedElsaInstanceOverviewProjection
             : null;
         var handoffConfigured = instance.CurrentDeploymentReference?.ManagedHandoff == true;
         var canOpen = canOpenPermission && healthy && handoffConfigured && currentIdentity is not null;
-        var unavailableReason = UnavailableReasonCode(
+        var unavailableReason = ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
             canOpenPermission, healthy, handoffConfigured, currentIdentity is not null, observed);
         var canMutate = role is WorkspaceRole.Owner or WorkspaceRole.SourceAdmin;
         var hasActiveOperation = activeOperation is not null &&
@@ -808,24 +810,9 @@ internal static class ManagedElsaInstanceOverviewProjection
         bool healthy,
         bool handoffConfigured,
         bool hasIdentity,
-        ElsaObservedLifecycle observedLifecycle)
-    {
-        if (!canOpen)
-            return "not-authorized";
-        if (ManagedElsaInstanceCustomerProjection.IsKnownInProgress(observedLifecycle))
-            return "instance.provisioning";
-        if (observedLifecycle == ElsaObservedLifecycle.Failed)
-            return "instance.failed";
-        if (observedLifecycle == ElsaObservedLifecycle.Unknown)
-            return "instance.unknown";
-        if (!healthy)
-            return "instance.unavailable";
-        if (!handoffConfigured)
-            return "handoff-unavailable";
-        if (!hasIdentity)
-            return "identity-unavailable";
-        return null;
-    }
+        ElsaObservedLifecycle observedLifecycle) =>
+        ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
+            canOpen, healthy, handoffConfigured, hasIdentity, observedLifecycle);
 
     private static ManagedElsaInstanceOverviewActionDecisionResponse ActionDecision(
         bool canMutate,

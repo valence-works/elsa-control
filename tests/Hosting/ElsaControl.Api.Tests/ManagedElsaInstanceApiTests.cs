@@ -2340,7 +2340,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
-    public void Canonical_projection_shows_provisioning_for_an_accepted_create_with_unknown_storage()
+    public void Canonical_projection_shows_recovery_required_for_a_parked_create_with_unknown_storage()
     {
         var instanceId = Guid.NewGuid();
         var instance = ElsaInstance.Hydrate(instanceId, Guid.NewGuid(), Guid.NewGuid(), "Claims runtime", "claims-runtime",
@@ -2352,10 +2352,12 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
 
         var response = ManagedElsaInstanceEndpoints.ToResponse(instance, canOpen: true, instance.WorkspaceId, activeOperation: operation);
 
-        Assert.Equal(ElsaObservedLifecycle.Provisioning, response.ObservedLifecycle);
+        Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, response.ObservedLifecycle);
         Assert.Equal(ElsaInstanceHealth.Unknown, response.Health);
         Assert.False(response.CanOpen);
-        Assert.Equal(ManagedElsaInstanceCustomerProjection.ProvisioningUnavailableReason, response.UnavailableReason);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.GenericUnavailableReason, response.UnavailableReason);
+        Assert.DoesNotContain("Failed", response.UnavailableReason, StringComparison.Ordinal);
+        Assert.NotEqual(ManagedElsaInstanceCustomerProjection.ProvisioningUnavailableReason, response.UnavailableReason);
     }
 
     [Fact]
