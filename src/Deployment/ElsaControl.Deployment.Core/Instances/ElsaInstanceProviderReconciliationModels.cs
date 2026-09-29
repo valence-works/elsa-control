@@ -69,12 +69,16 @@ public static class ElsaInstanceProviderRecoveryObservationReference
 
 /// <summary>
 /// Opaque, safe evidence that a new provider apply would not duplicate uncertain
-/// work. Its presence is advisory to a later retry decision; reconciliation never
-/// turns it into an automatic retry.
+/// work. Confirmed-completed evidence may request an automatic resume. Retry-safe
+/// evidence that would re-run a mutation stays manual.
 /// </summary>
 public sealed record ElsaInstanceProviderRetryEvidence
 {
-    public ElsaInstanceProviderRetryEvidence(string reference, string digest)
+    public ElsaInstanceProviderRetryEvidence(
+        string reference,
+        string digest,
+        bool autoResume = false,
+        int observedAutoResumeCount = 0)
     {
         var isOpaqueObservation = ElsaInstanceProviderRecoveryObservationReference.TryParse(
             reference, out _, out var referenceDigest);
@@ -84,11 +88,25 @@ public sealed record ElsaInstanceProviderRetryEvidence
         Digest = RequireDigest(digest);
         if (isOpaqueObservation && !string.Equals(referenceDigest, Digest, StringComparison.Ordinal))
             throw new ArgumentException("Retry evidence digest does not match the observation reference.", nameof(digest));
+        if (observedAutoResumeCount < 0)
+            throw new ArgumentOutOfRangeException(nameof(observedAutoResumeCount), "Observed auto-resume count cannot be negative.");
+        AutoResume = autoResume;
+        ObservedAutoResumeCount = observedAutoResumeCount;
     }
 
     public string Reference { get; }
 
     public string Digest { get; }
+
+    public bool AutoResume { get; }
+
+    /// <summary>
+    /// Auto-resume slots observed on the tick that produced this evidence.
+    /// Carried for the claim compare-and-set only; not part of the evidence
+    /// fingerprint, so two ticks that saw different counts can still share a
+    /// receipt.
+    /// </summary>
+    public int ObservedAutoResumeCount { get; }
 
     private static string RequireToken(string value, string parameterName)
     {
@@ -214,16 +232,23 @@ public sealed record ElsaInstanceProviderObservation
 
     public bool HasCurrentDeploymentProjection { get; }
 
+    /// <summary>
+    /// Optional operator-visible machine reason for a RecoveryRequired observation.
+    /// Included in the evidence fingerprint only when set so existing rows stay stable.
+    /// </summary>
+    public string? ReasonCode { get; init; }
+
     public ElsaInstanceProviderObservation Correlate(ElsaInstanceProviderReconciliationRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
         if (request.OperationId == Guid.Empty || request.AttemptNumber < 1)
             throw new ArgumentException("Provider reconciliation request identity is invalid.", nameof(request));
-        return HasCurrentDeploymentProjection
-            ? new(Kind, ObservedLifecycle, HealthGate, request.OperationId, request.AttemptNumber,
+        var correlated = HasCurrentDeploymentProjection
+            ? new ElsaInstanceProviderObservation(Kind, ObservedLifecycle, HealthGate, request.OperationId, request.AttemptNumber,
                 CorrelationId, RetryEvidence, CurrentDeploymentReference)
-            : new(Kind, ObservedLifecycle, HealthGate, request.OperationId, request.AttemptNumber,
+            : new ElsaInstanceProviderObservation(Kind, ObservedLifecycle, HealthGate, request.OperationId, request.AttemptNumber,
                 CorrelationId, RetryEvidence);
+        return ReasonCode is null ? correlated : correlated with { ReasonCode = ReasonCode };
     }
 
     internal string ComputeFingerprint()
@@ -235,6 +260,8 @@ public sealed record ElsaInstanceProviderObservation
             canonical += "managed-handoff\n";
         // StudioGrantsSupported is deliberately not part of the fingerprint: a Control build that predates it must
         // recompute the same evidence fingerprint for observations this build records.
+        if (ReasonCode is { Length: > 0 })
+            canonical += ReasonCode + "\n";
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 }
@@ -247,7 +274,8 @@ public sealed record ElsaInstanceProviderReconciliationRequest(
     ElsaDesiredLifecycle DesiredLifecycle,
     ElsaResolvedPlanReference? ResolvedPlanReference,
     ElsaCurrentDeploymentReference? CurrentDeploymentReference,
-    int InstanceVersion = 0);
+    int InstanceVersion = 0,
+    bool OperatorInitiated = false);
 
 public sealed record ElsaInstanceProviderReconciliationTarget(
     ElsaInstance Instance,
@@ -295,11 +323,24 @@ public sealed record ElsaInstanceProviderReconciliationCommit(
         if (Instance.Id != InstanceId || Instance.WorkspaceId != WorkspaceId ||
             Operation.Id != OperationId || Operation.InstanceId != InstanceId ||
             Operation.AttemptNumber != ExpectedAttemptNumber ||
-            RetrySafe != (RetryEvidenceReference is not null && RetryEvidenceDigest is not null) ||
+            !IsRetrySafeConsistent() ||
             Operation.State is not (ElsaInstanceOperationState.RecoveryRequired or ElsaInstanceOperationState.Succeeded or ElsaInstanceOperationState.Failed))
             throw new InvalidOperationException("Provider reconciliation commit state is invalid.");
-        if (RetrySafe)
-            _ = new ElsaInstanceProviderRetryEvidence(RetryEvidenceReference!, RetryEvidenceDigest!);
+        if (RetrySafe && RetryEvidenceReference is not null && RetryEvidenceDigest is not null)
+            _ = new ElsaInstanceProviderRetryEvidence(RetryEvidenceReference, RetryEvidenceDigest);
+    }
+
+    private bool IsRetrySafeConsistent()
+    {
+        var hasEvidence = RetryEvidenceReference is not null && RetryEvidenceDigest is not null;
+        if (RetrySafe == hasEvidence)
+            return true;
+        return RetrySafe &&
+            !hasEvidence &&
+            string.Equals(
+                DiagnosticCode,
+                ElsaInstanceProviderReconciliationService.AutoResumeExhaustedCode,
+                StringComparison.Ordinal);
     }
 }
 

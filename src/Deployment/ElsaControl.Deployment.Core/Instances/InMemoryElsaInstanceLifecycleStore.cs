@@ -380,6 +380,35 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         }
     }
 
+    public Task AttachRetryEvidenceAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        Guid operationId,
+        string reference,
+        string digest,
+        string? reasonCode,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            if (!_operations.TryGetValue(operationId, out var operation) ||
+                operation.InstanceId != instanceId ||
+                operation.State != ElsaInstanceOperationState.RecoveryRequired)
+                return Task.CompletedTask;
+            if (_reconciliationResults.TryGetValue(operationId, out var stored) &&
+                stored.Result.Projection.WorkspaceId == workspaceId)
+            {
+                _reconciliationResults[operationId] = stored with
+                {
+                    Result = stored.Result with { RetrySafe = true, DiagnosticCode = reasonCode ?? stored.Result.DiagnosticCode }
+                };
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
     private static ElsaInstanceProviderReconciliationProjection Projection(
         ElsaInstanceProviderReconciliationCommit commit,
         int instanceVersion) => new(

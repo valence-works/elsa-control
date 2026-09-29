@@ -260,7 +260,7 @@ public static class AzureProviderRecoveryObservationSupport
         if (completedStep is not (AzureProviderRunnerStep.Foundation or AzureProviderRunnerStep.AcrPull or
             AzureProviderRunnerStep.SeedSecrets or
             AzureProviderRunnerStep.SqlFirewallCreate or AzureProviderRunnerStep.SqlBootstrapScript or
-            AzureProviderRunnerStep.SqlFirewallCleanup))
+            AzureProviderRunnerStep.SqlFirewallCleanup or AzureProviderRunnerStep.Workload))
             return false;
 
         AzureProviderOperationPhase expectedPhase;
@@ -307,6 +307,10 @@ public static class AzureProviderRecoveryObservationSupport
             if (!validSourcePhase)
                 return false;
         }
+
+        if (attemptedStep == AzureProviderRunnerStep.Workload &&
+            currentPhase != AzureProviderOperationPhase.FoundationReady)
+            return false;
 
         return attemptedStep is null
             ? completedStep == AzureProviderRunnerStep.Foundation
@@ -368,6 +372,16 @@ public static class AzureProviderRecoveryObservationSupport
     public static bool IsSqlFirewallCleanupEligible(AzureProviderOperation operation) =>
         operation.Phase == AzureProviderOperationPhase.SqlBootstrapReady &&
         operation.AttemptedStep == AzureProviderRunnerStep.SqlFirewallCleanup &&
+        HasFoundationAndRegistry(operation);
+
+    /// <summary>
+    /// Workload observation is valid only after foundation, registry and SQL cleanup are
+    /// retained and before a later workload handle exists. A late Succeeded ARM deployment
+    /// fills those handles; the executor then resumes at Health.
+    /// </summary>
+    public static bool IsWorkloadEligible(AzureProviderOperation operation) =>
+        operation.Phase == AzureProviderOperationPhase.FoundationReady &&
+        operation.AttemptedStep == AzureProviderRunnerStep.Workload &&
         HasFoundationAndRegistry(operation);
 
     /// <summary>
@@ -487,4 +501,29 @@ public interface IAzureProviderRecoveryObservationStore
     Task<AzureProviderRecoveryObservationRecord?> GetAndValidateForAcceptedRecoveryReplayAsync(
         AzureProviderRecoveryObservationBinding binding,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns the latest recorded receipt for this lifecycle attempt so a
+    /// rate-limited tick can reuse the same retry-safe evidence.
+    /// </summary>
+    Task<AzureProviderRecoveryObservationReceipt?> GetLatestReceiptForAttemptAsync(
+        Guid workspaceId,
+        Guid lifecycleOperationId,
+        int observedLifecycleAttemptNumber,
+        Guid providerOperationId,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<AzureProviderRecoveryObservationReceipt?>(null);
+
+    /// <summary>
+    /// Latest receipt for this provider operation, regardless of lifecycle
+    /// attempt, so an exhausted park on attempt N+1 can restamp the last
+    /// postcondition onto the current attempt and instance version without
+    /// another automatic ARM read.
+    /// </summary>
+    Task<AzureProviderRecoveryObservationReceipt?> GetLatestReceiptForOperationAsync(
+        Guid workspaceId,
+        Guid lifecycleOperationId,
+        Guid providerOperationId,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<AzureProviderRecoveryObservationReceipt?>(null);
 }

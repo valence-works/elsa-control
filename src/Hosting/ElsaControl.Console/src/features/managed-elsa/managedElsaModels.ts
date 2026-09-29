@@ -112,6 +112,7 @@ export type ManagedElsaOperation = {
   state: "Accepted" | "WaitingForPriorOperation" | "Queued" | "Running" | "Succeeded" | "Failed" | "RecoveryRequired" | "Cancelled";
   attemptNumber: number;
   failureCode: string | null;
+  reasonCode?: string | null;
   links: Record<string, string>;
 };
 

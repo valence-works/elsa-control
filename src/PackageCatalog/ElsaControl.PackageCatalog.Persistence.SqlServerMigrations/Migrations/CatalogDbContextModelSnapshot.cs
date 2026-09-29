@@ -1366,12 +1366,21 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("nvarchar(32)");
 
+                    b.Property<int>("ArmObservationBackoffSeconds")
+                        .HasColumnType("int");
+
                     b.Property<int>("AttemptNumber")
                         .HasColumnType("int");
 
                     b.Property<string>("AttemptedStep")
                         .HasMaxLength(64)
                         .HasColumnType("nvarchar(64)");
+
+                    b.Property<long?>("AttemptedStepStartedAt")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("AutoResumeCount")
+                        .HasColumnType("int");
 
                     b.Property<int?>("CapacityCpuMillicores")
                         .HasColumnType("int");
@@ -1462,6 +1471,13 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<string>("KeyVaultUri")
                         .HasMaxLength(2048)
                         .HasColumnType("nvarchar(2048)");
+
+                    b.Property<long?>("LastArmObservedAt")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("LastObservationReasonCode")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
 
                     b.Property<long?>("LeaseExpiresAt")
                         .HasColumnType("bigint");

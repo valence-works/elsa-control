@@ -787,7 +787,8 @@ function operationLabel(operation: ManagedElsaOperation | undefined, loading: bo
   if (loading) return "Checking status…";
   if (!operation) return "Accepted · waiting for worker";
   if (operation.state === "Failed") return `Failed${operation.failureCode ? ` (${operation.failureCode})` : ""}`;
-  if (operation.state === "RecoveryRequired") return "Recovery required";
+  if (operation.state === "RecoveryRequired")
+    return operation.reasonCode ? `Recovery required (${operation.reasonCode})` : "Recovery required";
   if (operation.state === "Succeeded") return "Completed";
   return operation.state;
 }

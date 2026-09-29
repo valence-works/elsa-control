@@ -350,6 +350,47 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         return model;
     }
 
+    async Task<AzureProviderRecoveryObservationReceipt?> IAzureProviderRecoveryObservationStore.GetLatestReceiptForAttemptAsync(
+        Guid workspaceId,
+        Guid lifecycleOperationId,
+        int observedLifecycleAttemptNumber,
+        Guid providerOperationId,
+        CancellationToken cancellationToken)
+    {
+        if (workspaceId == Guid.Empty || lifecycleOperationId == Guid.Empty ||
+            providerOperationId == Guid.Empty || observedLifecycleAttemptNumber < 1)
+            return null;
+
+        var entity = await db.AzureProviderRecoveryObservations.AsNoTracking()
+            .Where(x => x.WorkspaceId == workspaceId &&
+                        x.LifecycleOperationId == lifecycleOperationId &&
+                        x.ObservedLifecycleAttemptNumber == observedLifecycleAttemptNumber &&
+                        x.ProviderOperationId == providerOperationId)
+            .OrderByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
+            .FirstOrDefaultAsync(cancellationToken);
+        return entity is null ? null : ToRecoveryObservationReceipt(entity);
+    }
+
+    async Task<AzureProviderRecoveryObservationReceipt?> IAzureProviderRecoveryObservationStore.GetLatestReceiptForOperationAsync(
+        Guid workspaceId,
+        Guid lifecycleOperationId,
+        Guid providerOperationId,
+        CancellationToken cancellationToken)
+    {
+        if (workspaceId == Guid.Empty || lifecycleOperationId == Guid.Empty || providerOperationId == Guid.Empty)
+            return null;
+
+        var entity = await db.AzureProviderRecoveryObservations.AsNoTracking()
+            .Where(x => x.WorkspaceId == workspaceId &&
+                        x.LifecycleOperationId == lifecycleOperationId &&
+                        x.ProviderOperationId == providerOperationId)
+            .OrderByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
+            .FirstOrDefaultAsync(cancellationToken);
+        return entity is null ? null : ToRecoveryObservationReceipt(entity);
+    }
+
     private async Task<AzureProviderRecoveryObservationRecord?> LoadAcceptedRecoveryObservationAsync(
         AzureProviderRecoveryObservationBinding binding,
         CancellationToken cancellationToken,
@@ -1072,6 +1113,8 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             entity.AttemptedStep == checkpoint.AttemptedStep &&
             lastTransitionCode == checkpoint.Code)
             return ToModel(entity);
+        if (entity.AttemptedStep != checkpoint.AttemptedStep)
+            entity.AttemptedStepStartedAt = now;
         entity.Phase = checkpoint.Phase; entity.AttemptedStep = checkpoint.AttemptedStep;
         entity.CheckpointSequence++; entity.Version++; entity.UpdatedAt = now;
         entity.ResourceGroupName = resources.ResourceGroupName; entity.FoundationDeploymentId = resources.FoundationDeploymentId;
@@ -1213,6 +1256,89 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
                 .ToListAsync(cancellationToken))
             .Select(ToTransition)
             .ToList();
+    }
+
+    public Task RecordArmObservationClockAsync(
+        Guid workspaceId,
+        Guid operationId,
+        DateTimeOffset observedAt,
+        int backoffSeconds,
+        CancellationToken cancellationToken = default) =>
+        RecordArmObservationClockAsync(workspaceId, operationId, observedAt, backoffSeconds, null, cancellationToken);
+
+    public async Task RecordArmObservationClockAsync(
+        Guid workspaceId,
+        Guid operationId,
+        DateTimeOffset observedAt,
+        int backoffSeconds,
+        string? reasonCode,
+        CancellationToken cancellationToken = default)
+    {
+        var entity = await db.AzureProviderOperations.SingleOrDefaultAsync(
+            x => x.WorkspaceId == workspaceId && x.Id == operationId, cancellationToken);
+        if (entity is null)
+            return;
+        entity.LastArmObservedAt = observedAt;
+        entity.ArmObservationBackoffSeconds = backoffSeconds;
+        if (AzureProviderOperationValidation.IsSafeCode(reasonCode))
+            entity.LastObservationReasonCode = reasonCode;
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            db.ChangeTracker.Clear();
+        }
+    }
+
+    public async Task<AzureProviderOperation?> IncrementAutoResumeCountAsync(
+        Guid workspaceId,
+        Guid operationId,
+        int expectedCount,
+        CancellationToken cancellationToken = default)
+    {
+        if (expectedCount < 0 || expectedCount >= AzureNamedDeploymentFreshness.MaximumAutoResumes)
+            return null;
+        var changed = await db.AzureProviderOperations
+            .Where(x => x.WorkspaceId == workspaceId && x.Id == operationId &&
+                        x.AutoResumeCount == expectedCount &&
+                        x.AutoResumeCount < AzureNamedDeploymentFreshness.MaximumAutoResumes)
+            .ExecuteUpdateAsync(
+                setters => setters.SetProperty(x => x.AutoResumeCount, x => x.AutoResumeCount + 1),
+                cancellationToken);
+        db.ChangeTracker.Clear();
+        return changed == 1
+            ? await GetAsync(workspaceId, operationId, cancellationToken)
+            : null;
+    }
+
+    public async Task RecordAutoResumeOutcomeAsync(
+        Guid workspaceId,
+        Guid operationId,
+        string reasonCode,
+        CancellationToken cancellationToken = default)
+    {
+        if (!AzureProviderOperationValidation.IsSafeCode(reasonCode))
+            return;
+        var entity = await db.AzureProviderOperations.SingleOrDefaultAsync(
+            x => x.WorkspaceId == workspaceId && x.Id == operationId, cancellationToken);
+        if (entity is null)
+            return;
+        // Outcome codes stay on LastObservationReasonCode only. Transition
+        // Sequence is coupled to Version via AddTransition; inserting at
+        // max(Sequence)+1 without bumping Version steals the next
+        // ClaimRecoveryAsync slot and rolls the unique (OperationId, Sequence)
+        // index back forever.
+        entity.LastObservationReasonCode = reasonCode;
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            db.ChangeTracker.Clear();
+        }
     }
 
     private async Task<AzureProviderOperation?> FindByKeyAsync(AzureProviderOperationRequest request, CancellationToken cancellationToken) =>
@@ -1608,7 +1734,12 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             capacity,
             x.ManagedHandoff,
             x.ManagedHandoffStudioGrants,
-            x.StatusChangedAt);
+            StatusChangedAt: x.StatusChangedAt,
+            AttemptedStepStartedAt: x.AttemptedStepStartedAt,
+            LastArmObservedAt: x.LastArmObservedAt,
+            AutoResumeCount: x.AutoResumeCount,
+            ArmObservationBackoffSeconds: x.ArmObservationBackoffSeconds,
+            LastObservationReasonCode: x.LastObservationReasonCode);
     }
 
     /// <summary>

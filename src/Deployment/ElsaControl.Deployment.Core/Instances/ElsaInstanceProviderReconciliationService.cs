@@ -6,7 +6,8 @@ namespace ElsaControl.Deployment.Core.Instances;
 public sealed class ElsaInstanceProviderReconciliationService(
     IElsaInstanceProviderReconciliationStore store,
     IElsaInstanceProviderReconciliationPort provider,
-    TimeProvider? timeProvider = null) : IElsaInstanceProviderReconciliationService
+    TimeProvider? timeProvider = null,
+    ElsaInstanceLifecycleService? lifecycle = null) : IElsaInstanceProviderReconciliationService
 {
     public const string ConvergedCode = "provider.reconciliation.converged";
     public const string UnknownCode = "provider.reconciliation.unknown";
@@ -18,6 +19,8 @@ public sealed class ElsaInstanceProviderReconciliationService(
     public const string UnavailableCode = "provider.reconciliation.unavailable";
     public const string RetrySafeCode = "provider.reconciliation.retry-safe";
     public const string CorrelationMismatchCode = "provider.reconciliation.correlation-mismatch";
+    public const string AutoResumeExhaustedCode = "azure.recovery.auto-resume-exhausted";
+    public const string AutoResumeClaimConflictCode = "azure.recovery.auto-resume.claim-conflict";
 
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
 
@@ -129,6 +132,9 @@ public sealed class ElsaInstanceProviderReconciliationService(
             var retryEvidence = projection.Operation.State == ElsaInstanceOperationState.RecoveryRequired
                 ? observation.RetryEvidence
                 : null;
+            var exhausted = string.Equals(
+                    observation.ReasonCode, AutoResumeExhaustedCode, StringComparison.Ordinal) ||
+                string.Equals(projection.Code, AutoResumeExhaustedCode, StringComparison.Ordinal);
             var result = await store.CommitAsync(new(
                 workspaceId,
                 instance.Id,
@@ -140,10 +146,12 @@ public sealed class ElsaInstanceProviderReconciliationService(
                 projection.Instance,
                 projection.Operation,
                 projection.Code,
-                retryEvidence is not null,
+                retryEvidence is not null || exhausted,
                 retryEvidence?.Reference,
                 retryEvidence?.Digest,
                 projection.At), cancellationToken);
+            if (retryEvidence?.AutoResume == true && result.RetrySafe && lifecycle is not null)
+                await TryAutoResumeAsync(instance, operation, result, retryEvidence, cancellationToken);
             if (result.Projection.OperationState != operation.State)
                 telemetry.RecordTransition(
                     instance.DesiredLifecycle,
@@ -179,6 +187,73 @@ public sealed class ElsaInstanceProviderReconciliationService(
                 null,
                 "provider.reconciliation.failed");
             throw;
+        }
+    }
+
+    private async Task TryAutoResumeAsync(
+        ElsaInstance instance,
+        ElsaInstanceOperation operation,
+        ElsaInstanceProviderReconciliationResult result,
+        ElsaInstanceProviderRetryEvidence retryEvidence,
+        CancellationToken cancellationToken)
+    {
+        var autoResume = provider as IElsaInstanceProviderAutoResumePort;
+        var claimedCount = 0;
+        if (autoResume is not null)
+        {
+            var claimed = await autoResume.TryChargeAutoResumeAsync(
+                instance.WorkspaceId, instance.Id, operation.Id,
+                retryEvidence.ObservedAutoResumeCount, cancellationToken);
+            if (claimed is null)
+            {
+                var currentCount = await autoResume.GetAutoResumeCountAsync(
+                    instance.WorkspaceId, instance.Id, operation.Id, cancellationToken)
+                    ?? retryEvidence.ObservedAutoResumeCount;
+                await autoResume.RecordAutoResumeOutcomeAsync(
+                    instance.WorkspaceId, instance.Id, operation.Id,
+                    currentCount >= IElsaInstanceProviderAutoResumePort.MaximumAutoResumes
+                        ? AutoResumeExhaustedCode
+                        : AutoResumeClaimConflictCode,
+                    cancellationToken);
+                return;
+            }
+
+            claimedCount = claimed.Value;
+        }
+
+        var idempotencyKey = claimedCount > 0
+            ? $"auto-resume.{operation.Id:N}.{claimedCount}"
+            : $"auto-resume.{operation.Id:N}.{operation.AttemptNumber}";
+        try
+        {
+            await lifecycle!.RecoverAsync(
+                new ElsaInstanceLifecycleRequest(
+                    instance.WorkspaceId,
+                    instance.Id,
+                    result.Projection.InstanceVersion,
+                    idempotencyKey,
+                    "auto-resume",
+                    ActorAccountId: null,
+                    ExpectedOperationId: operation.Id),
+                cancellationToken);
+            if (autoResume is not null)
+                await autoResume.RecordAutoResumeOutcomeAsync(
+                    instance.WorkspaceId, instance.Id, operation.Id,
+                    "azure.recovery.auto-resume.accepted", cancellationToken);
+        }
+        catch (ElsaInstanceLifecycleConflictException)
+        {
+            if (autoResume is not null)
+                await autoResume.RecordAutoResumeOutcomeAsync(
+                    instance.WorkspaceId, instance.Id, operation.Id,
+                    "azure.recovery.auto-resume.conflict", cancellationToken);
+        }
+        catch (InvalidOperationException)
+        {
+            if (autoResume is not null)
+                await autoResume.RecordAutoResumeOutcomeAsync(
+                    instance.WorkspaceId, instance.Id, operation.Id,
+                    "azure.recovery.auto-resume.rejected", cancellationToken);
         }
     }
 
@@ -241,7 +316,7 @@ public sealed class ElsaInstanceProviderReconciliationService(
 
         if (ManagedElsaInstanceCustomerProjection.IsKnownInProgress(observation.ObservedLifecycle))
             return (Project(instance, observation.ObservedLifecycle, ElsaInstanceHealth.Unknown),
-                operation, InProgressCode, now);
+                operation, OperatorVisibleReason(observation.ReasonCode) ?? InProgressCode, now);
 
         if (ManagedElsaInstanceCustomerProjection.IsKnownInProgress(instance.ObservedLifecycle))
             return (Project(instance, instance.ObservedLifecycle, instance.Health),
@@ -269,6 +344,12 @@ public sealed class ElsaInstanceProviderReconciliationService(
             _ => false
         };
     }
+
+    private static string? OperatorVisibleReason(string? reasonCode) =>
+        reasonCode is { Length: > 0 and <= 128 } &&
+        reasonCode.All(x => char.IsAsciiLetterLower(x) || char.IsAsciiDigit(x) || x is '.' or '-')
+            ? reasonCode
+            : null;
 
     private static ElsaInstance Project(
         ElsaInstance instance,

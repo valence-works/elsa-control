@@ -78,4 +78,54 @@ public interface IAzureProviderOperationStore
     Task<AzureProviderOperation?> FinalizeAsync(Guid workspaceId, Guid operationId, string leaseToken, AzureProviderOperationStatus status, string code, DateTimeOffset now, long? expectedVersion = null, CancellationToken cancellationToken = default);
     Task<int> RecoverStaleAsync(DateTimeOffset now, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<AzureProviderOperationTransition>> ListTransitionsAsync(Guid workspaceId, Guid operationId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Records the last ARM observation clock without creating recovery evidence or
+    /// bumping the provider version. Used to rate-limit <c>deployment group show</c>.
+    /// </summary>
+    Task RecordArmObservationClockAsync(
+        Guid workspaceId,
+        Guid operationId,
+        DateTimeOffset observedAt,
+        int backoffSeconds,
+        CancellationToken cancellationToken = default) =>
+        Task.CompletedTask;
+
+    /// <summary>
+    /// Records the ARM observation clock and an optional operator-visible reason
+    /// without bumping the provider version.
+    /// </summary>
+    Task RecordArmObservationClockAsync(
+        Guid workspaceId,
+        Guid operationId,
+        DateTimeOffset observedAt,
+        int backoffSeconds,
+        string? reasonCode,
+        CancellationToken cancellationToken = default) =>
+        RecordArmObservationClockAsync(workspaceId, operationId, observedAt, backoffSeconds, cancellationToken);
+
+    /// <summary>
+    /// Atomically claims one automatic resume slot when the stored count still
+    /// equals <paramref name="expectedCount"/> and is below the cap. Returns null
+    /// when the row is missing, the count moved, or the cap is already reached.
+    /// </summary>
+    Task<AzureProviderOperation?> IncrementAutoResumeCountAsync(
+        Guid workspaceId,
+        Guid operationId,
+        int expectedCount,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<AzureProviderOperation?>(null);
+
+    /// <summary>
+    /// Records an operator-visible auto-resume outcome on
+    /// <c>LastObservationReasonCode</c> only. Transition rows stay coupled to
+    /// <c>Version</c>; writing an out-of-band sequence would collide with the
+    /// next <see cref="ClaimRecoveryAsync"/>.
+    /// </summary>
+    Task RecordAutoResumeOutcomeAsync(
+        Guid workspaceId,
+        Guid operationId,
+        string reasonCode,
+        CancellationToken cancellationToken = default) =>
+        Task.CompletedTask;
 }

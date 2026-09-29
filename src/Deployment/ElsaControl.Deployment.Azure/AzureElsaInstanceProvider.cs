@@ -25,7 +25,8 @@ public sealed class AzureElsaInstanceProvider(
     IElsaInstanceProviderCleanupPort,
     IElsaInstanceProviderRecoveryPort,
     IElsaInstanceProviderDeleteRecoveryPort,
-    IElsaInstanceProviderHealthProbePort
+    IElsaInstanceProviderHealthProbePort,
+    IElsaInstanceProviderAutoResumePort
 {
     private readonly AzureElsaInstanceProviderOptions _options = options ?? new();
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
@@ -191,9 +192,13 @@ public sealed class AzureElsaInstanceProvider(
                 new(ElsaInstanceProviderObservationKind.Confirmed, ElsaObservedLifecycle.Failed,
                     ElsaInstanceProviderHealthGate.Failed, request.OperationId, request.AttemptNumber,
                     correlation),
-            _ => new(ElsaInstanceProviderObservationKind.Confirmed, ElsaObservedLifecycle.Provisioning,
+            _ => new ElsaInstanceProviderObservation(
+                ElsaInstanceProviderObservationKind.Confirmed, ElsaObservedLifecycle.Provisioning,
                 ElsaInstanceProviderHealthGate.Unknown, request.OperationId, request.AttemptNumber, correlation,
-                retryEvidence)
+                retryEvidence?.Evidence)
+            {
+                ReasonCode = retryEvidence?.ReasonCode
+            }
         };
     }
 
@@ -223,7 +228,11 @@ public sealed class AzureElsaInstanceProvider(
     /// typed, immutable postcondition. A failed observation remains unknown and cannot become
     /// retry evidence.
     /// </summary>
-    private async Task<ElsaInstanceProviderRetryEvidence?> TryRecordRecoveryObservationAsync(
+    private sealed record RecoveryObservationResult(
+        ElsaInstanceProviderRetryEvidence? Evidence,
+        string? ReasonCode);
+
+    private async Task<RecoveryObservationResult?> TryRecordRecoveryObservationAsync(
         ElsaInstanceProviderReconciliationRequest request,
         AzureProviderOperation operation,
         CancellationToken cancellationToken)
@@ -254,17 +263,68 @@ public sealed class AzureElsaInstanceProvider(
                 !string.Equals(retainedPlan.Fingerprint, operation.PlanFingerprint, StringComparison.Ordinal))
                 return null;
 
+            if (operation.AutoResumeCount >= AzureNamedDeploymentFreshness.MaximumAutoResumes &&
+                !request.OperatorInitiated)
+            {
+                await PersistAutoResumeExhaustedAsync(operation, cancellationToken);
+                return await ReuseOrRestampLastEvidenceAsync(
+                    request, operation, AzureLateSuccessCodes.AutoResumeExhausted, cancellationToken);
+            }
+
+            if (request.OperatorInitiated)
+            {
+                var forcedReuse = await TryReuseOperatorForcedReceiptAsync(request, operation, cancellationToken);
+                if (forcedReuse is not null)
+                    return forcedReuse;
+            }
+            else if (!AzureNamedDeploymentFreshness.IsArmReadDue(
+                    _timeProvider.GetUtcNow(), operation.LastArmObservedAt, operation.ArmObservationBackoffSeconds))
+            {
+                return await ReuseOrRestampLastEvidenceAsync(request, operation, cancellationToken: cancellationToken);
+            }
+
             var observed = await _recoveryObserver.ObserveAsync(
-                new AzureProviderRecoveryRequest(operation, retainedPlan, assignment, _providerScope), cancellationToken);
+                new AzureProviderRecoveryRequest(
+                    operation, retainedPlan, assignment, _providerScope, request.OperatorInitiated),
+                cancellationToken);
             observed.Validate();
+            var eligibleAutoResume = observed.Kind == AzureProviderRecoveryObservationKind.Confirmed &&
+                observed.CompletedStep is { } completed &&
+                AzureNamedDeploymentFreshness.IsConfirmedCompletedResume(operation.AttemptedStep, completed) &&
+                operation.AutoResumeCount < AzureNamedDeploymentFreshness.MaximumAutoResumes;
+            var reasonCode = ResolveObservationReason(observed, eligibleAutoResume, operation.AutoResumeCount);
+            await RecordArmObservationClockAsync(operation, eligibleAutoResume, reasonCode, cancellationToken);
             if (observed.Kind != AzureProviderRecoveryObservationKind.Confirmed || observed.CompletedStep is null)
-                return null;
+                return new RecoveryObservationResult(null, reasonCode);
 
             var observedPhase = AzureProviderRecoveryObservationSupport.RecoveryPhase(observed.CompletedStep.Value);
             if (!AzureProviderRecoveryObservationSupport.IsCompatibleBoundary(
                     operation.AttemptedStep, operation.Phase, observed.CompletedStep.Value, observedPhase))
-                return null;
+                return new RecoveryObservationResult(null, reasonCode);
             var resourceFingerprint = AzureProviderRecoveryObservationRecord.ComputeResourceFingerprint(observed.Resources);
+            var postconditionFingerprint = AzureProviderRecoveryObservationRecord.ComputePostconditionFingerprint(
+                observed, resourceFingerprint);
+            var latest = await _recoveryObservationStore.GetLatestReceiptForAttemptAsync(
+                request.WorkspaceId,
+                request.OperationId,
+                request.AttemptNumber,
+                operation.Id,
+                cancellationToken);
+            if (latest is not null &&
+                string.Equals(latest.Observation.PostconditionFingerprint, postconditionFingerprint, StringComparison.Ordinal) &&
+                (request.OperatorInitiated
+                    ? latest.Observation.ObservedInstanceVersion == request.InstanceVersion
+                    : IsReceiptVersionFresh(latest, request.InstanceVersion)))
+            {
+                return new RecoveryObservationResult(
+                    new ElsaInstanceProviderRetryEvidence(
+                        latest.Reference,
+                        latest.Digest,
+                        eligibleAutoResume && !request.OperatorInitiated,
+                        operation.AutoResumeCount),
+                    reasonCode);
+            }
+
             var record = new AzureProviderRecoveryObservationRecord(
                 organizationId,
                 request.WorkspaceId,
@@ -292,10 +352,16 @@ public sealed class AzureElsaInstanceProvider(
                 observedPhase,
                 observed.Health,
                 resourceFingerprint,
-                AzureProviderRecoveryObservationRecord.ComputePostconditionFingerprint(observed, resourceFingerprint),
+                postconditionFingerprint,
                 _timeProvider.GetUtcNow());
             var receipt = await _recoveryObservationStore.CreateOrGetAsync(record, cancellationToken);
-            return new ElsaInstanceProviderRetryEvidence(receipt.Reference, receipt.Digest);
+            return new RecoveryObservationResult(
+                new ElsaInstanceProviderRetryEvidence(
+                    receipt.Reference,
+                    receipt.Digest,
+                    eligibleAutoResume,
+                    operation.AutoResumeCount),
+                reasonCode);
         }
         catch (OperationCanceledException)
         {
@@ -305,6 +371,204 @@ public sealed class AzureElsaInstanceProvider(
         {
             return null;
         }
+    }
+
+    private async Task PersistAutoResumeExhaustedAsync(
+        AzureProviderOperation operation,
+        CancellationToken cancellationToken)
+    {
+        await operationStore.RecordAutoResumeOutcomeAsync(
+            operation.WorkspaceId, operation.Id, AzureLateSuccessCodes.AutoResumeExhausted, cancellationToken);
+    }
+
+    /// <summary>
+    /// Operator Recover may skip the ordinary backoff, but a retrying admin
+    /// Recover still reuses the last forced receipt when that receipt is current
+    /// for this attempt and instance version and the 60-second floor has not
+    /// elapsed. LastArmObservedAt is the floor clock: a restamp does not count.
+    /// </summary>
+    private async Task<RecoveryObservationResult?> TryReuseOperatorForcedReceiptAsync(
+        ElsaInstanceProviderReconciliationRequest request,
+        AzureProviderOperation operation,
+        CancellationToken cancellationToken)
+    {
+        if (AzureNamedDeploymentFreshness.IsOperatorForcedArmReadDue(
+                _timeProvider.GetUtcNow(), operation.LastArmObservedAt))
+            return null;
+
+        var latest = await _recoveryObservationStore!.GetLatestReceiptForAttemptAsync(
+            request.WorkspaceId,
+            request.OperationId,
+            request.AttemptNumber,
+            operation.Id,
+            cancellationToken);
+        if (latest is null ||
+            latest.Observation.ObservedLifecycleAttemptNumber != request.AttemptNumber ||
+            latest.Observation.ObservedInstanceVersion != request.InstanceVersion)
+            return null;
+
+        return ToManualEvidence(latest, operation, operation.LastObservationReasonCode);
+    }
+
+    private async Task<RecoveryObservationResult> ReuseOrRestampLastEvidenceAsync(
+        ElsaInstanceProviderReconciliationRequest request,
+        AzureProviderOperation operation,
+        string? reasonCode = null,
+        CancellationToken cancellationToken = default)
+    {
+        var resolvedReason = reasonCode ?? operation.LastObservationReasonCode;
+        var currentAttempt = await _recoveryObservationStore!.GetLatestReceiptForAttemptAsync(
+            request.WorkspaceId,
+            request.OperationId,
+            request.AttemptNumber,
+            operation.Id,
+            cancellationToken);
+        if (currentAttempt is not null && IsReceiptVersionFresh(currentAttempt, request.InstanceVersion))
+            return ToManualEvidence(currentAttempt, operation, resolvedReason);
+
+        var latest = await _recoveryObservationStore.GetLatestReceiptForOperationAsync(
+            request.WorkspaceId,
+            request.OperationId,
+            operation.Id,
+            cancellationToken);
+        if (latest is null)
+            return new RecoveryObservationResult(null, resolvedReason);
+        if (latest.Observation.ObservedLifecycleAttemptNumber == request.AttemptNumber &&
+            IsReceiptVersionFresh(latest, request.InstanceVersion))
+            return ToManualEvidence(latest, operation, resolvedReason);
+
+        try
+        {
+            var restamped = latest.Observation with
+            {
+                ObservedLifecycleAttemptNumber = request.AttemptNumber,
+                ObservedInstanceVersion = request.InstanceVersion,
+                ProviderAttemptNumber = operation.AttemptNumber,
+                ProviderVersion = operation.Version,
+                ProviderCheckpointSequence = operation.CheckpointSequence,
+                ProviderOperationIdentity = operation.OperationIdentity,
+                ProviderRequestHash = operation.RequestHash,
+                ObservedAt = _timeProvider.GetUtcNow()
+            };
+            var receipt = await _recoveryObservationStore.CreateOrGetAsync(restamped, cancellationToken);
+            return ToManualEvidence(receipt, operation, resolvedReason);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return new RecoveryObservationResult(null, resolvedReason);
+        }
+    }
+
+    private static RecoveryObservationResult ToManualEvidence(
+        AzureProviderRecoveryObservationReceipt receipt,
+        AzureProviderOperation operation,
+        string? reasonCode) =>
+        new(
+            new ElsaInstanceProviderRetryEvidence(
+                receipt.Reference,
+                receipt.Digest,
+                autoResume: false,
+                operation.AutoResumeCount),
+            reasonCode);
+
+    private static bool IsReceiptVersionFresh(
+        AzureProviderRecoveryObservationReceipt receipt,
+        int instanceVersion) =>
+        receipt.Observation.ObservedInstanceVersion == instanceVersion ||
+        receipt.Observation.ObservedInstanceVersion == instanceVersion - 1;
+
+    private static string? ResolveObservationReason(
+        AzureProviderRecoveryObservation observed,
+        bool eligibleAutoResume,
+        int autoResumeCount)
+    {
+        if (observed.Kind == AzureProviderRecoveryObservationKind.Ambiguous &&
+            (string.Equals(observed.Code, AzureLateSuccessCodes.DeploymentFailed, StringComparison.Ordinal) ||
+             string.Equals(observed.Code, AzureLateSuccessCodes.DeploymentCanceled, StringComparison.Ordinal)))
+            return observed.Code;
+        if (observed.Kind == AzureProviderRecoveryObservationKind.Confirmed &&
+            observed.CompletedStep is not null &&
+            !eligibleAutoResume &&
+            autoResumeCount >= AzureNamedDeploymentFreshness.MaximumAutoResumes)
+            return AzureLateSuccessCodes.AutoResumeExhausted;
+        return AzureProviderOperationValidation.IsSafeCode(observed.Code) ? observed.Code : null;
+    }
+
+    private Task RecordArmObservationClockAsync(
+        AzureProviderOperation operation,
+        bool eligibleAutoResume,
+        string? reasonCode,
+        CancellationToken cancellationToken)
+    {
+        var backoff = eligibleAutoResume
+            ? AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds
+            : AzureNamedDeploymentFreshness.NextBackoffSeconds(operation.ArmObservationBackoffSeconds);
+        return operationStore.RecordArmObservationClockAsync(
+            operation.WorkspaceId,
+            operation.Id,
+            _timeProvider.GetUtcNow(),
+            backoff,
+            reasonCode,
+            cancellationToken);
+    }
+
+    public async Task<int?> TryChargeAutoResumeAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        Guid lifecycleOperationId,
+        int expectedCount,
+        CancellationToken cancellationToken = default)
+    {
+        var operation = await TryGetCorrelatedReconcileAsync(workspaceId, instanceId, lifecycleOperationId, cancellationToken);
+        if (operation is null)
+            return null;
+        var charged = await operationStore.IncrementAutoResumeCountAsync(
+            workspaceId, operation.Id, expectedCount, cancellationToken);
+        return charged?.AutoResumeCount;
+    }
+
+    public async Task<int?> GetAutoResumeCountAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        Guid lifecycleOperationId,
+        CancellationToken cancellationToken = default)
+    {
+        var operation = await TryGetCorrelatedReconcileAsync(workspaceId, instanceId, lifecycleOperationId, cancellationToken);
+        return operation?.AutoResumeCount;
+    }
+
+    public async Task RecordAutoResumeOutcomeAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        Guid lifecycleOperationId,
+        string outcomeCode,
+        CancellationToken cancellationToken = default)
+    {
+        var operation = await TryGetCorrelatedReconcileAsync(workspaceId, instanceId, lifecycleOperationId, cancellationToken);
+        if (operation is null)
+            return;
+        await operationStore.RecordAutoResumeOutcomeAsync(
+            workspaceId, operation.Id, outcomeCode, cancellationToken);
+    }
+
+    private async Task<AzureProviderOperation?> TryGetCorrelatedReconcileAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        Guid lifecycleOperationId,
+        CancellationToken cancellationToken)
+    {
+        var operation = await operationStore.GetLatestReconcileAsync(
+            workspaceId, WorkloadName(instanceId), _options.ProviderScopeFingerprint, cancellationToken);
+        if (operation is null ||
+            operation.WorkspaceId != workspaceId ||
+            operation.InstanceId != instanceId ||
+            !string.Equals(operation.IdempotencyKey, IdempotencyKey(lifecycleOperationId), StringComparison.Ordinal))
+            return null;
+        return operation;
     }
 
     public async Task<ElsaInstanceProviderRecoveryResult> RecoverAsync(

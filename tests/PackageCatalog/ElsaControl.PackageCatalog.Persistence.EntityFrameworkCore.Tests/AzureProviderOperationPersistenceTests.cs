@@ -1190,6 +1190,145 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
     }
 
     [Fact]
+    public async Task Attempted_step_timestamp_is_written_ahead_and_arm_clock_does_not_bump_version()
+    {
+        var now = DateTimeOffset.Parse("2026-09-24T00:33:00Z");
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var created = await store.CreateOrGetAsync(Request(), now);
+        var claimed = Assert.IsType<AzureProviderOperation>(await store.ClaimAsync(
+            _workspaceId, created.Id, "worker", "lease", TimeSpan.FromMinutes(30), now.AddSeconds(5)));
+
+        var foundation = Assert.IsType<AzureProviderOperation>(await store.CheckpointAsync(
+            _workspaceId, created.Id, "lease",
+            new(AzureProviderOperationPhase.FoundationSubmitted, "azure.step.attempted",
+                "The Azure lifecycle step was marked before its remote call.", new(), null,
+                AzureProviderHealth.Unknown, [], AttemptedStep: AzureProviderRunnerStep.Foundation),
+            now.AddMinutes(1), claimed.Version));
+        Assert.Equal(AzureProviderRunnerStep.Foundation, foundation.AttemptedStep);
+        Assert.Equal(now.AddMinutes(1), foundation.AttemptedStepStartedAt);
+
+        var workload = Assert.IsType<AzureProviderOperation>(await store.CheckpointAsync(
+            _workspaceId, created.Id, "lease",
+            new(AzureProviderOperationPhase.FoundationReady, "azure.step.attempted",
+                "The Azure lifecycle step was marked before its remote call.", new(), null,
+                AzureProviderHealth.Unknown, [], AttemptedStep: AzureProviderRunnerStep.Workload),
+            now.AddMinutes(8), foundation.Version));
+        Assert.Equal(AzureProviderRunnerStep.Workload, workload.AttemptedStep);
+        Assert.Equal(now.AddMinutes(8), workload.AttemptedStepStartedAt);
+        Assert.Equal(foundation.Version + 1, workload.Version);
+
+        await store.RecordArmObservationClockAsync(_workspaceId, created.Id, now.AddMinutes(9), 60);
+        var afterClock = await store.GetAsync(_workspaceId, created.Id);
+        Assert.Equal(now.AddMinutes(9), afterClock!.LastArmObservedAt);
+        Assert.Equal(60, afterClock.ArmObservationBackoffSeconds);
+        Assert.Equal(workload.Version, afterClock.Version);
+
+        var incremented = Assert.IsType<AzureProviderOperation>(
+            await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id, 0));
+        Assert.Equal(1, incremented.AutoResumeCount);
+        Assert.Equal(workload.Version, incremented.Version);
+
+        for (var i = 1; i < AzureNamedDeploymentFreshness.MaximumAutoResumes; i++)
+            Assert.NotNull(await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id, i));
+        Assert.Null(await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id, AzureNamedDeploymentFreshness.MaximumAutoResumes));
+        Assert.Null(await store.IncrementAutoResumeCountAsync(_workspaceId, created.Id, 0));
+        var atCap = await store.GetAsync(_workspaceId, created.Id);
+        Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes, atCap!.AutoResumeCount);
+        Assert.Equal(workload.Version, atCap.Version);
+
+        await store.RecordAutoResumeOutcomeAsync(
+            _workspaceId, created.Id, AzureLateSuccessCodes.AutoResumeAccepted);
+        var afterOutcome = await store.GetAsync(_workspaceId, created.Id);
+        Assert.Equal(AzureLateSuccessCodes.AutoResumeAccepted, afterOutcome!.LastObservationReasonCode);
+        Assert.Equal(workload.Version, afterOutcome.Version);
+        var transitions = await store.ListTransitionsAsync(_workspaceId, created.Id);
+        Assert.DoesNotContain(transitions, transition => transition.Code == AzureLateSuccessCodes.AutoResumeAccepted);
+    }
+
+    [Fact]
+    public async Task Auto_resume_outcome_does_not_steal_the_claim_recovery_sequence()
+    {
+        var now = DateTimeOffset.UtcNow;
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var operation = await store.CreateOrGetAsync(Request(), now);
+        var claimed = Assert.IsType<AzureProviderOperation>(await store.ClaimAsync(
+            _workspaceId, operation.Id, "worker", "lease", TimeSpan.FromMinutes(1), now));
+        var parked = Assert.IsType<AzureProviderOperation>(await store.FinalizeAsync(
+            _workspaceId, operation.Id, "lease", AzureProviderOperationStatus.RecoveryRequired,
+            "azure.operation.recovery-required", now.AddSeconds(5), claimed.Version));
+
+        await store.RecordAutoResumeOutcomeAsync(
+            _workspaceId, operation.Id, AzureLateSuccessCodes.AutoResumeAccepted);
+        var afterOutcome = await store.GetAsync(_workspaceId, operation.Id);
+        Assert.Equal(parked.Version, afterOutcome!.Version);
+        Assert.DoesNotContain(
+            await store.ListTransitionsAsync(_workspaceId, operation.Id),
+            transition => transition.Code == AzureLateSuccessCodes.AutoResumeAccepted);
+
+        var recovered = Assert.IsType<AzureProviderOperation>(await store.ClaimRecoveryAsync(
+            _workspaceId, operation.Id, "worker", "resume-lease", TimeSpan.FromMinutes(1),
+            now.AddSeconds(7), afterOutcome.Version));
+        Assert.Equal(AzureProviderOperationStatus.Running, recovered.Status);
+        Assert.Equal(parked.Version + 1, recovered.Version);
+        Assert.Contains(
+            await store.ListTransitionsAsync(_workspaceId, operation.Id),
+            transition => transition.Code == "operation.recovery.claimed");
+    }
+
+    [Fact]
+    public async Task Exhausted_auto_resume_outcome_still_allows_manual_claim_recovery()
+    {
+        var now = DateTimeOffset.UtcNow;
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var operation = await store.CreateOrGetAsync(Request(), now);
+        var claimed = Assert.IsType<AzureProviderOperation>(await store.ClaimAsync(
+            _workspaceId, operation.Id, "worker", "lease", TimeSpan.FromMinutes(1), now));
+        for (var expected = 0; expected < AzureNamedDeploymentFreshness.MaximumAutoResumes; expected++)
+            Assert.NotNull(await store.IncrementAutoResumeCountAsync(_workspaceId, operation.Id, expected));
+        var parked = Assert.IsType<AzureProviderOperation>(await store.FinalizeAsync(
+            _workspaceId, operation.Id, "lease", AzureProviderOperationStatus.RecoveryRequired,
+            "azure.operation.recovery-required", now.AddSeconds(5), claimed.Version));
+
+        await store.RecordAutoResumeOutcomeAsync(
+            _workspaceId, operation.Id, AzureLateSuccessCodes.AutoResumeExhausted);
+        var afterOutcome = await store.GetAsync(_workspaceId, operation.Id);
+        Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes, afterOutcome!.AutoResumeCount);
+        Assert.Equal(parked.Version, afterOutcome.Version);
+
+        var recovered = Assert.IsType<AzureProviderOperation>(await store.ClaimRecoveryAsync(
+            _workspaceId, operation.Id, "worker", "manual-recover-lease", TimeSpan.FromMinutes(1),
+            now.AddSeconds(7), afterOutcome.Version));
+        Assert.Equal(AzureProviderOperationStatus.Running, recovered.Status);
+        Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes, recovered.AutoResumeCount);
+    }
+
+    [Fact]
+    public async Task Concurrent_auto_resume_claims_at_count_two_produce_exactly_one_increment()
+    {
+        var created = await new AzureProviderOperationStore(CreateContext())
+            .CreateOrGetAsync(Request(), DateTimeOffset.Parse("2026-09-24T00:33:00Z"));
+        using var setup = CreateContext();
+        var setupStore = new AzureProviderOperationStore(setup);
+        Assert.NotNull(await setupStore.IncrementAutoResumeCountAsync(_workspaceId, created.Id, 0));
+        Assert.NotNull(await setupStore.IncrementAutoResumeCountAsync(_workspaceId, created.Id, 1));
+
+        using var firstDb = CreateContext();
+        using var secondDb = CreateContext();
+        var claims = await Task.WhenAll(
+            new AzureProviderOperationStore(firstDb).IncrementAutoResumeCountAsync(_workspaceId, created.Id, 2),
+            new AzureProviderOperationStore(secondDb).IncrementAutoResumeCountAsync(_workspaceId, created.Id, 2));
+
+        Assert.Single(claims, claimed => claimed is not null);
+        Assert.Single(claims, claimed => claimed is null);
+        using var verify = CreateContext();
+        var after = await new AzureProviderOperationStore(verify).GetAsync(_workspaceId, created.Id);
+        Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes, after!.AutoResumeCount);
+    }
+
+    [Fact]
     public async Task Checkpoints_with_distinct_codes_preserve_distinct_transitions()
     {
         var now = DateTimeOffset.UtcNow;

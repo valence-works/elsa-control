@@ -281,13 +281,12 @@ public sealed class AzureProviderExecutor
             return Result(operation, AzureProviderExecutionOutcome.RecoveryRequired, observation.Code, observation.Message);
 
         var observedStep = observation.CompletedStep!.Value;
-        // The legacy combined SQL step, and later workload steps, are intentionally not
-        // recoverable from a single observation. They do not provide a safe precondition for
-        // this executor's staged SQL recovery handoff.
+        // The legacy combined SQL step, and later health/traffic steps, are intentionally not
+        // recoverable from a single observation. A confirmed Workload resumes at Health.
         if (observedStep is not (AzureProviderRunnerStep.Foundation or AzureProviderRunnerStep.AcrPull or
             AzureProviderRunnerStep.SeedSecrets or
             AzureProviderRunnerStep.SqlFirewallCreate or AzureProviderRunnerStep.SqlBootstrapScript or
-            AzureProviderRunnerStep.SqlFirewallCleanup))
+            AzureProviderRunnerStep.SqlFirewallCleanup or AzureProviderRunnerStep.Workload))
             return RecoveryInsufficient(operation);
         AzureProviderOperationPhase observedPhase;
         try
@@ -316,7 +315,9 @@ public sealed class AzureProviderExecutor
             observedStep == AzureProviderRunnerStep.SqlBootstrapScript &&
             !AzureProviderRecoveryObservationSupport.IsSqlBootstrapScriptEligible(operation) ||
             observedStep == AzureProviderRunnerStep.SqlFirewallCleanup &&
-            !AzureProviderRecoveryObservationSupport.IsSqlFirewallCleanupEligible(operation))
+            !AzureProviderRecoveryObservationSupport.IsSqlFirewallCleanupEligible(operation) ||
+            observedStep == AzureProviderRunnerStep.Workload &&
+            !AzureProviderRecoveryObservationSupport.IsWorkloadEligible(operation))
             return RecoveryInsufficient(operation);
 
         var now = _timeProvider.GetUtcNow();

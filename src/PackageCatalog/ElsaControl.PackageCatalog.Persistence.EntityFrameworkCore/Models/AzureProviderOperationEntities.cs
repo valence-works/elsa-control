@@ -48,6 +48,11 @@ internal sealed class AzureProviderOperationEntity
     public AzureProviderOperationStatus Status { get; set; }
     public AzureProviderOperationPhase Phase { get; set; }
     public AzureProviderRunnerStep? AttemptedStep { get; set; }
+    public DateTimeOffset? AttemptedStepStartedAt { get; set; }
+    public DateTimeOffset? LastArmObservedAt { get; set; }
+    public int AutoResumeCount { get; set; }
+    public int ArmObservationBackoffSeconds { get; set; }
+    public string? LastObservationReasonCode { get; set; }
     public long CheckpointSequence { get; set; }
     public int AttemptNumber { get; set; }
     public long Version { get; set; }

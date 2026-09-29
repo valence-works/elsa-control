@@ -1054,6 +1054,85 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
     }
 
     [Fact]
+    public async Task Active_operation_progress_exposes_attempt_fields_without_provider_phase()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-progress-owner");
+        var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, "overview-progress-runtime");
+        using var restart = await client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/restart",
+            created.Instance.ETag,
+            "overview-progress-restart"));
+        Assert.Equal(HttpStatusCode.Accepted, restart.StatusCode);
+
+        using var response = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        var json = await response.Content.ReadAsStringAsync();
+        var overview = JsonSerializer.Deserialize<ManagedElsaInstanceOverviewResponse>(
+            json, ControlApiTestApplication.JsonOptions);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotNull(overview!.ActiveOperation);
+        Assert.NotNull(overview.ActiveOperation!.Progress);
+        Assert.Equal(1, overview.ActiveOperation.Progress!.AttemptNumber);
+        Assert.Equal(overview.ActiveOperation.StartedAt, overview.ActiveOperation.Progress.AttemptStartedAt);
+        Assert.Null(overview.ActiveOperation.Progress.Phase);
+        Assert.Null(overview.ActiveOperation.Progress.AttemptedStep);
+        AssertExactCustomerDtoShape(json, "overview");
+    }
+
+    [Fact]
+    public async Task Active_operation_progress_updates_attempt_started_at_on_recover_attempts()
+    {
+        var app = await PrepareApplicationAsync();
+        var client = app.CreateTrustedWorkspaceClient("overview-attempt-owner");
+        var (workspaceId, created) = await CreateReadyInstanceAsync(app, client, "overview-attempt-runtime");
+        using var restart = await client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/restart",
+            created.Instance.ETag,
+            "overview-attempt-restart"));
+        Assert.Equal(HttpStatusCode.Accepted, restart.StatusCode);
+        var restarted = (await restart.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>())!;
+        var afterRestart = await client.GetControlJsonAsync<ManagedElsaInstanceOverviewResponse>(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        var originalStartedAt = afterRestart!.ActiveOperation!.StartedAt;
+
+        await ParkRecoveryRequiredAsync(app, restarted.OperationId, "a");
+        using var recover2 = await client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations",
+            await ReadInstanceETagAsync(client, workspaceId, created.Instance.InstanceId),
+            "overview-attempt-recover-2",
+            new ManagedElsaInstanceOperationRequest(ElsaInstanceOperationAction.Recover)));
+        Assert.Equal(HttpStatusCode.Accepted, recover2.StatusCode);
+
+        var overview2 = await client.GetControlJsonAsync<ManagedElsaInstanceOverviewResponse>(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        Assert.Equal(2, overview2!.ActiveOperation!.Progress!.AttemptNumber);
+        Assert.Equal(originalStartedAt, overview2.ActiveOperation.StartedAt);
+        Assert.NotNull(overview2.ActiveOperation.Progress.AttemptStartedAt);
+        var startedAt2 = overview2.ActiveOperation.Progress.AttemptStartedAt!.Value;
+
+        await ParkRecoveryRequiredAsync(app, restarted.OperationId, "b");
+        using var recover3 = await client.SendAsync(Mutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations",
+            await ReadInstanceETagAsync(client, workspaceId, created.Instance.InstanceId),
+            "overview-attempt-recover-3",
+            new ManagedElsaInstanceOperationRequest(ElsaInstanceOperationAction.Recover)));
+        Assert.Equal(HttpStatusCode.Accepted, recover3.StatusCode);
+
+        var overview3 = await client.GetControlJsonAsync<ManagedElsaInstanceOverviewResponse>(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        Assert.Equal(3, overview3!.ActiveOperation!.Progress!.AttemptNumber);
+        Assert.Equal(originalStartedAt, overview3.ActiveOperation.StartedAt);
+        Assert.NotNull(overview3.ActiveOperation.Progress.AttemptStartedAt);
+        Assert.True(overview3.ActiveOperation.Progress.AttemptStartedAt > startedAt2);
+    }
+
+    [Fact]
     public async Task Configured_bff_token_can_read_overview_and_is_still_denied_on_operator_routes()
     {
         var catalog = new MutableReleaseCatalogStore();
@@ -1276,6 +1355,34 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         ElsaInstanceOperationState state,
         string failureCode) =>
         await SetOperationStateAsync(app, operationId, state, failureCode, completed: true);
+
+    private static async Task ParkRecoveryRequiredAsync(
+        ControlApiTestApplication app,
+        Guid operationId,
+        string suffix)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var evidence = $"https://evidence.example/retry/overview-attempt-{suffix}";
+        var digest = "sha256:" + new string(suffix[0], 64);
+        var retrySafe = ElsaInstanceProviderReconciliationService.RetrySafeCode;
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstanceOperations
+            SET State = {ElsaInstanceOperationState.RecoveryRequired.ToString()},
+                FailureCode = {retrySafe},
+                ReconciliationRetryEvidenceReference = {evidence},
+                ReconciliationRetryEvidenceDigest = {digest},
+                CompletedAt = NULL
+            WHERE Id = {operationId}
+            """);
+    }
+
+    private static async Task<string> ReadInstanceETagAsync(HttpClient client, Guid workspaceId, Guid instanceId)
+    {
+        using var response = await client.GetAsync($"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}");
+        response.EnsureSuccessStatusCode();
+        return response.Headers.ETag?.Tag ?? throw new InvalidOperationException("Instance ETag is missing.");
+    }
 
     private static async Task SetOperationStateAsync(
         ControlApiTestApplication app,

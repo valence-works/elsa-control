@@ -826,6 +826,132 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Recovery_observer_confirms_fresh_owned_workload_without_mutation()
+    {
+        var process = new FakeCommandProcess();
+        ConfigureOwnedWorkloadObservation(process, DeploymentPoll("Succeeded", WorkloadObserveOutputs()));
+
+        var observation = await _fixture.Runner(process)
+            .ObserveAsync(CreateWorkloadRecoveryRequest());
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.Confirmed, observation.Kind);
+        Assert.Equal(AzureProviderRunnerStep.Workload, observation.CompletedStep);
+        Assert.Equal("azure.recovery.workload-observed", observation.Code);
+        Assert.Equal(
+            "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/proof-rg/providers/Microsoft.Resources/deployments/elsa-proof-aaaaaaaaaaaa-workload",
+            observation.Resources.WorkloadDeploymentId);
+        Assert.Equal(
+            "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/proof-rg/providers/Microsoft.App/containerApps/proof-app",
+            observation.Resources.WorkloadResourceId);
+        Assert.Equal("proof-app--candidate", observation.Resources.WorkloadRevisionName);
+        Assert.Equal("https://proof-app.hash.azurecontainerapps.io", observation.Endpoint);
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_rejects_a_stale_same_name_workload_deployment()
+    {
+        var process = new FakeCommandProcess();
+        ConfigureOwnedWorkloadObservation(
+            process,
+            DeploymentPoll("Succeeded", WorkloadObserveOutputs(), StaleDeploymentTimestamp),
+            includeRevision: false);
+
+        var observation = await _fixture.Runner(process)
+            .ObserveAsync(CreateWorkloadRecoveryRequest());
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.Ambiguous, observation.Kind);
+        Assert.Null(observation.CompletedStep);
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_rejects_an_unowned_resource_group_even_when_the_name_is_fresh()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(
+            args => args.Contains("group") && args.Contains("show"),
+            "{\"managed-by\":\"someone-else\",\"owner\":\"foreign\",\"workload-name\":\"proof\",\"sqlBootstrapObjectId\":\"11111111-1111-1111-1111-111111111111\"}");
+        process.Success(IsDeploymentPoll, DeploymentPoll("Succeeded", WorkloadObserveOutputs()));
+
+        var observation = await _fixture.Runner(process)
+            .ObserveAsync(CreateWorkloadRecoveryRequest());
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.Ambiguous, observation.Kind);
+        Assert.Null(observation.CompletedStep);
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_confirms_a_fresh_owned_workload_even_when_the_output_fingerprint_differs()
+    {
+        var process = new FakeCommandProcess();
+        ConfigureOwnedWorkloadObservation(process, DeploymentPoll("Succeeded", WorkloadObserveOutputs(new string('f', 64))));
+
+        var observation = await _fixture.Runner(process)
+            .ObserveAsync(CreateWorkloadRecoveryRequest());
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.Confirmed, observation.Kind);
+        Assert.Equal(AzureProviderRunnerStep.Workload, observation.CompletedStep);
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_reports_a_failed_workload_deployment_without_evidence()
+    {
+        var process = new FakeCommandProcess();
+        ConfigureOwnedWorkloadObservation(
+            process,
+            DeploymentPoll("Failed", WorkloadObserveOutputs()),
+            includeRevision: false);
+
+        var observation = await _fixture.Runner(process)
+            .ObserveAsync(CreateWorkloadRecoveryRequest());
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.Ambiguous, observation.Kind);
+        Assert.Equal(AzureLateSuccessCodes.DeploymentFailed, observation.Code);
+        Assert.Null(observation.CompletedStep);
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_reports_a_canceled_workload_deployment_without_evidence()
+    {
+        var process = new FakeCommandProcess();
+        ConfigureOwnedWorkloadObservation(
+            process,
+            DeploymentPoll("Canceled", WorkloadObserveOutputs()),
+            includeRevision: false);
+
+        var observation = await _fixture.Runner(process)
+            .ObserveAsync(CreateWorkloadRecoveryRequest());
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.Ambiguous, observation.Kind);
+        Assert.Equal(AzureLateSuccessCodes.DeploymentCanceled, observation.Code);
+        Assert.Null(observation.CompletedStep);
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_keeps_a_running_workload_pending_without_mutation()
+    {
+        var process = new FakeCommandProcess();
+        ConfigureOwnedWorkloadObservation(
+            process,
+            DeploymentPoll("Running"),
+            includeRevision: false);
+
+        var observation = await _fixture.Runner(process)
+            .ObserveAsync(CreateWorkloadRecoveryRequest());
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.InProgress, observation.Kind);
+        Assert.Equal("azure.recovery.workload-in-progress", observation.Code);
+        Assert.Null(observation.CompletedStep);
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
     public async Task Recovery_observer_reconstructs_missing_foundation_outputs_without_mutation()
     {
         var process = new FakeCommandProcess();
@@ -3243,6 +3369,41 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
         process.Success(args => args.Contains("properties.provisioningState"), "Succeeded");
     }
+
+    private static void ConfigureOwnedWorkloadObservation(
+        FakeCommandProcess process,
+        string poll,
+        bool includeRevision = true)
+    {
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(IsDeploymentPoll, poll);
+        if (includeRevision)
+            process.Success(args => args.Contains("containerapp") && args.Contains("show"), "proof-app--candidate");
+    }
+
+    private AzureProviderRecoveryRequest CreateWorkloadRecoveryRequest()
+    {
+        var request = CreateRecoveryRequest(
+            SqlFoundationResources(),
+            AzureProviderRunnerStep.Workload,
+            AzureProviderOperationPhase.FoundationReady);
+        return request with
+        {
+            Operation = request.Operation with
+            {
+                AttemptedStepStartedAt = DateTimeOffset.Parse("2026-09-24T00:33:00Z")
+            }
+        };
+    }
+
+    private string WorkloadObserveOutputs(string? planFingerprint = null) => $$"""
+        {
+          "planFingerprint": { "value": "{{planFingerprint ?? "abc123unique1"}}" },
+          "containerAppId": { "value": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/proof-rg/providers/Microsoft.App/containerApps/proof-app" },
+          "containerAppEndpoint": { "value": "https://proof-app.hash.azurecontainerapps.io" }
+        }
+        """;
 
     private static void AssertNoProviderMutation(FakeCommandProcess process) =>
         Assert.DoesNotContain(process.Calls, call => call.Any(argument =>

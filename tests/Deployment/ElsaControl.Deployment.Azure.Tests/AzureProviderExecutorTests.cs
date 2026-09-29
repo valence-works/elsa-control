@@ -577,8 +577,47 @@ public sealed class AzureProviderExecutorTests
         Assert.Equal(1, store.RecoveryClaimCount);
     }
 
+    [Fact]
+    public async Task Workload_observation_claims_once_and_resumes_at_health_not_ready()
+    {
+        var store = new FakeOperationStore();
+        var runner = new RecordingRunner
+        {
+            FoundationOutcome = AzureProviderRunnerOutcome.Uncertain,
+            FoundationResourcesOverride = FoundationResources()
+        };
+        var executor = new AzureProviderExecutor(store, runner, new StaticTimeProvider(Now), TimeSpan.FromMinutes(5));
+        var plan = CreatePlan();
+        var interrupted = await executor.ApplyAsync(CreateRequest(), plan);
+        var pendingWorkload = interrupted.Operation with
+        {
+            Resources = SqlResourcesForRecovery(),
+            AttemptedStep = AzureProviderRunnerStep.Workload,
+            Phase = AzureProviderOperationPhase.FoundationReady
+        };
+        store.Replace(pendingWorkload);
+        var observed = new AzureProviderRecoveryObservation(
+            AzureProviderRecoveryObservationKind.Confirmed,
+            AzureProviderRunnerStep.Workload,
+            CompleteResourcesForRecovery(),
+            AzureProviderHealth.Unknown,
+            null,
+            "azure.recovery.workload-observed",
+            "The retained Azure workload completion was observed without mutation.");
+
+        var previousCallCount = runner.Steps.Count;
+        var resumed = await executor.RecoverAsync(pendingWorkload, plan, observed);
+        var resumedSteps = runner.Steps.Skip(previousCallCount).ToArray();
+
+        Assert.Equal(AzureProviderExecutionOutcome.Succeeded, resumed.Outcome);
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, resumed.Operation.Status);
+        Assert.Equal(1, store.RecoveryClaimCount);
+        Assert.Equal(AzureProviderRunnerStep.Health, resumedSteps[0]);
+        Assert.Contains(AzureProviderRunnerStep.Promotion, resumedSteps);
+        Assert.DoesNotContain(AzureProviderRunnerStep.Workload, resumedSteps);
+    }
+
     [Theory]
-    [InlineData(AzureProviderRunnerStep.Workload, AzureProviderOperationPhase.WorkloadReady)]
     [InlineData(AzureProviderRunnerStep.Health, AzureProviderOperationPhase.HealthVerified)]
     [InlineData(AzureProviderRunnerStep.Promotion, AzureProviderOperationPhase.TrafficPromoted)]
     public async Task Recovery_rejects_observations_for_non_recoverable_later_steps_before_claim(
