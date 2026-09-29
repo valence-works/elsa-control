@@ -20,6 +20,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private const string AcrPullRoleDefinitionId = "7f951dda-4ed3-4680-a7ca-43fe172d538d";
     private const string KeyVaultSecretsUserRoleDefinitionId = "4633458b-17de-408a-b874-0445c86b69e6";
     private const string KeyVaultSecretsOfficerRoleDefinitionId = "b86a8fe4-44ce-4948-aee5-eccb2c155cd7";
+    internal const string LogAnalyticsWorkspaceSoftDeletedCode = "azure.cleanup.log-analytics-workspace-soft-deleted";
+    private const string DeletedWorkspacesApiVersion = "2025-07-01";
     private const string ProofTag = "108";
     private const string ManagedByTag = "elsa-control";
     private const string SqlConnectionSecretName = "sql-connection";
@@ -1564,6 +1566,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         if (!groupExists.Succeeded)
             return ProcessFailure(command, AzureProviderOperationPhase.CleanupVerified, groupExists, resources, mutation: false);
 
+        IReadOnlyList<AzureResource> liveInventory = [];
         if (groupExists.Value!.Value)
         {
             var tags = await ExecuteAzAsync(command,
@@ -1581,6 +1584,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 return Uncertain(command, AzureProviderOperationPhase.CleanupVerified, "azure.cleanup.inventory-uncertain", "The owned resource inventory could not be confirmed.");
             if (!IsExactInventory(command, inventory.Value!.Value, command.Plan.WorkloadName))
                 return Failed(command, AzureProviderOperationPhase.CleanupVerified, "azure.cleanup.ownership-unverified", "The resource inventory contains an unowned resource.");
+            liveInventory = inventory.Value.Value;
 
             var identityId = ResourceId(command, "Microsoft.ManagedIdentity", "userAssignedIdentities", $"{command.Plan.WorkloadName}-identity");
             var identityPresent = inventory.Value.Value.Any(resource => string.Equals(resource.Id, identityId, StringComparison.OrdinalIgnoreCase));
@@ -1705,6 +1709,11 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
 
         if (groupExists.Value!.Value)
         {
+            var workspaceForceDelete = await ForceDeleteLogAnalyticsWorkspaceAsync(
+                command, liveInventory, cancellationToken);
+            if (workspaceForceDelete is not null)
+                return workspaceForceDelete;
+
             EnsureMutationAuthority(command);
             await ExecuteAzAsync<AzureCommandNoOutput>(command,
                 ["group", "delete", "--subscription", _scope.SubscriptionId, "--name", ResourceGroupName(command), "--yes", "--no-wait", "--output", "none", "--only-show-errors"],
@@ -1718,6 +1727,10 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         var exactVaultId = resources.KeyVaultResourceId ?? ResourceId(command, "Microsoft.KeyVault", "vaults", vaultName);
         if (!await PurgeAndVerifyVaultAsync(command, vaultName, exactVaultId, cancellationToken))
             return Uncertain(command, AzureProviderOperationPhase.CleanupVerified, "azure.cleanup.vault-uncertain", "The owned Key Vault could not be proven absent.");
+
+        if (await IsLogAnalyticsWorkspaceSoftDeletedAsync(command, cancellationToken))
+            return Uncertain(command, AzureProviderOperationPhase.CleanupVerified, LogAnalyticsWorkspaceSoftDeletedCode,
+                "The owned Log Analytics workspace remains in the 14-day soft-delete list.");
 
         return new AzureProviderRunnerResult(
             AzureProviderRunnerOutcome.Completed,
@@ -2246,6 +2259,102 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         }
         return false;
     }
+
+    private async Task<AzureProviderRunnerResult?> ForceDeleteLogAnalyticsWorkspaceAsync(
+        AzureProviderRunnerCommand command,
+        IReadOnlyList<AzureResource> inventory,
+        CancellationToken cancellationToken)
+    {
+        var workspaceId = LogAnalyticsWorkspaceResourceId(command);
+        var present = inventory.Any(resource =>
+            string.Equals(resource.Id, workspaceId, StringComparison.OrdinalIgnoreCase));
+        if (!present)
+            return null;
+
+        EnsureMutationAuthority(command);
+        await ExecuteAzAsync<AzureCommandNoOutput>(command,
+            ["monitor", "log-analytics", "workspace", "delete",
+                "--subscription", _scope.SubscriptionId,
+                "--resource-group", ResourceGroupName(command),
+                "--workspace-name", LogAnalyticsWorkspaceName(command),
+                "--force", "true",
+                "--yes",
+                "--output", "none",
+                "--only-show-errors"],
+            static _ => AzureCommandNoOutput.Instance,
+            cancellationToken);
+        if (!await LogAnalyticsWorkspaceLiveAbsentAsync(command, cancellationToken))
+            return Uncertain(command, AzureProviderOperationPhase.CleanupVerified,
+                "azure.cleanup.log-analytics-workspace-uncertain",
+                "The owned Log Analytics workspace could not be proven absent after force-delete.");
+        return null;
+    }
+
+    private async Task<bool> LogAnalyticsWorkspaceLiveAbsentAsync(
+        AzureProviderRunnerCommand command,
+        CancellationToken cancellationToken)
+    {
+        var observationAttempts = _options.CleanupObservationAttempts ?? _options.ObservationAttempts;
+        for (var attempt = 0; attempt < observationAttempts; attempt++)
+        {
+            var show = await ExecuteAzAsync(command,
+                ["monitor", "log-analytics", "workspace", "show",
+                    "--subscription", _scope.SubscriptionId,
+                    "--resource-group", ResourceGroupName(command),
+                    "--workspace-name", LogAnalyticsWorkspaceName(command),
+                    "--query", "id",
+                    "--output", "tsv",
+                    "--only-show-errors"],
+                ParseStringAsync,
+                cancellationToken);
+            if (!show.Succeeded)
+                return true;
+            if (attempt + 1 < observationAttempts)
+                await Task.Delay(_options.ObservationDelay, cancellationToken);
+        }
+        return false;
+    }
+
+    private async Task<bool> IsLogAnalyticsWorkspaceSoftDeletedAsync(
+        AzureProviderRunnerCommand command,
+        CancellationToken cancellationToken)
+    {
+        var deleted = await ListDeletedLogAnalyticsWorkspacesAsync(command, cancellationToken);
+        if (!deleted.Succeeded || deleted.Value is null)
+            return true;
+        return deleted.Value.Value.Any(workspace => IsOwnedDeletedLogAnalyticsWorkspace(command, workspace));
+    }
+
+    private Task<AzureCommandProcessResult<SafeValue<IReadOnlyList<DeletedWorkspace>>>> ListDeletedLogAnalyticsWorkspacesAsync(
+        AzureProviderRunnerCommand command,
+        CancellationToken cancellationToken) =>
+        ExecuteAzAsync(command,
+            ["rest", "--method", "get",
+                "--url",
+                $"https://management.azure.com/subscriptions/{_scope.SubscriptionId}/providers/Microsoft.OperationalInsights/deletedWorkspaces?api-version={DeletedWorkspacesApiVersion}",
+                "--output", "json",
+                "--only-show-errors"],
+            ParseDeletedWorkspacesAsync,
+            cancellationToken);
+
+    private bool IsOwnedDeletedLogAnalyticsWorkspace(AzureProviderRunnerCommand command, DeletedWorkspace workspace)
+    {
+        var expectedName = LogAnalyticsWorkspaceName(command);
+        if (!string.Equals(workspace.Name, expectedName, StringComparison.OrdinalIgnoreCase))
+            return false;
+        var expectedId = LogAnalyticsWorkspaceResourceId(command);
+        if (string.Equals(workspace.Id, expectedId, StringComparison.OrdinalIgnoreCase))
+            return true;
+        var groupSegment = $"/resourceGroups/{ResourceGroupName(command)}/";
+        return workspace.Id is not null &&
+               workspace.Id.Contains(groupSegment, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private string LogAnalyticsWorkspaceName(AzureProviderRunnerCommand command) =>
+        $"{command.Plan.WorkloadName}-logs";
+
+    private string LogAnalyticsWorkspaceResourceId(AzureProviderRunnerCommand command) =>
+        ResourceId(command, "Microsoft.OperationalInsights", "workspaces", LogAnalyticsWorkspaceName(command));
 
     private async Task<bool> ResourceGroupAbsentAsync(AzureProviderRunnerCommand command, CancellationToken cancellationToken)
     {
@@ -2993,6 +3102,13 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private static SafeValue<IReadOnlyList<FirewallRule>> ParseFirewallRulesAsync(ReadOnlyMemory<char> output) => new(ParseJson<List<FirewallRule>>(output).Value);
     private static SafeValue<IReadOnlyList<DeploymentRecord>> ParseDeploymentsAsync(ReadOnlyMemory<char> output) => new(ParseJson<List<DeploymentRecord>>(output).Value);
     private static SafeValue<IReadOnlyList<DeletedVault>> ParseDeletedVaultsAsync(ReadOnlyMemory<char> output) => new(ParseJson<List<DeletedVault>>(output).Value);
+    private static SafeValue<IReadOnlyList<DeletedWorkspace>> ParseDeletedWorkspacesAsync(ReadOnlyMemory<char> output)
+    {
+        var trimmed = output.Span.TrimStart();
+        if (trimmed.Length > 0 && trimmed[0] == '[')
+            return new(ParseJson<List<DeletedWorkspace>>(output).Value);
+        return new(ParseJson<DeletedWorkspaceList>(output).Value.Value ?? []);
+    }
     private static SafeValue<IReadOnlyList<AdminRecord>> ParseAdminsAsync(ReadOnlyMemory<char> output) => new(ParseJson<List<AdminRecord>>(output).Value);
     private static SafeValue<IReadOnlyList<TrafficEntry>> ParseTrafficAsync(ReadOnlyMemory<char> output) => new(ParseJson<List<TrafficEntry>>(output).Value);
     private static SafeValue<RevisionState> ParseRevisionStateAsync(ReadOnlyMemory<char> output) => ParseJson<RevisionState>(output);
@@ -3173,6 +3289,12 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         [JsonIgnore] public string? EffectiveVaultId => Properties?.VaultId ?? VaultId;
     }
     private sealed class DeletedVaultProperties { public string? Location { get; set; } public string? VaultId { get; set; } }
+    private sealed class DeletedWorkspaceList { public List<DeletedWorkspace>? Value { get; set; } }
+    private sealed class DeletedWorkspace
+    {
+        public string? Id { get; set; }
+        public string? Name { get; set; }
+    }
     private sealed class AdminRecord { public string? Login { get; set; } public string? Sid { get; set; } }
     private sealed class TrafficEntry { public string? RevisionName { get; set; } public bool LatestRevision { get; set; } public int Weight { get; set; } }
     private sealed class RevisionState { public bool Active { get; set; } public string? Health { get; set; } public string? Fqdn { get; set; } }
