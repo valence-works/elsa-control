@@ -14,12 +14,12 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     [Fact]
     public async Task Provider_submission_handoff_does_not_write_the_recovery_required_alert_event()
     {
-        using var capture = new RecoveryRequiredAlertCapture();
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
         await using var db = CreateMigratedContext(connection);
         await db.Database.MigrateAsync();
         var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Alert handoff");
+        using var capture = new RecoveryRequiredAlertCapture(workspace.Id);
         var store = new EfCoreElsaInstanceLifecycleStore(
             db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
 
@@ -47,12 +47,12 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     [Fact]
     public async Task Stale_run_entry_writes_exactly_one_alert_event_and_a_refresh_writes_none()
     {
-        using var capture = new RecoveryRequiredAlertCapture();
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
         await using var db = CreateMigratedContext(connection);
         await db.Database.MigrateAsync();
         var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Alert stale run");
+        using var capture = new RecoveryRequiredAlertCapture(workspace.Id);
         var workspaceStore = new DeploymentWorkspaceStore(db);
         Assert.NotNull(await workspaceStore.ClaimNextQueuedRunAsync("stale-alert-worker", Now));
 
@@ -82,12 +82,12 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     [Fact]
     public async Task Instance_and_health_reads_do_not_write_the_recovery_required_alert_event()
     {
-        using var capture = new RecoveryRequiredAlertCapture();
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
         await using var db = CreateMigratedContext(connection);
         await db.Database.MigrateAsync();
         var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Alert read");
+        using var capture = new RecoveryRequiredAlertCapture(workspace.Id);
         var workspaceStore = new DeploymentWorkspaceStore(db);
         Assert.NotNull(await workspaceStore.ClaimNextQueuedRunAsync("stale-read-worker", Now));
         Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
@@ -120,8 +120,9 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         private readonly object _gate = new();
         private readonly List<Activity> _entered = [];
 
-        public RecoveryRequiredAlertCapture()
+        public RecoveryRequiredAlertCapture(Guid workspaceId)
         {
+            var workspace = workspaceId.ToString("D");
             _listener = new ActivityListener
             {
                 ShouldListenTo = source => source.Name == ManagedLifecycleTelemetry.ActivitySourceName,
@@ -129,6 +130,11 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 ActivityStopped = activity =>
                 {
                     if (activity.OperationName != ManagedLifecycleTelemetry.RecoveryRequiredEnteredActivityName)
+                        return;
+                    if (!string.Equals(
+                            activity.GetTagItem(ManagedLifecycleTelemetry.WorkspaceIdTag) as string,
+                            workspace,
+                            StringComparison.Ordinal))
                         return;
                     lock (_gate)
                         _entered.Add(activity);

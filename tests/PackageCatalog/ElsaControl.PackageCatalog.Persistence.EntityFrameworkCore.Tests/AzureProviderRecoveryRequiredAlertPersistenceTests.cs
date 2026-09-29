@@ -36,7 +36,7 @@ public sealed class AzureProviderRecoveryRequiredAlertPersistenceTests : IDispos
     [Fact]
     public async Task Finalize_to_recovery_required_writes_exactly_one_event_and_replays_write_none()
     {
-        using var capture = new AlertCapture();
+        using var capture = new AlertCapture(_workspaceId);
         var now = DateTimeOffset.Parse("2026-09-29T12:00:00Z");
         using var db = CreateContext();
         var store = new AzureProviderOperationStore(db);
@@ -72,7 +72,7 @@ public sealed class AzureProviderRecoveryRequiredAlertPersistenceTests : IDispos
     [Fact]
     public async Task Recover_then_a_second_entry_writes_exactly_one_more_event()
     {
-        using var capture = new AlertCapture();
+        using var capture = new AlertCapture(_workspaceId);
         var now = DateTimeOffset.Parse("2026-09-29T13:00:00Z");
         using var db = CreateContext();
         var store = new AzureProviderOperationStore(db);
@@ -108,7 +108,7 @@ public sealed class AzureProviderRecoveryRequiredAlertPersistenceTests : IDispos
     [Fact]
     public async Task Stale_lease_cas_writes_one_event_and_a_second_tick_writes_none()
     {
-        using var capture = new AlertCapture();
+        using var capture = new AlertCapture(_workspaceId);
         var now = DateTimeOffset.Parse("2026-09-29T14:00:00Z");
         using var db = CreateContext();
         var store = new AzureProviderOperationStore(db);
@@ -124,7 +124,7 @@ public sealed class AzureProviderRecoveryRequiredAlertPersistenceTests : IDispos
     [Fact]
     public async Task Heartbeat_and_checkpoint_refreshes_do_not_write_the_alert_event()
     {
-        using var capture = new AlertCapture();
+        using var capture = new AlertCapture(_workspaceId);
         var now = DateTimeOffset.Parse("2026-09-29T15:00:00Z");
         using var db = CreateContext();
         var store = new AzureProviderOperationStore(db);
@@ -210,8 +210,9 @@ public sealed class AzureProviderRecoveryRequiredAlertPersistenceTests : IDispos
         private readonly object _gate = new();
         private readonly List<Activity> _entered = [];
 
-        public AlertCapture()
+        public AlertCapture(Guid workspaceId)
         {
+            var workspace = workspaceId.ToString("D");
             _listener = new ActivityListener
             {
                 ShouldListenTo = source => source.Name == ManagedLifecycleTelemetry.ActivitySourceName,
@@ -219,6 +220,11 @@ public sealed class AzureProviderRecoveryRequiredAlertPersistenceTests : IDispos
                 ActivityStopped = activity =>
                 {
                     if (activity.OperationName != ManagedLifecycleTelemetry.RecoveryRequiredEnteredActivityName)
+                        return;
+                    if (!string.Equals(
+                            activity.GetTagItem(ManagedLifecycleTelemetry.WorkspaceIdTag) as string,
+                            workspace,
+                            StringComparison.Ordinal))
                         return;
                     lock (_gate)
                         _entered.Add(activity);
