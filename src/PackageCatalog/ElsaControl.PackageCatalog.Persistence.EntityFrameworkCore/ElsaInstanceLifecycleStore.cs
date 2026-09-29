@@ -204,7 +204,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 }
 
                 var priorObservedLifecycle = instance.ObservedLifecycle;
-                if (IsNoOpReconciliation(instance, commit.Instance, commit.Operation.State))
+                if (IsNoOpReconciliation(instance, operation, commit.Instance, commit.Operation.State))
                 {
                     ApplyNoOpReconciliationMetadata(operation, run, commit, instance.Version);
                     await dbContext.SaveChangesAsync(cancellationToken);
@@ -3652,14 +3652,23 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
     /// A RecoveryRequired tick that reprints the same customer-visible aggregate
     /// must not mark the instance modified. CatalogDbContext increments Version
     /// on every instance save, which made If-Match unusable while reconcile
-    /// polled.
+    /// polled. The first observation for an operation is never a no-op: persist
+    /// diagnostic, retry evidence, and the initial lifecycle.reconciled row even
+    /// when the create-time aggregate is already Unknown/Unknown.
     /// </summary>
     private static bool IsNoOpReconciliation(
         ElsaInstanceEntity current,
+        ElsaInstanceOperationEntity operation,
         ElsaInstance projected,
         ElsaInstanceOperationState commitState)
     {
         if (commitState != ElsaInstanceOperationState.RecoveryRequired)
+            return false;
+
+        // Null reconciled fields mean this operation has never committed an
+        // observation. Treat that first write as a real change.
+        if (operation.ReconciledObservedLifecycle != projected.ObservedLifecycle ||
+            operation.ReconciledHealth != projected.Health)
             return false;
 
         var projectedDeployment = projected.CurrentDeploymentReference;

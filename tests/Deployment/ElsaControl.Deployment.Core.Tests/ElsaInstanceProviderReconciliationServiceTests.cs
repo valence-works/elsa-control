@@ -203,7 +203,7 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
             accepted.Instance.Id,
             retrySafe.Projection.InstanceVersion,
             $"auto-resume.{accepted.Operation.Id:N}.1",
-            "auto-resume",
+            "pre-consumed-auto-resume-key",
             ActorAccountId: null,
             ExpectedOperationId: accepted.Operation.Id));
         store.MarkRecoveryRequired(accepted.Operation.Id);

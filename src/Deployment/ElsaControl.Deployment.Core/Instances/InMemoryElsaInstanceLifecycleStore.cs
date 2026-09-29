@@ -359,7 +359,8 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 operation.AttemptNumber != commit.ExpectedAttemptNumber || instance.Version != commit.ExpectedInstanceVersion)
                 throw new ElsaInstanceLifecycleConflictException("Provider reconciliation target changed concurrently.");
 
-            var noOp = IsNoOpReconciliation(instance, commit.Instance, commit.Operation.State);
+            var noOp = _reconciliationResults.ContainsKey(commit.OperationId) &&
+                IsNoOpReconciliation(instance, commit.Instance, commit.Operation.State);
             var persistedInstance = noOp
                 ? instance
                 : WithVersion(commit.Instance, checked(commit.ExpectedInstanceVersion + 1));
@@ -424,6 +425,9 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         instanceVersion,
         commit.Operation.State);
 
+    // First observation for an operation is never a no-op (caller requires a
+    // prior reconciliation result). Later RecoveryRequired ticks that reprint
+    // the same customer-visible aggregate must not advance Version.
     private static bool IsNoOpReconciliation(
         ElsaInstance current,
         ElsaInstance projected,
