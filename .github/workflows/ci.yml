@@ -33,6 +33,7 @@ jobs:
         run: |
           python3 scripts/tests/test_azure_api_deploy_workflow.py
           python3 scripts/tests/test_azure_api_candidate.py
+          python3 scripts/tests/test_deploy_azure_elsa_control.py
 
       - name: Validate production Azure image and template contracts
         run: |
