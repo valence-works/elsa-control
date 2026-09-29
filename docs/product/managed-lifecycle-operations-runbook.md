@@ -4,8 +4,12 @@
 operator response. This is the operational baseline for [#222](https://github.com/valence-works/elsa-control/issues/222).
 
 **Important:** the controlled fixtures and tests behind this runbook are not
-production availability evidence. They do not establish a 99.9% SLO, an alert
-delivery guarantee, or a provider-specific production support commitment.
+production availability evidence. They do not establish a 99.9% SLO or a
+provider-specific production support commitment. RecoveryRequired now has a
+Control-owned structured event and one Azure Monitor email rule; live mailbox
+proof is still open under [#657](https://github.com/valence-works/elsa-control/issues/657)
+(#508 GO row 26). Keep the business-day RecoveryRequired check until that proof
+passes. Customer copy must not say "has been alerted" until then.
 
 ## Operator contract
 
@@ -441,8 +445,37 @@ Validate this runbook against controlled persistence/API fixtures for:
 - rollback selection and restore-to-new escalation without source mutation.
 
 These checks prove deterministic contracts and safe response paths. They are not
-production SLO measurements and do not establish Azure Monitor, PagerDuty, or
-another vendor's alerting/delivery behavior.
+production SLO measurements and do not replace the live mailbox proof for
+RecoveryRequired alert delivery.
+
+## RecoveryRequired operator alert (#657)
+
+Control writes exactly one structured activity,
+`managed_lifecycle.recovery_required.entered`, when an operation actually
+enters `RecoveryRequired`. The write happens inside the same compare-and-set
+as the state change (the Azure provider transition row, or a lifecycle
+entry that is not the post-submit hand-off). Reads, health refreshes,
+reconciler re-ticks, heartbeats, checkpoints, and the
+`azure.recovery.auto-resume-exhausted` reason write do not emit it.
+Recover followed by a later entry emits one new event.
+
+The activity carries only the fixed reason code
+`managed.lifecycle.recovery-required`, opaque workspace/instance/operation
+IDs, and the health-alert dedupe identity. It does not carry names,
+messages, endpoints, or secrets. Control does not send email itself and
+does not page.
+
+The [managed telemetry sink](../../infra/managed-telemetry/README.md)
+defines one scheduled query rule on that event and one action group that
+emails the environment recipient. Staging must use
+`STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT`. Production must use
+`PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT`. Never put an address in
+committed config, and never point staging at the production ops mailbox.
+
+Until #508 GO row 26 (AC5) is proven on staging, keep the business-day
+manual RecoveryRequired check: inspect the health projection and the
+mailbox. A missing email is not proof that no engine is parked. Do not
+change customer-facing copy to say "has been alerted".
 
 ## Enabling the production workers (#264, #315)
 

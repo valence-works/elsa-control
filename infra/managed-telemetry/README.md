@@ -34,13 +34,20 @@ Microsoft documents [Entra-authenticated ingestion and the required scoped role]
 ## Validation and rollout
 
 1. Run `python3 scripts/tests/test_managed_telemetry_infrastructure.py`. It compiles
-   the template and inspects the actual generated resource/role boundary.
+   the template and inspects the actual generated resource/role boundary, including
+   the RecoveryRequired scheduled query rule and email action group.
 2. Resolve and verify the intended Control subscription, resource group, existing
    API identity, supported sink region, and resource names. Pass those explicit
-   values to a scoped `az deployment group what-if`; do not rely on the CLI's
-   default subscription. Review every proposed change before deployment.
+   values and the environment mailbox to a scoped `az deployment group what-if`:
+   staging uses `STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT`, production uses
+   `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT`. Do not reuse the production
+   mailbox on staging. Do not rely on the CLI's default subscription. Review
+   every proposed change before deployment.
 3. Deploy only this reviewed template in Incremental mode. Verify the exact identity
-   role, local-auth disablement, workspace linkage and quota/retention settings.
+   role, local-auth disablement, workspace linkage, quota/retention settings, the
+   `qr-recovery-required-entered` rule, and the `ag-recovery-required` action group
+   bound to the pipeline-supplied mailbox. The template has no default email and
+   no paging receivers.
 4. Enable the reviewed source exporter only through the existing immutable API
    image promotion and migration-compatibility gates. The live API's classic Docker
    mode must not be converted to site containers to enable observability.

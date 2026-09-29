@@ -5,6 +5,7 @@ using System.Text.Json;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Instances;
+using ElsaControl.Deployment.Core.Telemetry;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Manifests;
 using ElsaControl.PackageCatalog.Core.Accounts;
@@ -20,6 +21,8 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options) : DbContext(options)
 {
     private readonly HashSet<(Guid SubscriptionId, string Property)> _lifecycleDeadlineOverrides = [];
+    private readonly List<RecoveryRequiredAlertCandidate> _pendingRecoveryRequiredAlerts = [];
+    private readonly List<RecoveryRequiredAlertCandidate> _transitionRecoveryRequiredAlerts = [];
 
     public DbSet<PackageSource> PackageSources => Set<PackageSource>();
     public DbSet<Package> Packages => Set<Package>();
@@ -238,7 +241,14 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         try
         {
             PrepareForSave();
-            return base.SaveChanges(acceptAllChangesOnSuccess);
+            var result = base.SaveChanges(acceptAllChangesOnSuccess);
+            FlushRecoveryRequiredAlerts();
+            return result;
+        }
+        catch
+        {
+            ClearRecoveryRequiredAlerts();
+            throw;
         }
         finally
         {
@@ -256,7 +266,14 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         try
         {
             PrepareForSave();
-            return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+            var result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+            FlushRecoveryRequiredAlerts();
+            return result;
+        }
+        catch
+        {
+            ClearRecoveryRequiredAlerts();
+            throw;
         }
         finally
         {
@@ -281,6 +298,78 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
 
     internal void ClearLifecycleDeadlineOverrides() => _lifecycleDeadlineOverrides.Clear();
 
+    private void QueueRecoveryRequiredAlertIfEntered(
+        ElsaInstanceOperationState originalState,
+        Models.ElsaInstanceOperationEntity operation)
+    {
+        if (originalState == ElsaInstanceOperationState.RecoveryRequired ||
+            operation.State != ElsaInstanceOperationState.RecoveryRequired)
+            return;
+        // The post-submit hand-off parks Queued as RecoveryRequired so reconciliation
+        // owns the reservation. That is not an operator-alert entry; ARM Failed and
+        // other durable parks emit from the Azure transition compare-and-set instead.
+        if (IsProviderSubmissionHandoff(operation.Id))
+            return;
+        if (operation.WorkspaceId == Guid.Empty ||
+            operation.InstanceId is not { } instanceId ||
+            instanceId == Guid.Empty)
+            return;
+
+        _pendingRecoveryRequiredAlerts.Add(new RecoveryRequiredAlertCandidate(
+            operation.WorkspaceId,
+            instanceId,
+            operation.Id,
+            operation.DeploymentRunId));
+    }
+
+    private bool IsProviderSubmissionHandoff(Guid operationId) =>
+        ChangeTracker.Entries<Models.ElsaInstanceAuditEventEntity>().Any(entry =>
+            entry.State == EntityState.Added &&
+            entry.Entity.OperationId == operationId &&
+            entry.Entity.EventType == "lifecycle.provider-submitted");
+
+    /// <summary>
+    /// Queues the operator-alert event from the Azure provider transition
+    /// compare-and-set. The write is flushed only after this save succeeds, so
+    /// a failed persist never emails. PrepareForSave does not clear this list.
+    /// </summary>
+    internal void QueueProviderRecoveryRequiredAlert(
+        Guid workspaceId,
+        Guid instanceId,
+        Guid operationId)
+    {
+        if (workspaceId == Guid.Empty || instanceId == Guid.Empty || operationId == Guid.Empty)
+            return;
+        _transitionRecoveryRequiredAlerts.Add(new RecoveryRequiredAlertCandidate(
+            workspaceId,
+            instanceId,
+            operationId,
+            RunId: null));
+    }
+
+    private void FlushRecoveryRequiredAlerts()
+    {
+        foreach (var candidate in _pendingRecoveryRequiredAlerts.Concat(_transitionRecoveryRequiredAlerts))
+            ManagedLifecycleRecoveryRequiredAlert.RecordEntered(
+                candidate.WorkspaceId,
+                candidate.InstanceId,
+                candidate.OperationId,
+                candidate.RunId);
+        ClearRecoveryRequiredAlerts();
+    }
+
+    private void ClearRecoveryRequiredAlerts()
+    {
+        _pendingRecoveryRequiredAlerts.Clear();
+        _transitionRecoveryRequiredAlerts.Clear();
+    }
+
+    private readonly record struct RecoveryRequiredAlertCandidate(
+        Guid WorkspaceId,
+        Guid InstanceId,
+        Guid OperationId,
+        Guid? RunId);
+
     /// <summary>
     /// Runs the persistence guards over the changes detected once, at the start of the pass. With automatic detection on,
     /// every <c>ChangeTracker.Entries()</c> call rescans all tracked entities, so a long-lived context (a sync run saves
@@ -291,6 +380,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     /// </summary>
     private void PrepareForSave()
     {
+        _pendingRecoveryRequiredAlerts.Clear();
         var autoDetectChanges = ChangeTracker.AutoDetectChangesEnabled;
         if (autoDetectChanges)
             ChangeTracker.DetectChanges();
@@ -1052,6 +1142,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
 
                 var originalState = (ElsaInstanceOperationState)entry.Property(nameof(Models.ElsaInstanceOperationEntity.State)).OriginalValue!;
                 EnsureDefined(originalState, nameof(Models.ElsaInstanceOperationEntity.State));
+                QueueRecoveryRequiredAlertIfEntered(originalState, operation);
                 var isRecoveryResume = originalState == ElsaInstanceOperationState.RecoveryRequired &&
                     operation.State == ElsaInstanceOperationState.Queued &&
                     operation.AttemptNumber == (int)entry.Property(nameof(Models.ElsaInstanceOperationEntity.AttemptNumber)).OriginalValue! + 1;

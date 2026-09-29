@@ -23,6 +23,13 @@ param dailyQuotaGb int = 1
 
 param tags object = {}
 
+@description('Operator mailbox for RecoveryRequired entry alerts. Pass STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT on staging and PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT on production. Never commit an address or reuse the production mailbox for staging.')
+@minLength(3)
+@maxLength(320)
+param recoveryRequiredAlertEmail string
+
+var recoveryRequiredEventName = 'managed_lifecycle.recovery_required.entered'
+
 resource apiIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
   name: apiIdentityName
   scope: resourceGroup(apiIdentityResourceGroupName)
@@ -76,6 +83,63 @@ resource publisher 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', MonitoringMetricsPublisherRoleId)
     principalId: apiIdentity.properties.principalId
     principalType: 'ServicePrincipal'
+  }
+}
+
+resource recoveryRequiredActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
+  name: 'ag-recovery-required'
+  location: 'global'
+  tags: tags
+  properties: {
+    groupShortName: 'recovreq'
+    enabled: true
+    emailReceivers: [
+      {
+        name: 'recovery-required-operator'
+        emailAddress: recoveryRequiredAlertEmail
+        useCommonAlertSchema: true
+      }
+    ]
+  }
+}
+
+resource recoveryRequiredAlertRule 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
+  name: 'qr-recovery-required-entered'
+  location: location
+  tags: tags
+  properties: {
+    displayName: 'RecoveryRequired entered'
+    description: 'Fires when Control writes ${recoveryRequiredEventName}. One email per actual RecoveryRequired entry. Staging and production use separate recipients.'
+    severity: 1
+    enabled: true
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT5M'
+    autoMitigate: true
+    scopes: [
+      workspace.id
+    ]
+    targetResourceTypes: [
+      'Microsoft.OperationalInsights/workspaces'
+    ]
+    criteria: {
+      allOf: [
+        {
+          query: 'AppDependencies\n| union isfuzzy=true customEvents, AppTraces, AppRequests\n| where Name == \'managed_lifecycle.recovery_required.entered\' or name == \'managed_lifecycle.recovery_required.entered\' or OperationName == \'managed_lifecycle.recovery_required.entered\'\n| where TimeGenerated > ago(5m)'
+          timeAggregation: 'Count'
+          operator: 'GreaterThanOrEqual'
+          threshold: 1
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    actions: {
+      actionGroups: [
+        recoveryRequiredActionGroup.id
+      ]
+    }
   }
 }
 

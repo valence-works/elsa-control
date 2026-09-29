@@ -28,13 +28,16 @@ class ManagedTelemetryInfrastructureTests(unittest.TestCase):
             raise AssertionError(result.stderr)
         cls.template = json.loads(result.stdout)
         cls.resources = {resource["type"]: resource for resource in cls.template["resources"]}
+        cls.source = MAIN.read_text()
 
-    def test_only_sink_and_exact_publisher_role_are_created(self):
-        self.assertEqual(3, len(self.template["resources"]))
+    def test_only_sink_publisher_role_alert_rule_and_action_group_are_created(self):
+        self.assertEqual(5, len(self.template["resources"]))
         self.assertEqual({
             "Microsoft.OperationalInsights/workspaces",
             "Microsoft.Insights/components",
             "Microsoft.Authorization/roleAssignments",
+            "Microsoft.Insights/actionGroups",
+            "Microsoft.Insights/scheduledQueryRules",
         }, set(self.resources))
 
     def test_local_authentication_is_disabled_on_both_ingestion_surfaces(self):
@@ -77,6 +80,41 @@ class ManagedTelemetryInfrastructureTests(unittest.TestCase):
         self.assertNotIn("connectionstring", outputs)
         self.assertNotIn("instrumentationkey", outputs)
         self.assertNotIn("unsecured", serialized.lower())
+
+    def test_recovery_required_alert_uses_parameterized_email_and_no_paging(self):
+        parameter = self.template["parameters"]["recoveryRequiredAlertEmail"]
+        self.assertNotIn("defaultValue", parameter)
+        self.assertEqual("string", parameter["type"])
+        serialized = json.dumps(self.template)
+        self.assertNotRegex(serialized, r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+        self.assertNotIn("smsReceivers", serialized)
+        self.assertNotIn("voiceReceivers", serialized)
+        self.assertNotIn("webhookReceivers", serialized)
+        self.assertNotIn("armRoleReceivers", serialized)
+        self.assertNotIn("itsmReceivers", serialized)
+        self.assertNotIn("azureFunctionReceivers", serialized)
+        self.assertNotIn("logicAppReceivers", serialized)
+        self.assertNotIn("automationRunbookReceivers", serialized)
+        self.assertNotIn("azureAppPushReceivers", serialized)
+        action_group = self.resources["Microsoft.Insights/actionGroups"]["properties"]
+        self.assertTrue(action_group["enabled"])
+        self.assertEqual(1, len(action_group["emailReceivers"]))
+        self.assertEqual("[parameters('recoveryRequiredAlertEmail')]",
+                         action_group["emailReceivers"][0]["emailAddress"])
+        rule = self.resources["Microsoft.Insights/scheduledQueryRules"]["properties"]
+        self.assertTrue(rule["enabled"])
+        self.assertEqual(1, rule["severity"])
+        self.assertTrue(rule["autoMitigate"])
+        query = rule["criteria"]["allOf"][0]["query"]
+        self.assertIn("managed_lifecycle.recovery_required.entered", query)
+        self.assertGreaterEqual(rule["criteria"]["allOf"][0]["threshold"], 1)
+        self.assertIn("ag-recovery-required", json.dumps(rule["actions"]))
+
+    def test_staging_and_production_recipients_are_separate_pipeline_variables(self):
+        self.assertIn("STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT", self.source)
+        self.assertIn("PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT", self.source)
+        self.assertNotIn("sipke", self.source.lower())
+        self.assertNotIn("@valence", self.source.lower())
 
 
 if __name__ == "__main__":

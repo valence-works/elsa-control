@@ -19,6 +19,7 @@ public static class ManagedLifecycleTelemetry
 
     public const string WorkerActivityName = "managed_lifecycle.worker";
     public const string ReconciliationActivityName = "managed_lifecycle.reconciliation";
+    public const string RecoveryRequiredEnteredActivityName = "managed_lifecycle.recovery_required.entered";
 
     public const string CompletionCounterName = "managed_lifecycle.operations.completed";
     public const string ErrorCounterName = "managed_lifecycle.operations.errors";
@@ -38,6 +39,7 @@ public static class ManagedLifecycleTelemetry
     public const string WorkspaceIdTag = "workspace.id";
     public const string InstanceIdTag = "instance.id";
     public const string OperationIdTag = "operation.id";
+    public const string DedupeIdentityTag = "dedupe_identity";
 
     private const string Unknown = "unknown";
     private const string None = "none";
@@ -71,7 +73,12 @@ public static class ManagedLifecycleTelemetry
         ManagedElsaReasonCodeCatalog.ProviderReconciliationInProgress,
         ManagedElsaReasonCodeCatalog.ProviderReconciliationRetrySafe,
         ManagedElsaReasonCodeCatalog.ProviderReconciliationUnavailable,
-        ManagedElsaReasonCodeCatalog.ProviderReconciliationUnknown
+        ManagedElsaReasonCodeCatalog.ProviderReconciliationUnknown,
+        "provider.reconciliation.required",
+        "managed.lifecycle.recovery-required",
+        ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+        ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled,
+        ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted
     ];
 
     private static readonly ActivitySource ActivitySource = new(ActivitySourceName);
@@ -146,6 +153,30 @@ public static class ManagedLifecycleTelemetry
             null,
             null)));
 
+    /// <summary>
+    /// Emits the operator-alert activity for one RecoveryRequired entry. Tags are
+    /// the fixed reason code, opaque IDs, and the health-alert dedupe identity.
+    /// </summary>
+    public static void RecordRecoveryRequiredEntered(
+        Guid workspaceId,
+        Guid instanceId,
+        Guid operationId,
+        string reasonCode,
+        string dedupeIdentity)
+    {
+        using var activity = ActivitySource.StartActivity(RecoveryRequiredEnteredActivityName, ActivityKind.Internal);
+        if (activity is null)
+            return;
+
+        SetOpaqueId(activity, WorkspaceIdTag, workspaceId);
+        SetOpaqueId(activity, InstanceIdTag, instanceId);
+        SetOpaqueId(activity, OperationIdTag, operationId);
+        activity.SetTag(DiagnosticCodeTag, DiagnosticValue(reasonCode));
+        if (IsDedupeIdentity(dedupeIdentity))
+            activity.SetTag(DedupeIdentityTag, dedupeIdentity);
+        activity.SetStatus(ActivityStatusCode.Ok);
+    }
+
     internal static TagList Tags(
         ElsaInstanceOperationAction action,
         string outcome,
@@ -207,6 +238,11 @@ public static class ManagedLifecycleTelemetry
         if (value is { } id && id != Guid.Empty)
             activity.SetTag(key, id.ToString("D"));
     }
+
+    private static bool IsDedupeIdentity(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        value.Length == 64 &&
+        value.All(character => char.IsAsciiHexDigit(character));
 
     private static string EnumValue<T>(T value) where T : struct, Enum =>
         !Enum.IsDefined(typeof(T), value)

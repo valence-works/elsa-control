@@ -130,6 +130,19 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS: ${{ vars.STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS }}", self.source)
         self.assertIn("STAGING_SMOKE_OWNER_ORGANIZATION_ID: ${{ vars.STAGING_SMOKE_OWNER_ORGANIZATION_ID }}", self.source)
         self.assertIn(
+            "STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT: ${{ vars.STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT }}",
+            self.source,
+        )
+        self.assertIn(
+            "PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT: ${{ vars.PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT }}",
+            self.source,
+        )
+        self.assertIn("Staging never uses the production", self.source)
+        self.assertNotEqual(
+            "STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT",
+            "PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT",
+        )
+        self.assertIn(
             "EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ steps.deployment-config.outputs.pairing_allowlist }}",
             self.source,
         )

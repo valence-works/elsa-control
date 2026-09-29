@@ -1,6 +1,7 @@
 using System.Text.Json;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Cockpit;
+using ElsaControl.Deployment.Core.Telemetry;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.RuntimeBuilder.Abstractions.Plans;
 
@@ -134,7 +135,11 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             if (operation.State == ElsaInstanceOperationState.Queued)
                 operation = operation.TransitionTo(ElsaInstanceOperationState.Running);
             if (operation.State == ElsaInstanceOperationState.Running)
+            {
+                var previous = operation.State;
                 operation = operation.TransitionTo(ElsaInstanceOperationState.RecoveryRequired);
+                RecordRecoveryRequiredEntry(previous, operation, instance.WorkspaceId);
+            }
             if (operation.State != ElsaInstanceOperationState.RecoveryRequired)
                 throw new ElsaInstanceLifecycleConflictException("Lifecycle operation cannot require provider recovery.");
             _operations[operationId] = operation;
@@ -420,6 +425,17 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         commit.Instance.Health,
         instanceVersion,
         commit.Operation.State);
+
+    private static void RecordRecoveryRequiredEntry(
+        ElsaInstanceOperationState previous,
+        ElsaInstanceOperation next,
+        Guid workspaceId)
+    {
+        if (previous == ElsaInstanceOperationState.RecoveryRequired ||
+            next.State != ElsaInstanceOperationState.RecoveryRequired)
+            return;
+        ManagedLifecycleRecoveryRequiredAlert.RecordEntered(workspaceId, next.InstanceId, next.Id);
+    }
 
     private static ElsaInstance WithVersion(ElsaInstance instance, int version) => ElsaInstance.Hydrate(
         instance.Id,
@@ -1058,7 +1074,9 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             var operation = _operations[failure.OperationId];
             if (operation.State == ElsaInstanceOperationState.Accepted)
                 operation = operation.TransitionTo(ElsaInstanceOperationState.Queued);
+            var previous = operation.State;
             operation = operation.TransitionTo(ElsaInstanceOperationState.RecoveryRequired);
+            RecordRecoveryRequiredEntry(previous, operation, failure.WorkspaceId);
             _operations[operation.Id] = operation;
             _claims.Remove(operation.Id);
             var instance = _instances[failure.InstanceId];
