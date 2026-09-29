@@ -137,11 +137,14 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
             "PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT: ${{ vars.PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT }}",
             self.source,
         )
-        self.assertIn("Staging never uses the production", self.source)
-        self.assertNotEqual(
-            "STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT",
-            "PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT",
-        )
+        self.assertIn("scripts/deploy-managed-telemetry.sh", self.source)
+        self.assertIn("Deploy managed telemetry sink", self.source)
+        self.assertIn("ManagedLifecycleTelemetry__AzureMonitor__Environment=staging", self.source)
+        self.assertIn("ManagedLifecycleTelemetry__AzureMonitor__Environment=production", self.source)
+        self.assertIn("MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED", self.source)
+        self.assertIn("required+=(STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT)", self.source)
+        self.assertIn("required+=(PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT)", self.source)
+        self.assertIn("Staging RecoveryRequired alerts must not use the production mailbox.", self.source)
         self.assertIn(
             "EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ steps.deployment-config.outputs.pairing_allowlist }}",
             self.source,
@@ -502,9 +505,116 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
             self.assertNotEqual(0, missing.returncode)
             self.assertIn("AZURE_PROVISIONER_IDENTITY_ID", missing.stdout + missing.stderr)
             environment["AZURE_PROVISIONER_IDENTITY_ID"] = "staging-identity"
+            still_missing = subprocess.run(["bash", "-c", check_script], env=environment,
+                                           capture_output=True, text=True, check=False)
+            self.assertNotEqual(0, still_missing.returncode)
+            self.assertIn("STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT", still_missing.stdout + still_missing.stderr)
+            environment.update(
+                {
+                    "STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT": "staging-ops@example.test",
+                    "MANAGED_TELEMETRY_WORKSPACE_NAME": "law-staging",
+                    "MANAGED_TELEMETRY_APPLICATION_INSIGHTS_NAME": "appi-staging",
+                    "MANAGED_TELEMETRY_API_IDENTITY_NAME": "id-api-staging",
+                    "MANAGED_TELEMETRY_API_IDENTITY_RESOURCE_GROUP": "rg-test",
+                }
+            )
             configured = subprocess.run(["bash", "-c", check_script], env=environment,
                                         capture_output=True, text=True, check=False)
             self.assertEqual(0, configured.returncode, configured.stdout + configured.stderr)
+            environment["PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT"] = "staging-ops@example.test"
+            reused = subprocess.run(["bash", "-c", check_script], env=environment,
+                                    capture_output=True, text=True, check=False)
+            self.assertNotEqual(0, reused.returncode)
+            self.assertIn("must not use the production mailbox", reused.stdout + reused.stderr)
+
+    def test_managed_telemetry_deploy_passes_the_environment_recipient(self) -> None:
+        script = ROOT / "scripts" / "deploy-managed-telemetry.sh"
+        self.assertTrue(script.is_file())
+        source = script.read_text()
+        self.assertIn('recipient_var=STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT', source)
+        self.assertIn('recipient_var=PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT', source)
+        self.assertIn('environment="$environment"', source)
+        self.assertIn('recoveryRequiredAlertEmail="$recipient"', source)
+        self.assertIn("infra/managed-telemetry/main.bicep", source)
+        self.assertNotIn("echo \"$recipient\"", source)
+        self.assertNotIn("echo \"$STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT\"", source)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            call_log = temp_path / "az-calls"
+            fake_az = temp_path / "az"
+            fake_az.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "${AZ_CALL_LOG:?}"
+case "$*" in
+  'account set --subscription '*) exit 0 ;;
+  'deployment group create '*|'deployment group what-if '*) exit 0 ;;
+  *) exit 41 ;;
+esac
+"""
+            )
+            fake_az.chmod(0o755)
+
+            def run_script(**extra: str) -> subprocess.CompletedProcess[str]:
+                call_log.write_text("")
+                environment = os.environ.copy()
+                environment.update(
+                    {
+                        "PATH": f"{temp_path}{os.pathsep}{environment['PATH']}",
+                        "AZ_CALL_LOG": str(call_log),
+                        "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
+                        "AZURE_RESOURCE_GROUP": "rg-test",
+                        "AZURE_LOCATION": "westeurope",
+                        "MANAGED_TELEMETRY_WORKSPACE_NAME": "law-test",
+                        "MANAGED_TELEMETRY_APPLICATION_INSIGHTS_NAME": "appi-test",
+                        "MANAGED_TELEMETRY_API_IDENTITY_NAME": "id-api",
+                        "MANAGED_TELEMETRY_API_IDENTITY_RESOURCE_GROUP": "rg-test",
+                    }
+                )
+                environment.update(extra)
+                return subprocess.run(
+                    [str(script)],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+
+            missing = run_script(TARGET_ENVIRONMENT="test")
+            self.assertNotEqual(0, missing.returncode)
+            self.assertIn("STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT", missing.stdout + missing.stderr)
+            self.assertEqual("", call_log.read_text())
+
+            staging = run_script(
+                TARGET_ENVIRONMENT="test",
+                STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT="staging-ops@example.test",
+            )
+            self.assertEqual(0, staging.returncode, staging.stdout + staging.stderr)
+            staging_calls = call_log.read_text()
+            self.assertIn("deployment group create", staging_calls)
+            self.assertIn("environment=staging", staging_calls)
+            self.assertIn("recoveryRequiredAlertEmail=staging-ops@example.test", staging_calls)
+            self.assertNotIn("staging-ops@example.test", staging.stdout + staging.stderr)
+
+            reused = run_script(
+                TARGET_ENVIRONMENT="test",
+                STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT="ops@example.test",
+                PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT="ops@example.test",
+            )
+            self.assertNotEqual(0, reused.returncode)
+            self.assertIn("must not use PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT", reused.stdout + reused.stderr)
+
+            production = run_script(
+                TARGET_ENVIRONMENT="production",
+                PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT="prod-ops@example.test",
+            )
+            self.assertEqual(0, production.returncode, production.stdout + production.stderr)
+            production_calls = call_log.read_text()
+            self.assertIn("environment=production", production_calls)
+            self.assertIn("recoveryRequiredAlertEmail=prod-ops@example.test", production_calls)
+            self.assertNotIn("prod-ops@example.test", production.stdout + production.stderr)
 
     def test_promotion_reads_back_exact_runtime_before_settings_or_restart(self) -> None:
         deploy_start = self.source.index(

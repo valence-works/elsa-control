@@ -27,6 +27,7 @@ public static class ManagedLifecycleAzureMonitorTelemetryExtensions
         ArgumentNullException.ThrowIfNull(builder);
 
         var options = ManagedLifecycleAzureMonitorTelemetryOptions.Read(builder.Configuration);
+        ManagedLifecycleTelemetry.ConfigureAlertEnvironment(options.Environment);
         if (!options.Enabled)
             return builder;
 
@@ -49,6 +50,7 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryOptions
     public const string EnabledConfigurationKey = ConfigurationSection + ":Enabled";
     public const string ConnectionStringConfigurationKey = ConfigurationSection + ":ConnectionString";
     public const string ManagedIdentityClientIdConfigurationKey = ConfigurationSection + ":ManagedIdentityClientId";
+    public const string EnvironmentConfigurationKey = ConfigurationSection + ":Environment";
 
     // These bounds are code-owned deliberately. An operator can select the sink and its
     // metadata, but cannot turn it into an unbounded transport or queue through configuration.
@@ -61,6 +63,7 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryOptions
     public bool Enabled { get; init; }
     public string? ConnectionString { get; init; }
     public string? ManagedIdentityClientId { get; init; }
+    public string? Environment { get; init; }
 
     internal static ManagedLifecycleAzureMonitorTelemetryOptions Read(IConfiguration configuration)
     {
@@ -71,7 +74,8 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryOptions
         {
             return new ManagedLifecycleAzureMonitorTelemetryOptions
             {
-                Enabled = false
+                Enabled = false,
+                Environment = ReadEnvironment(section)
             };
         }
 
@@ -82,12 +86,22 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryOptions
         {
             Enabled = enabled,
             ConnectionString = section[nameof(ConnectionString)],
-            ManagedIdentityClientId = section[nameof(ManagedIdentityClientId)]
+            ManagedIdentityClientId = section[nameof(ManagedIdentityClientId)],
+            Environment = ReadEnvironment(section)
         };
+    }
+
+    private static string? ReadEnvironment(IConfiguration section)
+    {
+        var environment = section[nameof(Environment)]?.Trim();
+        return string.IsNullOrWhiteSpace(environment) ? null : environment;
     }
 
     public void Validate()
     {
+        if (Environment is { Length: > 0 } &&
+            Environment is not (ManagedLifecycleTelemetry.StagingEnvironment or ManagedLifecycleTelemetry.ProductionEnvironment))
+            throw Invalid("environment_invalid");
         if (!Enabled)
             return;
 

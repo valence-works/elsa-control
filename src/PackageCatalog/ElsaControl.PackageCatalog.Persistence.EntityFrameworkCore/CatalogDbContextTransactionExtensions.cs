@@ -164,6 +164,7 @@ internal static class CatalogDbContextTransactionExtensions
                 static async (_, state, attemptCancellationToken) =>
                 {
                     state.DbContext.ChangeTracker.Clear();
+                    state.DbContext.ResetRecoveryRequiredAlerts();
                     state.HasResult = false;
                     await using var transaction = await state.DbContext.Database.BeginTransactionAsync(
                         state.IsolationLevel, attemptCancellationToken);
@@ -171,6 +172,7 @@ internal static class CatalogDbContextTransactionExtensions
                     state.Result = result;
                     state.HasResult = true;
                     await transaction.CommitAsync(attemptCancellationToken);
+                    state.DbContext.FlushRecoveryRequiredAlertsAfterCommit();
                     return result;
                 },
                 verifySucceeded is null
@@ -191,6 +193,7 @@ internal static class CatalogDbContextTransactionExtensions
         catch
         {
             dbContext.ChangeTracker.Clear();
+            dbContext.ResetRecoveryRequiredAlerts();
             throw;
         }
     }

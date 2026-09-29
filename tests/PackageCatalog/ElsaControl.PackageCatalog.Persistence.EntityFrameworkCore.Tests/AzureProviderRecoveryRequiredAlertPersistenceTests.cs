@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Diagnostics;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
@@ -7,6 +8,7 @@ using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 
@@ -151,6 +153,123 @@ public sealed class AzureProviderRecoveryRequiredAlertPersistenceTests : IDispos
         Assert.Empty(capture.Entered);
     }
 
+    [Fact]
+    public async Task Failed_commit_of_stale_recovery_emits_nothing()
+    {
+        var now = DateTimeOffset.Parse("2026-09-29T16:00:00Z");
+        using (var seed = CreateContext())
+        {
+            await CreateClaimedAsync(new AzureProviderOperationStore(seed), now);
+        }
+
+        using var capture = new AlertCapture(_workspaceId);
+        using var db = CreateContext(new FailCommitInterceptor());
+        var store = new AzureProviderOperationStore(db);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.RecoverStaleAsync(now.AddMinutes(2)));
+
+        Assert.Empty(capture.Entered);
+        using var verify = CreateContext();
+        var persisted = await verify.AzureProviderOperations.AsNoTracking().SingleAsync();
+        Assert.Equal(AzureProviderOperationStatus.Running, persisted.Status);
+    }
+
+    [Fact]
+    public async Task Retried_commit_of_stale_recovery_emits_exactly_one_event()
+    {
+        var now = DateTimeOffset.Parse("2026-09-29T17:00:00Z");
+        using (var seed = CreateContext())
+        {
+            await CreateClaimedAsync(new AzureProviderOperationStore(seed), now);
+        }
+
+        using var capture = new AlertCapture(_workspaceId);
+        var interceptor = new FailFirstCommitInterceptor();
+        using var db = CreateContext(
+            exception => exception is TransientCommitException,
+            interceptor);
+        var store = new AzureProviderOperationStore(db);
+
+        Assert.Equal(1, await store.RecoverStaleAsync(now.AddMinutes(2)));
+
+        Assert.Equal(2, interceptor.Attempts);
+        Assert.Single(capture.Entered);
+        AssertAlert(capture.Entered[0], _lifecycleOperationId);
+        using var verify = CreateContext();
+        Assert.Equal(
+            AzureProviderOperationStatus.RecoveryRequired,
+            (await verify.AzureProviderOperations.AsNoTracking().SingleAsync()).Status);
+    }
+
+    [Fact]
+    public async Task Two_dbcontexts_racing_stale_recovery_emit_exactly_one_event()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"elsa-rr-alert-{Guid.NewGuid():N}.db");
+        var now = DateTimeOffset.Parse("2026-09-29T18:00:00Z");
+        try
+        {
+            var options = new DbContextOptionsBuilder<CatalogDbContext>()
+                .UseRetryingSqlite($"Data Source={path}").Options;
+            await using (var seed = new CatalogDbContext(options))
+            {
+                await seed.Database.EnsureCreatedAsync();
+                seed.Organizations.Add(new Organization { Id = _organizationId, Name = "Race organization" });
+                seed.Workspaces.Add(new Workspace
+                {
+                    Id = _workspaceId,
+                    OrganizationId = _organizationId,
+                    Name = "Race workspace"
+                });
+                await seed.SaveChangesAsync();
+                await CreateClaimedAsync(new AzureProviderOperationStore(seed), now);
+            }
+
+            using var capture = new AlertCapture(_workspaceId);
+            await using var first = new CatalogDbContext(options);
+            await using var second = new CatalogDbContext(options);
+            var recovered = await Task.WhenAll(
+                new AzureProviderOperationStore(first).RecoverStaleAsync(now.AddMinutes(2)),
+                new AzureProviderOperationStore(second).RecoverStaleAsync(now.AddMinutes(2)));
+
+            Assert.Equal(1, recovered.Sum());
+            Assert.Single(capture.Entered);
+            AssertAlert(capture.Entered[0], _lifecycleOperationId);
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task Authorize_missing_lifecycle_action_writes_exactly_one_event()
+    {
+        using var capture = new AlertCapture(_workspaceId);
+        var now = DateTimeOffset.Parse("2026-09-29T19:00:00Z");
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var operation = await CreateClaimedAsync(store, now);
+        var entity = await db.AzureProviderOperations.SingleAsync(x => x.Id == operation.Id);
+        entity.LifecycleAction = null;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var authorization = await store.AuthorizeAsync(
+            _workspaceId,
+            operation.Id,
+            "lease-1",
+            new NeverCalledCommercialGate(),
+            now,
+            operation.Version);
+
+        Assert.NotNull(authorization);
+        Assert.Equal(AzureProviderOperationStatus.RecoveryRequired, authorization!.Operation.Status);
+        Assert.Equal("provider.identity-binding-missing", authorization.Decision.Code);
+        Assert.Single(capture.Entered);
+        AssertAlert(capture.Entered[0], _lifecycleOperationId);
+    }
+
     public void Dispose() => _connection.Dispose();
 
     private async Task<AzureProviderOperation> CreateClaimedAsync(
@@ -190,8 +309,19 @@ public sealed class AzureProviderRecoveryRequiredAlertPersistenceTests : IDispos
             _workspaceId, created.Id, "worker-1", "lease-1", TimeSpan.FromMinutes(1), now));
     }
 
-    private CatalogDbContext CreateContext() =>
-        new(new DbContextOptionsBuilder<CatalogDbContext>().UseRetryingSqlite(_connection).Options);
+    private CatalogDbContext CreateContext(params IInterceptor[] interceptors) =>
+        CreateContext(isTransient: null, interceptors);
+
+    private CatalogDbContext CreateContext(
+        Func<Exception, bool>? isTransient,
+        params IInterceptor[] interceptors)
+    {
+        var options = new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(_connection, isTransient: isTransient);
+        if (interceptors.Length > 0)
+            options.AddInterceptors(interceptors);
+        return new CatalogDbContext(options.Options);
+    }
 
     private void AssertAlert(Activity activity, Guid operationId)
     {
@@ -243,5 +373,59 @@ public sealed class AzureProviderRecoveryRequiredAlertPersistenceTests : IDispos
         }
 
         public void Dispose() => _listener.Dispose();
+    }
+
+    private sealed class NeverCalledCommercialGate : IElsaInstanceCommercialGate
+    {
+        public Task<ElsaInstanceCommercialGateDecision> EvaluateAsync(
+            Guid organizationId,
+            ElsaInstanceOperationAction action,
+            int? activeInstanceCount = null,
+            CancellationToken cancellationToken = default) =>
+            throw new Xunit.Sdk.XunitException("The commercial gate must not run when provider identity is missing.");
+    }
+
+    private sealed class TransientCommitException : Exception;
+
+    private sealed class FailCommitInterceptor : DbTransactionInterceptor
+    {
+        public override InterceptionResult TransactionCommitting(
+            DbTransaction transaction,
+            TransactionEventData eventData,
+            InterceptionResult result) =>
+            throw new InvalidOperationException("The catalog transaction commit failed.");
+
+        public override ValueTask<InterceptionResult> TransactionCommittingAsync(
+            DbTransaction transaction,
+            TransactionEventData eventData,
+            InterceptionResult result,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("The catalog transaction commit failed.");
+    }
+
+    private sealed class FailFirstCommitInterceptor : DbTransactionInterceptor
+    {
+        private int _attempts;
+        public int Attempts => Volatile.Read(ref _attempts);
+
+        public override InterceptionResult TransactionCommitting(
+            DbTransaction transaction,
+            TransactionEventData eventData,
+            InterceptionResult result) =>
+            FailFirst(result);
+
+        public override ValueTask<InterceptionResult> TransactionCommittingAsync(
+            DbTransaction transaction,
+            TransactionEventData eventData,
+            InterceptionResult result,
+            CancellationToken cancellationToken = default) =>
+            new(FailFirst(result));
+
+        private InterceptionResult FailFirst(InterceptionResult result)
+        {
+            if (Interlocked.Increment(ref _attempts) == 1)
+                throw new TransientCommitException();
+            return result;
+        }
     }
 }

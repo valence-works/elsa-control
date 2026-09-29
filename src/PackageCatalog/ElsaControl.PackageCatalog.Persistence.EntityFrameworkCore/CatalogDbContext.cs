@@ -242,7 +242,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         {
             PrepareForSave();
             var result = base.SaveChanges(acceptAllChangesOnSuccess);
-            FlushRecoveryRequiredAlerts();
+            FlushRecoveryRequiredAlertsIfCommitted();
             return result;
         }
         catch
@@ -267,7 +267,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         {
             PrepareForSave();
             var result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
-            FlushRecoveryRequiredAlerts();
+            FlushRecoveryRequiredAlertsIfCommitted();
             return result;
         }
         catch
@@ -345,6 +345,28 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             instanceId,
             operationId,
             RunId: null));
+    }
+
+    /// <summary>
+    /// Drops queued RecoveryRequired alerts at the start of a transaction
+    /// attempt. A failed attempt must leave nothing behind for the next one.
+    /// </summary>
+    internal void ResetRecoveryRequiredAlerts() => ClearRecoveryRequiredAlerts();
+
+    /// <summary>
+    /// Emits queued RecoveryRequired alerts after the catalog transaction
+    /// commits. Call only from <c>ExecuteInTransactionCoreAsync</c> after
+    /// <c>CommitAsync</c> succeeds.
+    /// </summary>
+    internal void FlushRecoveryRequiredAlertsAfterCommit() => FlushRecoveryRequiredAlerts();
+
+    private void FlushRecoveryRequiredAlertsIfCommitted()
+    {
+        // An explicit catalog transaction commits later. Emitting here would
+        // send a span for a row that can still roll back or be retried.
+        if (Database.CurrentTransaction is not null)
+            return;
+        FlushRecoveryRequiredAlerts();
     }
 
     private void FlushRecoveryRequiredAlerts()

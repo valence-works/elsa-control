@@ -104,13 +104,47 @@ class ManagedTelemetryInfrastructureTests(unittest.TestCase):
         rule = self.resources["Microsoft.Insights/scheduledQueryRules"]["properties"]
         self.assertTrue(rule["enabled"])
         self.assertEqual(1, rule["severity"])
-        self.assertTrue(rule["autoMitigate"])
-        query = rule["criteria"]["allOf"][0]["query"]
-        self.assertIn("managed_lifecycle.recovery_required.entered", query)
+        self.assertFalse(rule["autoMitigate"])
+        self.assertEqual("PT5M", rule["evaluationFrequency"])
+        self.assertEqual("PT15M", rule["windowSize"])
         self.assertGreaterEqual(rule["criteria"]["allOf"][0]["threshold"], 1)
-        self.assertIn("ag-recovery-required", json.dumps(rule["actions"]))
+        self.assertIn(
+            "variables('recoveryRequiredActionGroupName')",
+            json.dumps(rule["actions"]))
 
-    def test_staging_and_production_recipients_are_separate_pipeline_variables(self):
+    def test_recovery_required_query_is_app_dependencies_on_the_emitted_event(self):
+        query = self.template["variables"]["recoveryRequiredAlertQuery"]
+        serialized = json.dumps(self.template)
+        self.assertIn("AppDependencies", query)
+        self.assertIn("Name == ''managed_lifecycle.recovery_required.entered''", query)
+        self.assertIn("Properties.environment", query)
+        self.assertIn("Properties.dedupe_identity", query)
+        self.assertIn("ingestion_time()", query)
+        self.assertNotIn("customEvents", query)
+        self.assertNotIn("union", query)
+        self.assertNotIn("TimeGenerated", query)
+        self.assertNotIn(" or name == ", query)
+        self.assertIn("parameters('environment')", serialized)
+        environment = self.template["parameters"]["environment"]
+        self.assertNotIn("defaultValue", environment)
+        self.assertEqual(["staging", "production"], environment["allowedValues"])
+        self.assertEqual(
+            "managed_lifecycle.recovery_required.entered",
+            self.template["variables"]["recoveryRequiredEventName"])
+
+    def test_staging_and_production_alert_resources_are_environment_scoped(self):
+        serialized = json.dumps(self.template)
+        variables = self.template["variables"]
+        self.assertIn("ag-recovery-required-", variables["recoveryRequiredActionGroupName"])
+        self.assertIn("qr-recovery-required-entered-", variables["recoveryRequiredAlertRuleName"])
+        self.assertIn("parameters('environment')", variables["recoveryRequiredActionGroupName"])
+        self.assertIn("parameters('environment')", variables["recoveryRequiredAlertRuleName"])
+        self.assertEqual(
+            "[variables('recoveryRequiredActionGroupName')]",
+            self.resources["Microsoft.Insights/actionGroups"]["name"])
+        self.assertEqual(
+            "[variables('recoveryRequiredAlertRuleName')]",
+            self.resources["Microsoft.Insights/scheduledQueryRules"]["name"])
         self.assertIn("STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT", self.source)
         self.assertIn("PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT", self.source)
         self.assertNotIn("sipke", self.source.lower())

@@ -459,23 +459,72 @@ reconciler re-ticks, heartbeats, checkpoints, and the
 `azure.recovery.auto-resume-exhausted` reason write do not emit it.
 Recover followed by a later entry emits one new event.
 
-The activity carries only the fixed reason code
-`managed.lifecycle.recovery-required`, opaque workspace/instance/operation
-IDs, and the health-alert dedupe identity. It does not carry names,
-messages, endpoints, or secrets. Control does not send email itself and
-does not page.
+The activity is an `ActivityKind.Internal` span on
+`ElsaControl.ManagedLifecycle`. The Azure Monitor exporter writes it to
+the Log Analytics `AppDependencies` table with `Name` equal to
+`managed_lifecycle.recovery_required.entered`. Tags are the fixed reason
+code `managed.lifecycle.recovery-required`, opaque
+workspace/instance/operation IDs, the SHA-256 health-alert dedupe
+identity, and the environment marker (`staging` or `production`). It does
+not carry names, messages, endpoints, or secrets. Control does not send
+email itself and does not page.
+
+The event is flushed only after the catalog persist commits. A failed
+commit emits nothing. Delivery is at most once: the exporter uses
+`MaxRetries = 0` and `DisableOfflineStorage = true`, and a lost commit
+acknowledgement after `CommitAsync` does not flush. A missing email is
+therefore not proof that no engine is parked.
 
 The [managed telemetry sink](../../infra/managed-telemetry/README.md)
-defines one scheduled query rule on that event and one action group that
-emails the environment recipient. Staging must use
-`STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT`. Production must use
-`PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT`. Never put an address in
-committed config, and never point staging at the production ops mailbox.
+defines one scheduled query rule and one email-only action group per
+environment. Names include the environment
+(`ag-recovery-required-staging` / `qr-recovery-required-entered-staging`,
+and the production pair) so Incremental deploys cannot overwrite each
+other. The rule is stateless (`autoMitigate: false`): one Fired email per
+evaluation that sees a new dedupe identity, and no Resolved email. It
+queries `AppDependencies` for the event name, filters
+`Properties.environment` to the sink environment, looks back 15 minutes
+at a 5-minute frequency, and uses `ingestion_time() > ago(5m)` plus
+`summarize` on `Properties.dedupe_identity` so exporter batching (60 s)
+and ingestion delay do not drop or double a row.
+
+Who reads the mailbox: the operator named in
+`STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT` for staging, and the operator
+named in `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT` for production.
+Never put an address in committed config, and never point staging at the
+production ops mailbox. `scripts/deploy-managed-telemetry.sh` (invoked by
+`azure-api-deploy.yml` in infra mode) refuses an unset recipient and
+refuses a staging mailbox that matches the production mailbox.
 
 Until #508 GO row 26 (AC5) is proven on staging, keep the business-day
 manual RecoveryRequired check: inspect the health projection and the
-mailbox. A missing email is not proof that no engine is parked. Do not
-change customer-facing copy to say "has been alerted".
+mailbox. Do not change customer-facing copy to say "has been alerted".
+
+Required operator steps before the first live email (Sipke):
+
+1. Set `STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT` on the `test` GitHub
+   environment and `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT` on
+   `production`. They must differ.
+2. Set `MANAGED_TELEMETRY_WORKSPACE_NAME`,
+   `MANAGED_TELEMETRY_APPLICATION_INSIGHTS_NAME`,
+   `MANAGED_TELEMETRY_API_IDENTITY_NAME`, and
+   `MANAGED_TELEMETRY_API_IDENTITY_RESOURCE_GROUP` on each environment
+   that deploys the sink.
+3. Enable the exporter on the target API: set
+   `MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED=true` (applied as
+   `ManagedLifecycleTelemetry:AzureMonitor:Enabled`), plus
+   `ManagedLifecycleTelemetry:AzureMonitor:ConnectionString` and
+   `ManagedLifecycleTelemetry:AzureMonitor:ManagedIdentityClientId` from
+   the reviewed sink component. Set
+   `APPLICATIONINSIGHTS_STATSBEAT_DISABLED=true` on the process. The
+   deploy workflow sets `ManagedLifecycleTelemetry:AzureMonitor:Environment`
+   to `staging` or `production` automatically. The Enabled flag is not
+   turned on by default; an API without a connection string fails closed
+   if Enabled is true.
+4. Run infra deploy so `scripts/deploy-managed-telemetry.sh` creates the
+   environment-scoped rule and action group. Prove one `AppDependencies`
+   row for a known RecoveryRequired entry in the staging workspace before
+   treating the mailbox as live.
 
 ## Enabling the production workers (#264, #315)
 

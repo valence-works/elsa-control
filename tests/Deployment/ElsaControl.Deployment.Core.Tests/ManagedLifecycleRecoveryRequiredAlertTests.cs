@@ -93,6 +93,51 @@ public sealed class ManagedLifecycleRecoveryRequiredAlertTests
     }
 
     [Fact]
+    public void Entry_event_is_an_internal_span_exported_as_app_dependencies()
+    {
+        using var capture = new AlertCapture();
+        var workspaceId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3");
+        var instanceId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb3");
+        var operationId = Guid.Parse("cccccccc-cccc-cccc-cccc-ccccccccccc3");
+
+        ManagedLifecycleRecoveryRequiredAlert.RecordEntered(workspaceId, instanceId, operationId);
+
+        var activity = Assert.Single(capture.Entered);
+        Assert.Equal(ActivityKind.Internal, activity.Kind);
+        Assert.Equal(
+            ManagedLifecycleTelemetry.RecoveryRequiredEnteredActivityName,
+            activity.OperationName);
+        Assert.Equal("AppDependencies", ManagedLifecycleTelemetry.AppDependenciesTableName);
+        Assert.Equal(
+            ManagedLifecycleTelemetry.RecoveryRequiredEnteredActivityName,
+            ManagedLifecycleRecoveryRequiredAlert.EventName);
+    }
+
+    [Fact]
+    public void Configured_environment_is_written_on_the_entry_event()
+    {
+        using var capture = new AlertCapture();
+        var workspaceId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa4");
+        var instanceId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb4");
+        var operationId = Guid.Parse("cccccccc-cccc-cccc-cccc-ccccccccccc4");
+        try
+        {
+            ManagedLifecycleTelemetry.ConfigureAlertEnvironment(ManagedLifecycleTelemetry.StagingEnvironment);
+            ManagedLifecycleRecoveryRequiredAlert.RecordEntered(workspaceId, instanceId, operationId);
+
+            var activity = Assert.Single(capture.Entered);
+            Assert.Equal(
+                ManagedLifecycleTelemetry.StagingEnvironment,
+                activity.GetTagItem(ManagedLifecycleTelemetry.EnvironmentTag));
+            Assert.Contains(ManagedLifecycleTelemetry.EnvironmentTag, activity.Tags.Select(tag => tag.Key));
+        }
+        finally
+        {
+            ManagedLifecycleTelemetry.ConfigureAlertEnvironment(null);
+        }
+    }
+
+    [Fact]
     public void Entry_event_carries_only_the_fixed_reason_and_opaque_ids()
     {
         using var capture = new AlertCapture();

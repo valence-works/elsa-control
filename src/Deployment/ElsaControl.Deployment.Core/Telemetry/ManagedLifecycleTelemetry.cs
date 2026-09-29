@@ -20,6 +20,9 @@ public static class ManagedLifecycleTelemetry
     public const string WorkerActivityName = "managed_lifecycle.worker";
     public const string ReconciliationActivityName = "managed_lifecycle.reconciliation";
     public const string RecoveryRequiredEnteredActivityName = "managed_lifecycle.recovery_required.entered";
+    public const string AppDependenciesTableName = "AppDependencies";
+    public const string StagingEnvironment = "staging";
+    public const string ProductionEnvironment = "production";
 
     public const string CompletionCounterName = "managed_lifecycle.operations.completed";
     public const string ErrorCounterName = "managed_lifecycle.operations.errors";
@@ -40,9 +43,11 @@ public static class ManagedLifecycleTelemetry
     public const string InstanceIdTag = "instance.id";
     public const string OperationIdTag = "operation.id";
     public const string DedupeIdentityTag = "dedupe_identity";
+    public const string EnvironmentTag = "environment";
 
     private const string Unknown = "unknown";
     private const string None = "none";
+    private static string? _alertEnvironment;
     private static readonly HashSet<string> KnownDiagnosticCodes =
     [
         "lifecycle.claim.conflict",
@@ -154,8 +159,33 @@ public static class ManagedLifecycleTelemetry
             null)));
 
     /// <summary>
+    /// Staging or production marker written on the RecoveryRequired entry
+    /// activity so each sink's alert rule can filter its own environment.
+    /// </summary>
+    public static string? AlertEnvironment => _alertEnvironment;
+
+    public static void ConfigureAlertEnvironment(string? environment)
+    {
+        if (string.IsNullOrWhiteSpace(environment))
+        {
+            _alertEnvironment = null;
+            return;
+        }
+
+        var normalized = environment.Trim().ToLowerInvariant();
+        if (normalized is not (StagingEnvironment or ProductionEnvironment))
+            throw new ArgumentOutOfRangeException(
+                nameof(environment),
+                "The RecoveryRequired alert environment must be staging or production.");
+        _alertEnvironment = normalized;
+    }
+
+    /// <summary>
     /// Emits the operator-alert activity for one RecoveryRequired entry. Tags are
-    /// the fixed reason code, opaque IDs, and the health-alert dedupe identity.
+    /// the fixed reason code, opaque IDs, the health-alert dedupe identity, and
+    /// the optional environment marker. The Azure Monitor exporter writes this
+    /// Internal span to <see cref="AppDependenciesTableName"/> with
+    /// <c>Name</c> equal to <see cref="RecoveryRequiredEnteredActivityName"/>.
     /// </summary>
     public static void RecordRecoveryRequiredEntered(
         Guid workspaceId,
@@ -174,6 +204,8 @@ public static class ManagedLifecycleTelemetry
         activity.SetTag(DiagnosticCodeTag, DiagnosticValue(reasonCode));
         if (IsDedupeIdentity(dedupeIdentity))
             activity.SetTag(DedupeIdentityTag, dedupeIdentity);
+        if (_alertEnvironment is { } environment)
+            activity.SetTag(EnvironmentTag, environment);
         activity.SetStatus(ActivityStatusCode.Ok);
     }
 

@@ -23,12 +23,23 @@ param dailyQuotaGb int = 1
 
 param tags object = {}
 
-@description('Operator mailbox for RecoveryRequired entry alerts. Pass STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT on staging and PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT on production. Never commit an address or reuse the production mailbox for staging.')
+@description('Operator mailbox for RecoveryRequired entry alerts. The pipeline passes STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT when environment is staging and PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT when environment is production. Never commit an address or reuse the production mailbox for staging.')
 @minLength(3)
 @maxLength(320)
 param recoveryRequiredAlertEmail string
 
+@description('Sink environment. Staging and production use separate action groups, rules, and event filters so Incremental deploys cannot overwrite each other.')
+@allowed([
+  'staging'
+  'production'
+])
+param environment string
+
 var recoveryRequiredEventName = 'managed_lifecycle.recovery_required.entered'
+var recoveryRequiredActionGroupName = 'ag-recovery-required-${environment}'
+var recoveryRequiredAlertRuleName = 'qr-recovery-required-entered-${environment}'
+var recoveryRequiredActionGroupShortName = environment == 'production' ? 'rr-prod' : 'rr-staging'
+var recoveryRequiredAlertQuery = 'AppDependencies\n| where Name == \'managed_lifecycle.recovery_required.entered\'\n| where tostring(Properties.environment) == \'${environment}\'\n| where isnotempty(tostring(Properties.dedupe_identity))\n| where ingestion_time() > ago(5m)\n| summarize by tostring(Properties.dedupe_identity)'
 
 resource apiIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
   name: apiIdentityName
@@ -87,11 +98,11 @@ resource publisher 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
 }
 
 resource recoveryRequiredActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
-  name: 'ag-recovery-required'
+  name: recoveryRequiredActionGroupName
   location: 'global'
   tags: tags
   properties: {
-    groupShortName: 'recovreq'
+    groupShortName: recoveryRequiredActionGroupShortName
     enabled: true
     emailReceivers: [
       {
@@ -104,17 +115,17 @@ resource recoveryRequiredActionGroup 'Microsoft.Insights/actionGroups@2023-01-01
 }
 
 resource recoveryRequiredAlertRule 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
-  name: 'qr-recovery-required-entered'
+  name: recoveryRequiredAlertRuleName
   location: location
   tags: tags
   properties: {
-    displayName: 'RecoveryRequired entered'
-    description: 'Fires when Control writes ${recoveryRequiredEventName}. One email per actual RecoveryRequired entry. Staging and production use separate recipients.'
+    displayName: 'RecoveryRequired entered (${environment})'
+    description: 'Fires when Control writes ${recoveryRequiredEventName} for ${environment}. Stateless: one email per actual RecoveryRequired entry. Staging and production use separate recipients, names, and environment filters.'
     severity: 1
     enabled: true
     evaluationFrequency: 'PT5M'
-    windowSize: 'PT5M'
-    autoMitigate: true
+    windowSize: 'PT15M'
+    autoMitigate: false
     scopes: [
       workspace.id
     ]
@@ -124,7 +135,7 @@ resource recoveryRequiredAlertRule 'Microsoft.Insights/scheduledQueryRules@2023-
     criteria: {
       allOf: [
         {
-          query: 'AppDependencies\n| union isfuzzy=true customEvents, AppTraces, AppRequests\n| where Name == \'managed_lifecycle.recovery_required.entered\' or name == \'managed_lifecycle.recovery_required.entered\' or OperationName == \'managed_lifecycle.recovery_required.entered\'\n| where TimeGenerated > ago(5m)'
+          query: recoveryRequiredAlertQuery
           timeAggregation: 'Count'
           operator: 'GreaterThanOrEqual'
           threshold: 1

@@ -11,6 +11,7 @@ using Azure.Core.Pipeline;
 using Azure.Identity;
 using ElsaControl.Api.Telemetry;
 using ElsaControl.Deployment.Abstractions.Instances;
+using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Telemetry;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -36,6 +37,7 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryTests : IDisposable
 
     public void Dispose()
     {
+        ManagedLifecycleTelemetry.ConfigureAlertEnvironment(null);
         Environment.SetEnvironmentVariable(StatsbeatVariable, _originalStatsbeat);
         Environment.SetEnvironmentVariable("OTEL_RESOURCE_ATTRIBUTES", _originalResourceAttributes);
     }
@@ -150,7 +152,8 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryTests : IDisposable
     {
         var builder = CreateBuilder(new Dictionary<string, string?>
         {
-            [$"{ManagedLifecycleAzureMonitorTelemetryOptions.ConfigurationSection}:Enabled"] = "false"
+            [$"{ManagedLifecycleAzureMonitorTelemetryOptions.ConfigurationSection}:Enabled"] = "false",
+            [ManagedLifecycleAzureMonitorTelemetryOptions.EnvironmentConfigurationKey] = "staging"
         });
 
         builder.AddManagedLifecycleAzureMonitorTelemetry();
@@ -158,6 +161,40 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryTests : IDisposable
         Assert.DoesNotContain(
             builder.Services,
             descriptor => descriptor.ServiceType == typeof(ManagedLifecycleAzureMonitorTelemetryLifetime));
+        Assert.Equal(ManagedLifecycleTelemetry.StagingEnvironment, ManagedLifecycleTelemetry.AlertEnvironment);
+    }
+
+    [Fact]
+    public void Invalid_alert_environment_fails_closed_before_the_exporter_is_built()
+    {
+        var builder = CreateBuilder(new Dictionary<string, string?>
+        {
+            [ManagedLifecycleAzureMonitorTelemetryOptions.EnabledConfigurationKey] = "false",
+            [ManagedLifecycleAzureMonitorTelemetryOptions.EnvironmentConfigurationKey] = "lab"
+        });
+
+        var exception = Assert.Throws<ArgumentOutOfRangeException>(() =>
+            builder.AddManagedLifecycleAzureMonitorTelemetry());
+
+        Assert.Contains("staging or production", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Enabled_invalid_environment_fails_closed_with_a_stable_code()
+    {
+        var options = new ManagedLifecycleAzureMonitorTelemetryOptions
+        {
+            Enabled = true,
+            ConnectionString = ValidConnectionString,
+            ManagedIdentityClientId = "00000000-0000-0000-0000-000000000002",
+            Environment = "lab"
+        };
+
+        var exception = Assert.Throws<InvalidOperationException>(options.Validate);
+
+        Assert.Equal(
+            "Managed lifecycle Azure Monitor telemetry configuration is invalid (environment_invalid).",
+            exception.Message);
     }
 
     [Fact]
@@ -257,6 +294,50 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryTests : IDisposable
             Assert.ThrowsAny<OperationCanceledException>(() => bounded.GetToken(context, cancellation.Token));
 
         Assert.True(credential.Cancelled.Task.IsCompletedSuccessfully);
+    }
+
+    [Fact]
+    public void Recovery_required_entry_is_exported_as_app_dependencies_with_the_activity_name()
+    {
+        var options = new ManagedLifecycleAzureMonitorTelemetryOptions
+        {
+            Enabled = true,
+            ConnectionString = ValidConnectionString.Replace(
+                "00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000008"),
+            ManagedIdentityClientId = "00000000-0000-0000-0000-000000000002",
+            Environment = ManagedLifecycleTelemetry.StagingEnvironment
+        };
+        using var handler = new RecordingIngestionHandler();
+        using var client = new HttpClient(handler);
+        using var sink = new ManagedLifecycleAzureMonitorTelemetrySinkFactory()
+            .Create(options, new RecordingCredential(), new HttpClientTransport(client));
+        ManagedLifecycleTelemetry.ConfigureAlertEnvironment(ManagedLifecycleTelemetry.StagingEnvironment);
+        var workspaceId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa5");
+        var instanceId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb5");
+        var operationId = Guid.Parse("cccccccc-cccc-cccc-cccc-ccccccccccc5");
+
+        ManagedLifecycleRecoveryRequiredAlert.RecordEntered(workspaceId, instanceId, operationId);
+        Assert.True(sink.ForceFlush());
+
+        var dependencies = handler.Payloads.SelectMany(ReadEnvelopeItems)
+            .Where(item => item.GetProperty("data").GetProperty("baseType").GetString() == "RemoteDependencyData")
+            .Select(item => item.GetProperty("data").GetProperty("baseData"))
+            .Where(data => data.GetProperty("name").GetString() ==
+                           ManagedLifecycleTelemetry.RecoveryRequiredEnteredActivityName)
+            .ToArray();
+        var dependency = Assert.Single(dependencies);
+        Assert.Equal(ManagedLifecycleTelemetry.AppDependenciesTableName, "AppDependencies");
+        var properties = dependency.GetProperty("properties");
+        Assert.Equal(workspaceId.ToString("D"), properties.GetProperty("workspace.id").GetString());
+        Assert.Equal(instanceId.ToString("D"), properties.GetProperty("instance.id").GetString());
+        Assert.Equal(operationId.ToString("D"), properties.GetProperty("operation.id").GetString());
+        Assert.Equal(
+            ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired,
+            properties.GetProperty("diagnostic_code").GetString());
+        Assert.Equal(ManagedLifecycleTelemetry.StagingEnvironment, properties.GetProperty("environment").GetString());
+        var dedupe = properties.GetProperty("dedupe_identity").GetString();
+        Assert.Equal(64, dedupe!.Length);
+        Assert.All(dedupe, character => Assert.True(char.IsAsciiHexDigit(character)));
     }
 
     [Fact]

@@ -114,6 +114,88 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Empty(capture.Entered);
     }
 
+    [Fact]
+    public async Task Deletion_recovery_writes_exactly_one_alert_event()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Alert deletion recovery");
+        var service = new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now));
+        var created = await service.CreateAsync(new ElsaInstanceCreateRequest(
+            workspace.OrganizationId, workspace.Id, "Alert Delete Elsa", "alert-delete-elsa",
+            WorkerIntent(), "alert-delete-create"));
+        var deletion = await service.DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+            db, workspace.Id, created.Instance.Id, created.Instance.Version, "alert-delete"));
+        await CompleteOperationAsync(db, created.Operation.Id);
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+        var claim = await store.TryClaimNextDeletionAsync("alert-delete-worker", Now);
+        Assert.NotNull(claim);
+        using var capture = new RecoveryRequiredAlertCapture(workspace.Id);
+        var failure = new ElsaInstanceDeletionFailure(
+            workspace.Id,
+            created.Instance.Id,
+            deletion.Operation.Id,
+            claim!.Outbox.Id,
+            claim.Instance.Version,
+            claim.Operation.AttemptNumber,
+            claim.CorrelatedRunId,
+            "alert-delete-worker",
+            claim.LeaseToken,
+            claim.LeaseVersion,
+            new string('a', 64),
+            "deletion.provider.unavailable",
+            Now.AddMinutes(1));
+
+        var recovered = await store.RequireDeletionRecoveryAsync(failure);
+
+        Assert.Equal(ElsaInstanceDeletionOutcome.RecoveryRequired, recovered.Outcome);
+        Assert.Single(capture.Entered);
+        Assert.Equal(
+            ManagedLifecycleTelemetry.RecoveryRequiredEnteredActivityName,
+            capture.Entered[0].OperationName);
+        Assert.Equal(
+            ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired,
+            capture.Entered[0].GetTagItem(ManagedLifecycleTelemetry.DiagnosticCodeTag));
+        Assert.Equal(workspace.Id.ToString("D"),
+            capture.Entered[0].GetTagItem(ManagedLifecycleTelemetry.WorkspaceIdTag));
+        Assert.Equal(created.Instance.Id.ToString("D"),
+            capture.Entered[0].GetTagItem(ManagedLifecycleTelemetry.InstanceIdTag));
+        Assert.Equal(deletion.Operation.Id.ToString("D"),
+            capture.Entered[0].GetTagItem(ManagedLifecycleTelemetry.OperationIdTag));
+    }
+
+    [Fact(Skip = "HOLD finding 6: Architect ruling pending on whether provider.submission.uncertain must emit. The lifecycle.provider-submitted hand-off exclusion currently swallows this park (ElsaInstanceLifecycleStore.CommitProviderSubmission). Do not restructure triggers until the ruling.")]
+    public async Task Uncertain_provider_submission_park_is_an_operator_alert_entry()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Alert uncertain submission");
+        using var capture = new RecoveryRequiredAlertCapture(workspace.Id);
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+
+        await store.CommitProviderSubmissionAsync(new(
+            workspace.Id,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            "provider-submission-uncertain",
+            Now));
+
+        Assert.Equal(
+            ElsaInstanceOperationState.RecoveryRequired,
+            (await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id)).State);
+        Assert.Equal(
+            "provider.submission.uncertain",
+            (await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id)).FailureCode);
+        Assert.Single(capture.Entered);
+    }
+
     private sealed class RecoveryRequiredAlertCapture : IDisposable
     {
         private readonly ActivityListener _listener;
