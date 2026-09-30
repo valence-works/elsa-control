@@ -18,41 +18,95 @@ public sealed class AddManagedStudioGrantCapability : Migration
     /// <inheritdoc />
     protected override void Up(MigrationBuilder migrationBuilder)
     {
-        migrationBuilder.AddColumn<bool>(
-            name: "CurrentDeploymentStudioGrants",
+        // Staging may already have applied an earlier version of this additive schema.
+        // Add each missing column independently and validate existing columns without rewriting values.
+        migrationBuilder.Sql(AddBitColumnIfMissingOrValidate(
             table: "ElsaInstances",
-            type: "bit",
-            nullable: false,
-            defaultValue: false);
+            column: "CurrentDeploymentStudioGrants",
+            constraint: "DF_ElsaInstances_CurrentDeploymentStudioGrants"));
 
-        migrationBuilder.AddColumn<string>(
-            name: "CurrentDeploymentStudioGrantsDeploymentId",
+        migrationBuilder.Sql(AddNullableStringColumnIfMissingOrValidate(
             table: "ElsaInstances",
-            type: "nvarchar(128)",
-            maxLength: 128,
-            nullable: true);
+            column: "CurrentDeploymentStudioGrantsDeploymentId"));
 
-        migrationBuilder.AddColumn<bool>(
-            name: "ManagedHandoffStudioGrants",
+        migrationBuilder.Sql(AddBitColumnIfMissingOrValidate(
             table: "AzureProviderOperations",
-            type: "bit",
-            nullable: false,
-            defaultValue: false);
+            column: "ManagedHandoffStudioGrants",
+            constraint: "DF_AzureProviderOperations_ManagedHandoffStudioGrants"));
     }
 
     /// <inheritdoc />
     protected override void Down(MigrationBuilder migrationBuilder)
     {
-        migrationBuilder.DropColumn(
-            name: "CurrentDeploymentStudioGrants",
-            table: "ElsaInstances");
+        // These additive columns may have been deployed before this migration was recorded.
+        // Keeping them makes rollback safe for old binaries and preserves their data; a later Up
+        // validates and reuses the same columns.
+    }
 
-        migrationBuilder.DropColumn(
-            name: "CurrentDeploymentStudioGrantsDeploymentId",
-            table: "ElsaInstances");
+    private static string AddBitColumnIfMissingOrValidate(string table, string column, string constraint)
+    {
+        var tableName = $"[dbo].[{table}]";
 
-        migrationBuilder.DropColumn(
-            name: "ManagedHandoffStudioGrants",
-            table: "AzureProviderOperations");
+        return $"""
+            IF COL_LENGTH(N'dbo.{table}', N'{column}') IS NULL
+            BEGIN
+                ALTER TABLE {tableName}
+                    ADD [{column}] bit NOT NULL CONSTRAINT [{constraint}] DEFAULT (0);
+            END
+            ELSE IF NOT EXISTS
+            (
+                SELECT 1
+                FROM sys.columns AS c
+                INNER JOIN sys.tables AS t ON t.object_id = c.object_id
+                INNER JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+                INNER JOIN sys.types AS ty ON ty.user_type_id = c.user_type_id
+                INNER JOIN sys.default_constraints AS dc
+                    ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
+                WHERE s.name = N'dbo'
+                    AND t.name = N'{table}'
+                    AND c.name = N'{column}'
+                    AND ty.name = N'bit'
+                    AND ty.is_user_defined = 0
+                    AND c.is_nullable = 0
+                    AND c.is_computed = 0
+                    AND UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(dc.definition,
+                        '(', ''), ')', ''), '[', ''), ']', ''), ' ', ''), CHAR(9), ''), ',', ''))
+                        IN (N'0', N'CONVERTBIT0', N'CAST0ASBIT')
+            )
+            BEGIN
+                THROW 51000, 'Existing {table}.{column} must be a non-nullable bit with a zero default.', 1;
+            END;
+            """;
+    }
+
+    private static string AddNullableStringColumnIfMissingOrValidate(string table, string column)
+    {
+        return $"""
+            IF COL_LENGTH(N'dbo.{table}', N'{column}') IS NULL
+            BEGIN
+                ALTER TABLE [dbo].[{table}]
+                    ADD [{column}] nvarchar(128) NULL;
+            END
+            ELSE IF NOT EXISTS
+            (
+                SELECT 1
+                FROM sys.columns AS c
+                INNER JOIN sys.tables AS t ON t.object_id = c.object_id
+                INNER JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+                INNER JOIN sys.types AS ty ON ty.user_type_id = c.user_type_id
+                WHERE s.name = N'dbo'
+                    AND t.name = N'{table}'
+                    AND c.name = N'{column}'
+                    AND ty.name = N'nvarchar'
+                    AND ty.is_user_defined = 0
+                    AND c.max_length = 256
+                    AND c.is_nullable = 1
+                    AND c.is_computed = 0
+                    AND c.default_object_id = 0
+            )
+            BEGIN
+                THROW 51000, 'Existing {table}.{column} must be a nullable nvarchar(128).', 1;
+            END;
+            """;
     }
 }
