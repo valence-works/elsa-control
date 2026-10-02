@@ -10,6 +10,8 @@ public static class StagingRecoveryLifecycleLeverDefaults
     public const string InstanceNotAllowedCode = "staging.recovery-lifecycle-lever.instance-not-allowed";
     public const string TransitionCode = StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode;
     public const string FiredEventType = StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType;
+    public const string ResetEventType = StagingRecoveryLifecycleLeverStoreDefaults.ResetEventType;
+    public const string ResetCode = StagingRecoveryLifecycleLeverStoreDefaults.ResetCode;
     public const string RecoveryRequiredEventType = StagingRecoveryLifecycleLeverStoreDefaults.RecoveryRequiredEventType;
 }
 

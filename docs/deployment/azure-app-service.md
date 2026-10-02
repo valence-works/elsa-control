@@ -401,6 +401,20 @@ This lever has its own flag and instance allowlist. The billing lever and this
 lever never enable each other. The Hosted smoke owner instance
 (`STAGING_SMOKE_OWNER_INSTANCE_ID`) must not appear on the allowlist.
 
+A lever-parked `Reconcile` has no provider retry observation, so production
+`Recover` refuses it. That is the provider-ledger safety boundary. Row 26
+re-entry uses the staging-only reset, not production Recover:
+
+1. `POST /api/staging/lifecycle-lever/instances/{id}/recovery-required`
+2. `POST /api/staging/lifecycle-lever/instances/{id}/reset` — transitions
+   `RecoveryRequired` to `Succeeded` through `TransitionTo` when the failure
+   code is `staging.lever.recovery-required` and no retry evidence exists
+3. Fire again
+
+Do not attach fabricated `provider.reconciliation.retry-safe` evidence. The
+reset is gated by the same flag, `sk_test_` prefix, instance allowlist, and
+smoke-owner deny as the fire endpoint.
+
 Set the **`test` GitHub environment** variables
 `STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED`,
 `STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS`, and

@@ -7,6 +7,7 @@ namespace ElsaControl.Api.OrganizationBilling;
 public enum StagingRecoveryLifecycleLeverOutcome
 {
     Fired,
+    Reset,
     Disabled,
     InstanceNotAllowed,
     InstanceNotFound
@@ -56,6 +57,42 @@ public sealed class StagingRecoveryLifecycleLever(
                 operatorSubject,
                 cancellationToken);
             return new StagingRecoveryLifecycleLeverResult(StagingRecoveryLifecycleLeverOutcome.Fired, commit);
+        }
+        catch (KeyNotFoundException)
+        {
+            return new StagingRecoveryLifecycleLeverResult(StagingRecoveryLifecycleLeverOutcome.InstanceNotFound);
+        }
+    }
+
+    public async Task<StagingRecoveryLifecycleLeverResult> ResetAsync(
+        Guid instanceId,
+        string? operatorSubject,
+        CancellationToken cancellationToken = default)
+    {
+        if (instanceId == Guid.Empty)
+            throw new ArgumentException("Instance ID is required.", nameof(instanceId));
+
+        if (!StagingLifecycleLeverGate.IsArmed(options.Value.Enabled, stripeOptions.Value))
+        {
+            if (options.Value.Enabled)
+            {
+                logger.LogWarning(
+                    "The staging recovery lifecycle lever reset is disabled because a required staging signal is missing.");
+            }
+
+            return new StagingRecoveryLifecycleLeverResult(StagingRecoveryLifecycleLeverOutcome.Disabled);
+        }
+
+        if (!options.Value.AllowsInstance(instanceId))
+            return new StagingRecoveryLifecycleLeverResult(StagingRecoveryLifecycleLeverOutcome.InstanceNotAllowed);
+
+        try
+        {
+            var commit = await store.ResetLeverParkedReconcileAsync(
+                instanceId,
+                operatorSubject,
+                cancellationToken);
+            return new StagingRecoveryLifecycleLeverResult(StagingRecoveryLifecycleLeverOutcome.Reset, commit);
         }
         catch (KeyNotFoundException)
         {

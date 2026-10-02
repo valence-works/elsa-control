@@ -193,6 +193,125 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
         }
     }
 
+    public async Task<StagingRecoveryLifecycleLeverCommit> ResetLeverParkedReconcileAsync(
+        Guid instanceId,
+        string? operatorSubject,
+        CancellationToken cancellationToken = default)
+    {
+        if (instanceId == Guid.Empty)
+            throw new ArgumentException("Instance ID is required.", nameof(instanceId));
+
+        dbContext.ChangeTracker.Clear();
+        var resetAuditId = Guid.NewGuid();
+        var now = _timeProvider.GetUtcNow().ToUniversalTime();
+        try
+        {
+            return await dbContext.ExecuteInTransactionAsync(
+                IsolationLevel.Serializable,
+                async () =>
+                {
+                    var instanceEntity = await LoadTrackedInstanceAsync(instanceId, cancellationToken)
+                        ?? throw new KeyNotFoundException("Elsa instance does not exist.");
+
+                    var operationEntity = await dbContext.ElsaInstanceOperations
+                        .Where(x => x.InstanceId == instanceId &&
+                                    x.Action == ElsaInstanceOperationAction.Reconcile &&
+                                    x.State == ElsaInstanceOperationState.RecoveryRequired)
+                        .OrderByDescending(x => x.AcceptedAt)
+                        .ThenByDescending(x => x.CreatedAt)
+                        .FirstOrDefaultAsync(cancellationToken);
+                    if (operationEntity is null)
+                        throw Conflict(
+                            "No lever-parked RecoveryRequired reconcile is active.",
+                            ElsaInstanceLifecycleConflictReason.InvalidState);
+                    if (!string.Equals(
+                            operationEntity.FailureCode,
+                            StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode,
+                            StringComparison.Ordinal) ||
+                        operationEntity.ReconciliationRetryEvidenceReference is not null ||
+                        operationEntity.ReconciliationRetryEvidenceDigest is not null)
+                        throw Conflict(
+                            "Only a staging-lever RecoveryRequired park without provider retry evidence can be reset.",
+                            ElsaInstanceLifecycleConflictReason.InvalidState);
+
+                    var priorObserved = instanceEntity.ObservedLifecycle;
+                    TransitionPersistedOperation(
+                        operationEntity,
+                        ElsaInstanceOperationState.Succeeded,
+                        now);
+                    operationEntity.CompletedAt = now;
+                    RestoreObservedReady(instanceEntity);
+                    instanceEntity.UpdatedAt = now;
+
+                    var reset = await CreateAuditEventAsync(
+                        instanceEntity,
+                        operationEntity,
+                        priorObserved,
+                        now,
+                        cancellationToken,
+                        StagingRecoveryLifecycleLeverStoreDefaults.ResetEventType,
+                        diagnosticCode: StagingRecoveryLifecycleLeverStoreDefaults.ResetCode,
+                        summary: StagingRecoveryLifecycleLeverStoreDefaults.ResetCode);
+                    reset.Id = resetAuditId;
+                    reset.OperatorSubject = NormalizeOperatorSubject(operatorSubject);
+                    await dbContext.ElsaInstanceAuditEvents.AddAsync(reset, cancellationToken);
+                    await dbContext.SaveChangesAsync(cancellationToken);
+
+                    return new StagingRecoveryLifecycleLeverCommit(
+                        MapInstance(instanceEntity),
+                        MapOperation(operationEntity));
+                },
+                async (commit, verificationCancellationToken) =>
+                    await dbContext.ElsaInstanceAuditEvents.AsNoTracking().AnyAsync(
+                        x => x.Id == resetAuditId &&
+                             x.InstanceId == instanceId &&
+                             x.OperationId == commit.Operation.Id &&
+                             x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.ResetEventType &&
+                             x.DiagnosticCode == StagingRecoveryLifecycleLeverStoreDefaults.ResetCode,
+                        verificationCancellationToken),
+                cancellationToken);
+        }
+        catch (ElsaInstanceLifecycleConflictException)
+        {
+            dbContext.ChangeTracker.Clear();
+            throw;
+        }
+        catch (KeyNotFoundException)
+        {
+            dbContext.ChangeTracker.Clear();
+            throw;
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            dbContext.ChangeTracker.Clear();
+            throw Conflict("An instance operation is already active.", ElsaInstanceLifecycleConflictReason.OperationActive);
+        }
+        catch (Exception exception) when (exception is DbUpdateException or DbException)
+        {
+            dbContext.ChangeTracker.Clear();
+            throw Conflict("An instance operation is already active.", ElsaInstanceLifecycleConflictReason.OperationActive);
+        }
+    }
+
+    private static void RestoreObservedReady(ElsaInstanceEntity instance)
+    {
+        if (instance.ObservedLifecycle == ElsaObservedLifecycle.Unknown)
+        {
+            instance.ObservedLifecycle = ElsaInstanceStateMachine.Transition(
+                ElsaObservedLifecycle.Unknown,
+                ElsaObservedLifecycle.Provisioning);
+        }
+
+        if (instance.ObservedLifecycle != ElsaObservedLifecycle.Ready)
+        {
+            instance.ObservedLifecycle = ElsaInstanceStateMachine.Transition(
+                instance.ObservedLifecycle,
+                ElsaObservedLifecycle.Ready);
+        }
+
+        instance.Health = ElsaInstanceHealth.Healthy;
+    }
+
     private static void TransitionPersistedOperation(
         ElsaInstanceOperationEntity entity,
         ElsaInstanceOperationState next,

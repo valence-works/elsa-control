@@ -37,26 +37,48 @@ public static class StagingRecoveryLifecycleLeverEndpoints
                     }
                     catch (ElsaInstanceLifecycleConflictException exception)
                     {
-                        return ManagedElsaInstanceEndpoints.Problem(
-                            ManagedElsaInstanceEndpoints.ConflictCode(exception),
-                            exception.Reason == ElsaInstanceLifecycleConflictReason.OperationActive
-                                ? "An instance operation is already active."
-                                : "The state machine refused the recovery-required transition.",
-                            ManagedElsaInstanceEndpoints.ConflictStatusCode(exception));
+                        return Conflict(exception, "The state machine refused the recovery-required transition.");
                     }
                     catch (ElsaInstanceStateConflictException)
                     {
-                        return ManagedElsaInstanceEndpoints.Problem(
-                            "instance.invalid-state",
-                            "The state machine refused the recovery-required transition.",
-                            StatusCodes.Status409Conflict);
+                        return InvalidState("The state machine refused the recovery-required transition.");
                     }
                     catch (InvalidOperationException)
                     {
-                        return ManagedElsaInstanceEndpoints.Problem(
-                            "instance.invalid-state",
-                            "The state machine refused the recovery-required transition.",
-                            StatusCodes.Status409Conflict);
+                        return InvalidState("The state machine refused the recovery-required transition.");
+                    }
+                })
+            .RequireAuthorization(AdminAuthorization.Policy)
+            .WithTags("Staging Lifecycle Lever");
+
+        endpoints.MapPost(
+                "/api/staging/lifecycle-lever/instances/{instanceId:guid}/reset",
+                async (
+                    Guid instanceId,
+                    HttpContext context,
+                    IOptions<ControlIdentityOptions> identityOptions,
+                    StagingRecoveryLifecycleLever lever,
+                    CancellationToken cancellationToken) =>
+                {
+                    try
+                    {
+                        var result = await lever.ResetAsync(
+                            instanceId,
+                            OperatorSubject(context.User, identityOptions.Value),
+                            cancellationToken);
+                        return ToHttpResult(result);
+                    }
+                    catch (ElsaInstanceLifecycleConflictException exception)
+                    {
+                        return Conflict(exception, "The state machine refused the staging lever reset.");
+                    }
+                    catch (ElsaInstanceStateConflictException)
+                    {
+                        return InvalidState("The state machine refused the staging lever reset.");
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        return InvalidState("The state machine refused the staging lever reset.");
                     }
                 })
             .RequireAuthorization(AdminAuthorization.Policy)
@@ -65,12 +87,27 @@ public static class StagingRecoveryLifecycleLeverEndpoints
         return endpoints;
     }
 
+    private static IResult Conflict(ElsaInstanceLifecycleConflictException exception, string invalidStateTitle) =>
+        ManagedElsaInstanceEndpoints.Problem(
+            ManagedElsaInstanceEndpoints.ConflictCode(exception),
+            exception.Reason == ElsaInstanceLifecycleConflictReason.OperationActive
+                ? "An instance operation is already active."
+                : invalidStateTitle,
+            ManagedElsaInstanceEndpoints.ConflictStatusCode(exception));
+
+    private static IResult InvalidState(string title) =>
+        ManagedElsaInstanceEndpoints.Problem(
+            "instance.invalid-state",
+            title,
+            StatusCodes.Status409Conflict);
+
     private static string? OperatorSubject(ClaimsPrincipal user, ControlIdentityOptions identityOptions) =>
         user.FindFirstValue(identityOptions.Claims.Subject) ?? user.FindFirstValue(ClaimTypes.NameIdentifier);
 
     private static IResult ToHttpResult(StagingRecoveryLifecycleLeverResult result) => result.Outcome switch
     {
-        StagingRecoveryLifecycleLeverOutcome.Fired => Results.Ok(ToResponse(result.Commit!)),
+        StagingRecoveryLifecycleLeverOutcome.Fired => Results.Ok(ToResponse(result.Commit!, StagingRecoveryLifecycleLeverDefaults.TransitionCode)),
+        StagingRecoveryLifecycleLeverOutcome.Reset => Results.Ok(ToResponse(result.Commit!, StagingRecoveryLifecycleLeverDefaults.ResetCode)),
         StagingRecoveryLifecycleLeverOutcome.Disabled => Problem(
             StagingRecoveryLifecycleLeverDefaults.DisabledCode,
             "The staging recovery lifecycle lever is disabled.",
@@ -83,7 +120,9 @@ public static class StagingRecoveryLifecycleLeverEndpoints
         _ => throw new InvalidOperationException("Unsupported staging recovery lifecycle lever outcome.")
     };
 
-    private static StagingRecoveryLifecycleLeverResponse ToResponse(StagingRecoveryLifecycleLeverCommit commit) =>
+    private static StagingRecoveryLifecycleLeverResponse ToResponse(
+        StagingRecoveryLifecycleLeverCommit commit,
+        string code) =>
         new(
             commit.Instance.Id,
             commit.Instance.WorkspaceId,
@@ -92,7 +131,7 @@ public static class StagingRecoveryLifecycleLeverEndpoints
             commit.Operation.State,
             commit.Operation.AttemptNumber,
             commit.Instance.Version,
-            StagingRecoveryLifecycleLeverDefaults.TransitionCode);
+            code);
 
     private static IResult Problem(string code, string title, int statusCode) =>
         Results.Problem(

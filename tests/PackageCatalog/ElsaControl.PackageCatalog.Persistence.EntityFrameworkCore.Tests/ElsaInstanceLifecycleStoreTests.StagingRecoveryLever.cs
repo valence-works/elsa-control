@@ -130,4 +130,107 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             await db.ElsaInstanceAuditEvents.CountAsync(x =>
                 x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType));
     }
+
+    [Fact]
+    public async Task Staging_recovery_lever_reset_clears_the_park_through_real_transitions()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Staging recovery lever reset workspace");
+        var created = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                workspace.OrganizationId, workspace.Id, "Managed Elsa", "staging-recovery-reset",
+                CreateIntent(), "create-staging-recovery-reset"));
+        await CompleteOperationAsync(db, created.Operation.Id);
+        db.ChangeTracker.Clear();
+
+        var store = CreateStore(db);
+        var parked = await store.AcceptReconcileAndRequireRecoveryAsync(created.Instance.Id, "api-key");
+        var refused = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            new ElsaInstanceLifecycleService(store, new FixedTimeProvider(Now))
+                .RecoverAsync(new ElsaInstanceLifecycleRequest(
+                    workspace.Id,
+                    created.Instance.Id,
+                    parked.Instance.Version,
+                    "recover-after-lever")));
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.InvalidState, refused.Reason);
+        Assert.Contains("Provider reconciliation has not established that retry is safe.", refused.Message, StringComparison.Ordinal);
+
+        Assert.True(ElsaInstanceOperation.CanTransition(
+            ElsaInstanceOperationState.RecoveryRequired,
+            ElsaInstanceOperationState.Succeeded));
+        var reset = await store.ResetLeverParkedReconcileAsync(created.Instance.Id, "api-key");
+
+        Assert.Equal(parked.Operation.Id, reset.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Succeeded, reset.Operation.State);
+        Assert.Equal(ElsaObservedLifecycle.Ready, reset.Instance.ObservedLifecycle);
+        Assert.Equal(ElsaInstanceHealth.Healthy, reset.Instance.Health);
+
+        var operation = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == reset.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Succeeded, operation.State);
+        Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode, operation.FailureCode);
+        Assert.Null(operation.ReconciliationRetryEvidenceReference);
+        Assert.Null(operation.ReconciliationRetryEvidenceDigest);
+        Assert.NotEqual(ElsaInstanceProviderReconciliationService.RetrySafeCode, operation.FailureCode);
+
+        var resetEvent = Assert.Single(
+            await db.ElsaInstanceAuditEvents.AsNoTracking()
+                .Where(x => x.OperationId == reset.Operation.Id &&
+                            x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.ResetEventType)
+                .ToListAsync());
+        Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.ResetCode, resetEvent.DiagnosticCode);
+        Assert.DoesNotContain(
+            await db.ElsaInstanceAuditEvents.AsNoTracking()
+                .Where(x => x.InstanceId == created.Instance.Id)
+                .Select(x => x.EventType)
+                .ToListAsync(),
+            eventType => eventType.Contains("alert", StringComparison.OrdinalIgnoreCase));
+
+        var second = await store.AcceptReconcileAndRequireRecoveryAsync(created.Instance.Id, "api-key");
+        Assert.NotEqual(parked.Operation.Id, second.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, second.Operation.State);
+        Assert.Equal(
+            2,
+            await db.ElsaInstanceAuditEvents.CountAsync(x =>
+                x.InstanceId == created.Instance.Id &&
+                x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType));
+    }
+
+    [Fact]
+    public async Task Staging_recovery_lever_reset_refuses_a_non_lever_recovery_required_park()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Non lever recovery park workspace");
+        var created = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                workspace.OrganizationId, workspace.Id, "Managed Elsa", "non-lever-recovery-park",
+                CreateIntent(), "create-non-lever-recovery-park"));
+        await CompleteOperationAsync(db, created.Operation.Id);
+        db.ChangeTracker.Clear();
+
+        var parked = await CreateStore(db).AcceptReconcileAndRequireRecoveryAsync(created.Instance.Id, "api-key");
+        db.ChangeTracker.Clear();
+        var operation = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == parked.Operation.Id);
+        operation.FailureCode = "provider.submission.uncertain";
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var error = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            CreateStore(db).ResetLeverParkedReconcileAsync(created.Instance.Id, "api-key"));
+
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.InvalidState, error.Reason);
+        var persisted = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == parked.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, persisted.State);
+        Assert.Equal("provider.submission.uncertain", persisted.FailureCode);
+        Assert.Equal(
+            0,
+            await db.ElsaInstanceAuditEvents.CountAsync(x =>
+                x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.ResetEventType));
+    }
 }
