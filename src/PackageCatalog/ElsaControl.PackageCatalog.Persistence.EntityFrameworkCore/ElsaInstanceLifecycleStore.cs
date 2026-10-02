@@ -420,10 +420,10 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 operation.WorkspaceId == workspaceId &&
                 operation.InstanceId == instanceId &&
                 (exceptOperationId == null || operation.Id != exceptOperationId) &&
-                (operation.ExpectedVersion >= version ||
-                 (operation.RecoveryExpectedVersion != null && operation.RecoveryExpectedVersion >= version)) &&
-                operation.Action != ElsaInstanceOperationAction.Create &&
-                !systemOnly.Contains(operation.Action),
+                ((operation.ExpectedVersion >= version &&
+                  operation.Action != ElsaInstanceOperationAction.Create &&
+                  !systemOnly.Contains(operation.Action)) ||
+                 operation.RecoveryExpectedVersion >= version),
                 cancellationToken);
     }
 

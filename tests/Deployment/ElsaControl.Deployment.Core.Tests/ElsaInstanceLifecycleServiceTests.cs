@@ -244,10 +244,11 @@ public sealed class ElsaInstanceLifecycleServiceTests
                 new StaticTimeProvider(Now))
             .ReconcileAsync(WorkspaceId, accepted.Id);
 
+        var recoverVersion = store.Instances.Single().Version;
         var recovered = await service.RecoverAsync(new ElsaInstanceLifecycleRequest(
             WorkspaceId,
             created.Instance.Id,
-            store.Instances.Single().Version,
+            recoverVersion,
             "recover-1"));
 
         Assert.False(recovered.Replayed);
@@ -260,7 +261,7 @@ public sealed class ElsaInstanceLifecycleServiceTests
 
         var conflict = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
             service.RecoverAsync(new ElsaInstanceLifecycleRequest(
-                WorkspaceId, created.Instance.Id, recovered.Instance.Version, "recover-1", "changed")));
+                WorkspaceId, created.Instance.Id, recoverVersion, "recover-1", "changed")));
         Assert.Equal(ElsaInstanceLifecycleConflictReason.IdempotencyConflict, conflict.Reason);
         Assert.Single(store.Outbox);
         Assert.Single(store.RecoveryRequests);
@@ -268,7 +269,7 @@ public sealed class ElsaInstanceLifecycleServiceTests
         var replayed = await service.RecoverAsync(new ElsaInstanceLifecycleRequest(
             WorkspaceId,
             created.Instance.Id,
-            recovered.Instance.Version,
+            recoverVersion,
             "recover-1"));
 
         Assert.True(replayed.Replayed);
@@ -367,10 +368,11 @@ public sealed class ElsaInstanceLifecycleServiceTests
         var observeCallsAfterReconcile = port.Calls;
         Assert.True(observeCallsAfterReconcile > 0);
 
+        var recoverVersion = store.Instances.Single().Version;
         var first = await service.RecoverAsync(new ElsaInstanceLifecycleRequest(
-            WorkspaceId, created.Instance.Id, store.Instances.Single().Version, "customer-recover-1"));
+            WorkspaceId, created.Instance.Id, recoverVersion, "customer-recover-1"));
         var replay = await service.RecoverAsync(new ElsaInstanceLifecycleRequest(
-            WorkspaceId, created.Instance.Id, first.Instance.Version, "customer-recover-1"));
+            WorkspaceId, created.Instance.Id, recoverVersion, "customer-recover-1"));
 
         Assert.False(first.Replayed);
         Assert.True(replay.Replayed);
@@ -811,6 +813,55 @@ public sealed class ElsaInstanceLifecycleServiceTests
                 CanonicalExpectedVersion: originalVersion)));
 
         Assert.Equal(ElsaInstanceLifecycleConflictReason.ChangedSinceRead, conflict.Reason);
+        Assert.DoesNotContain(store.Operations, operation => operation.Action == ElsaInstanceOperationAction.Delete);
+    }
+
+    [Fact]
+    public async Task Delete_rebase_is_rejected_after_a_customer_recover()
+    {
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var created = await service.CreateAsync(new ElsaInstanceCreateRequest(
+            OrganizationId, WorkspaceId, "Claims", "claims-prod", Intent(), "create-rebase-recover"));
+        var readVersion = created.Instance.Version;
+        store.MarkRecoveryRequired(created.Operation.Id);
+        await new ElsaInstanceProviderReconciliationService(
+                store,
+                new StaticProviderPort(new(
+                    ElsaInstanceProviderObservationKind.Unknown,
+                    ElsaObservedLifecycle.Unknown,
+                    ElsaInstanceProviderHealthGate.Unknown,
+                    "retry-proof-observation",
+                    new ElsaInstanceProviderRetryEvidence(
+                        "https://evidence.example.test/recovery/retry-proof",
+                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))),
+                new StaticTimeProvider(Now))
+            .ReconcileAsync(WorkspaceId, created.Operation.Id);
+        var recoverVersion = store.Instances.Single().Version;
+        var recovered = await service.RecoverAsync(new ElsaInstanceLifecycleRequest(
+            WorkspaceId, created.Instance.Id, recoverVersion, "recover-before-delete"));
+        var transitionVersion = 47;
+        await store.CommitAcceptedAsync(
+            recovered.Instance,
+            AdvanceInstanceVersion(recovered.Instance, transitionVersion),
+            recovered.Operation
+                .TransitionTo(ElsaInstanceOperationState.Queued)
+                .TransitionTo(ElsaInstanceOperationState.Running)
+                .TransitionTo(ElsaInstanceOperationState.Succeeded),
+            new ElsaInstanceLifecycleOutboxMessage(
+                Guid.NewGuid(), WorkspaceId, created.Instance.Id, recovered.Operation.Id,
+                recovered.Operation.Action, recovered.Operation.RequestHash, Now));
+        AddDeleteConfirmation(authority, created.Instance);
+
+        var conflict = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            service.DeleteAsync(new ElsaInstanceLifecycleRequest(
+                WorkspaceId, created.Instance.Id, transitionVersion, "delete-after-recover",
+                DeleteConfirmationId: DeleteConfirmationId, ActorAccountId: ActorAccountId,
+                CanonicalExpectedVersion: readVersion)));
+
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.ChangedSinceRead, conflict.Reason);
+        Assert.True(recovered.Operation.RecoveryExpectedVersion >= readVersion);
         Assert.DoesNotContain(store.Operations, operation => operation.Action == ElsaInstanceOperationAction.Delete);
     }
 

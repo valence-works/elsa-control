@@ -528,9 +528,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             return Task.FromResult(_operations.Values.Any(operation =>
                 operation.InstanceId == instanceId &&
                 operation.Id != exceptOperationId &&
-                (operation.ExpectedVersion >= version ||
-                 (operation.RecoveryExpectedVersion is { } recovered && recovered >= version)) &&
-                ElsaInstanceOperation.IsCustomerOrOperatorMutation(operation.Action)));
+                operation.BlocksDeleteRebaseAt(version)));
         }
     }
 

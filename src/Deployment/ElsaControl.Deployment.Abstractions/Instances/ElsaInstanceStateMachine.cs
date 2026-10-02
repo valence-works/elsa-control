@@ -223,6 +223,10 @@ public sealed record ElsaInstanceOperation
         };
     }
 
+    public bool BlocksDeleteRebaseAt(int version) =>
+        (IsCustomerOrOperatorMutation(Action) && ExpectedVersion >= version) ||
+        RecoveryExpectedVersion >= version;
+
     /// <summary>
     /// System-only accepted operations that may rebase a stale Delete If-Match.
     /// Provider receipts, lifecycle/status transitions, and telemetry bump
@@ -517,6 +521,13 @@ public static class ElsaInstanceStateMachine
                                     instance.Intent.DesiredLifecycle == ElsaDesiredLifecycle.Deleting
                 ? instance
                 : RequestReconciliation(instance);
+            // Customer Recover is a later mutation. Advance the aggregate so a
+            // Delete If-Match captured before Recover is stale. Delete recovery
+            // keeps the cleanup aggregate in place.
+            if (activeOperation.Action != ElsaInstanceOperationAction.Delete &&
+                instance.Intent.DesiredLifecycle != ElsaDesiredLifecycle.Deleting &&
+                recoveredInstance.Version == instance.Version)
+                recoveredInstance = recoveredInstance with { Version = checked(instance.Version + 1) };
             return new ElsaInstanceTransitionResult(recoveredInstance, activeOperation.Recover(operationScope, key, hash, expected));
         }
 

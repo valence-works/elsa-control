@@ -3295,7 +3295,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         await using var scope = app.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
         var evidence = $"https://evidence.example/retry/delete-after-recover-{suffix}";
-        var digest = "sha256:" + new string(suffix[0], 64);
+        var digest = "sha256:" + new string('a', 64);
         var retrySafe = ElsaInstanceProviderReconciliationService.RetrySafeCode;
         await db.Database.ExecuteSqlInterpolatedAsync($"""
             UPDATE ElsaInstanceOperations
