@@ -49,7 +49,7 @@ public static class WorkspacePermissionManagementEndpoints
                 new GrantWorkspacePermissionRequest(request.AccountId, request.Permission, context.GetWorkspaceAccess().AccountId),
                 cancellationToken);
             return Results.Ok(grant);
-        }).RequireWorkspaceOwner();
+        }).RequireWorkspaceOwner().AllowCloudBff();
 
         group.MapPost("/revocations", async (
             Guid workspaceId,
@@ -63,7 +63,7 @@ public static class WorkspacePermissionManagementEndpoints
                 new RevokeWorkspacePermissionRequest(request.AccountId, request.Permission, context.GetWorkspaceAccess().AccountId),
                 cancellationToken);
             return Results.Ok(result);
-        }).RequireWorkspaceOwner();
+        }).RequireWorkspaceOwner().AllowCloudBff();
 
         return endpoints;
     }
