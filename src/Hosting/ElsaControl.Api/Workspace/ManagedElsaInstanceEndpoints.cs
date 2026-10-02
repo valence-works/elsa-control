@@ -432,7 +432,9 @@ public static class ManagedElsaInstanceEndpoints
                     if (current.Version <= expectedVersion.Value)
                         return Problem(ConflictCode(exception), "The request conflicts with the current instance state.", StatusCodes.Status412PreconditionFailed);
                     if (!string.Equals(current.Name, instance.Name, StringComparison.Ordinal) ||
-                        !Equals(current.DesiredStateRevisionId, instance.DesiredStateRevisionId))
+                        !Equals(current.DesiredStateRevisionId, instance.DesiredStateRevisionId) ||
+                        await lifecycleStore.HasCustomerMutationAtOrAfterVersionAsync(
+                            workspaceId, instanceId, expectedVersion.Value, deleteRecovery?.Id, cancellationToken))
                         return Problem(
                             "instance.version-conflict",
                             "We couldn't start deleting this engine. Please try again. If it keeps failing, contact support.",

@@ -413,6 +413,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         if (workspaceId == Guid.Empty || instanceId == Guid.Empty)
             return false;
 
+        var systemOnly = ElsaInstanceOperation.SystemOnlyLifecycleActions;
         return await dbContext.ElsaInstanceOperations
             .AsNoTracking()
             .AnyAsync(operation =>
@@ -421,7 +422,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 (exceptOperationId == null || operation.Id != exceptOperationId) &&
                 operation.ExpectedVersion >= version &&
                 operation.Action != ElsaInstanceOperationAction.Create &&
-                operation.Action != ElsaInstanceOperationAction.Reconcile,
+                !systemOnly.Contains(operation.Action),
                 cancellationToken);
     }
 

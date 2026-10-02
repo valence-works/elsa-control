@@ -44,9 +44,11 @@ public interface IElsaInstanceLifecycleStore
 
     /// <summary>
     /// True when a customer or operator mutation was accepted at or after
-    /// <paramref name="version"/>. Create and Reconcile are system/founding
-    /// operations and do not count. <paramref name="exceptOperationId"/>
-    /// excludes the Delete being recovered or replayed.
+    /// <paramref name="version"/>. Create is founding and does not count.
+    /// Only <see cref="ElsaInstanceOperation.SystemOnlyLifecycleActions"/>
+    /// may rebase; unknown actions count as customer changes.
+    /// <paramref name="exceptOperationId"/> excludes the Delete being
+    /// recovered or replayed.
     /// </summary>
     Task<bool> HasCustomerMutationAtOrAfterVersionAsync(
         Guid workspaceId,

@@ -815,6 +815,50 @@ public sealed class ElsaInstanceLifecycleServiceTests
     }
 
     [Fact]
+    public async Task Delete_rebase_is_accepted_after_reconcile_only_churn()
+    {
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var created = await service.CreateAsync(new ElsaInstanceCreateRequest(
+            OrganizationId, WorkspaceId, "Claims", "claims-prod", Intent(), "create-rebase-reconcile"));
+        var originalVersion = created.Instance.Version;
+        await store.CommitAcceptedAsync(
+            created.Instance,
+            created.Instance,
+            created.Operation
+                .TransitionTo(ElsaInstanceOperationState.Queued)
+                .TransitionTo(ElsaInstanceOperationState.Running)
+                .TransitionTo(ElsaInstanceOperationState.Succeeded),
+            new ElsaInstanceLifecycleOutboxMessage(
+                Guid.NewGuid(), WorkspaceId, created.Instance.Id, created.Operation.Id,
+                created.Operation.Action, created.Operation.RequestHash, Now));
+        var reconciled = await service.ReconcileAsync(new ElsaInstanceLifecycleRequest(
+            WorkspaceId, created.Instance.Id, originalVersion, "reconcile-before-delete"));
+        var transitionVersion = 47;
+        await store.CommitAcceptedAsync(
+            reconciled.Instance,
+            AdvanceInstanceVersion(reconciled.Instance, transitionVersion),
+            reconciled.Operation
+                .TransitionTo(ElsaInstanceOperationState.Queued)
+                .TransitionTo(ElsaInstanceOperationState.Running)
+                .TransitionTo(ElsaInstanceOperationState.Succeeded),
+            new ElsaInstanceLifecycleOutboxMessage(
+                Guid.NewGuid(), WorkspaceId, created.Instance.Id, reconciled.Operation.Id,
+                reconciled.Operation.Action, reconciled.Operation.RequestHash, Now));
+        AddDeleteConfirmation(authority, created.Instance);
+
+        var accepted = await service.DeleteAsync(new ElsaInstanceLifecycleRequest(
+            WorkspaceId, created.Instance.Id, transitionVersion, "delete-after-reconcile",
+            DeleteConfirmationId: DeleteConfirmationId, ActorAccountId: ActorAccountId,
+            CanonicalExpectedVersion: originalVersion));
+
+        Assert.False(accepted.Replayed);
+        Assert.Equal(ElsaInstanceOperationAction.Delete, accepted.Operation.Action);
+        Assert.Equal(transitionVersion, accepted.Operation.ExpectedVersion);
+    }
+
+    [Fact]
     public async Task Delete_requires_confirmation_and_actor_at_the_lifecycle_boundary()
     {
         var store = new InMemoryElsaInstanceLifecycleStore();

@@ -1985,6 +1985,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         WorkspaceShowPresent(process);
         process.Success(IsLogAnalyticsWorkspaceDelete);
         WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
         process.Success(args => args.Contains("group") && args.Contains("delete"));
         process.Success(args => args.Contains("group") && args.Contains("exists"), "false");
         process.Success(args => args.Contains("list-deleted"), "[]");
@@ -2095,6 +2096,46 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Cleanup_is_uncertain_when_force_delete_leaves_the_workspace_present()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("resource") && args.Contains("list"),
+            "[{\"id\":\"" + ProofLogsWorkspaceId + "\",\"type\":\"Microsoft.OperationalInsights/workspaces\"}]");
+        WorkspaceShowPresent(process);
+        process.Failure(IsLogAnalyticsWorkspaceDelete);
+        WorkspaceShowPresent(process);
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal("azure.cleanup.log-analytics-workspace-uncertain", result.Code);
+        Assert.False(result.OwnedResourcesAbsent);
+        Assert.Contains(process.Calls, IsLogAnalyticsWorkspaceDelete);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("group") && call.Contains("delete"));
+    }
+
+    [Fact]
+    public async Task Cleanup_keeps_the_resource_group_when_the_workspace_is_already_soft_deleted()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "[]");
+        WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, SoftDeletedProofLogs);
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal(AzureBicepProviderRunner.LogAnalyticsWorkspaceSoftDeletedCode, result.Code);
+        Assert.False(result.OwnedResourcesAbsent);
+        Assert.DoesNotContain(process.Calls, IsLogAnalyticsWorkspaceDelete);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("group") && call.Contains("delete"));
+    }
+
+    [Fact]
     public async Task Cleanup_force_deletes_a_workspace_omitted_from_an_owned_inventory()
     {
         var process = new FakeCommandProcess();
@@ -2104,6 +2145,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         WorkspaceShowPresent(process);
         process.Success(IsLogAnalyticsWorkspaceDelete);
         WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
         process.Success(args => args.Contains("group") && args.Contains("delete"));
         process.Success(args => args.Contains("group") && args.Contains("exists"), "false");
         process.Success(args => args.Contains("list-deleted"), "[]");
@@ -2131,6 +2173,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("role") && args.Contains("assignment") && args.Contains("list"), "[]");
         process.Success(args => args.Contains("deployment") && args.Contains("group") && args.Contains("delete"));
         WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
         process.Success(args => args.Contains("group") && args.Contains("delete"));
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
@@ -2146,6 +2189,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
         process.Success(args => args.Contains("resource") && args.Contains("list"), "[]");
         WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
         process.Success(args => args.Contains("group") && args.Contains("delete"));
         process.Success(args => args.Contains("group") && args.Contains("exists"), "false");
         process.Success(args => args.Contains("list-deleted"), "[]");
@@ -2167,6 +2211,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
         process.Success(args => args.Contains("resource") && args.Contains("list"), "[]");
         WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
         process.Success(args => args.Contains("group") && args.Contains("delete"));
         process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
         process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
@@ -2218,6 +2263,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("deployment") && args.Contains("delete"));
         process.Success(args => args.Contains("deployment") && args.Contains("list"), "[]");
         WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
         process.Success(args => args.Contains("group") && args.Contains("delete"));
         process.Success(args => args.Contains("group") && args.Contains("exists"), "false");
         process.Success(args => args.Contains("list-deleted"), "[]");
@@ -3377,6 +3423,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("deployment") && args.Contains("delete"));
         process.Success(args => args.Contains("deployment") && args.Contains("list"), "[]");
         WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
         process.Success(args => args.Contains("group") && args.Contains("delete"));
         process.Success(args => args.Contains("group") && args.Contains("exists"), "false");
         process.Success(args => args.Contains("list-deleted"), "[]");
@@ -3481,6 +3528,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Failure(args => args.Contains("role") && args.Contains("list"));
         process.Success(args => args.Contains("group") && args.Contains("exists") && args.Contains("registry-rg"), "false");
         WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
         process.Success(args => args.Contains("group") && args.Contains("delete"));
         process.Success(args => args.Contains("group") && args.Contains("exists") && args.Contains("proof-rg"), "false");
         process.Success(args => args.Contains("list-deleted"), "[]");

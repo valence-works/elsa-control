@@ -236,6 +236,22 @@ public sealed class ElsaInstanceContractTests
     }
 
     [Fact]
+    public void Delete_if_match_rebase_uses_an_explicit_system_only_allowlist()
+    {
+        Assert.Equal(
+            [ElsaInstanceOperationAction.Reconcile],
+            ElsaInstanceOperation.SystemOnlyLifecycleActions);
+        foreach (var action in Enum.GetValues<ElsaInstanceOperationAction>())
+        {
+            var systemOnly = action == ElsaInstanceOperationAction.Reconcile;
+            Assert.Equal(systemOnly, ElsaInstanceOperation.IsSystemOnlyLifecycleAction(action));
+            Assert.Equal(
+                action != ElsaInstanceOperationAction.Create && !systemOnly,
+                ElsaInstanceOperation.IsCustomerOrOperatorMutation(action));
+        }
+    }
+
+    [Fact]
     public void Delete_is_explicit_and_only_cleanup_can_project_deleted()
     {
         var instance = CreateInstance(ElsaObservedLifecycle.Ready);

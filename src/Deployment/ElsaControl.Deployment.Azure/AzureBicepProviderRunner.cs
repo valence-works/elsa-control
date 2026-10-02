@@ -1719,6 +1719,9 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 command, cancellationToken);
             if (workspaceForceDelete is not null)
                 return workspaceForceDelete;
+            if (await IsLogAnalyticsWorkspaceSoftDeletedAsync(command, cancellationToken))
+                return Uncertain(command, AzureProviderOperationPhase.CleanupVerified, LogAnalyticsWorkspaceSoftDeletedCode,
+                    "The owned Log Analytics workspace remains in the 14-day soft-delete list.");
 
             EnsureMutationAuthority(command);
             await ExecuteAzAsync<AzureCommandNoOutput>(command,

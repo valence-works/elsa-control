@@ -204,13 +204,31 @@ public sealed record ElsaInstanceOperation
     }
 
     /// <summary>
+    /// System-only accepted operations that may rebase a stale Delete If-Match.
+    /// Provider receipts, lifecycle/status transitions, and telemetry bump
+    /// Version without writing an operation and therefore never appear here.
+    /// Unknown future actions are not on this list.
+    /// </summary>
+    public static readonly ElsaInstanceOperationAction[] SystemOnlyLifecycleActions =
+        [ElsaInstanceOperationAction.Reconcile];
+
+    public static bool IsSystemOnlyLifecycleAction(ElsaInstanceOperationAction action)
+    {
+        ElsaInstanceValue.RequireEnum(action, nameof(action));
+        return SystemOnlyLifecycleActions.Contains(action);
+    }
+
+    /// <summary>
     /// Customer and operator mutations that must not be skipped by a Delete
-    /// If-Match rebase. Create founds the instance; Reconcile is system churn.
+    /// If-Match rebase. Create founds the instance and is not a later mutation.
+    /// Anything that is not Create and not on
+    /// <see cref="SystemOnlyLifecycleActions"/> counts as a customer change.
     /// </summary>
     public static bool IsCustomerOrOperatorMutation(ElsaInstanceOperationAction action)
     {
         ElsaInstanceValue.RequireEnum(action, nameof(action));
-        return action is not (ElsaInstanceOperationAction.Create or ElsaInstanceOperationAction.Reconcile);
+        return action != ElsaInstanceOperationAction.Create &&
+               !IsSystemOnlyLifecycleAction(action);
     }
 
     public static bool CanTransition(ElsaInstanceOperationState current, ElsaInstanceOperationState next)
