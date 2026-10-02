@@ -2221,6 +2221,79 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Dedicated_delete_returns_412_when_if_match_lags_a_customer_rename()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-instance-delete-after-rename");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(owner, workspaceId, "narrow-delete-after-rename-runtime");
+        await MarkOperationSucceededAsync(app, created.Operation.Id);
+        var rename = new HttpRequestMessage(
+            HttpMethod.Patch,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}")
+        {
+            Content = JsonContent.Create(
+                new ManagedElsaInstancePatchRequest(Name: "Renamed before delete"),
+                options: ControlApiTestApplication.JsonOptions)
+        };
+        rename.Headers.Add("Idempotency-Key", "narrow-delete-after-rename");
+        rename.Headers.TryAddWithoutValidation("If-Match", created.Instance.ETag);
+        using var renamed = await owner.SendAsync(rename);
+        Assert.Equal(HttpStatusCode.Accepted, renamed.StatusCode);
+
+        using var confirmationResponse = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+        var operationCount = await CountOperationsAsync(app);
+
+        using var deletion = await SendDeleteAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "narrow-delete-after-rename-delete",
+            confirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.PreconditionFailed, deletion.StatusCode);
+        Assert.Contains("instance.version-conflict", await deletion.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(operationCount, await CountOperationsAsync(app));
+    }
+
+    [Fact]
+    public async Task Dedicated_delete_retries_once_after_reconcile_only_churn()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-instance-delete-after-reconcile");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(owner, workspaceId, "narrow-delete-after-reconcile-runtime");
+        await MarkOperationSucceededAsync(app, created.Operation.Id);
+        var reconcile = await SendOperationAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "narrow-delete-after-reconcile",
+            new(ElsaInstanceOperationAction.Reconcile));
+        Assert.Equal(HttpStatusCode.Accepted, reconcile.StatusCode);
+
+        using var confirmationResponse = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+
+        using var deletion = await SendDeleteAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "narrow-delete-after-reconcile-delete",
+            confirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.Accepted, deletion.StatusCode);
+    }
+
+    [Fact]
     public async Task Dedicated_delete_rechecks_workspace_membership_after_confirmation()
     {
         const string subject = "managed-instance-narrow-delete-revoked-owner";

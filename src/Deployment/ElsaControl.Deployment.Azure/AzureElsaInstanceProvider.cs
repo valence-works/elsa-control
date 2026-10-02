@@ -312,8 +312,9 @@ public sealed class AzureElsaInstanceProvider(
                 cancellationToken);
             if (latest is not null &&
                 string.Equals(latest.Observation.PostconditionFingerprint, postconditionFingerprint, StringComparison.Ordinal) &&
-                (!request.OperatorInitiated ||
-                 latest.Observation.ObservedInstanceVersion == request.InstanceVersion))
+                (request.OperatorInitiated
+                    ? latest.Observation.ObservedInstanceVersion == request.InstanceVersion
+                    : IsReceiptVersionFresh(latest, request.InstanceVersion)))
             {
                 return new RecoveryObservationResult(
                     new ElsaInstanceProviderRetryEvidence(
@@ -422,7 +423,7 @@ public sealed class AzureElsaInstanceProvider(
             request.AttemptNumber,
             operation.Id,
             cancellationToken);
-        if (currentAttempt is not null)
+        if (currentAttempt is not null && IsReceiptVersionFresh(currentAttempt, request.InstanceVersion))
             return ToManualEvidence(currentAttempt, operation, resolvedReason);
 
         var latest = await _recoveryObservationStore.GetLatestReceiptForOperationAsync(
@@ -432,7 +433,8 @@ public sealed class AzureElsaInstanceProvider(
             cancellationToken);
         if (latest is null)
             return new RecoveryObservationResult(null, resolvedReason);
-        if (latest.Observation.ObservedLifecycleAttemptNumber == request.AttemptNumber)
+        if (latest.Observation.ObservedLifecycleAttemptNumber == request.AttemptNumber &&
+            IsReceiptVersionFresh(latest, request.InstanceVersion))
             return ToManualEvidence(latest, operation, resolvedReason);
 
         try
@@ -472,6 +474,12 @@ public sealed class AzureElsaInstanceProvider(
                 autoResume: false,
                 operation.AutoResumeCount),
             reasonCode);
+
+    private static bool IsReceiptVersionFresh(
+        AzureProviderRecoveryObservationReceipt receipt,
+        int instanceVersion) =>
+        receipt.Observation.ObservedInstanceVersion == instanceVersion ||
+        receipt.Observation.ObservedInstanceVersion == instanceVersion - 1;
 
     private static string? ResolveObservationReason(
         AzureProviderRecoveryObservation observed,

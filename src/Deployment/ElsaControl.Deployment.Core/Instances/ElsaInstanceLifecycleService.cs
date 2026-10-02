@@ -357,6 +357,13 @@ public sealed class ElsaInstanceLifecycleService(
             requestedName,
             reason,
             confirmationId);
+        if (canonicalExpectedVersion is { } rebaseCanonical &&
+            rebaseCanonical < expectedVersion &&
+            action is ElsaInstanceOperationAction.Delete or ElsaInstanceOperationAction.Recover &&
+            await store.HasCustomerMutationAtOrAfterVersionAsync(
+                workspaceId, instanceId, rebaseCanonical, expectedOperationId, cancellationToken))
+            throw new ElsaInstanceLifecycleConflictException(
+                "Instance version conflict.", ElsaInstanceLifecycleConflictReason.VersionConflict);
         var activeOperation = await store.GetActiveOperationAsync(workspaceId, instanceId, cancellationToken);
         if (action == ElsaInstanceOperationAction.Recover && expectedOperationId is { } operationId &&
             (activeOperation is null || activeOperation.Id != operationId))

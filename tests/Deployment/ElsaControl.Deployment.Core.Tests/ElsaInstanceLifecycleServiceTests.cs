@@ -771,6 +771,50 @@ public sealed class ElsaInstanceLifecycleServiceTests
     }
 
     [Fact]
+    public async Task Delete_rebase_is_rejected_after_a_customer_mutation()
+    {
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var created = await service.CreateAsync(new ElsaInstanceCreateRequest(
+            OrganizationId, WorkspaceId, "Claims", "claims-prod", Intent(), "create-rebase-customer"));
+        var originalVersion = created.Instance.Version;
+        await store.CommitAcceptedAsync(
+            created.Instance,
+            created.Instance,
+            created.Operation
+                .TransitionTo(ElsaInstanceOperationState.Queued)
+                .TransitionTo(ElsaInstanceOperationState.Running)
+                .TransitionTo(ElsaInstanceOperationState.Succeeded),
+            new ElsaInstanceLifecycleOutboxMessage(
+                Guid.NewGuid(), WorkspaceId, created.Instance.Id, created.Operation.Id,
+                created.Operation.Action, created.Operation.RequestHash, Now));
+        var renamed = await service.UpdateIntentAsync(new ElsaInstanceIntentUpdateRequest(
+            WorkspaceId, created.Instance.Id, null, originalVersion, "rename-before-delete", "Claims renamed"));
+        var transitionVersion = 47;
+        await store.CommitAcceptedAsync(
+            renamed.Instance,
+            AdvanceInstanceVersion(renamed.Instance, transitionVersion),
+            renamed.Operation
+                .TransitionTo(ElsaInstanceOperationState.Queued)
+                .TransitionTo(ElsaInstanceOperationState.Running)
+                .TransitionTo(ElsaInstanceOperationState.Succeeded),
+            new ElsaInstanceLifecycleOutboxMessage(
+                Guid.NewGuid(), WorkspaceId, created.Instance.Id, renamed.Operation.Id,
+                renamed.Operation.Action, renamed.Operation.RequestHash, Now));
+        AddDeleteConfirmation(authority, created.Instance);
+
+        var conflict = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            service.DeleteAsync(new ElsaInstanceLifecycleRequest(
+                WorkspaceId, created.Instance.Id, transitionVersion, "delete-after-rename",
+                DeleteConfirmationId: DeleteConfirmationId, ActorAccountId: ActorAccountId,
+                CanonicalExpectedVersion: originalVersion)));
+
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.VersionConflict, conflict.Reason);
+        Assert.DoesNotContain(store.Operations, operation => operation.Action == ElsaInstanceOperationAction.Delete);
+    }
+
+    [Fact]
     public async Task Delete_requires_confirmation_and_actor_at_the_lifecycle_boundary()
     {
         var store = new InMemoryElsaInstanceLifecycleStore();
@@ -1010,6 +1054,15 @@ public sealed class ElsaInstanceLifecycleServiceTests
             string? idempotencyScope = null,
             CancellationToken cancellationToken = default) =>
             inner.FindOperationByKeyAsync(workspaceId, idempotencyKey, instanceId, action, idempotencyScope, cancellationToken);
+
+        public Task<bool> HasCustomerMutationAtOrAfterVersionAsync(
+            Guid workspaceId,
+            Guid instanceId,
+            int version,
+            Guid? exceptOperationId = null,
+            CancellationToken cancellationToken = default) =>
+            inner.HasCustomerMutationAtOrAfterVersionAsync(
+                workspaceId, instanceId, version, exceptOperationId, cancellationToken);
 
         public Task<ElsaInstanceLifecycleAcceptance> CommitAcceptedAsync(
             ElsaInstance? expectedInstance,

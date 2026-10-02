@@ -403,6 +403,28 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         return entity is null ? null : MapOperation(entity);
     }
 
+    public async Task<bool> HasCustomerMutationAtOrAfterVersionAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        int version,
+        Guid? exceptOperationId = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (workspaceId == Guid.Empty || instanceId == Guid.Empty)
+            return false;
+
+        return await dbContext.ElsaInstanceOperations
+            .AsNoTracking()
+            .AnyAsync(operation =>
+                operation.WorkspaceId == workspaceId &&
+                operation.InstanceId == instanceId &&
+                (exceptOperationId == null || operation.Id != exceptOperationId) &&
+                operation.ExpectedVersion >= version &&
+                operation.Action != ElsaInstanceOperationAction.Create &&
+                operation.Action != ElsaInstanceOperationAction.Reconcile,
+                cancellationToken);
+    }
+
     public async Task<ElsaInstanceOperation?> FindOperationByKeyAsync(
         Guid workspaceId,
         string idempotencyKey,

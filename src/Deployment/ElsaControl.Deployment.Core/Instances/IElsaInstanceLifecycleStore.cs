@@ -43,6 +43,19 @@ public interface IElsaInstanceLifecycleStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// True when a customer or operator mutation was accepted at or after
+    /// <paramref name="version"/>. Create and Reconcile are system/founding
+    /// operations and do not count. <paramref name="exceptOperationId"/>
+    /// excludes the Delete being recovered or replayed.
+    /// </summary>
+    Task<bool> HasCustomerMutationAtOrAfterVersionAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        int version,
+        Guid? exceptOperationId = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Atomically persists an accepted mutation. A store must return the original
     /// operation/outbox for an exact replay and reject mismatched key/hash, version,
     /// or active-operation races with <see cref="ElsaInstanceLifecycleConflictException"/>.

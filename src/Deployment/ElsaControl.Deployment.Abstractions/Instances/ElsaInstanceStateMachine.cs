@@ -203,6 +203,16 @@ public sealed record ElsaInstanceOperation
         };
     }
 
+    /// <summary>
+    /// Customer and operator mutations that must not be skipped by a Delete
+    /// If-Match rebase. Create founds the instance; Reconcile is system churn.
+    /// </summary>
+    public static bool IsCustomerOrOperatorMutation(ElsaInstanceOperationAction action)
+    {
+        ElsaInstanceValue.RequireEnum(action, nameof(action));
+        return action is not (ElsaInstanceOperationAction.Create or ElsaInstanceOperationAction.Reconcile);
+    }
+
     public static bool CanTransition(ElsaInstanceOperationState current, ElsaInstanceOperationState next)
     {
         ElsaInstanceValue.RequireEnum(current, nameof(current));

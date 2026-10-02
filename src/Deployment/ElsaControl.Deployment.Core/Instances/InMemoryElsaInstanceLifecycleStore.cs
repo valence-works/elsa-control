@@ -513,6 +513,26 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         }
     }
 
+    public Task<bool> HasCustomerMutationAtOrAfterVersionAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        int version,
+        Guid? exceptOperationId = null,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            if (!_instances.TryGetValue(instanceId, out var instance) || instance.WorkspaceId != workspaceId)
+                return Task.FromResult(false);
+            return Task.FromResult(_operations.Values.Any(operation =>
+                operation.InstanceId == instanceId &&
+                operation.Id != exceptOperationId &&
+                operation.ExpectedVersion >= version &&
+                ElsaInstanceOperation.IsCustomerOrOperatorMutation(operation.Action)));
+        }
+    }
+
     public Task<ElsaInstanceOperation?> FindOperationByKeyAsync(
         Guid workspaceId,
         string idempotencyKey,
