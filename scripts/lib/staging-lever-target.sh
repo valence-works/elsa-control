@@ -1,12 +1,58 @@
 # Shared staging-target predicate for operator levers.
-# Prefer TARGET_ENVIRONMENT (the workflow's GitHub environment / dispatch input).
-# Direct invocation also accepts the staging Azure env name valence-control-staging.
+# Explicit --environment / TARGET_ENVIRONMENT wins over AZURE_ENV_NAME.
+# Any disagreement among the provided names, or a non-test target, fails closed.
+
+is_staging_azure_env_name() {
+  [ "$1" = "test" ] || [ "$1" = "valence-control-staging" ]
+}
+
+# True when TARGET_ENVIRONMENT, ENVIRONMENT_NAME, and AZURE_ENV_NAME (those that
+# are set) do not all classify as staging or all classify as non-staging.
+staging_lever_target_names_disagree() {
+  local staging=0
+  local other=0
+  if [ -n "${TARGET_ENVIRONMENT:-}" ]; then
+    if [ "$TARGET_ENVIRONMENT" = "test" ]; then
+      staging=1
+    else
+      other=1
+    fi
+  fi
+  if [ -n "${ENVIRONMENT_NAME:-}" ]; then
+    if is_staging_azure_env_name "$ENVIRONMENT_NAME"; then
+      staging=1
+    else
+      other=1
+    fi
+  fi
+  if [ -n "${AZURE_ENV_NAME:-}" ]; then
+    if is_staging_azure_env_name "$AZURE_ENV_NAME"; then
+      staging=1
+    else
+      other=1
+    fi
+  fi
+  [ "$staging" -eq 1 ] && [ "$other" -eq 1 ]
+}
+
+require_consistent_staging_lever_target_names() {
+  if staging_lever_target_names_disagree; then
+    echo "Staging lever target names disagree; explicit --environment / TARGET_ENVIRONMENT wins over AZURE_ENV_NAME, and a mismatch or non-test target is refused." >&2
+    return 1
+  fi
+  return 0
+}
+
 is_staging_lever_target() {
+  if staging_lever_target_names_disagree; then
+    return 1
+  fi
   if [ -n "${TARGET_ENVIRONMENT:-}" ]; then
     [ "$TARGET_ENVIRONMENT" = "test" ]
+  elif [ -n "${ENVIRONMENT_NAME:-}" ]; then
+    is_staging_azure_env_name "$ENVIRONMENT_NAME"
   else
-    local env_name="${AZURE_ENV_NAME:-${ENVIRONMENT_NAME:-}}"
-    [ "$env_name" = "test" ] || [ "$env_name" = "valence-control-staging" ]
+    is_staging_azure_env_name "${AZURE_ENV_NAME:-}"
   fi
 }
 

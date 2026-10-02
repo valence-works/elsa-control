@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using ElsaControl.Deployment.Abstractions.Instances;
+using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.EntityFrameworkCore;
@@ -34,7 +35,6 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                 {
                     var instanceEntity = await LoadTrackedInstanceAsync(instanceId, cancellationToken)
                         ?? throw new KeyNotFoundException("Elsa instance does not exist.");
-                    var instance = MapInstance(instanceEntity);
 
                     var activeOperation = await dbContext.ElsaInstanceOperations
                         .AsNoTracking()
@@ -50,6 +50,16 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                         .FirstOrDefaultAsync(cancellationToken);
                     if (activeOperation is not null)
                         throw Conflict("An instance operation is already active.", ElsaInstanceLifecycleConflictReason.OperationActive);
+
+                    var preFireLifecycle = instanceEntity.ObservedLifecycle;
+                    var preFireHealth = instanceEntity.Health;
+                    if (preFireLifecycle != ElsaObservedLifecycle.Ready ||
+                        preFireHealth != ElsaInstanceHealth.Healthy)
+                        throw Conflict(
+                            "The instance must be Ready and Healthy before the staging recovery lever can fire.",
+                            ElsaInstanceLifecycleConflictReason.InvalidState);
+
+                    var instance = MapInstance(instanceEntity);
 
                     ElsaInstanceTransitionResult transition;
                     try
@@ -84,7 +94,6 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                             commercialDecision.CurrentInstanceCount,
                             commercialDecision.MaxInstances);
 
-                    var priorObservedLifecycle = instanceEntity.ObservedLifecycle;
                     ApplyAggregate(instanceEntity, transition.Instance);
                     instanceEntity.UpdatedAt = now;
 
@@ -107,7 +116,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                         await CreateAuditEventAsync(
                             instanceEntity,
                             operationEntity,
-                            priorObservedLifecycle,
+                            preFireLifecycle,
                             now,
                             cancellationToken,
                             StagingRecoveryLifecycleLeverStoreDefaults.AcceptedEventType,
@@ -134,6 +143,9 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                     instanceEntity.ObservedLifecycle = ElsaObservedLifecycle.Unknown;
                     instanceEntity.Health = ElsaInstanceHealth.Unknown;
                     instanceEntity.UpdatedAt = now;
+                    // TODO(#660): stamp ReasonEnteredAt (and RequiresHumanAt for the
+                    // immediate class) in this same compare-and-set once the catalog lands.
+                    // Do not hide run-less lever parks from the #660/#662 scan.
 
                     await dbContext.ElsaInstanceAuditEvents.AddAsync(
                         await CreateAuditEventAsync(
@@ -151,7 +163,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                     var fired = await CreateAuditEventAsync(
                         instanceEntity,
                         operationEntity,
-                        recoveryPrior,
+                        preFireLifecycle,
                         now,
                         cancellationToken,
                         StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType,
@@ -159,6 +171,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                         summary: reason);
                     fired.Id = firedAuditId;
                     fired.OperatorSubject = NormalizeOperatorSubject(operatorSubject);
+                    // Catalog sanitization rewrites Summary to DiagnosticCode. PriorState
+                    // is the durable QA-readable pre-fire snapshot (Ready:Healthy).
+                    fired.PriorState = StagingRecoveryLifecycleLeverStoreDefaults.FormatFiredSnapshot(
+                        preFireLifecycle,
+                        preFireHealth);
                     await dbContext.ElsaInstanceAuditEvents.AddAsync(fired, cancellationToken);
                     await dbContext.SaveChangesAsync(cancellationToken);
 
@@ -230,7 +247,20 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                         throw Conflict(
                             "No lever-parked RecoveryRequired reconcile is active.",
                             ElsaInstanceLifecycleConflictReason.InvalidState);
-                    if (!StagingRecoveryLifecycleLeverStoreDefaults.IsAllowedReason(operationEntity.FailureCode) ||
+                    var leverFired = await dbContext.ElsaInstanceAuditEvents
+                        .AsNoTracking()
+                        .AnyAsync(
+                            x => x.InstanceId == instanceId &&
+                                 x.OperationId == operationEntity.Id &&
+                                 x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType,
+                            cancellationToken);
+                    var providerKey = AzureProviderOperationValidation.LifecycleIdempotencyKey(operationEntity.Id);
+                    var hasProviderOperation = await dbContext.AzureProviderOperations
+                        .AsNoTracking()
+                        .AnyAsync(x => x.IdempotencyKey == providerKey, cancellationToken);
+                    if (!leverFired ||
+                        hasProviderOperation ||
+                        !StagingRecoveryLifecycleLeverStoreDefaults.IsAllowedReason(operationEntity.FailureCode) ||
                         !string.Equals(
                             operationEntity.ReconciliationDiagnosticCode,
                             StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode,
@@ -250,6 +280,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                     operationEntity.CompletedAt = now;
                     RestoreObservedReady(instanceEntity);
                     instanceEntity.UpdatedAt = now;
+                    // TODO(#660): clear RequiresHumanAt / ReasonEnteredAt in this
+                    // same transaction as TransitionTo(Succeeded) once those columns exist.
 
                     var reset = await CreateAuditEventAsync(
                         instanceEntity,
@@ -318,7 +350,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                 ElsaObservedLifecycle.Ready);
         }
 
-        instance.Health = ElsaInstanceHealth.Healthy;
+        instance.Health = ElsaInstanceHealth.Unknown;
     }
 
     private static void TransitionPersistedOperation(

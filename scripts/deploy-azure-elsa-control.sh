@@ -134,10 +134,11 @@ if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
   echo "Image tag has an invalid container tag format." >&2
   exit 1
 fi
-# Shared #655 staging-target predicate. AZURE_ENV_NAME / --environment
-# valence-control-staging counts when TARGET_ENVIRONMENT is unset.
+# Shared staging-target predicate. Explicit --environment / TARGET_ENVIRONMENT
+# wins over AZURE_ENV_NAME. A mismatch or non-test target fails closed.
 # shellcheck source=scripts/lib/staging-lever-target.sh
 . "$ROOT_DIR/scripts/lib/staging-lever-target.sh"
+require_consistent_staging_lever_target_names
 if [[ -n "$EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS" ]] && ! is_staging_billing_lever_target; then
   echo "EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS is only permitted for the test (staging) environment." >&2
   exit 1

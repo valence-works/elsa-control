@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Text.Json;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.OrganizationBilling;
 using ElsaControl.Api.Workspace;
@@ -44,9 +45,13 @@ public static class StagingRecoveryLifecycleLeverEndpoints
                     {
                         return InvalidState("The state machine refused the recovery-required transition.");
                     }
-                    catch (InvalidOperationException)
+                    catch (JsonException)
                     {
-                        return InvalidState("The state machine refused the recovery-required transition.");
+                        return ReasonNotAllowed();
+                    }
+                    catch (StagingRecoveryLifecycleLeverBadRequestException)
+                    {
+                        return ReasonNotAllowed();
                     }
                 })
             .RequireAuthorization(AdminAuthorization.Policy)
@@ -77,10 +82,6 @@ public static class StagingRecoveryLifecycleLeverEndpoints
                     {
                         return InvalidState("The state machine refused the staging lever reset.");
                     }
-                    catch (InvalidOperationException)
-                    {
-                        return InvalidState("The state machine refused the staging lever reset.");
-                    }
                 })
             .RequireAuthorization(AdminAuthorization.Policy)
             .WithTags("Staging Lifecycle Lever");
@@ -105,13 +106,43 @@ public static class StagingRecoveryLifecycleLeverEndpoints
     private static string? OperatorSubject(ClaimsPrincipal user, ControlIdentityOptions identityOptions) =>
         user.FindFirstValue(identityOptions.Claims.Subject) ?? user.FindFirstValue(ClaimTypes.NameIdentifier);
 
+    private static IResult ReasonNotAllowed() =>
+        Problem(
+            StagingRecoveryLifecycleLeverDefaults.ReasonNotAllowedCode,
+            "The staging recovery lifecycle lever reason is not allowed.",
+            StatusCodes.Status400BadRequest);
+
     private static async Task<string?> ReadReasonAsync(HttpContext context, CancellationToken cancellationToken)
     {
-        if (context.Request.ContentLength is null or 0)
+        var request = context.Request;
+        if (!HasRequestBody(request))
             return null;
 
-        var request = await context.Request.ReadFromJsonAsync<StagingRecoveryLifecycleLeverFireRequest>(cancellationToken);
-        return request?.Reason;
+        if (!request.HasJsonContentType())
+            throw new StagingRecoveryLifecycleLeverBadRequestException();
+
+        try
+        {
+            var body = await request.ReadFromJsonAsync<StagingRecoveryLifecycleLeverFireRequest>(cancellationToken);
+            return body?.Reason;
+        }
+        catch (JsonException exception)
+        {
+            throw new StagingRecoveryLifecycleLeverBadRequestException(
+                "The staging recovery lifecycle lever request body is not valid JSON.",
+                exception);
+        }
+    }
+
+    private static bool HasRequestBody(HttpRequest request)
+    {
+        if (request.ContentLength is 0)
+            return false;
+        if (request.ContentLength > 0)
+            return true;
+        if (request.Headers.ContentType.Count > 0)
+            return true;
+        return request.Headers.TransferEncoding.Count > 0;
     }
 
     private static IResult ToHttpResult(StagingRecoveryLifecycleLeverResult result) => result.Outcome switch
@@ -127,10 +158,7 @@ public static class StagingRecoveryLifecycleLeverEndpoints
             "The instance is not on the staging recovery lifecycle lever allowlist.",
             StatusCodes.Status403Forbidden),
         StagingRecoveryLifecycleLeverOutcome.InstanceNotFound => Results.NotFound(),
-        StagingRecoveryLifecycleLeverOutcome.ReasonNotAllowed => Problem(
-            StagingRecoveryLifecycleLeverDefaults.ReasonNotAllowedCode,
-            "The staging recovery lifecycle lever reason is not allowed.",
-            StatusCodes.Status400BadRequest),
+        StagingRecoveryLifecycleLeverOutcome.ReasonNotAllowed => ReasonNotAllowed(),
         _ => throw new InvalidOperationException("Unsupported staging recovery lifecycle lever outcome.")
     };
 
@@ -152,6 +180,19 @@ public static class StagingRecoveryLifecycleLeverEndpoints
             title: title,
             statusCode: statusCode,
             extensions: new Dictionary<string, object?> { ["code"] = code });
+}
+
+internal sealed class StagingRecoveryLifecycleLeverBadRequestException : Exception
+{
+    public StagingRecoveryLifecycleLeverBadRequestException()
+        : this("The staging recovery lifecycle lever request body is not allowed.")
+    {
+    }
+
+    public StagingRecoveryLifecycleLeverBadRequestException(string message, Exception? innerException = null)
+        : base(message, innerException)
+    {
+    }
 }
 
 public sealed record StagingRecoveryLifecycleLeverFireRequest(string? Reason = null);

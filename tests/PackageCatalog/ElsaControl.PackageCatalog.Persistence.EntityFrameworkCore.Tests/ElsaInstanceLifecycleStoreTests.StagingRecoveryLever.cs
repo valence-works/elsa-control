@@ -1,6 +1,8 @@
 using ElsaControl.Deployment.Abstractions.Instances;
+using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
+using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
@@ -21,7 +23,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 workspace.OrganizationId, workspace.Id, "Managed Elsa", "staging-recovery-lever",
                 CreateIntent(), "create-staging-recovery-lever"));
         await CompleteOperationAsync(db, created.Operation.Id);
-        db.ChangeTracker.Clear();
+        await SetObservedAsync(db, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy);
 
         Assert.False(ElsaInstanceOperation.CanTransition(
             ElsaInstanceOperationState.Accepted,
@@ -60,8 +62,12 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             events,
             x => x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType);
         Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode, fired.DiagnosticCode);
+        Assert.Equal(
+            StagingRecoveryLifecycleLeverStoreDefaults.FormatFiredSnapshot(
+                ElsaObservedLifecycle.Ready,
+                ElsaInstanceHealth.Healthy),
+            fired.PriorState);
         Assert.StartsWith("sha256:", fired.OperatorSubject);
-        Assert.DoesNotContain(events, x => x.EventType.Contains("alert", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -77,7 +83,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 workspace.OrganizationId, workspace.Id, "Managed Elsa", "uncertain-recovery-lever",
                 CreateIntent(), "create-uncertain-recovery-lever"));
         await CompleteOperationAsync(db, created.Operation.Id);
-        db.ChangeTracker.Clear();
+        await SetObservedAsync(db, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy);
 
         var store = CreateStore(db);
         var parked = await store.AcceptReconcileAndRequireRecoveryAsync(
@@ -92,6 +98,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.UncertainCode, operation.FailureCode);
         Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode, operation.ReconciliationDiagnosticCode);
         Assert.Null(operation.DeploymentRunId);
+        // TODO(#660): replace UpdatedAt with ReasonEnteredAt once the catalog lands.
         var enteredAt = operation.UpdatedAt;
 
         Assert.Null(await store.GetTargetAsync(workspace.Id, parked.Operation.Id));
@@ -124,7 +131,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 workspace.OrganizationId, workspace.Id, "Managed Elsa", "concurrent-recovery-lever",
                 CreateIntent(), "create-concurrent-recovery-lever"));
         await CompleteOperationAsync(setup, created.Operation.Id);
-        setup.ChangeTracker.Clear();
+        await SetObservedAsync(setup, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy);
 
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
             .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
@@ -193,7 +200,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 workspace.OrganizationId, workspace.Id, "Managed Elsa", "staging-recovery-reset",
                 CreateIntent(), "create-staging-recovery-reset"));
         await CompleteOperationAsync(db, created.Operation.Id);
-        db.ChangeTracker.Clear();
+        await SetObservedAsync(db, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy);
 
         var store = CreateStore(db);
         var parked = await store.AcceptReconcileAndRequireRecoveryAsync(created.Instance.Id, "api-key");
@@ -215,7 +222,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(parked.Operation.Id, reset.Operation.Id);
         Assert.Equal(ElsaInstanceOperationState.Succeeded, reset.Operation.State);
         Assert.Equal(ElsaObservedLifecycle.Ready, reset.Instance.ObservedLifecycle);
-        Assert.Equal(ElsaInstanceHealth.Healthy, reset.Instance.Health);
+        Assert.Equal(ElsaInstanceHealth.Unknown, reset.Instance.Health);
 
         var operation = await db.ElsaInstanceOperations.AsNoTracking()
             .SingleAsync(x => x.Id == reset.Operation.Id);
@@ -231,13 +238,8 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                             x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.ResetEventType)
                 .ToListAsync());
         Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.ResetCode, resetEvent.DiagnosticCode);
-        Assert.DoesNotContain(
-            await db.ElsaInstanceAuditEvents.AsNoTracking()
-                .Where(x => x.InstanceId == created.Instance.Id)
-                .Select(x => x.EventType)
-                .ToListAsync(),
-            eventType => eventType.Contains("alert", StringComparison.OrdinalIgnoreCase));
 
+        await SetObservedAsync(db, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy);
         var second = await store.AcceptReconcileAndRequireRecoveryAsync(created.Instance.Id, "api-key");
         Assert.NotEqual(parked.Operation.Id, second.Operation.Id);
         Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, second.Operation.State);
@@ -261,7 +263,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 workspace.OrganizationId, workspace.Id, "Managed Elsa", "non-lever-recovery-park",
                 CreateIntent(), "create-non-lever-recovery-park"));
         await CompleteOperationAsync(db, created.Operation.Id);
-        db.ChangeTracker.Clear();
+        await SetObservedAsync(db, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy);
 
         var parked = await CreateStore(db).AcceptReconcileAndRequireRecoveryAsync(created.Instance.Id, "api-key");
         db.ChangeTracker.Clear();
@@ -278,6 +280,280 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var persisted = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == parked.Operation.Id);
         Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, persisted.State);
         Assert.Equal(ElsaInstanceProviderReconciliationService.AmbiguousCode, persisted.FailureCode);
+        Assert.Equal(
+            0,
+            await db.ElsaInstanceAuditEvents.CountAsync(x =>
+                x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.ResetEventType));
+    }
+
+    [Fact]
+    public async Task Staging_recovery_lever_refuses_when_the_instance_is_not_ready()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Not ready staging recovery lever workspace");
+        var created = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                workspace.OrganizationId, workspace.Id, "Managed Elsa", "not-ready-recovery-lever",
+                CreateIntent(), "create-not-ready-recovery-lever"));
+        await CompleteOperationAsync(db, created.Operation.Id);
+        await SetObservedAsync(db, created.Instance.Id, ElsaObservedLifecycle.Stopped, ElsaInstanceHealth.Healthy);
+
+        var error = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            CreateStore(db).AcceptReconcileAndRequireRecoveryAsync(created.Instance.Id, "operator"));
+
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.InvalidState, error.Reason);
+        Assert.Equal(
+            0,
+            await db.ElsaInstanceOperations.CountAsync(x =>
+                x.InstanceId == created.Instance.Id &&
+                x.Action == ElsaInstanceOperationAction.Reconcile));
+        Assert.Equal(
+            0,
+            await db.ElsaInstanceAuditEvents.CountAsync(x =>
+                x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType));
+    }
+
+    [Fact]
+    public async Task Staging_recovery_lever_refuses_when_the_instance_is_ready_but_not_healthy()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Ready not healthy staging recovery lever workspace");
+        var created = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                workspace.OrganizationId, workspace.Id, "Managed Elsa", "ready-unhealthy-lever",
+                CreateIntent(), "create-ready-unhealthy-lever"));
+        await CompleteOperationAsync(db, created.Operation.Id);
+        await SetObservedAsync(db, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Degraded);
+
+        var error = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            CreateStore(db).AcceptReconcileAndRequireRecoveryAsync(created.Instance.Id, "operator"));
+
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.InvalidState, error.Reason);
+        Assert.Equal(
+            0,
+            await db.ElsaInstanceOperations.CountAsync(x =>
+                x.InstanceId == created.Instance.Id &&
+                x.Action == ElsaInstanceOperationAction.Reconcile));
+        Assert.Equal(
+            0,
+            await db.ElsaInstanceAuditEvents.CountAsync(x =>
+                x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType));
+    }
+
+    [Fact]
+    public async Task Staging_recovery_lever_reset_refuses_a_run_backed_uncertain_park_without_a_fired_row()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Run backed uncertain park workspace");
+        var created = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                workspace.OrganizationId, workspace.Id, "Managed Elsa", "run-backed-uncertain-park",
+                CreateIntent(), "create-run-backed-uncertain-park"));
+        await CompleteOperationAsync(db, created.Operation.Id);
+        await SetObservedAsync(db, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy);
+
+        var operationId = await SeedLeverShapedParkAsync(
+            db,
+            created.Instance,
+            StagingRecoveryLifecycleLeverStoreDefaults.UncertainCode,
+            deploymentRunId: Guid.NewGuid());
+
+        await AssertResetRefusedWithoutWritesAsync(db, created.Instance.Id, operationId);
+    }
+
+    [Fact]
+    public async Task Staging_recovery_lever_reset_refuses_a_lever_shaped_park_without_a_fired_row()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Lever shaped park without fired workspace");
+        var created = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                workspace.OrganizationId, workspace.Id, "Managed Elsa", "lever-shaped-no-fired",
+                CreateIntent(), "create-lever-shaped-no-fired"));
+        await CompleteOperationAsync(db, created.Operation.Id);
+        await SetObservedAsync(db, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy);
+
+        var operationId = await SeedLeverShapedParkAsync(
+            db,
+            created.Instance,
+            StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode);
+
+        await AssertResetRefusedWithoutWritesAsync(db, created.Instance.Id, operationId);
+    }
+
+    [Fact]
+    public async Task Staging_recovery_lever_reset_refuses_a_park_with_a_provider_operation()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Provider op lever park workspace");
+        var created = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                workspace.OrganizationId, workspace.Id, "Managed Elsa", "provider-op-lever-park",
+                CreateIntent(), "create-provider-op-lever-park"));
+        await CompleteOperationAsync(db, created.Operation.Id);
+        await SetObservedAsync(db, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy);
+
+        var parked = await CreateStore(db).AcceptReconcileAndRequireRecoveryAsync(created.Instance.Id, "api-key");
+        await AddProviderOperationAsync(db, workspace.Id, parked.Operation.Id);
+
+        await AssertResetRefusedWithoutWritesAsync(db, created.Instance.Id, parked.Operation.Id);
+    }
+
+    [Fact]
+    public async Task Staging_recovery_lever_concurrent_resets_have_one_winner()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var setup = CreateMigratedContext(connection);
+        await setup.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(setup, "Concurrent staging recovery lever reset workspace");
+        var created = await new ElsaInstanceLifecycleService(CreateStore(setup), new FixedTimeProvider(Now))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                workspace.OrganizationId, workspace.Id, "Managed Elsa", "concurrent-recovery-reset",
+                CreateIntent(), "create-concurrent-recovery-reset"));
+        await CompleteOperationAsync(setup, created.Operation.Id);
+        await SetObservedAsync(setup, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy);
+        var parked = await CreateStore(setup).AcceptReconcileAndRequireRecoveryAsync(created.Instance.Id, "setup");
+        setup.ChangeTracker.Clear();
+
+        var options = new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .Options;
+        await using var firstDb = new CatalogDbContext(options);
+        await using var secondDb = new CatalogDbContext(options);
+
+        var results = await Task.WhenAll(
+            CaptureAsync(() => CreateStore(firstDb).ResetLeverParkedReconcileAsync(created.Instance.Id, "first")),
+            CaptureAsync(() => CreateStore(secondDb).ResetLeverParkedReconcileAsync(created.Instance.Id, "second")));
+
+        Assert.Equal(1, results.Count(x => x.Error is null));
+        var conflict = Assert.Single(results, x => x.Error is not null).Error;
+        var refused = Assert.IsType<ElsaInstanceLifecycleConflictException>(conflict);
+        Assert.True(
+            refused.Reason is ElsaInstanceLifecycleConflictReason.InvalidState
+                or ElsaInstanceLifecycleConflictReason.OperationActive,
+            refused.Reason.ToString());
+
+        await using var verify = new CatalogDbContext(options);
+        Assert.Equal(
+            ElsaInstanceOperationState.Succeeded,
+            (await verify.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == parked.Operation.Id)).State);
+        Assert.Equal(
+            1,
+            await verify.ElsaInstanceAuditEvents.CountAsync(x =>
+                x.InstanceId == created.Instance.Id &&
+                x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.ResetEventType));
+    }
+
+    private static async Task SetObservedAsync(
+        CatalogDbContext db,
+        Guid instanceId,
+        ElsaObservedLifecycle lifecycle,
+        ElsaInstanceHealth health)
+    {
+        db.ChangeTracker.Clear();
+        var instance = await db.ElsaInstances.SingleAsync(x => x.Id == instanceId);
+        instance.ObservedLifecycle = lifecycle;
+        instance.Health = health;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+    }
+
+    private static async Task<Guid> SeedLeverShapedParkAsync(
+        CatalogDbContext db,
+        ElsaInstance instance,
+        string failureCode,
+        Guid? deploymentRunId = null)
+    {
+        db.ChangeTracker.Clear();
+        var id = Guid.NewGuid();
+        db.ElsaInstanceOperations.Add(new ElsaInstanceOperationEntity
+        {
+            Id = id,
+            InstanceId = instance.Id,
+            OrganizationId = instance.OrganizationId,
+            WorkspaceId = instance.WorkspaceId,
+            Action = ElsaInstanceOperationAction.Reconcile,
+            IdempotencyScope = $"instance/{instance.Id:D}/operations",
+            IdempotencyKey = $"seed-park-{id:N}",
+            RequestHash = new string('a', 64),
+            ExpectedVersion = instance.Version,
+            State = ElsaInstanceOperationState.RecoveryRequired,
+            AttemptNumber = 1,
+            AcceptedAt = Now,
+            FailureCode = failureCode,
+            FailureSummary = failureCode,
+            ReconciliationDiagnosticCode = StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode,
+            DeploymentRunId = deploymentRunId,
+            CreatedAt = Now,
+            UpdatedAt = Now
+        });
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        return id;
+    }
+
+    private static async Task AddProviderOperationAsync(CatalogDbContext db, Guid workspaceId, Guid operationId)
+    {
+        db.ChangeTracker.Clear();
+        var now = Now;
+        db.AzureProviderOperations.Add(new AzureProviderOperationEntity
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = workspaceId,
+            TargetKey = $"lever-reset-{operationId:N}",
+            Action = AzureProviderOperationAction.Reconcile,
+            IdempotencyKey = AzureProviderOperationValidation.LifecycleIdempotencyKey(operationId),
+            RequestHash = new string('a', 64),
+            OperationIdentity = new string('b', 64),
+            PlanFingerprint = new string('c', 64),
+            TemplateFingerprint = new string('d', 64),
+            ElsaVersion = "3.10.4",
+            ReleaseLine = "3.10",
+            Topology = "combined",
+            Isolation = "dedicated",
+            Location = "westeurope",
+            ImageRepository = "example.azurecr.io/elsa",
+            ImageDigest = "sha256:" + new string('e', 64),
+            SecretReferencesJson = "{}",
+            Status = AzureProviderOperationStatus.Succeeded,
+            Phase = AzureProviderOperationPhase.TrafficPromoted,
+            Health = AzureProviderHealth.Healthy,
+            DiagnosticsJson = "[]",
+            CreatedAt = now,
+            UpdatedAt = now,
+            StatusChangedAt = now
+        });
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+    }
+
+    private static async Task AssertResetRefusedWithoutWritesAsync(
+        CatalogDbContext db,
+        Guid instanceId,
+        Guid operationId)
+    {
+        var error = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            CreateStore(db).ResetLeverParkedReconcileAsync(instanceId, "api-key"));
+
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.InvalidState, error.Reason);
+        var persisted = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == operationId);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, persisted.State);
         Assert.Equal(
             0,
             await db.ElsaInstanceAuditEvents.CountAsync(x =>

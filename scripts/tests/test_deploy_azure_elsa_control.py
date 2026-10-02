@@ -23,6 +23,7 @@ class DeployAzureElsaControlTests(unittest.TestCase):
     def environment() -> dict[str, str]:
         environment = os.environ.copy()
         environment.pop("TARGET_ENVIRONMENT", None)
+        environment.pop("AZURE_ENV_NAME", None)
         environment.update(
             {
                 "ADMIN_API_KEY": "test-only-admin-key",
@@ -139,7 +140,7 @@ class DeployAzureElsaControlTests(unittest.TestCase):
             environment["TARGET_ENVIRONMENT"] = "production"
             refused = self.run_deploy(environment, "--environment", "valence-control-staging")
             self.assertNotEqual(0, refused.returncode)
-            self.assertIn("only permitted for the test (staging) environment", refused.stderr)
+            self.assertIn("Staging lever target names disagree", refused.stderr)
             self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", refused.stdout + refused.stderr)
 
     def test_empty_pairing_allowlist_is_accepted_for_every_target(self) -> None:
@@ -189,7 +190,7 @@ class DeployAzureElsaControlTests(unittest.TestCase):
             environment["TARGET_ENVIRONMENT"] = "production"
             refused = self.run_deploy(environment, "--environment", "valence-control-staging")
             self.assertNotEqual(0, refused.returncode)
-            self.assertIn("only permitted for the test (staging) environment", refused.stderr)
+            self.assertIn("Staging lever target names disagree", refused.stderr)
             self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", refused.stdout + refused.stderr)
 
             environment["TARGET_ENVIRONMENT"] = "test"
@@ -245,8 +246,32 @@ class DeployAzureElsaControlTests(unittest.TestCase):
             environment["TARGET_ENVIRONMENT"] = "production"
             refused = self.run_deploy(environment, "--environment", "valence-control-staging")
             self.assertNotEqual(0, refused.returncode)
-            self.assertIn("only permitted for the test (staging) environment", refused.stderr)
+            self.assertIn("Staging lever target names disagree", refused.stderr)
             self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", refused.stdout + refused.stderr)
+
+    def test_refuses_when_explicit_environment_disagrees_with_azure_env_name(self) -> None:
+        environment = self.environment()
+        environment["AZURE_ENV_NAME"] = "valence-control-staging"
+        environment["STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED"] = "true"
+        environment["STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS"] = (
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        result = self.run_deploy(environment, "--environment", "valence-control-production")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("Staging lever target names disagree", result.stderr)
+        self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
+
+        mismatched = self.environment()
+        mismatched["TARGET_ENVIRONMENT"] = "test"
+        mismatched["AZURE_ENV_NAME"] = "valence-control-staging"
+        mismatched["STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED"] = "true"
+        mismatched["STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS"] = (
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        refused = self.run_deploy(mismatched, "--environment", "valence-control-production")
+        self.assertNotEqual(0, refused.returncode)
+        self.assertIn("Staging lever target names disagree", refused.stderr)
+        self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", refused.stdout + refused.stderr)
 
     def test_treats_a_false_or_empty_lever_flag_as_unset_on_production(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

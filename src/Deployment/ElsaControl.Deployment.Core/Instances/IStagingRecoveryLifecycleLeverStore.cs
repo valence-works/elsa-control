@@ -12,6 +12,11 @@ public static class StagingRecoveryLifecycleLeverStoreDefaults
     public const string RecoveryRequiredEventType = "lifecycle.recovery-required";
     public const string AcceptedEventType = "lifecycle.accepted";
 
+    public static string FormatFiredSnapshot(
+        ElsaObservedLifecycle observedLifecycle,
+        ElsaInstanceHealth health) =>
+        $"{observedLifecycle}:{health}";
+
     public static bool IsAllowedReason(string? reason) =>
         string.Equals(reason, TransitionCode, StringComparison.Ordinal) ||
         string.Equals(reason, UncertainCode, StringComparison.Ordinal);

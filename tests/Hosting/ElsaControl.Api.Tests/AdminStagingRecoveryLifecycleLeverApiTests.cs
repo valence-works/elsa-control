@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using ElsaControl.Api.Admin.Organizations;
 using ElsaControl.Api.Admin.Staging;
@@ -152,6 +153,8 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
 
         await using var scope = app.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        // TODO(#660): replace UpdatedAt with ReasonEnteredAt once the catalog lands.
+        // TODO(#660): use GetRequiredService so reconcile ticks always run after Azure lifecycle is on.
         var enteredAt = await ScalarStringAsync(
             db,
             "SELECT UpdatedAt FROM ElsaInstanceOperations WHERE Id = @id",
@@ -351,6 +354,7 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
             ElsaInstanceOperationState.Succeeded));
         await AssertResetOnceAsync(app, AllowlistedInstanceId, firstBody.OperationId);
         await AssertNoRetryEvidenceAsync(app, firstBody.OperationId);
+        await ObserveHealthyAsync(app, AllowlistedInstanceId);
 
         var second = await PostAsync(client, AllowlistedInstanceId);
         if (second.StatusCode != HttpStatusCode.OK)
@@ -505,10 +509,166 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
             new AdminBillingLifecycleDeadlineAdvanceRequest(OrganizationBillingLifecycleDeadline.GraceEndsAt),
             ControlApiTestApplication.JsonOptions);
 
+    [Fact]
+    public async Task Fire_refuses_when_the_instance_is_not_ready()
+    {
+        await using var app = CreateApp(recoveryEnabled: true, allowlisted: AllowlistedInstanceId);
+        await SeedReadyInstanceAsync(
+            app,
+            AllowlistedInstanceId,
+            observed: ElsaObservedLifecycle.Stopped,
+            health: ElsaInstanceHealth.Healthy);
+
+        var response = await PostAsync(Operator(app), AllowlistedInstanceId);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("instance.invalid-state", await ProblemCodeAsync(response));
+        await AssertLeverDidNotFireAsync(app, AllowlistedInstanceId);
+    }
+
+    [Fact]
+    public async Task Fire_refuses_when_the_instance_is_ready_but_not_healthy()
+    {
+        await using var app = CreateApp(recoveryEnabled: true, allowlisted: AllowlistedInstanceId);
+        await SeedReadyInstanceAsync(
+            app,
+            AllowlistedInstanceId,
+            observed: ElsaObservedLifecycle.Ready,
+            health: ElsaInstanceHealth.Degraded);
+
+        var response = await PostAsync(Operator(app), AllowlistedInstanceId);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("instance.invalid-state", await ProblemCodeAsync(response));
+        await AssertLeverDidNotFireAsync(app, AllowlistedInstanceId);
+    }
+
+    [Fact]
+    public async Task Fire_refuses_a_non_json_body_without_writes()
+    {
+        await using var app = CreateApp(recoveryEnabled: true, allowlisted: AllowlistedInstanceId);
+        await SeedReadyInstanceAsync(app, AllowlistedInstanceId);
+        using var content = new StringContent(
+            """{"reason":"auto-resume-exhausted"}""",
+            Encoding.UTF8,
+            "text/plain");
+
+        var response = await Operator(app).PostAsync(
+            $"/api/staging/lifecycle-lever/instances/{AllowlistedInstanceId:D}/recovery-required",
+            content);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(StagingRecoveryLifecycleLeverDefaults.ReasonNotAllowedCode, await ProblemCodeAsync(response));
+        await AssertLeverDidNotFireAsync(app, AllowlistedInstanceId);
+    }
+
+    [Fact]
+    public async Task Fire_refuses_malformed_json_without_writes()
+    {
+        await using var app = CreateApp(recoveryEnabled: true, allowlisted: AllowlistedInstanceId);
+        await SeedReadyInstanceAsync(app, AllowlistedInstanceId);
+        using var content = new StringContent("{not-json", Encoding.UTF8, "application/json");
+
+        var response = await Operator(app).PostAsync(
+            $"/api/staging/lifecycle-lever/instances/{AllowlistedInstanceId:D}/recovery-required",
+            content);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(StagingRecoveryLifecycleLeverDefaults.ReasonNotAllowedCode, await ProblemCodeAsync(response));
+        await AssertLeverDidNotFireAsync(app, AllowlistedInstanceId);
+    }
+
+    [Fact]
+    public async Task Reset_refuses_a_non_allowlisted_instance_without_writes()
+    {
+        await using var app = CreateApp(recoveryEnabled: true, allowlisted: AllowlistedInstanceId);
+        await SeedReadyInstanceAsync(app, OtherInstanceId);
+
+        var response = await PostResetAsync(Operator(app), OtherInstanceId);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(StagingRecoveryLifecycleLeverDefaults.InstanceNotAllowedCode, await ProblemCodeAsync(response));
+        Assert.Equal(0, await CountResetAsync(app, OtherInstanceId));
+        await AssertLeverDidNotFireAsync(app, OtherInstanceId);
+    }
+
+    [Fact]
+    public async Task Reset_refuses_the_smoke_owner_instance_without_writes()
+    {
+        await using var app = CreateApp(
+            recoveryEnabled: true,
+            allowlisted: SmokeOwnerInstanceId,
+            smokeOwnerInstanceId: SmokeOwnerInstanceId);
+        await SeedReadyInstanceAsync(app, SmokeOwnerInstanceId);
+
+        var response = await PostResetAsync(Operator(app), SmokeOwnerInstanceId);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(StagingRecoveryLifecycleLeverDefaults.InstanceNotAllowedCode, await ProblemCodeAsync(response));
+        Assert.Equal(0, await CountResetAsync(app, SmokeOwnerInstanceId));
+        await AssertLeverDidNotFireAsync(app, SmokeOwnerInstanceId);
+    }
+
+    [Fact]
+    public async Task Reset_is_disabled_when_the_stripe_key_is_live()
+    {
+        await using var app = CreateApp(
+            recoveryEnabled: true,
+            allowlisted: AllowlistedInstanceId,
+            stripeSecretKey: LiveSecretKey);
+        await SeedReadyInstanceAsync(app, AllowlistedInstanceId);
+
+        var response = await PostResetAsync(Operator(app), AllowlistedInstanceId);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(StagingRecoveryLifecycleLeverDefaults.DisabledCode, await ProblemCodeAsync(response));
+        Assert.Equal(0, await CountResetAsync(app, AllowlistedInstanceId));
+        Assert.DoesNotContain(LiveSecretKey, await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Reset_refuses_a_non_lever_recovery_required_park_without_writes()
+    {
+        await using var app = CreateApp(recoveryEnabled: true, allowlisted: AllowlistedInstanceId);
+        await SeedReadyInstanceAsync(app, AllowlistedInstanceId);
+        var fired = await PostAsync(Operator(app), AllowlistedInstanceId);
+        Assert.Equal(HttpStatusCode.OK, fired.StatusCode);
+        var body = await fired.Content.ReadControlJsonAsync<StagingRecoveryLifecycleLeverResponse>();
+        Assert.NotNull(body);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            Assert.Equal(1, await ExecuteAsync(
+                db,
+                "UPDATE ElsaInstanceOperations SET FailureCode = @code, ReconciliationDiagnosticCode = @code WHERE Id = @id",
+                ("@code", ElsaInstanceProviderReconciliationService.AmbiguousCode),
+                ("@id", body.OperationId)));
+        }
+
+        var response = await PostResetAsync(Operator(app), AllowlistedInstanceId);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("instance.invalid-state", await ProblemCodeAsync(response));
+        Assert.Equal(0, await CountResetAsync(app, AllowlistedInstanceId));
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            Assert.Equal(
+                ElsaInstanceOperationState.RecoveryRequired.ToString(),
+                await ScalarStringAsync(
+                    db,
+                    "SELECT State FROM ElsaInstanceOperations WHERE Id = @id",
+                    ("@id", body.OperationId)));
+        }
+    }
+
     private static async Task SeedReadyInstanceAsync(
         ControlApiTestApplication app,
         Guid instanceId,
-        bool deleted = false)
+        bool deleted = false,
+        ElsaObservedLifecycle? observed = null,
+        ElsaInstanceHealth? health = null)
     {
         Guid operationId = Guid.Empty;
         await app.SeedAsync(async db =>
@@ -554,14 +714,27 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
             "UPDATE ElsaInstanceOperations SET State = @state WHERE Id = @id",
             ("@state", ElsaInstanceOperationState.Succeeded.ToString()),
             ("@id", operationId)));
-        var observed = deleted ? ElsaObservedLifecycle.Deleted : ElsaObservedLifecycle.Ready;
+        var observedLifecycle = observed ?? (deleted ? ElsaObservedLifecycle.Deleted : ElsaObservedLifecycle.Ready);
         var desired = deleted ? ElsaDesiredLifecycle.Deleting : ElsaDesiredLifecycle.Running;
+        var observedHealth = health ?? (deleted ? ElsaInstanceHealth.Unknown : ElsaInstanceHealth.Healthy);
         Assert.Equal(1, await ExecuteAsync(
             db,
             "UPDATE ElsaInstances SET ObservedLifecycle = @observed, DesiredLifecycle = @desired, Health = @health WHERE Id = @id",
-            ("@observed", observed.ToString()),
+            ("@observed", observedLifecycle.ToString()),
             ("@desired", desired.ToString()),
-            ("@health", (deleted ? ElsaInstanceHealth.Unknown : ElsaInstanceHealth.Healthy).ToString()),
+            ("@health", observedHealth.ToString()),
+            ("@id", instanceId)));
+        db.ChangeTracker.Clear();
+    }
+
+    private static async Task ObserveHealthyAsync(ControlApiTestApplication app, Guid instanceId)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Equal(1, await ExecuteAsync(
+            db,
+            "UPDATE ElsaInstances SET Health = @health WHERE Id = @id",
+            ("@health", ElsaInstanceHealth.Healthy.ToString()),
             ("@id", instanceId)));
         db.ChangeTracker.Clear();
     }
@@ -614,10 +787,15 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
             "SELECT COUNT(*) FROM ElsaInstanceAuditEvents WHERE OperationId = @id AND EventType = @eventType",
             ("@id", persistedOperationId),
             ("@eventType", StagingRecoveryLifecycleLeverDefaults.RecoveryRequiredEventType)));
-        Assert.Equal(0, await ScalarIntAsync(
-            db,
-            "SELECT COUNT(*) FROM ElsaInstanceAuditEvents WHERE InstanceId = @instanceId AND EventType LIKE '%alert%'",
-            ("@instanceId", instanceId)));
+        Assert.Equal(
+            StagingRecoveryLifecycleLeverStoreDefaults.FormatFiredSnapshot(
+                ElsaObservedLifecycle.Ready,
+                ElsaInstanceHealth.Healthy),
+            await ScalarStringAsync(
+                db,
+                "SELECT PriorState FROM ElsaInstanceAuditEvents WHERE OperationId = @id AND EventType = @eventType",
+                ("@id", persistedOperationId),
+                ("@eventType", StagingRecoveryLifecycleLeverDefaults.FiredEventType)));
     }
 
     private static async Task AssertLeverDidNotFireAsync(ControlApiTestApplication app, Guid instanceId)
@@ -673,10 +851,18 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
                 "SELECT FailureCode FROM ElsaInstanceOperations WHERE Id = @id",
                 ("@id", operationId)));
         Assert.Equal(1, await CountResetAsync(app, instanceId, operationId));
-        Assert.Equal(0, await ScalarIntAsync(
-            db,
-            "SELECT COUNT(*) FROM ElsaInstanceAuditEvents WHERE InstanceId = @instanceId AND EventType LIKE '%alert%'",
-            ("@instanceId", instanceId)));
+        Assert.Equal(
+            ElsaObservedLifecycle.Ready.ToString(),
+            await ScalarStringAsync(
+                db,
+                "SELECT ObservedLifecycle FROM ElsaInstances WHERE Id = @id",
+                ("@id", instanceId)));
+        Assert.Equal(
+            ElsaInstanceHealth.Unknown.ToString(),
+            await ScalarStringAsync(
+                db,
+                "SELECT Health FROM ElsaInstances WHERE Id = @id",
+                ("@id", instanceId)));
     }
 
     private static async Task AssertNoRetryEvidenceAsync(ControlApiTestApplication app, Guid operationId)
