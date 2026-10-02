@@ -222,7 +222,7 @@ public static class ManagedElsaInstanceCustomerProjection
          ManagedElsaReasonCodeCatalog.RequiresHuman(
             parked.ParkReason,
             parked.FailureCode,
-            parked.ReasonEnteredAt ?? parked.ParkedAt,
+            parked.ReasonEnteredAt,
             now));
 
     private static ActiveLifecycleOperation? ToActive(ElsaInstanceOperationSummary? operation) =>
@@ -231,16 +231,14 @@ public static class ManagedElsaInstanceCustomerProjection
             : new(
                 operation.Action,
                 operation.State,
-                FirstReason(operation.RecoveryReason, operation.ReasonCode),
+                ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                    operation.FailureCode,
+                    operation.ReasonCode,
+                    operation.RecoveryReason),
                 operation.FailureCode,
                 operation.UpdatedAt ?? operation.AttemptStartedAt ?? operation.StartedAt ?? operation.AcceptedAt,
                 operation.ReasonEnteredAt,
                 operation.RequiresHumanAt);
-
-    private static string? FirstReason(string? recoveryReason, string? reasonCode) =>
-        !string.IsNullOrWhiteSpace(recoveryReason) ? recoveryReason
-        : string.IsNullOrWhiteSpace(reasonCode) ? null
-        : reasonCode;
 
     private static bool IsProvisioningAction(ElsaInstanceOperationAction action) =>
         action is ElsaInstanceOperationAction.Create

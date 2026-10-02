@@ -256,7 +256,12 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     ? preserveUncertainSubmission ? ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain : commit.DiagnosticCode
                     : null;
                 if (operation.State == ElsaInstanceOperationState.RecoveryRequired)
-                    ApplyReasonClock(operation, previousReason, run.RecoveryReason, commit.ReconciledAt, restartClock: false);
+                    ApplyReasonClock(
+                        operation,
+                        previousReason,
+                        CurrentParkReason(operation, run.RecoveryReason),
+                        commit.ReconciledAt,
+                        restartClock: false);
                 else
                 {
                     operation.ReasonEnteredAt = null;
@@ -2177,7 +2182,12 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     operation.FailureSummary = null;
                     operation.UpdatedAt = commit.SubmittedAt.ToUniversalTime();
                     run.RecoveryReason = ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted;
-                    ApplyReasonClock(operation, previousUncertainReason, run.RecoveryReason, commit.SubmittedAt, restartClock: false);
+                    ApplyReasonClock(
+                        operation,
+                        previousUncertainReason,
+                        CurrentParkReason(operation, run.RecoveryReason),
+                        commit.SubmittedAt,
+                        restartClock: false);
                     run.WorkerId = null;
                     run.WorkerHeartbeatAt = null;
                     if (commit.PlacementAssignmentId is not null)
@@ -2216,7 +2226,12 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             run.RecoveryReason = commit.CorrelationId == "provider-submission-uncertain"
                 ? ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain
                 : ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted;
-            ApplyReasonClock(operation, previousReason, run.RecoveryReason, commit.SubmittedAt, restartClock: false);
+            ApplyReasonClock(
+                operation,
+                previousReason,
+                CurrentParkReason(operation, run.RecoveryReason),
+                commit.SubmittedAt,
+                restartClock: false);
             run.WorkerId = null;
             run.WorkerHeartbeatAt = null;
             if (commit.PlacementAssignmentId is not null)
@@ -3731,21 +3746,13 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         };
     }
 
-    private static string? CurrentParkReason(ElsaInstanceOperationEntity operation, string? runRecoveryReason) =>
-        FirstNonEmpty(runRecoveryReason, operation.FailureCode, operation.ReconciliationDiagnosticCode);
+    internal static string? CurrentParkReason(ElsaInstanceOperationEntity operation, string? runRecoveryReason) =>
+        ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+            operation.FailureCode,
+            operation.ReconciliationDiagnosticCode,
+            runRecoveryReason);
 
-    private static string? FirstNonEmpty(params string?[] values)
-    {
-        foreach (var value in values)
-        {
-            if (!string.IsNullOrWhiteSpace(value))
-                return value;
-        }
-
-        return null;
-    }
-
-    private static void ApplyReasonClock(
+    internal static void ApplyReasonClock(
         ElsaInstanceOperationEntity operation,
         string? previousCode,
         string? nextCode,

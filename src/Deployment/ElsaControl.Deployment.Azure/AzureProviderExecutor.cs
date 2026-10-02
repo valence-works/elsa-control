@@ -361,7 +361,7 @@ public sealed class AzureProviderExecutor
             // expected-version CAS to convert this value-free uncertain checkpoint to recovery.
             // FinalizeResultAsync retains that CAS; if the store itself fails, that exception must
             // escape rather than being reported as a fabricated persisted recovery result.
-            return await MarkRecoveryAsync(claimed, leaseToken, "azure.recovery.checkpoint-uncertain", "The observed Azure recovery step could not be durably checkpointed.");
+            return await MarkRecoveryAsync(claimed, leaseToken, ManagedElsaReasonCodeCatalog.AzureRecoveryCheckpointUncertain, "The observed Azure recovery step could not be durably checkpointed.");
         }
         if (checkpointed is null)
             return await GetConcurrentResultAsync(claimed);
@@ -884,7 +884,7 @@ public sealed class AzureProviderExecutor
                 operation,
                 leaseToken,
                 promotion.Outcome == AzureProviderRunnerOutcome.Uncertain
-                    ? "azure.promotion.uncertain"
+                    ? ManagedElsaReasonCodeCatalog.AzurePromotionUncertain
                     : "azure.promotion.rollback-unavailable",
                 promotion.Outcome == AzureProviderRunnerOutcome.Uncertain
                     ? "Candidate promotion was uncertain and no previously verified stable traffic revision was available."
@@ -935,7 +935,7 @@ public sealed class AzureProviderExecutor
                     promotion.Outcome == AzureProviderRunnerOutcome.Uncertain
                         ? AzureProviderOperationStatus.RecoveryRequired
                         : AzureProviderOperationStatus.Failed,
-                    promotion.Outcome == AzureProviderRunnerOutcome.Uncertain ? "azure.promotion.uncertain" : SafeStepCode(AzureProviderRunnerStep.Promotion, promotion.Outcome),
+                    promotion.Outcome == AzureProviderRunnerOutcome.Uncertain ? ManagedElsaReasonCodeCatalog.AzurePromotionUncertain : SafeStepCode(AzureProviderRunnerStep.Promotion, promotion.Outcome),
                     promotion.Outcome == AzureProviderRunnerOutcome.Uncertain
                         ? "Candidate promotion was uncertain; stable traffic was restored but operator recovery is required."
                         : SafeStepMessage(AzureProviderRunnerStep.Promotion, promotion.Outcome),
@@ -955,7 +955,7 @@ public sealed class AzureProviderExecutor
             // The durable recovery state is the safe result when rollback itself is not confirmed.
         }
 
-        return await MarkRecoveryAsync(operation, leaseToken, "azure.promotion.rollback-uncertain", "Candidate promotion and stable-traffic restoration could not both be confirmed.");
+        return await MarkRecoveryAsync(operation, leaseToken, ManagedElsaReasonCodeCatalog.AzurePromotionRollbackUncertain, "Candidate promotion and stable-traffic restoration could not both be confirmed.");
     }
 
     private async Task<AzureProviderOperation?> CheckpointAsync(
@@ -1194,7 +1194,7 @@ public sealed class AzureProviderExecutor
 
     private static AzureProviderExecutionResult RecoveryInsufficient(AzureProviderOperation operation) =>
         Result(operation, AzureProviderExecutionOutcome.RecoveryRequired,
-            "azure.recovery.observation-insufficient",
+            ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInsufficient,
             "The retained Azure recovery observation cannot authorize the current lifecycle checkpoint.");
 
     private static void ValidateRunnerResult(

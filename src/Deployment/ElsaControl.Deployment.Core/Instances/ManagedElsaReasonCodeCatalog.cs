@@ -50,6 +50,7 @@ public static class ManagedElsaReasonCodeCatalog
     public const string ProviderReconciliationHealthFailed = "provider.reconciliation.health-failed";
     public const string ProviderReconciliationFailed = "provider.reconciliation.failed";
     public const string ProviderReconciliationCancelled = "provider.reconciliation.cancelled";
+    public const string ProviderReconciliationRequired = "provider.reconciliation.required";
     public const string ProviderIdentityBindingMissing = "provider.identity-binding-missing";
     public const string AzureDeploymentFailed = "azure.deployment.failed";
     public const string AzureDeploymentWaitExceeded = "azure.deployment.wait-exceeded";
@@ -59,6 +60,39 @@ public static class ManagedElsaReasonCodeCatalog
     public const string AzureRecoveryAutoResumeAccepted = "azure.recovery.auto-resume.accepted";
     public const string AzureRecoveryAutoResumeConflict = "azure.recovery.auto-resume.conflict";
     public const string AzureRecoveryAutoResumeRejected = "azure.recovery.auto-resume.rejected";
+    public const string AzureRecoveryFoundationObserved = "azure.recovery.foundation-observed";
+    public const string AzureRecoveryFoundationOutputsUnavailable = "azure.recovery.foundation-outputs-unavailable";
+    public const string AzureRecoveryFoundationOutputsInvalid = "azure.recovery.foundation-outputs-invalid";
+    public const string AzureRecoveryWorkloadInProgress = "azure.recovery.workload-in-progress";
+    public const string AzureRecoveryWorkloadObserved = "azure.recovery.workload-observed";
+    public const string AzureRecoveryWorkloadOutputsUnavailable = "azure.recovery.workload-outputs-unavailable";
+    public const string AzureRecoveryWorkloadRevisionUnavailable = "azure.recovery.workload-revision-unavailable";
+    public const string AzureRecoveryWorkloadOutputsInvalid = "azure.recovery.workload-outputs-invalid";
+    public const string AzureRecoveryAcrPullObserved = "azure.recovery.acr-pull-observed";
+    public const string AzureRecoverySeedSecretsObserved = "azure.recovery.seed-secrets-observed";
+    public const string AzureRecoverySeedSecretsAbsent = "azure.recovery.seed-secrets-absent";
+    public const string AzureRecoverySeedSecretsPartial = "azure.recovery.seed-secrets-partial";
+    public const string AzureRecoverySqlFirewallCreateObserved = "azure.recovery.sql-firewall-create-observed";
+    public const string AzureRecoverySqlFirewallCleanupObserved = "azure.recovery.sql-firewall-cleanup-observed";
+    public const string AzureRecoverySqlBootstrapObserved = "azure.recovery.sql-bootstrap-observed";
+    public const string AzureRecoveryObservationInProgress = "azure.recovery.observation-in-progress";
+    public const string AzureRecoveryObservationInsufficient = "azure.recovery.observation-insufficient";
+    public const string AzureRecoveryObservationUnavailable = "azure.recovery.observation-unavailable";
+    public const string AzureRecoveryObservationInvalid = "azure.recovery.observation-invalid";
+    public const string AzureRecoveryObservationFailed = "azure.recovery.observation-failed";
+    public const string AzureRecoveryObservationAmbiguous = "azure.recovery.observation-ambiguous";
+    public const string AzureRecoveryCheckpointUncertain = "azure.recovery.checkpoint-uncertain";
+    public const string AzureRecoveryStepUnsupported = "azure.recovery.step-unsupported";
+    public const string AzureRecoveryOperationUnavailable = "azure.recovery.operation-unavailable";
+    public const string AzureRecoveryUnavailable = "azure.recovery.unavailable";
+    public const string AzureRecoveryAssignmentInvalid = "azure.recovery.assignment-invalid";
+    public const string AzureRecoveryAssignmentMismatch = "azure.recovery.assignment-mismatch";
+    public const string AzureRecoveryIdentityMismatch = "azure.recovery.identity-mismatch";
+    public const string AzureRecoveryPlanUnavailable = "azure.recovery.plan-unavailable";
+    public const string AzureRecoveryPlanMismatch = "azure.recovery.plan-mismatch";
+    public const string AzureRecoveryStateInvalid = "azure.recovery.state-invalid";
+    public const string AzurePromotionUncertain = "azure.promotion.uncertain";
+    public const string AzurePromotionRollbackUncertain = "azure.promotion.rollback-uncertain";
     public const string StagingLeverRecoveryRequired = "staging.lever.recovery-required";
 
     public static readonly FrozenDictionary<string, ManagedElsaReasonCode> ByCode =
@@ -67,16 +101,42 @@ public static class ManagedElsaReasonCodeCatalog
             new(ProviderSubmissionAccepted, ManagedElsaReasonClass.HealthyHandOff),
             new(ProviderReconciliationInProgress, ManagedElsaReasonClass.HealthyHandOff),
             new(ProviderReconciliationConverged, ManagedElsaReasonClass.HealthyHandOff),
-            new(AzureRecoveryAutoResumeAccepted, ManagedElsaReasonClass.HealthyHandOff),
             new(ProviderSubmissionUncertain, ManagedElsaReasonClass.Temporary),
             new(ProviderReconciliationUnknown, ManagedElsaReasonClass.Temporary),
             new(ProviderReconciliationUnavailable, ManagedElsaReasonClass.Temporary),
             new(ProviderReconciliationHealthUnknown, ManagedElsaReasonClass.Temporary),
             new(ProviderReconciliationRetrySafe, ManagedElsaReasonClass.Temporary),
+            new(ProviderReconciliationRequired, ManagedElsaReasonClass.Temporary),
             new(AzureRecoveryAutoResumeClaimConflict, ManagedElsaReasonClass.Temporary),
+            new(AzureRecoveryObservationUnavailable, ManagedElsaReasonClass.Temporary),
+            new(AzureRecoveryObservationInvalid, ManagedElsaReasonClass.Temporary),
+            new(AzureRecoveryObservationFailed, ManagedElsaReasonClass.Temporary),
+            new(AzureRecoveryOperationUnavailable, ManagedElsaReasonClass.Temporary),
+            new(AzureRecoveryUnavailable, ManagedElsaReasonClass.Temporary),
+            new(AzurePromotionRollbackUncertain, ManagedElsaReasonClass.Temporary),
             new(AzureDeploymentFailed, ManagedElsaReasonClass.AutoResuming),
             new(AzureDeploymentWaitExceeded, ManagedElsaReasonClass.AutoResuming),
             new(AzureDeploymentCanceled, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoveryAutoResumeAccepted, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoveryFoundationObserved, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoveryFoundationOutputsUnavailable, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoveryFoundationOutputsInvalid, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoveryWorkloadInProgress, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoveryWorkloadObserved, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoveryWorkloadOutputsUnavailable, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoveryWorkloadRevisionUnavailable, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoveryWorkloadOutputsInvalid, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoveryAcrPullObserved, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoverySeedSecretsObserved, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoverySeedSecretsAbsent, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoverySeedSecretsPartial, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoverySqlFirewallCreateObserved, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoverySqlFirewallCleanupObserved, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoverySqlBootstrapObserved, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoveryObservationInProgress, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoveryObservationInsufficient, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoveryCheckpointUncertain, ManagedElsaReasonClass.AutoResuming),
+            new(AzurePromotionUncertain, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoveryAutoResumeExhausted, ManagedElsaReasonClass.NeedsPerson),
             new(ProviderReconciliationAmbiguous, ManagedElsaReasonClass.NeedsPerson),
             new(ProviderReconciliationCorrelationMismatch, ManagedElsaReasonClass.NeedsPerson),
@@ -87,6 +147,14 @@ public static class ManagedElsaReasonCodeCatalog
             new(ProviderIdentityBindingMissing, ManagedElsaReasonClass.NeedsPerson),
             new(AzureRecoveryAutoResumeConflict, ManagedElsaReasonClass.NeedsPerson),
             new(AzureRecoveryAutoResumeRejected, ManagedElsaReasonClass.NeedsPerson),
+            new(AzureRecoveryObservationAmbiguous, ManagedElsaReasonClass.NeedsPerson),
+            new(AzureRecoveryStepUnsupported, ManagedElsaReasonClass.NeedsPerson),
+            new(AzureRecoveryAssignmentInvalid, ManagedElsaReasonClass.NeedsPerson),
+            new(AzureRecoveryAssignmentMismatch, ManagedElsaReasonClass.NeedsPerson),
+            new(AzureRecoveryIdentityMismatch, ManagedElsaReasonClass.NeedsPerson),
+            new(AzureRecoveryPlanUnavailable, ManagedElsaReasonClass.NeedsPerson),
+            new(AzureRecoveryPlanMismatch, ManagedElsaReasonClass.NeedsPerson),
+            new(AzureRecoveryStateInvalid, ManagedElsaReasonClass.NeedsPerson),
             new(StagingLeverRecoveryRequired, ManagedElsaReasonClass.NeedsPerson)
         }.ToFrozenDictionary(entry => entry.Code, StringComparer.Ordinal);
 
@@ -95,6 +163,12 @@ public static class ManagedElsaReasonCodeCatalog
             .GetFields(BindingFlags.Public | BindingFlags.Static)
             .Where(field => field is { IsLiteral: true, IsInitOnly: false } && field.FieldType == typeof(string))
             .Select(field => (string)field.GetRawConstantValue()!)
+            .ToArray();
+
+    public static IReadOnlyList<string> AutoResumingCodes { get; } =
+        ByCode.Values
+            .Where(entry => entry.Class == ManagedElsaReasonClass.AutoResuming)
+            .Select(entry => entry.Code)
             .ToArray();
 
     public static bool TryGet(string? code, [NotNullWhen(true)] out ManagedElsaReasonCode? entry)
@@ -106,17 +180,33 @@ public static class ManagedElsaReasonCodeCatalog
     public static ManagedElsaReasonClass Classify(string? code) =>
         TryGet(code, out var entry) ? entry.Class : ManagedElsaReasonClass.NeedsPerson;
 
+    /// <summary>
+    /// The operation's current park reason. Failure wins only for the
+    /// intentional uncertain / lever parks; otherwise the latest diagnostic
+    /// is current and the run reason is fallback only.
+    /// </summary>
+    public static string? SelectCurrentReason(
+        string? failureCode,
+        string? diagnosticCode,
+        string? runRecoveryReason = null)
+    {
+        if (IsOperationOwnedPark(failureCode))
+            return failureCode;
+        if (!string.IsNullOrWhiteSpace(diagnosticCode))
+            return diagnosticCode;
+        if (!string.IsNullOrWhiteSpace(failureCode))
+            return failureCode;
+        return TryGet(runRecoveryReason, out _) ? runRecoveryReason : null;
+    }
+
     public static bool RequiresHuman(
         string? parkReason,
         string? failureCode,
         DateTimeOffset? reasonEnteredAt,
         DateTimeOffset now)
     {
-        if (!string.IsNullOrEmpty(failureCode) && Evaluate(failureCode, reasonEnteredAt, now))
-            return true;
-
-        var reason = FirstReason(parkReason, failureCode);
-        return reason is null || Evaluate(reason, reasonEnteredAt, now);
+        var reason = SelectCurrentReason(failureCode, parkReason);
+        return Evaluate(reason, reasonEnteredAt, now);
     }
 
     public static bool RequiresHuman(string? code, DateTimeOffset? reasonEnteredAt, DateTimeOffset now) =>
@@ -138,15 +228,12 @@ public static class ManagedElsaReasonCodeCatalog
     }
 
     private static bool HasExceededWindow(DateTimeOffset? reasonEnteredAt, DateTimeOffset now) =>
-        reasonEnteredAt is not { } origin ||
+        reasonEnteredAt is { } origin &&
         now.ToUniversalTime() - origin.ToUniversalTime() >= HumanRequiredAfter;
 
-    private static string? FirstReason(string? parkReason, string? failureCode)
-    {
-        if (!string.IsNullOrWhiteSpace(parkReason))
-            return parkReason;
-        return string.IsNullOrWhiteSpace(failureCode) ? null : failureCode;
-    }
+    private static bool IsOperationOwnedPark(string? failureCode) =>
+        string.Equals(failureCode, ProviderSubmissionUncertain, StringComparison.Ordinal) ||
+        string.Equals(failureCode, StagingLeverRecoveryRequired, StringComparison.Ordinal);
 }
 
 public readonly record struct ManagedElsaReasonClockState(

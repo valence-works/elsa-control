@@ -1,3 +1,5 @@
+using ElsaControl.Deployment.Core.Instances;
+
 namespace ElsaControl.Deployment.Azure;
 
 /// <summary>
@@ -110,13 +112,13 @@ internal static class AzureProviderSafeDiagnostics
         "azure.cleanup.role-scope-invalid",
         "azure.cleanup.role-uncertain",
         "azure.cleanup.vault-uncertain",
-        "azure.deployment.canceled",
-        "azure.deployment.failed",
-        "azure.deployment.wait-exceeded",
-        "azure.recovery.auto-resume-exhausted",
-        "azure.recovery.auto-resume.accepted",
-        "azure.recovery.auto-resume.conflict",
-        "azure.recovery.auto-resume.rejected",
+        ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled,
+        ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+        ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded,
+        ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted,
+        ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeAccepted,
+        ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeConflict,
+        ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeRejected,
         "azure.foundation.output-invalid",
         "azure.foundation.ownership-invalid",
         "azure.foundation.sql-admin-invalid",

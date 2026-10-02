@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using ElsaControl.Deployment.Core.Instances;
 using Xunit;
 
@@ -6,6 +7,10 @@ namespace ElsaControl.Deployment.Core.Tests;
 public sealed class ManagedElsaReasonCodeCatalogTests
 {
     private static readonly DateTimeOffset Now = new(2026, 10, 2, 12, 0, 0, TimeSpan.Zero);
+
+    private static readonly Regex ProductionReasonLiteral = new(
+        """"(provider\.(?:submission|reconciliation|identity-binding)[a-z0-9.-]*|azure\.deployment\.(?:failed|wait-exceeded|canceled)|azure\.recovery\.[a-z0-9.-]+|azure\.promotion\.(?:uncertain|rollback-uncertain)|staging\.lever\.[a-z0-9.-]+)"""",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     [Fact]
     public void Catalog_enumerates_every_defined_lifecycle_and_park_constant()
@@ -25,6 +30,27 @@ public sealed class ManagedElsaReasonCodeCatalogTests
         Assert.Equal(ManagedElsaReasonCodeCatalog.DefinedCodes.Count, ManagedElsaReasonCodeCatalog.ByCode.Count);
     }
 
+    [Fact]
+    public void Catalog_contains_every_reason_literal_production_writes()
+    {
+        var missing = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var file in Directory.EnumerateFiles(Path.Combine(FindRepoRoot(), "src"), "*.cs", SearchOption.AllDirectories))
+        {
+            if (file.EndsWith("ManagedElsaReasonCodeCatalog.cs", StringComparison.Ordinal))
+                continue;
+
+            var text = File.ReadAllText(file);
+            foreach (Match match in ProductionReasonLiteral.Matches(text))
+            {
+                var code = match.Groups[1].Value;
+                if (!ManagedElsaReasonCodeCatalog.TryGet(code, out _))
+                    missing.Add($"{code} ({Path.GetRelativePath(FindRepoRoot(), file)})");
+            }
+        }
+
+        Assert.True(missing.Count == 0, "Uncatalogued production reason literals:\n" + string.Join('\n', missing));
+    }
+
     [Theory]
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted, ManagedElsaReasonClass.HealthyHandOff)]
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationInProgress, ManagedElsaReasonClass.HealthyHandOff)]
@@ -38,6 +64,10 @@ public sealed class ManagedElsaReasonCodeCatalogTests
     [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed, ManagedElsaReasonClass.AutoResuming)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded, ManagedElsaReasonClass.AutoResuming)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled, ManagedElsaReasonClass.AutoResuming)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeAccepted, ManagedElsaReasonClass.AutoResuming)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadInProgress, ManagedElsaReasonClass.AutoResuming)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadObserved, ManagedElsaReasonClass.AutoResuming)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzurePromotionUncertain, ManagedElsaReasonClass.AutoResuming)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationAmbiguous, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderIdentityBindingMissing, ManagedElsaReasonClass.NeedsPerson)]
@@ -73,6 +103,30 @@ public sealed class ManagedElsaReasonCodeCatalogTests
         Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman(
             ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, Now, atBound));
         Assert.Equal(TimeSpan.FromMinutes(10), ManagedElsaReasonCodeCatalog.HumanRequiredAfter);
+        Assert.False(ManagedElsaReasonCodeCatalog.RequiresHuman(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, null, Now));
+    }
+
+    [Fact]
+    public void Select_current_reason_prefers_operation_fields_and_keeps_uncertain_owned()
+    {
+        Assert.Equal(
+            ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadInProgress,
+            ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                ManagedElsaReasonCodeCatalog.ProviderReconciliationRetrySafe,
+                ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadInProgress,
+                ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted));
+        Assert.Equal(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
+            ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
+                ManagedElsaReasonCodeCatalog.ProviderReconciliationInProgress,
+                ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted));
+        Assert.Equal(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted,
+            ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                null, null, ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted));
+        Assert.Null(ManagedElsaReasonCodeCatalog.SelectCurrentReason(null, null, "Worker heartbeat became stale."));
     }
 
     [Fact]
@@ -129,5 +183,13 @@ public sealed class ManagedElsaReasonCodeCatalogTests
         Assert.Equal(Now, parked.RequiresHumanAt);
         Assert.Equal(Now.AddMinutes(3), recovered.ReasonEnteredAt);
         Assert.Null(recovered.RequiresHumanAt);
+    }
+
+    private static string FindRepoRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "ElsaControl.sln")))
+            directory = directory.Parent;
+        return directory?.FullName ?? throw new InvalidOperationException("Could not locate repository root.");
     }
 }

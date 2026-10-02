@@ -360,6 +360,10 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationInProgress)]
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationConverged)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadInProgress)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadObserved)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzurePromotionUncertain)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeAccepted)]
     public void Healthy_hand_off_and_auto_resuming_reasons_keep_the_normal_in_progress_projection(string reason)
     {
         var instance = Instance(ElsaObservedLifecycle.Unknown);

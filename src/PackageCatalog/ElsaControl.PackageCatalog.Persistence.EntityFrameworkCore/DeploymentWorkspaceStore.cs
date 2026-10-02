@@ -3,6 +3,7 @@ using System.Text.Json;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Artifacts;
 using ElsaControl.Deployment.Core.Cockpit;
+using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.EntityFrameworkCore;
@@ -1360,6 +1361,14 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
         operation.LeaseExpiresAt = null;
         operation.HeartbeatAt = null;
         operation.UpdatedAt = now;
+        var previousReason = EfCoreElsaInstanceLifecycleStore.CurrentParkReason(operation, run.RecoveryReason);
+        operation.ReconciliationDiagnosticCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationRequired;
+        EfCoreElsaInstanceLifecycleStore.ApplyReasonClock(
+            operation,
+            previousReason,
+            EfCoreElsaInstanceLifecycleStore.CurrentParkReason(operation, run.RecoveryReason),
+            now,
+            restartClock: false);
         instance.ObservedLifecycle = ElsaObservedLifecycle.Unknown;
         instance.Health = ElsaInstanceHealth.Unknown;
         instance.UpdatedAt = now;
@@ -1376,7 +1385,7 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
             PriorState = priorState.ToString(), NewState = ElsaObservedLifecycle.Unknown.ToString(),
             DesiredStateRevisionId = instance.DesiredStateRevisionId,
             PlanReference = instance.ResolvedPlanUri,
-            DiagnosticCode = "provider.reconciliation.required",
+            DiagnosticCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationRequired,
             Summary = "Provider state must be reconciled before retry.",
             RequestKeyHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
                 System.Text.Encoding.UTF8.GetBytes(operation.IdempotencyKey))),

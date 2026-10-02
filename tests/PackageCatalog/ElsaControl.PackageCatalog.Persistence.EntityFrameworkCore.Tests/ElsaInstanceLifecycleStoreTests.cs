@@ -2510,6 +2510,65 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.True(elapsedAfter >= elapsedBefore);
     }
 
+    public static TheoryData<string> AutoResumingParkCodes()
+    {
+        var data = new TheoryData<string>();
+        foreach (var code in ManagedElsaReasonCodeCatalog.AutoResumingCodes)
+            data.Add(code);
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(AutoResumingParkCodes))]
+    public async Task Auto_resuming_park_code_reaches_lifecycle_reason_without_requiring_a_human(string parkCode)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "EF " + parkCode);
+        var workspaceStore = new DeploymentWorkspaceStore(db);
+        Assert.NotNull(await workspaceStore.ClaimNextQueuedRunAsync("deployment-worker", Now));
+        Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
+            Now.AddMinutes(10), TimeSpan.FromMinutes(5)));
+        db.ChangeTracker.Clear();
+
+        var reconcileAt = DateTimeOffset.UtcNow;
+        var reconciled = await new ElsaInstanceProviderReconciliationService(
+                CreateStore(db),
+                new QueueProviderPort(new ElsaInstanceProviderObservation(
+                    ElsaInstanceProviderObservationKind.Confirmed,
+                    ElsaObservedLifecycle.Provisioning,
+                    ElsaInstanceProviderHealthGate.Unknown,
+                    "auto-resuming-park")
+                {
+                    ReasonCode = parkCode
+                }),
+                new FixedTimeProvider(reconcileAt))
+            .ReconcileAsync(workspace.Id, accepted.Operation.Id);
+
+        Assert.Equal(parkCode, reconciled.DiagnosticCode);
+        var operation = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, operation.State);
+        Assert.Equal(parkCode, operation.ReconciliationDiagnosticCode);
+        Assert.Equal(
+            parkCode,
+            ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                operation.FailureCode,
+                operation.ReconciliationDiagnosticCode,
+                (await db.DeploymentRuns.AsNoTracking().SingleAsync(x => x.Id == operation.DeploymentRunId)).RecoveryReason));
+        Assert.Null(operation.RequiresHumanAt);
+        Assert.Equal(ManagedElsaReasonClass.AutoResuming, ManagedElsaReasonCodeCatalog.Classify(parkCode));
+        Assert.False(ManagedElsaReasonCodeCatalog.RequiresHuman(
+            parkCode, operation.FailureCode, operation.ReasonEnteredAt, reconcileAt));
+
+        var listed = Assert.Single(
+            (await new EfCoreManagedElsaInstanceApiStore(db).ListInstancesAsync(workspace.Id, 1, 10)).Items);
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, listed.ObservedLifecycle);
+        Assert.NotEqual(ElsaObservedLifecycle.RecoveryRequired, listed.ObservedLifecycle);
+        Assert.Null(ManagedElsaInstanceCustomerProjection.CustomerLabel(listed.ObservedLifecycle));
+    }
+
     [Fact]
     public async Task Repeated_retry_safe_evidence_does_not_bump_version_and_admin_recover_stays_available()
     {
