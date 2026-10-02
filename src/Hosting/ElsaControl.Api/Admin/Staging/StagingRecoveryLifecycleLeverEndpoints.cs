@@ -32,6 +32,7 @@ public static class StagingRecoveryLifecycleLeverEndpoints
                         var result = await lever.FireAsync(
                             instanceId,
                             OperatorSubject(context.User, identityOptions.Value),
+                            await ReadReasonAsync(context, cancellationToken),
                             cancellationToken);
                         return ToHttpResult(result);
                     }
@@ -104,9 +105,18 @@ public static class StagingRecoveryLifecycleLeverEndpoints
     private static string? OperatorSubject(ClaimsPrincipal user, ControlIdentityOptions identityOptions) =>
         user.FindFirstValue(identityOptions.Claims.Subject) ?? user.FindFirstValue(ClaimTypes.NameIdentifier);
 
+    private static async Task<string?> ReadReasonAsync(HttpContext context, CancellationToken cancellationToken)
+    {
+        if (context.Request.ContentLength is null or 0)
+            return null;
+
+        var request = await context.Request.ReadFromJsonAsync<StagingRecoveryLifecycleLeverFireRequest>(cancellationToken);
+        return request?.Reason;
+    }
+
     private static IResult ToHttpResult(StagingRecoveryLifecycleLeverResult result) => result.Outcome switch
     {
-        StagingRecoveryLifecycleLeverOutcome.Fired => Results.Ok(ToResponse(result.Commit!, StagingRecoveryLifecycleLeverDefaults.TransitionCode)),
+        StagingRecoveryLifecycleLeverOutcome.Fired => Results.Ok(ToResponse(result.Commit!, result.Commit!.Reason)),
         StagingRecoveryLifecycleLeverOutcome.Reset => Results.Ok(ToResponse(result.Commit!, StagingRecoveryLifecycleLeverDefaults.ResetCode)),
         StagingRecoveryLifecycleLeverOutcome.Disabled => Problem(
             StagingRecoveryLifecycleLeverDefaults.DisabledCode,
@@ -117,6 +127,10 @@ public static class StagingRecoveryLifecycleLeverEndpoints
             "The instance is not on the staging recovery lifecycle lever allowlist.",
             StatusCodes.Status403Forbidden),
         StagingRecoveryLifecycleLeverOutcome.InstanceNotFound => Results.NotFound(),
+        StagingRecoveryLifecycleLeverOutcome.ReasonNotAllowed => Problem(
+            StagingRecoveryLifecycleLeverDefaults.ReasonNotAllowedCode,
+            "The staging recovery lifecycle lever reason is not allowed.",
+            StatusCodes.Status400BadRequest),
         _ => throw new InvalidOperationException("Unsupported staging recovery lifecycle lever outcome.")
     };
 
@@ -139,6 +153,8 @@ public static class StagingRecoveryLifecycleLeverEndpoints
             statusCode: statusCode,
             extensions: new Dictionary<string, object?> { ["code"] = code });
 }
+
+public sealed record StagingRecoveryLifecycleLeverFireRequest(string? Reason = null);
 
 public sealed record StagingRecoveryLifecycleLeverResponse(
     Guid InstanceId,

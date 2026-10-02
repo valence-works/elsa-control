@@ -5,11 +5,34 @@ namespace ElsaControl.Deployment.Core.Instances;
 public static class StagingRecoveryLifecycleLeverStoreDefaults
 {
     public const string TransitionCode = "staging.lever.recovery-required";
+    public const string UncertainCode = "provider.submission.uncertain";
     public const string FiredEventType = "staging.lever.fired";
     public const string ResetEventType = "staging.lever.reset";
     public const string ResetCode = "staging.lever.reset";
     public const string RecoveryRequiredEventType = "lifecycle.recovery-required";
     public const string AcceptedEventType = "lifecycle.accepted";
+
+    public static bool IsAllowedReason(string? reason) =>
+        string.Equals(reason, TransitionCode, StringComparison.Ordinal) ||
+        string.Equals(reason, UncertainCode, StringComparison.Ordinal);
+
+    public static bool TryNormalizeReason(string? reason, out string normalized)
+    {
+        if (reason is null)
+        {
+            normalized = TransitionCode;
+            return true;
+        }
+
+        if (IsAllowedReason(reason))
+        {
+            normalized = reason;
+            return true;
+        }
+
+        normalized = reason;
+        return false;
+    }
 }
 
 /// <summary>
@@ -24,6 +47,7 @@ public interface IStagingRecoveryLifecycleLeverStore
     Task<StagingRecoveryLifecycleLeverCommit> AcceptReconcileAndRequireRecoveryAsync(
         Guid instanceId,
         string? operatorSubject,
+        string reason = StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode,
         CancellationToken cancellationToken = default);
 
     Task<StagingRecoveryLifecycleLeverCommit> ResetLeverParkedReconcileAsync(
@@ -34,4 +58,5 @@ public interface IStagingRecoveryLifecycleLeverStore
 
 public sealed record StagingRecoveryLifecycleLeverCommit(
     ElsaInstance Instance,
-    ElsaInstanceOperation Operation);
+    ElsaInstanceOperation Operation,
+    string Reason = StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode);

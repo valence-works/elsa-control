@@ -10,7 +10,8 @@ public enum StagingRecoveryLifecycleLeverOutcome
     Reset,
     Disabled,
     InstanceNotAllowed,
-    InstanceNotFound
+    InstanceNotFound,
+    ReasonNotAllowed
 }
 
 public sealed record StagingRecoveryLifecycleLeverResult(
@@ -31,6 +32,7 @@ public sealed class StagingRecoveryLifecycleLever(
     public async Task<StagingRecoveryLifecycleLeverResult> FireAsync(
         Guid instanceId,
         string? operatorSubject,
+        string? reason = null,
         CancellationToken cancellationToken = default)
     {
         if (instanceId == Guid.Empty)
@@ -50,11 +52,15 @@ public sealed class StagingRecoveryLifecycleLever(
         if (!options.Value.AllowsInstance(instanceId))
             return new StagingRecoveryLifecycleLeverResult(StagingRecoveryLifecycleLeverOutcome.InstanceNotAllowed);
 
+        if (!StagingRecoveryLifecycleLeverStoreDefaults.TryNormalizeReason(reason, out var normalizedReason))
+            return new StagingRecoveryLifecycleLeverResult(StagingRecoveryLifecycleLeverOutcome.ReasonNotAllowed);
+
         try
         {
             var commit = await store.AcceptReconcileAndRequireRecoveryAsync(
                 instanceId,
                 operatorSubject,
+                normalizedReason,
                 cancellationToken);
             return new StagingRecoveryLifecycleLeverResult(StagingRecoveryLifecycleLeverOutcome.Fired, commit);
         }

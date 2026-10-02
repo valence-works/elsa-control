@@ -15,10 +15,13 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
     public async Task<StagingRecoveryLifecycleLeverCommit> AcceptReconcileAndRequireRecoveryAsync(
         Guid instanceId,
         string? operatorSubject,
+        string reason = StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode,
         CancellationToken cancellationToken = default)
     {
         if (instanceId == Guid.Empty)
             throw new ArgumentException("Instance ID is required.", nameof(instanceId));
+        if (!StagingRecoveryLifecycleLeverStoreDefaults.IsAllowedReason(reason))
+            throw new ArgumentException("The staging recovery lever reason is not allowed.", nameof(reason));
 
         dbContext.ChangeTracker.Clear();
         var firedAuditId = Guid.NewGuid();
@@ -123,8 +126,10 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                         operationEntity,
                         ElsaInstanceOperationState.RecoveryRequired,
                         now);
-                    operationEntity.FailureCode = StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode;
-                    operationEntity.FailureSummary = StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode;
+                    operationEntity.FailureCode = reason;
+                    operationEntity.FailureSummary = reason;
+                    operationEntity.ReconciliationDiagnosticCode =
+                        StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode;
                     operationEntity.CompletedAt = null;
                     instanceEntity.ObservedLifecycle = ElsaObservedLifecycle.Unknown;
                     instanceEntity.Health = ElsaInstanceHealth.Unknown;
@@ -138,7 +143,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                             now,
                             cancellationToken,
                             StagingRecoveryLifecycleLeverStoreDefaults.RecoveryRequiredEventType,
-                            diagnosticCode: StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode,
+                            diagnosticCode: reason,
                             summary: "Provider state must be reconciled before retry."),
                         cancellationToken);
                     await dbContext.SaveChangesAsync(cancellationToken);
@@ -150,8 +155,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                         now,
                         cancellationToken,
                         StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType,
-                        diagnosticCode: StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode,
-                        summary: StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode);
+                        diagnosticCode: reason,
+                        summary: reason);
                     fired.Id = firedAuditId;
                     fired.OperatorSubject = NormalizeOperatorSubject(operatorSubject);
                     await dbContext.ElsaInstanceAuditEvents.AddAsync(fired, cancellationToken);
@@ -159,7 +164,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
 
                     return new StagingRecoveryLifecycleLeverCommit(
                         MapInstance(instanceEntity),
-                        MapOperation(operationEntity));
+                        MapOperation(operationEntity),
+                        reason);
                 },
                 async (commit, verificationCancellationToken) =>
                     await dbContext.ElsaInstanceAuditEvents.AsNoTracking().AnyAsync(
@@ -167,7 +173,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                              x.InstanceId == instanceId &&
                              x.OperationId == commit.Operation.Id &&
                              x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType &&
-                             x.DiagnosticCode == StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode,
+                             x.DiagnosticCode == reason,
                         verificationCancellationToken),
                 cancellationToken);
         }
@@ -224,14 +230,16 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                         throw Conflict(
                             "No lever-parked RecoveryRequired reconcile is active.",
                             ElsaInstanceLifecycleConflictReason.InvalidState);
-                    if (!string.Equals(
-                            operationEntity.FailureCode,
+                    if (!StagingRecoveryLifecycleLeverStoreDefaults.IsAllowedReason(operationEntity.FailureCode) ||
+                        !string.Equals(
+                            operationEntity.ReconciliationDiagnosticCode,
                             StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode,
                             StringComparison.Ordinal) ||
+                        operationEntity.DeploymentRunId is not null ||
                         operationEntity.ReconciliationRetryEvidenceReference is not null ||
                         operationEntity.ReconciliationRetryEvidenceDigest is not null)
                         throw Conflict(
-                            "Only a staging-lever RecoveryRequired park without provider retry evidence can be reset.",
+                            "Only a staging-lever RecoveryRequired park without provider correlation can be reset.",
                             ElsaInstanceLifecycleConflictReason.InvalidState);
 
                     var priorObserved = instanceEntity.ObservedLifecycle;
@@ -259,7 +267,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
 
                     return new StagingRecoveryLifecycleLeverCommit(
                         MapInstance(instanceEntity),
-                        MapOperation(operationEntity));
+                        MapOperation(operationEntity),
+                        operationEntity.FailureCode ?? StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode);
                 },
                 async (commit, verificationCancellationToken) =>
                     await dbContext.ElsaInstanceAuditEvents.AsNoTracking().AnyAsync(

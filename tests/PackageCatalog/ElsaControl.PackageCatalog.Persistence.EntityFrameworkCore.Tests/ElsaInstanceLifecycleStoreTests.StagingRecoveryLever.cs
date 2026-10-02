@@ -43,6 +43,8 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             .SingleAsync(x => x.Id == commit.Operation.Id);
         Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, operation.State);
         Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode, operation.FailureCode);
+        Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode, operation.ReconciliationDiagnosticCode);
+        Assert.Null(operation.DeploymentRunId);
 
         var events = await db.ElsaInstanceAuditEvents.AsNoTracking()
             .Where(x => x.OperationId == commit.Operation.Id)
@@ -60,6 +62,53 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode, fired.DiagnosticCode);
         Assert.StartsWith("sha256:", fired.OperatorSubject);
         Assert.DoesNotContain(events, x => x.EventType.Contains("alert", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Staging_recovery_lever_uncertain_park_has_no_provider_target_for_reconcile_ticks()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Uncertain staging recovery lever workspace");
+        var created = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                workspace.OrganizationId, workspace.Id, "Managed Elsa", "uncertain-recovery-lever",
+                CreateIntent(), "create-uncertain-recovery-lever"));
+        await CompleteOperationAsync(db, created.Operation.Id);
+        db.ChangeTracker.Clear();
+
+        var store = CreateStore(db);
+        var parked = await store.AcceptReconcileAndRequireRecoveryAsync(
+            created.Instance.Id,
+            "api-key",
+            StagingRecoveryLifecycleLeverStoreDefaults.UncertainCode);
+
+        Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.UncertainCode, parked.Reason);
+        var operation = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == parked.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, operation.State);
+        Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.UncertainCode, operation.FailureCode);
+        Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode, operation.ReconciliationDiagnosticCode);
+        Assert.Null(operation.DeploymentRunId);
+        var enteredAt = operation.UpdatedAt;
+
+        Assert.Null(await store.GetTargetAsync(workspace.Id, parked.Operation.Id));
+        Assert.DoesNotContain(
+            await store.ListPendingProviderOperationsAsync(64),
+            pending => pending.OperationId == parked.Operation.Id);
+        Assert.Null(await store.GetTargetAsync(workspace.Id, parked.Operation.Id));
+
+        var afterTicks = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == parked.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, afterTicks.State);
+        Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.UncertainCode, afterTicks.FailureCode);
+        Assert.Equal(enteredAt, afterTicks.UpdatedAt);
+        Assert.Null(afterTicks.DeploymentRunId);
+
+        var reset = await store.ResetLeverParkedReconcileAsync(created.Instance.Id, "api-key");
+        Assert.Equal(ElsaInstanceOperationState.Succeeded, reset.Operation.State);
     }
 
     [Fact]
@@ -217,7 +266,8 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var parked = await CreateStore(db).AcceptReconcileAndRequireRecoveryAsync(created.Instance.Id, "api-key");
         db.ChangeTracker.Clear();
         var operation = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == parked.Operation.Id);
-        operation.FailureCode = "provider.submission.uncertain";
+        operation.FailureCode = ElsaInstanceProviderReconciliationService.AmbiguousCode;
+        operation.ReconciliationDiagnosticCode = ElsaInstanceProviderReconciliationService.AmbiguousCode;
         await db.SaveChangesAsync();
         db.ChangeTracker.Clear();
 
@@ -227,7 +277,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(ElsaInstanceLifecycleConflictReason.InvalidState, error.Reason);
         var persisted = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == parked.Operation.Id);
         Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, persisted.State);
-        Assert.Equal("provider.submission.uncertain", persisted.FailureCode);
+        Assert.Equal(ElsaInstanceProviderReconciliationService.AmbiguousCode, persisted.FailureCode);
         Assert.Equal(
             0,
             await db.ElsaInstanceAuditEvents.CountAsync(x =>
