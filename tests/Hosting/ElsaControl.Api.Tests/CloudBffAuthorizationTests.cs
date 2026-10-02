@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Claims;
 using System.Text.Json;
@@ -24,6 +25,7 @@ public sealed class CloudBffAuthorizationTests
 {
     private const string ClientId = "elsa-cloud-lovable-bff";
     private const string Scope = CloudBffDefaults.DefaultScope;
+    private const string CloudAccountIssuer = "https://cloud-account.test/auth/v1";
 
     [Fact]
     public async Task Valid_bff_token_is_allowed_on_the_me_workspace_and_organization_routes()
@@ -37,6 +39,73 @@ public sealed class CloudBffAuthorizationTests
 
         Assert.Equal(HttpStatusCode.OK, workspaces.StatusCode);
         Assert.Equal(HttpStatusCode.OK, organizations.StatusCode);
+    }
+
+    [Fact]
+    public async Task Cloud_customer_can_manage_reader_access_only_within_owned_org_and_workspace()
+    {
+        await using var app = CreateBffApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var owner = CreateCloudCustomerClient(app, "b6f73e84-5b47-4f4d-ad52-e3c4c9a815c6");
+        using var bootstrapResponse = await owner.PostAsJsonAsync(
+            "/api/cloud/bootstrap",
+            new CloudBootstrapRequest(),
+            ControlApiTestApplication.JsonOptions);
+        var bootstrap = await bootstrapResponse.Content.ReadFromJsonAsync<CloudBootstrapResponse>(
+            ControlApiTestApplication.JsonOptions);
+        Assert.Equal(HttpStatusCode.OK, bootstrapResponse.StatusCode);
+        Assert.NotNull(bootstrap);
+
+        using var contextResponse = await owner.GetAsync("/api/me/workspaces");
+        var context = await contextResponse.Content.ReadFromJsonAsync<MeWorkspacesResponse>(
+            ControlApiTestApplication.JsonOptions);
+        Assert.Equal(HttpStatusCode.OK, contextResponse.StatusCode);
+        Assert.NotNull(context);
+
+        using var foreignOwner = CreateCloudCustomerClient(app, "8ffab131-51f3-48f6-a777-0f07ae2b281c");
+        using var foreignBootstrap = await foreignOwner.PostAsJsonAsync(
+            "/api/cloud/bootstrap",
+            new CloudBootstrapRequest(),
+            ControlApiTestApplication.JsonOptions);
+        Assert.Equal(HttpStatusCode.OK, foreignBootstrap.StatusCode);
+        using var foreignOrganization = await foreignOwner.GetAsync(
+            $"/api/organizations/{bootstrap!.OrganizationId:D}/workspaces/");
+        Assert.Equal(HttpStatusCode.NotFound, foreignOrganization.StatusCode);
+
+        var readerSubject = "c69cd0db-2bb1-4922-8e04-384f0a15b787";
+        var readerAccountId = await AddCloudOrganizationMemberAsync(app, bootstrap.OrganizationId, readerSubject);
+        using var ownerMembership = await owner.PutAsJsonAsync(
+            $"/api/organizations/{bootstrap.OrganizationId:D}/workspaces/{bootstrap.WorkspaceId:D}/members/{readerAccountId:D}",
+            new OrganizationWorkspaceMembershipRequest(WorkspaceRole.Reader),
+            ControlApiTestApplication.JsonOptions);
+        Assert.Equal(HttpStatusCode.OK, ownerMembership.StatusCode);
+
+        using var reader = CreateCloudCustomerClient(app, readerSubject);
+        using var readerWorkspaceEscalation = await reader.PutAsJsonAsync(
+            $"/api/organizations/{bootstrap.OrganizationId:D}/workspaces/{bootstrap.WorkspaceId:D}/members/{context!.Account.Id:D}",
+            new OrganizationWorkspaceMembershipRequest(WorkspaceRole.Owner),
+            ControlApiTestApplication.JsonOptions);
+        using var readerPermissionGrant = await reader.PostAsJsonAsync(
+            $"/api/workspaces/{bootstrap.WorkspaceId:D}/permissions/grants",
+            new WorkspacePermissionGrantRequest(readerAccountId, "instances.open"),
+            ControlApiTestApplication.JsonOptions);
+        Assert.Equal(HttpStatusCode.Forbidden, readerWorkspaceEscalation.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, readerPermissionGrant.StatusCode);
+
+        using var grant = await owner.PostAsJsonAsync(
+            $"/api/workspaces/{bootstrap.WorkspaceId:D}/permissions/grants",
+            new WorkspacePermissionGrantRequest(readerAccountId, "instances.open"),
+            ControlApiTestApplication.JsonOptions);
+        using var revoke = await owner.PostAsJsonAsync(
+            $"/api/workspaces/{bootstrap.WorkspaceId:D}/permissions/revocations",
+            new WorkspacePermissionRevokeRequest(readerAccountId, "instances.open"),
+            ControlApiTestApplication.JsonOptions);
+        using var remove = await owner.DeleteAsync(
+            $"/api/organizations/{bootstrap.OrganizationId:D}/workspaces/{bootstrap.WorkspaceId:D}/members/{readerAccountId:D}");
+
+        Assert.Equal(HttpStatusCode.OK, grant.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, revoke.StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, remove.StatusCode);
     }
 
     [Fact]
@@ -201,6 +270,7 @@ public sealed class CloudBffAuthorizationTests
             "GET /api/me/workspaces",
             "GET /api/organizations/{organizationId:guid}/billing/hosted-subscription",
             "GET /api/organizations/{organizationId:guid}/deployments/audit",
+            "GET /api/organizations/{organizationId:guid}/workspaces/",
             "GET /api/workspaces/{workspaceId:guid}/external-engine-connections/",
             "GET /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}",
             "GET /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/pairing",
@@ -217,6 +287,8 @@ public sealed class CloudBffAuthorizationTests
             "POST /api/organizations/{organizationId:guid}/billing/delete",
             "POST /api/organizations/{organizationId:guid}/billing/hosted-portal",
             "POST /api/organizations/{organizationId:guid}/billing/prepare-hosted-trial",
+            "POST /api/workspaces/{workspaceId:guid}/permissions/grants",
+            "POST /api/workspaces/{workspaceId:guid}/permissions/revocations",
             "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/",
             "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/disconnect",
             "POST /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/repair",
@@ -225,7 +297,9 @@ public sealed class CloudBffAuthorizationTests
             "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete",
             "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete-confirmations",
             "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/restart",
-            "POST /api/workspaces/{workspaceId:guid}/instances/"
+            "POST /api/workspaces/{workspaceId:guid}/instances/",
+            "PUT /api/organizations/{organizationId:guid}/workspaces/{workspaceId:guid}/members/{accountId:guid}",
+            "DELETE /api/organizations/{organizationId:guid}/workspaces/{workspaceId:guid}/members/{accountId:guid}"
         };
         Assert.Equal(expected.Order(StringComparer.Ordinal), allowed);
     }
@@ -544,7 +618,11 @@ public sealed class CloudBffAuthorizationTests
         {
             [$"{CloudBffOptions.ConfigurationSection}:Enabled"] = "true",
             [$"{CloudBffOptions.ConfigurationSection}:ClientId"] = ClientId,
-            [$"{CloudBffOptions.ConfigurationSection}:Scope"] = Scope
+            [$"{CloudBffOptions.ConfigurationSection}:Scope"] = Scope,
+            [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
+            [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Issuer"] = CloudAccountIssuer,
+            [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Audience"] = "authenticated",
+            [$"{CloudAccountIdentityDefaults.ConfigurationSection}:TestSigningKey"] = ControlApiTestApplication.TestControlIdentitySigningKey
         };
         if (additionalConfiguration is not null)
         {
@@ -574,6 +652,47 @@ public sealed class CloudBffAuthorizationTests
         }
 
         return app.CreateControlIdentityClient(subject: subject, claims: tokenClaims);
+    }
+
+    private static HttpClient CreateCloudCustomerClient(ControlApiTestApplication app, string subject)
+    {
+        var client = app.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", TestWorkspaceIdentity.CreateToken(
+            subject,
+            CloudAccountIssuer,
+            "authenticated",
+            claims: new Dictionary<string, string> { ["role"] = "authenticated", ["email"] = "customer@example.test" }));
+        return client;
+    }
+
+    private static async Task<Guid> AddCloudOrganizationMemberAsync(
+        ControlApiTestApplication app,
+        Guid organizationId,
+        string subject)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var database = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var account = new Account
+        {
+            DisplayName = subject,
+            Email = "reader@example.test"
+        };
+        account.ExternalIdentities.Add(new ExternalIdentity
+        {
+            Account = account,
+            Issuer = CloudAccountIssuer,
+            Subject = subject,
+            DisplayName = subject,
+            Email = "reader@example.test"
+        });
+        database.OrganizationMemberships.Add(new OrganizationMembership
+        {
+            Account = account,
+            OrganizationId = organizationId,
+            Role = OrganizationRole.Member
+        });
+        await database.SaveChangesAsync();
+        return account.Id;
     }
 
     private static async Task EnableManagedHostingAsync(ControlApiTestApplication app, Guid workspaceId)
