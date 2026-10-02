@@ -21,6 +21,12 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private const string KeyVaultSecretsUserRoleDefinitionId = "4633458b-17de-408a-b874-0445c86b69e6";
     private const string KeyVaultSecretsOfficerRoleDefinitionId = "b86a8fe4-44ce-4948-aee5-eccb2c155cd7";
     internal const string LogAnalyticsWorkspaceSoftDeletedCode = "azure.cleanup.log-analytics-workspace-soft-deleted";
+    /// <summary>
+    /// Azure CLI exit code for ResourceNotFound. Other unsuccessful
+    /// <c>workspace show</c> outcomes are transport/auth/server failures and
+    /// must not be treated as absence.
+    /// </summary>
+    internal const int AzureCliResourceNotFoundExitCode = 3;
     private const string DeletedWorkspacesApiVersion = "2025-07-01";
     private const string ProofTag = "108";
     private const string ManagedByTag = "elsa-control";
@@ -1710,7 +1716,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         if (groupExists.Value!.Value)
         {
             var workspaceForceDelete = await ForceDeleteLogAnalyticsWorkspaceAsync(
-                command, liveInventory, cancellationToken);
+                command, cancellationToken);
             if (workspaceForceDelete is not null)
                 return workspaceForceDelete;
 
@@ -2262,13 +2268,16 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
 
     private async Task<AzureProviderRunnerResult?> ForceDeleteLogAnalyticsWorkspaceAsync(
         AzureProviderRunnerCommand command,
-        IReadOnlyList<AzureResource> inventory,
         CancellationToken cancellationToken)
     {
-        var workspaceId = LogAnalyticsWorkspaceResourceId(command);
-        var present = inventory.Any(resource =>
-            string.Equals(resource.Id, workspaceId, StringComparison.OrdinalIgnoreCase));
-        if (!present)
+        // Inventory membership is not a completeness proof. Observe the
+        // workspace authoritatively before the resource group is deleted.
+        var live = await ObserveLogAnalyticsWorkspaceLiveAsync(command, cancellationToken);
+        if (live == LogAnalyticsWorkspaceLiveObservation.Ambiguous)
+            return Uncertain(command, AzureProviderOperationPhase.CleanupVerified,
+                "azure.cleanup.log-analytics-workspace-observation-uncertain",
+                "The owned Log Analytics workspace could not be observed before resource-group deletion.");
+        if (live == LogAnalyticsWorkspaceLiveObservation.Absent)
             return null;
 
         EnsureMutationAuthority(command);
@@ -2297,22 +2306,44 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         var observationAttempts = _options.CleanupObservationAttempts ?? _options.ObservationAttempts;
         for (var attempt = 0; attempt < observationAttempts; attempt++)
         {
-            var show = await ExecuteAzAsync(command,
-                ["monitor", "log-analytics", "workspace", "show",
-                    "--subscription", _scope.SubscriptionId,
-                    "--resource-group", ResourceGroupName(command),
-                    "--workspace-name", LogAnalyticsWorkspaceName(command),
-                    "--query", "id",
-                    "--output", "tsv",
-                    "--only-show-errors"],
-                ParseStringAsync,
-                cancellationToken);
-            if (!show.Succeeded)
+            if (await ObserveLogAnalyticsWorkspaceLiveAsync(command, cancellationToken) ==
+                LogAnalyticsWorkspaceLiveObservation.Absent)
                 return true;
             if (attempt + 1 < observationAttempts)
                 await Task.Delay(_options.ObservationDelay, cancellationToken);
         }
         return false;
+    }
+
+    private async Task<LogAnalyticsWorkspaceLiveObservation> ObserveLogAnalyticsWorkspaceLiveAsync(
+        AzureProviderRunnerCommand command,
+        CancellationToken cancellationToken)
+    {
+        var show = await ExecuteAzAsync(command,
+            ["monitor", "log-analytics", "workspace", "show",
+                "--subscription", _scope.SubscriptionId,
+                "--resource-group", ResourceGroupName(command),
+                "--workspace-name", LogAnalyticsWorkspaceName(command),
+                "--query", "id",
+                "--output", "tsv",
+                "--only-show-errors"],
+            ParseStringAsync,
+            cancellationToken);
+        if (show.Succeeded)
+            return string.IsNullOrWhiteSpace(show.Value?.Value)
+                ? LogAnalyticsWorkspaceLiveObservation.Ambiguous
+                : LogAnalyticsWorkspaceLiveObservation.Present;
+        if (show.FailureKind == AzureCommandProcessFailureKind.NonZeroExitCode &&
+            show.ExitCode == AzureCliResourceNotFoundExitCode)
+            return LogAnalyticsWorkspaceLiveObservation.Absent;
+        return LogAnalyticsWorkspaceLiveObservation.Ambiguous;
+    }
+
+    private enum LogAnalyticsWorkspaceLiveObservation
+    {
+        Present,
+        Absent,
+        Ambiguous
     }
 
     private async Task<bool> IsLogAnalyticsWorkspaceSoftDeletedAsync(

@@ -236,7 +236,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 .Split('\n', StringSplitOptions.RemoveEmptyEntries);
             Assert.Equal(1, commandLines.Count(line =>
                 line.StartsWith("group delete ", StringComparison.Ordinal)));
-            Assert.Equal(9, commandLines.Length);
+            Assert.Equal(10, commandLines.Length);
             Assert.Equal(3, commandLines.Count(line => line.StartsWith("group exists ", StringComparison.Ordinal)));
             Assert.Equal(2, commandLines.Count(line => line.StartsWith("keyvault list-deleted ", StringComparison.Ordinal)));
             Assert.Equal(1, commandLines.Count(line => line.StartsWith("rest --method get ", StringComparison.Ordinal) &&
@@ -340,6 +340,9 @@ fi
 if [ "$#" -eq 9 ] && [ "$*" = "resource list --subscription $subscription --resource-group $resource_group --output json --only-show-errors" ]; then
     printf '%s' '[]'
     exit 0
+fi
+if [ "$1" = "monitor" ] && [ "$2" = "log-analytics" ] && [ "$3" = "workspace" ] && [ "$4" = "show" ]; then
+    exit 3
 fi
 if [ "$#" -eq 11 ] && [ "$*" = "group delete --subscription $subscription --name $resource_group --yes --no-wait --output none --only-show-errors" ]; then
     : > "$delete_requested"

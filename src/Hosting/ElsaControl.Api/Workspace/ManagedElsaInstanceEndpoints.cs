@@ -396,16 +396,17 @@ public static class ManagedElsaInstanceEndpoints
                 if (deleteRecovery?.Action != ElsaInstanceOperationAction.Delete)
                     deleteRecovery = null;
 
-                async Task<IResult> AcceptDeleteAsync(int version)
+                async Task<IResult> AcceptDeleteAsync(int transitionVersion, int canonicalVersion)
                 {
                     var lifecycleRequest = new ElsaInstanceLifecycleRequest(
                         workspaceId,
                         instanceId,
-                        version,
+                        transitionVersion,
                         keyResult.Value!,
                         DeleteConfirmationId: request.DeleteConfirmationId,
                         ActorAccountId: access.AccountId,
-                        ExpectedOperationId: deleteRecovery?.Id);
+                        ExpectedOperationId: deleteRecovery?.Id,
+                        CanonicalExpectedVersion: canonicalVersion);
                     var accepted = deleteRecovery is not null
                         ? await lifecycle.RecoverDeleteAsync(lifecycleRequest, cancellationToken)
                         : await lifecycle.DeleteAsync(lifecycleRequest, cancellationToken);
@@ -420,7 +421,7 @@ public static class ManagedElsaInstanceEndpoints
 
                 try
                 {
-                    return await AcceptDeleteAsync(expectedVersion.Value);
+                    return await AcceptDeleteAsync(expectedVersion.Value, expectedVersion.Value);
                 }
                 catch (ElsaInstanceLifecycleConflictException exception)
                     when (exception.Reason == ElsaInstanceLifecycleConflictReason.VersionConflict)
@@ -432,7 +433,7 @@ public static class ManagedElsaInstanceEndpoints
                         return Problem(ConflictCode(exception), "The request conflicts with the current instance state.", StatusCodes.Status412PreconditionFailed);
                     try
                     {
-                        return await AcceptDeleteAsync(current.Version);
+                        return await AcceptDeleteAsync(current.Version, expectedVersion.Value);
                     }
                     catch (ElsaInstanceLifecycleConflictException retryException)
                         when (retryException.Reason == ElsaInstanceLifecycleConflictReason.VersionConflict)

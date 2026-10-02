@@ -2177,6 +2177,50 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Dedicated_delete_replays_the_original_etag_after_rebased_acceptance_loses_the_response()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-instance-delete-rebase-lost-202");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(owner, workspaceId, "narrow-delete-rebase-lost-202-runtime");
+        using var confirmationResponse = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE ElsaInstances SET Version = Version + 4 WHERE Id = {created.Instance.InstanceId}");
+        }
+
+        using var accepted = await SendDeleteAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "narrow-delete-rebase-lost-202",
+            confirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.Accepted, accepted.StatusCode);
+        var acceptedBody = await accepted.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>();
+        Assert.NotNull(acceptedBody);
+
+        using var lostResponseReplay = await SendDeleteAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "narrow-delete-rebase-lost-202",
+            confirmation.ConfirmationId);
+        Assert.Equal(HttpStatusCode.Accepted, lostResponseReplay.StatusCode);
+        var replayBody = await lostResponseReplay.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>();
+        Assert.Equal(acceptedBody!.OperationId, replayBody!.OperationId);
+        Assert.Equal(2, await CountOperationsAsync(app));
+    }
+
+    [Fact]
     public async Task Dedicated_delete_rechecks_workspace_membership_after_confirmation()
     {
         const string subject = "managed-instance-narrow-delete-revoked-owner";

@@ -166,9 +166,17 @@ public sealed record ElsaInstanceLifecycleRequest(
     Guid? DeleteConfirmationId = null,
     Guid? ActorAccountId = null,
     Guid? ExpectedOperationId = null,
-    bool OperatorInitiated = false)
+    bool OperatorInitiated = false,
+    int? CanonicalExpectedVersion = null)
 {
     public int IfMatchVersion => ExpectedVersion;
+
+    /// <summary>
+    /// Customer-visible If-Match used to identify the request. A server-side
+    /// rebase may advance <see cref="ExpectedVersion"/> for the transition
+    /// while keeping this original version in the idempotency hash.
+    /// </summary>
+    public int RequestIdentityVersion => CanonicalExpectedVersion ?? ExpectedVersion;
 }
 
 /// <summary>Input for an immutable intent revision and optional instance metadata update.</summary>

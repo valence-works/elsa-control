@@ -212,7 +212,8 @@ public sealed class ElsaInstanceLifecycleService(
             request.ExpectedVersion, request.IdempotencyKey, null, null, request.Reason, cancellationToken,
             confirmationId: request.DeleteConfirmationId,
             actorAccountId: request.ActorAccountId,
-            expectedOperationId: request.ExpectedOperationId);
+            expectedOperationId: request.ExpectedOperationId,
+            canonicalExpectedVersion: request.CanonicalExpectedVersion);
     }
 
     public Task<ElsaInstanceLifecycleAcceptance> DeleteAsync(
@@ -222,7 +223,8 @@ public sealed class ElsaInstanceLifecycleService(
         ValidateDeleteRequest(request);
         return AcceptAsync(request.WorkspaceId, request.InstanceId, ElsaInstanceOperationAction.Delete,
             request.ExpectedVersion, request.IdempotencyKey, null, null, request.Reason, cancellationToken,
-            confirmationId: request.DeleteConfirmationId, actorAccountId: request.ActorAccountId);
+            confirmationId: request.DeleteConfirmationId, actorAccountId: request.ActorAccountId,
+            canonicalExpectedVersion: request.CanonicalExpectedVersion);
     }
 
     public Task<ElsaInstanceLifecycleAcceptance> ApproveMinorUpgradeAsync(
@@ -268,13 +270,19 @@ public sealed class ElsaInstanceLifecycleService(
         bool migrationAuthorized = false,
         Guid? confirmationId = null,
         Guid? actorAccountId = null,
-        Guid? expectedOperationId = null)
+        Guid? expectedOperationId = null,
+        int? canonicalExpectedVersion = null)
     {
         ValidateWorkspace(workspaceId);
         if (instanceId == Guid.Empty)
             throw new ArgumentException("Instance ID is required.", nameof(instanceId));
         if (expectedVersion < 1)
             throw new ArgumentOutOfRangeException(nameof(expectedVersion), "Expected version must be positive.");
+        if (canonicalExpectedVersion is { } canonicalVersion &&
+            (canonicalVersion < 1 || canonicalVersion > expectedVersion))
+            throw new ArgumentOutOfRangeException(nameof(canonicalExpectedVersion),
+                "Canonical expected version must be positive and cannot be ahead of the effective transition version.");
+        var requestIdentityVersion = canonicalExpectedVersion ?? expectedVersion;
         if (expectedOperationId == Guid.Empty)
             throw new ArgumentException("Expected operation ID cannot be empty.", nameof(expectedOperationId));
         ValidateActor(actorAccountId);
@@ -314,7 +322,7 @@ public sealed class ElsaInstanceLifecycleService(
                 : existingOperation.RequestHash;
             var replayRequestHash = ComputeRequestHash(
                 action,
-                expectedVersion,
+                requestIdentityVersion,
                 requestedIntent?.ComputeCanonicalHash(),
                 requestedName,
                 reason,
@@ -344,7 +352,7 @@ public sealed class ElsaInstanceLifecycleService(
 
         var requestHash = ComputeRequestHash(
             action,
-            expectedVersion,
+            requestIdentityVersion,
             requestedIntent?.ComputeCanonicalHash(),
             requestedName,
             reason,

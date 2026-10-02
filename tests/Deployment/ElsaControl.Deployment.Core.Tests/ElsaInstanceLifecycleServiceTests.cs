@@ -727,6 +727,50 @@ public sealed class ElsaInstanceLifecycleServiceTests
     }
 
     [Fact]
+    public async Task Delete_rebased_acceptance_replays_the_original_etag_after_a_lost_response()
+    {
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var created = await service.CreateAsync(new ElsaInstanceCreateRequest(
+            OrganizationId, WorkspaceId, "Claims", "claims-prod", Intent(), "create-rebase-lost-202"));
+        var originalVersion = created.Instance.Version;
+        var transitionVersion = 47;
+        await store.CommitAcceptedAsync(
+            created.Instance,
+            AdvanceInstanceVersion(created.Instance, transitionVersion),
+            created.Operation
+                .TransitionTo(ElsaInstanceOperationState.Queued)
+                .TransitionTo(ElsaInstanceOperationState.Running)
+                .TransitionTo(ElsaInstanceOperationState.Succeeded),
+            new ElsaInstanceLifecycleOutboxMessage(
+                Guid.NewGuid(), WorkspaceId, created.Instance.Id, created.Operation.Id,
+                created.Operation.Action, created.Operation.RequestHash, Now));
+        AddDeleteConfirmation(authority, created.Instance);
+        var originalRequest = new ElsaInstanceLifecycleRequest(
+            WorkspaceId, created.Instance.Id, originalVersion, "delete-rebase-lost-202",
+            DeleteConfirmationId: DeleteConfirmationId, ActorAccountId: ActorAccountId);
+
+        var stale = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(
+            () => service.DeleteAsync(originalRequest));
+        var accepted = await service.DeleteAsync(originalRequest with
+        {
+            ExpectedVersion = transitionVersion,
+            CanonicalExpectedVersion = originalVersion
+        });
+        var lostResponseReplay = await service.DeleteAsync(originalRequest);
+
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.VersionConflict, stale.Reason);
+        Assert.False(accepted.Replayed);
+        Assert.Equal(transitionVersion, accepted.Operation.ExpectedVersion);
+        Assert.True(lostResponseReplay.Replayed);
+        Assert.Equal(accepted.Operation.Id, lostResponseReplay.Operation.Id);
+        var differentIdentity = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(
+            () => service.DeleteAsync(originalRequest with { ExpectedVersion = transitionVersion }));
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.IdempotencyConflict, differentIdentity.Reason);
+    }
+
+    [Fact]
     public async Task Delete_requires_confirmation_and_actor_at_the_lifecycle_boundary()
     {
         var store = new InMemoryElsaInstanceLifecycleStore();
@@ -876,6 +920,28 @@ public sealed class ElsaInstanceLifecycleServiceTests
                         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))),
                 new StaticTimeProvider(Now))
             .ReconcileAsync(WorkspaceId, operationId);
+
+    private static ElsaInstance AdvanceInstanceVersion(ElsaInstance instance, int version) => ElsaInstance.Hydrate(
+        instance.Id,
+        instance.OrganizationId,
+        instance.WorkspaceId,
+        instance.Name,
+        instance.Slug,
+        instance.Intent,
+        instance.ObservedLifecycle,
+        instance.Health,
+        version,
+        instance.IdentityBinding,
+        instance.DesiredStateRevisionId,
+        instance.ResolvedPlanReference,
+        instance.CurrentResolvedRelease,
+        instance.CurrentDeploymentReference,
+        instance.PlacementAssignmentReference,
+        instance.ElsaTenantReference,
+        instance.LastOperationId,
+        instance.DeletedAt,
+        instance.CreatedAt,
+        instance.UpdatedAt);
 
     private static void AddDeleteConfirmation(
         InMemoryElsaInstanceDeleteConfirmationAuthority authority,
