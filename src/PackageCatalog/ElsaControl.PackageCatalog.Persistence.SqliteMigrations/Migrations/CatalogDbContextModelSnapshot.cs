@@ -3380,6 +3380,8 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.HasIndex("OperationId", "AttemptNumber")
                         .IsUnique();
 
+                    b.HasIndex("OrganizationId", "WorkspaceId", "InstanceId");
+
                     b.ToTable("ElsaInstanceRecoveryRequiredAlertOutbox", t =>
                         {
                             t.HasTrigger("TR_ElsaInstanceRecoveryRequiredAlertOutbox_AppendOnly_Delete");
@@ -6594,39 +6596,6 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceLifecycleOutboxEntity", b =>
-                {
-                    b.HasOne("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceOperationEntity", "Operation")
-                        .WithMany()
-                        .HasForeignKey("OperationId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Organization", null)
-                        .WithMany()
-                        .HasForeignKey("OrganizationId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Workspace", null)
-                        .WithMany()
-                        .HasForeignKey("OrganizationId", "WorkspaceId")
-                        .HasPrincipalKey("OrganizationId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceEntity", "Instance")
-                        .WithMany()
-                        .HasForeignKey("OrganizationId", "WorkspaceId", "InstanceId")
-                        .HasPrincipalKey("OrganizationId", "WorkspaceId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("Instance");
-
-                    b.Navigation("Operation");
-                });
-
-            modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity", b =>
                 {
                     b.HasOne("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceOperationEntity", "Operation")
                         .WithMany()

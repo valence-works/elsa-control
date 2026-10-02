@@ -1447,6 +1447,7 @@ internal sealed class ElsaInstanceRecoveryRequiredAlertOutboxConfiguration
             value => new DateTimeOffset(value, TimeSpan.Zero));
         builder.HasIndex(x => new { x.OperationId, x.AttemptNumber }).IsUnique();
         builder.HasIndex(x => new { x.WorkspaceId, x.CreatedAt });
+        builder.HasIndex(x => new { x.OrganizationId, x.WorkspaceId, x.InstanceId });
         builder.HasOne<Organization>().WithMany().HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Restrict);
         builder.HasOne<Workspace>().WithMany()
             .HasForeignKey(x => new { x.OrganizationId, x.WorkspaceId })

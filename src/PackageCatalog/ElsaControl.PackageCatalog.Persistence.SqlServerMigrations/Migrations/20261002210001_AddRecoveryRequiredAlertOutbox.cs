@@ -61,6 +61,10 @@ public sealed class AddRecoveryRequiredAlertOutbox : Migration
             name: "IX_ElsaInstanceRecoveryRequiredAlertOutbox_WorkspaceId_CreatedAt",
             table: "ElsaInstanceRecoveryRequiredAlertOutbox",
             columns: ["WorkspaceId", "CreatedAt"]);
+        migrationBuilder.CreateIndex(
+            name: "IX_ElsaInstanceRecoveryRequiredAlertOutbox_OrganizationId_WorkspaceId_InstanceId",
+            table: "ElsaInstanceRecoveryRequiredAlertOutbox",
+            columns: ["OrganizationId", "WorkspaceId", "InstanceId"]);
 
         migrationBuilder.Sql("""
             CREATE TRIGGER TR_ElsaInstanceRecoveryRequiredAlertOutbox_AppendOnly

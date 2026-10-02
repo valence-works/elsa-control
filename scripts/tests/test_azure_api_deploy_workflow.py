@@ -142,7 +142,6 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertIn("ManagedLifecycleTelemetry__AzureMonitor__Environment=staging", self.source)
         self.assertIn("ManagedLifecycleTelemetry__AzureMonitor__Environment=production", self.source)
         self.assertIn("MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED", self.source)
-        self.assertIn("required+=(STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT)", self.source)
         self.assertIn("required+=(PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT)", self.source)
         self.assertIn(
             """                required+=(

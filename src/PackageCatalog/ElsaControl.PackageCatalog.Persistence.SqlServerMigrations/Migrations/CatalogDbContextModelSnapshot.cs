@@ -3400,6 +3400,8 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.HasIndex("OperationId", "AttemptNumber")
                         .IsUnique();
 
+                    b.HasIndex("OrganizationId", "WorkspaceId", "InstanceId");
+
                     b.ToTable("ElsaInstanceRecoveryRequiredAlertOutbox", t =>
                         {
                             t.HasTrigger("TR_ElsaInstanceRecoveryRequiredAlertOutbox_AppendOnly");
