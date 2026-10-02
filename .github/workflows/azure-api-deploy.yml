@@ -288,7 +288,10 @@ jobs:
                 MANAGED_TELEMETRY_API_IDENTITY_RESOURCE_GROUP
               )
               if [ "$TARGET_ENVIRONMENT" = "test" ]; then
-                required+=(STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT)
+                required+=(
+                  STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT
+                  PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT
+                )
               else
                 required+=(PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT)
               fi

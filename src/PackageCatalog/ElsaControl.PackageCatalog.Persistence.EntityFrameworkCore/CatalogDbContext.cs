@@ -305,9 +305,11 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         if (originalState == ElsaInstanceOperationState.RecoveryRequired ||
             operation.State != ElsaInstanceOperationState.RecoveryRequired)
             return;
-        // The post-submit hand-off parks Queued as RecoveryRequired so reconciliation
-        // owns the reservation. That is not an operator-alert entry; ARM Failed and
-        // other durable parks emit from the Azure transition compare-and-set instead.
+        // Temporary two-site design. After #660 lands ReasonEnteredAt / RequiresHumanAt,
+        // this SaveChanges hook and Azure AddTransition are removed; the single CAS
+        // plus post-commit outbox becomes the only alert site. Healthy hand-off and
+        // temporary parks (including provider.submission.uncertain) must not email
+        // at entry. Do not treat this hand-off skip as the final operator-recovery path.
         if (IsProviderSubmissionHandoff(operation.Id))
             return;
         if (operation.WorkspaceId == Guid.Empty ||

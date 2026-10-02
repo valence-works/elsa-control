@@ -167,8 +167,8 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             capture.Entered[0].GetTagItem(ManagedLifecycleTelemetry.OperationIdTag));
     }
 
-    [Fact(Skip = "HOLD finding 6: Architect ruling pending on whether provider.submission.uncertain must emit. The lifecycle.provider-submitted hand-off exclusion currently swallows this park (ElsaInstanceLifecycleStore.CommitProviderSubmission). Do not restructure triggers until the ruling.")]
-    public async Task Uncertain_provider_submission_park_is_an_operator_alert_entry()
+    [Fact]
+    public async Task Uncertain_provider_submission_park_does_not_emit_at_entry()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -193,7 +193,14 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(
             "provider.submission.uncertain",
             (await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id)).FailureCode);
-        Assert.Single(capture.Entered);
+        // Temporary class (Architect + CEO): no alert at entry. The 10-minute
+        // RequiresHumanAt CAS + outbox row is #662 work after #660 lands the columns.
+        Assert.Empty(capture.Entered);
+    }
+
+    [Fact(Skip = "Blocked on #660 ReasonEnteredAt/RequiresHumanAt. After rebase this PR becomes the single CAS + post-commit outbox site: uncertain stays quiet at 9:59 and writes exactly one alert row at 10:00.")]
+    public void Uncertain_provider_submission_park_alerts_once_after_ten_minutes()
+    {
     }
 
     private sealed class RecoveryRequiredAlertCapture : IDisposable

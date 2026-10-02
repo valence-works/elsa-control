@@ -42,10 +42,15 @@ if [ -z "$recipient" ]; then
   exit 1
 fi
 
-if [ "$environment" = "staging" ] && [ -n "${PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT:-}" ] &&
-   [ "$recipient" = "${PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT}" ]; then
-  echo "::error::Staging RecoveryRequired alerts must not use PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT." >&2
-  exit 1
+if [ "$environment" = "staging" ]; then
+  if [ -z "${PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT:-}" ]; then
+    echo "::error::Staging RecoveryRequired alerts require PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT so the mailbox cannot silently reuse production." >&2
+    exit 1
+  fi
+  if [ "$recipient" = "${PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT}" ]; then
+    echo "::error::Staging RecoveryRequired alerts must not use PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT." >&2
+    exit 1
+  fi
 fi
 
 required=(

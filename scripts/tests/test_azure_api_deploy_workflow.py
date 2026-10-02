@@ -144,6 +144,13 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertIn("MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED", self.source)
         self.assertIn("required+=(STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT)", self.source)
         self.assertIn("required+=(PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT)", self.source)
+        self.assertIn(
+            """                required+=(
+                  STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT
+                  PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT
+                )""",
+            self.source,
+        )
         self.assertIn("Staging RecoveryRequired alerts must not use the production mailbox.", self.source)
         self.assertIn(
             "EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ steps.deployment-config.outputs.pairing_allowlist }}",
@@ -518,6 +525,14 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
                     "MANAGED_TELEMETRY_API_IDENTITY_RESOURCE_GROUP": "rg-test",
                 }
             )
+            production_mailbox_missing = subprocess.run(["bash", "-c", check_script], env=environment,
+                                                         capture_output=True, text=True, check=False)
+            self.assertNotEqual(0, production_mailbox_missing.returncode)
+            self.assertIn(
+                "PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT",
+                production_mailbox_missing.stdout + production_mailbox_missing.stderr,
+            )
+            environment["PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT"] = "prod-ops@example.test"
             configured = subprocess.run(["bash", "-c", check_script], env=environment,
                                         capture_output=True, text=True, check=False)
             self.assertEqual(0, configured.returncode, configured.stdout + configured.stderr)
@@ -538,6 +553,10 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertIn("infra/managed-telemetry/main.bicep", source)
         self.assertNotIn("echo \"$recipient\"", source)
         self.assertNotIn("echo \"$STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT\"", source)
+        self.assertIn(
+            "Staging RecoveryRequired alerts require PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT so the mailbox cannot silently reuse production.",
+            source,
+        )
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -587,9 +606,21 @@ esac
             self.assertIn("STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT", missing.stdout + missing.stderr)
             self.assertEqual("", call_log.read_text())
 
+            staging_without_production = run_script(
+                TARGET_ENVIRONMENT="test",
+                STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT="staging-ops@example.test",
+            )
+            self.assertNotEqual(0, staging_without_production.returncode)
+            self.assertIn(
+                "PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT",
+                staging_without_production.stdout + staging_without_production.stderr,
+            )
+            self.assertEqual("", call_log.read_text())
+
             staging = run_script(
                 TARGET_ENVIRONMENT="test",
                 STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT="staging-ops@example.test",
+                PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT="prod-ops@example.test",
             )
             self.assertEqual(0, staging.returncode, staging.stdout + staging.stderr)
             staging_calls = call_log.read_text()

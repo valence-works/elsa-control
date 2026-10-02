@@ -493,8 +493,9 @@ Who reads the mailbox: the operator named in
 named in `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT` for production.
 Never put an address in committed config, and never point staging at the
 production ops mailbox. `scripts/deploy-managed-telemetry.sh` (invoked by
-`azure-api-deploy.yml` in infra mode) refuses an unset recipient and
-refuses a staging mailbox that matches the production mailbox.
+`azure-api-deploy.yml` in infra mode) refuses an unset recipient. Staging
+infra fails closed unless `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT`
+is also visible and differs from the staging mailbox.
 
 Until #508 GO row 26 (AC5) is proven on staging, keep the business-day
 manual RecoveryRequired check: inspect the health projection and the
@@ -504,7 +505,8 @@ Required operator steps before the first live email (Sipke):
 
 1. Set `STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT` on the `test` GitHub
    environment and `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT` on
-   `production`. They must differ.
+   `production`. They must differ. Staging infra also needs the production
+   mailbox visible on `test` so the equality check can fail closed.
 2. Set `MANAGED_TELEMETRY_WORKSPACE_NAME`,
    `MANAGED_TELEMETRY_APPLICATION_INSIGHTS_NAME`,
    `MANAGED_TELEMETRY_API_IDENTITY_NAME`, and

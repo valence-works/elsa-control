@@ -42,7 +42,9 @@ Microsoft documents [Entra-authenticated ingestion and the required scoped role]
    passes `environment=staging` plus `STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT`
    on `test`, and `environment=production` plus
    `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT` on `production`. An unset
-   recipient fails the deploy. Do not reuse the production mailbox on staging.
+   recipient fails the deploy. Staging also requires
+   `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT` to be visible and different
+   so the mailbox cannot silently reuse production.
    Do not rely on the CLI's default subscription. Review every proposed change
    before deployment. A local `az deployment group what-if` must pass the same
    `environment` and `recoveryRequiredAlertEmail` parameters.
