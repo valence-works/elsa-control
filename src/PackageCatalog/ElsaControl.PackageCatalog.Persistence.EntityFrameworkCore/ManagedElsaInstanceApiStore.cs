@@ -588,7 +588,9 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
             operation.ReconciledObservedLifecycle,
             operation.ReconciledHealth,
             operation.ReconciliationDiagnosticCode,
-            UpdatedAt: operation.UpdatedAt);
+            UpdatedAt: operation.UpdatedAt,
+            ReasonEnteredAt: operation.ReasonEnteredAt,
+            RequiresHumanAt: operation.RequiresHumanAt);
 
     private static ElsaInstance? TryMapInstance(Models.ElsaInstanceEntity entity)
     {

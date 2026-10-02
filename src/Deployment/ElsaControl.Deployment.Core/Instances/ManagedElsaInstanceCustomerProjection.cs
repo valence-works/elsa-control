@@ -201,11 +201,12 @@ public static class ManagedElsaInstanceCustomerProjection
         DateTimeOffset now) =>
         activeOperation is { State: ElsaInstanceOperationState.RecoveryRequired } parked &&
         IsProvisioningAction(parked.Action) &&
-        ManagedElsaReasonCodeCatalog.RequiresHuman(
+        (parked.RequiresHumanAt is not null ||
+         ManagedElsaReasonCodeCatalog.RequiresHuman(
             parked.ParkReason,
             parked.FailureCode,
-            parked.ParkedAt,
-            now);
+            parked.ReasonEnteredAt ?? parked.ParkedAt,
+            now));
 
     private static ActiveLifecycleOperation? ToActive(ElsaInstanceOperationSummary? operation) =>
         operation is null
@@ -215,7 +216,9 @@ public static class ManagedElsaInstanceCustomerProjection
                 operation.State,
                 FirstReason(operation.RecoveryReason, operation.ReasonCode),
                 operation.FailureCode,
-                operation.UpdatedAt ?? operation.AttemptStartedAt ?? operation.StartedAt ?? operation.AcceptedAt);
+                operation.UpdatedAt ?? operation.AttemptStartedAt ?? operation.StartedAt ?? operation.AcceptedAt,
+                operation.ReasonEnteredAt,
+                operation.RequiresHumanAt);
 
     private static string? FirstReason(string? recoveryReason, string? reasonCode) =>
         !string.IsNullOrWhiteSpace(recoveryReason) ? recoveryReason
@@ -239,4 +242,6 @@ public readonly record struct ActiveLifecycleOperation(
     ElsaInstanceOperationState State,
     string? ParkReason = null,
     string? FailureCode = null,
-    DateTimeOffset? ParkedAt = null);
+    DateTimeOffset? ParkedAt = null,
+    DateTimeOffset? ReasonEnteredAt = null,
+    DateTimeOffset? RequiresHumanAt = null);

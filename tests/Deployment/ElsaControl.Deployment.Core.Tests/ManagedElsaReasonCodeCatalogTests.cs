@@ -8,86 +8,126 @@ public sealed class ManagedElsaReasonCodeCatalogTests
     private static readonly DateTimeOffset Now = new(2026, 10, 2, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
-    public void Catalog_is_one_table_keyed_by_code()
+    public void Catalog_enumerates_every_defined_lifecycle_and_park_constant()
     {
-        Assert.NotEmpty(ManagedElsaReasonCodeCatalog.ByCode);
+        Assert.NotEmpty(ManagedElsaReasonCodeCatalog.DefinedCodes);
         Assert.Equal(
-            ManagedElsaReasonCodeCatalog.ByCode.Count,
-            ManagedElsaReasonCodeCatalog.ByCode.Values.Select(entry => entry.Code).Distinct(StringComparer.Ordinal).Count());
+            ManagedElsaReasonCodeCatalog.DefinedCodes.Count,
+            ManagedElsaReasonCodeCatalog.DefinedCodes.Distinct(StringComparer.Ordinal).Count());
 
-        foreach (var (key, entry) in ManagedElsaReasonCodeCatalog.ByCode)
+        foreach (var code in ManagedElsaReasonCodeCatalog.DefinedCodes)
         {
-            Assert.Equal(key, entry.Code);
-            Assert.True(ManagedElsaReasonCodeCatalog.TryGet(entry.Code, out var found));
-            Assert.Same(entry, found);
+            Assert.True(ManagedElsaReasonCodeCatalog.TryGet(code, out var entry), code);
+            Assert.Equal(code, entry!.Code);
+            Assert.Equal(ManagedElsaReasonCodeCatalog.Classify(code), entry.Class);
         }
-    }
 
-    [Fact]
-    public void Submission_uncertain_is_the_only_age_bounded_row()
-    {
-        var uncertain = Assert.Single(
-            ManagedElsaReasonCodeCatalog.ByCode.Values,
-            entry => entry.UncertainHealthyWindow is not null);
-
-        Assert.Equal(ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, uncertain.Code);
-        Assert.True(uncertain.RequiresHuman);
-        Assert.Equal(ManagedElsaReasonCodeCatalog.SubmissionUncertainHealthyWindow, uncertain.UncertainHealthyWindow);
-        Assert.Equal(TimeSpan.FromMinutes(10), uncertain.UncertainHealthyWindow);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.DefinedCodes.Count, ManagedElsaReasonCodeCatalog.ByCode.Count);
     }
 
     [Theory]
-    [InlineData(ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted)]
-    [InlineData(ElsaInstanceProviderReconciliationService.InProgressCode)]
-    [InlineData(ElsaInstanceProviderReconciliationService.HealthUnknownCode)]
-    [InlineData(ElsaInstanceProviderReconciliationService.UnavailableCode)]
-    [InlineData(ElsaInstanceProviderReconciliationService.UnknownCode)]
-    public void Catalogued_non_human_reasons_do_not_require_a_human(string reason)
+    [InlineData(ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted, ManagedElsaReasonClass.HealthyHandOff)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationInProgress, ManagedElsaReasonClass.HealthyHandOff)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationConverged, ManagedElsaReasonClass.HealthyHandOff)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, ManagedElsaReasonClass.Temporary)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationUnknown, ManagedElsaReasonClass.Temporary)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationUnavailable, ManagedElsaReasonClass.Temporary)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationHealthUnknown, ManagedElsaReasonClass.Temporary)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationRetrySafe, ManagedElsaReasonClass.Temporary)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeClaimConflict, ManagedElsaReasonClass.Temporary)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed, ManagedElsaReasonClass.AutoResuming)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded, ManagedElsaReasonClass.AutoResuming)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled, ManagedElsaReasonClass.AutoResuming)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationAmbiguous, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProviderIdentityBindingMissing, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.StagingLeverRecoveryRequired, ManagedElsaReasonClass.NeedsPerson)]
+    public void Catalogued_codes_have_the_architect_class(string code, ManagedElsaReasonClass expected)
     {
-        Assert.True(ManagedElsaReasonCodeCatalog.TryGet(reason, out var entry));
-        Assert.False(entry!.RequiresHuman);
-        Assert.Null(entry.UncertainHealthyWindow);
-        Assert.False(ManagedElsaReasonCodeCatalog.RequiresHuman(reason, null, Now, Now));
-    }
-
-    [Theory]
-    [InlineData(ElsaInstanceProviderReconciliationService.AutoResumeExhaustedCode)]
-    [InlineData(ElsaInstanceProviderReconciliationService.FailedCode)]
-    [InlineData(ElsaInstanceProviderReconciliationService.HealthFailedCode)]
-    [InlineData(ElsaInstanceProviderReconciliationService.AmbiguousCode)]
-    [InlineData(ElsaInstanceProviderReconciliationService.CorrelationMismatchCode)]
-    [InlineData(ElsaInstanceProviderReconciliationService.RetrySafeCode)]
-    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed)]
-    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded)]
-    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled)]
-    public void Catalogued_human_required_reasons_require_a_human(string reason)
-    {
-        Assert.True(ManagedElsaReasonCodeCatalog.TryGet(reason, out var entry));
-        Assert.True(entry!.RequiresHuman);
-        Assert.Null(entry.UncertainHealthyWindow);
-        Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman(reason, null, Now, Now));
+        Assert.Equal(expected, ManagedElsaReasonCodeCatalog.Classify(code));
     }
 
     [Fact]
-    public void Submission_uncertain_requires_a_human_only_after_the_named_window()
+    public void Healthy_hand_off_never_requires_a_human()
     {
-        var origin = Now;
-        var inside = origin + ManagedElsaReasonCodeCatalog.SubmissionUncertainHealthyWindow - TimeSpan.FromTicks(1);
-        var atBound = origin + ManagedElsaReasonCodeCatalog.SubmissionUncertainHealthyWindow;
+        Assert.False(ManagedElsaReasonCodeCatalog.RequiresHuman(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted, Now, Now + TimeSpan.FromHours(1)));
+        var clock = ManagedElsaReasonClock.Advance(
+            null, ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted, null, null, Now, restartClock: false);
+        Assert.Equal(Now, clock.ReasonEnteredAt);
+        Assert.Null(clock.RequiresHumanAt);
+    }
+
+    [Fact]
+    public void Auto_resuming_and_temporary_require_a_human_only_after_the_named_window()
+    {
+        var inside = Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter - TimeSpan.FromTicks(1);
+        var atBound = Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter;
 
         Assert.False(ManagedElsaReasonCodeCatalog.RequiresHuman(
-            ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, null, origin, inside));
+            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed, Now, inside));
         Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman(
-            ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, null, origin, atBound));
+            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed, Now, atBound));
+        Assert.False(ManagedElsaReasonCodeCatalog.RequiresHuman(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, Now, inside));
+        Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, Now, atBound));
+        Assert.Equal(TimeSpan.FromMinutes(10), ManagedElsaReasonCodeCatalog.HumanRequiredAfter);
     }
 
     [Fact]
-    public void Unknown_or_missing_reason_fails_safe_to_human_required()
+    public void Exhausted_and_unknown_codes_require_a_human_immediately()
     {
-        Assert.False(ManagedElsaReasonCodeCatalog.TryGet("provider.recovery.never-seen", out _));
-        Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman(null, null, Now, Now));
-        Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman("provider.recovery.never-seen", null, Now, Now));
         Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman(
-            ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, null, parkedAt: null, Now));
+            ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted, Now, Now));
+        Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman("provider.recovery.never-seen", Now, Now));
+        Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman(null, null, Now, Now));
+        var clock = ManagedElsaReasonClock.Advance(
+            null, "provider.recovery.never-seen", null, null, Now, restartClock: false);
+        Assert.Equal(Now, clock.RequiresHumanAt);
+    }
+
+    [Fact]
+    public void Clock_does_not_reset_when_the_class_stays_the_same()
+    {
+        var first = ManagedElsaReasonClock.Advance(
+            null, ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, null, null, Now, restartClock: false);
+        var switched = ManagedElsaReasonClock.Advance(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
+            ManagedElsaReasonCodeCatalog.ProviderReconciliationUnknown,
+            first.ReasonEnteredAt,
+            first.RequiresHumanAt,
+            Now.AddMinutes(5),
+            restartClock: false);
+        var atBound = ManagedElsaReasonClock.Advance(
+            ManagedElsaReasonCodeCatalog.ProviderReconciliationUnknown,
+            ManagedElsaReasonCodeCatalog.ProviderReconciliationUnavailable,
+            switched.ReasonEnteredAt,
+            switched.RequiresHumanAt,
+            Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter,
+            restartClock: false);
+
+        Assert.Equal(Now, switched.ReasonEnteredAt);
+        Assert.Null(switched.RequiresHumanAt);
+        Assert.Equal(Now, atBound.ReasonEnteredAt);
+        Assert.Equal(Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter, atBound.RequiresHumanAt);
+    }
+
+    [Fact]
+    public void Resume_or_recover_restarts_the_clock_and_clears_the_flag()
+    {
+        var parked = ManagedElsaReasonClock.Advance(
+            null, ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted, null, null, Now, restartClock: false);
+        var recovered = ManagedElsaReasonClock.Advance(
+            ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted,
+            nextCode: null,
+            parked.ReasonEnteredAt,
+            parked.RequiresHumanAt,
+            Now.AddMinutes(3),
+            restartClock: true);
+
+        Assert.Equal(Now, parked.RequiresHumanAt);
+        Assert.Equal(Now.AddMinutes(3), recovered.ReasonEnteredAt);
+        Assert.Null(recovered.RequiresHumanAt);
     }
 }

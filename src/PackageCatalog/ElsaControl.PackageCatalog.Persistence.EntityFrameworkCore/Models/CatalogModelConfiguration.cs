@@ -1288,6 +1288,8 @@ internal sealed class ElsaInstanceOperationConfiguration : IEntityTypeConfigurat
         builder.Property(x => x.DeletionDiagnosticCode).HasMaxLength(128);
         builder.Property(x => x.CreatedAt).HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
         builder.Property(x => x.UpdatedAt).HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        builder.Property(x => x.ReasonEnteredAt).HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null, value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
+        builder.Property(x => x.RequiresHumanAt).HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null, value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
         builder.HasIndex(x => new { x.WorkspaceId, x.IdempotencyScope, x.IdempotencyKey }).IsUnique();
         builder.HasIndex(x => x.InstanceId)
             .HasDatabaseName("IX_ElsaInstanceOperations_ActiveInstanceId")

@@ -289,7 +289,7 @@ public sealed class ElsaInstanceLifecycleWorker(
                     item.Instance.ObservedLifecycle,
                     item.Instance.Health,
                     result.Operation.State,
-                    "provider.submission.rejected");
+                    ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected);
             }
             catch
             {
@@ -303,7 +303,7 @@ public sealed class ElsaInstanceLifecycleWorker(
                     item.Instance.ObservedLifecycle,
                     item.Instance.Health,
                     result.Operation.State,
-                    "provider.submission.uncertain");
+                    ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain);
                 if (_submissionStore is not null)
                 {
                     try

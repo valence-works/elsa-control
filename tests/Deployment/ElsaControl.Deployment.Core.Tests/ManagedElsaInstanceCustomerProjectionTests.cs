@@ -212,9 +212,9 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
     }
 
     [Theory]
-    [InlineData("azure.recovery.auto-resume-exhausted")]
-    [InlineData("azure.deployment.failed")]
-    [InlineData("azure.deployment.wait-exceeded")]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationAmbiguous)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProviderIdentityBindingMissing)]
     public void Recovery_required_reason_codes_project_the_same_non_progress_state(string reasonCode)
     {
         var instance = Instance(ElsaObservedLifecycle.Unknown);
@@ -357,9 +357,10 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
 
     [Theory]
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted)]
-    [InlineData(ElsaInstanceProviderReconciliationService.InProgressCode)]
-    [InlineData(ElsaInstanceProviderReconciliationService.HealthUnknownCode)]
-    public void Healthy_hand_off_reasons_keep_the_normal_in_progress_projection(string reason)
+    [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationInProgress)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationConverged)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed)]
+    public void Healthy_hand_off_and_auto_resuming_reasons_keep_the_normal_in_progress_projection(string reason)
     {
         var instance = Instance(ElsaObservedLifecycle.Unknown);
         var operation = Operation(
@@ -388,7 +389,7 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
             parkedAt: Now);
 
         var projected = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(
-            instance, operation, Now + ManagedElsaReasonCodeCatalog.SubmissionUncertainHealthyWindow - TimeSpan.FromSeconds(1));
+            instance, operation, Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter - TimeSpan.FromSeconds(1));
 
         Assert.Equal(ElsaObservedLifecycle.Provisioning, projected);
         Assert.True(ManagedElsaInstanceCustomerProjection.IsKnownInProgress(projected));
@@ -407,12 +408,30 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
             parkedAt: Now);
 
         var projected = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(
-            instance, operation, Now + ManagedElsaReasonCodeCatalog.SubmissionUncertainHealthyWindow);
+            instance, operation, Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter);
 
         Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, projected);
         Assert.False(ManagedElsaInstanceCustomerProjection.IsKnownInProgress(projected));
         Assert.Equal(ManagedElsaInstanceCustomerProjection.NeedsAttentionLabel,
             ManagedElsaInstanceCustomerProjection.CustomerLabel(projected));
+    }
+
+    [Fact]
+    public void Auto_resuming_park_projects_recovery_required_after_the_window()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Provisioning);
+        var operation = Operation(
+            instance.Id,
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+            parkedAt: Now);
+
+        Assert.Equal(ElsaObservedLifecycle.Provisioning,
+            ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation, Now));
+        Assert.Equal(ElsaObservedLifecycle.RecoveryRequired,
+            ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(
+                instance, operation, Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter));
     }
 
     [Fact]
@@ -553,5 +572,6 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
             null,
             reasonCode,
             RecoveryReason: reasonCode,
-            UpdatedAt: parkedAt ?? Now);
+            UpdatedAt: parkedAt ?? Now,
+            ReasonEnteredAt: parkedAt ?? Now);
 }
