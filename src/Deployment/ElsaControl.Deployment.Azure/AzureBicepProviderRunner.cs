@@ -21,6 +21,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private const string KeyVaultSecretsUserRoleDefinitionId = "4633458b-17de-408a-b874-0445c86b69e6";
     private const string KeyVaultSecretsOfficerRoleDefinitionId = "b86a8fe4-44ce-4948-aee5-eccb2c155cd7";
     internal const string LogAnalyticsWorkspaceSoftDeletedCode = "azure.cleanup.log-analytics-workspace-soft-deleted";
+    internal const string LogAnalyticsWorkspaceDeletedListUncertainCode = "azure.cleanup.log-analytics-workspace-deleted-list-uncertain";
     /// <summary>
     /// Azure CLI exit code for ResourceNotFound. Other unsuccessful
     /// <c>workspace show</c> outcomes are transport/auth/server failures and
@@ -1719,7 +1720,11 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 command, cancellationToken);
             if (workspaceForceDelete is not null)
                 return workspaceForceDelete;
-            if (await IsLogAnalyticsWorkspaceSoftDeletedAsync(command, cancellationToken))
+            var deletedWorkspacesBeforeGroup = await ObserveDeletedLogAnalyticsWorkspacesAsync(command, cancellationToken);
+            if (deletedWorkspacesBeforeGroup == DeletedLogAnalyticsWorkspaceObservation.Uncertain)
+                return Uncertain(command, AzureProviderOperationPhase.CleanupVerified, LogAnalyticsWorkspaceDeletedListUncertainCode,
+                    "The subscription deleted-workspaces list could not be read before resource-group deletion.");
+            if (deletedWorkspacesBeforeGroup == DeletedLogAnalyticsWorkspaceObservation.OwnedSoftDeleted)
                 return Uncertain(command, AzureProviderOperationPhase.CleanupVerified, LogAnalyticsWorkspaceSoftDeletedCode,
                     "The owned Log Analytics workspace remains in the 14-day soft-delete list.");
 
@@ -1737,7 +1742,11 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         if (!await PurgeAndVerifyVaultAsync(command, vaultName, exactVaultId, cancellationToken))
             return Uncertain(command, AzureProviderOperationPhase.CleanupVerified, "azure.cleanup.vault-uncertain", "The owned Key Vault could not be proven absent.");
 
-        if (await IsLogAnalyticsWorkspaceSoftDeletedAsync(command, cancellationToken))
+        var deletedWorkspacesAfterVault = await ObserveDeletedLogAnalyticsWorkspacesAsync(command, cancellationToken);
+        if (deletedWorkspacesAfterVault == DeletedLogAnalyticsWorkspaceObservation.Uncertain)
+            return Uncertain(command, AzureProviderOperationPhase.CleanupVerified, LogAnalyticsWorkspaceDeletedListUncertainCode,
+                "The subscription deleted-workspaces list could not be read after vault purge.");
+        if (deletedWorkspacesAfterVault == DeletedLogAnalyticsWorkspaceObservation.OwnedSoftDeleted)
             return Uncertain(command, AzureProviderOperationPhase.CleanupVerified, LogAnalyticsWorkspaceSoftDeletedCode,
                 "The owned Log Analytics workspace remains in the 14-day soft-delete list.");
 
@@ -2349,14 +2358,23 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         Ambiguous
     }
 
-    private async Task<bool> IsLogAnalyticsWorkspaceSoftDeletedAsync(
+    private async Task<DeletedLogAnalyticsWorkspaceObservation> ObserveDeletedLogAnalyticsWorkspacesAsync(
         AzureProviderRunnerCommand command,
         CancellationToken cancellationToken)
     {
         var deleted = await ListDeletedLogAnalyticsWorkspacesAsync(command, cancellationToken);
         if (!deleted.Succeeded || deleted.Value is null)
-            return true;
-        return deleted.Value.Value.Any(workspace => IsOwnedDeletedLogAnalyticsWorkspace(command, workspace));
+            return DeletedLogAnalyticsWorkspaceObservation.Uncertain;
+        return deleted.Value.Value.Any(workspace => IsOwnedDeletedLogAnalyticsWorkspace(command, workspace))
+            ? DeletedLogAnalyticsWorkspaceObservation.OwnedSoftDeleted
+            : DeletedLogAnalyticsWorkspaceObservation.Absent;
+    }
+
+    private enum DeletedLogAnalyticsWorkspaceObservation
+    {
+        Absent,
+        OwnedSoftDeleted,
+        Uncertain
     }
 
     private Task<AzureCommandProcessResult<SafeValue<IReadOnlyList<DeletedWorkspace>>>> ListDeletedLogAnalyticsWorkspacesAsync(

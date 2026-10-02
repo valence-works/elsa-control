@@ -2136,6 +2136,26 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Cleanup_is_uncertain_when_deleted_workspaces_listing_fails_before_resource_group_delete()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "[]");
+        WorkspaceShowNotFound(process);
+        process.Failure(IsDeletedWorkspacesQuery);
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal(AzureBicepProviderRunner.LogAnalyticsWorkspaceDeletedListUncertainCode, result.Code);
+        Assert.NotEqual(AzureBicepProviderRunner.LogAnalyticsWorkspaceSoftDeletedCode, result.Code);
+        Assert.False(result.OwnedResourcesAbsent);
+        Assert.DoesNotContain(process.Calls, IsLogAnalyticsWorkspaceDelete);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("group") && call.Contains("delete"));
+    }
+
+    [Fact]
     public async Task Cleanup_force_deletes_a_workspace_omitted_from_an_owned_inventory()
     {
         var process = new FakeCommandProcess();

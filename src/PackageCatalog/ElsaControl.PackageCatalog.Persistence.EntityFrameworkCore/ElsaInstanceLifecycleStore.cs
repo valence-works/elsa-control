@@ -420,7 +420,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 operation.WorkspaceId == workspaceId &&
                 operation.InstanceId == instanceId &&
                 (exceptOperationId == null || operation.Id != exceptOperationId) &&
-                operation.ExpectedVersion >= version &&
+                (operation.ExpectedVersion >= version ||
+                 (operation.RecoveryExpectedVersion != null && operation.RecoveryExpectedVersion >= version)) &&
                 operation.Action != ElsaInstanceOperationAction.Create &&
                 !systemOnly.Contains(operation.Action),
                 cancellationToken);
@@ -2673,6 +2674,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         existingOperation.RecoveryRequestHash = requestedOperation.RecoveryRequestHash;
         if (isRecoveryResume)
         {
+            existingOperation.RecoveryExpectedVersion = requestedOperation.RecoveryExpectedVersion;
             var deleteAuthority = existingOperation.Action == ElsaInstanceOperationAction.Delete
                 ? await CaptureAzureDeleteRecoveryAuthorityAsync(
                     existingInstance, existingOperation, requestedOperation.AttemptNumber,
@@ -3757,6 +3759,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             IdempotencyKey = operation.IdempotencyKey,
             RequestHash = operation.RequestHash,
             ExpectedVersion = operation.ExpectedVersion,
+            RecoveryExpectedVersion = operation.RecoveryExpectedVersion,
             State = operation.State,
             AttemptNumber = operation.AttemptNumber,
             AcceptedAt = operation.AcceptedAt,
@@ -4110,7 +4113,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 entity.AcceptedAt,
                 recovery?.IdempotencyScope ?? entity.RecoveryIdempotencyScope,
                 recovery?.IdempotencyKey ?? entity.RecoveryIdempotencyKey,
-                recovery?.RequestHash ?? entity.RecoveryRequestHash);
+                recovery?.RequestHash ?? entity.RecoveryRequestHash,
+                entity.RecoveryExpectedVersion);
         }
         catch (Exception exception) when (exception is ArgumentException or ArgumentOutOfRangeException or InvalidOperationException)
         {

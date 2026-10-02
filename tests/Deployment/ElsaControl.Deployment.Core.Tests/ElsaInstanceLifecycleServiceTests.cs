@@ -810,7 +810,7 @@ public sealed class ElsaInstanceLifecycleServiceTests
                 DeleteConfirmationId: DeleteConfirmationId, ActorAccountId: ActorAccountId,
                 CanonicalExpectedVersion: originalVersion)));
 
-        Assert.Equal(ElsaInstanceLifecycleConflictReason.VersionConflict, conflict.Reason);
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.ChangedSinceRead, conflict.Reason);
         Assert.DoesNotContain(store.Operations, operation => operation.Action == ElsaInstanceOperationAction.Delete);
     }
 

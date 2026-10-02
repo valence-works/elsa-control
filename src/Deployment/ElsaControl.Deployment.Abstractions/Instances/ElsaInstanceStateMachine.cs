@@ -48,7 +48,8 @@ public sealed record ElsaInstanceOperation
         DateTimeOffset acceptedAt,
         string? recoveryIdempotencyScope = null,
         string? recoveryIdempotencyKey = null,
-        string? recoveryRequestHash = null)
+        string? recoveryRequestHash = null,
+        int? recoveryExpectedVersion = null)
     {
         Id = id;
         InstanceId = instanceId;
@@ -63,6 +64,7 @@ public sealed record ElsaInstanceOperation
         RecoveryIdempotencyScope = recoveryIdempotencyScope;
         RecoveryIdempotencyKey = recoveryIdempotencyKey;
         RecoveryRequestHash = recoveryRequestHash;
+        RecoveryExpectedVersion = recoveryExpectedVersion;
     }
 
     public Guid Id { get; }
@@ -88,6 +90,13 @@ public sealed record ElsaInstanceOperation
     public string? RecoveryIdempotencyScope { get; private init; }
     public string? RecoveryIdempotencyKey { get; private init; }
     public string? RecoveryRequestHash { get; private init; }
+
+    /// <summary>
+    /// Version Recover was accepted against. Recover mutates this row in
+    /// place and leaves <see cref="ExpectedVersion"/> at the original
+    /// accept, so Delete If-Match rebase uses this stamp to see Recover.
+    /// </summary>
+    public int? RecoveryExpectedVersion { get; private init; }
 
     public bool HoldsReservation => ElsaInstanceOperationGuard.IsActive(State);
 
@@ -141,7 +150,8 @@ public sealed record ElsaInstanceOperation
         DateTimeOffset acceptedAt,
         string? recoveryIdempotencyScope = null,
         string? recoveryIdempotencyKey = null,
-        string? recoveryRequestHash = null)
+        string? recoveryRequestHash = null,
+        int? recoveryExpectedVersion = null)
     {
         if (id == Guid.Empty)
             throw new ArgumentException("Operation ID is required.", nameof(id));
@@ -153,6 +163,8 @@ public sealed record ElsaInstanceOperation
             throw new ArgumentOutOfRangeException(nameof(expectedVersion), "Expected version must be positive.");
         if (attemptNumber < 1)
             throw new ArgumentOutOfRangeException(nameof(attemptNumber), "Attempt number must be positive.");
+        if (recoveryExpectedVersion is { } recoveredVersion && recoveredVersion < 1)
+            throw new ArgumentOutOfRangeException(nameof(recoveryExpectedVersion), "Recovery expected version must be positive.");
         if (state == ElsaInstanceOperationState.WaitingForPriorOperation &&
             action != ElsaInstanceOperationAction.Delete)
             throw new ArgumentException("Only delete operations can wait for a prior operation.", nameof(state));
@@ -172,7 +184,8 @@ public sealed record ElsaInstanceOperation
             acceptedAt.ToUniversalTime(),
             recoveryIdempotencyScope is null ? null : ElsaInstanceReferenceValue.RequireOperationScope(recoveryIdempotencyScope, nameof(recoveryIdempotencyScope)),
             recoveryIdempotencyKey is null ? null : ElsaInstanceReferenceValue.RequireOperationKey(recoveryIdempotencyKey, nameof(recoveryIdempotencyKey)),
-            recoveryRequestHash is null ? null : ElsaInstanceReferenceValue.RequireCanonicalHash(recoveryRequestHash, nameof(recoveryRequestHash)));
+            recoveryRequestHash is null ? null : ElsaInstanceReferenceValue.RequireCanonicalHash(recoveryRequestHash, nameof(recoveryRequestHash)),
+            recoveryExpectedVersion);
     }
 
     public ElsaInstanceOperation TransitionTo(ElsaInstanceOperationState next)
@@ -189,17 +202,24 @@ public sealed record ElsaInstanceOperation
     /// Recovery is explicit: an uncertain operation cannot be retried by directly
     /// inserting another queued operation.
     /// </summary>
-    public ElsaInstanceOperation Recover(string idempotencyScope, string idempotencyKey, string requestHash)
+    public ElsaInstanceOperation Recover(
+        string idempotencyScope,
+        string idempotencyKey,
+        string requestHash,
+        int recoveryExpectedVersion)
     {
         if (State != ElsaInstanceOperationState.RecoveryRequired)
             throw new InvalidOperationException("Only a recovery-required operation can be recovered.");
+        if (recoveryExpectedVersion < 1)
+            throw new ArgumentOutOfRangeException(nameof(recoveryExpectedVersion), "Recovery expected version must be positive.");
         return this with
         {
             State = ElsaInstanceOperationState.Queued,
             AttemptNumber = checked(AttemptNumber + 1),
             RecoveryIdempotencyScope = ElsaInstanceReferenceValue.RequireOperationScope(idempotencyScope, nameof(idempotencyScope)),
             RecoveryIdempotencyKey = ElsaInstanceReferenceValue.RequireOperationKey(idempotencyKey, nameof(idempotencyKey)),
-            RecoveryRequestHash = ElsaInstanceReferenceValue.RequireCanonicalHash(requestHash, nameof(requestHash))
+            RecoveryRequestHash = ElsaInstanceReferenceValue.RequireCanonicalHash(requestHash, nameof(requestHash)),
+            RecoveryExpectedVersion = recoveryExpectedVersion
         };
     }
 
@@ -497,7 +517,7 @@ public static class ElsaInstanceStateMachine
                                     instance.Intent.DesiredLifecycle == ElsaDesiredLifecycle.Deleting
                 ? instance
                 : RequestReconciliation(instance);
-            return new ElsaInstanceTransitionResult(recoveredInstance, activeOperation.Recover(operationScope, key, hash));
+            return new ElsaInstanceTransitionResult(recoveredInstance, activeOperation.Recover(operationScope, key, hash, expected));
         }
 
         if (activeOperation is not null && ElsaInstanceOperationGuard.IsIdempotentReplay(activeOperation, operationScope, key, hash))

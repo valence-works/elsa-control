@@ -368,6 +368,7 @@ public sealed class ElsaInstanceContractTests
         Assert.Equal(recoveryRequired.Id, result.Operation.Id);
         Assert.Equal(ElsaInstanceOperationState.Queued, result.Operation.State);
         Assert.Equal(recoveryRequired.AttemptNumber + 1, result.Operation.AttemptNumber);
+        Assert.Equal(instance.Version, result.Operation.RecoveryExpectedVersion);
     }
 
     [Fact]
@@ -385,6 +386,7 @@ public sealed class ElsaInstanceContractTests
 
         Assert.Equal(recoveryRequired.Id, result.Operation.Id);
         Assert.Equal(ElsaInstanceOperationState.Queued, result.Operation.State);
+        Assert.Equal(delete.Instance.Version, result.Operation.RecoveryExpectedVersion);
         Assert.Equal(ElsaObservedLifecycle.Unknown, result.Instance.ObservedLifecycle);
         Assert.Equal(ElsaDesiredLifecycle.Deleting, result.Instance.DesiredLifecycle);
     }

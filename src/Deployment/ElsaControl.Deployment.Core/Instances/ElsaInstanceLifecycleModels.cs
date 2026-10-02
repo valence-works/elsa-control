@@ -237,6 +237,13 @@ public enum ElsaInstanceLifecycleConflictReason
     /// <summary>An optimistic concurrency (If-Match/expected-version) conflict.</summary>
     VersionConflict,
 
+    /// <summary>
+    /// A customer or member mutation was accepted at or after the client's
+    /// If-Match. Distinct from <see cref="VersionConflict"/> so Cloud can
+    /// refuse a silent retry and show the changed-since-read copy.
+    /// </summary>
+    ChangedSinceRead,
+
     /// <summary>An idempotency key was reused for a request that does not match the original.</summary>
     IdempotencyConflict,
 

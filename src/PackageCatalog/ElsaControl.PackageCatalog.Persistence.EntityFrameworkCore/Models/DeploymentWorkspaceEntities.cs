@@ -247,6 +247,12 @@ internal sealed class ElsaInstanceOperationEntity
     public string? RecoveryIdempotencyKey { get; set; }
     public string? RecoveryRequestHash { get; set; }
     public int ExpectedVersion { get; set; }
+    /// <summary>
+    /// Version the latest Recover was accepted against. Null until Recover
+    /// mutates this row. Used by Delete If-Match rebase; the original
+    /// <see cref="ExpectedVersion"/> stays at the founding accept.
+    /// </summary>
+    public int? RecoveryExpectedVersion { get; set; }
     public ElsaInstanceOperationState State { get; set; }
     public int AttemptNumber { get; set; }
     public DateTimeOffset AcceptedAt { get; set; }

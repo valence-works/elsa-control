@@ -17,6 +17,12 @@ namespace ElsaControl.Api.Workspace;
 public static class ManagedElsaInstanceEndpoints
 {
     internal const string HandoffUnavailableReason = "Managed sign-in is not configured for this instance's current deployment.";
+    internal const string ChangedSinceReadCode = "instance.changed-since-read";
+    internal const string ChangedSinceReadDetail =
+        "This engine changed since you opened this page. Review its current state, then confirm Delete again if you still want to delete it.";
+    internal const string SystemOnlyVersionConflictCode = "instance.version-conflict";
+    internal const string SystemOnlyVersionConflictDetail =
+        "We couldn't start deleting this engine. Please try again. If it keeps failing, contact support.";
 
     private static readonly ManagedElsaInstanceLaunchProfile InitialLaunchProfile = new(
         "West Europe Dedicated", "Managed hosting in West Europe.",
@@ -431,25 +437,28 @@ public static class ManagedElsaInstanceEndpoints
                         return Results.NotFound();
                     if (current.Version <= expectedVersion.Value)
                         return Problem(ConflictCode(exception), "The request conflicts with the current instance state.", StatusCodes.Status412PreconditionFailed);
-                    if (!string.Equals(current.Name, instance.Name, StringComparison.Ordinal) ||
-                        !Equals(current.DesiredStateRevisionId, instance.DesiredStateRevisionId) ||
-                        await lifecycleStore.HasCustomerMutationAtOrAfterVersionAsync(
+                    // Name / DesiredStateRevisionId are not snapshotted at the
+                    // client's If-Match. Customer rename and intent updates
+                    // write an operation row; Recover stamps
+                    // RecoveryExpectedVersion. A same-request re-read cannot
+                    // see those. Do not compare `current` with `instance`.
+                    if (await lifecycleStore.HasCustomerMutationAtOrAfterVersionAsync(
                             workspaceId, instanceId, expectedVersion.Value, deleteRecovery?.Id, cancellationToken))
                         return Problem(
-                            "instance.version-conflict",
-                            "We couldn't start deleting this engine. Please try again. If it keeps failing, contact support.",
+                            ChangedSinceReadCode,
+                            ChangedSinceReadDetail,
                             StatusCodes.Status412PreconditionFailed);
                     try
                     {
                         return await AcceptDeleteAsync(current.Version, expectedVersion.Value);
                     }
                     catch (ElsaInstanceLifecycleConflictException retryException)
-                        when (retryException.Reason == ElsaInstanceLifecycleConflictReason.VersionConflict)
+                        when (retryException.Reason is ElsaInstanceLifecycleConflictReason.VersionConflict
+                            or ElsaInstanceLifecycleConflictReason.ChangedSinceRead)
                     {
-                        return Problem(
-                            "instance.version-conflict",
-                            "We couldn't start deleting this engine. Please try again. If it keeps failing, contact support.",
-                            StatusCodes.Status412PreconditionFailed);
+                        return retryException.Reason == ElsaInstanceLifecycleConflictReason.ChangedSinceRead
+                            ? Problem(ChangedSinceReadCode, ChangedSinceReadDetail, StatusCodes.Status412PreconditionFailed)
+                            : Problem(SystemOnlyVersionConflictCode, SystemOnlyVersionConflictDetail, StatusCodes.Status412PreconditionFailed);
                     }
                 }
             }
@@ -1002,7 +1011,8 @@ public static class ManagedElsaInstanceEndpoints
 
     internal static string ConflictCode(ElsaInstanceLifecycleConflictException exception) => exception.Reason switch
     {
-        ElsaInstanceLifecycleConflictReason.VersionConflict => "instance.version-conflict",
+        ElsaInstanceLifecycleConflictReason.VersionConflict => SystemOnlyVersionConflictCode,
+        ElsaInstanceLifecycleConflictReason.ChangedSinceRead => ChangedSinceReadCode,
         ElsaInstanceLifecycleConflictReason.SlugConflict => "instance.slug-conflict",
         ElsaInstanceLifecycleConflictReason.OperationActive => "instance.operation-active",
         ElsaInstanceLifecycleConflictReason.IdempotencyConflict => "instance.idempotency-conflict",
@@ -1013,7 +1023,8 @@ public static class ManagedElsaInstanceEndpoints
     };
 
     internal static int ConflictStatusCode(ElsaInstanceLifecycleConflictException exception) =>
-        exception.Reason == ElsaInstanceLifecycleConflictReason.VersionConflict
+        exception.Reason is ElsaInstanceLifecycleConflictReason.VersionConflict
+            or ElsaInstanceLifecycleConflictReason.ChangedSinceRead
             ? StatusCodes.Status412PreconditionFailed
             : exception.Reason == ElsaInstanceLifecycleConflictReason.CommercialDenied
                 ? StatusCodes.Status422UnprocessableEntity

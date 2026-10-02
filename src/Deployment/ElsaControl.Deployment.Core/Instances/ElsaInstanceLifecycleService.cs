@@ -363,7 +363,7 @@ public sealed class ElsaInstanceLifecycleService(
             await store.HasCustomerMutationAtOrAfterVersionAsync(
                 workspaceId, instanceId, rebaseCanonical, expectedOperationId, cancellationToken))
             throw new ElsaInstanceLifecycleConflictException(
-                "Instance version conflict.", ElsaInstanceLifecycleConflictReason.VersionConflict);
+                "Instance changed since the client read.", ElsaInstanceLifecycleConflictReason.ChangedSinceRead);
         var activeOperation = await store.GetActiveOperationAsync(workspaceId, instanceId, cancellationToken);
         if (action == ElsaInstanceOperationAction.Recover && expectedOperationId is { } operationId &&
             (activeOperation is null || activeOperation.Id != operationId))

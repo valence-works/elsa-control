@@ -3644,6 +3644,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<int>("ReconciliationVersion")
                         .HasColumnType("int");
 
+                    b.Property<int?>("RecoveryExpectedVersion")
+                        .HasColumnType("int");
+
                     b.Property<string>("RecoveryIdempotencyKey")
                         .HasMaxLength(128)
                         .HasColumnType("nvarchar(128)");
