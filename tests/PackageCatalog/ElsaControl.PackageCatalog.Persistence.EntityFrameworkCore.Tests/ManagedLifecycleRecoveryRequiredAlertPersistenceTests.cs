@@ -236,9 +236,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Theory]
-    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed)]
-    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded)]
-    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled)]
+    [MemberData(nameof(AutoResumingParkCodes))]
     public async Task Azure_park_code_reaches_the_lifecycle_reason_in_one_reconcile_without_alerting(
         string parkCode)
     {
@@ -247,6 +245,42 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         await using var db = CreateMigratedContext(connection);
         await db.Database.MigrateAsync();
         var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, $"Alert {parkCode}");
+        var workspaceStore = new DeploymentWorkspaceStore(db);
+        Assert.NotNull(await workspaceStore.ClaimNextQueuedRunAsync("alert-auto-resume-worker", Now));
+        Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
+            Now.AddMinutes(10), TimeSpan.FromMinutes(5)));
+        db.ChangeTracker.Clear();
+        using var capture = new RecoveryRequiredAlertCapture(workspace.Id);
+
+        var reconciled = await new ElsaInstanceProviderReconciliationService(
+                CreateStore(db),
+                new QueueProviderPort(new ElsaInstanceProviderObservation(
+                    ElsaInstanceProviderObservationKind.Confirmed,
+                    ElsaObservedLifecycle.Provisioning,
+                    ElsaInstanceProviderHealthGate.Unknown,
+                    "alert-auto-resuming-park")
+                {
+                    ReasonCode = parkCode
+                }),
+                new FixedTimeProvider(Now.AddMinutes(1)))
+            .ReconcileAsync(workspace.Id, accepted.Operation.Id);
+
+        Assert.Equal(parkCode, reconciled.DiagnosticCode);
+        var parked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(parkCode, parked.ReconciliationDiagnosticCode);
+        Assert.Null(parked.RequiresHumanAt);
+        Assert.Empty(capture.Entered);
+        Assert.Empty(db.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking());
+    }
+
+    [Fact]
+    public async Task Auto_resume_exhausted_park_writes_exactly_one_alert()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Alert exhausted");
         var store = new EfCoreElsaInstanceLifecycleStore(
             db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
         await store.CommitProviderSubmissionAsync(new(
@@ -258,12 +292,44 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             Now));
         using var capture = new RecoveryRequiredAlertCapture(workspace.Id);
 
-        await ReconcileParkAsync(store, workspace.Id, accepted, parkCode, Now.AddMinutes(1));
+        await ReconcileParkAsync(
+            store,
+            workspace.Id,
+            accepted,
+            ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted,
+            Now.AddMinutes(1));
 
         var parked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
-        Assert.Equal(parkCode, (await db.DeploymentRuns.AsNoTracking().SingleAsync(x => x.Id == parked.DeploymentRunId)).RecoveryReason);
-        Assert.Null(parked.RequiresHumanAt);
-        Assert.Empty(capture.Entered);
+        Assert.Equal(Now.AddMinutes(1), parked.RequiresHumanAt);
+        Assert.Single(capture.Entered);
+        Assert.Equal(1, await db.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+    }
+
+    [Fact]
+    public async Task Unknown_park_code_writes_exactly_one_alert()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Alert unknown park");
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+        await store.CommitProviderSubmissionAsync(new(
+            workspace.Id,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            "provider-operation-accepted",
+            Now));
+        using var capture = new RecoveryRequiredAlertCapture(workspace.Id);
+
+        await ReconcileParkAsync(store, workspace.Id, accepted, "azure.recovery.not-in-catalog", Now.AddMinutes(1));
+
+        var parked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(Now.AddMinutes(1), parked.RequiresHumanAt);
+        Assert.Single(capture.Entered);
+        Assert.Equal(1, await db.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
     }
 
     private static async Task ReconcileParkAsync(
