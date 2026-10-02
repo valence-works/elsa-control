@@ -2447,7 +2447,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(HttpStatusCode.Accepted, apply.StatusCode);
         var applied = await apply.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>();
         Assert.NotNull(applied);
-        await ParkRecoveryRequiredAsync(app, applied.OperationId, "recover-delete");
+        await ParkRecoveryRequiredAsync(app, applied.OperationId, "a");
 
         using var etagResponse = await owner.GetAsync(
             $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}");
