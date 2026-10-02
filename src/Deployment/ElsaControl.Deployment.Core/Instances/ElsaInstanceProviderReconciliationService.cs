@@ -16,6 +16,7 @@ public sealed class ElsaInstanceProviderReconciliationService(
     public const string HealthFailedCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationHealthFailed;
     public const string HealthUnknownCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationHealthUnknown;
     public const string FailedCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationFailed;
+    public const string CancelledCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationCancelled;
     public const string UnavailableCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationUnavailable;
     public const string RetrySafeCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationRetrySafe;
     public const string CorrelationMismatchCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationCorrelationMismatch;
@@ -175,7 +176,7 @@ public sealed class ElsaInstanceProviderReconciliationService(
                 ElsaObservedLifecycle.Unknown,
                 ElsaInstanceHealth.Unknown,
                 null,
-                "provider.reconciliation.cancelled");
+                CancelledCode);
             throw;
         }
         catch
@@ -185,7 +186,7 @@ public sealed class ElsaInstanceProviderReconciliationService(
                 ElsaObservedLifecycle.Unknown,
                 ElsaInstanceHealth.Unknown,
                 null,
-                "provider.reconciliation.failed");
+                FailedCode);
             throw;
         }
     }

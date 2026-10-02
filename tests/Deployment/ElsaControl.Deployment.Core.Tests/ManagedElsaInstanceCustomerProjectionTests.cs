@@ -417,6 +417,29 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
     }
 
     [Fact]
+    public void Customer_elapsed_counts_from_operation_start_and_never_decreases_across_auto_resumes()
+    {
+        var startedAt = Now;
+        var acceptedAt = Now.AddSeconds(-30);
+        var origin = ManagedElsaInstanceCustomerProjection.CustomerElapsedOrigin(startedAt, acceptedAt);
+        Assert.Equal(acceptedAt, origin);
+        Assert.NotEqual(startedAt.AddMinutes(4), origin);
+
+        var beforeResume = Now.AddMinutes(4);
+        var afterResume = Now.AddMinutes(4);
+        var later = Now.AddMinutes(7);
+        var elapsedBefore = beforeResume - origin!.Value;
+        var elapsedAfterResume = afterResume - origin.Value;
+        var elapsedLater = later - origin.Value;
+        var resetIfAttemptOrReasonClockWereUsed = afterResume - afterResume;
+
+        Assert.True(elapsedAfterResume >= elapsedBefore);
+        Assert.True(elapsedLater > elapsedAfterResume);
+        Assert.True(elapsedLater > resetIfAttemptOrReasonClockWereUsed);
+        Assert.NotEqual(origin, afterResume);
+    }
+
+    [Fact]
     public void Auto_resuming_park_projects_recovery_required_after_the_window()
     {
         var instance = Instance(ElsaObservedLifecycle.Provisioning);

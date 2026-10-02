@@ -155,6 +155,23 @@ public static class ManagedElsaInstanceCustomerProjection
         return lifecycle == ElsaObservedLifecycle.RecoveryRequired ? NeedsAttentionLabel : null;
     }
 
+    /// <summary>
+    /// Origin for the #605 AC7 elapsed value. Counts from when the
+    /// operation started — the earlier of <paramref name="startedAt"/> and
+    /// <paramref name="acceptedAt"/>. <c>ReasonEnteredAt</c> is internal
+    /// (the 10-minute human-required clock) and must never be used here.
+    /// Current-attempt start is also ignored so auto-resume cannot reset
+    /// the customer timer.
+    /// </summary>
+    public static DateTimeOffset? CustomerElapsedOrigin(
+        DateTimeOffset? startedAt,
+        DateTimeOffset? acceptedAt = null)
+    {
+        if (startedAt is { } started && acceptedAt is { } accepted)
+            return started <= accepted ? started : accepted;
+        return startedAt ?? acceptedAt;
+    }
+
     public static string? UnavailableReasonCode(
         bool canOpen,
         bool healthy,

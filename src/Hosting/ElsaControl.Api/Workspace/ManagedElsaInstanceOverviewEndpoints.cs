@@ -28,7 +28,8 @@ public static class ManagedElsaInstanceOverviewEndpoints
     internal const string ActivityLimitInvalidCode = "instance.activity-limit-invalid";
     internal const string DeploymentStatusUnclearMessage = "Deployment status unclear. We're still confirming the result.";
     internal const string CheckingDeploymentStatusMessage = "Checking deployment status";
-    internal const string SubmissionUncertainCode = "provider.submission.uncertain";
+    internal const string SubmissionUncertainCode =
+        ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain;
     internal const string UnknownFieldCode = "request.unknown-field";
     internal const string ApplyReleaseInvalidCode = "instance.apply-release-invalid";
     internal const string RestartReason = "Restart";

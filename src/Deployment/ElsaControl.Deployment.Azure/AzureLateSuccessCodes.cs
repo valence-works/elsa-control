@@ -1,18 +1,20 @@
+using ElsaControl.Deployment.Core.Instances;
+
 namespace ElsaControl.Deployment.Azure;
 
 /// <summary>
 /// Stable machine reason codes for late Azure success observation. Each value is
-/// a safe operation code of at most 128 characters.
+/// a catalog constant so #660 completeness stays one table.
 /// </summary>
 public static class AzureLateSuccessCodes
 {
-    public const string DeploymentFailed = "azure.deployment.failed";
-    public const string DeploymentCanceled = "azure.deployment.canceled";
-    public const string AutoResumeExhausted = "azure.recovery.auto-resume-exhausted";
-    public const string AutoResumeClaimConflict = "azure.recovery.auto-resume.claim-conflict";
-    public const string AutoResumeAccepted = "azure.recovery.auto-resume.accepted";
-    public const string AutoResumeConflict = "azure.recovery.auto-resume.conflict";
-    public const string AutoResumeRejected = "azure.recovery.auto-resume.rejected";
+    public const string DeploymentFailed = ManagedElsaReasonCodeCatalog.AzureDeploymentFailed;
+    public const string DeploymentCanceled = ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled;
+    public const string AutoResumeExhausted = ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted;
+    public const string AutoResumeClaimConflict = ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeClaimConflict;
+    public const string AutoResumeAccepted = ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeAccepted;
+    public const string AutoResumeConflict = ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeConflict;
+    public const string AutoResumeRejected = ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeRejected;
 
     public static string DeploymentOutcome(string? armProvisioningState) =>
         string.Equals(armProvisioningState, "Canceled", StringComparison.OrdinalIgnoreCase) ||

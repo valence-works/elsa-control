@@ -2471,6 +2471,11 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         await using var db = CreateMigratedContext(connection);
         await db.Database.MigrateAsync();
         var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "EF auto-resume");
+        var originalStartedAt = (await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Operation.Id)).StartedAt;
+        var elapsedBefore = Now.AddMinutes(11) -
+            ManagedElsaInstanceCustomerProjection.CustomerElapsedOrigin(
+                originalStartedAt, accepted.Operation.AcceptedAt)!.Value;
         var workspaceStore = new DeploymentWorkspaceStore(db);
         Assert.NotNull(await workspaceStore.ClaimNextQueuedRunAsync("deployment-worker", Now));
         Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
@@ -2498,6 +2503,11 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var operation = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
         Assert.Equal(ElsaInstanceOperationState.Queued, operation.State);
         Assert.Equal(accepted.Operation.AttemptNumber + 1, operation.AttemptNumber);
+        Assert.Equal(originalStartedAt, operation.StartedAt);
+        var elapsedAfter = Now.AddMinutes(11) -
+            ManagedElsaInstanceCustomerProjection.CustomerElapsedOrigin(
+                operation.StartedAt, operation.AcceptedAt)!.Value;
+        Assert.True(elapsedAfter >= elapsedBefore);
     }
 
     [Fact]

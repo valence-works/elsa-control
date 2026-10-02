@@ -12,7 +12,7 @@ namespace ElsaControl.Deployment.Azure;
 public sealed class AzureProviderExecutor
 {
     private static readonly TimeSpan DefaultLeaseDuration = TimeSpan.FromMinutes(15);
-    private const string IdentityBindingMissingCode = "provider.identity-binding-missing";
+    private const string IdentityBindingMissingCode = ManagedElsaReasonCodeCatalog.ProviderIdentityBindingMissing;
     private const string IdentityBindingMissingSummary =
         "The managed-instance provider operation is missing its durable identity binding.";
     private readonly IAzureProviderOperationStore _store;
