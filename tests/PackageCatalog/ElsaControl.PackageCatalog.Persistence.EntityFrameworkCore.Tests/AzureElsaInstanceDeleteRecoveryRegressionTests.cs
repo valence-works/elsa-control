@@ -236,10 +236,10 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 .Split('\n', StringSplitOptions.RemoveEmptyEntries);
             Assert.Equal(1, commandLines.Count(line =>
                 line.StartsWith("group delete ", StringComparison.Ordinal)));
-            Assert.Equal(10, commandLines.Length);
+            Assert.Equal(11, commandLines.Length);
             Assert.Equal(3, commandLines.Count(line => line.StartsWith("group exists ", StringComparison.Ordinal)));
             Assert.Equal(2, commandLines.Count(line => line.StartsWith("keyvault list-deleted ", StringComparison.Ordinal)));
-            Assert.Equal(1, commandLines.Count(line => line.StartsWith("rest --method get ", StringComparison.Ordinal) &&
+            Assert.Equal(2, commandLines.Count(line => line.StartsWith("rest --method get ", StringComparison.Ordinal) &&
                 line.Contains("deletedWorkspaces", StringComparison.Ordinal)));
             Assert.Equal(ElsaObservedLifecycle.Deleted,
                 (await finalizeDb.ElsaInstances.AsNoTracking()
