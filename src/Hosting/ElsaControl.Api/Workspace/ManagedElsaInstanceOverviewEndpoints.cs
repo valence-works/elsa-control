@@ -704,9 +704,8 @@ internal static class ManagedElsaInstanceOverviewProjection
         ElsaInstanceCommercialGateDecision applyGate)
     {
         var observed = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, activeOperation);
-        var healthy = instance.DesiredLifecycle == ElsaDesiredLifecycle.Running &&
-                      instance.ObservedLifecycle == ElsaObservedLifecycle.Ready &&
-                      instance.Health == ElsaInstanceHealth.Healthy;
+        var healthy = ManagedElsaInstanceCustomerProjection.IsCustomerHealthy(
+            instance.DesiredLifecycle, observed, instance.Health);
         var currentIdentity = identity is { } candidate &&
                               candidate.OrganizationId == instance.OrganizationId &&
                               candidate.WorkspaceId == workspaceId &&

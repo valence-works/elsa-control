@@ -44,6 +44,94 @@ public sealed class ManagedElsaInstanceApiStoreReadTests
     }
 
     [Fact]
+    public async Task Customer_list_keeps_provisioning_for_a_healthy_hand_off_park()
+    {
+        await using var connection = OpenConnection();
+        await using var db = CreateContext(connection);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Healthy hand-off projection workspace");
+        var instance = NewInstance(workspace);
+        instance.ObservedLifecycle = ElsaObservedLifecycle.Provisioning;
+        instance.Health = ElsaInstanceHealth.Unknown;
+        db.ElsaInstances.Add(instance);
+        var parked = NewOperation(workspace, instance, BaseTime, ElsaInstanceOperationAction.Create);
+        parked.State = ElsaInstanceOperationState.RecoveryRequired;
+        parked.StartedAt = BaseTime;
+        parked.UpdatedAt = BaseTime;
+        parked.ReconciliationDiagnosticCode = ManagedElsaHumanRequiredPark.ProviderSubmissionAccepted;
+        instance.LastOperationId = parked.Id.ToString("D");
+        db.ElsaInstanceOperations.Add(parked);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var listed = Assert.Single(
+            (await new EfCoreManagedElsaInstanceApiStore(db).ListInstancesAsync(workspace.Id, 1, 10)).Items);
+        var stored = await db.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == instance.Id);
+
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, listed.ObservedLifecycle);
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, stored.ObservedLifecycle);
+        Assert.NotEqual(ElsaObservedLifecycle.RecoveryRequired, listed.ObservedLifecycle);
+    }
+
+    [Fact]
+    public async Task Ready_healthy_list_agrees_with_projected_park_state()
+    {
+        await using var connection = OpenConnection();
+        await using var db = CreateContext(connection);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Ready healthy park workspace");
+        var instance = NewInstance(workspace);
+        instance.ObservedLifecycle = ElsaObservedLifecycle.Ready;
+        instance.Health = ElsaInstanceHealth.Healthy;
+        db.ElsaInstances.Add(instance);
+        var parked = NewOperation(workspace, instance, BaseTime, ElsaInstanceOperationAction.UpdateIntent);
+        parked.State = ElsaInstanceOperationState.RecoveryRequired;
+        parked.StartedAt = BaseTime;
+        parked.ReconciliationDiagnosticCode = ElsaInstanceProviderReconciliationService.AutoResumeExhaustedCode;
+        instance.LastOperationId = parked.Id.ToString("D");
+        db.ElsaInstanceOperations.Add(parked);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var listed = Assert.Single(
+            (await new EfCoreManagedElsaInstanceApiStore(db).ListInstancesAsync(workspace.Id, 1, 10)).Items);
+        var stored = await db.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == instance.Id);
+        var active = (await new EfCoreManagedElsaInstanceApiStore(db)
+            .GetActiveOperationsAsync(workspace.Id, [instance.Id])).GetValueOrDefault(instance.Id);
+        var detail = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(
+            ElsaInstance.Hydrate(
+                stored.Id,
+                stored.OrganizationId,
+                stored.WorkspaceId,
+                stored.Name,
+                stored.Slug,
+                listed.Intent,
+                stored.ObservedLifecycle,
+                stored.Health,
+                stored.Version,
+                listed.IdentityBinding,
+                listed.DesiredStateRevisionId,
+                listed.ResolvedPlanReference,
+                listed.CurrentResolvedRelease,
+                listed.CurrentDeploymentReference,
+                listed.PlacementAssignmentReference,
+                listed.ElsaTenantReference,
+                listed.LastOperationId,
+                listed.DeletedAt,
+                listed.CreatedAt,
+                listed.UpdatedAt),
+            active);
+
+        Assert.Equal(ElsaObservedLifecycle.Ready, stored.ObservedLifecycle);
+        Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, listed.ObservedLifecycle);
+        Assert.Equal(listed.ObservedLifecycle, detail);
+        Assert.False(ManagedElsaInstanceCustomerProjection.IsCustomerHealthy(
+            stored.DesiredLifecycle, listed.ObservedLifecycle, stored.Health));
+        Assert.False(ManagedElsaInstanceCustomerProjection.IsCustomerHealthy(
+            stored.DesiredLifecycle, detail, stored.Health));
+    }
+
+    [Fact]
     public async Task Lists_operations_newest_first_and_pages_within_the_workspace()
     {
         await using var connection = OpenConnection();

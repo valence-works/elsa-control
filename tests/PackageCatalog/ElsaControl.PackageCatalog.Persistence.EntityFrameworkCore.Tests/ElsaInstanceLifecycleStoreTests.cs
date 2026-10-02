@@ -2890,7 +2890,8 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(ElsaObservedLifecycle.Provisioning, storedInFlight.ObservedLifecycle);
         var inFlightList = Assert.Single(
             (await new EfCoreManagedElsaInstanceApiStore(db).ListInstancesAsync(workspace.Id, 1, 10)).Items);
-        Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, inFlightList.ObservedLifecycle);
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, inFlightList.ObservedLifecycle);
+        Assert.NotEqual(ElsaObservedLifecycle.RecoveryRequired, inFlightList.ObservedLifecycle);
         Assert.NotEqual(ElsaObservedLifecycle.RecoveryRequired, storedInFlight.ObservedLifecycle);
         Assert.Equal(ElsaInstanceHealth.Unknown, inFlightList.Health);
 

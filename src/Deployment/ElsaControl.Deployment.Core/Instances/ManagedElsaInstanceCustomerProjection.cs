@@ -23,26 +23,29 @@ public static class ManagedElsaInstanceCustomerProjection
 
     public static ElsaObservedLifecycle ProjectObservedLifecycle(
         ElsaInstance instance,
-        ElsaInstanceOperationSummary? activeOperation)
+        ElsaInstanceOperationSummary? activeOperation,
+        DateTimeOffset? now = null)
     {
         ArgumentNullException.ThrowIfNull(instance);
         return ProjectObservedLifecycle(
             instance.ObservedLifecycle,
-            activeOperation is null ? null : new ActiveLifecycleOperation(activeOperation.Action, activeOperation.State),
-            instance.DesiredLifecycle);
+            ToActive(activeOperation),
+            instance.DesiredLifecycle,
+            now);
     }
 
     public static ElsaObservedLifecycle ProjectObservedLifecycle(
         ElsaObservedLifecycle stored,
         ActiveLifecycleOperation? activeOperation,
-        ElsaDesiredLifecycle desiredLifecycle = ElsaDesiredLifecycle.Running)
+        ElsaDesiredLifecycle desiredLifecycle = ElsaDesiredLifecycle.Running,
+        DateTimeOffset? now = null)
     {
         ElsaInstanceValue.RequireEnum(stored, nameof(stored));
         ElsaInstanceValue.RequireEnum(desiredLifecycle, nameof(desiredLifecycle));
         if (HasStoredTerminalPriority(stored) || desiredLifecycle == ElsaDesiredLifecycle.Deleting)
             return stored;
 
-        if (IsParkedProvisioningRecovery(activeOperation))
+        if (IsParkedProvisioningRecovery(activeOperation, now ?? DateTimeOffset.UtcNow))
             return ElsaObservedLifecycle.RecoveryRequired;
 
         if (stored != ElsaObservedLifecycle.Unknown)
@@ -59,17 +62,27 @@ public static class ManagedElsaInstanceCustomerProjection
             ElsaInstanceOperationState.WaitingForPriorOperation or
             ElsaInstanceOperationState.Queued or
             ElsaInstanceOperationState.EntitlementHeld => ElsaObservedLifecycle.Pending,
-            ElsaInstanceOperationState.Running => ElsaObservedLifecycle.Provisioning,
+            ElsaInstanceOperationState.Running or
+            ElsaInstanceOperationState.RecoveryRequired => ElsaObservedLifecycle.Provisioning,
             _ => ElsaObservedLifecycle.Unknown
         };
     }
 
+    public static bool IsCustomerHealthy(
+        ElsaDesiredLifecycle desired,
+        ElsaObservedLifecycle projectedObserved,
+        ElsaInstanceHealth health) =>
+        desired == ElsaDesiredLifecycle.Running &&
+        projectedObserved == ElsaObservedLifecycle.Ready &&
+        health == ElsaInstanceHealth.Healthy;
+
     public static ElsaInstance Apply(
         ElsaInstance instance,
-        ElsaInstanceOperationSummary? activeOperation)
+        ElsaInstanceOperationSummary? activeOperation,
+        DateTimeOffset? now = null)
     {
         ArgumentNullException.ThrowIfNull(instance);
-        var observed = ProjectObservedLifecycle(instance, activeOperation);
+        var observed = ProjectObservedLifecycle(instance, activeOperation, now);
         if (observed == instance.ObservedLifecycle)
             return instance;
 
@@ -183,9 +196,31 @@ public static class ManagedElsaInstanceCustomerProjection
             or ElsaObservedLifecycle.Deleting
             or ElsaObservedLifecycle.Deleted;
 
-    private static bool IsParkedProvisioningRecovery(ActiveLifecycleOperation? activeOperation) =>
-        activeOperation is { State: ElsaInstanceOperationState.RecoveryRequired, Action: var action } &&
-        IsProvisioningAction(action);
+    private static bool IsParkedProvisioningRecovery(
+        ActiveLifecycleOperation? activeOperation,
+        DateTimeOffset now) =>
+        activeOperation is { State: ElsaInstanceOperationState.RecoveryRequired } parked &&
+        IsProvisioningAction(parked.Action) &&
+        ManagedElsaHumanRequiredPark.RequiresHuman(
+            parked.ParkReason,
+            parked.FailureCode,
+            parked.ParkedAt,
+            now);
+
+    private static ActiveLifecycleOperation? ToActive(ElsaInstanceOperationSummary? operation) =>
+        operation is null
+            ? null
+            : new(
+                operation.Action,
+                operation.State,
+                FirstReason(operation.RecoveryReason, operation.ReasonCode),
+                operation.FailureCode,
+                operation.UpdatedAt ?? operation.AttemptStartedAt ?? operation.StartedAt ?? operation.AcceptedAt);
+
+    private static string? FirstReason(string? recoveryReason, string? reasonCode) =>
+        !string.IsNullOrWhiteSpace(recoveryReason) ? recoveryReason
+        : string.IsNullOrWhiteSpace(reasonCode) ? null
+        : reasonCode;
 
     private static bool IsProvisioningAction(ElsaInstanceOperationAction action) =>
         action is ElsaInstanceOperationAction.Create
@@ -201,4 +236,7 @@ public static class ManagedElsaInstanceCustomerProjection
 
 public readonly record struct ActiveLifecycleOperation(
     ElsaInstanceOperationAction Action,
-    ElsaInstanceOperationState State);
+    ElsaInstanceOperationState State,
+    string? ParkReason = null,
+    string? FailureCode = null,
+    DateTimeOffset? ParkedAt = null);

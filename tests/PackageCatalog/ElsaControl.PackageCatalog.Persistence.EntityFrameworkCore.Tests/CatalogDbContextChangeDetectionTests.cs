@@ -1,3 +1,4 @@
+using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Core.Packages;
 using ElsaControl.PackageCatalog.Core.Sync;
@@ -110,6 +111,52 @@ public sealed class CatalogDbContextChangeDetectionTests : IAsyncLifetime
         Assert.Equal("Managed Elsa handoff replay records are append-only.", exception.Message);
         Assert.True(_db.ChangeTracker.AutoDetectChangesEnabled);
         Assert.Equal(Now.AddMinutes(5), await ReadAsync(db => db.ManagedElsaHandoffReplays.Select(x => x.ExpiresAt).SingleAsync()));
+    }
+
+    [Fact]
+    public async Task Save_rejects_persisting_recovery_required_on_an_instance()
+    {
+        var instance = await SeedInstanceAsync();
+        instance.ObservedLifecycle = ElsaObservedLifecycle.RecoveryRequired;
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => _db.SaveChangesAsync());
+
+        Assert.Equal("RecoveryRequired is a customer projection and cannot be persisted.", exception.Message);
+        Assert.Equal(ElsaObservedLifecycle.Pending, await ReadAsync(db =>
+            db.ElsaInstances.Select(x => x.ObservedLifecycle).SingleAsync()));
+    }
+
+    [Fact]
+    public async Task Save_rejects_persisting_recovery_required_as_reconciled_lifecycle()
+    {
+        var instance = await SeedInstanceAsync();
+        var now = Now;
+        var operation = new ElsaInstanceOperationEntity
+        {
+            Id = Guid.NewGuid(),
+            InstanceId = instance.Id,
+            OrganizationId = instance.OrganizationId,
+            WorkspaceId = instance.WorkspaceId,
+            Action = ElsaInstanceOperationAction.Create,
+            IdempotencyScope = $"instance/{instance.Id:N}/Create",
+            IdempotencyKey = "persist-recovery-required",
+            RequestHash = new string('a', 64),
+            ExpectedVersion = 1,
+            State = ElsaInstanceOperationState.Succeeded,
+            AttemptNumber = 1,
+            AcceptedAt = now,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        _db.ElsaInstanceOperations.Add(operation);
+        await _db.SaveChangesAsync();
+        operation.ReconciledObservedLifecycle = ElsaObservedLifecycle.RecoveryRequired;
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => _db.SaveChangesAsync());
+
+        Assert.Equal("RecoveryRequired is a customer projection and cannot be persisted.", exception.Message);
+        Assert.Null(await ReadAsync(db =>
+            db.ElsaInstanceOperations.Select(x => x.ReconciledObservedLifecycle).SingleAsync()));
     }
 
     [Fact]

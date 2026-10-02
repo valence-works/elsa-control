@@ -2361,6 +2361,54 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public void Ready_healthy_human_required_park_agrees_on_list_detail_and_overview()
+    {
+        var (instance, identity, operation) = ReadyHealthyParked(
+            ElsaInstanceProviderReconciliationService.AutoResumeExhaustedCode);
+        var listed = ManagedElsaInstanceCustomerProjection.Apply(instance, operation);
+        var list = ManagedElsaInstanceEndpoints.ToResponse(
+            listed, canOpen: true, instance.WorkspaceId, identity, operation);
+        var detail = ManagedElsaInstanceEndpoints.ToResponse(
+            instance, canOpen: true, instance.WorkspaceId, identity, operation);
+        var overview = Overview(instance, identity, operation);
+
+        Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, list.ObservedLifecycle);
+        Assert.Equal(list.ObservedLifecycle, detail.ObservedLifecycle);
+        Assert.Equal(list.ObservedLifecycle, overview.Summary.ObservedLifecycle);
+        Assert.False(list.CanOpen);
+        Assert.Equal(list.CanOpen, detail.CanOpen);
+        Assert.Equal(list.CanOpen, overview.Summary.CanOpen);
+        Assert.Equal("instance.recovery-required", overview.Summary.UnavailableReason);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.GenericUnavailableReason, list.UnavailableReason);
+        Assert.DoesNotContain("Failed", list.UnavailableReason, StringComparison.Ordinal);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.NeedsAttentionLabel,
+            ManagedElsaInstanceCustomerProjection.CustomerLabel(list.ObservedLifecycle));
+    }
+
+    [Fact]
+    public void Ready_healthy_hand_off_park_stays_openable_on_list_detail_and_overview()
+    {
+        var (instance, identity, operation) = ReadyHealthyParked(
+            ManagedElsaHumanRequiredPark.ProviderSubmissionAccepted);
+        var listed = ManagedElsaInstanceCustomerProjection.Apply(instance, operation);
+        var list = ManagedElsaInstanceEndpoints.ToResponse(
+            listed, canOpen: true, instance.WorkspaceId, identity, operation);
+        var detail = ManagedElsaInstanceEndpoints.ToResponse(
+            instance, canOpen: true, instance.WorkspaceId, identity, operation);
+        var overview = Overview(instance, identity, operation);
+
+        Assert.Equal(ElsaObservedLifecycle.Ready, list.ObservedLifecycle);
+        Assert.Equal(list.ObservedLifecycle, detail.ObservedLifecycle);
+        Assert.Equal(list.ObservedLifecycle, overview.Summary.ObservedLifecycle);
+        Assert.True(list.CanOpen);
+        Assert.Equal(list.CanOpen, detail.CanOpen);
+        Assert.Equal(list.CanOpen, overview.Summary.CanOpen);
+        Assert.Null(overview.Summary.UnavailableReason);
+        Assert.Null(list.UnavailableReason);
+        Assert.Null(ManagedElsaInstanceCustomerProjection.CustomerLabel(list.ObservedLifecycle));
+    }
+
+    [Fact]
     public void Canonical_projection_keeps_stale_ready_health_separate_from_lifecycle()
     {
         var instanceId = Guid.NewGuid();
@@ -2775,6 +2823,49 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
             bound ? audience ?? "urn:elsa:instance:" + instanceId.ToString("D") : null,
             bound ? callbackUri ?? new Uri("https://managed.example.test/managed-elsa/handoff/callback") : null,
             bound ? 1 : null);
+
+    private static (ElsaInstance Instance, ManagedElsaInstanceIdentity Identity, ElsaInstanceOperationSummary Operation)
+        ReadyHealthyParked(string recoveryReason)
+    {
+        var instanceId = Guid.NewGuid();
+        const string origin = "https://managed.example.test";
+        var instance = ElsaInstance.Hydrate(
+            instanceId, Guid.NewGuid(), Guid.NewGuid(), "Claims runtime", "claims-runtime",
+            Intent(), ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy, 2,
+            currentDeploymentReference: new ElsaCurrentDeploymentReference(
+                "deployment-managed", "attempt-1", origin, true));
+        var identity = new ManagedElsaInstanceIdentity(
+            instance.OrganizationId, instance.WorkspaceId, instanceId,
+            ElsaInstanceIdentityBinding.AudienceFor(instanceId),
+            new Uri(ElsaInstanceIdentityBinding.CanonicalizeCallbackUri(origin)), 1, DateTimeOffset.UtcNow);
+        var now = DateTimeOffset.UtcNow;
+        var operation = new ElsaInstanceOperationSummary(
+            Guid.NewGuid(), instanceId, ElsaInstanceOperationAction.UpdateIntent,
+            ElsaInstanceOperationState.RecoveryRequired, 1, 1, now, now, null, null, null, null, null, null, null,
+            RecoveryReason: recoveryReason, UpdatedAt: now);
+        return (instance, identity, operation);
+    }
+
+    private static ManagedElsaInstanceOverviewResponse Overview(
+        ElsaInstance instance,
+        ManagedElsaInstanceIdentity identity,
+        ElsaInstanceOperationSummary operation) =>
+        ManagedElsaInstanceOverviewProjection.ToOverview(
+            instance,
+            instance.WorkspaceId,
+            WorkspaceRole.Owner,
+            canOpenPermission: true,
+            identity,
+            operation,
+            lastOperation: null,
+            new ManagedLifecycleOperationalHealthResult(
+                ManagedLifecycleOperationalHealthStatus.Healthy,
+                ManagedLifecycleOperationalHealthDiagnosticCodes.Healthy,
+                new string('a', 64),
+                DateTimeOffset.UtcNow,
+                []),
+            new ElsaInstanceCommercialGateDecision(true, "commercial.allowed", "allowed"),
+            new ElsaInstanceCommercialGateDecision(true, "commercial.allowed", "allowed"));
 
     private static ElsaInstanceIntent Intent() => new(
         new ElsaReleaseIntent("valence-runtime", "3.8", channel: "stable"),

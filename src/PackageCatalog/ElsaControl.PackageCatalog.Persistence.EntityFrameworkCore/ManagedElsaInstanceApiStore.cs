@@ -179,6 +179,27 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
         if (latest.Count == 0)
             return latest;
 
+        var runIds = latest.Values
+            .Where(operation => operation.DeploymentRunId is not null)
+            .Select(operation => operation.DeploymentRunId!.Value)
+            .Distinct()
+            .ToArray();
+        if (runIds.Length > 0)
+        {
+            var recoveryReasons = await dbContext.DeploymentRuns
+                .AsNoTracking()
+                .Where(run => run.WorkspaceId == workspaceId && runIds.Contains(run.Id))
+                .Select(run => new { run.Id, run.RecoveryReason })
+                .ToListAsync(cancellationToken);
+            foreach (var instanceId in latest.Keys.ToArray())
+            {
+                var operation = latest[instanceId];
+                if (operation.DeploymentRunId is { } runId &&
+                    recoveryReasons.FirstOrDefault(run => run.Id == runId)?.RecoveryReason is { } recoveryReason)
+                    latest[instanceId] = operation with { RecoveryReason = recoveryReason };
+            }
+        }
+
         var operationIds = latest.Values.Select(x => x.Id).ToArray();
         var recoveryStarts = await dbContext.ElsaInstanceRecoveryRequests
             .AsNoTracking()
@@ -566,7 +587,8 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
             operation.FailureCode,
             operation.ReconciledObservedLifecycle,
             operation.ReconciledHealth,
-            operation.ReconciliationDiagnosticCode);
+            operation.ReconciliationDiagnosticCode,
+            UpdatedAt: operation.UpdatedAt);
 
     private static ElsaInstance? TryMapInstance(Models.ElsaInstanceEntity entity)
     {
