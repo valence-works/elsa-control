@@ -316,7 +316,7 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryTests : IDisposable
         var instanceId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb5");
         var operationId = Guid.Parse("cccccccc-cccc-cccc-cccc-ccccccccccc5");
 
-        ManagedLifecycleRecoveryRequiredAlert.RecordEntered(workspaceId, instanceId, operationId);
+        ManagedLifecycleRecoveryRequiredAlert.RecordEntered(workspaceId, instanceId, operationId, 1);
         Assert.True(sink.ForceFlush());
 
         var dependencies = handler.Payloads.SelectMany(ReadEnvelopeItems)

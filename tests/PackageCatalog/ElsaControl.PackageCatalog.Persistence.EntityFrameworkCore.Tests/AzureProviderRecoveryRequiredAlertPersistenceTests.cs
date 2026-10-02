@@ -67,8 +67,7 @@ public sealed class AzureProviderRecoveryRequiredAlertPersistenceTests : IDispos
 
         Assert.Equal(AzureProviderOperationStatus.RecoveryRequired, parked.Status);
         Assert.NotNull(replay);
-        Assert.Single(capture.Entered);
-        AssertAlert(capture.Entered[0], _lifecycleOperationId);
+        Assert.Empty(capture.Entered);
     }
 
     [Fact]
@@ -87,11 +86,11 @@ public sealed class AzureProviderRecoveryRequiredAlertPersistenceTests : IDispos
             AzureLateSuccessCodes.DeploymentFailed,
             now.AddSeconds(30),
             operation.Version));
-        Assert.Single(capture.Entered);
+        Assert.Empty(capture.Entered);
 
         var claimed = Assert.IsType<AzureProviderOperation>(await store.ClaimRecoveryAsync(
             _workspaceId, first.Id, "worker-2", "lease-2", TimeSpan.FromMinutes(1), now.AddMinutes(2), first.Version));
-        Assert.Single(capture.Entered);
+        Assert.Empty(capture.Entered);
 
         var second = Assert.IsType<AzureProviderOperation>(await store.FinalizeAsync(
             _workspaceId,
@@ -103,8 +102,7 @@ public sealed class AzureProviderRecoveryRequiredAlertPersistenceTests : IDispos
             claimed.Version));
 
         Assert.Equal(AzureProviderOperationStatus.RecoveryRequired, second.Status);
-        Assert.Equal(2, capture.Entered.Count);
-        Assert.All(capture.Entered, activity => AssertAlert(activity, _lifecycleOperationId));
+        Assert.Empty(capture.Entered);
     }
 
     [Fact]
@@ -119,8 +117,7 @@ public sealed class AzureProviderRecoveryRequiredAlertPersistenceTests : IDispos
         Assert.Equal(1, await store.RecoverStaleAsync(now.AddMinutes(2)));
         Assert.Equal(0, await store.RecoverStaleAsync(now.AddMinutes(3)));
 
-        Assert.Single(capture.Entered);
-        AssertAlert(capture.Entered[0], _lifecycleOperationId);
+        Assert.Empty(capture.Entered);
     }
 
     [Fact]
@@ -193,8 +190,7 @@ public sealed class AzureProviderRecoveryRequiredAlertPersistenceTests : IDispos
         Assert.Equal(1, await store.RecoverStaleAsync(now.AddMinutes(2)));
 
         Assert.Equal(2, interceptor.Attempts);
-        Assert.Single(capture.Entered);
-        AssertAlert(capture.Entered[0], _lifecycleOperationId);
+        Assert.Empty(capture.Entered);
         using var verify = CreateContext();
         Assert.Equal(
             AzureProviderOperationStatus.RecoveryRequired,
@@ -232,8 +228,7 @@ public sealed class AzureProviderRecoveryRequiredAlertPersistenceTests : IDispos
                 new AzureProviderOperationStore(second).RecoverStaleAsync(now.AddMinutes(2)));
 
             Assert.Equal(1, recovered.Sum());
-            Assert.Single(capture.Entered);
-            AssertAlert(capture.Entered[0], _lifecycleOperationId);
+            Assert.Empty(capture.Entered);
         }
         finally
         {
@@ -266,8 +261,7 @@ public sealed class AzureProviderRecoveryRequiredAlertPersistenceTests : IDispos
         Assert.NotNull(authorization);
         Assert.Equal(AzureProviderOperationStatus.RecoveryRequired, authorization!.Operation.Status);
         Assert.Equal("provider.identity-binding-missing", authorization.Decision.Code);
-        Assert.Single(capture.Entered);
-        AssertAlert(capture.Entered[0], _lifecycleOperationId);
+        Assert.Empty(capture.Entered);
     }
 
     public void Dispose() => _connection.Dispose();

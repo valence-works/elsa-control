@@ -1769,6 +1769,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             operation.State = ElsaInstanceOperationState.RecoveryRequired;
             operation.FailureCode = failure.DiagnosticCode;
             operation.FailureSummary = failure.DiagnosticCode;
+            ApplyReasonClock(operation, previousReason, failure.DiagnosticCode, recoveryAt, restartClock: false);
             operation.WorkerId = null;
             operation.LeaseTokenHash = null;
             operation.LeaseExpiresAt = null;

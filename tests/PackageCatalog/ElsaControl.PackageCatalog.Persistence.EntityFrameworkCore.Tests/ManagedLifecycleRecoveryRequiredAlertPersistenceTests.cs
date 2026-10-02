@@ -193,14 +193,104 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(
             "provider.submission.uncertain",
             (await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id)).FailureCode);
-        // Temporary class (Architect + CEO): no alert at entry. The 10-minute
-        // RequiresHumanAt CAS + outbox row is #662 work after #660 lands the columns.
+        var parked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Null(parked.RequiresHumanAt);
+        Assert.Empty(capture.Entered);
+        Assert.Empty(db.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking());
+    }
+
+    [Fact]
+    public async Task Uncertain_provider_submission_park_alerts_once_after_ten_minutes()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Alert uncertain clock");
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+        await store.CommitProviderSubmissionAsync(new(
+            workspace.Id,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            "provider-submission-uncertain",
+            Now));
+        using var capture = new RecoveryRequiredAlertCapture(workspace.Id);
+
+        await ReconcileParkAsync(
+            store, workspace.Id, accepted, ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, Now.AddMinutes(10).AddSeconds(-1));
+        Assert.Null((await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id)).RequiresHumanAt);
+        Assert.Empty(capture.Entered);
+
+        await ReconcileParkAsync(
+            store, workspace.Id, accepted, ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, Now.AddMinutes(10));
+
+        var parked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(Now.AddMinutes(10), parked.RequiresHumanAt);
+        Assert.Single(capture.Entered);
+        Assert.Equal(1, await db.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+        Assert.Equal(
+            accepted.Operation.AttemptNumber,
+            (await db.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking().SingleAsync()).AttemptNumber);
+    }
+
+    [Theory]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled)]
+    public async Task Azure_park_code_reaches_the_lifecycle_reason_in_one_reconcile_without_alerting(
+        string parkCode)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, $"Alert {parkCode}");
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+        await store.CommitProviderSubmissionAsync(new(
+            workspace.Id,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            "provider-operation-accepted",
+            Now));
+        using var capture = new RecoveryRequiredAlertCapture(workspace.Id);
+
+        await ReconcileParkAsync(store, workspace.Id, accepted, parkCode, Now.AddMinutes(1));
+
+        var parked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(parkCode, (await db.DeploymentRuns.AsNoTracking().SingleAsync(x => x.Id == parked.DeploymentRunId)).RecoveryReason);
+        Assert.Null(parked.RequiresHumanAt);
         Assert.Empty(capture.Entered);
     }
 
-    [Fact(Skip = "Blocked on #660 ReasonEnteredAt/RequiresHumanAt. After rebase this PR becomes the single CAS + post-commit outbox site: uncertain stays quiet at 9:59 and writes exactly one alert row at 10:00.")]
-    public void Uncertain_provider_submission_park_alerts_once_after_ten_minutes()
+    private static async Task ReconcileParkAsync(
+        EfCoreElsaInstanceLifecycleStore store,
+        Guid workspaceId,
+        ElsaInstanceLifecycleAcceptance accepted,
+        string diagnosticCode,
+        DateTimeOffset at)
     {
+        var target = Assert.IsType<ElsaInstanceProviderReconciliationTarget>(
+            await store.GetTargetAsync(workspaceId, accepted.Operation.Id));
+        await store.CommitAsync(new(
+            workspaceId,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            target.Instance.Version,
+            target.Operation.AttemptNumber,
+            target.ReconciliationVersion,
+            Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes($"{diagnosticCode}:{at:O}"))),
+            target.Instance,
+            target.Operation,
+            diagnosticCode,
+            RetrySafe: false,
+            null,
+            null,
+            at));
     }
 
     private sealed class RecoveryRequiredAlertCapture : IDisposable

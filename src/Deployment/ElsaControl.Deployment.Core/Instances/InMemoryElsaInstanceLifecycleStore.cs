@@ -48,6 +48,8 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
     private readonly Dictionary<string, ElsaInstanceLifecycleResolvedPlan> _resolvedPlans = new(StringComparer.Ordinal);
     private readonly Dictionary<Guid, ElsaInstanceLifecycleDeploymentRun> _deploymentRuns = [];
     private readonly Dictionary<Guid, ElsaInstanceLifecycleRecordedFailure> _failures = [];
+    private readonly Dictionary<Guid, ManagedElsaReasonClockState> _clocks = [];
+    private readonly HashSet<(Guid OperationId, int AttemptNumber)> _alertOutbox = [];
     private readonly Dictionary<Guid, StoredReconciliationResult> _reconciliationResults = [];
     private readonly Dictionary<Guid, StoredDeletionResult> _deletionResults = [];
     private readonly Dictionary<Guid, ElsaInstanceRecoveryRequestEnvelope> _recoveryRequests = [];
@@ -136,9 +138,8 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 operation = operation.TransitionTo(ElsaInstanceOperationState.Running);
             if (operation.State == ElsaInstanceOperationState.Running)
             {
-                var previous = operation.State;
                 operation = operation.TransitionTo(ElsaInstanceOperationState.RecoveryRequired);
-                RecordRecoveryRequiredEntry(previous, operation, instance.WorkspaceId);
+                ApplyParkClock(operation, instance.WorkspaceId, previousCode: null, nextCode: null, restartClock: false);
             }
             if (operation.State != ElsaInstanceOperationState.RecoveryRequired)
                 throw new ElsaInstanceLifecycleConflictException("Lifecycle operation cannot require provider recovery.");
@@ -206,6 +207,14 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                             : ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted
                     }
                 };
+            ApplyParkClock(
+                recovered,
+                instance.WorkspaceId,
+                previousCode: null,
+                nextCode: commit.CorrelationId == "provider-submission-uncertain"
+                    ? ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain
+                    : ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted,
+                restartClock: false);
             _instances[instance.Id] = ElsaInstance.Hydrate(
                 instance.Id, instance.OrganizationId, instance.WorkspaceId, instance.Name, instance.Slug,
                 instance.Intent, instance.ObservedLifecycle, instance.Health, instance.Version,
@@ -426,15 +435,30 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         instanceVersion,
         commit.Operation.State);
 
-    private static void RecordRecoveryRequiredEntry(
-        ElsaInstanceOperationState previous,
-        ElsaInstanceOperation next,
-        Guid workspaceId)
+    private void ApplyParkClock(
+        ElsaInstanceOperation operation,
+        Guid workspaceId,
+        string? previousCode,
+        string? nextCode,
+        bool restartClock)
     {
-        if (previous == ElsaInstanceOperationState.RecoveryRequired ||
-            next.State != ElsaInstanceOperationState.RecoveryRequired)
+        var current = _clocks.GetValueOrDefault(operation.Id);
+        var next = ManagedElsaReasonClock.Advance(
+            previousCode,
+            nextCode,
+            current.ReasonEnteredAt,
+            current.RequiresHumanAt,
+            _timeProvider.GetUtcNow(),
+            restartClock);
+        var newlyHuman = current.RequiresHumanAt is null && next.RequiresHumanAt is not null;
+        _clocks[operation.Id] = next;
+        if (!newlyHuman || !_alertOutbox.Add((operation.Id, operation.AttemptNumber)))
             return;
-        ManagedLifecycleRecoveryRequiredAlert.RecordEntered(workspaceId, next.InstanceId, next.Id);
+        ManagedLifecycleRecoveryRequiredAlert.RecordEntered(
+            workspaceId,
+            operation.InstanceId,
+            operation.Id,
+            operation.AttemptNumber);
     }
 
     private static ElsaInstance WithVersion(ElsaInstance instance, int version) => ElsaInstance.Hydrate(
@@ -667,7 +691,15 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                     throw new ElsaInstanceDeleteConfirmationException();
 
                 if (isRecoveryResume)
+                {
                     AppendRecoveryRequest(instance, operation, outbox.CreatedAt);
+                    ApplyParkClock(
+                        operation,
+                        instance.WorkspaceId,
+                        previousCode: null,
+                        nextCode: null,
+                        restartClock: true);
+                }
                 _instances[instance.Id] = instance;
                 _operations[operation.Id] = operation;
                 return Task.FromResult(new ElsaInstanceLifecycleAcceptance(instance, operation, existingOutbox, false));
@@ -1074,9 +1106,13 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             var operation = _operations[failure.OperationId];
             if (operation.State == ElsaInstanceOperationState.Accepted)
                 operation = operation.TransitionTo(ElsaInstanceOperationState.Queued);
-            var previous = operation.State;
             operation = operation.TransitionTo(ElsaInstanceOperationState.RecoveryRequired);
-            RecordRecoveryRequiredEntry(previous, operation, failure.WorkspaceId);
+            ApplyParkClock(
+                operation,
+                failure.WorkspaceId,
+                previousCode: null,
+                nextCode: failure.DiagnosticCode,
+                restartClock: false);
             _operations[operation.Id] = operation;
             _claims.Remove(operation.Id);
             var instance = _instances[failure.InstanceId];

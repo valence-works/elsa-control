@@ -100,7 +100,7 @@ public sealed class ManagedLifecycleRecoveryRequiredAlertTests
         var instanceId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb3");
         var operationId = Guid.Parse("cccccccc-cccc-cccc-cccc-ccccccccccc3");
 
-        ManagedLifecycleRecoveryRequiredAlert.RecordEntered(workspaceId, instanceId, operationId);
+        ManagedLifecycleRecoveryRequiredAlert.RecordEntered(workspaceId, instanceId, operationId, 1);
 
         var activity = Assert.Single(capture.Entered);
         Assert.Equal(ActivityKind.Internal, activity.Kind);
@@ -123,7 +123,7 @@ public sealed class ManagedLifecycleRecoveryRequiredAlertTests
         try
         {
             ManagedLifecycleTelemetry.ConfigureAlertEnvironment(ManagedLifecycleTelemetry.StagingEnvironment);
-            ManagedLifecycleRecoveryRequiredAlert.RecordEntered(workspaceId, instanceId, operationId);
+            ManagedLifecycleRecoveryRequiredAlert.RecordEntered(workspaceId, instanceId, operationId, 1);
 
             var activity = Assert.Single(capture.Entered);
             Assert.Equal(
@@ -145,8 +145,8 @@ public sealed class ManagedLifecycleRecoveryRequiredAlertTests
         var instanceId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2");
         var operationId = Guid.Parse("cccccccc-cccc-cccc-cccc-ccccccccccc2");
 
-        ManagedLifecycleRecoveryRequiredAlert.RecordEntered(workspaceId, instanceId, operationId);
-        ManagedLifecycleRecoveryRequiredAlert.RecordEntered(workspaceId, instanceId, operationId);
+        ManagedLifecycleRecoveryRequiredAlert.RecordEntered(workspaceId, instanceId, operationId, 1);
+        ManagedLifecycleRecoveryRequiredAlert.RecordEntered(workspaceId, instanceId, operationId, 1);
 
         Assert.Equal(2, capture.Entered.Count);
         var activity = capture.Entered[0];

@@ -267,7 +267,7 @@ public sealed class ElsaInstanceProviderReconciliationService(
     {
         if (observation.Kind != ElsaInstanceProviderObservationKind.Confirmed)
             return (Project(instance, ElsaObservedLifecycle.Unknown, ElsaInstanceHealth.Unknown), operation,
-                uncertainCode ?? (observation.Kind == ElsaInstanceProviderObservationKind.Unknown ? UnknownCode : AmbiguousCode), now);
+                UnconfirmedReason(observation, uncertainCode), now);
 
         if (observation.ObservedLifecycle == ElsaObservedLifecycle.Ready)
         {
@@ -344,6 +344,18 @@ public sealed class ElsaInstanceProviderReconciliationService(
                 ElsaInstanceOperationAction.Stop or ElsaInstanceOperationAction.Delete),
             _ => false
         };
+    }
+
+    private static string UnconfirmedReason(
+        ElsaInstanceProviderObservation observation,
+        string? uncertainCode)
+    {
+        if (uncertainCode is not null)
+            return uncertainCode;
+        var visible = OperatorVisibleReason(observation.ReasonCode);
+        if (visible is not null && ManagedElsaReasonCodeCatalog.TryGet(visible, out _))
+            return visible;
+        return observation.Kind == ElsaInstanceProviderObservationKind.Unknown ? UnknownCode : AmbiguousCode;
     }
 
     private static string? OperatorVisibleReason(string? reasonCode) =>

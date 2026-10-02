@@ -1654,7 +1654,6 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
 
     private void AddTransition(AzureProviderOperationEntity entity, string code, string message, DateTimeOffset now)
     {
-        var previousStatus = TryOriginalStatus(entity);
         db.AzureProviderOperationTransitions.Add(new AzureProviderOperationTransitionEntity
         {
             Id = Guid.NewGuid(),
@@ -1666,43 +1665,6 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             Message = message,
             OccurredAt = now
         });
-        // One operator-alert event per actual entry into RecoveryRequired, written
-        // in the same compare-and-set as the transition row. Replays, claims, and
-        // reason-only writes (including auto-resume-exhausted) never reach here.
-        if (entity.Status == AzureProviderOperationStatus.RecoveryRequired &&
-            previousStatus != AzureProviderOperationStatus.RecoveryRequired)
-            RecordRecoveryRequiredEntered(entity);
-    }
-
-    private AzureProviderOperationStatus? TryOriginalStatus(AzureProviderOperationEntity entity)
-    {
-        var entry = db.Entry(entity);
-        if (entry.State == EntityState.Detached)
-            return null;
-        return (AzureProviderOperationStatus?)entry.Property(x => x.Status).OriginalValue;
-    }
-
-    private void RecordRecoveryRequiredEntered(AzureProviderOperationEntity entity)
-    {
-        if (entity.WorkspaceId == Guid.Empty ||
-            entity.InstanceId is not { } instanceId ||
-            instanceId == Guid.Empty)
-            return;
-
-        db.QueueProviderRecoveryRequiredAlert(
-            entity.WorkspaceId,
-            instanceId,
-            ResolveLifecycleOperationId(entity));
-    }
-
-    private static Guid ResolveLifecycleOperationId(AzureProviderOperationEntity entity)
-    {
-        const string prefix = "elsa-instance-operation:";
-        if (entity.IdempotencyKey.StartsWith(prefix, StringComparison.Ordinal) &&
-            Guid.TryParseExact(entity.IdempotencyKey[prefix.Length..], "D", out var lifecycleId) &&
-            lifecycleId != Guid.Empty)
-            return lifecycleId;
-        return entity.Id;
     }
 
     private static bool ResourcesEqual(AzureProviderOperationEntity entity, AzureProviderResourceReferences resources) =>

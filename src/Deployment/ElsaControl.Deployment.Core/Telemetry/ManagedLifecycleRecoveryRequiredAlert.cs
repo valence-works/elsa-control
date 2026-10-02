@@ -5,9 +5,9 @@ using ElsaControl.Deployment.Core.Instances;
 namespace ElsaControl.Deployment.Core.Telemetry;
 
 /// <summary>
-/// Writes the single operator-alert event for an actual entry into
-/// <c>RecoveryRequired</c>. Callers invoke this only from the state-machine
-/// compare-and-set that changed the row; reads, refreshes, and auto-resume
+/// Writes the single operator-alert event after
+/// <c>RequiresHumanAt</c> is set. Callers invoke this only from the
+/// post-commit outbox flush; reads, refreshes, and auto-resume
 /// outcome writes must not call it.
 /// </summary>
 public static class ManagedLifecycleRecoveryRequiredAlert
@@ -19,9 +19,10 @@ public static class ManagedLifecycleRecoveryRequiredAlert
         Guid workspaceId,
         Guid instanceId,
         Guid operationId,
+        int attemptNumber,
         Guid? runId = null)
     {
-        if (workspaceId == Guid.Empty || instanceId == Guid.Empty || operationId == Guid.Empty)
+        if (workspaceId == Guid.Empty || instanceId == Guid.Empty || operationId == Guid.Empty || attemptNumber < 1)
             return;
 
         ManagedLifecycleTelemetry.RecordRecoveryRequiredEntered(
@@ -29,19 +30,21 @@ public static class ManagedLifecycleRecoveryRequiredAlert
             instanceId,
             operationId,
             ReasonCode,
-            ComputeDedupeIdentity(workspaceId, instanceId, operationId, runId));
+            ComputeDedupeIdentity(workspaceId, instanceId, operationId, attemptNumber, runId));
     }
 
-    internal static string ComputeDedupeIdentity(
+    public static string ComputeDedupeIdentity(
         Guid workspaceId,
         Guid instanceId,
         Guid operationId,
-        Guid? runId) =>
+        int attemptNumber,
+        Guid? runId = null) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join(
             '\n',
             workspaceId.ToString("D"),
             instanceId.ToString("D"),
             operationId.ToString("D"),
+            attemptNumber.ToString(System.Globalization.CultureInfo.InvariantCulture),
             runId?.ToString("D") ?? string.Empty,
             ReasonCode))));
 }

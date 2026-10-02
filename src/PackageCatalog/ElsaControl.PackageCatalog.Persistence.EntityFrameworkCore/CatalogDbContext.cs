@@ -22,7 +22,6 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
 {
     private readonly HashSet<(Guid SubscriptionId, string Property)> _lifecycleDeadlineOverrides = [];
     private readonly List<RecoveryRequiredAlertCandidate> _pendingRecoveryRequiredAlerts = [];
-    private readonly List<RecoveryRequiredAlertCandidate> _transitionRecoveryRequiredAlerts = [];
 
     public DbSet<PackageSource> PackageSources => Set<PackageSource>();
     public DbSet<Package> Packages => Set<Package>();
@@ -57,6 +56,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     internal DbSet<Models.ElsaInstanceProvisioningContextEntity> ElsaInstanceProvisioningContexts => Set<Models.ElsaInstanceProvisioningContextEntity>();
     internal DbSet<Models.ElsaInstanceIntentRevisionEntity> ElsaInstanceIntentRevisions => Set<Models.ElsaInstanceIntentRevisionEntity>();
     internal DbSet<Models.ElsaInstanceLifecycleOutboxEntity> ElsaInstanceLifecycleOutbox => Set<Models.ElsaInstanceLifecycleOutboxEntity>();
+    internal DbSet<Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity> ElsaInstanceRecoveryRequiredAlertOutbox => Set<Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity>();
     internal DbSet<Models.ElsaInstanceOperationEntity> ElsaInstanceOperations => Set<Models.ElsaInstanceOperationEntity>();
     internal DbSet<Models.ElsaInstanceRecoveryRequestEntity> ElsaInstanceRecoveryRequests => Set<Models.ElsaInstanceRecoveryRequestEntity>();
     internal DbSet<Models.ElsaInstanceResolvedPlanEntity> ElsaInstanceResolvedPlans => Set<Models.ElsaInstanceResolvedPlanEntity>();
@@ -154,6 +154,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         modelBuilder.ApplyConfiguration(new Models.ElsaInstanceProvisioningContextConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ElsaInstanceIntentRevisionConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ElsaInstanceLifecycleOutboxConfiguration());
+        modelBuilder.ApplyConfiguration(new Models.ElsaInstanceRecoveryRequiredAlertOutboxConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ElsaInstanceOperationConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ElsaInstanceRecoveryRequestConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ElsaInstanceResolvedPlanConfiguration());
@@ -298,55 +299,50 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
 
     internal void ClearLifecycleDeadlineOverrides() => _lifecycleDeadlineOverrides.Clear();
 
-    private void QueueRecoveryRequiredAlertIfEntered(
-        ElsaInstanceOperationState originalState,
-        Models.ElsaInstanceOperationEntity operation)
+    private void QueueRecoveryRequiredAlertIfRequiresHuman(
+        Microsoft.EntityFrameworkCore.ChangeTracking.EntityEntry<Models.ElsaInstanceOperationEntity> entry)
     {
-        if (originalState == ElsaInstanceOperationState.RecoveryRequired ||
-            operation.State != ElsaInstanceOperationState.RecoveryRequired)
-            return;
-        // Temporary two-site design. After #660 lands ReasonEnteredAt / RequiresHumanAt,
-        // this SaveChanges hook and Azure AddTransition are removed; the single CAS
-        // plus post-commit outbox becomes the only alert site. Healthy hand-off and
-        // temporary parks (including provider.submission.uncertain) must not email
-        // at entry. Do not treat this hand-off skip as the final operator-recovery path.
-        if (IsProviderSubmissionHandoff(operation.Id))
+        var operation = entry.Entity;
+        DateTimeOffset? original = entry.State == EntityState.Added
+            ? null
+            : (DateTimeOffset?)entry.Property(nameof(Models.ElsaInstanceOperationEntity.RequiresHumanAt)).OriginalValue;
+        if (original is not null || operation.RequiresHumanAt is null)
             return;
         if (operation.WorkspaceId == Guid.Empty ||
             operation.InstanceId is not { } instanceId ||
-            instanceId == Guid.Empty)
+            instanceId == Guid.Empty ||
+            operation.AttemptNumber < 1)
+            return;
+        if (ChangeTracker.Entries<Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity>()
+            .Any(existing =>
+                existing.State == EntityState.Added &&
+                existing.Entity.OperationId == operation.Id &&
+                existing.Entity.AttemptNumber == operation.AttemptNumber))
             return;
 
+        var createdAt = operation.RequiresHumanAt.Value.ToUniversalTime();
+        var dedupe = ManagedLifecycleRecoveryRequiredAlert.ComputeDedupeIdentity(
+            operation.WorkspaceId,
+            instanceId,
+            operation.Id,
+            operation.AttemptNumber);
+        ElsaInstanceRecoveryRequiredAlertOutbox.Add(new Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = operation.OrganizationId,
+            WorkspaceId = operation.WorkspaceId,
+            InstanceId = instanceId,
+            OperationId = operation.Id,
+            AttemptNumber = operation.AttemptNumber,
+            DedupeIdentity = dedupe,
+            CreatedAt = createdAt
+        });
         _pendingRecoveryRequiredAlerts.Add(new RecoveryRequiredAlertCandidate(
             operation.WorkspaceId,
             instanceId,
             operation.Id,
+            operation.AttemptNumber,
             operation.DeploymentRunId));
-    }
-
-    private bool IsProviderSubmissionHandoff(Guid operationId) =>
-        ChangeTracker.Entries<Models.ElsaInstanceAuditEventEntity>().Any(entry =>
-            entry.State == EntityState.Added &&
-            entry.Entity.OperationId == operationId &&
-            entry.Entity.EventType == "lifecycle.provider-submitted");
-
-    /// <summary>
-    /// Queues the operator-alert event from the Azure provider transition
-    /// compare-and-set. The write is flushed only after this save succeeds, so
-    /// a failed persist never emails. PrepareForSave does not clear this list.
-    /// </summary>
-    internal void QueueProviderRecoveryRequiredAlert(
-        Guid workspaceId,
-        Guid instanceId,
-        Guid operationId)
-    {
-        if (workspaceId == Guid.Empty || instanceId == Guid.Empty || operationId == Guid.Empty)
-            return;
-        _transitionRecoveryRequiredAlerts.Add(new RecoveryRequiredAlertCandidate(
-            workspaceId,
-            instanceId,
-            operationId,
-            RunId: null));
     }
 
     /// <summary>
@@ -373,25 +369,23 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
 
     private void FlushRecoveryRequiredAlerts()
     {
-        foreach (var candidate in _pendingRecoveryRequiredAlerts.Concat(_transitionRecoveryRequiredAlerts))
+        foreach (var candidate in _pendingRecoveryRequiredAlerts)
             ManagedLifecycleRecoveryRequiredAlert.RecordEntered(
                 candidate.WorkspaceId,
                 candidate.InstanceId,
                 candidate.OperationId,
+                candidate.AttemptNumber,
                 candidate.RunId);
         ClearRecoveryRequiredAlerts();
     }
 
-    private void ClearRecoveryRequiredAlerts()
-    {
-        _pendingRecoveryRequiredAlerts.Clear();
-        _transitionRecoveryRequiredAlerts.Clear();
-    }
+    private void ClearRecoveryRequiredAlerts() => _pendingRecoveryRequiredAlerts.Clear();
 
     private readonly record struct RecoveryRequiredAlertCandidate(
         Guid WorkspaceId,
         Guid InstanceId,
         Guid OperationId,
+        int AttemptNumber,
         Guid? RunId);
 
     /// <summary>
@@ -421,6 +415,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             EnsureElsaInstanceIntentRevisionsAreAppendOnly();
             EnsureElsaInstanceProvisioningContextsAreAppendOnly();
             EnsureElsaInstanceLifecycleOutboxIsAppendOnly();
+            EnsureElsaInstanceRecoveryRequiredAlertOutboxIsAppendOnly();
             EnsureElsaInstanceResolvedPlansAreAppendOnly();
             EnsureElsaInstanceRecoveryRequestsAreAppendOnly();
             EnsureManagedElsaHandoffRowsAreAppendOnly();
@@ -789,6 +784,13 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         if (ChangeTracker.Entries<Models.ElsaInstanceProvisioningContextEntity>()
             .Any(x => x.State is EntityState.Modified or EntityState.Deleted))
             throw new InvalidOperationException("Elsa instance provisioning contexts are immutable.");
+    }
+
+    private void EnsureElsaInstanceRecoveryRequiredAlertOutboxIsAppendOnly()
+    {
+        if (ChangeTracker.Entries<Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity>()
+            .Any(x => x.State is EntityState.Modified or EntityState.Deleted))
+            throw new InvalidOperationException("RecoveryRequired alert outbox records are append-only.");
     }
 
     private void EnsureElsaInstanceLifecycleOutboxIsAppendOnly()
@@ -1166,7 +1168,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
 
                 var originalState = (ElsaInstanceOperationState)entry.Property(nameof(Models.ElsaInstanceOperationEntity.State)).OriginalValue!;
                 EnsureDefined(originalState, nameof(Models.ElsaInstanceOperationEntity.State));
-                QueueRecoveryRequiredAlertIfEntered(originalState, operation);
+                QueueRecoveryRequiredAlertIfRequiresHuman(entry);
                 var isRecoveryResume = originalState == ElsaInstanceOperationState.RecoveryRequired &&
                     operation.State == ElsaInstanceOperationState.Queued &&
                     operation.AttemptNumber == (int)entry.Property(nameof(Models.ElsaInstanceOperationEntity.AttemptNumber)).OriginalValue! + 1;
@@ -1176,6 +1178,8 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
                 if (operation.AttemptNumber < originalAttemptNumber)
                     throw new InvalidOperationException("Instance operation attempt number cannot decrease.");
             }
+
+            QueueRecoveryRequiredAlertIfRequiresHuman(entry);
         }
 
 
