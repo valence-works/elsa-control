@@ -201,7 +201,7 @@ public static class ManagedElsaInstanceCustomerProjection
         DateTimeOffset now) =>
         activeOperation is { State: ElsaInstanceOperationState.RecoveryRequired } parked &&
         IsProvisioningAction(parked.Action) &&
-        ManagedElsaHumanRequiredPark.RequiresHuman(
+        ManagedElsaReasonCodeCatalog.RequiresHuman(
             parked.ParkReason,
             parked.FailureCode,
             parked.ParkedAt,

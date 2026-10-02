@@ -356,7 +356,7 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
     }
 
     [Theory]
-    [InlineData(ManagedElsaHumanRequiredPark.ProviderSubmissionAccepted)]
+    [InlineData(ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted)]
     [InlineData(ElsaInstanceProviderReconciliationService.InProgressCode)]
     [InlineData(ElsaInstanceProviderReconciliationService.HealthUnknownCode)]
     public void Healthy_hand_off_reasons_keep_the_normal_in_progress_projection(string reason)
@@ -384,11 +384,11 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
             instance.Id,
             ElsaInstanceOperationAction.Create,
             ElsaInstanceOperationState.RecoveryRequired,
-            ManagedElsaHumanRequiredPark.ProviderSubmissionUncertain,
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
             parkedAt: Now);
 
         var projected = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(
-            instance, operation, Now + ManagedElsaHumanRequiredPark.SubmissionUncertainHealthyWindow - TimeSpan.FromSeconds(1));
+            instance, operation, Now + ManagedElsaReasonCodeCatalog.SubmissionUncertainHealthyWindow - TimeSpan.FromSeconds(1));
 
         Assert.Equal(ElsaObservedLifecycle.Provisioning, projected);
         Assert.True(ManagedElsaInstanceCustomerProjection.IsKnownInProgress(projected));
@@ -403,11 +403,11 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
             instance.Id,
             ElsaInstanceOperationAction.Create,
             ElsaInstanceOperationState.RecoveryRequired,
-            ManagedElsaHumanRequiredPark.ProviderSubmissionUncertain,
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
             parkedAt: Now);
 
         var projected = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(
-            instance, operation, Now + ManagedElsaHumanRequiredPark.SubmissionUncertainHealthyWindow);
+            instance, operation, Now + ManagedElsaReasonCodeCatalog.SubmissionUncertainHealthyWindow);
 
         Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, projected);
         Assert.False(ManagedElsaInstanceCustomerProjection.IsKnownInProgress(projected));
@@ -461,7 +461,7 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
             instance.Id,
             ElsaInstanceOperationAction.UpdateIntent,
             ElsaInstanceOperationState.RecoveryRequired,
-            ManagedElsaHumanRequiredPark.ProviderSubmissionAccepted);
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted);
         var listed = ManagedElsaInstanceCustomerProjection.Apply(instance, operation, Now);
         var detail = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation, Now);
 

@@ -2389,7 +2389,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     public void Ready_healthy_hand_off_park_stays_openable_on_list_detail_and_overview()
     {
         var (instance, identity, operation) = ReadyHealthyParked(
-            ManagedElsaHumanRequiredPark.ProviderSubmissionAccepted);
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted);
         var listed = ManagedElsaInstanceCustomerProjection.Apply(instance, operation);
         var list = ManagedElsaInstanceEndpoints.ToResponse(
             listed, canOpen: true, instance.WorkspaceId, identity, operation);

@@ -58,7 +58,7 @@ public sealed class ManagedElsaInstanceApiStoreReadTests
         parked.State = ElsaInstanceOperationState.RecoveryRequired;
         parked.StartedAt = BaseTime;
         parked.UpdatedAt = BaseTime;
-        parked.ReconciliationDiagnosticCode = ManagedElsaHumanRequiredPark.ProviderSubmissionAccepted;
+        parked.ReconciliationDiagnosticCode = ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted;
         instance.LastOperationId = parked.Id.ToString("D");
         db.ElsaInstanceOperations.Add(parked);
         await db.SaveChangesAsync();
