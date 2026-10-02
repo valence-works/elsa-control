@@ -45,7 +45,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
-    public async Task Stale_run_entry_writes_exactly_one_alert_event_and_a_refresh_writes_none()
+    public async Task Stale_run_entry_does_not_alert_because_the_park_is_temporary()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -64,19 +64,12 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var stored = await db.ElsaInstanceOperations.AsNoTracking()
             .SingleAsync(x => x.Id == accepted.Operation.Id);
         Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, stored.State);
-        Assert.Single(capture.Entered);
         Assert.Equal(
-            ManagedLifecycleTelemetry.RecoveryRequiredEnteredActivityName,
-            capture.Entered[0].OperationName);
-        Assert.Equal(workspace.Id.ToString("D"),
-            capture.Entered[0].GetTagItem(ManagedLifecycleTelemetry.WorkspaceIdTag));
-        Assert.Equal(accepted.Instance.Id.ToString("D"),
-            capture.Entered[0].GetTagItem(ManagedLifecycleTelemetry.InstanceIdTag));
-        Assert.Equal(accepted.Operation.Id.ToString("D"),
-            capture.Entered[0].GetTagItem(ManagedLifecycleTelemetry.OperationIdTag));
-        Assert.Equal(
-            ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired,
-            capture.Entered[0].GetTagItem(ManagedLifecycleTelemetry.DiagnosticCodeTag));
+            ManagedElsaReasonCodeCatalog.ProviderReconciliationRequired,
+            stored.ReconciliationDiagnosticCode);
+        Assert.Null(stored.RequiresHumanAt);
+        Assert.Empty(capture.Entered);
+        Assert.Empty(db.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking());
     }
 
     [Fact]

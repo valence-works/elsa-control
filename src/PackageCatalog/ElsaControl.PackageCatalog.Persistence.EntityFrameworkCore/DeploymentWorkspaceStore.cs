@@ -1354,18 +1354,7 @@ public sealed class DeploymentWorkspaceStore(CatalogDbContext dbContext) : IWork
             throw new InvalidOperationException("Managed lifecycle recovery linkage is inconsistent.");
 
         var priorState = instance.ObservedLifecycle;
-        var previousReason = operation.FailureCode;
         operation.State = ElsaInstanceOperationState.RecoveryRequired;
-        var nextReason = operation.FailureCode;
-        var clock = ManagedElsaReasonClock.Advance(
-            previousReason,
-            nextReason,
-            operation.ReasonEnteredAt,
-            operation.RequiresHumanAt,
-            now,
-            restartClock: false);
-        operation.ReasonEnteredAt = clock.ReasonEnteredAt;
-        operation.RequiresHumanAt = clock.RequiresHumanAt;
         operation.CompletedAt = null;
         operation.WorkerId = null;
         operation.LeaseTokenHash = null;
