@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using ElsaControl.Deployment.Abstractions.Instances;
 
 namespace ElsaControl.Deployment.Core.Instances;
@@ -20,9 +21,19 @@ public static class ManagedElsaInstanceCustomerProjection
         "Control cannot determine this instance's state. Refresh to retry observation, or recover the instance if it remains unknown.";
     public const string RecoveryRequiredUnavailableReason =
         "The latest operation on this instance paused and is waiting for Valence Works to resume it. " +
-        "Valence Works has been alerted. Check again later, or quote the operation reference if you contact support.";
+        "Refresh to check again, or quote the operation reference if you contact support.";
+    public const string ParkedDeleteUnavailableReason =
+        "Deletion needs operator recovery. Contact support. " +
+        "Refresh to check again, or quote the operation reference if you contact support.";
     public const string RecoveryRequiredUnavailableReasonCode = "instance.recovery-required";
     public const string NeedsAttentionLabel = "Needs attention";
+
+    private static readonly FrozenSet<string> CustomerSafeOperationReasonCodes = new HashSet<string>(StringComparer.Ordinal)
+    {
+        ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight,
+        ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale,
+        ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending
+    }.ToFrozenSet(StringComparer.Ordinal);
 
     public static ElsaObservedLifecycle ProjectObservedLifecycle(
         ElsaInstance instance,
@@ -120,11 +131,14 @@ public static class ManagedElsaInstanceCustomerProjection
         ElsaObservedLifecycle observedLifecycle,
         string? unauthorizedReason = "Not authorized to open this instance.",
         string? handoffUnavailableReason = null,
-        string? identityUnavailableReason = "The current identity binding is unavailable.")
+        string? identityUnavailableReason = "The current identity binding is unavailable.",
+        ElsaInstanceOperationSummary? activeOperation = null)
     {
         ElsaInstanceValue.RequireEnum(observedLifecycle, nameof(observedLifecycle));
         if (!canOpen)
             return unauthorizedReason;
+        if (IsParkedCustomerDelete(activeOperation))
+            return ParkedDeleteUnavailableReason;
         if (observedLifecycle == ElsaObservedLifecycle.RecoveryRequired)
             return RecoveryRequiredUnavailableReason;
         if (observedLifecycle is ElsaObservedLifecycle.Pending or
@@ -180,11 +194,14 @@ public static class ManagedElsaInstanceCustomerProjection
         bool healthy,
         bool handoffConfigured,
         bool hasIdentity,
-        ElsaObservedLifecycle observedLifecycle)
+        ElsaObservedLifecycle observedLifecycle,
+        ElsaInstanceOperationSummary? activeOperation = null)
     {
         ElsaInstanceValue.RequireEnum(observedLifecycle, nameof(observedLifecycle));
         if (!canOpen)
             return "not-authorized";
+        if (IsParkedCustomerDelete(activeOperation))
+            return CustomerSafeOperationReason(activeOperation) ?? RecoveryRequiredUnavailableReasonCode;
         if (observedLifecycle == ElsaObservedLifecycle.RecoveryRequired)
             return RecoveryRequiredUnavailableReasonCode;
         if (IsKnownInProgress(observedLifecycle))
@@ -209,6 +226,30 @@ public static class ManagedElsaInstanceCustomerProjection
             ElsaObservedLifecycle.Updating => ElsaObservedLifecycle.Updating,
             ElsaObservedLifecycle.Provisioning => ElsaObservedLifecycle.Provisioning,
             _ => ElsaObservedLifecycle.Provisioning
+        };
+
+    /// <summary>
+    /// Allowlisted cleanup, progress, and recovery codes for customer Delete
+    /// and list contracts. Unknown provider diagnostics, Azure inventory, and
+    /// resource identifiers are discarded.
+    /// </summary>
+    public static string? CustomerSafeOperationReason(string? reasonCode) =>
+        !string.IsNullOrWhiteSpace(reasonCode) && CustomerSafeOperationReasonCodes.Contains(reasonCode)
+            ? reasonCode
+            : null;
+
+    public static string? CustomerSafeOperationReason(ElsaInstanceOperationSummary? operation) =>
+        CustomerSafeOperationReason(ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+            operation?.FailureCode,
+            operation?.ReasonCode,
+            operation?.RecoveryReason));
+
+    public static bool IsParkedCustomerDelete(ElsaInstanceOperationSummary? operation) =>
+        operation is
+        {
+            Action: ElsaInstanceOperationAction.Delete,
+            State: ElsaInstanceOperationState.RecoveryRequired,
+            RequiresHumanAt: not null
         };
 
     private static bool HasStoredTerminalPriority(ElsaObservedLifecycle stored) =>

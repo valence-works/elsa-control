@@ -716,7 +716,7 @@ internal static class ManagedElsaInstanceOverviewProjection
         var handoffConfigured = instance.CurrentDeploymentReference?.ManagedHandoff == true;
         var canOpen = canOpenPermission && healthy && handoffConfigured && currentIdentity is not null;
         var unavailableReason = ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
-            canOpenPermission, healthy, handoffConfigured, currentIdentity is not null, observed);
+            canOpenPermission, healthy, handoffConfigured, currentIdentity is not null, observed, activeOperation);
         var canMutate = role is WorkspaceRole.Owner or WorkspaceRole.SourceAdmin;
         var hasActiveOperation = activeOperation is not null &&
                                  ElsaInstanceOperationGuard.IsBlocking(activeOperation.State);

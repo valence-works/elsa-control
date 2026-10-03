@@ -122,6 +122,8 @@ public static class ManagedElsaReasonCodeCatalog
     public const string DeletionProviderAbsent = "deletion.provider.absent";
     public const string DeletionProviderAmbiguous = "deletion.provider.ambiguous";
     public const string DeletionProviderFinalizationPending = "deletion.provider-finalization-pending";
+    public const string DeletionBlockedByOperationInFlight = "lifecycle.deletion.blocked-by-operation-in-flight";
+    public const string DeletionProviderProgressStale = "lifecycle.deletion.provider-progress-stale";
     public const string AssignmentRebindOperationsInFlight = "assignment.rebind.operations-inflight";
     public const string AssignmentRebindPlacementMismatch = "assignment.rebind.placement-mismatch";
     public const string AssignmentRebindAmbiguous = "assignment.rebind.ambiguous";
@@ -215,6 +217,8 @@ public static class ManagedElsaReasonCodeCatalog
             new(DeletionPredecessorRecoverySuperseded, ManagedElsaReasonClass.NeedsPerson),
             new(DeletionRecoveryAuthorityUnavailable, ManagedElsaReasonClass.NeedsPerson),
             new(DeletionRecoveryPlanUnavailable, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionBlockedByOperationInFlight, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionProviderProgressStale, ManagedElsaReasonClass.NeedsPerson),
             new(AssignmentRebindOperationsInFlight, ManagedElsaReasonClass.Temporary),
             new(AssignmentRebindPlacementMismatch, ManagedElsaReasonClass.NeedsPerson),
             new(AssignmentRebindAmbiguous, ManagedElsaReasonClass.NeedsPerson)

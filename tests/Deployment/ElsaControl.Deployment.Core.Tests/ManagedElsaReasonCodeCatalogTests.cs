@@ -29,6 +29,7 @@ public sealed class ManagedElsaReasonCodeCatalogTests
         }
 
         Assert.Contains("deletion.", ManagedElsaReasonLiteralScanner.ReasonFamilyPrefixes, StringComparer.Ordinal);
+        Assert.Contains("lifecycle.deletion.", ManagedElsaReasonLiteralScanner.ReasonFamilyPrefixes, StringComparer.Ordinal);
         Assert.Contains("assignment.rebind.", ManagedElsaReasonLiteralScanner.ReasonFamilyPrefixes, StringComparer.Ordinal);
         Assert.Equal(ManagedElsaReasonCodeCatalog.DefinedCodes.Count, ManagedElsaReasonCodeCatalog.ByCode.Count);
     }
@@ -102,6 +103,8 @@ public sealed class ManagedElsaReasonCodeCatalogTests
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderCleanupFailed, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderAmbiguous, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionPredecessorRecoverySuperseded, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.AssignmentRebindOperationsInFlight, ManagedElsaReasonClass.Temporary)]
     [InlineData(ManagedElsaReasonCodeCatalog.AssignmentRebindPlacementMismatch, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.AssignmentRebindAmbiguous, ManagedElsaReasonClass.NeedsPerson)]
@@ -199,6 +202,10 @@ public sealed class ManagedElsaReasonCodeCatalogTests
     {
         Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman(
             ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted, Now, Now));
+        Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman(
+            ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight, Now, Now));
+        Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman(
+            ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale, Now, Now));
         Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman("provider.recovery.never-seen", Now, Now));
         Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman(null, null, Now, Now));
         var clock = ManagedElsaReasonClock.Advance(

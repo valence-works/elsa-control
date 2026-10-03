@@ -587,7 +587,7 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
             operation.FailureCode,
             operation.ReconciledObservedLifecycle,
             operation.ReconciledHealth,
-            operation.ReconciliationDiagnosticCode,
+            operation.ReconciliationDiagnosticCode ?? operation.DeletionDiagnosticCode,
             UpdatedAt: operation.UpdatedAt,
             ReasonEnteredAt: operation.ReasonEnteredAt,
             RequiresHumanAt: operation.RequiresHumanAt);

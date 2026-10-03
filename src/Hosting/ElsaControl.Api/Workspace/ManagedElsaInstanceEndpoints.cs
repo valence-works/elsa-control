@@ -878,10 +878,12 @@ public static class ManagedElsaInstanceEndpoints
             openable ? currentIdentity!.CallbackUri.AbsoluteUri : null,
             ManagedElsaInstanceCustomerProjection.UnavailableReason(
                 canOpen, healthy, handoffConfigured, currentIdentity is not null, observedLifecycle,
-                handoffUnavailableReason: HandoffUnavailableReason))
+                handoffUnavailableReason: HandoffUnavailableReason,
+                activeOperation: activeOperation))
         {
             UnavailableReasonCode = ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
-                canOpen, healthy, handoffConfigured, currentIdentity is not null, observedLifecycle),
+                canOpen, healthy, handoffConfigured, currentIdentity is not null, observedLifecycle,
+                activeOperation),
             Version = instance.Version,
             ETag = ETag(instance.Version),
             DesiredStateRevisionId = instance.DesiredStateRevisionId?.Value,
@@ -949,12 +951,15 @@ public static class ManagedElsaInstanceEndpoints
         };
 
     internal static ManagedElsaInstanceDeleteOperationResponse ToDeleteOperationResponse(ElsaInstanceOperationSummary operation) =>
-        new(operation.Id, operation.State, operation.AcceptedAt, operation.StartedAt, operation.CompletedAt);
+        new(operation.Id, operation.State, operation.AcceptedAt, operation.StartedAt, operation.CompletedAt)
+        {
+            ReasonCode = ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation)
+        };
 
     internal static ElsaInstanceAuditEventSummary RedactAudit(ElsaInstanceAuditEventSummary audit) =>
         audit with { OperatorSubject = null };
 
-    private static ManagedElsaInstanceResponse ToLegacyResponse(ManagedElsaInstanceSummary summary, bool canOpen, bool controlHandoffEnabled)
+    internal static ManagedElsaInstanceResponse ToLegacyResponse(ManagedElsaInstanceSummary summary, bool canOpen, bool controlHandoffEnabled)
     {
         var healthy = summary.DesiredLifecycle == ElsaDesiredLifecycle.Running && summary.ObservedLifecycle == ElsaObservedLifecycle.Ready && summary.Health == ElsaInstanceHealth.Healthy;
         var openable = canOpen && healthy && controlHandoffEnabled && summary.Audience is not null && summary.CallbackUri is not null;
@@ -1098,7 +1103,11 @@ public sealed record ManagedElsaInstanceLaunchProfile(
     string DomainOutcome);
 public sealed record ManagedElsaInstanceAcceptedResponse(ManagedElsaInstanceResponse Instance, ManagedElsaInstanceOperationResponse Operation, IReadOnlyDictionary<string, string> Links);
 public sealed record ManagedElsaInstanceDeleteAcceptedResponse(Guid OperationId, ElsaInstanceOperationState State, DateTimeOffset AcceptedAt, string OperationUrl);
-public sealed record ManagedElsaInstanceDeleteOperationResponse(Guid OperationId, ElsaInstanceOperationState State, DateTimeOffset AcceptedAt, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt);
+public sealed record ManagedElsaInstanceDeleteOperationResponse(Guid OperationId, ElsaInstanceOperationState State, DateTimeOffset AcceptedAt, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt)
+{
+    /// <summary>Allowlisted cleanup, progress, or recovery code. Never a provider diagnostic.</summary>
+    public string? ReasonCode { get; init; }
+}
 public sealed record ManagedElsaInstanceOperationResponse(Guid Id, Guid InstanceId, ElsaInstanceOperationAction Action, ElsaInstanceOperationState State, int ExpectedVersion, int AttemptNumber, DateTimeOffset AcceptedAt, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, string? DesiredStateRevisionId, string? ResolvedPlanId, Guid? DeploymentRunId, string? FailureCode, ElsaObservedLifecycle? ReconciledObservedLifecycle, ElsaInstanceHealth? ReconciledHealth, IReadOnlyDictionary<string, string> Links)
 {
     public string? ReasonCode { get; init; }
