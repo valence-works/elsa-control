@@ -840,7 +840,8 @@ public sealed class ElsaInstanceLifecycleServiceTests
             .ReconcileAsync(WorkspaceId, created.Operation.Id);
         var recoverVersion = store.Instances.Single().Version;
         var recovered = await service.RecoverAsync(new ElsaInstanceLifecycleRequest(
-            WorkspaceId, created.Instance.Id, recoverVersion, "recover-before-delete"));
+            WorkspaceId, created.Instance.Id, recoverVersion, "recover-before-delete",
+            ActorAccountId: ActorAccountId));
         var transitionVersion = 47;
         await store.CommitAcceptedAsync(
             recovered.Instance,
@@ -863,6 +864,57 @@ public sealed class ElsaInstanceLifecycleServiceTests
         Assert.Equal(ElsaInstanceLifecycleConflictReason.ChangedSinceRead, conflict.Reason);
         Assert.True(recovered.Operation.RecoveryExpectedVersion >= readVersion);
         Assert.DoesNotContain(store.Operations, operation => operation.Action == ElsaInstanceOperationAction.Delete);
+    }
+
+    [Fact]
+    public async Task Delete_rebase_is_accepted_after_system_auto_resume()
+    {
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var created = await service.CreateAsync(new ElsaInstanceCreateRequest(
+            OrganizationId, WorkspaceId, "Claims", "claims-prod", Intent(), "create-rebase-auto-resume"));
+        var readVersion = created.Instance.Version;
+        store.MarkRecoveryRequired(created.Operation.Id);
+        await new ElsaInstanceProviderReconciliationService(
+                store,
+                new StaticProviderPort(new(
+                    ElsaInstanceProviderObservationKind.Confirmed,
+                    ElsaObservedLifecycle.Provisioning,
+                    ElsaInstanceProviderHealthGate.Unknown,
+                    "auto-resume-observation",
+                    new ElsaInstanceProviderRetryEvidence(
+                        ElsaInstanceProviderRecoveryObservationReference.Create(
+                            Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        autoResume: true))),
+                new StaticTimeProvider(Now),
+                service)
+            .ReconcileAsync(WorkspaceId, created.Operation.Id);
+        var resumed = store.Operations.Single();
+        Assert.Equal(ElsaInstanceOperationState.Queued, resumed.State);
+        Assert.Null(resumed.RecoveryExpectedVersion);
+        var transitionVersion = 47;
+        await store.CommitAcceptedAsync(
+            store.Instances.Single(),
+            AdvanceInstanceVersion(store.Instances.Single(), transitionVersion),
+            resumed
+                .TransitionTo(ElsaInstanceOperationState.Running)
+                .TransitionTo(ElsaInstanceOperationState.Succeeded),
+            new ElsaInstanceLifecycleOutboxMessage(
+                Guid.NewGuid(), WorkspaceId, created.Instance.Id, resumed.Id,
+                resumed.Action, resumed.RequestHash, Now));
+        AddDeleteConfirmation(authority, created.Instance);
+
+        var accepted = await service.DeleteAsync(new ElsaInstanceLifecycleRequest(
+            WorkspaceId, created.Instance.Id, transitionVersion, "delete-after-auto-resume",
+            DeleteConfirmationId: DeleteConfirmationId, ActorAccountId: ActorAccountId,
+            CanonicalExpectedVersion: readVersion));
+
+        Assert.False(accepted.Replayed);
+        Assert.Equal(ElsaInstanceOperationAction.Delete, accepted.Operation.Action);
+        Assert.Equal(transitionVersion, accepted.Operation.ExpectedVersion);
     }
 
     [Fact]

@@ -47,9 +47,10 @@ public interface IElsaInstanceLifecycleStore
     /// <paramref name="version"/>. Create is founding and does not count.
     /// Only <see cref="ElsaInstanceOperation.SystemOnlyLifecycleActions"/>
     /// may rebase; unknown actions count as customer changes.
-    /// Recover mutates the parked row in place, so a
+    /// Customer or operator Recover mutates the parked row in place, so a
     /// <see cref="ElsaInstanceOperation.RecoveryExpectedVersion"/> at or
-    /// after <paramref name="version"/> also counts.
+    /// after <paramref name="version"/> also counts. System auto-resume
+    /// does not stamp and does not count.
     /// <paramref name="exceptOperationId"/> excludes the Delete being
     /// recovered or replayed.
     /// </summary>

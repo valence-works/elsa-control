@@ -175,6 +175,7 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
         Assert.Equal(accepted.Operation.Id, resumed.Id);
         Assert.Equal(ElsaInstanceOperationState.Queued, resumed.State);
         Assert.Equal(accepted.Operation.AttemptNumber + 1, resumed.AttemptNumber);
+        Assert.Null(resumed.RecoveryExpectedVersion);
         var recovery = Assert.Single(store.RecoveryRequests);
         Assert.Equal(accepted.Operation.Id, recovery.OperationId);
         Assert.Equal($"auto-resume.{accepted.Operation.Id:N}.1", recovery.IdempotencyKey);
@@ -359,6 +360,7 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
             ExpectedOperationId: accepted.Operation.Id));
 
         Assert.Equal(ElsaInstanceOperationState.Queued, recovered.Operation.State);
+        Assert.Equal(accepted.Instance.Version, recovered.Operation.RecoveryExpectedVersion);
         Assert.Equal(3, port.AutoResumeCount);
     }
 

@@ -439,9 +439,13 @@ public static class ManagedElsaInstanceEndpoints
                         return Problem(ConflictCode(exception), "The request conflicts with the current instance state.", StatusCodes.Status412PreconditionFailed);
                     // Name / DesiredStateRevisionId are not snapshotted at the
                     // client's If-Match. Customer rename and intent updates
-                    // write an operation row; Recover stamps
+                    // write an operation row; customer/operator Recover stamps
                     // RecoveryExpectedVersion. A same-request re-read cannot
                     // see those. Do not compare `current` with `instance`.
+                    // Safety assumption: every customer/member mutating
+                    // instance route records an operation or a Recover stamp.
+                    // Instance_mutating_routes_are_classified_and_record_delete_rebase_causes
+                    // discovers those routes and asserts the recording.
                     if (await lifecycleStore.HasCustomerMutationAtOrAfterVersionAsync(
                             workspaceId, instanceId, expectedVersion.Value, deleteRecovery?.Id, cancellationToken))
                         return Problem(

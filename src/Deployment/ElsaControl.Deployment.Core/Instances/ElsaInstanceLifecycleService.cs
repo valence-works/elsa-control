@@ -147,7 +147,8 @@ public sealed class ElsaInstanceLifecycleService(
         return await AcceptAsync(request.WorkspaceId, request.InstanceId, ElsaInstanceOperationAction.Recover,
             request.ExpectedVersion, request.IdempotencyKey, null, null, request.Reason, cancellationToken,
             actorAccountId: request.ActorAccountId,
-            expectedOperationId: request.ExpectedOperationId);
+            expectedOperationId: request.ExpectedOperationId,
+            recordCustomerRecovery: request.ActorAccountId is not null || request.OperatorInitiated);
     }
 
     private async Task RefreshOperatorRecoveryEvidenceAsync(
@@ -271,7 +272,8 @@ public sealed class ElsaInstanceLifecycleService(
         Guid? confirmationId = null,
         Guid? actorAccountId = null,
         Guid? expectedOperationId = null,
-        int? canonicalExpectedVersion = null)
+        int? canonicalExpectedVersion = null,
+        bool recordCustomerRecovery = false)
     {
         ValidateWorkspace(workspaceId);
         if (instanceId == Guid.Empty)
@@ -343,7 +345,8 @@ public sealed class ElsaInstanceLifecycleService(
                 requestedIntent,
                 minorApproved,
                 migrationAuthorized,
-                operationScope);
+                operationScope,
+                recordCustomerRecovery);
             if (requestedName is not null && !string.Equals(replayTransition.Instance.Name, requestedName, StringComparison.Ordinal))
                 replayTransition = new ElsaInstanceTransitionResult(replayTransition.Instance.Rename(requestedName), replayTransition.Operation);
             return await CommitAsync(instance, replayTransition,
@@ -379,7 +382,8 @@ public sealed class ElsaInstanceLifecycleService(
             effectiveIntent,
             minorApproved,
             migrationAuthorized,
-            operationScope);
+            operationScope,
+            recordCustomerRecovery);
         if (requestedName is not null && !string.Equals(transition.Instance.Name, requestedName, StringComparison.Ordinal))
             transition = new ElsaInstanceTransitionResult(transition.Instance.Rename(requestedName), transition.Operation);
         return await CommitAsync(instance, transition,
@@ -396,12 +400,14 @@ public sealed class ElsaInstanceLifecycleService(
         ElsaInstanceIntent? requestedIntent = null,
         bool minorApproved = false,
         bool migrationAuthorized = false,
-        string? idempotencyScope = null)
+        string? idempotencyScope = null,
+        bool recordCustomerRecovery = false)
     {
         try
         {
             return ElsaInstanceStateMachine.Request(instance, action, activeOperation, expectedVersion,
-                idempotencyKey, requestHash, requestedIntent, minorApproved, migrationAuthorized, idempotencyScope);
+                idempotencyKey, requestHash, requestedIntent, minorApproved, migrationAuthorized, idempotencyScope,
+                recordCustomerRecovery);
         }
         catch (ElsaInstanceStateConflictException exception)
         {

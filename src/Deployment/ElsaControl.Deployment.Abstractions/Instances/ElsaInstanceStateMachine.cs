@@ -92,9 +92,11 @@ public sealed record ElsaInstanceOperation
     public string? RecoveryRequestHash { get; private init; }
 
     /// <summary>
-    /// Version Recover was accepted against. Recover mutates this row in
-    /// place and leaves <see cref="ExpectedVersion"/> at the original
-    /// accept, so Delete If-Match rebase uses this stamp to see Recover.
+    /// Version a customer or operator Recover was accepted against.
+    /// Recover mutates this row in place and leaves
+    /// <see cref="ExpectedVersion"/> at the original accept, so Delete
+    /// If-Match rebase uses this stamp. System auto-resume leaves it
+    /// null so a stale Delete can still rebase.
     /// </summary>
     public int? RecoveryExpectedVersion { get; private init; }
 
@@ -206,11 +208,11 @@ public sealed record ElsaInstanceOperation
         string idempotencyScope,
         string idempotencyKey,
         string requestHash,
-        int recoveryExpectedVersion)
+        int? recoveryExpectedVersion)
     {
         if (State != ElsaInstanceOperationState.RecoveryRequired)
             throw new InvalidOperationException("Only a recovery-required operation can be recovered.");
-        if (recoveryExpectedVersion < 1)
+        if (recoveryExpectedVersion is { } version && version < 1)
             throw new ArgumentOutOfRangeException(nameof(recoveryExpectedVersion), "Recovery expected version must be positive.");
         return this with
         {
@@ -490,7 +492,8 @@ public static class ElsaInstanceStateMachine
         ElsaInstanceIntent? requestedIntent = null,
         bool minorApproved = false,
         bool migrationAuthorized = false,
-        string? idempotencyScope = null)
+        string? idempotencyScope = null,
+        bool recordCustomerRecovery = true)
     {
         ArgumentNullException.ThrowIfNull(instance);
 
@@ -528,7 +531,13 @@ public static class ElsaInstanceStateMachine
                 instance.Intent.DesiredLifecycle != ElsaDesiredLifecycle.Deleting &&
                 recoveredInstance.Version == instance.Version)
                 recoveredInstance = recoveredInstance with { Version = checked(instance.Version + 1) };
-            return new ElsaInstanceTransitionResult(recoveredInstance, activeOperation.Recover(operationScope, key, hash, expected));
+            return new ElsaInstanceTransitionResult(
+                recoveredInstance,
+                activeOperation.Recover(
+                    operationScope,
+                    key,
+                    hash,
+                    recordCustomerRecovery ? expected : null));
         }
 
         if (activeOperation is not null && ElsaInstanceOperationGuard.IsIdempotentReplay(activeOperation, operationScope, key, hash))

@@ -372,6 +372,23 @@ public sealed class ElsaInstanceContractTests
     }
 
     [Fact]
+    public void Auto_resume_recover_does_not_stamp_recovery_expected_version()
+    {
+        var instance = CreateInstance(ElsaObservedLifecycle.Failed);
+        var recoveryRequired = OperationFor(instance, ElsaInstanceOperationState.RecoveryRequired);
+
+        var result = ElsaInstanceStateMachine.Request(
+            instance,
+            ElsaInstanceOperationAction.Recover,
+            recoveryRequired,
+            recordCustomerRecovery: false);
+
+        Assert.Equal(recoveryRequired.Id, result.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Queued, result.Operation.State);
+        Assert.Null(result.Operation.RecoveryExpectedVersion);
+    }
+
+    [Fact]
     public void Recovering_delete_reuses_operation_without_reconciling_to_provisioning()
     {
         var instance = CreateInstance(ElsaObservedLifecycle.Unknown);
