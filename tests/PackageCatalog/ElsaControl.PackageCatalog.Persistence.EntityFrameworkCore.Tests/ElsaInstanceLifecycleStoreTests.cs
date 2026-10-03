@@ -2570,6 +2570,304 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
+    public async Task Exhausted_park_then_recover_then_resubmit_is_a_healthy_hand_off()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Exhausted recover resubmit");
+        var workspaceStore = new DeploymentWorkspaceStore(db);
+        Assert.NotNull(await workspaceStore.ClaimNextQueuedRunAsync("deployment-worker", Now));
+        Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
+            Now.AddMinutes(10), TimeSpan.FromMinutes(5)));
+        db.ChangeTracker.Clear();
+
+        var exhaustedAt = Now.AddMinutes(11);
+        await new ElsaInstanceProviderReconciliationService(
+                CreateStore(db),
+                new QueueProviderPort(new ElsaInstanceProviderObservation(
+                    ElsaInstanceProviderObservationKind.Confirmed,
+                    ElsaObservedLifecycle.Provisioning,
+                    ElsaInstanceProviderHealthGate.Unknown,
+                    "exhausted-park")
+                {
+                    ReasonCode = ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted
+                }),
+                new FixedTimeProvider(exhaustedAt))
+            .ReconcileAsync(workspace.Id, accepted.Operation.Id);
+        db.ChangeTracker.Clear();
+        var exhausted = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(exhaustedAt, exhausted.RequiresHumanAt);
+        Assert.Equal(ManagedElsaReasonClass.NeedsPerson,
+            ManagedElsaReasonCodeCatalog.Classify(exhausted.ReconciliationDiagnosticCode));
+
+        var current = await CreateStore(db).GetInstanceAsync(workspace.Id, accepted.Instance.Id);
+        var recovered = await new ElsaInstanceLifecycleService(
+                CreateStore(db), new FixedTimeProvider(Now.AddMinutes(12)))
+            .RecoverAsync(new(workspace.Id, accepted.Instance.Id, current!.Version, "recover-exhausted"));
+        Assert.Equal(ElsaInstanceOperationState.Queued, recovered.Operation.State);
+        db.ChangeTracker.Clear();
+        var afterRecover = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Null(afterRecover.ReconciliationDiagnosticCode);
+        Assert.Null(afterRecover.RequiresHumanAt);
+
+        var submittedAt = Now.AddMinutes(13);
+        await CreateStore(db).CommitProviderSubmissionAsync(new(
+            workspace.Id,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            recovered.Operation.AttemptNumber,
+            "provider-operation-accepted",
+            submittedAt));
+        db.ChangeTracker.Clear();
+
+        var resubmitted = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted, resubmitted.ReconciliationDiagnosticCode);
+        Assert.Equal(
+            ManagedElsaReasonClass.HealthyHandOff,
+            ManagedElsaReasonCodeCatalog.Classify(
+                ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                    resubmitted.FailureCode,
+                    resubmitted.ReconciliationDiagnosticCode,
+                    (await db.DeploymentRuns.AsNoTracking().SingleAsync(x => x.Id == resubmitted.DeploymentRunId)).RecoveryReason)));
+        Assert.Null(resubmitted.RequiresHumanAt);
+        var listed = Assert.Single(
+            (await new EfCoreManagedElsaInstanceApiStore(db).ListInstancesAsync(workspace.Id, 1, 10)).Items);
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, listed.ObservedLifecycle);
+        Assert.Null(ManagedElsaInstanceCustomerProjection.CustomerLabel(listed.ObservedLifecycle));
+    }
+
+    [Fact]
+    public async Task Azure_park_without_recovery_evidence_stays_temporary_then_needs_a_person()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "No recovery evidence");
+        var workspaceStore = new DeploymentWorkspaceStore(db);
+        Assert.NotNull(await workspaceStore.ClaimNextQueuedRunAsync("deployment-worker", Now));
+        Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
+            Now.AddMinutes(10), TimeSpan.FromMinutes(5)));
+        db.ChangeTracker.Clear();
+
+        var firstAt = Now.AddMinutes(11);
+        await new ElsaInstanceProviderReconciliationService(
+                CreateStore(db),
+                new QueueProviderPort(new ElsaInstanceProviderObservation(
+                    ElsaInstanceProviderObservationKind.Confirmed,
+                    ElsaObservedLifecycle.Provisioning,
+                    ElsaInstanceProviderHealthGate.Unknown,
+                    "no-evidence")
+                {
+                    ReasonCode = ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable
+                }),
+                new FixedTimeProvider(firstAt))
+            .ReconcileAsync(workspace.Id, accepted.Operation.Id);
+        db.ChangeTracker.Clear();
+        var first = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable, first.ReconciliationDiagnosticCode);
+        Assert.Equal(ManagedElsaReasonClass.Temporary,
+            ManagedElsaReasonCodeCatalog.Classify(first.ReconciliationDiagnosticCode));
+        Assert.NotNull(first.ReasonEnteredAt);
+        Assert.Null(first.RequiresHumanAt);
+        Assert.Equal(
+            ElsaObservedLifecycle.Provisioning,
+            ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(
+                (await CreateStore(db).GetInstanceAsync(workspace.Id, accepted.Instance.Id))!,
+                (await new EfCoreManagedElsaInstanceApiStore(db).GetActiveOperationsAsync(
+                    workspace.Id, [accepted.Instance.Id])).GetValueOrDefault(accepted.Instance.Id),
+                firstAt));
+
+        await new ElsaInstanceProviderReconciliationService(
+                CreateStore(db),
+                new QueueProviderPort(new ElsaInstanceProviderObservation(
+                    ElsaInstanceProviderObservationKind.Confirmed,
+                    ElsaObservedLifecycle.Provisioning,
+                    ElsaInstanceProviderHealthGate.Unknown,
+                    "no-evidence-later")
+                {
+                    ReasonCode = ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable
+                }),
+                new FixedTimeProvider(first.ReasonEnteredAt!.Value + ManagedElsaReasonCodeCatalog.HumanRequiredAfter))
+            .ReconcileAsync(workspace.Id, accepted.Operation.Id);
+        db.ChangeTracker.Clear();
+        var later = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(first.ReasonEnteredAt, later.ReasonEnteredAt);
+        Assert.Equal(first.ReasonEnteredAt!.Value + ManagedElsaReasonCodeCatalog.HumanRequiredAfter, later.RequiresHumanAt);
+        Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, Assert.Single(
+            (await new EfCoreManagedElsaInstanceApiStore(db).ListInstancesAsync(workspace.Id, 1, 10)).Items).ObservedLifecycle);
+    }
+
+    [Fact]
+    public async Task Reason_clock_columns_round_trip_through_a_fresh_ef_context()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Clock persistence");
+        var workspaceStore = new DeploymentWorkspaceStore(db);
+        Assert.NotNull(await workspaceStore.ClaimNextQueuedRunAsync("deployment-worker", Now));
+        Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
+            Now.AddMinutes(10), TimeSpan.FromMinutes(5)));
+        db.ChangeTracker.Clear();
+
+        var committedAt = Now.AddMinutes(11);
+        await new ElsaInstanceProviderReconciliationService(
+                CreateStore(db),
+                new QueueProviderPort(new ElsaInstanceProviderObservation(
+                    ElsaInstanceProviderObservationKind.Confirmed,
+                    ElsaObservedLifecycle.Provisioning,
+                    ElsaInstanceProviderHealthGate.Unknown,
+                    "needs-person-clock")
+                {
+                    ReasonCode = ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted
+                }),
+                new FixedTimeProvider(committedAt))
+            .ReconcileAsync(workspace.Id, accepted.Operation.Id);
+        db.ChangeTracker.Clear();
+
+        await using var reread = CreateMigratedContext(connection);
+        var persisted = await reread.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(committedAt, persisted.ReasonEnteredAt);
+        Assert.Equal(committedAt, persisted.RequiresHumanAt);
+        Assert.Equal(committedAt.UtcTicks, persisted.ReasonEnteredAt!.Value.UtcTicks);
+        Assert.Equal(committedAt.UtcTicks, persisted.RequiresHumanAt!.Value.UtcTicks);
+    }
+
+    [Fact]
+    public async Task Same_class_reason_keeps_the_clock_and_a_class_change_or_resume_moves_it()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Clock class change");
+        var workspaceStore = new DeploymentWorkspaceStore(db);
+        Assert.NotNull(await workspaceStore.ClaimNextQueuedRunAsync("deployment-worker", Now));
+        var staleAt = Now.AddMinutes(10);
+        Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
+            staleAt, TimeSpan.FromMinutes(5)));
+        db.ChangeTracker.Clear();
+        var afterStale = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(staleAt, afterStale.ReasonEnteredAt);
+        Assert.Equal(ManagedElsaReasonClass.Temporary,
+            ManagedElsaReasonCodeCatalog.Classify(afterStale.ReconciliationDiagnosticCode));
+
+        await new ElsaInstanceProviderReconciliationService(
+                CreateStore(db),
+                new QueueProviderPort(new ElsaInstanceProviderObservation(
+                    ElsaInstanceProviderObservationKind.Unknown,
+                    ElsaObservedLifecycle.Unknown,
+                    ElsaInstanceProviderHealthGate.Unknown,
+                    "same-class-unknown")),
+                new FixedTimeProvider(Now.AddMinutes(11)))
+            .ReconcileAsync(workspace.Id, accepted.Operation.Id);
+        db.ChangeTracker.Clear();
+        var sameClass = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.ProviderReconciliationUnknown, sameClass.ReconciliationDiagnosticCode);
+        Assert.Equal(staleAt, sameClass.ReasonEnteredAt);
+        Assert.Null(sameClass.RequiresHumanAt);
+
+        var classChangeAt = Now.AddMinutes(12);
+        await new ElsaInstanceProviderReconciliationService(
+                CreateStore(db),
+                new QueueProviderPort(new ElsaInstanceProviderObservation(
+                    ElsaInstanceProviderObservationKind.Confirmed,
+                    ElsaObservedLifecycle.Provisioning,
+                    ElsaInstanceProviderHealthGate.Unknown,
+                    "class-change-exhausted")
+                {
+                    ReasonCode = ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted
+                }),
+                new FixedTimeProvider(classChangeAt))
+            .ReconcileAsync(workspace.Id, accepted.Operation.Id);
+        db.ChangeTracker.Clear();
+        var changed = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(classChangeAt, changed.ReasonEnteredAt);
+        Assert.Equal(classChangeAt, changed.RequiresHumanAt);
+
+        var current = await CreateStore(db).GetInstanceAsync(workspace.Id, accepted.Instance.Id);
+        var resumeAt = Now.AddMinutes(13);
+        await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(resumeAt))
+            .RecoverAsync(new(workspace.Id, accepted.Instance.Id, current!.Version, "resume-clock"));
+        db.ChangeTracker.Clear();
+        var resumed = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(resumeAt, resumed.ReasonEnteredAt);
+        Assert.Null(resumed.RequiresHumanAt);
+        Assert.Null(resumed.ReconciliationDiagnosticCode);
+    }
+
+    [Fact]
+    public async Task Lever_park_stamps_the_reason_clock()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Lever clock");
+        db.ChangeTracker.Clear();
+        var operation = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == accepted.Operation.Id);
+        var previous = EfCoreElsaInstanceLifecycleStore.CurrentParkReason(operation, null);
+        operation.State = ElsaInstanceOperationState.RecoveryRequired;
+        operation.FailureCode = ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain;
+        operation.ReconciliationDiagnosticCode = ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain;
+        var firedAt = Now.AddMinutes(2);
+        EfCoreElsaInstanceLifecycleStore.ApplyReasonClock(
+            operation,
+            previous,
+            EfCoreElsaInstanceLifecycleStore.CurrentParkReason(operation, null),
+            firedAt,
+            restartClock: false);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var parked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(firedAt, parked.ReasonEnteredAt);
+        Assert.Null(parked.RequiresHumanAt);
+        Assert.Equal(ManagedElsaReasonClass.Temporary,
+            ManagedElsaReasonCodeCatalog.Classify(
+                ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                    parked.FailureCode, parked.ReconciliationDiagnosticCode)));
+    }
+
+    [Fact]
+    public async Task Delete_park_stamps_the_reason_clock()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Delete park clock");
+        var service = new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now));
+        var created = await service.CreateAsync(new ElsaInstanceCreateRequest(
+            workspace.OrganizationId, workspace.Id, "Delete Elsa", "delete-clock-elsa", WorkerIntent(), "delete-clock-create"));
+        var deletion = await service.DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+            db, workspace.Id, created.Instance.Id, created.Instance.Version, "delete-clock"));
+        await CompleteOperationAsync(db, created.Operation.Id);
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now.AddMinutes(1)));
+        var claimed = await store.TryClaimNextDeletionAsync("deletion-worker", Now.AddMinutes(1));
+        Assert.NotNull(claimed);
+        var failedAt = Now.AddMinutes(2);
+        var recovered = await store.RequireDeletionRecoveryAsync(new ElsaInstanceDeletionFailure(
+            workspace.Id, created.Instance.Id, deletion.Operation.Id,
+            claimed!.Outbox.Id, claimed.Instance.Version, claimed.Operation.AttemptNumber,
+            claimed.CorrelatedRunId, "deletion-worker", claimed.LeaseToken, claimed.LeaseVersion,
+            new string('f', 64), "deletion.provider.unavailable", failedAt));
+
+        Assert.Equal(ElsaInstanceDeletionOutcome.RecoveryRequired, recovered.Outcome);
+        db.ChangeTracker.Clear();
+        var parked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == deletion.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, parked.State);
+        Assert.Equal(failedAt, parked.ReasonEnteredAt);
+        Assert.Equal(failedAt, parked.RequiresHumanAt);
+    }
+
+    [Fact]
     public async Task Repeated_retry_safe_evidence_does_not_bump_version_and_admin_recover_stays_available()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

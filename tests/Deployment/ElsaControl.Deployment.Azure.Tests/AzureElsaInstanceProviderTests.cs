@@ -368,10 +368,34 @@ public sealed class AzureElsaInstanceProviderTests
         var observation = await fixture.Provider.ObserveAsync(fixture.Request);
 
         Assert.Null(observation.RetryEvidence);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable, observation.ReasonCode);
         Assert.Equal(0, fixture.Observer.Calls);
         Assert.Equal(0, fixture.ObservationStore.CreateCalls);
         Assert.Equal(0, fixture.OperationStore.ArmClockCalls);
         Assert.Equal(0, fixture.OperationStore.AutoResumeIncrements);
+    }
+
+    [Fact]
+    public async Task Recovery_required_without_evidence_emits_a_temporary_observation_reason()
+    {
+        var fixture = await CreateObserveFixtureAsync(
+            ConfirmedObservation(AzureProviderRunnerStep.Workload),
+            attemptedStep: AzureProviderRunnerStep.Workload,
+            phase: AzureProviderOperationPhase.FoundationReady,
+            lastArmObservedAt: DateTimeOffset.Parse("2026-09-24T00:48:18Z"),
+            backoffSeconds: 60,
+            now: DateTimeOffset.Parse("2026-09-24T00:48:18Z"));
+        fixture.OperationStore.Current = fixture.OperationStore.Current! with
+        {
+            LastObservationReasonCode = null
+        };
+
+        var observation = await fixture.Provider.ObserveAsync(fixture.Request);
+
+        Assert.Null(observation.RetryEvidence);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable, observation.ReasonCode);
+        Assert.Equal(ManagedElsaReasonClass.Temporary,
+            ManagedElsaReasonCodeCatalog.Classify(observation.ReasonCode));
     }
 
     [Fact]
