@@ -69,6 +69,7 @@ Evidence used; nothing below is assumed live.
 | Inline review comments on a 40-PR sample | No non-Sipke review-comment authors. |
 | Top-level PR comments | `cursor[bot]` posts Issue Bus / `ready-for-CR` notes from Cursor cloud agents. Those are not Bugbot runs. |
 | Org/repo GitHub App installations | `GET /orgs/valence-works/installations` returned 403 (`Resource not accessible by integration`). `GET /repos/valence-works/elsa-control/installation` returned 401. Could not list whether Greptile or Copilot apps are installed. |
+| Request Copilot on this PR (#688) | GitHub MCP `update_pull_request` with `copilot-pull-request-reviewer[bot]` returned 403 (`Resource not accessible by personal access token`). `gh pr edit 688 --add-reviewer @copilot` returned GraphQL 403 (`Resource not accessible by integration`). No reviewer was added. This is a token-permission failure, not proof that Copilot is enabled. |
 | Cursor Bugbot dashboard | Sipke has not enabled Bugbot for this repo. Official enablement is dashboard-only; this environment cannot flip it. |
 
 ## What Sipke must enable
