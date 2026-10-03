@@ -23,6 +23,15 @@ namespace ElsaControl.Api.Tests;
 
 public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInstanceApiTests.Fixture>
 {
+    private static readonly string[] SafeAuditJsonProperties =
+    [
+        "deploymentRunId", "diagnosticCode", "eventType", "id", "migrationId", "newState",
+        "occurredAt", "operationId", "priorState", "sequence"
+    ];
+
+    private static readonly string[] ForbiddenAuditJsonProperties =
+    ["actorAccountId", "operatorSubject", "desiredStateRevisionId", "planReference", "summary", "requestKeyHash"];
+
     private readonly Fixture _fixture;
 
     public ManagedElsaInstanceApiTests(Fixture fixture) => _fixture = fixture;
@@ -514,8 +523,8 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         var audit = await client.GetControlJsonAsync<ManagedElsaInstanceAuditResponse>(
             $"/api/workspaces/{workspaceId}/instances/{acceptedBody.Instance.InstanceId}/audit");
         var acceptedAudit = Assert.Single(audit!.Items);
-        Assert.NotNull(acceptedAudit.ActorAccountId);
-        Assert.Null(acceptedAudit.OperatorSubject);
+        Assert.Equal(acceptedBody.Operation.Id, acceptedAudit.OperationId);
+        Assert.Null(acceptedAudit.DiagnosticCode);
     }
 
     [Fact]
@@ -1001,6 +1010,35 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(HttpStatusCode.BadRequest, negative.StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, tooLarge.StatusCode);
         Assert.Contains("instance.audit-limit-invalid", await zero.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Audit_reader_response_is_customer_safe_and_keeps_the_console_fieldset()
+    {
+        const string rawDiagnostic = "provider.private-secret-value";
+        const string rawSummary = "/subscriptions/subscription-secret/resourceGroups/customer-rg/providers/Microsoft.ContainerApps/apps/customer-app";
+        var app = await PrepareApplicationAsync([]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-audit-safe-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(owner, workspaceId, "managed-audit-safe-runtime");
+        await PersistRawAuditFieldsAsync(app, created.Instance.InstanceId, rawDiagnostic, rawSummary);
+
+        await app.AddWorkspaceMemberAsync(workspaceId, "managed-audit-safe-reader", WorkspaceRole.Reader);
+        using var reader = app.CreateTrustedWorkspaceClient("managed-audit-safe-reader");
+        using var response = await reader.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/audit");
+        var json = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var document = System.Text.Json.JsonDocument.Parse(json);
+        var item = Assert.Single(document.RootElement.GetProperty("items").EnumerateArray());
+        var properties = item.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal).ToArray();
+        Assert.Equal(SafeAuditJsonProperties, properties);
+        Assert.DoesNotContain(rawDiagnostic, json, StringComparison.Ordinal);
+        Assert.DoesNotContain(rawSummary, json, StringComparison.Ordinal);
+        AssertNoForbiddenAuditJsonProperties(json);
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, item.GetProperty("diagnosticCode").ValueKind);
     }
 
     [Fact]
@@ -3651,16 +3689,34 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
-    public void Customer_audit_projection_redacts_operator_subject()
+    public void Customer_audit_projection_discards_provider_diagnostics_and_internal_fields()
     {
-        var audit = new ElsaInstanceAuditEventSummary(Guid.NewGuid(), 1, "instance.updated", Guid.NewGuid(),
-            "sha256:sensitive-operator-fingerprint", null, null, null, null, null, null, null, null, null, null,
-            DateTimeOffset.UtcNow);
+        var audit = new ElsaInstanceAuditEventSummary(
+            Guid.NewGuid(), 1, "instance.updated", Guid.NewGuid(), "sha256:sensitive-operator-fingerprint",
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Pending", "Ready", "desired-state-secret",
+            "plan-secret", "provider.private-secret-value", "/subscriptions/subscription-secret/resourceGroups/customer-resource-group",
+            "request-key-secret", DateTimeOffset.UtcNow);
 
-        var response = ManagedElsaInstanceEndpoints.RedactAudit(audit);
+        var response = ManagedElsaInstanceEndpoints.ToAuditResponse(audit);
 
-        Assert.Null(response.OperatorSubject);
+        Assert.Null(response.DiagnosticCode);
         Assert.Equal(audit.Id, response.Id);
+        var json = System.Text.Json.JsonSerializer.Serialize(response, ControlApiTestApplication.JsonOptions);
+        AssertNoForbiddenAuditJsonProperties(json);
+    }
+
+    [Theory]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending)]
+    [InlineData(ManagedLifecycleOperationalHealthDiagnosticCodes.UnhealthyEndpoint)]
+    public void Customer_audit_projection_preserves_canonical_diagnostic_codes(string diagnosticCode)
+    {
+        var audit = new ElsaInstanceAuditEventSummary(
+            Guid.NewGuid(), 1, "instance.updated", null, null, null, null, null, null, null, null, null,
+            diagnosticCode, null, null, DateTimeOffset.UtcNow);
+
+        var response = ManagedElsaInstanceEndpoints.ToAuditResponse(audit);
+
+        Assert.Equal(diagnosticCode, response.DiagnosticCode);
     }
 
     [Fact]
@@ -4103,6 +4159,34 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         var completedAtTicks = DateTimeOffset.UtcNow.UtcTicks;
         await db.Database.ExecuteSqlInterpolatedAsync(
             $"UPDATE ElsaInstanceOperations SET State = {ElsaInstanceOperationState.Succeeded.ToString()}, CompletedAt = {completedAtTicks} WHERE Id = {operationId}");
+    }
+
+    private static async Task PersistRawAuditFieldsAsync(
+        ControlApiTestApplication app,
+        Guid instanceId,
+        string diagnosticCode,
+        string summary)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var actorAccountId = Guid.NewGuid();
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstanceAuditEvents
+            SET ActorAccountId = {actorAccountId},
+                OperatorSubject = {"sha256:sensitive-operator-fingerprint"},
+                DesiredStateRevisionId = {"desired-state-secret"},
+                PlanReference = {"plan-secret"},
+                DiagnosticCode = {diagnosticCode},
+                Summary = {summary},
+                RequestKeyHash = {"request-key-secret"}
+            WHERE InstanceId = {instanceId}
+            """);
+    }
+
+    private static void AssertNoForbiddenAuditJsonProperties(string json)
+    {
+        foreach (var forbiddenProperty in ForbiddenAuditJsonProperties)
+            Assert.DoesNotContain($"\"{forbiddenProperty}\"", json, StringComparison.Ordinal);
     }
 
     private static async Task<CorrelationInvalidDeleteTopology> SeedCorrelationInvalidDeleteTopologyAsync(

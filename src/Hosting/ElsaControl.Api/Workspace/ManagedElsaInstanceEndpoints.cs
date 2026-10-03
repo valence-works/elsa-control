@@ -697,7 +697,7 @@ public static class ManagedElsaInstanceEndpoints
             var events = await queries.ListAuditAsync(
                 workspaceId, instanceId, cancellationToken, currentLimit,
                 context.GetWorkspaceAccess().OrganizationId);
-            return Results.Ok(new ManagedElsaInstanceAuditResponse(events.Select(RedactAudit).ToList()));
+            return Results.Ok(new ManagedElsaInstanceAuditResponse(events.Select(ToAuditResponse).ToList()));
         }).RequireWorkspaceAccess();
 
         group.MapManagedElsaInstanceOverviewEndpoints();
@@ -958,8 +958,19 @@ public static class ManagedElsaInstanceEndpoints
             ReasonCode = ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation)
         };
 
-    internal static ElsaInstanceAuditEventSummary RedactAudit(ElsaInstanceAuditEventSummary audit) =>
-        audit with { OperatorSubject = null };
+    internal static ManagedElsaInstanceAuditEventResponse ToAuditResponse(ElsaInstanceAuditEventSummary audit) =>
+        new(
+            audit.Id,
+            audit.Sequence,
+            audit.EventType,
+            audit.OperationId,
+            audit.MigrationId,
+            audit.DeploymentRunId,
+            audit.PriorState,
+            audit.NewState,
+            ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(audit.DiagnosticCode)
+                ?? ManagedElsaInstanceOverviewEndpoints.CustomerActivityDiagnosticCode(audit.DiagnosticCode),
+            audit.OccurredAt);
 
     internal static ManagedElsaInstanceResponse ToLegacyResponse(ManagedElsaInstanceSummary summary, bool canOpen, bool controlHandoffEnabled)
     {
@@ -1118,7 +1129,18 @@ public sealed record ManagedElsaInstanceOperationResponse(Guid Id, Guid Instance
 public sealed record ManagedElsaInstanceIdentityBindingResponse(string Audience, string CanonicalCallbackUri, string VerifiedEndpointOrigin, int BindingVersion, DateTimeOffset ChangedAt);
 public sealed record ManagedElsaInstanceRevisionsResponse(IReadOnlyList<ElsaInstanceIntentRevisionSummary> Items);
 public sealed record ManagedElsaInstanceDeploymentsResponse(IReadOnlyList<ElsaInstanceDeploymentSummary> Items);
-public sealed record ManagedElsaInstanceAuditResponse(IReadOnlyList<ElsaInstanceAuditEventSummary> Items);
+public sealed record ManagedElsaInstanceAuditResponse(IReadOnlyList<ManagedElsaInstanceAuditEventResponse> Items);
+public sealed record ManagedElsaInstanceAuditEventResponse(
+    Guid Id,
+    long Sequence,
+    string EventType,
+    Guid? OperationId,
+    Guid? MigrationId,
+    Guid? DeploymentRunId,
+    string? PriorState,
+    string? NewState,
+    string? DiagnosticCode,
+    DateTimeOffset OccurredAt);
 public sealed record ManagedElsaInstanceOperationalHealthResponse(
     ManagedLifecycleOperationalHealthStatus Status,
     string DiagnosticCode,
