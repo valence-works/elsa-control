@@ -278,6 +278,16 @@ internal sealed class ElsaInstanceOperationEntity
     public string? DeletionDiagnosticCode { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
+    /// <summary>
+    /// When the current catalog class was entered. Moves only on class change
+    /// or resume/Recover. Not <see cref="UpdatedAt"/> — reconcile rewrites that.
+    /// </summary>
+    public DateTimeOffset? ReasonEnteredAt { get; set; }
+    /// <summary>
+    /// Set once when the catalog says a person is required. #662 owns the
+    /// compare-and-set plus post-commit outbox alert. Recover clears it.
+    /// </summary>
+    public DateTimeOffset? RequiresHumanAt { get; set; }
 }
 
 /// <summary>

@@ -28,7 +28,8 @@ public static class ManagedElsaInstanceOverviewEndpoints
     internal const string ActivityLimitInvalidCode = "instance.activity-limit-invalid";
     internal const string DeploymentStatusUnclearMessage = "Deployment status unclear. We're still confirming the result.";
     internal const string CheckingDeploymentStatusMessage = "Checking deployment status";
-    internal const string SubmissionUncertainCode = "provider.submission.uncertain";
+    internal const string SubmissionUncertainCode =
+        ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain;
     internal const string UnknownFieldCode = "request.unknown-field";
     internal const string ApplyReleaseInvalidCode = "instance.apply-release-invalid";
     internal const string RestartReason = "Restart";
@@ -37,6 +38,8 @@ public static class ManagedElsaInstanceOverviewEndpoints
     internal const string InstanceFailedCode = "instance.failed";
     internal const string InstanceProvisioningCode = "instance.provisioning";
     internal const string InstanceUnknownCode = "instance.unknown";
+    internal const string InstanceRecoveryRequiredCode =
+        ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReasonCode;
     internal const int DefaultActivityLimit = 25;
     internal const int MaxActivityLimit = 100;
     internal const int MaxAvailableReleases = 20;
@@ -702,9 +705,8 @@ internal static class ManagedElsaInstanceOverviewProjection
         ElsaInstanceCommercialGateDecision applyGate)
     {
         var observed = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, activeOperation);
-        var healthy = instance.DesiredLifecycle == ElsaDesiredLifecycle.Running &&
-                      instance.ObservedLifecycle == ElsaObservedLifecycle.Ready &&
-                      instance.Health == ElsaInstanceHealth.Healthy;
+        var healthy = ManagedElsaInstanceCustomerProjection.IsCustomerHealthy(
+            instance.DesiredLifecycle, observed, instance.Health);
         var currentIdentity = identity is { } candidate &&
                               candidate.OrganizationId == instance.OrganizationId &&
                               candidate.WorkspaceId == workspaceId &&
@@ -713,7 +715,7 @@ internal static class ManagedElsaInstanceOverviewProjection
             : null;
         var handoffConfigured = instance.CurrentDeploymentReference?.ManagedHandoff == true;
         var canOpen = canOpenPermission && healthy && handoffConfigured && currentIdentity is not null;
-        var unavailableReason = UnavailableReasonCode(
+        var unavailableReason = ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
             canOpenPermission, healthy, handoffConfigured, currentIdentity is not null, observed);
         var canMutate = role is WorkspaceRole.Owner or WorkspaceRole.SourceAdmin;
         var hasActiveOperation = activeOperation is not null &&
@@ -808,24 +810,9 @@ internal static class ManagedElsaInstanceOverviewProjection
         bool healthy,
         bool handoffConfigured,
         bool hasIdentity,
-        ElsaObservedLifecycle observedLifecycle)
-    {
-        if (!canOpen)
-            return "not-authorized";
-        if (ManagedElsaInstanceCustomerProjection.IsKnownInProgress(observedLifecycle))
-            return "instance.provisioning";
-        if (observedLifecycle == ElsaObservedLifecycle.Failed)
-            return "instance.failed";
-        if (observedLifecycle == ElsaObservedLifecycle.Unknown)
-            return "instance.unknown";
-        if (!healthy)
-            return "instance.unavailable";
-        if (!handoffConfigured)
-            return "handoff-unavailable";
-        if (!hasIdentity)
-            return "identity-unavailable";
-        return null;
-    }
+        ElsaObservedLifecycle observedLifecycle) =>
+        ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
+            canOpen, healthy, handoffConfigured, hasIdentity, observedLifecycle);
 
     private static ManagedElsaInstanceOverviewActionDecisionResponse ActionDecision(
         bool canMutate,

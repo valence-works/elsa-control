@@ -92,7 +92,11 @@ public sealed record ElsaInstanceOperationSummary(
     ElsaObservedLifecycle? ReconciledObservedLifecycle,
     ElsaInstanceHealth? ReconciledHealth,
     string? ReasonCode = null,
-    DateTimeOffset? AttemptStartedAt = null);
+    DateTimeOffset? AttemptStartedAt = null,
+    [property: System.Text.Json.Serialization.JsonIgnore] string? RecoveryReason = null,
+    DateTimeOffset? UpdatedAt = null,
+    [property: System.Text.Json.Serialization.JsonIgnore] DateTimeOffset? ReasonEnteredAt = null,
+    [property: System.Text.Json.Serialization.JsonIgnore] DateTimeOffset? RequiresHumanAt = null);
 
 /// <summary>
 /// Safe operator projection of one instance's unfinished lifecycle topology.

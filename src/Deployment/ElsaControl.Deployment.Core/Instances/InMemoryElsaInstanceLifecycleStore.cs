@@ -171,12 +171,12 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 // An uncertain provider call may have been accepted remotely. Once a later
                 // replay returns a concrete correlation, upgrade the durable marker so future
                 // polls reconcile only and never submit the same operation again.
-                if (existingRun.Run.RecoveryReason == "provider.submission.uncertain" &&
+                if (existingRun.Run.RecoveryReason == ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain &&
                     commit.CorrelationId != "provider-submission-uncertain")
                 {
                     _deploymentRuns[existingRun.Run.Id] = existingRun with
                     {
-                        Run = existingRun.Run with { RecoveryReason = "provider.submission.accepted" }
+                        Run = existingRun.Run with { RecoveryReason = ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted }
                     };
                     _instances[instance.Id] = WithPlacementAssignment(instance, commit.PlacementAssignmentId);
                 }
@@ -197,8 +197,8 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                     {
                         Status = WorkspaceDeploymentRunStatus.RecoveryRequired,
                         RecoveryReason = commit.CorrelationId == "provider-submission-uncertain"
-                            ? "provider.submission.uncertain"
-                            : "provider.submission.accepted"
+                            ? ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain
+                            : ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted
                     }
                 };
             _instances[instance.Id] = ElsaInstance.Hydrate(
@@ -248,7 +248,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                     var run = _deploymentRuns.Values.Single(x => x.Operation.Id == operation.Id);
                     var shouldReplaySubmission = operation.State == ElsaInstanceOperationState.Queued ||
                         operation.State == ElsaInstanceOperationState.RecoveryRequired &&
-                        string.Equals(run.Run.RecoveryReason, "provider.submission.uncertain", StringComparison.Ordinal);
+                        string.Equals(run.Run.RecoveryReason, ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, StringComparison.Ordinal);
                     var planId = instance.ResolvedPlanReference?.PlanId;
                     var plan = planId is null
                         ? null

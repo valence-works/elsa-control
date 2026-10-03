@@ -3622,6 +3622,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<int>("ReconciliationVersion")
                         .HasColumnType("INTEGER");
 
+                    b.Property<long?>("ReasonEnteredAt")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("RecoveryIdempotencyKey")
                         .HasMaxLength(128)
                         .HasColumnType("TEXT");
@@ -3638,6 +3641,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("TEXT");
+
+                    b.Property<long?>("RequiresHumanAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("ResolvedPlanId")
                         .HasMaxLength(128)

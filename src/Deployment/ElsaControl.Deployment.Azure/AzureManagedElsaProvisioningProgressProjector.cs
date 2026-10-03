@@ -34,8 +34,8 @@ internal enum AzureManagedElsaProvisioningMappingAnomaly
 public static class AzureManagedElsaProvisioningProgressProjector
 {
     private const string Provider = "azure";
-    internal const string ProviderSubmissionAccepted = "provider.submission.accepted";
-    internal const string ProviderSubmissionUncertain = "provider.submission.uncertain";
+    internal const string ProviderSubmissionAccepted = ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted;
+    internal const string ProviderSubmissionUncertain = ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain;
     internal const string ProviderReconciliationInProgress = ElsaInstanceProviderReconciliationService.InProgressCode;
     internal const string ProviderReconciliationHealthUnknown = ElsaInstanceProviderReconciliationService.HealthUnknownCode;
     internal const string ProviderReconciliationUnavailable = ElsaInstanceProviderReconciliationService.UnavailableCode;

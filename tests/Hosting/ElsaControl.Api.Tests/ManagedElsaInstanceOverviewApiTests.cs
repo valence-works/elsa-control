@@ -1114,6 +1114,10 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         Assert.Equal(originalStartedAt, overview2.ActiveOperation.StartedAt);
         Assert.NotNull(overview2.ActiveOperation.Progress.AttemptStartedAt);
         var startedAt2 = overview2.ActiveOperation.Progress.AttemptStartedAt!.Value;
+        var elapsedOrigin2 = ManagedElsaInstanceCustomerProjection.CustomerElapsedOrigin(
+            overview2.ActiveOperation.StartedAt, overview2.ActiveOperation.AcceptedAt);
+        Assert.NotEqual(startedAt2, elapsedOrigin2);
+        Assert.True(startedAt2 - elapsedOrigin2 >= TimeSpan.Zero);
 
         await ParkRecoveryRequiredAsync(app, restarted.OperationId, "b");
         using var recover3 = await client.SendAsync(Mutation(
@@ -1130,6 +1134,17 @@ public sealed class ManagedElsaInstanceOverviewApiTests : IClassFixture<ManagedE
         Assert.Equal(originalStartedAt, overview3.ActiveOperation.StartedAt);
         Assert.NotNull(overview3.ActiveOperation.Progress.AttemptStartedAt);
         Assert.True(overview3.ActiveOperation.Progress.AttemptStartedAt > startedAt2);
+        var elapsedOrigin3 = ManagedElsaInstanceCustomerProjection.CustomerElapsedOrigin(
+            overview3.ActiveOperation.StartedAt, overview3.ActiveOperation.AcceptedAt);
+        Assert.Equal(elapsedOrigin2, elapsedOrigin3);
+        var elapsed2 = startedAt2 - elapsedOrigin2!.Value;
+        var elapsed3 = overview3.ActiveOperation.Progress.AttemptStartedAt.Value - elapsedOrigin3!.Value;
+        Assert.True(elapsed3 >= elapsed2);
+        using var overviewJson = await client.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/overview");
+        var json = await overviewJson.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("reasonEnteredAt", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("requiresHumanAt", json, StringComparison.Ordinal);
     }
 
     [Fact]

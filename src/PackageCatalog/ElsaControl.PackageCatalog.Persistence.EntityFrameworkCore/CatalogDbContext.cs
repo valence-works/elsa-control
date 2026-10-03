@@ -939,6 +939,8 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
 
             EnsureDefined(instance.DesiredLifecycle, nameof(instance.DesiredLifecycle));
             EnsureDefined(instance.ObservedLifecycle, nameof(instance.ObservedLifecycle));
+            if (instance.ObservedLifecycle == ElsaObservedLifecycle.RecoveryRequired)
+                throw new InvalidOperationException("RecoveryRequired is a customer projection and cannot be persisted.");
             EnsureDefined(instance.Health, nameof(instance.Health));
             if (entry.State == EntityState.Added && instance.Version < 1)
                 instance.Version = 1;
@@ -997,7 +999,11 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
                 operation.ReconciliationRetryEvidenceDigest = evidence.Digest;
             }
             if (operation.ReconciledObservedLifecycle is { } reconciledLifecycle)
+            {
                 EnsureDefined(reconciledLifecycle, nameof(operation.ReconciledObservedLifecycle));
+                if (reconciledLifecycle == ElsaObservedLifecycle.RecoveryRequired)
+                    throw new InvalidOperationException("RecoveryRequired is a customer projection and cannot be persisted.");
+            }
             if (operation.ReconciledHealth is { } reconciledHealth)
                 EnsureDefined(reconciledHealth, nameof(operation.ReconciledHealth));
             if (operation.ReconciliationVersion < 0 || operation.ReconciledInstanceVersion is < 1)

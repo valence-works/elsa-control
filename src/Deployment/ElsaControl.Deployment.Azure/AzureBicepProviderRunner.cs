@@ -250,7 +250,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             if (!outputs.Succeeded || outputs.Value is null)
                 return RecoveryObservationInProgress(
                     request,
-                    "azure.recovery.foundation-outputs-unavailable",
+                    ManagedElsaReasonCodeCatalog.AzureRecoveryFoundationOutputsUnavailable,
                     "The retained Azure foundation outputs are not yet available for recovery observation.");
 
             try
@@ -261,7 +261,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             {
                 return RecoveryObservationAmbiguous(
                     request,
-                    "azure.recovery.foundation-outputs-invalid",
+                    ManagedElsaReasonCodeCatalog.AzureRecoveryFoundationOutputsInvalid,
                     "The retained Azure foundation outputs do not match the governed recovery boundary.");
             }
         }
@@ -272,7 +272,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             resources,
             AzureProviderHealth.Unknown,
             null,
-            "azure.recovery.foundation-observed",
+            ManagedElsaReasonCodeCatalog.AzureRecoveryFoundationObserved,
             "The retained Azure foundation completion was observed without mutation.");
     }
 
@@ -320,7 +320,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         if (!IsTerminalDeploymentState(observed.State))
             return RecoveryObservationInProgress(
                 request,
-                "azure.recovery.workload-in-progress",
+                ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadInProgress,
                 "The retained Azure workload deployment is still running.");
 
         var baseline = AzureNamedDeploymentFreshness.FreshnessBaseline(
@@ -344,7 +344,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         if (observed.Outputs is null)
             return RecoveryObservationInProgress(
                 request,
-                "azure.recovery.workload-outputs-unavailable",
+                ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadOutputsUnavailable,
                 "The retained Azure workload outputs are not yet available for recovery observation.");
 
         var revision = await ExecuteAzAsync(command,
@@ -356,7 +356,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         if (!revision.Succeeded || string.IsNullOrWhiteSpace(revision.Value?.Value))
             return RecoveryObservationInProgress(
                 request,
-                "azure.recovery.workload-revision-unavailable",
+                ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadRevisionUnavailable,
                 "The retained Azure workload revision is not yet available for recovery observation.");
 
         var suffix = WorkloadRevisionSuffix(revision.Value.Value, AppName(command));
@@ -370,7 +370,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         {
             return RecoveryObservationAmbiguous(
                 request,
-                "azure.recovery.workload-outputs-invalid",
+                ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadOutputsInvalid,
                 "The retained Azure workload outputs do not match the governed recovery boundary.");
         }
 
@@ -380,7 +380,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             resources,
             AzureProviderHealth.Unknown,
             resources.WorkloadResourceId is null ? null : observed.Outputs.String("containerAppEndpoint"),
-            "azure.recovery.workload-observed",
+            ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadObserved,
             "The retained Azure workload completion was observed without mutation.");
     }
 
@@ -461,7 +461,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             resources with { AcrPullRoleAssignmentId = role.AssignmentId },
             AzureProviderHealth.Unknown,
             null,
-            "azure.recovery.acr-pull-observed",
+            ManagedElsaReasonCodeCatalog.AzureRecoveryAcrPullObserved,
             "The retained Azure registry access checkpoint was observed without mutation.");
     }
 
@@ -495,7 +495,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 request.Operation.Resources,
                 AzureProviderHealth.Unknown,
                 null,
-                "azure.recovery.seed-secrets-observed",
+                ManagedElsaReasonCodeCatalog.AzureRecoverySeedSecretsObserved,
                 "The retained seed step has no expected entries and requires no mutation.");
 
         var present = 0;
@@ -529,12 +529,12 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 request.Operation.Resources,
                 AzureProviderHealth.Unknown,
                 null,
-                "azure.recovery.seed-secrets-absent",
+                ManagedElsaReasonCodeCatalog.AzureRecoverySeedSecretsAbsent,
                 "All exact expected seed entries were observed absent without mutation.");
         if (present != secretReferences.Length)
             return RecoveryObservationAmbiguous(
                 request,
-                "azure.recovery.seed-secrets-partial",
+                ManagedElsaReasonCodeCatalog.AzureRecoverySeedSecretsPartial,
                 "The retained seed inventory is partial and cannot authorize recovery.");
 
         return new(
@@ -543,14 +543,14 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             request.Operation.Resources,
             AzureProviderHealth.Unknown,
             null,
-            "azure.recovery.seed-secrets-observed",
+            ManagedElsaReasonCodeCatalog.AzureRecoverySeedSecretsObserved,
             "All exact expected seed entries and provider-owned metadata were observed without mutation.");
     }
 
     private static AzureProviderRecoveryObservation RecoveryObservationInProgress(AzureProviderRecoveryRequest request) =>
         RecoveryObservationInProgress(
             request,
-            "azure.recovery.observation-in-progress",
+            ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInProgress,
             "The retained Azure postcondition is not yet proven.");
 
     private static AzureProviderRecoveryObservation RecoveryObservationInProgress(
@@ -563,7 +563,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private static AzureProviderRecoveryObservation RecoveryObservationAmbiguous(AzureProviderRecoveryRequest request) =>
         RecoveryObservationAmbiguous(
             request,
-            "azure.recovery.observation-ambiguous",
+            ManagedElsaReasonCodeCatalog.AzureRecoveryObservationAmbiguous,
             "The retained Azure ownership boundary is ambiguous.");
 
     private static AzureProviderRecoveryObservation RecoveryObservationAmbiguous(
@@ -575,7 +575,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
 
     private static AzureProviderRecoveryObservation RecoveryObservationUnsupported(AzureProviderRecoveryRequest request) =>
         new(AzureProviderRecoveryObservationKind.Ambiguous, null, request.Operation.Resources, AzureProviderHealth.Unknown,
-            null, "azure.recovery.step-unsupported", "The retained Azure recovery step is not supported by this provider observer.");
+            null, ManagedElsaReasonCodeCatalog.AzureRecoveryStepUnsupported, "The retained Azure recovery step is not supported by this provider observer.");
 
     private static AzureProviderRunnerStep? GetSqlRecoveryStep(AzureProviderOperation operation) =>
         operation.AttemptedStep switch
@@ -621,7 +621,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                     request.Operation.Resources,
                     AzureProviderHealth.Unknown,
                     null,
-                    "azure.recovery.sql-firewall-cleanup-observed",
+                    ManagedElsaReasonCodeCatalog.AzureRecoverySqlFirewallCleanupObserved,
                     "The exact temporary SQL firewall rule was observed absent without mutation.");
             case SqlFirewallObservationState.Absent:
                 // An uncertain SQL script cannot be replayed and the observer cannot reopen the
@@ -640,7 +640,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 request.Operation.Resources,
                 AzureProviderHealth.Unknown,
                 null,
-                "azure.recovery.sql-firewall-create-observed",
+                ManagedElsaReasonCodeCatalog.AzureRecoverySqlFirewallCreateObserved,
                 "The exact temporary SQL firewall rule was observed without mutation.");
 
         return await ObserveSqlBootstrapPostconditionAsync(request, command, cancellationToken);
@@ -672,7 +672,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 request.Operation.Resources,
                 AzureProviderHealth.Unknown,
                 null,
-                "azure.recovery.sql-bootstrap-observed",
+                ManagedElsaReasonCodeCatalog.AzureRecoverySqlBootstrapObserved,
                 "The exact SQL bootstrap principal and role postcondition was observed without mutation."),
             SqlBootstrapPostconditionState.Conflict => RecoveryObservationAmbiguous(request),
             _ => RecoveryObservationInProgress(request)
@@ -2595,7 +2595,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 if (current && string.Equals(observed.State, "Succeeded", StringComparison.OrdinalIgnoreCase) && observed.Outputs is not null)
                     return (observed.Outputs, null);
                 if (current && IsTerminalDeploymentState(observed.State) && !string.Equals(observed.State, "Succeeded", StringComparison.OrdinalIgnoreCase))
-                    return (null, Uncertain(command, phase, "azure.deployment.failed",
+                    return (null, Uncertain(command, phase, ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
                         "Azure reported the deployment as failed or canceled, so its partial result requires recovery.", resources));
             }
             else if (!IsTransientObservationFailure(poll))
@@ -2604,7 +2604,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             }
 
             if (_timeProvider.GetUtcNow() >= deadline)
-                return (null, Uncertain(command, phase, "azure.deployment.wait-exceeded",
+                return (null, Uncertain(command, phase, ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded,
                     "The Azure deployment was not observed to finish within its configured wait limit. It was neither cancelled nor resubmitted.", resources));
             await Task.Delay(_options.DeploymentPollInterval, _timeProvider, cancellationToken);
         }

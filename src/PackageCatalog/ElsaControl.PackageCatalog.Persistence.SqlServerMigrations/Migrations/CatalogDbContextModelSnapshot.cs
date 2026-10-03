@@ -3644,6 +3644,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<int>("ReconciliationVersion")
                         .HasColumnType("int");
 
+                    b.Property<long?>("ReasonEnteredAt")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("RecoveryIdempotencyKey")
                         .HasMaxLength(128)
                         .HasColumnType("nvarchar(128)");
@@ -3660,6 +3663,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("nvarchar(64)");
+
+                    b.Property<long?>("RequiresHumanAt")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("ResolvedPlanId")
                         .HasMaxLength(128)

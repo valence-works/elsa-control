@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using ElsaControl.Deployment.Abstractions.Instances;
+using ElsaControl.Deployment.Core.Instances;
 
 namespace ElsaControl.Deployment.Core.Telemetry;
 
@@ -45,8 +46,8 @@ public static class ManagedLifecycleTelemetry
         "lifecycle.claim.conflict",
         "lifecycle.worker.cancelled",
         "lifecycle.worker.failed",
-        "provider.submission.rejected",
-        "provider.submission.uncertain",
+        ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected,
+        ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
         "resolution.failed",
         "resolution.invalid",
         "resolution.input-unavailable",
@@ -60,17 +61,17 @@ public static class ManagedLifecycleTelemetry
         "manifest.projection.invalid",
         "plan.invalid",
         "run.reservation.conflict",
-        "provider.reconciliation.ambiguous",
-        "provider.reconciliation.cancelled",
-        "provider.reconciliation.converged",
-        "provider.reconciliation.correlation-mismatch",
-        "provider.reconciliation.failed",
-        "provider.reconciliation.health-failed",
-        "provider.reconciliation.health-unknown",
-        "provider.reconciliation.in-progress",
-        "provider.reconciliation.retry-safe",
-        "provider.reconciliation.unavailable",
-        "provider.reconciliation.unknown"
+        ManagedElsaReasonCodeCatalog.ProviderReconciliationAmbiguous,
+        ManagedElsaReasonCodeCatalog.ProviderReconciliationCancelled,
+        ManagedElsaReasonCodeCatalog.ProviderReconciliationConverged,
+        ManagedElsaReasonCodeCatalog.ProviderReconciliationCorrelationMismatch,
+        ManagedElsaReasonCodeCatalog.ProviderReconciliationFailed,
+        ManagedElsaReasonCodeCatalog.ProviderReconciliationHealthFailed,
+        ManagedElsaReasonCodeCatalog.ProviderReconciliationHealthUnknown,
+        ManagedElsaReasonCodeCatalog.ProviderReconciliationInProgress,
+        ManagedElsaReasonCodeCatalog.ProviderReconciliationRetrySafe,
+        ManagedElsaReasonCodeCatalog.ProviderReconciliationUnavailable,
+        ManagedElsaReasonCodeCatalog.ProviderReconciliationUnknown
     ];
 
     private static readonly ActivitySource ActivitySource = new(ActivitySourceName);

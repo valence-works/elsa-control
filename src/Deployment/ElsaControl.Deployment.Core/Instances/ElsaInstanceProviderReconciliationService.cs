@@ -9,18 +9,19 @@ public sealed class ElsaInstanceProviderReconciliationService(
     TimeProvider? timeProvider = null,
     ElsaInstanceLifecycleService? lifecycle = null) : IElsaInstanceProviderReconciliationService
 {
-    public const string ConvergedCode = "provider.reconciliation.converged";
-    public const string UnknownCode = "provider.reconciliation.unknown";
-    public const string AmbiguousCode = "provider.reconciliation.ambiguous";
-    public const string InProgressCode = "provider.reconciliation.in-progress";
-    public const string HealthFailedCode = "provider.reconciliation.health-failed";
-    public const string HealthUnknownCode = "provider.reconciliation.health-unknown";
-    public const string FailedCode = "provider.reconciliation.failed";
-    public const string UnavailableCode = "provider.reconciliation.unavailable";
-    public const string RetrySafeCode = "provider.reconciliation.retry-safe";
-    public const string CorrelationMismatchCode = "provider.reconciliation.correlation-mismatch";
-    public const string AutoResumeExhaustedCode = "azure.recovery.auto-resume-exhausted";
-    public const string AutoResumeClaimConflictCode = "azure.recovery.auto-resume.claim-conflict";
+    public const string ConvergedCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationConverged;
+    public const string UnknownCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationUnknown;
+    public const string AmbiguousCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationAmbiguous;
+    public const string InProgressCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationInProgress;
+    public const string HealthFailedCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationHealthFailed;
+    public const string HealthUnknownCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationHealthUnknown;
+    public const string FailedCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationFailed;
+    public const string CancelledCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationCancelled;
+    public const string UnavailableCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationUnavailable;
+    public const string RetrySafeCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationRetrySafe;
+    public const string CorrelationMismatchCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationCorrelationMismatch;
+    public const string AutoResumeExhaustedCode = ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted;
+    public const string AutoResumeClaimConflictCode = ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeClaimConflict;
 
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
 
@@ -175,7 +176,7 @@ public sealed class ElsaInstanceProviderReconciliationService(
                 ElsaObservedLifecycle.Unknown,
                 ElsaInstanceHealth.Unknown,
                 null,
-                "provider.reconciliation.cancelled");
+                CancelledCode);
             throw;
         }
         catch
@@ -185,7 +186,7 @@ public sealed class ElsaInstanceProviderReconciliationService(
                 ElsaObservedLifecycle.Unknown,
                 ElsaInstanceHealth.Unknown,
                 null,
-                "provider.reconciliation.failed");
+                FailedCode);
             throw;
         }
     }
@@ -239,21 +240,21 @@ public sealed class ElsaInstanceProviderReconciliationService(
             if (autoResume is not null)
                 await autoResume.RecordAutoResumeOutcomeAsync(
                     instance.WorkspaceId, instance.Id, operation.Id,
-                    "azure.recovery.auto-resume.accepted", cancellationToken);
+                    ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeAccepted, cancellationToken);
         }
         catch (ElsaInstanceLifecycleConflictException)
         {
             if (autoResume is not null)
                 await autoResume.RecordAutoResumeOutcomeAsync(
                     instance.WorkspaceId, instance.Id, operation.Id,
-                    "azure.recovery.auto-resume.conflict", cancellationToken);
+                    ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeConflict, cancellationToken);
         }
         catch (InvalidOperationException)
         {
             if (autoResume is not null)
                 await autoResume.RecordAutoResumeOutcomeAsync(
                     instance.WorkspaceId, instance.Id, operation.Id,
-                    "azure.recovery.auto-resume.rejected", cancellationToken);
+                    ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeRejected, cancellationToken);
         }
     }
 
