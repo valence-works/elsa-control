@@ -718,10 +718,16 @@ Provider RecoveryRequired, failed/unavailable observations and correlation failu
 remain on the explicit recovery path; the ordinary worker does not replay them.
 
 A stuck provider runner that is still heartbeating does not count as verified
-cleanup progress. After 60 minutes with no Status, Phase, or remaining-inventory
-receipt change, the lifecycle Delete parks as `RecoveryRequired` with
-`lifecycle.deletion.provider-progress-stale` or
-`lifecycle.deletion.blocked-by-operation-in-flight`. Operator Recover on that
+cleanup progress. After 60 minutes with no Status, Phase, or durable
+persisted-resource receipt change, the lifecycle Delete parks as
+`RecoveryRequired` with `lifecycle.deletion.provider-progress-stale` or
+`lifecycle.deletion.blocked-by-operation-in-flight`. The cleanup receipt
+fingerprints Status, Phase, attempt, endpoint, and persisted resource locators
+only. Live ARM remaining-resource lists stay inside `RunCleanupAsync` until the
+final CleanupVerified write; Control does not persist shrinking inventory during
+the CleanupSubmitted wait. That silence is why the bound is 60 minutes rather
+than 30. Metadata-only checkpoints (transition code, diagnostics, health, or
+attempted step) do not move `ProgressChangedAt`. Operator Recover on that
 target can still return InProgress until the executor lease expires and the
 abandon path releases the in-flight operation. Deletion-worker lease fencing
 stays deferred; do not treat a live executor heartbeat as proof that Azure

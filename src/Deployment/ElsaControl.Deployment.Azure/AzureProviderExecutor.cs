@@ -767,6 +767,12 @@ public sealed class AzureProviderExecutor
         if (operation.Phase != AzureProviderOperationPhase.CleanupSubmitted)
             return await FinalizeResultAsync(operation, leaseToken, AzureProviderOperationStatus.Failed, "azure.cleanup.phase.invalid", "The delete operation has an invalid cleanup phase.");
 
+        // The runner is one blocking step from CleanupSubmitted to its result.
+        // Heartbeats during RunRunnerAsync are lease liveness only. Live ARM
+        // remaining-resource lists are not published as durable checkpoints
+        // while the runner is in flight; the next verified write is the
+        // CleanupVerified inventory-cleared checkpoint or a failure/recovery
+        // finalize. See CleanupProgressReceipt and ProviderProgressStaleAfter.
         var attempted = await MarkAttemptedStepAsync(operation, leaseToken, AzureProviderRunnerStep.Cleanup);
         if (attempted is null)
             return await GetConcurrentResultAsync(operation);

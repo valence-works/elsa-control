@@ -1226,6 +1226,46 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
     }
 
     [Fact]
+    public async Task ControlRoom_metadata_only_checkpoint_must_not_count_as_provider_progress()
+    {
+        var now = DateTimeOffset.Parse("2026-10-03T10:00:00Z");
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var created = await store.CreateOrGetAsync(Request(), now);
+        var claimed = Assert.IsType<AzureProviderOperation>(await store.ClaimAsync(
+            _workspaceId, created.Id, "worker", "lease", TimeSpan.FromMinutes(30), now.AddSeconds(5)));
+        var resources = new AzureProviderResourceReferences(
+            ResourceGroupName: "rg-safe",
+            FoundationDeploymentId: "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-safe/providers/Microsoft.Resources/deployments/foundation");
+
+        var submitted = Assert.IsType<AzureProviderOperation>(await store.CheckpointAsync(
+            _workspaceId, created.Id, "lease",
+            new(AzureProviderOperationPhase.CleanupSubmitted, "azure.cleanup.submitted",
+                "Cleanup submitted.", resources, null, AzureProviderHealth.Unknown, []),
+            now.AddMinutes(1), claimed.Version));
+        Assert.Equal(AzureProviderOperationPhase.CleanupSubmitted, submitted.Phase);
+        Assert.Equal(AzureProviderOperationStatus.Running, submitted.Status);
+        Assert.Equal(now.AddMinutes(1), submitted.ProgressChangedAt);
+
+        var metadataOnly = Assert.IsType<AzureProviderOperation>(await store.CheckpointAsync(
+            _workspaceId, created.Id, "lease",
+            new(AzureProviderOperationPhase.CleanupSubmitted, "azure.cleanup.observation",
+                "Metadata-only transition.", resources, null, AzureProviderHealth.Unknown, []),
+            now.AddMinutes(2), submitted.Version));
+
+        Assert.Equal(AzureProviderOperationPhase.CleanupSubmitted, metadataOnly.Phase);
+        Assert.Equal(AzureProviderOperationStatus.Running, metadataOnly.Status);
+        Assert.Equal(submitted.Resources, metadataOnly.Resources);
+        Assert.Equal(submitted.ProgressChangedAt, metadataOnly.ProgressChangedAt);
+        Assert.Equal(now.AddMinutes(1), metadataOnly.ProgressChangedAt);
+        Assert.Equal(now.AddMinutes(2), metadataOnly.UpdatedAt);
+        Assert.Equal(submitted.Version + 1, metadataOnly.Version);
+        var transitions = await store.ListTransitionsAsync(_workspaceId, created.Id);
+        Assert.Contains(transitions, x => x.Code == "azure.cleanup.submitted");
+        Assert.Contains(transitions, x => x.Code == "azure.cleanup.observation");
+    }
+
+    [Fact]
     public async Task Attempted_step_timestamp_is_written_ahead_and_arm_clock_does_not_bump_version()
     {
         var now = DateTimeOffset.Parse("2026-09-24T00:33:00Z");

@@ -1124,7 +1124,11 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             return ToModel(entity);
         if (entity.AttemptedStep != checkpoint.AttemptedStep)
             entity.AttemptedStepStartedAt = now;
-        entity.ProgressChangedAt = now;
+        // Verified progress is Status/Phase or persisted inventory only. Transition
+        // code, diagnostics, health, attempted step, and endpoint restamps still
+        // persist, but they do not satisfy the no-progress bound.
+        if (entity.Phase != checkpoint.Phase || !ResourcesEqual(entity, resources))
+            entity.ProgressChangedAt = now;
         entity.Phase = checkpoint.Phase; entity.AttemptedStep = checkpoint.AttemptedStep;
         entity.CheckpointSequence++; entity.Version++; entity.UpdatedAt = now;
         entity.ResourceGroupName = resources.ResourceGroupName; entity.FoundationDeploymentId = resources.FoundationDeploymentId;

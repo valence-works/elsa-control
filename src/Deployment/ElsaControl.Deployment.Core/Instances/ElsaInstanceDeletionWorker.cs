@@ -13,11 +13,13 @@ public sealed class ElsaInstanceDeletionWorker(
     /// <summary>
     /// Escalate only when verified provider progress has been silent.
     /// QA's ~50-minute Delete (#508) was wall-clock Azure cleanup, including
-    /// Log Analytics workspace deletion. After remaining inventory is only that
-    /// workspace, Status/Phase/receipt can stay unchanged until Azure finishes
-    /// the delete. A 30-minute bound would park that healthy path. 60 minutes
-    /// covers the observed 50-minute window with margin. Heartbeats, CreatedAt,
-    /// and restamped ARM reads never reset this clock.
+    /// Log Analytics workspace deletion. The cleanup runner does not persist
+    /// live ARM remaining-resource lists during that wait, so Status, Phase,
+    /// and the durable persisted-resource receipt can stay unchanged until
+    /// CleanupVerified. A 30-minute bound would park that healthy path. 60
+    /// minutes covers the observed 50-minute window with margin. Heartbeats,
+    /// CreatedAt, restamped ARM reads, and metadata-only checkpoints never
+    /// reset this clock.
     /// </summary>
     public static readonly TimeSpan ProviderProgressStaleAfter = TimeSpan.FromMinutes(60);
 

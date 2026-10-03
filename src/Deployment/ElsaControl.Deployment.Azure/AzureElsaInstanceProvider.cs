@@ -1183,12 +1183,20 @@ public sealed class AzureElsaInstanceProvider(
         return operation.ProgressChangedAt ?? operation.StatusChangedAt;
     }
 
+    /// <summary>
+    /// Durable fingerprint of Status, Phase, attempt, endpoint, and persisted
+    /// resource locators. This is not a live ARM remaining-resource inventory:
+    /// <c>RunCleanupAsync</c> keeps live Azure inventory local until the final
+    /// CleanupVerified write. A receipt change counts only when those durable
+    /// fields actually change. The 60-minute Delete bound covers the
+    /// CleanupSubmitted wait, during which no mid-cleanup ARM list is persisted.
+    /// </summary>
     internal static string CleanupProgressReceipt(AzureProviderOperation operation)
     {
         ArgumentNullException.ThrowIfNull(operation);
         var resources = operation.Resources;
         var canonical =
-            $"{operation.Status}\n{operation.Phase}\n{operation.AttemptNumber}\n{resources.ResourceGroupName}\n{resources.FoundationDeploymentId}\n{resources.WorkloadDeploymentId}\n{resources.WorkloadResourceId}\n{resources.WorkloadRevisionName}\n{resources.StableTrafficRevisionName}\n{resources.WorkloadIdentityResourceId}\n{resources.KeyVaultResourceId}\n{resources.SqlServerResourceId}\n{resources.ContainerAppsEnvironmentResourceId}\n{resources.RegistryResourceId}\n{resources.AcrPullDeploymentId}\n{operation.Endpoint}\n";
+            $"{operation.Status}\n{operation.Phase}\n{operation.AttemptNumber}\n{resources.ResourceGroupName}\n{resources.FoundationDeploymentId}\n{resources.WorkloadDeploymentId}\n{resources.WorkloadResourceId}\n{resources.WorkloadRevisionName}\n{resources.StableTrafficRevisionName}\n{resources.WorkloadIdentityResourceId}\n{resources.WorkloadIdentityClientId}\n{resources.WorkloadIdentityPrincipalId}\n{resources.KeyVaultResourceId}\n{resources.KeyVaultUri}\n{resources.SqlServerResourceId}\n{resources.SqlServerFqdn}\n{resources.ContainerAppsEnvironmentResourceId}\n{resources.RegistryResourceId}\n{resources.AcrPullDeploymentId}\n{resources.AcrPullRoleAssignmentId}\n{operation.Endpoint}\n";
         return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(canonical)));
     }
 

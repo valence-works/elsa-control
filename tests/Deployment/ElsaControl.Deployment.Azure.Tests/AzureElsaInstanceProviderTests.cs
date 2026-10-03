@@ -1131,7 +1131,12 @@ public sealed class AzureElsaInstanceProviderTests
             ProgressChangedAt = created.AddMinutes(5),
             HeartbeatAt = created.AddMinutes(40),
             LastArmObservedAt = created.AddMinutes(40),
-            UpdatedAt = created.AddMinutes(40)
+            UpdatedAt = created.AddMinutes(40),
+            Resources = new(
+                ResourceGroupName: "rg-safe",
+                FoundationDeploymentId: "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-safe/providers/Microsoft.Resources/deployments/foundation",
+                AcrPullRoleAssignmentId: "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-reg/providers/Microsoft.ContainerRegistry/registries/reg/providers/Microsoft.Authorization/roleAssignments/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                RegistryResourceId: "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-reg/providers/Microsoft.ContainerRegistry/registries/reg")
         };
 
         Assert.Equal(created.AddMinutes(5), AzureElsaInstanceProvider.LastProviderProgressAt(operation));
@@ -1147,6 +1152,24 @@ public sealed class AzureElsaInstanceProviderTests
         Assert.NotEqual(
             AzureElsaInstanceProvider.CleanupProgressReceipt(operation),
             AzureElsaInstanceProvider.CleanupProgressReceipt(shrinking));
+
+        var persistedRoleCleared = operation with
+        {
+            Resources = operation.Resources with { AcrPullRoleAssignmentId = null }
+        };
+        Assert.NotEqual(
+            AzureElsaInstanceProvider.CleanupProgressReceipt(operation),
+            AzureElsaInstanceProvider.CleanupProgressReceipt(persistedRoleCleared));
+
+        var metadataOnly = operation with
+        {
+            HeartbeatAt = created.AddMinutes(50),
+            LastArmObservedAt = created.AddMinutes(50),
+            UpdatedAt = created.AddMinutes(50)
+        };
+        Assert.Equal(
+            AzureElsaInstanceProvider.CleanupProgressReceipt(operation),
+            AzureElsaInstanceProvider.CleanupProgressReceipt(metadataOnly));
     }
 
     [Fact]
