@@ -44,8 +44,6 @@ public static class ElsaInstanceDeletionDiagnosticCodes
     public const string ProviderAbsent = ManagedElsaReasonCodeCatalog.DeletionProviderAbsent;
     public const string ProviderAmbiguous = ManagedElsaReasonCodeCatalog.DeletionProviderAmbiguous;
     public const string ProviderFinalizationPending = ManagedElsaReasonCodeCatalog.DeletionProviderFinalizationPending;
-    public const string BlockedByOperationInFlight = ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight;
-    public const string ProviderProgressStale = ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale;
 }
 
 public sealed record ElsaInstanceCleanupEvidence
