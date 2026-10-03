@@ -12,6 +12,34 @@ param location string
 @description('Id of the user or app to assign application roles')
 param principalId string = ''
 
+@description('Azure SQL Catalog service objective (SKU name). Empty selects the environment default: S0 for test/valence-control-staging, GP_S_Gen5 otherwise.')
+param sqlDatabaseSkuName string = ''
+
+@description('Azure SQL Catalog edition (SKU tier). Empty selects the environment default: Standard for test/valence-control-staging, GeneralPurpose otherwise.')
+param sqlDatabaseSkuTier string = ''
+
+@description('Azure SQL Catalog SKU family. Empty selects Gen5 for GP_S_* objectives and omits the family for DTU objectives.')
+param sqlDatabaseSkuFamily string = ''
+
+@description('Azure SQL Catalog SKU capacity (vCores or DTUs). 0 selects the environment default (10 for S0, 1 for GP_S_Gen5).')
+param sqlDatabaseSkuCapacity int = 0
+
+@description('Azure SQL Catalog max size in bytes. Empty selects 250 GiB for S0 and omits the property for GP_S_Gen5. 0 omits the property. String avoids ARM 32-bit int overflow.')
+param sqlDatabaseMaxSizeBytes string = ''
+
+// Workflow GitHub target `test` maps to Azure environmentName valence-control-staging.
+// Matching only the literal name `test` would miss the real staging Catalog.
+var controlSqlStagingEnvironmentNames = [
+  'test'
+  'valence-control-staging'
+]
+var useStagingControlSqlSku = contains(controlSqlStagingEnvironmentNames, environmentName)
+var resolvedSqlDatabaseSkuName = !empty(sqlDatabaseSkuName) ? sqlDatabaseSkuName : (useStagingControlSqlSku ? 'S0' : 'GP_S_Gen5')
+var resolvedSqlDatabaseSkuTier = !empty(sqlDatabaseSkuTier) ? sqlDatabaseSkuTier : (useStagingControlSqlSku ? 'Standard' : 'GeneralPurpose')
+var resolvedSqlDatabaseSkuFamily = !empty(sqlDatabaseSkuFamily) ? sqlDatabaseSkuFamily : (startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 'Gen5' : '')
+var resolvedSqlDatabaseSkuCapacity = sqlDatabaseSkuCapacity > 0 ? sqlDatabaseSkuCapacity : (startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 1 : 10)
+var resolvedSqlDatabaseMaxSizeBytes = !empty(sqlDatabaseMaxSizeBytes) ? sqlDatabaseMaxSizeBytes : (resolvedSqlDatabaseSkuName == 'S0' ? '268435456000' : '0')
+
 var tags = {
   'azd-env-name': environmentName
 }
@@ -37,6 +65,11 @@ module control_sql 'control-sql/control-sql.module.bicep' = {
   scope: rg
   params: {
     location: location
+    sqlDatabaseSkuName: resolvedSqlDatabaseSkuName
+    sqlDatabaseSkuTier: resolvedSqlDatabaseSkuTier
+    sqlDatabaseSkuFamily: resolvedSqlDatabaseSkuFamily
+    sqlDatabaseSkuCapacity: resolvedSqlDatabaseSkuCapacity
+    sqlDatabaseMaxSizeBytes: resolvedSqlDatabaseMaxSizeBytes
   }
 }
 module elsa_control 'elsa-control/elsa-control.module.bicep' = {
