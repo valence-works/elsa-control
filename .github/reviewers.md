@@ -1,22 +1,31 @@
 # Advisory PR reviewers
 
 This file is the single source of truth for advisory pull-request reviewers in
-`valence-works/elsa-control`. The Codex control-room must read it **before
-opening any PR**.
+`valence-works/elsa-control`. Read it **before opening any PR**. Whoever
+opens the PR (Codex control room or a Cursor/Claude worker) requests the
+advisory review.
 
-These reviewers are **advisory only**. They are not the merge gate.
+These reviewers are **advisory only**. They are not the merge gate. No
+advisory reviewer's review, of any type, counts toward a merge or satisfies
+the gate. Neither does a control-room review, PASS or HOLD, a `ready-for-CR`
+note, green CI, or GitHub's `reviewDecision`/`APPROVED` state.
 
 ## Selection
 
-1. On every PR it opens, Codex requests a review from **exactly one** advisory
-   reviewer marked live in the table below.
+1. On every PR it opens, whoever opens the PR requests a review from
+   **exactly one** advisory reviewer marked live in the table below.
 2. If only one reviewer is live, use that reviewer.
 3. If more than one is live, rotate across PRs or pick by fit (for example,
    Copilot for a fast first pass, Greptile for whole-repo context, Bugbot for
    defect hunting).
 4. If none is live, say so on the PR and proceed to the Elsa Control Code
    Review gate. Do not invent a substitute reviewer.
-5. Codex never reviews or approves its own PRs.
+5. Codex and the control room may post QA notes or reviews, but these are
+   never approval. They must never submit a GitHub `APPROVE` review or post a
+   review whose first line is `**Verdict:`.
+6. A missing, slow or failed advisory review never blocks Code Review or a
+   merge, and never substitutes for it. Advisory findings are input. Code
+   Review decides which ones matter.
 
 ## Merge gate
 
@@ -24,17 +33,29 @@ Stay consistent with the merge-authority comment on
 [issue #508](https://github.com/valence-works/elsa-control/issues/508#issuecomment-5969355661)
 (comment `5969355661`):
 
-- A PR may merge only with an **APPROVE from the separate Elsa Control Code
-  Review agent** posted as a GitHub PR review on the **exact head SHA**, plus
-  **green required CI on that SHA**.
-- The control-room's own review never counts as approval.
-- A push after an APPROVE makes that approval stale; the new head needs
-  re-review.
-- Hand the advisory reviewer's findings to Elsa Control Code Review **before**
-  it gives its verdict.
-- Merges also need Sipke's explicit yes unless and until he has confirmed a
-  standing rule in the CEO chat.
-- Deploys, live billing, and destructive actions always need his explicit yes.
+- The gate is a PR review on the exact head SHA whose first line is
+  `**Verdict: APPROVE**`, posted by Elsa Control Code Review. The GitHub
+  review state is irrelevant: these are COMMENT reviews. Nothing else
+  counts. That includes reviews starting `## Control-room` / `Control-room`,
+  any advisory-bot review including `APPROVED`, and any review on an
+  earlier head.
+- Green CI means the `CI` workflow run on the exact head SHA finished with
+  every job `success`, including `Full .NET restore, build, and test`,
+  `Build and smoke-test API provider image` and `Build and Test`. A running,
+  cancelled or re-run-pending CI run is not green. Never use auto-merge.
+- A push after a `**Verdict: APPROVE**` makes that verdict stale; the new
+  head needs re-review.
+- Hand the advisory reviewer's findings to Elsa Control Code Review
+  **before** it gives its verdict. They are input. Code Review decides
+  which ones matter. A missing, slow or failed advisory review never
+  blocks that verdict.
+- Merges also need Sipke's explicit yes unless and until he has confirmed
+  a standing rule in the CEO chat.
+- The Elsa Control CEO merges after Code Review's `**Verdict: APPROVE**` on
+  the exact head plus Sipke's per-PR yes. The control room, Codex, Cursor
+  and other workers never merge, and never merge on a control-room PASS.
+- Deploys, live billing, and destructive actions always need his explicit
+  yes.
 
 The author or Cursor posts `ready-for-CR` naming the exact head once CI is
 green. The CEO, or a CEO routine, routes that head to Code Review.
@@ -54,7 +75,7 @@ Checked 2026-10-03.
 | Reviewer | Live | How to invoke | Good for | How to tell it ran |
 | --- | --- | --- | --- | --- |
 | Greptile | no — not verified / not live (2026-10-03) | After Sipke installs the Greptile GitHub App and enables this repo in the Greptile dashboard, post a top-level PR comment `@greptileai` ([official trigger docs](https://www.greptile.com/docs/code-review-bot/trigger-code-review)). Optional: `@greptileai review the auth changes`. Do not treat adding a human or the control-room as a Greptile review. | Whole-repo context, summaries, inline comments, and suggested fixes. | A PR review and/or comments from `greptile-apps[bot]` (or the current Greptile GitHub App account) appear on the PR. |
-| GitHub Copilot Code Review | no — not verified / not live (2026-10-03) | Request Copilot as a reviewer: GitHub UI Reviewers → Copilot → Request; `gh pr create --reviewer @copilot` / `gh pr edit <n> --add-reviewer @copilot`; or REST `requested_reviewers: ["copilot-pull-request-reviewer[bot]"]` ([official docs](https://docs.github.com/en/copilot/how-tos/agents/copilot-code-review/using-copilot-code-review)). | Fast first-pass comments with severity labels and suggested patches. Default Copilot reviews are Comment reviews and do not satisfy the merge gate. | A review from `copilot-pull-request-reviewer[bot]` appears, and the Reviewers sidebar shows Copilot completed. |
+| GitHub Copilot Code Review | no — not verified / not live (2026-10-03) | Request Copilot as a reviewer: GitHub UI Reviewers → Copilot → Request; `gh pr create --reviewer @copilot` / `gh pr edit <n> --add-reviewer @copilot`; or REST `requested_reviewers: ["copilot-pull-request-reviewer[bot]"]` ([official docs](https://docs.github.com/en/copilot/how-tos/agents/copilot-code-review/using-copilot-code-review)). | Fast first-pass comments with severity labels and suggested patches. Copilot reviews are advisory. No Copilot review satisfies the merge gate, whatever its type (Comment, Approve or Request changes). | A review from `copilot-pull-request-reviewer[bot]` appears, and the Reviewers sidebar shows Copilot completed. |
 | Cursor Bugbot | no — not live (2026-10-03). Sipke has not enabled it in the Cursor dashboard. | After Sipke enables Bugbot for this repo at [cursor.com/dashboard](https://cursor.com/dashboard) (Integrations, then Bugbot under Automations), post a **top-level** PR comment `cursor review` ([official docs](https://cursor.com/docs/bugbot)). `bugbot run` is the documented alias. Do not use `@cursor review`. | Defect, security, and edge-case findings with inline comments and suggested fixes. | Inline comments plus a GitHub check named `Cursor Bugbot`. A `cursor[bot]` Issue Bus or `ready-for-CR` comment is **not** a Bugbot review. |
 
 ## Liveness evidence (2026-10-03)
@@ -68,8 +89,8 @@ Evidence used; nothing below is assumed live.
 | Reviews on the last ~90 PRs | Only `sfmskywalker`. No `greptile-apps[bot]`, `copilot-pull-request-reviewer[bot]`, or Bugbot review author. |
 | Inline review comments on a 40-PR sample | No non-Sipke review-comment authors. |
 | Top-level PR comments | `cursor[bot]` posts Issue Bus / `ready-for-CR` notes from Cursor cloud agents. Those are not Bugbot runs. |
-| Org/repo GitHub App installations | `GET /orgs/valence-works/installations` returned 403 (`Resource not accessible by integration`). `GET /repos/valence-works/elsa-control/installation` returned 401. Could not list whether Greptile or Copilot apps are installed. |
-| Request Copilot on this PR (#688) | GitHub MCP `update_pull_request` with `copilot-pull-request-reviewer[bot]` returned 403 (`Resource not accessible by personal access token`). `gh pr edit 688 --add-reviewer @copilot` returned GraphQL 403 (`Resource not accessible by integration`). No reviewer was added. This is a token-permission failure, not proof that Copilot is enabled. |
+| Org/repo GitHub App installations | Not verifiable with available tokens. |
+| Request Copilot on this PR (#688) | Not verifiable with available tokens. |
 | Cursor Bugbot dashboard | Sipke has not enabled Bugbot for this repo. Official enablement is dashboard-only; this environment cannot flip it. |
 
 ## What Sipke must enable
@@ -92,8 +113,9 @@ Until the matching evidence exists, keep each row not live.
 
 ## Sibling repositories
 
-Do not edit sibling repos from an `elsa-control` change. If Codex opens PRs in
-`valence-works/elsa-cloud` or `valence-works/elsa-production-image`, those
-repos need the same file and AGENTS.md pointer. The #508 merge-authority
-comment already applies to elsa-cloud. This environment received 404 for both
-sibling repos, so they were not modified here.
+Do not edit sibling repos from an `elsa-control` change. If Codex or a
+Cursor/Claude worker opens PRs in `valence-works/elsa-cloud` or
+`valence-works/elsa-production-image`, those repos need the same file and
+AGENTS.md pointer. The #508 merge-authority comment already applies to
+elsa-cloud. This environment received 404 for both sibling repos, so they
+were not modified here.
