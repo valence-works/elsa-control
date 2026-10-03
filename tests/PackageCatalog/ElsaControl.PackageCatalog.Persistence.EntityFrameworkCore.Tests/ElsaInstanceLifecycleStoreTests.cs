@@ -2851,12 +2851,15 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             Now.AddMinutes(10), TimeSpan.FromMinutes(5)));
         db.ChangeTracker.Clear();
 
-        ElsaInstanceProviderObservation Tick(string correlation) =>
+        ElsaInstanceProviderObservation Tick(string correlation, char digestMarker) =>
             new ElsaInstanceProviderObservation(
                 ElsaInstanceProviderObservationKind.Confirmed,
                 ElsaObservedLifecycle.Provisioning,
                 ElsaInstanceProviderHealthGate.Unknown,
-                correlation)
+                correlation,
+                new ElsaInstanceProviderRetryEvidence(
+                    $"https://evidence.example/retry/{correlation}",
+                    "sha256:" + new string(digestMarker, 64)))
             {
                 ReasonCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationUnknown
             };
@@ -2864,7 +2867,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var firstAt = Now.AddMinutes(11);
         var first = await new ElsaInstanceProviderReconciliationService(
                 CreateStore(db),
-                new QueueProviderPort(Tick("reason-clock-first")),
+                new QueueProviderPort(Tick("reason-clock-first", 'a')),
                 new FixedTimeProvider(firstAt))
             .ReconcileAsync(workspace.Id, accepted.Operation.Id);
         db.ChangeTracker.Clear();
@@ -2881,7 +2884,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var noOpAt = firstAt.AddMinutes(1);
         var noOp = await new ElsaInstanceProviderReconciliationService(
                 CreateStore(db),
-                new QueueProviderPort(Tick("reason-clock-noop")),
+                new QueueProviderPort(Tick("reason-clock-noop", 'b')),
                 new FixedTimeProvider(noOpAt))
             .ReconcileAsync(workspace.Id, accepted.Operation.Id);
         db.ChangeTracker.Clear();
@@ -2894,11 +2897,16 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var afterNoOp = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
         Assert.Equal(enteredAt, afterNoOp.ReasonEnteredAt);
         Assert.Null(afterNoOp.RequiresHumanAt);
+        Assert.False(ManagedElsaReasonCodeCatalog.RequiresHuman(
+            afterNoOp.ReconciliationDiagnosticCode, afterNoOp.FailureCode, enteredAt, noOpAt));
+        var beforeEscalation = await ProjectAtAsync(noOpAt);
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, beforeEscalation.ObservedLifecycle);
+        Assert.Null(ManagedElsaInstanceCustomerProjection.CustomerLabel(beforeEscalation.ObservedLifecycle));
 
         var lateAt = enteredAt + ManagedElsaReasonCodeCatalog.HumanRequiredAfter;
         var late = await new ElsaInstanceProviderReconciliationService(
                 CreateStore(db),
-                new QueueProviderPort(Tick("reason-clock-late")),
+                new QueueProviderPort(Tick("reason-clock-late", 'c')),
                 new FixedTimeProvider(lateAt))
             .ReconcileAsync(workspace.Id, accepted.Operation.Id);
         db.ChangeTracker.Clear();
@@ -2912,6 +2920,65 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(enteredAt, afterLate.ReasonEnteredAt);
         Assert.Equal(lateAt.ToUniversalTime(), afterLate.RequiresHumanAt);
         Assert.Equal(first.Projection.InstanceVersion, late.Projection.InstanceVersion);
+        var auditsAfterFirst = await db.ElsaInstanceAuditEvents.CountAsync(x =>
+            x.OperationId == accepted.Operation.Id && x.EventType == "lifecycle.reconciled");
+
+        async Task<ElsaInstance> ProjectAtAsync(DateTimeOffset now)
+        {
+            var stored = await CreateStore(db).GetInstanceAsync(workspace.Id, accepted.Instance.Id);
+            var active = await new EfCoreManagedElsaInstanceApiStore(db)
+                .GetActiveOperationsAsync(workspace.Id, [accepted.Instance.Id]);
+            return ManagedElsaInstanceCustomerProjection.Apply(
+                stored!, active.GetValueOrDefault(accepted.Instance.Id), now);
+        }
+
+        Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman(
+            afterLate.ReconciliationDiagnosticCode, afterLate.FailureCode, enteredAt, lateAt));
+        Assert.True(afterLate.RequiresHumanAt is not null);
+        var escalated = await ProjectAtAsync(lateAt);
+        Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, escalated.ObservedLifecycle);
+        Assert.Equal(
+            ManagedElsaInstanceCustomerProjection.NeedsAttentionLabel,
+            ManagedElsaInstanceCustomerProjection.CustomerLabel(escalated.ObservedLifecycle));
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, await db.ElsaInstances
+            .Where(x => x.Id == accepted.Instance.Id)
+            .Select(x => x.ObservedLifecycle)
+            .SingleAsync());
+
+        var stillLate = lateAt.AddMinutes(1);
+        var secondEscalation = await new ElsaInstanceProviderReconciliationService(
+                CreateStore(db),
+                new QueueProviderPort(Tick("reason-clock-hold", 'd')),
+                new FixedTimeProvider(stillLate))
+            .ReconcileAsync(workspace.Id, accepted.Operation.Id);
+        db.ChangeTracker.Clear();
+        Assert.False(secondEscalation.Replayed);
+        Assert.Equal(versionAfterFirst, secondEscalation.Projection.InstanceVersion);
+        var afterSecond = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(enteredAt, afterSecond.ReasonEnteredAt);
+        Assert.Equal(lateAt.ToUniversalTime(), afterSecond.RequiresHumanAt);
+        Assert.Equal(auditsAfterFirst, await db.ElsaInstanceAuditEvents.CountAsync(x =>
+            x.OperationId == accepted.Operation.Id && x.EventType == "lifecycle.reconciled"));
+
+        var recoverAt = stillLate.AddMinutes(1);
+        var recovered = await new ElsaInstanceLifecycleService(
+                CreateStore(db), new FixedTimeProvider(recoverAt))
+            .RecoverAsync(new ElsaInstanceLifecycleRequest(
+                workspace.Id, accepted.Instance.Id, versionAfterFirst, "recover-after-clock-escalation",
+                ActorAccountId: Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")));
+        db.ChangeTracker.Clear();
+        Assert.Equal(ElsaInstanceOperationState.Queued, recovered.Operation.State);
+        Assert.Equal(versionAfterFirst, recovered.Operation.RecoveryExpectedVersion);
+        var afterRecover = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Null(afterRecover.RequiresHumanAt);
+        Assert.Equal(recoverAt.ToUniversalTime(), afterRecover.ReasonEnteredAt);
+        var afterRecoverProjection = await ProjectAtAsync(recoverAt);
+        Assert.NotEqual(ElsaObservedLifecycle.RecoveryRequired, afterRecoverProjection.ObservedLifecycle);
+        Assert.Null(ManagedElsaInstanceCustomerProjection.CustomerLabel(afterRecoverProjection.ObservedLifecycle));
+        Assert.True(await db.ElsaInstances
+            .Where(x => x.Id == accepted.Instance.Id)
+            .Select(x => x.Version)
+            .SingleAsync() >= versionAfterFirst);
     }
 
     [Theory]
