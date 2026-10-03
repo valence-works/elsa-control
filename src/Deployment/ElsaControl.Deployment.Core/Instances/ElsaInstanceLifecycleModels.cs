@@ -166,9 +166,17 @@ public sealed record ElsaInstanceLifecycleRequest(
     Guid? DeleteConfirmationId = null,
     Guid? ActorAccountId = null,
     Guid? ExpectedOperationId = null,
-    bool OperatorInitiated = false)
+    bool OperatorInitiated = false,
+    int? CanonicalExpectedVersion = null)
 {
     public int IfMatchVersion => ExpectedVersion;
+
+    /// <summary>
+    /// Customer-visible If-Match used to identify the request. A server-side
+    /// rebase may advance <see cref="ExpectedVersion"/> for the transition
+    /// while keeping this original version in the idempotency hash.
+    /// </summary>
+    public int RequestIdentityVersion => CanonicalExpectedVersion ?? ExpectedVersion;
 }
 
 /// <summary>Input for an immutable intent revision and optional instance metadata update.</summary>
@@ -228,6 +236,13 @@ public enum ElsaInstanceLifecycleConflictReason
 {
     /// <summary>An optimistic concurrency (If-Match/expected-version) conflict.</summary>
     VersionConflict,
+
+    /// <summary>
+    /// A customer or member mutation was accepted at or after the client's
+    /// If-Match. Distinct from <see cref="VersionConflict"/> so Cloud can
+    /// refuse a silent retry and show the changed-since-read copy.
+    /// </summary>
+    ChangedSinceRead,
 
     /// <summary>An idempotency key was reused for a request that does not match the original.</summary>
     IdempotencyConflict,

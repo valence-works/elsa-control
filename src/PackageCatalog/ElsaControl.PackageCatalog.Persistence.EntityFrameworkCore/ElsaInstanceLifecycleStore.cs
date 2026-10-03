@@ -265,6 +265,13 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 }
 
                 var priorObservedLifecycle = instance.ObservedLifecycle;
+                if (IsNoOpReconciliation(instance, operation, commit.Instance, commit.Operation.State))
+                {
+                    ApplyNoOpReconciliationMetadata(operation, run, commit, instance.Version);
+                    await dbContext.SaveChangesAsync(cancellationToken);
+                    return ReconciliationResult(operation, replayed: false);
+                }
+
                 ApplyAggregate(instance, commit.Instance);
                 if (commit.Operation.State == ElsaInstanceOperationState.Succeeded &&
                     commit.Instance.ObservedLifecycle == ElsaObservedLifecycle.Ready &&
@@ -468,6 +475,30 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             .ThenByDescending(x => x.CreatedAt)
             .FirstOrDefaultAsync(cancellationToken);
         return entity is null ? null : MapOperation(entity);
+    }
+
+    public async Task<bool> HasCustomerMutationAtOrAfterVersionAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        int version,
+        Guid? exceptOperationId = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (workspaceId == Guid.Empty || instanceId == Guid.Empty)
+            return false;
+
+        var systemOnly = ElsaInstanceOperation.SystemOnlyLifecycleActions;
+        return await dbContext.ElsaInstanceOperations
+            .AsNoTracking()
+            .AnyAsync(operation =>
+                operation.WorkspaceId == workspaceId &&
+                operation.InstanceId == instanceId &&
+                (exceptOperationId == null || operation.Id != exceptOperationId) &&
+                ((operation.ExpectedVersion >= version &&
+                  operation.Action != ElsaInstanceOperationAction.Create &&
+                  !systemOnly.Contains(operation.Action)) ||
+                 operation.RecoveryExpectedVersion >= version),
+                cancellationToken);
     }
 
     public async Task<ElsaInstanceOperation?> FindOperationByKeyAsync(
@@ -2742,6 +2773,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         existingOperation.RecoveryRequestHash = requestedOperation.RecoveryRequestHash;
         if (isRecoveryResume)
         {
+            existingOperation.RecoveryExpectedVersion = ElsaInstanceOperation.MergeRecoveryExpectedVersion(
+                requestedOperation.RecoveryExpectedVersion, existingOperation.RecoveryExpectedVersion);
             ApplyReasonClock(existingOperation, CurrentParkReason(existingOperation, null), nextCode: null, requestedAt, restartClock: true);
             var deleteAuthority = existingOperation.Action == ElsaInstanceOperationAction.Delete
                 ? await CaptureAzureDeleteRecoveryAuthorityAsync(
@@ -3742,6 +3775,87 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         entity.Version = instance.Version;
     }
 
+    /// <summary>
+    /// A RecoveryRequired tick that reprints the same customer-visible aggregate
+    /// must not mark the instance modified. CatalogDbContext increments Version
+    /// on every instance save, which made If-Match unusable while reconcile
+    /// polled. The first observation for an operation is never a no-op: persist
+    /// diagnostic, retry evidence, and the initial lifecycle.reconciled row even
+    /// when the create-time aggregate is already Unknown/Unknown.
+    /// </summary>
+    private static bool IsNoOpReconciliation(
+        ElsaInstanceEntity current,
+        ElsaInstanceOperationEntity operation,
+        ElsaInstance projected,
+        ElsaInstanceOperationState commitState)
+    {
+        if (commitState != ElsaInstanceOperationState.RecoveryRequired)
+            return false;
+
+        // Null reconciled fields mean this operation has never committed an
+        // observation. Treat that first write as a real change.
+        if (operation.ReconciledObservedLifecycle != projected.ObservedLifecycle ||
+            operation.ReconciledHealth != projected.Health)
+            return false;
+
+        var projectedDeployment = projected.CurrentDeploymentReference;
+        return current.ObservedLifecycle == projected.ObservedLifecycle &&
+               current.Health == projected.Health &&
+               current.DesiredLifecycle == projected.DesiredLifecycle &&
+               current.DeletedAt == projected.DeletedAt &&
+               string.Equals(current.CurrentDeploymentId, projectedDeployment?.DeploymentId, StringComparison.Ordinal) &&
+               string.Equals(current.CurrentDeploymentRevisionId, projectedDeployment?.RevisionId, StringComparison.Ordinal) &&
+               string.Equals(current.CurrentDeploymentEndpointUri, projectedDeployment?.EndpointUri, StringComparison.Ordinal) &&
+               current.CurrentDeploymentManagedHandoff == (projectedDeployment?.ManagedHandoff == true);
+    }
+
+    private static void ApplyNoOpReconciliationMetadata(
+        ElsaInstanceOperationEntity operation,
+        DeploymentRunEntity run,
+        ElsaInstanceProviderReconciliationCommit commit,
+        int instanceVersion)
+    {
+        var preserveUncertainSubmission = !commit.RetrySafe &&
+            (string.Equals(operation.FailureCode, ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, StringComparison.Ordinal) ||
+             string.Equals(run.RecoveryReason, ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, StringComparison.Ordinal));
+        var previousReason = CurrentParkReason(operation, run.RecoveryReason);
+        operation.FailureCode = preserveUncertainSubmission
+            ? ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain
+            : commit.RetrySafe
+                ? ElsaInstanceProviderReconciliationService.RetrySafeCode
+                : null;
+        operation.FailureSummary = null;
+        operation.CompletedAt = null;
+        operation.WorkerId = null;
+        operation.LeaseTokenHash = null;
+        operation.LeaseExpiresAt = null;
+        operation.HeartbeatAt = null;
+        operation.UpdatedAt = commit.ReconciledAt.ToUniversalTime();
+        operation.ReconciliationEvidenceFingerprint = commit.EvidenceFingerprint;
+        operation.ReconciliationDiagnosticCode = commit.DiagnosticCode;
+        operation.ReconciliationRetryEvidenceReference = commit.RetryEvidenceReference ??
+            operation.ReconciliationRetryEvidenceReference;
+        operation.ReconciliationRetryEvidenceDigest = commit.RetryEvidenceDigest ??
+            operation.ReconciliationRetryEvidenceDigest;
+        operation.ReconciledObservedLifecycle = commit.Instance.ObservedLifecycle;
+        operation.ReconciledHealth = commit.Instance.Health;
+        operation.ReconciledInstanceVersion = instanceVersion;
+        operation.ReconciledAt = commit.ReconciledAt.ToUniversalTime();
+        run.RecoveryReason = preserveUncertainSubmission
+            ? ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain
+            : commit.DiagnosticCode;
+        // Identical RecoveryRequired ticks must still advance the #660 reason
+        // clock so RequiresHumanAt can trip without instance-version churn.
+        ApplyReasonClock(
+            operation,
+            previousReason,
+            CurrentParkReason(operation, run.RecoveryReason),
+            commit.ReconciledAt,
+            restartClock: false);
+        run.WorkerId = null;
+        run.WorkerHeartbeatAt = null;
+    }
+
     private static ElsaInstanceOperationEntity ToEntity(
         ElsaInstanceOperation operation,
         ElsaInstance instance,
@@ -3756,6 +3870,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             IdempotencyKey = operation.IdempotencyKey,
             RequestHash = operation.RequestHash,
             ExpectedVersion = operation.ExpectedVersion,
+            RecoveryExpectedVersion = operation.RecoveryExpectedVersion,
             State = operation.State,
             AttemptNumber = operation.AttemptNumber,
             AcceptedAt = operation.AcceptedAt,
@@ -4198,7 +4313,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 entity.AcceptedAt,
                 recovery?.IdempotencyScope ?? entity.RecoveryIdempotencyScope,
                 recovery?.IdempotencyKey ?? entity.RecoveryIdempotencyKey,
-                recovery?.RequestHash ?? entity.RecoveryRequestHash);
+                recovery?.RequestHash ?? entity.RecoveryRequestHash,
+                entity.RecoveryExpectedVersion);
         }
         catch (Exception exception) when (exception is ArgumentException or ArgumentOutOfRangeException or InvalidOperationException)
         {

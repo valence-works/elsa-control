@@ -396,7 +396,11 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 operation.AttemptNumber != commit.ExpectedAttemptNumber || instance.Version != commit.ExpectedInstanceVersion)
                 throw new ElsaInstanceLifecycleConflictException("Provider reconciliation target changed concurrently.");
 
-            var persistedInstance = WithVersion(commit.Instance, checked(commit.ExpectedInstanceVersion + 1));
+            var noOp = _reconciliationResults.ContainsKey(commit.OperationId) &&
+                IsNoOpReconciliation(instance, commit.Instance, commit.Operation.State);
+            var persistedInstance = noOp
+                ? instance
+                : WithVersion(commit.Instance, checked(commit.ExpectedInstanceVersion + 1));
             _instances[commit.InstanceId] = persistedInstance;
             _operations[commit.OperationId] = commit.Operation;
             var outcome = commit.Operation.State switch
@@ -583,6 +587,20 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         return ManagedElsaReasonCodeCatalog.SelectCurrentReason(failureCode, diagnostic, runReason);
     }
 
+    // First observation for an operation is never a no-op (caller requires a
+    // prior reconciliation result). Later RecoveryRequired ticks that reprint
+    // the same customer-visible aggregate must not advance Version.
+    private static bool IsNoOpReconciliation(
+        ElsaInstance current,
+        ElsaInstance projected,
+        ElsaInstanceOperationState commitState) =>
+        commitState == ElsaInstanceOperationState.RecoveryRequired &&
+        current.ObservedLifecycle == projected.ObservedLifecycle &&
+        current.Health == projected.Health &&
+        current.DesiredLifecycle == projected.DesiredLifecycle &&
+        current.DeletedAt == projected.DeletedAt &&
+        Equals(current.CurrentDeploymentReference, projected.CurrentDeploymentReference);
+
     private static ElsaInstance WithVersion(ElsaInstance instance, int version) => ElsaInstance.Hydrate(
         instance.Id,
         instance.OrganizationId,
@@ -654,6 +672,25 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 _instances.TryGetValue(instanceId, out var instance) && instance.WorkspaceId == workspaceId
                 ? operation
                 : null);
+        }
+    }
+
+    public Task<bool> HasCustomerMutationAtOrAfterVersionAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        int version,
+        Guid? exceptOperationId = null,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            if (!_instances.TryGetValue(instanceId, out var instance) || instance.WorkspaceId != workspaceId)
+                return Task.FromResult(false);
+            return Task.FromResult(_operations.Values.Any(operation =>
+                operation.InstanceId == instanceId &&
+                operation.Id != exceptOperationId &&
+                operation.BlocksDeleteRebaseAt(version)));
         }
     }
 
@@ -814,6 +851,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
 
                 if (isRecoveryResume)
                 {
+                    operation = operation.WithPreservedRecoveryExpectedVersion(storedOperation.RecoveryExpectedVersion);
                     AppendRecoveryRequest(instance, operation, outbox.CreatedAt);
                     ApplyParkClock(
                         operation,
@@ -1523,7 +1561,8 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             operation.AcceptedAt,
             recovery.IdempotencyScope,
             recovery.IdempotencyKey,
-            recovery.RequestHash);
+            recovery.RequestHash,
+            operation.RecoveryExpectedVersion);
 
     private static ElsaInstanceLifecycleConflictException RecoveryConflict() =>
         new(

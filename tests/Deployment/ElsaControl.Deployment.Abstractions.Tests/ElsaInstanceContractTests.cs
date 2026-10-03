@@ -236,6 +236,22 @@ public sealed class ElsaInstanceContractTests
     }
 
     [Fact]
+    public void Delete_if_match_rebase_uses_an_explicit_system_only_allowlist()
+    {
+        Assert.Equal(
+            [ElsaInstanceOperationAction.Reconcile],
+            ElsaInstanceOperation.SystemOnlyLifecycleActions);
+        foreach (var action in Enum.GetValues<ElsaInstanceOperationAction>())
+        {
+            var systemOnly = action == ElsaInstanceOperationAction.Reconcile;
+            Assert.Equal(systemOnly, ElsaInstanceOperation.IsSystemOnlyLifecycleAction(action));
+            Assert.Equal(
+                action != ElsaInstanceOperationAction.Create && !systemOnly,
+                ElsaInstanceOperation.IsCustomerOrOperatorMutation(action));
+        }
+    }
+
+    [Fact]
     public void Delete_is_explicit_and_only_cleanup_can_project_deleted()
     {
         var instance = CreateInstance(ElsaObservedLifecycle.Ready);
@@ -352,6 +368,60 @@ public sealed class ElsaInstanceContractTests
         Assert.Equal(recoveryRequired.Id, result.Operation.Id);
         Assert.Equal(ElsaInstanceOperationState.Queued, result.Operation.State);
         Assert.Equal(recoveryRequired.AttemptNumber + 1, result.Operation.AttemptNumber);
+        Assert.Equal(instance.Version, result.Operation.RecoveryExpectedVersion);
+    }
+
+    [Fact]
+    public void Auto_resume_recover_does_not_stamp_recovery_expected_version()
+    {
+        var instance = CreateInstance(ElsaObservedLifecycle.Failed);
+        var recoveryRequired = OperationFor(instance, ElsaInstanceOperationState.RecoveryRequired);
+
+        var result = ElsaInstanceStateMachine.Request(
+            instance,
+            ElsaInstanceOperationAction.Recover,
+            recoveryRequired,
+            recordCustomerRecovery: false);
+
+        Assert.Equal(recoveryRequired.Id, result.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Queued, result.Operation.State);
+        Assert.Null(result.Operation.RecoveryExpectedVersion);
+    }
+
+    [Fact]
+    public void Auto_resume_recover_preserves_an_existing_recovery_expected_version()
+    {
+        var instance = CreateInstance(ElsaObservedLifecycle.Failed);
+        var stamped = OperationFor(instance, ElsaInstanceOperationState.RecoveryRequired)
+            .Recover("instance/recover", "customer-recover", Hash('c'), instance.Version)
+            .TransitionTo(ElsaInstanceOperationState.Running)
+            .TransitionTo(ElsaInstanceOperationState.RecoveryRequired);
+
+        var result = ElsaInstanceStateMachine.Request(
+            instance,
+            ElsaInstanceOperationAction.Recover,
+            stamped,
+            recordCustomerRecovery: false);
+
+        Assert.Equal(instance.Version, result.Operation.RecoveryExpectedVersion);
+    }
+
+    [Fact]
+    public void Later_customer_recover_advances_recovery_expected_version()
+    {
+        var instance = CreateInstance(ElsaObservedLifecycle.Failed);
+        var first = OperationFor(instance, ElsaInstanceOperationState.RecoveryRequired);
+        var recovered = ElsaInstanceStateMachine.Request(instance, ElsaInstanceOperationAction.Recover, first);
+        var parked = recovered.Operation
+            .TransitionTo(ElsaInstanceOperationState.Running)
+            .TransitionTo(ElsaInstanceOperationState.RecoveryRequired);
+
+        // Request Recover already advanced the aggregate; a later customer Recover
+        // stamps the newer expected version instead of keeping the first marker.
+        var result = ElsaInstanceStateMachine.Request(recovered.Instance, ElsaInstanceOperationAction.Recover, parked);
+
+        Assert.True(result.Operation.RecoveryExpectedVersion > recovered.Operation.RecoveryExpectedVersion);
+        Assert.Equal(recovered.Instance.Version, result.Operation.RecoveryExpectedVersion);
     }
 
     [Fact]
@@ -369,6 +439,7 @@ public sealed class ElsaInstanceContractTests
 
         Assert.Equal(recoveryRequired.Id, result.Operation.Id);
         Assert.Equal(ElsaInstanceOperationState.Queued, result.Operation.State);
+        Assert.Equal(delete.Instance.Version, result.Operation.RecoveryExpectedVersion);
         Assert.Equal(ElsaObservedLifecycle.Unknown, result.Instance.ObservedLifecycle);
         Assert.Equal(ElsaDesiredLifecycle.Deleting, result.Instance.DesiredLifecycle);
     }

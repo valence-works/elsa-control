@@ -43,6 +43,26 @@ public interface IElsaInstanceLifecycleStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// True when a customer or operator mutation was accepted at or after
+    /// <paramref name="version"/>. Create is founding and does not count.
+    /// Only <see cref="ElsaInstanceOperation.SystemOnlyLifecycleActions"/>
+    /// may rebase; unknown actions count as customer changes.
+    /// Customer or operator Recover mutates the parked row in place, so a
+    /// <see cref="ElsaInstanceOperation.RecoveryExpectedVersion"/> at or
+    /// after <paramref name="version"/> also counts. System auto-resume
+    /// does not stamp a new marker; it preserves an existing customer or
+    /// operator marker and therefore still counts when one is present.
+    /// <paramref name="exceptOperationId"/> excludes the Delete being
+    /// recovered or replayed.
+    /// </summary>
+    Task<bool> HasCustomerMutationAtOrAfterVersionAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        int version,
+        Guid? exceptOperationId = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Atomically persists an accepted mutation. A store must return the original
     /// operation/outbox for an exact replay and reject mismatched key/hash, version,
     /// or active-operation races with <see cref="ElsaInstanceLifecycleConflictException"/>.

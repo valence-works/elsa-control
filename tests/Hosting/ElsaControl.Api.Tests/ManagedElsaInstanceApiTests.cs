@@ -2,6 +2,8 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Security.Claims;
 using ElsaControl.Api.Admin.Workspaces;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Workspace;
 using ElsaControl.Deployment.Abstractions.Instances;
@@ -2147,6 +2149,765 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Instance_mutating_routes_are_classified_and_record_delete_rebase_causes()
+    {
+        var app = await PrepareApplicationAsync([], [
+            CatalogEntry("valence-runtime", "3.8", "3.8.4", "stable", "combined", "supported", "paid"),
+            CatalogEntry("valence-runtime", "3.8", "3.8.5", "stable", "combined", "supported", "paid", 'b'),
+            CatalogEntry("valence-runtime", "3.9", "3.9.0", "stable", "combined", "supported", "paid", 'c')
+        ]);
+        using var warmup = await app.CreateClient().GetAsync("/health");
+        warmup.EnsureSuccessStatusCode();
+
+        var discovered = app.Services.GetRequiredService<EndpointDataSource>().Endpoints
+            .OfType<RouteEndpoint>()
+            .Where(endpoint =>
+            {
+                var route = endpoint.RoutePattern.RawText;
+                return route is not null &&
+                       (route.Contains("/instances", StringComparison.Ordinal) ||
+                        route.Contains("/operations", StringComparison.Ordinal));
+            })
+            .SelectMany(endpoint => endpoint.Metadata.GetMetadata<HttpMethodMetadata>()?.HttpMethods
+                .Where(method => !string.Equals(method, HttpMethods.Get, StringComparison.OrdinalIgnoreCase) &&
+                                 !string.Equals(method, HttpMethods.Head, StringComparison.OrdinalIgnoreCase))
+                .Select(method => $"{method} {endpoint.RoutePattern.RawText}") ?? [])
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var classified = new[]
+        {
+            "PATCH /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}",
+            "POST /api/admin/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/operations/{operationId:guid}/recover",
+            "POST /api/workspaces/{workspaceId:guid}/instances/",
+            "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/apply-release",
+            "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete",
+            "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete-confirmations",
+            "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/operations",
+            "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/restart"
+        };
+        Assert.Equal(classified, discovered);
+
+        var owner = app.CreateTrustedWorkspaceClient("managed-instance-mutation-guard");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+
+        var created = await CreateReadyInstanceAsync(
+            app,
+            owner,
+            workspaceId,
+            "mutation-guard-create-runtime",
+            Intent() with
+            {
+                Release = new ElsaReleaseIntent("valence-runtime", "3.8", requestedVersion: "3.8.4", channel: "stable")
+            });
+        Assert.True(await CountOperationsAsync(app) >= 1);
+
+        var confirmationVersion = await ReadInstanceVersionAsync(app, created.Instance.InstanceId);
+        var confirmationOps = await CountOperationsAsync(app);
+        using var confirmationOnly = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        Assert.Equal(HttpStatusCode.OK, confirmationOnly.StatusCode);
+        Assert.Equal(confirmationVersion, await ReadInstanceVersionAsync(app, created.Instance.InstanceId));
+        Assert.Equal(confirmationOps, await CountOperationsAsync(app));
+
+        await AssertRecordsMutationAsync(app, created.Instance.InstanceId, async () =>
+        {
+            using var current = await owner.GetAsync(
+                $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}");
+            current.EnsureSuccessStatusCode();
+            using var patch = await owner.SendAsync(CustomerMutation(
+                HttpMethod.Patch,
+                $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}",
+                current.Headers.ETag?.Tag,
+                "mutation-guard-rename",
+                new ManagedElsaInstancePatchRequest(Name: "Mutation guard renamed")));
+            Assert.Equal(HttpStatusCode.Accepted, patch.StatusCode);
+            var accepted = await patch.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+            await MarkOperationSucceededAsync(app, accepted!.Operation.Id);
+        });
+
+        await AssertRecordsMutationAsync(app, created.Instance.InstanceId, async () =>
+        {
+            using var current = await owner.GetAsync(
+                $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}");
+            current.EnsureSuccessStatusCode();
+            using var restart = await owner.SendAsync(CustomerMutation(
+                HttpMethod.Post,
+                $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/restart",
+                current.Headers.ETag?.Tag,
+                "mutation-guard-restart"));
+            Assert.Equal(HttpStatusCode.Accepted, restart.StatusCode);
+            var accepted = await restart.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>();
+            await MarkOperationSucceededAsync(app, accepted!.OperationId);
+            await MarkInstanceReadyAsync(app, created.Instance.InstanceId);
+        });
+
+        await AssertRecordsMutationAsync(app, created.Instance.InstanceId, async () =>
+        {
+            using var current = await owner.GetAsync(
+                $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}");
+            current.EnsureSuccessStatusCode();
+            using var apply = await owner.SendAsync(CustomerMutation(
+                HttpMethod.Post,
+                $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/apply-release",
+                current.Headers.ETag?.Tag,
+                "mutation-guard-apply",
+                new ManagedElsaInstanceApplyReleaseRequest("3.8.5")));
+            Assert.Equal(HttpStatusCode.Accepted, apply.StatusCode);
+            var accepted = await apply.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>();
+            await MarkOperationSucceededAsync(app, accepted!.OperationId);
+            await MarkInstanceReadyAsync(app, created.Instance.InstanceId);
+        });
+
+        foreach (var action in Enum.GetValues<ElsaInstanceOperationAction>())
+        {
+            if (action is ElsaInstanceOperationAction.Create or ElsaInstanceOperationAction.UpdateIntent)
+            {
+                using var current = await owner.GetAsync(
+                    $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}");
+                current.EnsureSuccessStatusCode();
+                var opsBefore = await CountOperationsAsync(app);
+                using var rejected = await SendOperationAsync(
+                    owner, workspaceId, created.Instance.InstanceId, current.Headers.ETag!.Tag,
+                    $"mutation-guard-ops-{action}", new(action));
+                Assert.Equal(HttpStatusCode.UnprocessableEntity, rejected.StatusCode);
+                Assert.Equal(opsBefore, await CountOperationsAsync(app));
+                continue;
+            }
+
+            var subject = await CreateReadyInstanceAsync(
+                app,
+                owner,
+                workspaceId,
+                $"mutation-guard-ops-{action}-runtime",
+                Intent() with
+                {
+                    Release = new ElsaReleaseIntent("valence-runtime", "3.8", requestedVersion: "3.8.4", channel: "stable")
+                });
+            if (action == ElsaInstanceOperationAction.Recover)
+                await ParkApplyReleaseForRecoverAsync(
+                    app, owner, workspaceId, subject, "mutation-guard-ops-recover");
+            await AssertRecordsMutationAsync(app, subject.Instance.InstanceId, async () =>
+            {
+                await InvokeOperationsActionAsync(app, owner, workspaceId, subject, action);
+            });
+        }
+
+        var recoverInstance = await CreateReadyInstanceAsync(
+            app, owner, workspaceId, "mutation-guard-admin-recover-runtime",
+            Intent() with
+            {
+                Release = new ElsaReleaseIntent("valence-runtime", "3.8", requestedVersion: "3.8.4", channel: "stable")
+            });
+        using var recoverApply = await owner.SendAsync(CustomerMutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{recoverInstance.Instance.InstanceId:D}/apply-release",
+            recoverInstance.Instance.ETag,
+            "mutation-guard-admin-recover-apply",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.5")));
+        Assert.Equal(HttpStatusCode.Accepted, recoverApply.StatusCode);
+        var recoverApplied = await recoverApply.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>();
+        await ParkRecoveryRequiredAsync(app, recoverApplied!.OperationId, "guard");
+        using var recoverEtag = await owner.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{recoverInstance.Instance.InstanceId:D}");
+        recoverEtag.EnsureSuccessStatusCode();
+        await AssertRecordsMutationAsync(app, recoverInstance.Instance.InstanceId, async () =>
+        {
+            using var admin = app.CreateClient();
+            admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+            using var recover = await SendAdminRecoveryAsync(
+                admin,
+                $"/api/admin/workspaces/{workspaceId:D}/instances/{recoverInstance.Instance.InstanceId:D}/operations/{recoverApplied.OperationId:D}/recover",
+                recoverEtag.Headers.ETag?.Tag,
+                "mutation-guard-admin-recover",
+                new("operator recovery"));
+            Assert.Equal(HttpStatusCode.Accepted, recover.StatusCode);
+        });
+
+        using var deleteCurrent = await owner.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}");
+        deleteCurrent.EnsureSuccessStatusCode();
+        using var deleteConfirmation = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var deleteConfirmationBody = await deleteConfirmation.Content
+            .ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        await AssertRecordsMutationAsync(app, created.Instance.InstanceId, async () =>
+        {
+            using var deletion = await SendDeleteAsync(
+                owner,
+                workspaceId,
+                created.Instance.InstanceId,
+                deleteCurrent.Headers.ETag!.Tag,
+                "mutation-guard-delete",
+                deleteConfirmationBody!.ConfirmationId);
+            Assert.Equal(HttpStatusCode.Accepted, deletion.StatusCode);
+        });
+    }
+
+    [Fact]
+    public async Task Dedicated_delete_retries_once_when_if_match_lags_the_current_version()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-instance-delete-stale-retry");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(owner, workspaceId, "narrow-delete-stale-retry-runtime");
+        using var confirmationResponse = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE ElsaInstances SET Version = Version + 1 WHERE Id = {created.Instance.InstanceId}");
+        }
+
+        using var deletion = await SendDeleteAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "narrow-delete-stale-retry",
+            confirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.Accepted, deletion.StatusCode);
+    }
+
+    [Fact]
+    public async Task Dedicated_delete_replays_the_original_etag_after_rebased_acceptance_loses_the_response()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-instance-delete-rebase-lost-202");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(owner, workspaceId, "narrow-delete-rebase-lost-202-runtime");
+        using var confirmationResponse = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE ElsaInstances SET Version = Version + 4 WHERE Id = {created.Instance.InstanceId}");
+        }
+
+        using var accepted = await SendDeleteAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "narrow-delete-rebase-lost-202",
+            confirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.Accepted, accepted.StatusCode);
+        var acceptedBody = await accepted.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>();
+        Assert.NotNull(acceptedBody);
+
+        using var lostResponseReplay = await SendDeleteAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "narrow-delete-rebase-lost-202",
+            confirmation.ConfirmationId);
+        Assert.Equal(HttpStatusCode.Accepted, lostResponseReplay.StatusCode);
+        var replayBody = await lostResponseReplay.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteAcceptedResponse>();
+        Assert.Equal(acceptedBody!.OperationId, replayBody!.OperationId);
+        Assert.Equal(2, await CountOperationsAsync(app));
+    }
+
+    [Fact]
+    public async Task Dedicated_delete_returns_412_when_if_match_lags_a_customer_rename()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-instance-delete-after-rename");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(owner, workspaceId, "narrow-delete-after-rename-runtime");
+        await MarkOperationSucceededAsync(app, created.Operation.Id);
+        var rename = new HttpRequestMessage(
+            HttpMethod.Patch,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}")
+        {
+            Content = JsonContent.Create(
+                new ManagedElsaInstancePatchRequest(Name: "Renamed before delete"),
+                options: ControlApiTestApplication.JsonOptions)
+        };
+        rename.Headers.Add("Idempotency-Key", "narrow-delete-after-rename");
+        rename.Headers.TryAddWithoutValidation("If-Match", created.Instance.ETag);
+        using var renamed = await owner.SendAsync(rename);
+        Assert.Equal(HttpStatusCode.Accepted, renamed.StatusCode);
+
+        using var confirmationResponse = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+        var operationCount = await CountOperationsAsync(app);
+
+        using var deletion = await SendDeleteAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "narrow-delete-after-rename-delete",
+            confirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.PreconditionFailed, deletion.StatusCode);
+        var renameBody = await deletion.Content.ReadAsStringAsync();
+        Assert.Contains(ManagedElsaInstanceEndpoints.ChangedSinceReadCode, renameBody, StringComparison.Ordinal);
+        Assert.DoesNotContain(ManagedElsaInstanceEndpoints.SystemOnlyVersionConflictCode, renameBody, StringComparison.Ordinal);
+        Assert.Equal(operationCount, await CountOperationsAsync(app));
+    }
+
+    [Fact]
+    public async Task Dedicated_delete_retries_once_after_reconcile_only_churn()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-instance-delete-after-reconcile");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(owner, workspaceId, "narrow-delete-after-reconcile-runtime");
+        await MarkOperationSucceededAsync(app, created.Operation.Id);
+        var reconcile = await SendOperationAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "narrow-delete-after-reconcile",
+            new(ElsaInstanceOperationAction.Reconcile));
+        Assert.Equal(HttpStatusCode.Accepted, reconcile.StatusCode);
+
+        using var confirmationResponse = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+
+        using var deletion = await SendDeleteAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "narrow-delete-after-reconcile-delete",
+            confirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.Accepted, deletion.StatusCode);
+    }
+
+    [Fact]
+    public async Task Dedicated_delete_returns_412_when_if_match_lags_a_customer_restart()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-instance-delete-after-restart");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateReadyInstanceAsync(app, owner, workspaceId, "narrow-delete-after-restart-runtime");
+        using var restart = await owner.SendAsync(CustomerMutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/restart",
+            created.Instance.ETag,
+            "narrow-delete-after-restart"));
+        Assert.Equal(HttpStatusCode.Accepted, restart.StatusCode);
+
+        using var confirmationResponse = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+        var operationCount = await CountOperationsAsync(app);
+
+        using var deletion = await SendDeleteAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "narrow-delete-after-restart-delete",
+            confirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.PreconditionFailed, deletion.StatusCode);
+        var restartBody = await deletion.Content.ReadAsStringAsync();
+        Assert.Contains(ManagedElsaInstanceEndpoints.ChangedSinceReadCode, restartBody, StringComparison.Ordinal);
+        Assert.DoesNotContain(ManagedElsaInstanceEndpoints.SystemOnlyVersionConflictCode, restartBody, StringComparison.Ordinal);
+        Assert.Equal(operationCount, await CountOperationsAsync(app));
+    }
+
+    [Fact]
+    public async Task Dedicated_delete_returns_412_when_if_match_lags_a_customer_apply_release()
+    {
+        var app = await PrepareApplicationAsync([], [
+            CatalogEntry("valence-runtime", "3.8", "3.8.4", "stable", "combined", "supported", "paid"),
+            CatalogEntry("valence-runtime", "3.8", "3.8.5", "stable", "combined", "supported", "paid", 'b')
+        ]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-instance-delete-after-apply");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateReadyInstanceAsync(
+            app,
+            owner,
+            workspaceId,
+            "narrow-delete-after-apply-runtime",
+            Intent() with
+            {
+                Release = new ElsaReleaseIntent("valence-runtime", "3.8", requestedVersion: "3.8.4", channel: "stable")
+            });
+        using var apply = await owner.SendAsync(CustomerMutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/apply-release",
+            created.Instance.ETag,
+            "narrow-delete-after-apply",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.5")));
+        Assert.Equal(HttpStatusCode.Accepted, apply.StatusCode);
+
+        using var confirmationResponse = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+        var operationCount = await CountOperationsAsync(app);
+
+        using var deletion = await SendDeleteAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "narrow-delete-after-apply-delete",
+            confirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.PreconditionFailed, deletion.StatusCode);
+        var applyBody = await deletion.Content.ReadAsStringAsync();
+        Assert.Contains(ManagedElsaInstanceEndpoints.ChangedSinceReadCode, applyBody, StringComparison.Ordinal);
+        Assert.Contains(ManagedElsaInstanceEndpoints.ChangedSinceReadDetail, applyBody, StringComparison.Ordinal);
+        Assert.DoesNotContain(ManagedElsaInstanceEndpoints.SystemOnlyVersionConflictCode, applyBody, StringComparison.Ordinal);
+        Assert.Equal(operationCount, await CountOperationsAsync(app));
+    }
+
+    [Fact]
+    public async Task Dedicated_delete_returns_412_with_exact_ac2_copy_when_if_match_lags_a_customer_change()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-instance-delete-ac2-copy");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateReadyInstanceAsync(app, owner, workspaceId, "narrow-delete-ac2-copy-runtime");
+        using var restart = await owner.SendAsync(CustomerMutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/restart",
+            created.Instance.ETag,
+            "narrow-delete-ac2-copy-restart"));
+        Assert.Equal(HttpStatusCode.Accepted, restart.StatusCode);
+
+        using var confirmationResponse = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+
+        using var deletion = await SendDeleteAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            created.Instance.ETag,
+            "narrow-delete-ac2-copy-delete",
+            confirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.PreconditionFailed, deletion.StatusCode);
+        var body = await deletion.Content.ReadAsStringAsync();
+        Assert.Contains(ManagedElsaInstanceEndpoints.ChangedSinceReadCode, body, StringComparison.Ordinal);
+        Assert.Contains(ManagedElsaInstanceEndpoints.ChangedSinceReadDetail, body, StringComparison.Ordinal);
+        Assert.Equal(
+            ManagedElsaInstanceEndpoints.ChangedSinceReadDetail,
+            ExtractProblemTitle(body));
+        Assert.DoesNotContain("try again", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("keeps failing", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(ManagedElsaInstanceEndpoints.SystemOnlyVersionConflictCode, body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Dedicated_delete_returns_412_when_if_match_lags_a_member_recover()
+    {
+        var app = await PrepareApplicationAsync([], [
+            CatalogEntry("valence-runtime", "3.8", "3.8.4", "stable", "combined", "supported", "paid"),
+            CatalogEntry("valence-runtime", "3.8", "3.8.5", "stable", "combined", "supported", "paid", 'b')
+        ]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-instance-delete-after-recover-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        await app.AddWorkspaceMemberAsync(workspaceId, "managed-instance-delete-after-recover-member", WorkspaceRole.Owner);
+        var member = app.CreateTrustedWorkspaceClient("managed-instance-delete-after-recover-member");
+        var created = await CreateReadyInstanceAsync(
+            app,
+            owner,
+            workspaceId,
+            "narrow-delete-after-recover-runtime",
+            Intent() with
+            {
+                Release = new ElsaReleaseIntent("valence-runtime", "3.8", requestedVersion: "3.8.4", channel: "stable")
+            });
+        using var apply = await owner.SendAsync(CustomerMutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/apply-release",
+            created.Instance.ETag,
+            "narrow-delete-after-recover-apply",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.5")));
+        Assert.Equal(HttpStatusCode.Accepted, apply.StatusCode);
+        var applied = await apply.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>();
+        Assert.NotNull(applied);
+        await ParkRecoveryRequiredAsync(app, applied.OperationId, "a");
+
+        using var etagResponse = await owner.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}");
+        etagResponse.EnsureSuccessStatusCode();
+        var capturedETag = etagResponse.Headers.ETag?.Tag;
+        Assert.False(string.IsNullOrWhiteSpace(capturedETag));
+
+        using var recover = await SendOperationAsync(
+            member,
+            workspaceId,
+            created.Instance.InstanceId,
+            capturedETag!,
+            "narrow-delete-after-recover",
+            new(ElsaInstanceOperationAction.Recover));
+        var recoverText = await recover.Content.ReadAsStringAsync();
+        Assert.True(recover.StatusCode == HttpStatusCode.Accepted, recoverText);
+
+        using var confirmationResponse = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+        var operationCount = await CountOperationsAsync(app);
+
+        using var deletion = await SendDeleteAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            capturedETag!,
+            "narrow-delete-after-recover-delete",
+            confirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.PreconditionFailed, deletion.StatusCode);
+        var deleteBody = await deletion.Content.ReadAsStringAsync();
+        Assert.Contains(ManagedElsaInstanceEndpoints.ChangedSinceReadCode, deleteBody, StringComparison.Ordinal);
+        Assert.Contains(ManagedElsaInstanceEndpoints.ChangedSinceReadDetail, deleteBody, StringComparison.Ordinal);
+        Assert.DoesNotContain(ManagedElsaInstanceEndpoints.SystemOnlyVersionConflictCode, deleteBody, StringComparison.Ordinal);
+        Assert.Equal(operationCount, await CountOperationsAsync(app));
+    }
+
+    [Fact]
+    public async Task Dedicated_delete_retries_once_after_system_auto_resume()
+    {
+        var app = await PrepareApplicationAsync([], [
+            CatalogEntry("valence-runtime", "3.8", "3.8.4", "stable", "combined", "supported", "paid"),
+            CatalogEntry("valence-runtime", "3.8", "3.8.5", "stable", "combined", "supported", "paid", 'b')
+        ]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-instance-delete-after-auto-resume");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateReadyInstanceAsync(
+            app,
+            owner,
+            workspaceId,
+            "narrow-delete-after-auto-resume-runtime",
+            Intent() with
+            {
+                Release = new ElsaReleaseIntent("valence-runtime", "3.8", requestedVersion: "3.8.4", channel: "stable")
+            });
+        using var apply = await owner.SendAsync(CustomerMutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/apply-release",
+            created.Instance.ETag,
+            "narrow-delete-after-auto-resume-apply",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.5")));
+        Assert.Equal(HttpStatusCode.Accepted, apply.StatusCode);
+        var applied = await apply.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>();
+        Assert.NotNull(applied);
+        await ParkRecoveryRequiredAsync(app, applied.OperationId, "auto");
+
+        using var etagResponse = await owner.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}");
+        etagResponse.EnsureSuccessStatusCode();
+        var capturedETag = etagResponse.Headers.ETag?.Tag;
+        Assert.False(string.IsNullOrWhiteSpace(capturedETag));
+        var capturedVersion = ReadETagVersion(capturedETag!);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var lifecycle = scope.ServiceProvider.GetRequiredService<ElsaInstanceLifecycleService>();
+            var recovered = await lifecycle.RecoverAsync(new ElsaInstanceLifecycleRequest(
+                workspaceId,
+                created.Instance.InstanceId,
+                capturedVersion,
+                $"auto-resume.{applied.OperationId:N}.1",
+                "auto-resume",
+                ActorAccountId: null,
+                ExpectedOperationId: applied.OperationId));
+            Assert.Null(recovered.Operation.RecoveryExpectedVersion);
+        }
+
+        using var confirmationResponse = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+
+        using var deletion = await SendDeleteAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            capturedETag!,
+            "narrow-delete-after-auto-resume-delete",
+            confirmation!.ConfirmationId);
+        var deleteText = await deletion.Content.ReadAsStringAsync();
+        Assert.True(deletion.StatusCode == HttpStatusCode.Accepted, deleteText);
+        Assert.DoesNotContain(ManagedElsaInstanceEndpoints.ChangedSinceReadCode, deleteText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Dedicated_delete_returns_412_when_auto_resume_follows_a_member_recover()
+    {
+        var app = await PrepareApplicationAsync([], [
+            CatalogEntry("valence-runtime", "3.8", "3.8.4", "stable", "combined", "supported", "paid"),
+            CatalogEntry("valence-runtime", "3.8", "3.8.5", "stable", "combined", "supported", "paid", 'b')
+        ]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-instance-delete-after-recover-auto-resume-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        await app.AddWorkspaceMemberAsync(
+            workspaceId, "managed-instance-delete-after-recover-auto-resume-member", WorkspaceRole.Owner);
+        var member = app.CreateTrustedWorkspaceClient("managed-instance-delete-after-recover-auto-resume-member");
+        var created = await CreateReadyInstanceAsync(
+            app,
+            owner,
+            workspaceId,
+            "narrow-delete-after-recover-auto-resume-runtime",
+            Intent() with
+            {
+                Release = new ElsaReleaseIntent("valence-runtime", "3.8", requestedVersion: "3.8.4", channel: "stable")
+            });
+        using var apply = await owner.SendAsync(CustomerMutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/apply-release",
+            created.Instance.ETag,
+            "narrow-delete-after-recover-auto-resume-apply",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.5")));
+        Assert.Equal(HttpStatusCode.Accepted, apply.StatusCode);
+        var applied = await apply.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>();
+        Assert.NotNull(applied);
+        await ParkRecoveryRequiredAsync(app, applied.OperationId, "mix");
+
+        using var etagResponse = await owner.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}");
+        etagResponse.EnsureSuccessStatusCode();
+        var capturedETag = etagResponse.Headers.ETag?.Tag;
+        Assert.False(string.IsNullOrWhiteSpace(capturedETag));
+        var capturedVersion = ReadETagVersion(capturedETag!);
+
+        using var recover = await SendOperationAsync(
+            member,
+            workspaceId,
+            created.Instance.InstanceId,
+            capturedETag!,
+            "narrow-delete-after-recover-auto-resume-recover",
+            new(ElsaInstanceOperationAction.Recover));
+        var recoverText = await recover.Content.ReadAsStringAsync();
+        Assert.True(recover.StatusCode == HttpStatusCode.Accepted, recoverText);
+        Assert.True(await ReadRecoveryExpectedVersionAsync(app, applied.OperationId) >= capturedVersion);
+
+        await ParkRecoveryRequiredAsync(app, applied.OperationId, "mix-2");
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var lifecycle = scope.ServiceProvider.GetRequiredService<ElsaInstanceLifecycleService>();
+            var resumed = await lifecycle.RecoverAsync(new ElsaInstanceLifecycleRequest(
+                workspaceId,
+                created.Instance.InstanceId,
+                await ReadInstanceVersionAsync(app, created.Instance.InstanceId),
+                $"auto-resume.{applied.OperationId:N}.2",
+                "auto-resume",
+                ActorAccountId: null,
+                ExpectedOperationId: applied.OperationId));
+            Assert.True(resumed.Operation.RecoveryExpectedVersion >= capturedVersion);
+        }
+
+        Assert.True(await ReadRecoveryExpectedVersionAsync(app, applied.OperationId) >= capturedVersion);
+        using var confirmationResponse = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+        var operationCount = await CountOperationsAsync(app);
+
+        using var deletion = await SendDeleteAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            capturedETag!,
+            "narrow-delete-after-recover-auto-resume-delete",
+            confirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.PreconditionFailed, deletion.StatusCode);
+        var deleteBody = await deletion.Content.ReadAsStringAsync();
+        Assert.Contains(ManagedElsaInstanceEndpoints.ChangedSinceReadCode, deleteBody, StringComparison.Ordinal);
+        Assert.Contains(ManagedElsaInstanceEndpoints.ChangedSinceReadDetail, deleteBody, StringComparison.Ordinal);
+        Assert.DoesNotContain(ManagedElsaInstanceEndpoints.SystemOnlyVersionConflictCode, deleteBody, StringComparison.Ordinal);
+        Assert.Equal(operationCount, await CountOperationsAsync(app));
+    }
+
+    [Fact]
+    public async Task Dedicated_delete_returns_412_when_if_match_lags_an_operator_recover()
+    {
+        var app = await PrepareApplicationAsync([], [
+            CatalogEntry("valence-runtime", "3.8", "3.8.4", "stable", "combined", "supported", "paid"),
+            CatalogEntry("valence-runtime", "3.8", "3.8.5", "stable", "combined", "supported", "paid", 'b')
+        ]);
+        var owner = app.CreateTrustedWorkspaceClient("managed-instance-delete-after-operator-recover");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateReadyInstanceAsync(
+            app,
+            owner,
+            workspaceId,
+            "narrow-delete-after-operator-recover-runtime",
+            Intent() with
+            {
+                Release = new ElsaReleaseIntent("valence-runtime", "3.8", requestedVersion: "3.8.4", channel: "stable")
+            });
+        using var apply = await owner.SendAsync(CustomerMutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/apply-release",
+            created.Instance.ETag,
+            "narrow-delete-after-operator-recover-apply",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.5")));
+        Assert.Equal(HttpStatusCode.Accepted, apply.StatusCode);
+        var applied = await apply.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>();
+        Assert.NotNull(applied);
+        await ParkRecoveryRequiredAsync(app, applied.OperationId, "op");
+
+        using var etagResponse = await owner.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}");
+        etagResponse.EnsureSuccessStatusCode();
+        var capturedETag = etagResponse.Headers.ETag?.Tag;
+        Assert.False(string.IsNullOrWhiteSpace(capturedETag));
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        var recoveryPath =
+            $"/api/admin/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations/{applied.OperationId:D}/recover";
+        using var recover = await SendAdminRecoveryAsync(
+            admin, recoveryPath, capturedETag, "narrow-delete-after-operator-recover", new("operator recovery"));
+        var recoverText = await recover.Content.ReadAsStringAsync();
+        Assert.True(recover.StatusCode == HttpStatusCode.Accepted, recoverText);
+
+        using var confirmationResponse = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+        var operationCount = await CountOperationsAsync(app);
+
+        using var deletion = await SendDeleteAsync(
+            owner,
+            workspaceId,
+            created.Instance.InstanceId,
+            capturedETag!,
+            "narrow-delete-after-operator-recover-delete",
+            confirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.PreconditionFailed, deletion.StatusCode);
+        var deleteBody = await deletion.Content.ReadAsStringAsync();
+        Assert.Contains(ManagedElsaInstanceEndpoints.ChangedSinceReadCode, deleteBody, StringComparison.Ordinal);
+        Assert.Contains(ManagedElsaInstanceEndpoints.ChangedSinceReadDetail, deleteBody, StringComparison.Ordinal);
+        Assert.DoesNotContain(ManagedElsaInstanceEndpoints.SystemOnlyVersionConflictCode, deleteBody, StringComparison.Ordinal);
+        Assert.Equal(operationCount, await CountOperationsAsync(app));
+    }
+
+    [Fact]
     public async Task Dedicated_delete_rechecks_workspace_membership_after_confirmation()
     {
         const string subject = "managed-instance-narrow-delete-revoked-owner";
@@ -3043,6 +3804,205 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Guid OperationId,
         int InstanceVersion);
 
+    private static async Task ParkApplyReleaseForRecoverAsync(
+        ControlApiTestApplication app,
+        HttpClient owner,
+        Guid workspaceId,
+        ManagedElsaInstanceAcceptedResponse subject,
+        string suffix)
+    {
+        using var apply = await owner.SendAsync(CustomerMutation(
+            HttpMethod.Post,
+            $"/api/workspaces/{workspaceId:D}/instances/{subject.Instance.InstanceId:D}/apply-release",
+            subject.Instance.ETag,
+            $"{suffix}-apply",
+            new ManagedElsaInstanceApplyReleaseRequest("3.8.5")));
+        Assert.Equal(HttpStatusCode.Accepted, apply.StatusCode);
+        var applied = await apply.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewOperationResponse>();
+        await ParkRecoveryRequiredAsync(app, applied!.OperationId, suffix);
+    }
+
+    private static async Task ParkRecoveryRequiredAsync(
+        ControlApiTestApplication app,
+        Guid operationId,
+        string suffix)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var evidence = $"https://evidence.example/retry/delete-after-recover-{suffix}";
+        var digest = "sha256:" + new string('a', 64);
+        var retrySafe = ElsaInstanceProviderReconciliationService.RetrySafeCode;
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstanceOperations
+            SET State = {ElsaInstanceOperationState.RecoveryRequired.ToString()},
+                FailureCode = {retrySafe},
+                ReconciliationRetryEvidenceReference = {evidence},
+                ReconciliationRetryEvidenceDigest = {digest},
+                CompletedAt = NULL
+            WHERE Id = {operationId}
+            """);
+    }
+
+    private static async Task AssertRecordsMutationAsync(
+        ControlApiTestApplication app,
+        Guid instanceId,
+        Func<Task> mutate)
+    {
+        var versionBefore = await ReadInstanceVersionAsync(app, instanceId);
+        var operationsBefore = await CountOperationsForInstanceAsync(app, instanceId);
+        await mutate();
+        var operationsAfter = await CountOperationsForInstanceAsync(app, instanceId);
+        var stamped = await HasRecoveryStampAtOrAfterAsync(app, instanceId, versionBefore);
+        Assert.True(
+            operationsAfter > operationsBefore || stamped,
+            "Mutating instance route must write an operation row or stamp RecoveryExpectedVersion.");
+    }
+
+    private static async Task<bool> HasRecoveryStampAtOrAfterAsync(
+        ControlApiTestApplication app,
+        Guid instanceId,
+        int version)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        await db.Database.OpenConnectionAsync();
+        await using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = """
+            SELECT COUNT(*) FROM ElsaInstanceOperations
+            WHERE InstanceId = @instanceId AND RecoveryExpectedVersion >= @version
+            """;
+        var instance = command.CreateParameter();
+        instance.ParameterName = "@instanceId";
+        instance.Value = instanceId;
+        command.Parameters.Add(instance);
+        var versionParameter = command.CreateParameter();
+        versionParameter.ParameterName = "@version";
+        versionParameter.Value = version;
+        command.Parameters.Add(versionParameter);
+        return Convert.ToInt32(await command.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture) > 0;
+    }
+
+    private static async Task InvokeOperationsActionAsync(
+        ControlApiTestApplication app,
+        HttpClient owner,
+        Guid workspaceId,
+        ManagedElsaInstanceAcceptedResponse subject,
+        ElsaInstanceOperationAction action)
+    {
+        var instanceId = subject.Instance.InstanceId;
+        using var current = await owner.GetAsync($"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}");
+        current.EnsureSuccessStatusCode();
+        var etag = current.Headers.ETag!.Tag;
+        ManagedElsaInstanceOperationRequest body = action switch
+        {
+            ElsaInstanceOperationAction.ApproveMinorUpgrade => new(
+                action,
+                Intent: Intent() with
+                {
+                    Release = new ElsaReleaseIntent("valence-runtime", "3.8", requestedVersion: "3.8.5", channel: "stable")
+                }),
+            ElsaInstanceOperationAction.MajorMigration => new(
+                action,
+                Intent: Intent() with
+                {
+                    Release = new ElsaReleaseIntent("valence-runtime", "3.9", requestedVersion: "3.9.0", channel: "stable")
+                }),
+            ElsaInstanceOperationAction.Delete => await DeleteOperationRequestAsync(owner, workspaceId, instanceId),
+            _ => new(action)
+        };
+
+        if (action == ElsaInstanceOperationAction.Start)
+            await MarkInstanceStoppedAsync(app, instanceId);
+        if (action == ElsaInstanceOperationAction.Retry)
+            await MarkInstanceFailedAsync(app, instanceId);
+
+        using var response = await SendOperationAsync(
+            owner, workspaceId, instanceId, etag!, $"mutation-guard-ops-{action}", body);
+        var text = await response.Content.ReadAsStringAsync();
+        Assert.True(response.StatusCode == HttpStatusCode.Accepted, $"{action}: {text}");
+    }
+
+    private static async Task<ManagedElsaInstanceOperationRequest> DeleteOperationRequestAsync(
+        HttpClient owner,
+        Guid workspaceId,
+        Guid instanceId)
+    {
+        using var confirmation = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/delete-confirmations", null);
+        var body = await confirmation.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        return new(ElsaInstanceOperationAction.Delete, DeleteConfirmationId: body!.ConfirmationId);
+    }
+
+    private static async Task MarkInstanceFailedAsync(ControlApiTestApplication app, Guid instanceId)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstances
+            SET ObservedLifecycle = {ElsaObservedLifecycle.Failed.ToString()},
+                Health = {ElsaInstanceHealth.Degraded.ToString()}
+            WHERE Id = {instanceId}
+            """);
+    }
+
+    private static async Task MarkInstanceStoppedAsync(ControlApiTestApplication app, Guid instanceId)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstances
+            SET DesiredLifecycle = {ElsaDesiredLifecycle.Stopped.ToString()},
+                ObservedLifecycle = {ElsaObservedLifecycle.Stopped.ToString()},
+                Health = {ElsaInstanceHealth.Healthy.ToString()}
+            WHERE Id = {instanceId}
+            """);
+    }
+
+    private static int ReadETagVersion(string etag)
+    {
+        var value = etag.Trim();
+        if (value.Length >= 3 && value[0] == '"' && value[^1] == '"')
+            value = value[1..^1];
+        return int.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static async Task<int> ReadInstanceVersionAsync(ControlApiTestApplication app, Guid instanceId)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        await db.Database.OpenConnectionAsync();
+        await using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = "SELECT Version FROM ElsaInstances WHERE Id = @id";
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = "@id";
+        parameter.Value = instanceId;
+        command.Parameters.Add(parameter);
+        return Convert.ToInt32(await command.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static async Task<int?> ReadRecoveryExpectedVersionAsync(ControlApiTestApplication app, Guid operationId)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        await db.Database.OpenConnectionAsync();
+        await using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = "SELECT RecoveryExpectedVersion FROM ElsaInstanceOperations WHERE Id = @id";
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = "@id";
+        parameter.Value = operationId;
+        command.Parameters.Add(parameter);
+        var value = await command.ExecuteScalarAsync();
+        return value is null or DBNull ? null : Convert.ToInt32(value, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static string ExtractProblemTitle(string json)
+    {
+        using var document = System.Text.Json.JsonDocument.Parse(json);
+        return document.RootElement.TryGetProperty("title", out var title)
+            ? title.GetString() ?? string.Empty
+            : string.Empty;
+    }
+
     private static async Task MarkOperationRecoveryRequiredAsync(ControlApiTestApplication app, Guid operationId)
     {
         await using var scope = app.Services.CreateAsyncScope();
@@ -3114,6 +4074,20 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         return Convert.ToInt32(await command.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture);
     }
 
+    private static async Task<int> CountOperationsForInstanceAsync(ControlApiTestApplication app, Guid instanceId)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        await db.Database.OpenConnectionAsync();
+        await using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM ElsaInstanceOperations WHERE InstanceId = @instanceId";
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = "@instanceId";
+        parameter.Value = instanceId;
+        command.Parameters.Add(parameter);
+        return Convert.ToInt32(await command.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
     private static async Task<(int Operations, int Outbox, int Audit)> ReadLifecycleRowCountsAsync(
         ControlApiTestApplication app)
     {
@@ -3131,6 +4105,58 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         await using var command = db.Database.GetDbConnection().CreateCommand();
         command.CommandText = $"SELECT COUNT(*) FROM {table}";
         return Convert.ToInt32(await command.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static async Task MarkInstanceReadyAsync(ControlApiTestApplication app, Guid instanceId)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstances
+            SET DesiredLifecycle = {ElsaDesiredLifecycle.Running.ToString()},
+                ObservedLifecycle = {ElsaObservedLifecycle.Ready.ToString()},
+                Health = {ElsaInstanceHealth.Healthy.ToString()}
+            WHERE Id = {instanceId}
+            """);
+    }
+
+    private static async Task<ManagedElsaInstanceAcceptedResponse> CreateReadyInstanceAsync(
+        ControlApiTestApplication app,
+        HttpClient client,
+        Guid workspaceId,
+        string slug,
+        ElsaInstanceIntent? intent = null)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, $"/api/workspaces/{workspaceId}/instances")
+        {
+            Content = JsonContent.Create(
+                new ManagedElsaInstanceCreateRequest("Claims runtime", slug, intent ?? Intent()),
+                options: ControlApiTestApplication.JsonOptions)
+        };
+        request.Headers.Add("Idempotency-Key", $"create-{slug}");
+        var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>())!;
+        await MarkOperationSucceededAsync(app, created.Operation.Id);
+        await MarkInstanceReadyAsync(app, created.Instance.InstanceId);
+        return created;
+    }
+
+    private static HttpRequestMessage CustomerMutation(
+        HttpMethod method,
+        string path,
+        string? etag,
+        string? idempotencyKey,
+        object? body = null)
+    {
+        var request = new HttpRequestMessage(method, path);
+        if (body is not null)
+            request.Content = JsonContent.Create(body, options: ControlApiTestApplication.JsonOptions);
+        if (etag is not null)
+            request.Headers.TryAddWithoutValidation("If-Match", etag);
+        if (idempotencyKey is not null)
+            request.Headers.Add("Idempotency-Key", idempotencyKey);
+        return request;
     }
 
     private static async Task<ManagedElsaInstanceAcceptedResponse> CreateCanonicalInstanceAsync(

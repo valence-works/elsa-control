@@ -236,9 +236,11 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 .Split('\n', StringSplitOptions.RemoveEmptyEntries);
             Assert.Equal(1, commandLines.Count(line =>
                 line.StartsWith("group delete ", StringComparison.Ordinal)));
-            Assert.Equal(8, commandLines.Length);
+            Assert.Equal(11, commandLines.Length);
             Assert.Equal(3, commandLines.Count(line => line.StartsWith("group exists ", StringComparison.Ordinal)));
             Assert.Equal(2, commandLines.Count(line => line.StartsWith("keyvault list-deleted ", StringComparison.Ordinal)));
+            Assert.Equal(2, commandLines.Count(line => line.StartsWith("rest --method get ", StringComparison.Ordinal) &&
+                line.Contains("deletedWorkspaces", StringComparison.Ordinal)));
             Assert.Equal(ElsaObservedLifecycle.Deleted,
                 (await finalizeDb.ElsaInstances.AsNoTracking()
                     .SingleAsync(x => x.Id == accepted.Instance.Id)).ObservedLifecycle);
@@ -339,12 +341,20 @@ if [ "$#" -eq 9 ] && [ "$*" = "resource list --subscription $subscription --reso
     printf '%s' '[]'
     exit 0
 fi
+if [ "$1" = "monitor" ] && [ "$2" = "log-analytics" ] && [ "$3" = "workspace" ] && [ "$4" = "show" ]; then
+    exit 3
+fi
 if [ "$#" -eq 11 ] && [ "$*" = "group delete --subscription $subscription --name $resource_group --yes --no-wait --output none --only-show-errors" ]; then
     : > "$delete_requested"
     exit 0
 fi
 if [ "$#" -eq 9 ] && [ "$*" = "keyvault list-deleted --subscription $subscription --resource-type vault --output json --only-show-errors" ]; then
     printf '%s' '[]'
+    exit 0
+fi
+if [ "$#" -eq 8 ] && [ "$1" = "rest" ] && [ "$2" = "--method" ] && [ "$3" = "get" ] && [ "$4" = "--url" ] &&
+    printf '%s' "$5" | grep -q 'deletedWorkspaces' && [ "$6" = "--output" ] && [ "$7" = "json" ] && [ "$8" = "--only-show-errors" ]; then
+    printf '%s' '{"value":[]}'
     exit 0
 fi
 exit 97

@@ -3692,6 +3692,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<long?>("ReasonEnteredAt")
                         .HasColumnType("INTEGER");
 
+                    b.Property<int?>("RecoveryExpectedVersion")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("RecoveryIdempotencyKey")
                         .HasMaxLength(128)
                         .HasColumnType("TEXT");
