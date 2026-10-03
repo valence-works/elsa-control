@@ -212,17 +212,26 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         using var capture = new RecoveryRequiredAlertCapture(workspace.Id);
         var observation = UnchangedParkObservation(ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain);
 
-        await ReconcileUnchangedParkAsync(
+        var beforeBound = await ReconcileUnchangedParkAsync(
             store, workspace.Id, accepted.Operation.Id, observation,
             Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter - TimeSpan.FromSeconds(1));
-        Assert.Null((await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id)).RequiresHumanAt);
+        var before = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        var instanceBefore = await db.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == accepted.Instance.Id);
+        Assert.False(beforeBound.Replayed);
+        Assert.NotNull(before.ReconciliationEvidenceFingerprint);
+        Assert.Null(before.RequiresHumanAt);
         Assert.Empty(capture.Entered);
 
-        await ReconcileUnchangedParkAsync(
+        var atBound = await ReconcileUnchangedParkAsync(
             store, workspace.Id, accepted.Operation.Id, observation,
             Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter);
 
         var parked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        var instanceAtBound = await db.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == accepted.Instance.Id);
+        Assert.True(atBound.Replayed);
+        Assert.Equal(before.ReconciliationEvidenceFingerprint, parked.ReconciliationEvidenceFingerprint);
+        Assert.Equal(before.ReconciliationVersion, parked.ReconciliationVersion);
+        Assert.Equal(instanceBefore.Version, instanceAtBound.Version);
         Assert.Equal(Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter, parked.RequiresHumanAt);
         Assert.Single(capture.Entered);
         Assert.Equal(1, await db.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
@@ -230,9 +239,13 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             accepted.Operation.AttemptNumber,
             (await db.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking().SingleAsync()).AttemptNumber);
 
-        await ReconcileUnchangedParkAsync(
+        var afterBound = await ReconcileUnchangedParkAsync(
             store, workspace.Id, accepted.Operation.Id, observation,
             Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter + TimeSpan.FromMinutes(1));
+        var after = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.True(afterBound.Replayed);
+        Assert.Equal(before.ReconciliationEvidenceFingerprint, after.ReconciliationEvidenceFingerprint);
+        Assert.Equal(before.ReconciliationVersion, after.ReconciliationVersion);
         Assert.Single(capture.Entered);
         Assert.Equal(1, await db.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
     }
@@ -323,6 +336,111 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter + TimeSpan.FromMinutes(1)));
         Assert.Single(capture.Entered);
         Assert.Equal(1, await db.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+    }
+
+    [Fact]
+    public async Task Two_dbcontexts_racing_the_ten_minute_scan_write_exactly_one_outbox_row()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"elsa-rr-clock-scan-{Guid.NewGuid():N}.db");
+        var options = ClockRaceOptions(path);
+        try
+        {
+            Guid workspaceId;
+            Guid operationId;
+            await using (var seed = new CatalogDbContext(options))
+            {
+                await seed.Database.MigrateAsync();
+                await seed.Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL;");
+                var (workspace, accepted) = await QueueManagedLifecycleRunAsync(seed, "Alert clock race scan");
+                workspaceId = workspace.Id;
+                operationId = accepted.Operation.Id;
+                var store = new EfCoreElsaInstanceLifecycleStore(
+                    seed, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+                await store.CommitProviderSubmissionAsync(new(
+                    workspace.Id,
+                    accepted.Instance.Id,
+                    accepted.Operation.Id,
+                    accepted.Operation.AttemptNumber,
+                    "provider-submission-uncertain",
+                    Now));
+            }
+
+            using var capture = new RecoveryRequiredAlertCapture(workspaceId);
+            var atBound = Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter;
+            await using var first = new CatalogDbContext(options);
+            await using var second = new CatalogDbContext(options);
+            var advanced = await Task.WhenAll(
+                new EfCoreElsaInstanceLifecycleStore(first, EmptyResolutionInputSource.Instance)
+                    .AdvanceDueHumanRequiredClocksAsync(atBound),
+                new EfCoreElsaInstanceLifecycleStore(second, EmptyResolutionInputSource.Instance)
+                    .AdvanceDueHumanRequiredClocksAsync(atBound));
+
+            Assert.Equal(1, advanced.Sum());
+            Assert.Single(capture.Entered);
+            await using var verify = new CatalogDbContext(options);
+            Assert.Equal(1, await verify.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+            Assert.Equal(
+                atBound,
+                (await verify.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == operationId)).RequiresHumanAt);
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task Two_dbcontexts_racing_an_unchanged_fingerprint_write_exactly_one_outbox_row()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"elsa-rr-clock-replay-{Guid.NewGuid():N}.db");
+        var options = ClockRaceOptions(path);
+        try
+        {
+            Guid workspaceId;
+            Guid operationId;
+            var observation = UnchangedParkObservation(ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain);
+            await using (var seed = new CatalogDbContext(options))
+            {
+                await seed.Database.MigrateAsync();
+                await seed.Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL;");
+                var (workspace, accepted) = await QueueManagedLifecycleRunAsync(seed, "Alert clock race replay");
+                workspaceId = workspace.Id;
+                operationId = accepted.Operation.Id;
+                var store = new EfCoreElsaInstanceLifecycleStore(
+                    seed, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+                await store.CommitProviderSubmissionAsync(new(
+                    workspace.Id,
+                    accepted.Instance.Id,
+                    accepted.Operation.Id,
+                    accepted.Operation.AttemptNumber,
+                    "provider-submission-uncertain",
+                    Now));
+                await ReconcileUnchangedParkAsync(
+                    store, workspace.Id, accepted.Operation.Id, observation,
+                    Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter - TimeSpan.FromSeconds(1));
+            }
+
+            using var capture = new RecoveryRequiredAlertCapture(workspaceId);
+            var atBound = Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter;
+            await using var first = new CatalogDbContext(options);
+            await using var second = new CatalogDbContext(options);
+            var outcomes = await Task.WhenAll(
+                RaceUnchangedParkAsync(first, workspaceId, operationId, observation, atBound),
+                RaceUnchangedParkAsync(second, workspaceId, operationId, observation, atBound));
+
+            Assert.Contains(true, outcomes);
+            Assert.Single(capture.Entered);
+            await using var verify = new CatalogDbContext(options);
+            Assert.Equal(1, await verify.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+            var parked = await verify.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == operationId);
+            Assert.Equal(atBound, parked.RequiresHumanAt);
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
     }
 
     [Theory]
@@ -513,6 +631,36 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 new StableObservationPort(observation),
                 new FixedTimeProvider(at))
             .ReconcileAsync(workspaceId, operationId);
+
+    private static async Task<bool> RaceUnchangedParkAsync(
+        CatalogDbContext db,
+        Guid workspaceId,
+        Guid operationId,
+        ElsaInstanceProviderObservation observation,
+        DateTimeOffset at)
+    {
+        try
+        {
+            await ReconcileUnchangedParkAsync(
+                new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance),
+                workspaceId,
+                operationId,
+                observation,
+                at);
+            return true;
+        }
+        catch (ElsaInstanceLifecycleConflictException)
+        {
+            return false;
+        }
+    }
+
+    private static DbContextOptions<CatalogDbContext> ClockRaceOptions(string path) =>
+        new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(
+                $"Data Source={path};Default Timeout=30",
+                sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .Options;
 
     private static ElsaInstanceProviderObservation UnchangedParkObservation(string reasonCode) =>
         new(
