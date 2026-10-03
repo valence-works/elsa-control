@@ -12,7 +12,8 @@ export type ManagedElsaObservedLifecycle =
   | "Deleting"
   | "Failed"
   | "Unknown"
-  | "Deleted";
+  | "Deleted"
+  | "RecoveryRequired";
 export type ManagedElsaHealth = "Healthy" | "Degraded" | "Unreachable" | "Unknown";
 
 export const managedElsaHandoffTokenType = "elsa-handoff+jwt" as const;

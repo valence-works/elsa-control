@@ -220,10 +220,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 operation.State = commit.Operation.State;
                 var preserveUncertainSubmission = commit.Operation.State == ElsaInstanceOperationState.RecoveryRequired &&
                     !commit.RetrySafe &&
-                    (string.Equals(operation.FailureCode, "provider.submission.uncertain", StringComparison.Ordinal) ||
-                     string.Equals(run.RecoveryReason, "provider.submission.uncertain", StringComparison.Ordinal));
+                    (string.Equals(operation.FailureCode, ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, StringComparison.Ordinal) ||
+                     string.Equals(run.RecoveryReason, ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, StringComparison.Ordinal));
+                var previousReason = CurrentParkReason(operation, run.RecoveryReason);
                 operation.FailureCode = preserveUncertainSubmission
-                    ? "provider.submission.uncertain"
+                    ? ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain
                     : commit.Operation.State == ElsaInstanceOperationState.RecoveryRequired && commit.RetrySafe
                         ? ElsaInstanceProviderReconciliationService.RetrySafeCode
                         : commit.Operation.State == ElsaInstanceOperationState.Failed ? commit.DiagnosticCode : null;
@@ -259,8 +260,20 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     ? null
                     : commit.ReconciledAt.ToUniversalTime();
                 run.RecoveryReason = run.Status == WorkspaceDeploymentRunStatus.RecoveryRequired
-                    ? preserveUncertainSubmission ? "provider.submission.uncertain" : commit.DiagnosticCode
+                    ? preserveUncertainSubmission ? ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain : commit.DiagnosticCode
                     : null;
+                if (operation.State == ElsaInstanceOperationState.RecoveryRequired)
+                    ApplyReasonClock(
+                        operation,
+                        previousReason,
+                        CurrentParkReason(operation, run.RecoveryReason),
+                        commit.ReconciledAt,
+                        restartClock: false);
+                else
+                {
+                    operation.ReasonEnteredAt = null;
+                    operation.RequiresHumanAt = null;
+                }
                 run.FailureMessage = run.Status == WorkspaceDeploymentRunStatus.Failed
                     ? "Provider reconciliation established a terminal failure."
                     : null;
@@ -2191,14 +2204,21 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 // A provider call can be accepted remotely while its response is lost. A
                 // successful replay upgrades the uncertain marker to an accepted hand-off;
                 // subsequent polls must reconcile only and never submit again.
-                if ((operation.FailureCode == "provider.submission.uncertain" ||
-                     run.RecoveryReason == "provider.submission.uncertain") &&
+                if ((operation.FailureCode == ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain ||
+                     run.RecoveryReason == ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain) &&
                     commit.CorrelationId != "provider-submission-uncertain")
                 {
+                    var previousUncertainReason = CurrentParkReason(operation, run.RecoveryReason);
                     operation.FailureCode = null;
                     operation.FailureSummary = null;
                     operation.UpdatedAt = commit.SubmittedAt.ToUniversalTime();
-                    run.RecoveryReason = "provider.submission.accepted";
+                    run.RecoveryReason = ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted;
+                    ApplyReasonClock(
+                        operation,
+                        previousUncertainReason,
+                        CurrentParkReason(operation, run.RecoveryReason),
+                        commit.SubmittedAt,
+                        restartClock: false);
                     run.WorkerId = null;
                     run.WorkerHeartbeatAt = null;
                     if (commit.PlacementAssignmentId is not null)
@@ -2223,8 +2243,9 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 throw Conflict("Provider submission reservation is no longer queued.");
 
             operation.State = ElsaInstanceOperationState.RecoveryRequired;
+            var previousReason = CurrentParkReason(operation, run.RecoveryReason);
             operation.FailureCode = commit.CorrelationId == "provider-submission-uncertain"
-                ? "provider.submission.uncertain"
+                ? ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain
                 : null;
             operation.FailureSummary = null;
             operation.WorkerId = null;
@@ -2234,8 +2255,14 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             operation.UpdatedAt = commit.SubmittedAt.ToUniversalTime();
             run.Status = WorkspaceDeploymentRunStatus.RecoveryRequired;
             run.RecoveryReason = commit.CorrelationId == "provider-submission-uncertain"
-                ? "provider.submission.uncertain"
-                : "provider.submission.accepted";
+                ? ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain
+                : ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted;
+            ApplyReasonClock(
+                operation,
+                previousReason,
+                CurrentParkReason(operation, run.RecoveryReason),
+                commit.SubmittedAt,
+                restartClock: false);
             run.WorkerId = null;
             run.WorkerHeartbeatAt = null;
             if (commit.PlacementAssignmentId is not null)
@@ -2282,7 +2309,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             .Where(operation => operation.State == ElsaInstanceOperationState.Queued ||
                                operation.State == ElsaInstanceOperationState.EntitlementHeld ||
                                operation.State == ElsaInstanceOperationState.RecoveryRequired &&
-                               string.Equals(operation.FailureCode, "provider.submission.uncertain", StringComparison.Ordinal))
+                               string.Equals(operation.FailureCode, ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, StringComparison.Ordinal))
             .Where(operation => operation.InstanceId is not null && operation.DeploymentRunId is not null &&
                                 operation.ResolvedPlanId is not null)
             .ToArray();
@@ -2322,7 +2349,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             var shouldReplaySubmission = operation.State == ElsaInstanceOperationState.Queued ||
                 operation.State == ElsaInstanceOperationState.EntitlementHeld ||
                 operation.State == ElsaInstanceOperationState.RecoveryRequired &&
-                string.Equals(operation.FailureCode, "provider.submission.uncertain", StringComparison.Ordinal);
+                string.Equals(operation.FailureCode, ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, StringComparison.Ordinal);
             if (!shouldReplaySubmission)
             {
                 pending.Add(new(operation.WorkspaceId, operation.Id));
@@ -2675,6 +2702,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         if (isRecoveryResume)
         {
             existingOperation.RecoveryExpectedVersion = requestedOperation.RecoveryExpectedVersion;
+            ApplyReasonClock(existingOperation, CurrentParkReason(existingOperation, null), nextCode: null, requestedAt, restartClock: true);
             var deleteAuthority = existingOperation.Action == ElsaInstanceOperationAction.Delete
                 ? await CaptureAzureDeleteRecoveryAuthorityAsync(
                     existingInstance, existingOperation, requestedOperation.AttemptNumber,
@@ -3714,10 +3742,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         int instanceVersion)
     {
         var preserveUncertainSubmission = !commit.RetrySafe &&
-            (string.Equals(operation.FailureCode, "provider.submission.uncertain", StringComparison.Ordinal) ||
-             string.Equals(run.RecoveryReason, "provider.submission.uncertain", StringComparison.Ordinal));
+            (string.Equals(operation.FailureCode, ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, StringComparison.Ordinal) ||
+             string.Equals(run.RecoveryReason, ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, StringComparison.Ordinal));
+        var previousReason = CurrentParkReason(operation, run.RecoveryReason);
         operation.FailureCode = preserveUncertainSubmission
-            ? "provider.submission.uncertain"
+            ? ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain
             : commit.RetrySafe
                 ? ElsaInstanceProviderReconciliationService.RetrySafeCode
                 : null;
@@ -3739,8 +3768,16 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         operation.ReconciledInstanceVersion = instanceVersion;
         operation.ReconciledAt = commit.ReconciledAt.ToUniversalTime();
         run.RecoveryReason = preserveUncertainSubmission
-            ? "provider.submission.uncertain"
+            ? ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain
             : commit.DiagnosticCode;
+        // Identical RecoveryRequired ticks must still advance the #660 reason
+        // clock so RequiresHumanAt can trip without instance-version churn.
+        ApplyReasonClock(
+            operation,
+            previousReason,
+            CurrentParkReason(operation, run.RecoveryReason),
+            commit.ReconciledAt,
+            restartClock: false);
         run.WorkerId = null;
         run.WorkerHeartbeatAt = null;
     }
@@ -3821,6 +3858,30 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             AuthoredAt = authoredAt.ToUniversalTime(),
             CreatedAt = authoredAt.ToUniversalTime()
         };
+    }
+
+    internal static string? CurrentParkReason(ElsaInstanceOperationEntity operation, string? runRecoveryReason) =>
+        ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+            operation.FailureCode,
+            operation.ReconciliationDiagnosticCode,
+            runRecoveryReason);
+
+    internal static void ApplyReasonClock(
+        ElsaInstanceOperationEntity operation,
+        string? previousCode,
+        string? nextCode,
+        DateTimeOffset now,
+        bool restartClock)
+    {
+        var clock = ManagedElsaReasonClock.Advance(
+            previousCode,
+            nextCode,
+            operation.ReasonEnteredAt,
+            operation.RequiresHumanAt,
+            now,
+            restartClock);
+        operation.ReasonEnteredAt = clock.ReasonEnteredAt;
+        operation.RequiresHumanAt = clock.RequiresHumanAt;
     }
 
     private static ElsaInstanceLifecycleOutboxMessage MapOutbox(ElsaInstanceLifecycleOutboxEntity entity)

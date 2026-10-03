@@ -845,9 +845,9 @@ public static class ManagedElsaInstanceEndpoints
         CancellationToken cancellationToken,
         ElsaInstanceOperationSummary? activeOperation = null)
     {
-        var healthy = instance.DesiredLifecycle == ElsaDesiredLifecycle.Running &&
-                      instance.ObservedLifecycle == ElsaObservedLifecycle.Ready &&
-                      instance.Health == ElsaInstanceHealth.Healthy;
+        var observedLifecycle = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, activeOperation);
+        var healthy = ManagedElsaInstanceCustomerProjection.IsCustomerHealthy(
+            instance.DesiredLifecycle, observedLifecycle, instance.Health);
         var identity = canOpen && healthy
             ? await identities.FindOpenableAsync(instance.OrganizationId, instance.Id, cancellationToken)
             : null;
@@ -862,9 +862,8 @@ public static class ManagedElsaInstanceEndpoints
         ElsaInstanceOperationSummary? activeOperation = null)
     {
         var observedLifecycle = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, activeOperation);
-        var healthy = instance.DesiredLifecycle == ElsaDesiredLifecycle.Running &&
-                      instance.ObservedLifecycle == ElsaObservedLifecycle.Ready &&
-                      instance.Health == ElsaInstanceHealth.Healthy;
+        var healthy = ManagedElsaInstanceCustomerProjection.IsCustomerHealthy(
+            instance.DesiredLifecycle, observedLifecycle, instance.Health);
         var currentIdentity = identity is { } candidate && candidate.OrganizationId == instance.OrganizationId &&
                               candidate.WorkspaceId == workspaceId && candidate.InstanceId == instance.Id
             ? candidate

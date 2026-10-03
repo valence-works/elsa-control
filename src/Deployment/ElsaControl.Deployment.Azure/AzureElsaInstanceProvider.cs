@@ -582,7 +582,7 @@ public sealed class AzureElsaInstanceProvider(
         var submission = request.Submission;
         if (submission.PlacementAssignmentId is not { } assignmentText ||
             !Guid.TryParseExact(assignmentText, "D", out var assignmentId))
-            return RecoveryRejected("azure.recovery.assignment-invalid");
+            return RecoveryRejected(ManagedElsaReasonCodeCatalog.AzureRecoveryAssignmentInvalid);
 
         try
         {
@@ -604,7 +604,7 @@ public sealed class AzureElsaInstanceProvider(
             _options.ProviderScopeFingerprint,
             cancellationToken);
         if (operation is null)
-            return RecoveryRequired("azure.recovery.operation-unavailable");
+            return RecoveryRequired(ManagedElsaReasonCodeCatalog.AzureRecoveryOperationUnavailable);
         if (operation.WorkspaceId != submission.WorkspaceId ||
             !string.Equals(operation.TargetKey, WorkloadName(submission.InstanceId), StringComparison.OrdinalIgnoreCase) ||
             operation.Action != AzureProviderOperationAction.Reconcile ||
@@ -615,7 +615,7 @@ public sealed class AzureElsaInstanceProvider(
             operation.ProviderAssignmentId != assignmentId ||
             !await ScopeIsCurrentAsync(
                 submission.WorkspaceId, operation.ProviderAssignmentId, operation.ProviderScopeFingerprint, cancellationToken))
-            return RecoveryRejected("azure.recovery.identity-mismatch");
+            return RecoveryRejected(ManagedElsaReasonCodeCatalog.AzureRecoveryIdentityMismatch);
 
         // Recovery never resolves the current catalog intent. It may only use the exact
         // provider plan retained by this operation. Translate the already-resolved lifecycle
@@ -633,7 +633,7 @@ public sealed class AzureElsaInstanceProvider(
         }
         if (retainedPlan is null ||
             !string.Equals(retainedPlan.Fingerprint, operation.PlanFingerprint, StringComparison.Ordinal))
-            return RecoveryRejected("azure.recovery.plan-unavailable");
+            return RecoveryRejected(ManagedElsaReasonCodeCatalog.AzureRecoveryPlanUnavailable);
 
         var translatedRequestedPlan = AzureWorkloadPlanTranslator.Translate(
             submission.Plan,
@@ -642,18 +642,18 @@ public sealed class AzureElsaInstanceProvider(
         if (!translatedRequestedPlan.IsAccepted ||
             translatedRequestedPlan.Plan is null ||
             !string.Equals(translatedRequestedPlan.Plan.Fingerprint, retainedPlan.Fingerprint, StringComparison.Ordinal))
-            return RecoveryRejected("azure.recovery.plan-mismatch");
+            return RecoveryRejected(ManagedElsaReasonCodeCatalog.AzureRecoveryPlanMismatch);
 
         // Post-claim replay is read-only, but still requires proof that this exact
         // accepted lifecycle recovery authorized the current provider successor.
         var isReplay = operation.Status is AzureProviderOperationStatus.Running or AzureProviderOperationStatus.Succeeded;
         if (!isReplay && operation.Status != AzureProviderOperationStatus.RecoveryRequired)
-            return RecoveryRejected("azure.recovery.state-invalid");
+            return RecoveryRejected(ManagedElsaReasonCodeCatalog.AzureRecoveryStateInvalid);
 
         if (_recoveryObservationStore is null)
             return isReplay
-                ? RecoveryRejected("azure.recovery.observation-unavailable")
-                : RecoveryRequired("azure.recovery.observation-unavailable");
+                ? RecoveryRejected(ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable)
+                : RecoveryRequired(ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable);
 
         var envelope = request.Envelope;
         AzureProviderRecoveryObservationRecord? recordedObservation;
@@ -690,8 +690,8 @@ public sealed class AzureElsaInstanceProvider(
             !IsRecordedObservationAuthoritative(recordedObservation, operation, assignmentId, submission, isReplay) ||
             !await ObservationScopeIsAuthoritativeAsync(recordedObservation, operation, assignmentId, cancellationToken))
             return isReplay
-                ? RecoveryRejected("azure.recovery.observation-invalid")
-                : RecoveryRequired("azure.recovery.observation-invalid");
+                ? RecoveryRejected(ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInvalid)
+                : RecoveryRequired(ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInvalid);
 
         var assignment = await assignmentStore.GetAsync(submission.WorkspaceId, assignmentId, cancellationToken);
         if (assignment is null ||
@@ -702,13 +702,13 @@ public sealed class AzureElsaInstanceProvider(
             assignment.LastOperationId != operation.Id ||
             !string.Equals(assignment.ProviderScopeFingerprint, NormalizeScope(_options.ProviderScopeFingerprint), StringComparison.Ordinal) ||
             !string.Equals(assignment.WorkloadName, WorkloadName(submission.InstanceId), StringComparison.OrdinalIgnoreCase))
-            return RecoveryRejected("azure.recovery.assignment-mismatch");
+            return RecoveryRejected(ManagedElsaReasonCodeCatalog.AzureRecoveryAssignmentMismatch);
         if (isReplay)
             return operation.Status == AzureProviderOperationStatus.Succeeded
                 ? new(ElsaInstanceProviderRecoveryOutcome.Succeeded, "azure.operation.no-op")
                 : new(ElsaInstanceProviderRecoveryOutcome.InProgress, "azure.operation.in-progress");
         if (_recoveryObserver is null || _executor is null)
-            return RecoveryRequired("azure.recovery.unavailable");
+            return RecoveryRequired(ManagedElsaReasonCodeCatalog.AzureRecoveryUnavailable);
 
         // Re-observe after the accepted ledger check and immediately before the recovery CAS.
         // This is the only point at which provider state may authorize a claim.
@@ -725,7 +725,7 @@ public sealed class AzureElsaInstanceProvider(
         }
         catch (Exception)
         {
-            return RecoveryRequired("azure.recovery.observation-failed");
+            return RecoveryRequired(ManagedElsaReasonCodeCatalog.AzureRecoveryObservationFailed);
         }
         if (observed.Kind != AzureProviderRecoveryObservationKind.Confirmed)
             return RecoveryRequired(observed.Code);

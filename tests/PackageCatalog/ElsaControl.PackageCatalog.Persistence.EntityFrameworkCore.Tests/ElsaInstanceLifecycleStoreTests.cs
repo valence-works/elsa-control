@@ -2471,6 +2471,11 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         await using var db = CreateMigratedContext(connection);
         await db.Database.MigrateAsync();
         var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "EF auto-resume");
+        var originalStartedAt = (await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Operation.Id)).StartedAt;
+        var elapsedBefore = Now.AddMinutes(11) -
+            ManagedElsaInstanceCustomerProjection.CustomerElapsedOrigin(
+                originalStartedAt, accepted.Operation.AcceptedAt)!.Value;
         var workspaceStore = new DeploymentWorkspaceStore(db);
         Assert.NotNull(await workspaceStore.ClaimNextQueuedRunAsync("deployment-worker", Now));
         Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
@@ -2498,6 +2503,70 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var operation = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
         Assert.Equal(ElsaInstanceOperationState.Queued, operation.State);
         Assert.Equal(accepted.Operation.AttemptNumber + 1, operation.AttemptNumber);
+        Assert.Equal(originalStartedAt, operation.StartedAt);
+        var elapsedAfter = Now.AddMinutes(11) -
+            ManagedElsaInstanceCustomerProjection.CustomerElapsedOrigin(
+                operation.StartedAt, operation.AcceptedAt)!.Value;
+        Assert.True(elapsedAfter >= elapsedBefore);
+    }
+
+    public static TheoryData<string> AutoResumingParkCodes()
+    {
+        var data = new TheoryData<string>();
+        foreach (var code in ManagedElsaReasonCodeCatalog.AutoResumingCodes)
+            data.Add(code);
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(AutoResumingParkCodes))]
+    public async Task Auto_resuming_park_code_reaches_lifecycle_reason_without_requiring_a_human(string parkCode)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "EF " + parkCode);
+        var workspaceStore = new DeploymentWorkspaceStore(db);
+        Assert.NotNull(await workspaceStore.ClaimNextQueuedRunAsync("deployment-worker", Now));
+        Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
+            Now.AddMinutes(10), TimeSpan.FromMinutes(5)));
+        db.ChangeTracker.Clear();
+
+        var reconcileAt = DateTimeOffset.UtcNow;
+        var reconciled = await new ElsaInstanceProviderReconciliationService(
+                CreateStore(db),
+                new QueueProviderPort(new ElsaInstanceProviderObservation(
+                    ElsaInstanceProviderObservationKind.Confirmed,
+                    ElsaObservedLifecycle.Provisioning,
+                    ElsaInstanceProviderHealthGate.Unknown,
+                    "auto-resuming-park")
+                {
+                    ReasonCode = parkCode
+                }),
+                new FixedTimeProvider(reconcileAt))
+            .ReconcileAsync(workspace.Id, accepted.Operation.Id);
+
+        Assert.Equal(parkCode, reconciled.DiagnosticCode);
+        var operation = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, operation.State);
+        Assert.Equal(parkCode, operation.ReconciliationDiagnosticCode);
+        Assert.Equal(
+            parkCode,
+            ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                operation.FailureCode,
+                operation.ReconciliationDiagnosticCode,
+                (await db.DeploymentRuns.AsNoTracking().SingleAsync(x => x.Id == operation.DeploymentRunId)).RecoveryReason));
+        Assert.Null(operation.RequiresHumanAt);
+        Assert.Equal(ManagedElsaReasonClass.AutoResuming, ManagedElsaReasonCodeCatalog.Classify(parkCode));
+        Assert.False(ManagedElsaReasonCodeCatalog.RequiresHuman(
+            parkCode, operation.FailureCode, operation.ReasonEnteredAt, reconcileAt));
+
+        var listed = Assert.Single(
+            (await new EfCoreManagedElsaInstanceApiStore(db).ListInstancesAsync(workspace.Id, 1, 10)).Items);
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, listed.ObservedLifecycle);
+        Assert.NotEqual(ElsaObservedLifecycle.RecoveryRequired, listed.ObservedLifecycle);
+        Assert.Null(ManagedElsaInstanceCustomerProjection.CustomerLabel(listed.ObservedLifecycle));
     }
 
     [Fact]
@@ -2768,6 +2837,83 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.NotEqual(ElsaInstanceOperationState.Failed, deletion.Operation.State);
     }
 
+    [Fact]
+    public async Task No_op_reconciliation_advances_reason_clock_without_version_churn()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "No-op reason clock");
+        var workspaceStore = new DeploymentWorkspaceStore(db);
+        _ = await workspaceStore.ClaimNextQueuedRunAsync("deployment-worker", Now);
+        Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
+            Now.AddMinutes(10), TimeSpan.FromMinutes(5)));
+        db.ChangeTracker.Clear();
+
+        ElsaInstanceProviderObservation Tick(string correlation) =>
+            new ElsaInstanceProviderObservation(
+                ElsaInstanceProviderObservationKind.Confirmed,
+                ElsaObservedLifecycle.Provisioning,
+                ElsaInstanceProviderHealthGate.Unknown,
+                correlation)
+            {
+                ReasonCode = ManagedElsaReasonCodeCatalog.ProviderReconciliationUnknown
+            };
+
+        var firstAt = Now.AddMinutes(11);
+        var first = await new ElsaInstanceProviderReconciliationService(
+                CreateStore(db),
+                new QueueProviderPort(Tick("reason-clock-first")),
+                new FixedTimeProvider(firstAt))
+            .ReconcileAsync(workspace.Id, accepted.Operation.Id);
+        db.ChangeTracker.Clear();
+        var versionAfterFirst = await db.ElsaInstances
+            .Where(x => x.Id == accepted.Instance.Id)
+            .Select(x => x.Version)
+            .SingleAsync();
+        var afterFirst = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.ProviderReconciliationUnknown, afterFirst.ReconciliationDiagnosticCode);
+        Assert.NotNull(afterFirst.ReasonEnteredAt);
+        Assert.Null(afterFirst.RequiresHumanAt);
+        var enteredAt = afterFirst.ReasonEnteredAt.Value;
+
+        var noOpAt = firstAt.AddMinutes(1);
+        var noOp = await new ElsaInstanceProviderReconciliationService(
+                CreateStore(db),
+                new QueueProviderPort(Tick("reason-clock-noop")),
+                new FixedTimeProvider(noOpAt))
+            .ReconcileAsync(workspace.Id, accepted.Operation.Id);
+        db.ChangeTracker.Clear();
+        Assert.False(noOp.Replayed);
+        Assert.Equal(versionAfterFirst, noOp.Projection.InstanceVersion);
+        Assert.Equal(versionAfterFirst, await db.ElsaInstances
+            .Where(x => x.Id == accepted.Instance.Id)
+            .Select(x => x.Version)
+            .SingleAsync());
+        var afterNoOp = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(enteredAt, afterNoOp.ReasonEnteredAt);
+        Assert.Null(afterNoOp.RequiresHumanAt);
+
+        var lateAt = enteredAt + ManagedElsaReasonCodeCatalog.HumanRequiredAfter;
+        var late = await new ElsaInstanceProviderReconciliationService(
+                CreateStore(db),
+                new QueueProviderPort(Tick("reason-clock-late")),
+                new FixedTimeProvider(lateAt))
+            .ReconcileAsync(workspace.Id, accepted.Operation.Id);
+        db.ChangeTracker.Clear();
+        Assert.False(late.Replayed);
+        Assert.Equal(versionAfterFirst, late.Projection.InstanceVersion);
+        Assert.Equal(versionAfterFirst, await db.ElsaInstances
+            .Where(x => x.Id == accepted.Instance.Id)
+            .Select(x => x.Version)
+            .SingleAsync());
+        var afterLate = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(enteredAt, afterLate.ReasonEnteredAt);
+        Assert.Equal(lateAt.ToUniversalTime(), afterLate.RequiresHumanAt);
+        Assert.Equal(first.Projection.InstanceVersion, late.Projection.InstanceVersion);
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
@@ -2946,9 +3092,14 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(ElsaObservedLifecycle.Provisioning, inFlight.Projection.ObservedLifecycle);
         Assert.Equal(ElsaInstanceHealth.Unknown, inFlight.Projection.Health);
         Assert.NotEqual(ElsaObservedLifecycle.Ready, inFlight.Projection.ObservedLifecycle);
+        var storedInFlight = await db.ElsaInstances.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Instance.Id);
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, storedInFlight.ObservedLifecycle);
         var inFlightList = Assert.Single(
             (await new EfCoreManagedElsaInstanceApiStore(db).ListInstancesAsync(workspace.Id, 1, 10)).Items);
         Assert.Equal(ElsaObservedLifecycle.Provisioning, inFlightList.ObservedLifecycle);
+        Assert.NotEqual(ElsaObservedLifecycle.RecoveryRequired, inFlightList.ObservedLifecycle);
+        Assert.NotEqual(ElsaObservedLifecycle.RecoveryRequired, storedInFlight.ObservedLifecycle);
         Assert.Equal(ElsaInstanceHealth.Unknown, inFlightList.Health);
 
         var assignment = Assert.IsType<AzureProviderResourceAssignment>(await

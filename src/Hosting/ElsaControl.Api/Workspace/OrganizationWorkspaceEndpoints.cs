@@ -25,7 +25,7 @@ public static class OrganizationWorkspaceEndpoints
             return result.Succeeded
                 ? Results.Ok(new OrganizationWorkspacesResponse(result.Workspaces.Select(ToResponse).ToList()))
                 : ToHttpResult(result.Failure!.Value);
-        });
+        }).AllowCloudBff();
 
         group.MapPost("/", async (
             Guid organizationId,
@@ -99,7 +99,7 @@ public static class OrganizationWorkspaceEndpoints
             return result.Succeeded
                 ? Results.Ok(ToResponse(result.Workspace!))
                 : ToHttpResult(result.Failure!.Value);
-        });
+        }).AllowCloudBff();
 
         group.MapDelete("/{workspaceId:guid}/members/{accountId:guid}", async (
             Guid organizationId,
@@ -118,7 +118,7 @@ public static class OrganizationWorkspaceEndpoints
             return result.Succeeded
                 ? Results.NoContent()
                 : ToHttpResult(result.Failure!.Value);
-        });
+        }).AllowCloudBff();
 
         return endpoints;
     }

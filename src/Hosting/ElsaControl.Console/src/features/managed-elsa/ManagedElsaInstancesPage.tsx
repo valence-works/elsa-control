@@ -251,7 +251,8 @@ function shouldSurfaceLifecycleGuidance(instance: ManagedElsaInstance): boolean 
   return instance.observedLifecycle === "Unknown" ||
     instance.observedLifecycle === "Pending" ||
     instance.observedLifecycle === "Provisioning" ||
-    instance.observedLifecycle === "Failed";
+    instance.observedLifecycle === "Failed" ||
+    instance.observedLifecycle === "RecoveryRequired";
 }
 
 function InstanceHealthBadge({ instance }: { instance: ManagedElsaInstance }) {

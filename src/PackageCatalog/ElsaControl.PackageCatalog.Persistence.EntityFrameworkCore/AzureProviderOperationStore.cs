@@ -949,7 +949,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
                 entity.InstanceId is not { } instanceId || instanceId == Guid.Empty ||
                 entity.LifecycleAction is not { } lifecycleAction)
             {
-                const string missingIdentityCode = "provider.identity-binding-missing";
+                const string missingIdentityCode = ManagedElsaReasonCodeCatalog.ProviderIdentityBindingMissing;
                 const string missingIdentitySummary =
                     "The managed-instance provider operation is missing its durable identity binding.";
                 entity.Status = AzureProviderOperationStatus.RecoveryRequired;
