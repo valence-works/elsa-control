@@ -34,7 +34,9 @@ note, green CI, or GitHub's `reviewDecision`/`APPROVED` state.
 
 Stay consistent with the merge-authority comment on
 [issue #508](https://github.com/valence-works/elsa-control/issues/508#issuecomment-5969355661)
-(comment `5969355661`):
+(comment `5969355661`) and the standing human authority recorded on
+[issue #508](https://github.com/valence-works/elsa-control/issues/508#issuecomment-5970160426)
+(comment `5970160426`, Sipke, 3 Oct ~16:41 Europe/Amsterdam):
 
 - The gate review is authored by `sfmskywalker` and posted by Elsa Control
   Code Review. A review by any other author never counts, whatever its
@@ -52,31 +54,35 @@ Stay consistent with the merge-authority comment on
   including `APPROVED`, and any review on an earlier head.
 - A new push makes every earlier verdict stale; the new head needs
   re-review.
-- Green CI means the `CI` workflow run on the exact head SHA finished with
-  every job `success`, including `Full .NET restore, build, and test`,
+- Green CI (required-green) means the `CI` workflow run on the exact head
+  SHA finished with every job `success`, including
+  `Full .NET restore, build, and test`,
   `Build and smoke-test API provider image` and `Build and Test`. A running,
   cancelled or re-run-pending CI run is not green. Never use auto-merge.
 - Merge one PR at a time. Merge with the head pinned
   (`gh pr merge --match-head-commit <sha>`, or the REST merge `sha`
-  parameter). If main has moved since the APPROVE, update the branch first.
-  That creates a new head, which needs fresh green CI and a fresh Code
-  Review `**Verdict: APPROVE**` before merging. This is the #674/#675
-  failure.
+  parameter).
+- If main has moved since the head's CI ran or since the latest Code
+  Review verdict, update the branch first. That creates a new head, which
+  needs fresh green CI and a fresh Code Review `**Verdict: APPROVE**`
+  before merging. This is the #674/#675 failure.
 - Hand the advisory reviewer's findings to Elsa Control Code Review
   **before** it gives its verdict. They are input. Code Review decides
   which ones matter. A missing, slow or failed advisory review never
   blocks that verdict.
-- The current rule is that the Elsa Control CEO needs Sipke's explicit
-  per-PR yes before every merge. Sipke may later confirm a standing rule
-  in the CEO chat (Code Review `**Verdict: APPROVE**` plus green CI).
-  Until he does, per-PR yes applies.
-- The Elsa Control CEO merges after Code Review's latest
-  `**Verdict: APPROVE**` on the exact head plus Sipke's yes (per PR until
-  he confirms a standing rule in the CEO chat). The control room, Codex,
-  Cursor and other workers never merge, and never merge on a control-room
-  PASS.
-- Deploys, live billing, and destructive actions always need his explicit
-  yes.
+- Adequately reviewed means the latest Code Review verdict on that exact
+  head is `**Verdict: APPROVE**`. When that holds and CI is required-green
+  on the same SHA, the Codex control room may merge and deploy staging
+  without per-PR reconfirmation.
+- Production publication, production configuration changes, live payment
+  changes, and destructive actions against real customer resources still
+  need Sipke's explicit approval.
+- The Elsa Control CEO and CEO routines still need Sipke's explicit
+  per-PR yes for merges **they** perform, until he confirms a standing
+  rule for them in the CEO chat. That does not revoke the control room's
+  standing merge-and-staging authority.
+- Codex workers, Cursor, Claude, and other non-control-room workers never
+  merge, and never merge on a control-room PASS.
 
 The author or Cursor posts `ready-for-CR` naming the exact head once CI is
 green. The CEO, or a CEO routine, routes that head to Code Review.
