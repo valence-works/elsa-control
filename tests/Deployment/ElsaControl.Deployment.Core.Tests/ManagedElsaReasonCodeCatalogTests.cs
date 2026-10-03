@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using ElsaControl.Deployment.Core.Instances;
 using Xunit;
 
@@ -7,10 +6,6 @@ namespace ElsaControl.Deployment.Core.Tests;
 public sealed class ManagedElsaReasonCodeCatalogTests
 {
     private static readonly DateTimeOffset Now = new(2026, 10, 2, 12, 0, 0, TimeSpan.Zero);
-
-    private static readonly Regex ProductionReasonLiteral = new(
-        """"(provider\.(?:submission|reconciliation|identity-binding)[a-z0-9.-]*|azure\.deployment\.(?:failed|wait-exceeded|canceled)|azure\.recovery\.[a-z0-9.-]+|azure\.promotion\.(?:uncertain|rollback-uncertain)|staging\.lever\.[a-z0-9.-]+)"""",
-        RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     [Fact]
     public void Catalog_enumerates_every_defined_lifecycle_and_park_constant()
@@ -25,30 +20,43 @@ public sealed class ManagedElsaReasonCodeCatalogTests
             Assert.True(ManagedElsaReasonCodeCatalog.TryGet(code, out var entry), code);
             Assert.Equal(code, entry!.Code);
             Assert.Equal(ManagedElsaReasonCodeCatalog.Classify(code), entry.Class);
+            Assert.True(
+                ManagedElsaReasonLiteralScanner.IsCataloguedFamily(code),
+                "Declared prefixes must cover catalog family " + code);
+            Assert.True(
+                ManagedElsaReasonLiteralScanner.ProductionReasonLiteral.IsMatch("\"" + code + "\""),
+                "Scanner must cover catalog family " + code);
         }
 
+        Assert.Contains("deletion.", ManagedElsaReasonLiteralScanner.ReasonFamilyPrefixes, StringComparer.Ordinal);
+        Assert.Contains("assignment.rebind.", ManagedElsaReasonLiteralScanner.ReasonFamilyPrefixes, StringComparer.Ordinal);
         Assert.Equal(ManagedElsaReasonCodeCatalog.DefinedCodes.Count, ManagedElsaReasonCodeCatalog.ByCode.Count);
     }
 
     [Fact]
     public void Catalog_contains_every_reason_literal_production_writes()
     {
-        var missing = new SortedSet<string>(StringComparer.Ordinal);
-        foreach (var file in Directory.EnumerateFiles(Path.Combine(FindRepoRoot(), "src"), "*.cs", SearchOption.AllDirectories))
-        {
-            if (file.EndsWith("ManagedElsaReasonCodeCatalog.cs", StringComparison.Ordinal))
-                continue;
-
-            var text = File.ReadAllText(file);
-            foreach (Match match in ProductionReasonLiteral.Matches(text))
-            {
-                var code = match.Groups[1].Value;
-                if (!ManagedElsaReasonCodeCatalog.TryGet(code, out _))
-                    missing.Add($"{code} ({Path.GetRelativePath(FindRepoRoot(), file)})");
-            }
-        }
-
+        var missing = ManagedElsaReasonLiteralScanner.FindUncataloguedInProduction(FindRepoRoot());
         Assert.True(missing.Count == 0, "Uncatalogued production reason literals:\n" + string.Join('\n', missing));
+    }
+
+    [Fact]
+    public void Completeness_scan_fails_on_a_planted_uncatalogued_literal()
+    {
+        const string plantedRecovery = "azure.recovery.planted-uncatalogued";
+        const string plantedDeletion = "deletion.planted-uncatalogued";
+        const string plantedRebind = "assignment.rebind.planted-uncatalogued";
+        Assert.False(ManagedElsaReasonCodeCatalog.TryGet(plantedRecovery, out _));
+        Assert.False(ManagedElsaReasonCodeCatalog.TryGet(plantedDeletion, out _));
+        Assert.False(ManagedElsaReasonCodeCatalog.TryGet(plantedRebind, out _));
+        Assert.Equal(plantedRecovery, Assert.Single(ManagedElsaReasonLiteralScanner.FindUncatalogued(
+            $"operation.ReconciliationDiagnosticCode = \"{plantedRecovery}\";")));
+        Assert.Equal(plantedDeletion, Assert.Single(ManagedElsaReasonLiteralScanner.FindUncatalogued(
+            $"operation.ReconciliationDiagnosticCode = \"{plantedDeletion}\";")));
+        Assert.Equal(plantedRebind, Assert.Single(ManagedElsaReasonLiteralScanner.FindUncatalogued(
+            $"operation.ReconciliationDiagnosticCode = \"{plantedRebind}\";")));
+        Assert.Empty(ManagedElsaReasonLiteralScanner.FindUncatalogued(
+            $"operation.ReconciliationDiagnosticCode = \"{ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted}\";"));
     }
 
     [Theory]
@@ -68,10 +76,29 @@ public sealed class ManagedElsaReasonCodeCatalogTests
     [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadInProgress, ManagedElsaReasonClass.AutoResuming)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadObserved, ManagedElsaReasonClass.AutoResuming)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzurePromotionUncertain, ManagedElsaReasonClass.AutoResuming)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable, ManagedElsaReasonClass.Temporary)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryFoundationOutputsInvalid, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadOutputsInvalid, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoverySeedSecretsPartial, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationAmbiguous, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderIdentityBindingMissing, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.StagingLeverRecoveryRequired, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionLocalAbsent, ManagedElsaReasonClass.HealthyHandOff)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderConfirmedAbsent, ManagedElsaReasonClass.HealthyHandOff)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderUnavailable, ManagedElsaReasonClass.Temporary)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionAzureProviderUnavailable, ManagedElsaReasonClass.Temporary)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending, ManagedElsaReasonClass.Temporary)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderUncertain, ManagedElsaReasonClass.Temporary)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionRecoveryAuthorityUnavailable, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionRecoveryPlanUnavailable, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionCorrelationInvalid, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderCleanupFailed, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderAmbiguous, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionPredecessorRecoverySuperseded, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AssignmentRebindOperationsInFlight, ManagedElsaReasonClass.Temporary)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AssignmentRebindPlacementMismatch, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AssignmentRebindAmbiguous, ManagedElsaReasonClass.NeedsPerson)]
     public void Catalogued_codes_have_the_architect_class(string code, ManagedElsaReasonClass expected)
     {
         Assert.Equal(expected, ManagedElsaReasonCodeCatalog.Classify(code));
@@ -105,6 +132,10 @@ public sealed class ManagedElsaReasonCodeCatalogTests
         Assert.Equal(TimeSpan.FromMinutes(10), ManagedElsaReasonCodeCatalog.HumanRequiredAfter);
         Assert.False(ManagedElsaReasonCodeCatalog.RequiresHuman(
             ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, null, Now));
+        Assert.False(ManagedElsaReasonCodeCatalog.RequiresHuman(
+            ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable, Now, inside));
+        Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman(
+            ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable, Now, atBound));
     }
 
     [Fact]

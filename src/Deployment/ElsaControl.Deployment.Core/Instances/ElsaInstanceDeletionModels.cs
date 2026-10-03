@@ -16,7 +16,32 @@ public enum ElsaInstanceCleanupObservationKind
 
 public static class ElsaInstanceDeletionDiagnosticCodes
 {
-    public const string PredecessorRecoverySuperseded = "deletion.predecessor-recovery-superseded";
+    public const string LocalAbsent = ManagedElsaReasonCodeCatalog.DeletionLocalAbsent;
+    public const string ProviderConfirmedAbsent = ManagedElsaReasonCodeCatalog.DeletionProviderConfirmedAbsent;
+    public const string ProviderUnavailable = ManagedElsaReasonCodeCatalog.DeletionProviderUnavailable;
+    public const string AzureProviderUnavailable = ManagedElsaReasonCodeCatalog.DeletionAzureProviderUnavailable;
+    public const string ProviderCleanupPending = ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending;
+    public const string ProviderAssignmentUnavailable = ManagedElsaReasonCodeCatalog.DeletionProviderAssignmentUnavailable;
+    public const string ProviderEvidenceUnavailable = ManagedElsaReasonCodeCatalog.DeletionProviderEvidenceUnavailable;
+    public const string ProviderPlanUnavailable = ManagedElsaReasonCodeCatalog.DeletionProviderPlanUnavailable;
+    public const string RecoveryCapabilityUnavailable = ManagedElsaReasonCodeCatalog.DeletionRecoveryCapabilityUnavailable;
+    public const string RecoveryAssignmentIncomplete = ManagedElsaReasonCodeCatalog.DeletionRecoveryAssignmentIncomplete;
+    public const string ClaimConflict = ManagedElsaReasonCodeCatalog.DeletionClaimConflict;
+    public const string CorrelationInvalid = ManagedElsaReasonCodeCatalog.DeletionCorrelationInvalid;
+    public const string ItemInvalid = ManagedElsaReasonCodeCatalog.DeletionItemInvalid;
+    public const string ProviderAssignmentInvalid = ManagedElsaReasonCodeCatalog.DeletionProviderAssignmentInvalid;
+    public const string ProviderCorrelationInvalid = ManagedElsaReasonCodeCatalog.DeletionProviderCorrelationInvalid;
+    public const string ProviderCleanupFailed = ManagedElsaReasonCodeCatalog.DeletionProviderCleanupFailed;
+    public const string RecoveryAuthorityUnavailable = ManagedElsaReasonCodeCatalog.DeletionRecoveryAuthorityUnavailable;
+    public const string RecoveryPlanUnavailable = ManagedElsaReasonCodeCatalog.DeletionRecoveryPlanUnavailable;
+    public const string RecoveryAssignmentInvalid = ManagedElsaReasonCodeCatalog.DeletionRecoveryAssignmentInvalid;
+    public const string RecoveryClaimLost = ManagedElsaReasonCodeCatalog.DeletionRecoveryClaimLost;
+    public const string PredecessorRecoverySuperseded = ManagedElsaReasonCodeCatalog.DeletionPredecessorRecoverySuperseded;
+    public const string ProviderUncertain = ManagedElsaReasonCodeCatalog.DeletionProviderUncertain;
+    public const string ProviderUnknown = ManagedElsaReasonCodeCatalog.DeletionProviderUnknown;
+    public const string ProviderAbsent = ManagedElsaReasonCodeCatalog.DeletionProviderAbsent;
+    public const string ProviderAmbiguous = ManagedElsaReasonCodeCatalog.DeletionProviderAmbiguous;
+    public const string ProviderFinalizationPending = ManagedElsaReasonCodeCatalog.DeletionProviderFinalizationPending;
 }
 
 public sealed record ElsaInstanceCleanupEvidence
