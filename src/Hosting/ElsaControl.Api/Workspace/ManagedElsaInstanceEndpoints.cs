@@ -949,7 +949,7 @@ public static class ManagedElsaInstanceEndpoints
                 ["instance"] = $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}"
             })
         {
-            ReasonCode = ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation)
+            ReasonCode = ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation.ReasonCode)
         };
 
     internal static ManagedElsaInstanceDeleteOperationResponse ToDeleteOperationResponse(ElsaInstanceOperationSummary operation) =>

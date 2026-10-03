@@ -26,13 +26,35 @@ public static class ManagedElsaInstanceCustomerProjection
         "Deletion needs operator recovery. Contact support. " +
         "Refresh to check again, or quote the operation reference if you contact support.";
     public const string RecoveryRequiredUnavailableReasonCode = "instance.recovery-required";
+    public const string ProvisioningUnavailableReasonCode = "instance.provisioning";
+    public const string FailedUnavailableReasonCode = "instance.failed";
+    public const string UnknownUnavailableReasonCode = "instance.unknown";
+    public const string GenericUnavailableReasonCode = "instance.unavailable";
+    public const string NotAuthorizedUnavailableReasonCode = "not-authorized";
+    public const string HandoffUnavailableReasonCode = "handoff-unavailable";
+    public const string IdentityUnavailableReasonCode = "identity-unavailable";
     public const string NeedsAttentionLabel = "Needs attention";
 
     private static readonly FrozenSet<string> CustomerSafeOperationReasonCodes = new HashSet<string>(StringComparer.Ordinal)
     {
         ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight,
         ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale,
-        ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending
+        ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending,
+        RecoveryRequiredUnavailableReasonCode,
+        ProvisioningUnavailableReasonCode,
+        FailedUnavailableReasonCode,
+        UnknownUnavailableReasonCode,
+        GenericUnavailableReasonCode,
+        NotAuthorizedUnavailableReasonCode,
+        HandoffUnavailableReasonCode,
+        IdentityUnavailableReasonCode,
+        ElsaInstanceCommercialOperation.EntitlementRequired,
+        ElsaInstanceCommercialOperation.EntitlementExpired,
+        ElsaInstanceCommercialOperation.SubscriptionStateRequired,
+        ElsaInstanceCommercialOperation.LifecycleConstrained,
+        ElsaInstanceCommercialOperation.InstanceLimitReached,
+        ElsaInstanceCommercialOperation.BindingRequired,
+        ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded
     }.ToFrozenSet(StringComparer.Ordinal);
 
     public static ElsaObservedLifecycle ProjectObservedLifecycle(
@@ -199,23 +221,23 @@ public static class ManagedElsaInstanceCustomerProjection
     {
         ElsaInstanceValue.RequireEnum(observedLifecycle, nameof(observedLifecycle));
         if (!canOpen)
-            return "not-authorized";
+            return NotAuthorizedUnavailableReasonCode;
         if (IsParkedCustomerDelete(activeOperation))
             return CustomerSafeOperationReason(activeOperation) ?? RecoveryRequiredUnavailableReasonCode;
         if (observedLifecycle == ElsaObservedLifecycle.RecoveryRequired)
             return RecoveryRequiredUnavailableReasonCode;
         if (IsKnownInProgress(observedLifecycle))
-            return "instance.provisioning";
+            return ProvisioningUnavailableReasonCode;
         if (observedLifecycle == ElsaObservedLifecycle.Failed)
-            return "instance.failed";
+            return FailedUnavailableReasonCode;
         if (observedLifecycle == ElsaObservedLifecycle.Unknown)
-            return "instance.unknown";
+            return UnknownUnavailableReasonCode;
         if (!healthy)
-            return "instance.unavailable";
+            return GenericUnavailableReasonCode;
         if (!handoffConfigured)
-            return "handoff-unavailable";
+            return HandoffUnavailableReasonCode;
         if (!hasIdentity)
-            return "identity-unavailable";
+            return IdentityUnavailableReasonCode;
         return null;
     }
 
@@ -229,9 +251,9 @@ public static class ManagedElsaInstanceCustomerProjection
         };
 
     /// <summary>
-    /// Allowlisted cleanup, progress, and recovery codes for customer Delete,
-    /// generic operation, and list contracts. Unknown provider diagnostics,
-    /// Azure inventory, and resource identifiers are discarded.
+    /// Allowlisted customer operation, cleanup, progress, and recovery codes.
+    /// Unknown provider diagnostics, Azure inventory, and resource identifiers
+    /// are discarded. Generic operation and Delete DTOs share this boundary.
     /// </summary>
     public static string? CustomerSafeOperationReason(string? reasonCode) =>
         !string.IsNullOrWhiteSpace(reasonCode) && CustomerSafeOperationReasonCodes.Contains(reasonCode)

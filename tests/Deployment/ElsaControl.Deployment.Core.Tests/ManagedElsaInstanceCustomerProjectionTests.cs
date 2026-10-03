@@ -662,6 +662,9 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending)]
+    [InlineData(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReasonCode)]
+    [InlineData(ElsaInstanceCommercialOperation.EntitlementRequired)]
+    [InlineData(ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded)]
     public void Customer_safe_operation_reason_keeps_allowlisted_failure_and_reason_codes(string reasonCode)
     {
         var now = Now;

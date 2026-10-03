@@ -3488,6 +3488,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending)]
+    [InlineData(ElsaInstanceCommercialOperation.EntitlementRequired)]
     public async Task Generic_operation_dto_keeps_allowlisted_reason_and_failure_codes(string reasonCode)
     {
         var slug = $"generic-operation-allow-{reasonCode.Split('.')[^1]}";
@@ -3561,6 +3562,31 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         var kept = ManagedElsaInstanceEndpoints.ToOperationResponse(workspaceId, instanceId, allowlisted);
         Assert.Equal(ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight, kept.ReasonCode);
         Assert.Equal(ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending, kept.FailureCode);
+
+        var mixed = ManagedElsaInstanceEndpoints.ToOperationResponse(
+            workspaceId, instanceId,
+            unsupported with
+            {
+                FailureCode = ElsaInstanceCommercialOperation.EntitlementRequired,
+                ReasonCode = "provider.reconciliation.unsupported-synthetic"
+            });
+        var acceptedJson = System.Text.Json.JsonSerializer.Serialize(
+            new ManagedElsaInstanceAcceptedResponse(
+                ManagedElsaInstanceEndpoints.ToResponse(
+                    ElsaInstance.Hydrate(instanceId, Guid.NewGuid(), workspaceId, "Claims runtime", "generic-allowlist",
+                        Intent(), ElsaObservedLifecycle.Unknown, ElsaInstanceHealth.Unknown, 1,
+                        lastOperationId: new ElsaLastOperationId(unsupported.Id)),
+                    canOpen: true, workspaceId, activeOperation: unsupported),
+                mixed,
+                new Dictionary<string, string>
+                {
+                    ["self"] = $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations/{unsupported.Id:D}"
+                }),
+            ControlApiTestApplication.JsonOptions);
+        Assert.Equal(ElsaInstanceCommercialOperation.EntitlementRequired, mixed.FailureCode);
+        Assert.Null(mixed.ReasonCode);
+        Assert.DoesNotContain("provider.reconciliation.unsupported-synthetic", acceptedJson, StringComparison.Ordinal);
+        Assert.Contains(ElsaInstanceCommercialOperation.EntitlementRequired, acceptedJson, StringComparison.Ordinal);
     }
 
     [Fact]
