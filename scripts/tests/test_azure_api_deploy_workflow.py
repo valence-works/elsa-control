@@ -52,6 +52,40 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertNotIn("--registry-password", self.source)
         self.assertNotIn("--registry-username", self.source)
 
+    def test_run_blocks_have_yaml_indented_content(self) -> None:
+        """Catch workflow validation failures caused by unindented heredoc lines."""
+
+        lines = self.source.splitlines()
+        run_block_count = 0
+        for line_number, line in enumerate(lines):
+            if not line.startswith("        run: |"):
+                continue
+
+            run_block_count += 1
+            key_indent = len(line) - len(line.lstrip(" "))
+            next_step = next(
+                (
+                    index
+                    for index in range(line_number + 1, len(lines))
+                    if lines[index].startswith("      - name:")
+                ),
+                len(lines),
+            )
+            content = lines[line_number + 1 : next_step]
+            self.assertTrue(
+                any(candidate.strip() for candidate in content),
+                f"run block on line {line_number + 1} has no content",
+            )
+            for offset, candidate in enumerate(content, line_number + 2):
+                if candidate.strip():
+                    self.assertGreaterEqual(
+                        len(candidate) - len(candidate.lstrip(" ")),
+                        key_indent + 2,
+                        f"workflow content on line {offset} is outside its YAML block",
+                    )
+
+        self.assertGreater(run_block_count, 0)
+
     def test_deploy_and_rollback_use_the_captured_runtime_mode(self) -> None:
         self.assertIn("env.DEPLOY_MODE != 'build'", self.source)
         self.assertIn("env.DEPLOY_MODE == 'promote'", self.source)

@@ -431,13 +431,13 @@ jobs:
           if [ "${#missing[@]}" -eq 0 ]; then
             if [ "$TARGET_ENVIRONMENT" = "production" ] && [ "$DEPLOY_MODE" != "build" ]; then
               if ! python3 - <<'PY'
-from scripts.production_stripe_reconcile import ProductionAuditConfig, ReconciliationError
+          from scripts.production_stripe_reconcile import ProductionAuditConfig, ReconciliationError
 
-try:
-    ProductionAuditConfig.from_environment()
-except (ReconciliationError, ValueError):
-    raise SystemExit(1)
-PY
+          try:
+              ProductionAuditConfig.from_environment()
+          except (ReconciliationError, ValueError):
+              raise SystemExit(1)
+          PY
               then
                 echo "::error::Production Stripe audit configuration is invalid; refusing to mutate Azure."
                 exit 1
