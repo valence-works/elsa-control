@@ -360,7 +360,7 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
             ExpectedOperationId: accepted.Operation.Id));
 
         Assert.Equal(ElsaInstanceOperationState.Queued, recovered.Operation.State);
-        Assert.Equal(accepted.Instance.Version, recovered.Operation.RecoveryExpectedVersion);
+        Assert.Equal(result.Projection.InstanceVersion, recovered.Operation.RecoveryExpectedVersion);
         Assert.Equal(3, port.AutoResumeCount);
     }
 

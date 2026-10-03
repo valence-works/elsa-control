@@ -2173,7 +2173,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         {
             "PATCH /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}",
             "POST /api/admin/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/operations/{operationId:guid}/recover",
-            "POST /api/workspaces/{workspaceId:guid}/instances",
+            "POST /api/workspaces/{workspaceId:guid}/instances/",
             "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/apply-release",
             "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete",
             "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete-confirmations",
@@ -2286,7 +2286,11 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         }
 
         var recoverInstance = await CreateReadyInstanceAsync(
-            app, owner, workspaceId, "mutation-guard-admin-recover-runtime");
+            app, owner, workspaceId, "mutation-guard-admin-recover-runtime",
+            Intent() with
+            {
+                Release = new ElsaReleaseIntent("valence-runtime", "3.8", requestedVersion: "3.8.4", channel: "stable")
+            });
         using var recoverApply = await owner.SendAsync(CustomerMutation(
             HttpMethod.Post,
             $"/api/workspaces/{workspaceId:D}/instances/{recoverInstance.Instance.InstanceId:D}/apply-release",
@@ -3696,6 +3700,8 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
             _ => new(action)
         };
 
+        if (action == ElsaInstanceOperationAction.Start)
+            await MarkInstanceStoppedAsync(app, instanceId);
         if (action == ElsaInstanceOperationAction.Retry)
             await MarkInstanceFailedAsync(app, instanceId);
         if (action == ElsaInstanceOperationAction.Recover)
@@ -3739,6 +3745,19 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
             UPDATE ElsaInstances
             SET ObservedLifecycle = {ElsaObservedLifecycle.Failed.ToString()},
                 Health = {ElsaInstanceHealth.Degraded.ToString()}
+            WHERE Id = {instanceId}
+            """);
+    }
+
+    private static async Task MarkInstanceStoppedAsync(ControlApiTestApplication app, Guid instanceId)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstances
+            SET DesiredLifecycle = {ElsaDesiredLifecycle.Stopped.ToString()},
+                ObservedLifecycle = {ElsaObservedLifecycle.Stopped.ToString()},
+                Health = {ElsaInstanceHealth.Healthy.ToString()}
             WHERE Id = {instanceId}
             """);
     }
