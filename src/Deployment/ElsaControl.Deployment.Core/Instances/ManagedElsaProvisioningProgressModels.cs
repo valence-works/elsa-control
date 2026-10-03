@@ -35,7 +35,14 @@ public sealed record ManagedElsaProvisioningProgress(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? BlockingOperationStage = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? StaleReason = null);
+    string? StaleReason = null,
+    // Lifecycle attempt metadata is optional for legacy rows without a
+    // matching recovery authority. It is safe to expose because it contains
+    // no provider identifiers or diagnostics.
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? AttemptNumber = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    DateTimeOffset? AttemptStartedAt = null);
 
 /// <summary>A stable customer-facing provisioning stage.</summary>
 public sealed record ManagedElsaProvisioningStage(

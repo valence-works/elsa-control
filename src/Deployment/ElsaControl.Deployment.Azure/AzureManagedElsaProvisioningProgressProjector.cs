@@ -23,7 +23,8 @@ internal enum AzureManagedElsaProvisioningMappingAnomaly
 {
     None = 0,
     UnknownPhase = 1,
-    NonMonotonicStage = 2
+    NonMonotonicStage = 2,
+    UnknownAttemptedStep = 4
 }
 
 /// <summary>
@@ -62,7 +63,12 @@ public static class AzureManagedElsaProvisioningProgressProjector
         }
 
         if (provider is not null)
+        {
             Observe(provider.Phase);
+            if (provider.AttemptedStep is { } attemptedStep &&
+                (!Enum.IsDefined(attemptedStep) || MapStage(attemptedStep) is null))
+                result |= AzureManagedElsaProvisioningMappingAnomaly.UnknownAttemptedStep;
+        }
 
         return result;
 
@@ -101,16 +107,31 @@ public static class AzureManagedElsaProvisioningProgressProjector
             .Select(mapped => mapped!)
             .ToList();
 
-        var providerStage = provider is null ? null : MapStage(provider.Phase);
+        string? providerStage = null;
+        var currentStageUnavailable = false;
+        if (provider is not null)
+        {
+            providerStage = MapCurrentStage(provider);
+            currentStageUnavailable = providerStage is null;
+        }
         var eventStage = events
             .Select(activity => StageIndex(activity.Stage))
             .Where(index => index >= 0)
             .Select(index => (int?)index)
             .DefaultIfEmpty()
             .Max();
-        var knownStage = Max(providerStage is null ? null : StageIndex(providerStage), eventStage);
+        // A provider row describes the current attempt. Historical transitions
+        // can fill a provider-free snapshot, but must never advance the stage
+        // past an authoritative current provider step.
+        var knownStage = currentStageUnavailable
+            ? null
+            : providerStage is not null
+                ? StageIndex(providerStage)
+                : eventStage;
 
         var startedAt = lifecycle?.AcceptedAt.ToUniversalTime() ?? provider?.CreatedAt.ToUniversalTime();
+        var attemptStartedAt = lifecycle?.AttemptStartedAt ??
+            (lifecycle?.AttemptNumber == 1 ? lifecycle.AcceptedAt : null);
         var lastUpdatedAt = Latest(
             lifecycle?.AcceptedAt,
             lifecycle?.StartedAt,
@@ -264,7 +285,7 @@ public static class AzureManagedElsaProvisioningProgressProjector
                 ? ManagedElsaProvisioningProgressStates.Queued
                 : ManagedElsaProvisioningProgressStates.Active;
             knownStage ??= 0;
-            if (healthyContinuation &&
+            if (healthyContinuation && !currentStageUnavailable && provider?.AttemptedStep is null &&
                 string.Equals(input.RecoveryReason, ProviderReconciliationHealthUnknown, StringComparison.Ordinal))
             {
                 state = ManagedElsaProvisioningProgressStates.Active;
@@ -274,9 +295,9 @@ public static class AzureManagedElsaProvisioningProgressProjector
         else if (provider is not null)
         {
             state = ManagedElsaProvisioningProgressStates.Active;
-            if (healthyContinuation && providerAcceptedOrQueued)
+            if (healthyContinuation && !currentStageUnavailable && provider.AttemptedStep is null && providerAcceptedOrQueued)
                 knownStage = Max(knownStage, StageIndex(ManagedElsaProvisioningProgressStages.RequestAccepted));
-            if (healthyContinuation &&
+            if (healthyContinuation && !currentStageUnavailable && provider.AttemptedStep is null &&
                 (string.Equals(input.RecoveryReason, ProviderReconciliationHealthUnknown, StringComparison.Ordinal) ||
                  (provider.Status == AzureProviderOperationStatus.Succeeded && !observedReady)))
             {
@@ -318,7 +339,7 @@ public static class AzureManagedElsaProvisioningProgressProjector
                 "engine.ready",
                 (completedAt ?? lastUpdatedAt ?? startedAt ?? now).ToUniversalTime()));
         }
-        else if (blocked)
+        else if (blocked && !currentStageUnavailable)
         {
             var sequence = NextSequence(events);
             var stage = StageAt(knownStage ?? 0);
@@ -359,9 +380,10 @@ public static class AzureManagedElsaProvisioningProgressProjector
             stageTimes,
             completedAt,
             startedAt,
-            lastUpdatedAt);
+            lastUpdatedAt,
+            currentStageUnavailable);
 
-        var currentStage = allReady || knownStage is null ? null : StageAt(knownStage.Value);
+        var currentStage = allReady || currentStageUnavailable || knownStage is null ? null : StageAt(knownStage.Value);
         if (state == ManagedElsaProvisioningProgressStates.WaitingForPriorOperation)
             currentStage = waitingStage ?? ManagedElsaProvisioningProgressStages.WaitingForPriorOperation;
         else if (state == ManagedElsaProvisioningProgressStates.EntitlementHeld)
@@ -380,7 +402,9 @@ public static class AzureManagedElsaProvisioningProgressProjector
             activity,
             blockingOperationId,
             blockingOperationStage,
-            staleReason);
+            staleReason,
+            lifecycle?.AttemptNumber,
+            attemptStartedAt?.ToUniversalTime());
     }
 
     private static ManagedElsaProvisioningProgress Unavailable(
@@ -413,7 +437,10 @@ public static class AzureManagedElsaProvisioningProgressProjector
                         ManagedElsaProvisioningProgressActivityStatuses.Started,
                         "request.accepted",
                         lifecycle.AcceptedAt.ToUniversalTime())
-                ]);
+                ],
+            AttemptNumber: lifecycle?.AttemptNumber,
+            AttemptStartedAt: (lifecycle?.AttemptStartedAt ??
+                (lifecycle?.AttemptNumber == 1 ? lifecycle.AcceptedAt : null))?.ToUniversalTime());
 
     private static IReadOnlyList<ManagedElsaProvisioningStage> BuildStages(
         string state,
@@ -423,7 +450,8 @@ public static class AzureManagedElsaProvisioningProgressProjector
         IReadOnlyDictionary<int, (DateTimeOffset StartedAt, DateTimeOffset CompletedAt)> times,
         DateTimeOffset? completedAt,
         DateTimeOffset? startedAt,
-        DateTimeOffset? lastUpdatedAt)
+        DateTimeOffset? lastUpdatedAt,
+        bool stageUnavailable)
     {
         var stages = new List<ManagedElsaProvisioningStage>(ManagedElsaProvisioningProgressStages.Ordered.Count);
         var current = knownStage;
@@ -437,6 +465,16 @@ public static class AzureManagedElsaProvisioningProgressProjector
 
             string status;
             DateTimeOffset? stageCompletedAt = null;
+            if (stageUnavailable && !allReady)
+            {
+                stages.Add(new ManagedElsaProvisioningStage(
+                    code,
+                    ManagedElsaProvisioningProgressStageStatuses.Unknown,
+                    stageStartedAt,
+                    null));
+                continue;
+            }
+
             if (allReady)
             {
                 status = ManagedElsaProvisioningProgressStageStatuses.Completed;
@@ -527,6 +565,25 @@ public static class AzureManagedElsaProvisioningProgressProjector
         AzureProviderOperationPhase.WorkloadSubmitted or AzureProviderOperationPhase.WorkloadReady => ManagedElsaProvisioningProgressStages.RuntimeDeployment,
         AzureProviderOperationPhase.HealthVerified => ManagedElsaProvisioningProgressStages.HealthVerification,
         AzureProviderOperationPhase.TrafficPromoted => ManagedElsaProvisioningProgressStages.TrafficRouting,
+        _ => null
+    };
+
+    private static string? MapCurrentStage(AzureProviderOperation provider) =>
+        provider.AttemptedStep is { } attemptedStep
+            ? Enum.IsDefined(attemptedStep) ? MapStage(attemptedStep) : null
+            : MapStage(provider.Phase);
+
+    private static string? MapStage(AzureProviderRunnerStep step) => step switch
+    {
+        AzureProviderRunnerStep.Foundation => ManagedElsaProvisioningProgressStages.HostingFoundation,
+        AzureProviderRunnerStep.AcrPull or AzureProviderRunnerStep.SeedSecrets or
+            AzureProviderRunnerStep.SqlBootstrap or AzureProviderRunnerStep.SqlFirewallCreate or
+            AzureProviderRunnerStep.SqlBootstrapScript or AzureProviderRunnerStep.SqlFirewallCleanup =>
+            ManagedElsaProvisioningProgressStages.Configuration,
+        AzureProviderRunnerStep.Workload => ManagedElsaProvisioningProgressStages.RuntimeDeployment,
+        AzureProviderRunnerStep.Health => ManagedElsaProvisioningProgressStages.HealthVerification,
+        AzureProviderRunnerStep.Promotion or AzureProviderRunnerStep.RestoreStableTraffic =>
+            ManagedElsaProvisioningProgressStages.TrafficRouting,
         _ => null
     };
 

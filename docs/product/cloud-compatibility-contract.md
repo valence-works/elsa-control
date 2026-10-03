@@ -50,6 +50,17 @@ The Cloud BFF token is admitted only on the explicit route allowlist in
 descriptive contract identifiers, not substitutes for that allowlist or for
 normal Control authorization.
 
+The provisioning-progress response keeps `startedAt` as the original lifecycle
+acceptance time. Its optional `attemptNumber` identifies the current lifecycle
+attempt, and `attemptStartedAt` is the acceptance time for that attempt. The
+first attempt uses lifecycle acceptance; a recovery attempt uses its matching
+append-only recovery ledger entry. If legacy data has no unambiguous ledger
+authority, `attemptStartedAt` is omitted. These fields are presentation
+metadata and do not change the existing stale-progress clock. `currentStage`
+and the ordered stage entries use stable customer tokens; provider phases and
+runner steps are mapped inside Control, and unknown current mapping leaves the
+stage status unknown rather than guessing from historical activity.
+
 ## Evolution and rollout
 
 - `contractVersion` versions the envelope schema, not the Cloud application,

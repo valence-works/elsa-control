@@ -134,7 +134,11 @@ public sealed record ElsaInstanceLifecycleTopologyOperation(
     // Set only for WaitingForPriorOperation. The projector resolves this id
     // inside the same organization and instance, one level, and fails closed
     // when it is foreign, mismatched, or missing.
-    Guid? BlockingOperationId = null);
+    Guid? BlockingOperationId = null,
+    // The authoritative acceptance time for this lifecycle attempt. Initial
+    // attempts use AcceptedAt; recovery attempts use the matching append-only
+    // recovery ledger row and remain null when legacy authority is absent.
+    [property: JsonIgnore] DateTimeOffset? AttemptStartedAt = null);
 
 public sealed record ElsaInstanceLifecycleTopologyOutbox(
     Guid Id,

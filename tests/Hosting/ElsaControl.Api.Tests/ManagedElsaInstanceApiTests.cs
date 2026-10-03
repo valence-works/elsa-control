@@ -3835,6 +3835,8 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.NotNull(progress);
         Assert.Equal(ManagedElsaProvisioningProgressStates.Queued, progress.State);
         Assert.Equal("azure", progress.Provider);
+        Assert.Equal(1, progress.AttemptNumber);
+        Assert.Equal(progress.StartedAt, progress.AttemptStartedAt);
         Assert.Equal(ManagedElsaProvisioningProgressStages.RequestAccepted, progress.CurrentStage);
         Assert.Equal(ManagedElsaProvisioningProgressStages.Ordered, progress.Stages.Select(stage => stage.Code));
         Assert.Equal(ManagedElsaProvisioningProgressStageStatuses.Current, progress.Stages[0].Status);
