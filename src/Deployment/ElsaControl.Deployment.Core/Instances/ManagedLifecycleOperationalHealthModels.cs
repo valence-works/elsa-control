@@ -62,7 +62,8 @@ public sealed record ManagedLifecycleOperationSnapshot
         DateTimeOffset? startedAt = null,
         string? diagnosticCode = null,
         DateTimeOffset? heartbeatAt = null,
-        DateTimeOffset? lastProgressAt = null)
+        DateTimeOffset? lastProgressAt = null,
+        DateTimeOffset? requiresHumanAt = null)
     {
         if (id == Guid.Empty)
             throw new ArgumentException("Operation ID is required.", nameof(id));
@@ -89,6 +90,7 @@ public sealed record ManagedLifecycleOperationSnapshot
         HeartbeatAt = heartbeatAtUtc;
         LastProgressAt = lastProgressAtUtc;
         DiagnosticCode = ManagedLifecycleOperationalHealthValue.OptionalDiagnosticCode(diagnosticCode, nameof(diagnosticCode));
+        RequiresHumanAt = requiresHumanAt?.ToUniversalTime();
     }
 
     public Guid Id { get; }
@@ -106,6 +108,8 @@ public sealed record ManagedLifecycleOperationSnapshot
     public DateTimeOffset? LastProgressAt { get; }
 
     public string? DiagnosticCode { get; }
+
+    public DateTimeOffset? RequiresHumanAt { get; }
 }
 
 /// <summary>

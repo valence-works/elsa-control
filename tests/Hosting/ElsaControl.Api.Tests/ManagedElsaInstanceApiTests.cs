@@ -2346,9 +2346,11 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         var instance = ElsaInstance.Hydrate(instanceId, Guid.NewGuid(), Guid.NewGuid(), "Claims runtime", "claims-runtime",
             Intent(), ElsaObservedLifecycle.Unknown, ElsaInstanceHealth.Unknown, 4,
             lastOperationId: new ElsaLastOperationId(Guid.NewGuid()));
+        var now = DateTimeOffset.UtcNow;
         var operation = new ElsaInstanceOperationSummary(
             Guid.NewGuid(), instanceId, ElsaInstanceOperationAction.Create, ElsaInstanceOperationState.RecoveryRequired,
-            1, 1, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null, null, null, null, null, null, null);
+            1, 1, now, now, null, null, null, null, null, null, null,
+            ReasonEnteredAt: now, RequiresHumanAt: now);
 
         var response = ManagedElsaInstanceEndpoints.ToResponse(instance, canOpen: true, instance.WorkspaceId, activeOperation: operation);
 
@@ -2842,7 +2844,8 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         var operation = new ElsaInstanceOperationSummary(
             Guid.NewGuid(), instanceId, ElsaInstanceOperationAction.UpdateIntent,
             ElsaInstanceOperationState.RecoveryRequired, 1, 1, now, now, null, null, null, null, null, null, null,
-            RecoveryReason: recoveryReason, UpdatedAt: now);
+            RecoveryReason: recoveryReason, UpdatedAt: now, ReasonEnteredAt: now,
+            RequiresHumanAt: ManagedElsaReasonCodeCatalog.RequiresHuman(recoveryReason, now, now) ? now : null);
         return (instance, identity, operation);
     }
 

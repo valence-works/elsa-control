@@ -139,6 +139,11 @@ public sealed class EfCoreManagedElsaInstanceOperationalStore(CatalogDbContext d
             var diagnosticCode = entity.State == ElsaInstanceOperationState.Failed
                 ? TrySafeDiagnosticCode(entity.FailureCode) ?? TrySafeDiagnosticCode(entity.ReconciliationDiagnosticCode)
                 : TrySafeDiagnosticCode(entity.ReconciliationDiagnosticCode) ?? TrySafeDiagnosticCode(entity.FailureCode);
+            var parkReason = ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                entity.FailureCode,
+                entity.ReconciliationDiagnosticCode);
+            if (entity.State == ElsaInstanceOperationState.RecoveryRequired)
+                diagnosticCode = TrySafeDiagnosticCode(parkReason) ?? diagnosticCode;
             return new ManagedLifecycleOperationSnapshot(
                 entity.Id,
                 entity.State,
@@ -146,7 +151,8 @@ public sealed class EfCoreManagedElsaInstanceOperationalStore(CatalogDbContext d
                 entity.AcceptedAt,
                 entity.StartedAt,
                 diagnosticCode,
-                entity.HeartbeatAt);
+                entity.HeartbeatAt,
+                requiresHumanAt: entity.RequiresHumanAt);
         }
         catch (ArgumentException)
         {

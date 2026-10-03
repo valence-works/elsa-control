@@ -19,6 +19,10 @@ public static class ManagedLifecycleTelemetry
 
     public const string WorkerActivityName = "managed_lifecycle.worker";
     public const string ReconciliationActivityName = "managed_lifecycle.reconciliation";
+    public const string RecoveryRequiredEnteredActivityName = "managed_lifecycle.recovery_required.entered";
+    public const string AppDependenciesTableName = "AppDependencies";
+    public const string StagingEnvironment = "staging";
+    public const string ProductionEnvironment = "production";
 
     public const string CompletionCounterName = "managed_lifecycle.operations.completed";
     public const string ErrorCounterName = "managed_lifecycle.operations.errors";
@@ -26,6 +30,8 @@ public static class ManagedLifecycleTelemetry
     public const string RetryCounterName = "managed_lifecycle.operations.retries";
     public const string DurationHistogramName = "managed_lifecycle.operations.duration";
     public const string EndpointHealthCounterName = "managed_lifecycle.endpoint.health.evaluations";
+    public const string RecoveryRequiredClockScanFailureCounterName =
+        "managed_lifecycle.recovery_required.clock_scan.failures";
 
     public const string ActionTag = "action";
     public const string OutcomeTag = "outcome";
@@ -38,9 +44,12 @@ public static class ManagedLifecycleTelemetry
     public const string WorkspaceIdTag = "workspace.id";
     public const string InstanceIdTag = "instance.id";
     public const string OperationIdTag = "operation.id";
+    public const string DedupeIdentityTag = "dedupe_identity";
+    public const string EnvironmentTag = "environment";
 
     private const string Unknown = "unknown";
     private const string None = "none";
+    private static string? _alertEnvironment;
     private static readonly HashSet<string> KnownDiagnosticCodes =
     [
         "lifecycle.claim.conflict",
@@ -71,7 +80,12 @@ public static class ManagedLifecycleTelemetry
         ManagedElsaReasonCodeCatalog.ProviderReconciliationInProgress,
         ManagedElsaReasonCodeCatalog.ProviderReconciliationRetrySafe,
         ManagedElsaReasonCodeCatalog.ProviderReconciliationUnavailable,
-        ManagedElsaReasonCodeCatalog.ProviderReconciliationUnknown
+        ManagedElsaReasonCodeCatalog.ProviderReconciliationUnknown,
+        "provider.reconciliation.required",
+        "managed.lifecycle.recovery-required",
+        ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+        ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled,
+        ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted
     ];
 
     private static readonly ActivitySource ActivitySource = new(ActivitySourceName);
@@ -100,6 +114,13 @@ public static class ManagedLifecycleTelemetry
         EndpointHealthCounterName,
         "{evaluation}",
         "Provider-neutral endpoint health evaluations.");
+    private static readonly Counter<long> RecoveryRequiredClockScanFailureCounter = Meter.CreateCounter<long>(
+        RecoveryRequiredClockScanFailureCounterName,
+        "{failure}",
+        "RecoveryRequired clock-scan rows that failed without stalling reconciliation.");
+
+    public static void RecordRecoveryRequiredClockScanFailure() =>
+        RecoveryRequiredClockScanFailureCounter.Add(1);
 
     public static ManagedLifecycleTelemetryOperation StartOperation(
         string activityName,
@@ -145,6 +166,57 @@ public static class ManagedLifecycleTelemetry
             health,
             null,
             null)));
+
+    /// <summary>
+    /// Staging or production marker written on the RecoveryRequired entry
+    /// activity so each sink's alert rule can filter its own environment.
+    /// </summary>
+    public static string? AlertEnvironment => _alertEnvironment;
+
+    public static void ConfigureAlertEnvironment(string? environment)
+    {
+        if (string.IsNullOrWhiteSpace(environment))
+        {
+            _alertEnvironment = null;
+            return;
+        }
+
+        var normalized = environment.Trim().ToLowerInvariant();
+        if (normalized is not (StagingEnvironment or ProductionEnvironment))
+            throw new ArgumentOutOfRangeException(
+                nameof(environment),
+                "The RecoveryRequired alert environment must be staging or production.");
+        _alertEnvironment = normalized;
+    }
+
+    /// <summary>
+    /// Emits the operator-alert activity for one RecoveryRequired entry. Tags are
+    /// the fixed reason code, opaque IDs, the health-alert dedupe identity, and
+    /// the optional environment marker. The Azure Monitor exporter writes this
+    /// Internal span to <see cref="AppDependenciesTableName"/> with
+    /// <c>Name</c> equal to <see cref="RecoveryRequiredEnteredActivityName"/>.
+    /// </summary>
+    public static void RecordRecoveryRequiredEntered(
+        Guid workspaceId,
+        Guid instanceId,
+        Guid operationId,
+        string reasonCode,
+        string dedupeIdentity)
+    {
+        using var activity = ActivitySource.StartActivity(RecoveryRequiredEnteredActivityName, ActivityKind.Internal);
+        if (activity is null)
+            return;
+
+        SetOpaqueId(activity, WorkspaceIdTag, workspaceId);
+        SetOpaqueId(activity, InstanceIdTag, instanceId);
+        SetOpaqueId(activity, OperationIdTag, operationId);
+        activity.SetTag(DiagnosticCodeTag, DiagnosticValue(reasonCode));
+        if (IsDedupeIdentity(dedupeIdentity))
+            activity.SetTag(DedupeIdentityTag, dedupeIdentity);
+        if (_alertEnvironment is { } environment)
+            activity.SetTag(EnvironmentTag, environment);
+        activity.SetStatus(ActivityStatusCode.Ok);
+    }
 
     internal static TagList Tags(
         ElsaInstanceOperationAction action,
@@ -207,6 +279,11 @@ public static class ManagedLifecycleTelemetry
         if (value is { } id && id != Guid.Empty)
             activity.SetTag(key, id.ToString("D"));
     }
+
+    private static bool IsDedupeIdentity(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        value.Length == 64 &&
+        value.All(character => char.IsAsciiHexDigit(character));
 
     private static string EnumValue<T>(T value) where T : struct, Enum =>
         !Enum.IsDefined(typeof(T), value)

@@ -311,6 +311,29 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
         Assert.False(result.RetrySafe);
     }
 
+    [Theory]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled)]
+    public async Task Azure_park_reason_reaches_the_lifecycle_in_one_reconcile(string parkCode)
+    {
+        var (store, accepted) = await RecoveryTargetAsync();
+        var observation = new ElsaInstanceProviderObservation(
+            ElsaInstanceProviderObservationKind.Ambiguous,
+            ElsaObservedLifecycle.Unknown,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "observation-azure-park")
+        {
+            ReasonCode = parkCode
+        };
+
+        var result = await Service(store, new RecordingPort(observation)).ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(parkCode, result.DiagnosticCode);
+        Assert.False(result.RetrySafe);
+    }
+
     [Fact]
     public async Task Manual_retry_safe_evidence_does_not_auto_resume()
     {

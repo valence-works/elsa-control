@@ -11,4 +11,13 @@ public interface IElsaInstanceProviderReconciliationService
         Guid workspaceId,
         Guid operationId,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Advances the human-required clock on parked operations that have sat
+    /// in a temporary or auto-resuming class past the 10-minute bound,
+    /// including run-less parks the pending-operation query skips.
+    /// </summary>
+    Task<int> AdvanceDueHumanRequiredClocksAsync(
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(0);
 }

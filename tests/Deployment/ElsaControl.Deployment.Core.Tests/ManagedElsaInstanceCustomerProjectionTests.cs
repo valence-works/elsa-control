@@ -411,8 +411,15 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
             ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
             parkedAt: Now);
 
+        var flagged = Operation(
+            instance.Id,
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
+            parkedAt: Now,
+            requiresHumanAt: Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter);
         var projected = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(
-            instance, operation, Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter);
+            instance, flagged, Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter);
 
         Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, projected);
         Assert.False(ManagedElsaInstanceCustomerProjection.IsKnownInProgress(projected));
@@ -456,9 +463,16 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
 
         Assert.Equal(ElsaObservedLifecycle.Provisioning,
             ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation, Now));
+        var flagged = Operation(
+            instance.Id,
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable,
+            parkedAt: Now,
+            requiresHumanAt: Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter);
         Assert.Equal(ElsaObservedLifecycle.RecoveryRequired,
             ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(
-                instance, operation, Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter));
+                instance, flagged, Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter));
     }
 
     [Fact]
@@ -474,9 +488,16 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
 
         Assert.Equal(ElsaObservedLifecycle.Provisioning,
             ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation, Now));
+        var flagged = Operation(
+            instance.Id,
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+            parkedAt: Now,
+            requiresHumanAt: Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter);
         Assert.Equal(ElsaObservedLifecycle.RecoveryRequired,
             ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(
-                instance, operation, Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter));
+                instance, flagged, Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter));
     }
 
     [Fact]
@@ -598,8 +619,15 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
         ElsaInstanceOperationAction action,
         ElsaInstanceOperationState state,
         string? reasonCode = null,
-        DateTimeOffset? parkedAt = null) =>
-        new(
+        DateTimeOffset? parkedAt = null,
+        DateTimeOffset? requiresHumanAt = null)
+    {
+        var enteredAt = parkedAt ?? Now;
+        var humanAt = requiresHumanAt ?? (state == ElsaInstanceOperationState.RecoveryRequired &&
+            ManagedElsaReasonCodeCatalog.RequiresHuman(reasonCode, enteredAt, Now)
+                ? Now
+                : null);
+        return new(
             Guid.Parse("40000000-0000-0000-0000-000000000001"),
             instanceId,
             action,
@@ -617,6 +645,8 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
             null,
             reasonCode,
             RecoveryReason: reasonCode,
-            UpdatedAt: parkedAt ?? Now,
-            ReasonEnteredAt: parkedAt ?? Now);
+            UpdatedAt: enteredAt,
+            ReasonEnteredAt: enteredAt,
+            RequiresHumanAt: humanAt);
+    }
 }

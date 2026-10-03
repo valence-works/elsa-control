@@ -1,6 +1,7 @@
 using System.Text.Json;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Cockpit;
+using ElsaControl.Deployment.Core.Telemetry;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.RuntimeBuilder.Abstractions.Plans;
 
@@ -31,13 +32,18 @@ public sealed record ElsaInstanceRecoveryRequestEnvelope(
 /// </summary>
 public sealed class InMemoryElsaInstanceLifecycleStore(
     TimeProvider? timeProvider = null,
-    IElsaInstanceDeleteConfirmationAuthority? deleteConfirmationAuthority = null)
+    IElsaInstanceDeleteConfirmationAuthority? deleteConfirmationAuthority = null,
+    Action<Exception, Guid>? clockScanFailed = null)
     : IElsaInstanceLifecycleStore, IElsaInstanceLifecycleWorkerStore, IElsaInstanceProviderSubmissionStore, IElsaInstanceProviderPendingOperationStore, IElsaInstanceProviderReconciliationStore, IElsaInstanceDeletionStore
 {
     private static readonly TimeSpan WorkerLeaseDuration = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan DeletionDeferralDelay = TimeSpan.FromMinutes(1);
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
     private readonly IElsaInstanceDeleteConfirmationAuthority? _deleteConfirmationAuthority = deleteConfirmationAuthority;
+    private readonly Action<Exception, Guid>? _clockScanFailed = clockScanFailed;
+
+    /// <summary>Test seam: invoked once per selected clock-scan candidate.</summary>
+    public Action<Guid>? ClockScanProbe { get; set; }
     private readonly object _gate = new();
     private readonly Dictionary<Guid, ElsaInstance> _instances = [];
     private readonly Dictionary<Guid, ElsaInstanceOperation> _operations = [];
@@ -47,6 +53,9 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
     private readonly Dictionary<string, ElsaInstanceLifecycleResolvedPlan> _resolvedPlans = new(StringComparer.Ordinal);
     private readonly Dictionary<Guid, ElsaInstanceLifecycleDeploymentRun> _deploymentRuns = [];
     private readonly Dictionary<Guid, ElsaInstanceLifecycleRecordedFailure> _failures = [];
+    private readonly Dictionary<Guid, ManagedElsaReasonClockState> _clocks = [];
+    private readonly Dictionary<Guid, string?> _parkReasons = [];
+    private readonly HashSet<(Guid OperationId, int AttemptNumber)> _alertOutbox = [];
     private readonly Dictionary<Guid, StoredReconciliationResult> _reconciliationResults = [];
     private readonly Dictionary<Guid, StoredDeletionResult> _deletionResults = [];
     private readonly Dictionary<Guid, ElsaInstanceRecoveryRequestEnvelope> _recoveryRequests = [];
@@ -105,6 +114,12 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         }
     }
 
+    public ManagedElsaReasonClockState GetReasonClock(Guid operationId)
+    {
+        lock (_gate)
+            return _clocks.GetValueOrDefault(operationId);
+    }
+
     /// <summary>
     /// Gets the immutable recovery request envelopes accepted by this store.
     /// </summary>
@@ -122,7 +137,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
     /// deterministic core tests. Durable adapters perform the equivalent transition
     /// while retaining their existing deployment-run reservation.
     /// </summary>
-    public void MarkRecoveryRequired(Guid operationId)
+    public void MarkRecoveryRequired(Guid operationId, string? reasonCode = null)
     {
         lock (_gate)
         {
@@ -134,7 +149,10 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             if (operation.State == ElsaInstanceOperationState.Queued)
                 operation = operation.TransitionTo(ElsaInstanceOperationState.Running);
             if (operation.State == ElsaInstanceOperationState.Running)
+            {
                 operation = operation.TransitionTo(ElsaInstanceOperationState.RecoveryRequired);
+                ApplyParkClock(operation, instance.WorkspaceId, previousCode: null, nextCode: reasonCode, restartClock: false);
+            }
             if (operation.State != ElsaInstanceOperationState.RecoveryRequired)
                 throw new ElsaInstanceLifecycleConflictException("Lifecycle operation cannot require provider recovery.");
             _operations[operationId] = operation;
@@ -201,6 +219,14 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                             : ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted
                     }
                 };
+            ApplyParkClock(
+                recovered,
+                instance.WorkspaceId,
+                previousCode: null,
+                nextCode: commit.CorrelationId == "provider-submission-uncertain"
+                    ? ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain
+                    : ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted,
+                restartClock: false);
             _instances[instance.Id] = ElsaInstance.Hydrate(
                 instance.Id, instance.OrganizationId, instance.WorkspaceId, instance.Name, instance.Slug,
                 instance.Intent, instance.ObservedLifecycle, instance.Health, instance.Version,
@@ -347,6 +373,17 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 }
                 else
                 {
+                    if (_operations.TryGetValue(commit.OperationId, out var replayOperation))
+                    {
+                        ApplyParkClock(
+                            replayOperation,
+                            commit.WorkspaceId,
+                            replay.Result.DiagnosticCode,
+                            replay.Result.DiagnosticCode,
+                            restartClock: false,
+                            commit.ReconciledAt);
+                    }
+
                     return Task.FromResult(replay.Result with { Replayed = true });
                 }
             }
@@ -409,6 +446,78 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         return Task.CompletedTask;
     }
 
+    public Task<int> AdvanceDueHumanRequiredClocksAsync(
+        DateTimeOffset now,
+        int limit = 64,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (limit is < 1 or > 256)
+            throw new ArgumentOutOfRangeException(nameof(limit));
+
+        now = now.ToUniversalTime();
+        lock (_gate)
+        {
+            var advanced = 0;
+            var candidates = RecoveryRequiredHumanClockScan.SelectCandidates(
+                    _operations.Values.Where(candidate =>
+                        candidate.State == ElsaInstanceOperationState.RecoveryRequired),
+                    candidate => _clocks.GetValueOrDefault(candidate.Id).RequiresHumanAt,
+                    candidate => _clocks.GetValueOrDefault(candidate.Id).ReasonEnteredAt,
+                    candidate => candidate.Id,
+                    now,
+                    limit)
+                .ToArray();
+            foreach (var operation in candidates)
+            {
+                try
+                {
+                    ClockScanProbe?.Invoke(operation.Id);
+                    var clock = _clocks.GetValueOrDefault(operation.Id);
+                    var beforeHumanAt = clock.RequiresHumanAt;
+                    if (beforeHumanAt is not null)
+                        continue;
+                    if (!_instances.TryGetValue(operation.InstanceId, out var instance))
+                        continue;
+                    var reason = CurrentParkReason(operation.Id);
+                    if (clock.ReasonEnteredAt is null)
+                    {
+                        ApplyParkClock(
+                            operation,
+                            instance.WorkspaceId,
+                            reason,
+                            reason,
+                            restartClock: false,
+                            now);
+                        clock = _clocks.GetValueOrDefault(operation.Id);
+                    }
+
+                    if (!ManagedElsaReasonCodeCatalog.RequiresHuman(reason, clock.ReasonEnteredAt, now))
+                        continue;
+                    if (clock.RequiresHumanAt is null)
+                    {
+                        ApplyParkClock(
+                            operation,
+                            instance.WorkspaceId,
+                            reason,
+                            reason,
+                            restartClock: false,
+                            now);
+                    }
+
+                    if (_clocks.GetValueOrDefault(operation.Id).RequiresHumanAt is not null && beforeHumanAt is null)
+                        advanced++;
+                }
+                catch (Exception exception)
+                {
+                    RecoveryRequiredHumanClockScan.RecordFailure(operation.Id, exception, _clockScanFailed);
+                }
+            }
+
+            return Task.FromResult(advanced);
+        }
+    }
+
     private static ElsaInstanceProviderReconciliationProjection Projection(
         ElsaInstanceProviderReconciliationCommit commit,
         int instanceVersion) => new(
@@ -420,6 +529,59 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         commit.Instance.Health,
         instanceVersion,
         commit.Operation.State);
+
+    private void ApplyParkClock(
+        ElsaInstanceOperation operation,
+        Guid workspaceId,
+        string? previousCode,
+        string? nextCode,
+        bool restartClock,
+        DateTimeOffset? now = null)
+    {
+        var current = _clocks.GetValueOrDefault(operation.Id);
+        var next = ManagedElsaReasonClock.Advance(
+            previousCode,
+            nextCode,
+            current.ReasonEnteredAt,
+            current.RequiresHumanAt,
+            now ?? _timeProvider.GetUtcNow(),
+            restartClock);
+        var newlyHuman = current.RequiresHumanAt is null && next.RequiresHumanAt is not null;
+        _clocks[operation.Id] = next;
+        _parkReasons[operation.Id] = nextCode;
+        if (!newlyHuman || !_alertOutbox.Add((operation.Id, operation.AttemptNumber)))
+            return;
+        Guid? runId = null;
+        foreach (var stored in _deploymentRuns.Values)
+        {
+            if (stored.Operation.Id == operation.Id)
+            {
+                runId = stored.Run.Id;
+                break;
+            }
+        }
+
+        ManagedLifecycleRecoveryRequiredAlert.RecordEntered(
+            workspaceId,
+            operation.InstanceId,
+            operation.Id,
+            operation.AttemptNumber,
+            runId);
+    }
+
+    private string? CurrentParkReason(Guid operationId)
+    {
+        var failureCode = _failures.TryGetValue(operationId, out var failure)
+            ? failure.Code
+            : _parkReasons.GetValueOrDefault(operationId);
+        var diagnostic = _reconciliationResults.TryGetValue(operationId, out var stored)
+            ? stored.Result.DiagnosticCode
+            : null;
+        var runReason = _deploymentRuns.Values
+            .FirstOrDefault(candidate => candidate.Operation.Id == operationId)
+            ?.Run.RecoveryReason;
+        return ManagedElsaReasonCodeCatalog.SelectCurrentReason(failureCode, diagnostic, runReason);
+    }
 
     private static ElsaInstance WithVersion(ElsaInstance instance, int version) => ElsaInstance.Hydrate(
         instance.Id,
@@ -651,7 +813,15 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                     throw new ElsaInstanceDeleteConfirmationException();
 
                 if (isRecoveryResume)
+                {
                     AppendRecoveryRequest(instance, operation, outbox.CreatedAt);
+                    ApplyParkClock(
+                        operation,
+                        instance.WorkspaceId,
+                        previousCode: null,
+                        nextCode: null,
+                        restartClock: true);
+                }
                 _instances[instance.Id] = instance;
                 _operations[operation.Id] = operation;
                 return Task.FromResult(new ElsaInstanceLifecycleAcceptance(instance, operation, existingOutbox, false));
@@ -1059,6 +1229,12 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             if (operation.State == ElsaInstanceOperationState.Accepted)
                 operation = operation.TransitionTo(ElsaInstanceOperationState.Queued);
             operation = operation.TransitionTo(ElsaInstanceOperationState.RecoveryRequired);
+            ApplyParkClock(
+                operation,
+                failure.WorkspaceId,
+                previousCode: null,
+                nextCode: failure.DiagnosticCode,
+                restartClock: false);
             _operations[operation.Id] = operation;
             _claims.Remove(operation.Id);
             var instance = _instances[failure.InstanceId];
