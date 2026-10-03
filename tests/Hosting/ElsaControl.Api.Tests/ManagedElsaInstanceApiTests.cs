@@ -1995,6 +1995,28 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.DoesNotContain("resolvedPlanId", statusJson, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("providerResponse", statusJson, StringComparison.OrdinalIgnoreCase);
 
+        var runningProjection = ManagedElsaInstanceEndpoints.ToDeleteOperationResponse(new ElsaInstanceOperationSummary(
+            firstBody.OperationId,
+            created.Instance.InstanceId,
+            ElsaInstanceOperationAction.Delete,
+            ElsaInstanceOperationState.Running,
+            created.Instance.Version,
+            1,
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null));
+        Assert.Equal(ElsaInstanceOperationState.Running, runningProjection.State);
+        Assert.Equal(firstBody.OperationId, runningProjection.OperationId);
+        var runningJson = System.Text.Json.JsonSerializer.Serialize(runningProjection, ControlApiTestApplication.JsonOptions);
+        Assert.DoesNotContain("deletion.provider-cleanup-pending", runningJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("reasonCode", runningJson, StringComparison.OrdinalIgnoreCase);
+
         var recoveryProjection = ManagedElsaInstanceEndpoints.ToDeleteOperationResponse(new ElsaInstanceOperationSummary(
             firstBody.OperationId,
             created.Instance.InstanceId,

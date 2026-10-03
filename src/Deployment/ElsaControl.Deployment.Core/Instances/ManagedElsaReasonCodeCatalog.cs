@@ -101,6 +101,7 @@ public static class ManagedElsaReasonCodeCatalog
     public const string DeletionProviderUnavailable = "deletion.provider.unavailable";
     public const string DeletionAzureProviderUnavailable = "deletion.provider-unavailable";
     public const string DeletionProviderCleanupPending = "deletion.provider-cleanup-pending";
+    public const string DeletionProviderProgressStale = "deletion.provider-progress-stale";
     public const string DeletionProviderAssignmentUnavailable = "deletion.provider-assignment-unavailable";
     public const string DeletionProviderEvidenceUnavailable = "deletion.provider-evidence-unavailable";
     public const string DeletionProviderPlanUnavailable = "deletion.provider-plan-unavailable";
@@ -194,6 +195,7 @@ public static class ManagedElsaReasonCodeCatalog
             new(DeletionProviderUnavailable, ManagedElsaReasonClass.Temporary),
             new(DeletionAzureProviderUnavailable, ManagedElsaReasonClass.Temporary),
             new(DeletionProviderCleanupPending, ManagedElsaReasonClass.Temporary),
+            new(DeletionProviderProgressStale, ManagedElsaReasonClass.NeedsPerson),
             new(DeletionProviderAssignmentUnavailable, ManagedElsaReasonClass.Temporary),
             new(DeletionProviderEvidenceUnavailable, ManagedElsaReasonClass.Temporary),
             new(DeletionProviderPlanUnavailable, ManagedElsaReasonClass.Temporary),

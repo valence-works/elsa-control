@@ -963,7 +963,8 @@ public sealed class AzureElsaInstanceProvider(
                 diagnosticCode,
                 finalizationInProgress || providerOperationInProgress
                     ? ElsaInstanceCleanupObservationKind.InProgress
-                    : ElsaInstanceCleanupObservationKind.Unknown);
+                    : ElsaInstanceCleanupObservationKind.Unknown,
+                LastProviderProgressAt(pending));
         }
     }
 
@@ -1164,8 +1165,22 @@ public sealed class AzureElsaInstanceProvider(
     private static ElsaInstanceCleanupObservation CleanupUnknown(
         ElsaInstanceCleanupRequest request,
         string code,
-        ElsaInstanceCleanupObservationKind kind = ElsaInstanceCleanupObservationKind.Unknown) =>
-        new(kind, request.OperationId, request.AttemptNumber, code);
+        ElsaInstanceCleanupObservationKind kind = ElsaInstanceCleanupObservationKind.Unknown,
+        DateTimeOffset? lastProviderProgressAt = null) =>
+        new(kind, request.OperationId, request.AttemptNumber, code, LastProviderProgressAt: lastProviderProgressAt);
+
+    internal static DateTimeOffset LastProviderProgressAt(AzureProviderOperation operation)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        var latest = operation.CreatedAt;
+        if (operation.StatusChangedAt is { } statusChanged && statusChanged > latest)
+            latest = statusChanged;
+        if (operation.HeartbeatAt is { } heartbeat && heartbeat > latest)
+            latest = heartbeat;
+        if (operation.LastArmObservedAt is { } armObserved && armObserved > latest)
+            latest = armObserved;
+        return latest;
+    }
 
     /// <summary>
     /// A succeeded operation whose plan configured the handoff has deployed and promoted a revision carrying it:

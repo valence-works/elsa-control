@@ -1131,7 +1131,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                     continue;
                 var claim = new LifecycleClaim(workerId.Trim(), CreateLeaseToken(),
                     existingClaim is null ? 1 : checked(existingClaim.Version + 1), nowUtc.Add(WorkerLeaseDuration));
-                if (operation.State == ElsaInstanceOperationState.Queued)
+                if (operation.State is ElsaInstanceOperationState.Accepted or ElsaInstanceOperationState.Queued)
                 {
                     operation = operation.TransitionTo(ElsaInstanceOperationState.Running);
                     _operations[operation.Id] = operation;
@@ -1204,6 +1204,11 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 claim.Version != item.LeaseVersion || claim.ExpiresAt <= now.ToUniversalTime())
                 return Task.FromResult(false);
 
+            if (operation.State == ElsaInstanceOperationState.Accepted)
+            {
+                operation = operation.TransitionTo(ElsaInstanceOperationState.Running);
+                _operations[operation.Id] = operation;
+            }
             _claims[item.Operation.Id] = claim with
             {
                 ExpiresAt = now.ToUniversalTime().Add(DeletionDeferralDelay)

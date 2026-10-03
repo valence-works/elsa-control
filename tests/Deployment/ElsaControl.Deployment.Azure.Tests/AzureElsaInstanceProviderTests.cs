@@ -1099,6 +1099,8 @@ public sealed class AzureElsaInstanceProviderTests
             "deletion.provider-cleanup-pending", result.DiagnosticCode);
         Assert.Equal(lifecycleOperationId, result.OperationId);
         Assert.Equal(3, result.AttemptNumber);
+        if (expectedKind == ElsaInstanceCleanupObservationKind.InProgress)
+            Assert.Equal(AzureElsaInstanceProvider.LastProviderProgressAt(delete), result.LastProviderProgressAt);
         if (alreadyDeleted)
         {
             Assert.Empty(service.DeleteSubmissions);

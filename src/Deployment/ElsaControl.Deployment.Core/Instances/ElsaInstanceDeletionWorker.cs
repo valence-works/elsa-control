@@ -10,6 +10,12 @@ public sealed class ElsaInstanceDeletionWorker(
     TimeProvider? timeProvider = null,
     IElsaInstanceProviderDeleteRecoveryPort? deleteRecoveryPort = null)
 {
+    /// <summary>
+    /// Escalate only when the provider operation itself has been silent.
+    /// Worker heartbeats and operation age must not trip this bound.
+    /// </summary>
+    public static readonly TimeSpan ProviderProgressStaleAfter = TimeSpan.FromMinutes(30);
+
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
     private readonly IElsaInstanceProviderDeleteRecoveryPort? _deleteRecoveryPort = deleteRecoveryPort;
 
@@ -119,7 +125,17 @@ public sealed class ElsaInstanceDeletionWorker(
         var fingerprint = observation.ComputeFingerprint();
         if (correlated && observation.Kind == ElsaInstanceCleanupObservationKind.InProgress)
         {
-            if (!await store.DeferDeletionAsync(item, workerId, _timeProvider.GetUtcNow(),
+            var now = _timeProvider.GetUtcNow();
+            if (HasStaleProviderProgress(observation, now))
+            {
+                return await store.RequireDeletionRecoveryAsync(new(
+                    item.Instance.WorkspaceId, item.Instance.Id, item.Operation.Id, item.Outbox.Id,
+                    item.Instance.Version, item.Operation.AttemptNumber, item.CorrelatedRunId, workerId,
+                    item.LeaseToken, item.LeaseVersion, fingerprint,
+                    ElsaInstanceDeletionDiagnosticCodes.ProviderProgressStale, now), cancellationToken);
+            }
+
+            if (!await store.DeferDeletionAsync(item, workerId, now,
                     observation.DiagnosticCode, cancellationToken))
                 throw new ElsaInstanceLifecycleConflictException(
                     "Deletion work item changed before async cleanup could be deferred.");
@@ -221,6 +237,17 @@ public sealed class ElsaInstanceDeletionWorker(
             ElsaInstanceDeletionOutcome.RecoveryRequired => ElsaInstanceLifecycleWorkerOutcome.Failed,
             _ => ElsaInstanceLifecycleWorkerOutcome.Conflict
         }, result.Operation, result.Instance, FailureCode: result.DiagnosticCode);
+
+    internal static bool HasStaleProviderProgress(
+        ElsaInstanceCleanupObservation observation,
+        DateTimeOffset now)
+    {
+        if (observation.Kind != ElsaInstanceCleanupObservationKind.InProgress)
+            return false;
+        if (observation.LastProviderProgressAt is not { } progress)
+            return false;
+        return now.ToUniversalTime() - progress.ToUniversalTime() > ProviderProgressStaleAfter;
+    }
 
     private static ElsaInstanceLifecycleWorkerResult? TryConflict(ElsaInstanceDeletionWorkItem item) =>
         item.Operation is null || item.Instance is null ? null : new(

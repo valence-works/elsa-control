@@ -21,6 +21,7 @@ public static class ElsaInstanceDeletionDiagnosticCodes
     public const string ProviderUnavailable = ManagedElsaReasonCodeCatalog.DeletionProviderUnavailable;
     public const string AzureProviderUnavailable = ManagedElsaReasonCodeCatalog.DeletionAzureProviderUnavailable;
     public const string ProviderCleanupPending = ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending;
+    public const string ProviderProgressStale = ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale;
     public const string ProviderAssignmentUnavailable = ManagedElsaReasonCodeCatalog.DeletionProviderAssignmentUnavailable;
     public const string ProviderEvidenceUnavailable = ManagedElsaReasonCodeCatalog.DeletionProviderEvidenceUnavailable;
     public const string ProviderPlanUnavailable = ManagedElsaReasonCodeCatalog.DeletionProviderPlanUnavailable;
@@ -89,7 +90,8 @@ public sealed record ElsaInstanceCleanupObservation(
     Guid OperationId,
     int AttemptNumber,
     string DiagnosticCode,
-    ElsaInstanceCleanupEvidence? Evidence = null)
+    ElsaInstanceCleanupEvidence? Evidence = null,
+    DateTimeOffset? LastProviderProgressAt = null)
 {
     public void Validate()
     {

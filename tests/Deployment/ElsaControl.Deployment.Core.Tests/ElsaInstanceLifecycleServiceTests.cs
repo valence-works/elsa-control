@@ -1087,7 +1087,7 @@ public sealed class ElsaInstanceLifecycleServiceTests
 
         Assert.NotNull(claimed);
         Assert.Equal(deletion.Operation.Id, claimed!.Operation.Id);
-        Assert.Equal(ElsaInstanceOperationState.Accepted, claimed.Operation.State);
+        Assert.Equal(ElsaInstanceOperationState.Running, claimed.Operation.State);
         Assert.True(claimed.CanFinalizeLocally);
     }
 

@@ -78,6 +78,44 @@ public sealed class ElsaInstanceDeletionWorkerTests
     }
 
     [Fact]
+    public async Task Stale_provider_progress_requires_recovery_instead_of_deferral()
+    {
+        var item = WorkItem(local: false);
+        var store = new RecordingStore(item);
+        var port = new RecordingPort(new(
+            ElsaInstanceCleanupObservationKind.InProgress, item.Operation.Id,
+            item.Operation.AttemptNumber, "deletion.provider-cleanup-pending",
+            LastProviderProgressAt: Now - ElsaInstanceDeletionWorker.ProviderProgressStaleAfter - TimeSpan.FromSeconds(1)));
+
+        var result = await new ElsaInstanceDeletionWorker(store, port, new FixedTimeProvider(Now))
+            .ProcessAvailableAsync("delete-worker");
+
+        Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Failed, Assert.Single(result.Results).Outcome);
+        Assert.Equal(0, store.Deferrals);
+        Assert.Null(store.Commit);
+        Assert.Equal("deletion.provider-progress-stale", store.Failure!.DiagnosticCode);
+    }
+
+    [Fact]
+    public async Task Recent_provider_progress_is_deferred_and_not_escalated()
+    {
+        var item = WorkItem(local: false);
+        var store = new DeferredStore(item, Now);
+        var port = new RecordingPort(new(
+            ElsaInstanceCleanupObservationKind.InProgress, item.Operation.Id,
+            item.Operation.AttemptNumber, "deletion.provider-cleanup-pending",
+            LastProviderProgressAt: Now - TimeSpan.FromMinutes(10)));
+
+        var result = await new ElsaInstanceDeletionWorker(store, port, new FixedTimeProvider(Now))
+            .ProcessAvailableAsync("delete-worker");
+
+        Assert.Empty(result.Results);
+        Assert.Equal(1, store.Deferrals);
+        Assert.Null(store.Failure);
+        Assert.Equal("deletion.provider-cleanup-pending", store.DeferredDiagnosticCode);
+    }
+
+    [Fact]
     public async Task In_progress_cleanup_is_deferred_then_same_delete_completes_on_next_poll()
     {
         var item = WorkItem(local: false);

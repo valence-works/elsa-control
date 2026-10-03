@@ -95,6 +95,7 @@ public sealed class ManagedElsaReasonCodeCatalogTests
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderUnavailable, ManagedElsaReasonClass.Temporary)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionAzureProviderUnavailable, ManagedElsaReasonClass.Temporary)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending, ManagedElsaReasonClass.Temporary)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderUncertain, ManagedElsaReasonClass.Temporary)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionRecoveryAuthorityUnavailable, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionRecoveryPlanUnavailable, ManagedElsaReasonClass.NeedsPerson)]
