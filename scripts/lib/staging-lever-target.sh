@@ -1,40 +1,40 @@
 # Shared staging-target predicate for operator levers.
 # Explicit --environment / TARGET_ENVIRONMENT wins over AZURE_ENV_NAME.
-# Set names must be exactly equal. TARGET_ENVIRONMENT=test is the GitHub
-# environment alias for valence-control-staging only; --environment test
-# and AZURE_ENV_NAME=valence-control-staging stay distinct (rg-test vs
+# Azure names (ENVIRONMENT_NAME / AZURE_ENV_NAME) must be exactly equal.
+# TARGET_ENVIRONMENT=test is the GitHub environment alias for
+# valence-control-staging only; --environment test and
+# AZURE_ENV_NAME=valence-control-staging stay distinct (rg-test vs
 # rg-valence-control-staging). Any mismatch or non-test target fails closed.
 
 is_staging_azure_env_name() {
   [ "$1" = "test" ] || [ "$1" = "valence-control-staging" ]
 }
 
-# TARGET_ENVIRONMENT=test aliases to the real staging Azure env name.
-# ENVIRONMENT_NAME and AZURE_ENV_NAME are compared as written.
-canonical_staging_lever_target_name() {
-  if [ "$1" = "test" ]; then
-    printf '%s\n' "valence-control-staging"
-  else
-    printf '%s\n' "$1"
-  fi
-}
-
-# True when the set names are not exactly equal after aliasing
-# TARGET_ENVIRONMENT=test only.
+# True when the set names cannot be the same deploy target.
+# ENVIRONMENT_NAME and AZURE_ENV_NAME compare as written. TARGET_ENVIRONMENT=test
+# aliases to valence-control-staging; any other TARGET_ENVIRONMENT refuses a
+# staging Azure name.
 staging_lever_target_names_disagree() {
-  local first=""
+  local azure=""
   local name=""
-  if [ -n "${TARGET_ENVIRONMENT:-}" ]; then
-    first="$(canonical_staging_lever_target_name "$TARGET_ENVIRONMENT")"
-  fi
   for name in "${ENVIRONMENT_NAME:-}" "${AZURE_ENV_NAME:-}"; do
     [ -z "$name" ] && continue
-    if [ -z "$first" ]; then
-      first="$name"
-    elif [ "$name" != "$first" ]; then
+    if [ -z "$azure" ]; then
+      azure="$name"
+    elif [ "$name" != "$azure" ]; then
       return 0
     fi
   done
+
+  if [ -n "${TARGET_ENVIRONMENT:-}" ]; then
+    if [ "$TARGET_ENVIRONMENT" = "test" ]; then
+      if [ -n "$azure" ] && [ "$azure" != "valence-control-staging" ]; then
+        return 0
+      fi
+    elif [ -n "$azure" ] && is_staging_azure_env_name "$azure"; then
+      return 0
+    fi
+  fi
   return 1
 }
 
