@@ -1109,8 +1109,10 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             }
         }
 
-        foreach (var entry in ChangeTracker.Entries<Models.ElsaInstanceOperationEntity>()
-                     .Where(x => x.State is EntityState.Added or EntityState.Modified))
+        var operationEntries = ChangeTracker.Entries<Models.ElsaInstanceOperationEntity>()
+            .Where(x => x.State is EntityState.Added or EntityState.Modified)
+            .ToList();
+        foreach (var entry in operationEntries)
         {
             var operation = entry.Entity;
             EnsureDefined(operation.Action, nameof(operation.Action));
@@ -1210,7 +1212,6 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
 
                 var originalState = (ElsaInstanceOperationState)entry.Property(nameof(Models.ElsaInstanceOperationEntity.State)).OriginalValue!;
                 EnsureDefined(originalState, nameof(Models.ElsaInstanceOperationEntity.State));
-                QueueRecoveryRequiredAlertIfRequiresHuman(entry);
                 var isRecoveryResume = originalState == ElsaInstanceOperationState.RecoveryRequired &&
                     operation.State == ElsaInstanceOperationState.Queued &&
                     operation.AttemptNumber == (int)entry.Property(nameof(Models.ElsaInstanceOperationEntity.AttemptNumber)).OriginalValue! + 1;
@@ -1220,9 +1221,10 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
                 if (operation.AttemptNumber < originalAttemptNumber)
                     throw new InvalidOperationException("Instance operation attempt number cannot decrease.");
             }
-
-            QueueRecoveryRequiredAlertIfRequiresHuman(entry);
         }
+
+        foreach (var entry in operationEntries)
+            QueueRecoveryRequiredAlertIfRequiresHuman(entry);
 
 
         foreach (var entry in ChangeTracker.Entries<Models.ElsaInstanceRecoveryRequestEntity>()
