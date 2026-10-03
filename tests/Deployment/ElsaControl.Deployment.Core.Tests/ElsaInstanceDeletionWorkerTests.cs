@@ -211,6 +211,29 @@ public sealed class ElsaInstanceDeletionWorkerTests
     }
 
     [Fact]
+    public void Changed_receipt_does_not_adopt_a_future_provider_timestamp()
+    {
+        var item = WorkItem(local: false) with
+        {
+            RunningSince = Now - TimeSpan.FromMinutes(20),
+            LastVerifiedProgressAt = Now - TimeSpan.FromMinutes(10),
+            LastVerifiedProgressReceipt = Receipt('1')
+        };
+
+        var advanced = ElsaInstanceDeletionWorker.ApplyVerifiedProgress(
+            item,
+            new(ElsaInstanceCleanupObservationKind.InProgress, item.Operation.Id,
+                item.Operation.AttemptNumber, "deletion.provider-cleanup-pending",
+                LastProviderProgressAt: Now.AddDays(1),
+                ProgressReceipt: Receipt('2')),
+            Now);
+
+        Assert.Equal(Receipt('2'), advanced.LastVerifiedProgressReceipt);
+        Assert.Equal(Now, advanced.LastVerifiedProgressAt);
+        Assert.False(ElsaInstanceDeletionWorker.HasStaleProviderProgress(advanced, Now));
+    }
+
+    [Fact]
     public async Task Changed_receipt_with_unchanged_old_status_time_counts_as_progress()
     {
         var oldStatus = Now - TimeSpan.FromMinutes(70);

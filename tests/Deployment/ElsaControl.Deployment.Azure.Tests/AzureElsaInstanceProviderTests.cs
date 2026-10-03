@@ -1170,6 +1170,14 @@ public sealed class AzureElsaInstanceProviderTests
         Assert.Equal(
             AzureElsaInstanceProvider.CleanupProgressReceipt(operation),
             AzureElsaInstanceProvider.CleanupProgressReceipt(metadataOnly));
+
+        var endpointOnly = operation with
+        {
+            Endpoint = "https://runtime.example.test/"
+        };
+        Assert.Equal(
+            AzureElsaInstanceProvider.CleanupProgressReceipt(operation),
+            AzureElsaInstanceProvider.CleanupProgressReceipt(endpointOnly));
     }
 
     [Fact]

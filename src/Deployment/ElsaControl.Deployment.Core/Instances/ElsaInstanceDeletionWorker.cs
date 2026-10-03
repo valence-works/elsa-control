@@ -260,17 +260,16 @@ public sealed class ElsaInstanceDeletionWorker(
             !string.Equals(observation.ProgressReceipt, receipt, StringComparison.Ordinal))
         {
             // A differing receipt is verified progress at the observation time.
-            // Do not adopt an older Status/Phase stamp from the same observation:
-            // that would move the monotonic clock backwards or treat a real
-            // inventory change as already stale.
+            // Do not adopt an older or future Status/Phase stamp from the same
+            // observation: that would rewind the monotonic clock, treat a real
+            // inventory change as already stale, or extend the bound by skew.
             receipt = observation.ProgressReceipt;
             candidate = nowUtc;
         }
-
-        if (observation.LastProviderProgressAt is { } progress)
+        else if (observation.LastProviderProgressAt is { } progress)
         {
             var progressUtc = progress.ToUniversalTime();
-            if (candidate is null || progressUtc > candidate.Value)
+            if (progressUtc <= nowUtc)
                 candidate = progressUtc;
         }
 
