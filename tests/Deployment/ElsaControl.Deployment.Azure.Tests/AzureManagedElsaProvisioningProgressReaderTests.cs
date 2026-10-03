@@ -70,9 +70,46 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
         var result = Assert.IsType<ManagedElsaProvisioningProgress>(await reader.ReadAsync(WorkspaceId, InstanceId));
 
         Assert.Equal(ManagedElsaProvisioningProgressStates.Ready, result.State);
+        Assert.Equal(1, result.AttemptNumber);
+        Assert.Equal(AcceptedAt, result.AttemptStartedAt);
         Assert.Equal(operationId, providers.LifecycleOperationId);
         Assert.All(result.Stages, stage =>
             Assert.Equal(ManagedElsaProvisioningProgressStageStatuses.Completed, stage.Status));
+    }
+
+    [Fact]
+    public async Task Finished_retry_create_carries_the_authoritative_attempt_clock_from_the_store_summary()
+    {
+        var operationId = Guid.NewGuid();
+        var attemptStartedAt = AcceptedAt.AddMinutes(20);
+        var instances = new InstanceStore
+        {
+            Topology = Topology([], operationId, ElsaObservedLifecycle.Ready),
+            LastOperation = new ElsaInstanceOperationSummary(
+                operationId,
+                InstanceId,
+                ElsaInstanceOperationAction.Create,
+                ElsaInstanceOperationState.Succeeded,
+                1,
+                2,
+                AcceptedAt,
+                AcceptedAt.AddSeconds(1),
+                AcceptedAt.AddMinutes(28),
+                null,
+                null,
+                null,
+                null,
+                ElsaObservedLifecycle.Ready,
+                ElsaInstanceHealth.Healthy,
+                AttemptStartedAt: attemptStartedAt)
+        };
+        var result = Assert.IsType<ManagedElsaProvisioningProgress>(await Reader(instances, new ProviderStore()).ReadAsync(
+            WorkspaceId,
+            InstanceId));
+
+        Assert.Equal(2, result.AttemptNumber);
+        Assert.Equal(attemptStartedAt, result.AttemptStartedAt);
+        Assert.Equal(AcceptedAt, result.StartedAt);
     }
 
     [Fact]
@@ -406,6 +443,33 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
         Assert.All(logger.Messages, message => Assert.DoesNotContain("999", message, StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task Unknown_attempted_step_emits_a_protected_warning_and_stays_redacted()
+    {
+        var lifecycle = Lifecycle(Guid.NewGuid(), ElsaInstanceOperationState.Running);
+        var logger = new RecordingLogger();
+        var providers = new ProviderStore
+        {
+            Snapshot = new AzureManagedElsaProvisioningOperationSnapshot(
+                Provider(
+                    AzureProviderOperationPhase.FoundationReady,
+                    (AzureProviderRunnerStep)999),
+                [])
+        };
+        var reader = new AzureManagedElsaProvisioningProgressReader(
+            new InstanceStore { Topology = Topology([lifecycle], lifecycle.Id) },
+            providers,
+            logger);
+
+        var result = await reader.ReadAsync(WorkspaceId, InstanceId);
+
+        Assert.Equal(53003, Assert.Single(logger.EventIds));
+        Assert.Null(result!.CurrentStage);
+        Assert.All(result.Stages, stage =>
+            Assert.Equal(ManagedElsaProvisioningProgressStageStatuses.Unknown, stage.Status));
+        Assert.All(logger.Messages, message => Assert.DoesNotContain("999", message, StringComparison.Ordinal));
+    }
+
     private static AzureManagedElsaProvisioningProgressReader Reader(
         IManagedElsaInstanceApiStore instances,
         IAzureManagedElsaProvisioningOperationStore providers,
@@ -413,17 +477,20 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
         new(instances, providers, NullLogger<AzureManagedElsaProvisioningProgressReader>.Instance, timeProvider ?? new FixedTimeProvider(AcceptedAt));
 
     private static AzureProviderOperation Provider(
-        AzureProviderOperationPhase phase) =>
-        Provider(AzureProviderOperationStatus.Running, phase);
+        AzureProviderOperationPhase phase,
+        AzureProviderRunnerStep? attemptedStep = null) =>
+        Provider(AzureProviderOperationStatus.Running, phase, attemptedStep);
 
     private static AzureProviderOperation Provider(
         AzureProviderOperationStatus status,
-        AzureProviderOperationPhase phase) =>
+        AzureProviderOperationPhase phase,
+        AzureProviderRunnerStep? attemptedStep = null) =>
         new(Guid.NewGuid(), WorkspaceId, "safe-target", AzureProviderOperationAction.Reconcile, "safe-idempotency", "hash",
             "provider-operation", "plan", "template", "3.8.1", "3.8", "topology", "isolated", "westeurope",
             "image", "digest", null, null, status, phase, 1, 1, 1, new(), null,
             AzureProviderHealth.Unknown, [], null, null, null, AcceptedAt, AcceptedAt, null,
-            InstanceId: InstanceId, LifecycleAction: ElsaInstanceOperationAction.Create);
+            InstanceId: InstanceId, LifecycleAction: ElsaInstanceOperationAction.Create,
+            AttemptedStep: attemptedStep);
 
     private static AzureProviderOperationTransition Transition(long sequence, AzureProviderOperationPhase phase) =>
         new(Guid.NewGuid(), Guid.NewGuid(), sequence, AzureProviderOperationStatus.Running, phase, "private", "private", AcceptedAt.AddSeconds(sequence));

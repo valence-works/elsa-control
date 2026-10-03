@@ -70,6 +70,14 @@ public sealed class AzureManagedElsaProvisioningProgressReader(
                 workspaceId,
                 instanceId);
         }
+        if (anomalies.HasFlag(AzureManagedElsaProvisioningMappingAnomaly.UnknownAttemptedStep))
+        {
+            logger.LogWarning(
+                new EventId(53003, "UnknownManagedProvisioningAttemptedStep"),
+                "Managed provisioning progress encountered an unknown provider attempted step for workspace {WorkspaceId} and instance {InstanceId}.",
+                workspaceId,
+                instanceId);
+        }
         if (anomalies.HasFlag(AzureManagedElsaProvisioningMappingAnomaly.NonMonotonicStage))
         {
             logger.LogWarning(
@@ -118,5 +126,7 @@ public sealed class AzureManagedElsaProvisioningProgressReader(
             operation.FailureCode,
             DeletionDiagnosticCode: null,
             ReconciliationDiagnosticCode: null,
-            Outbox: null);
+            Outbox: null,
+            AttemptStartedAt: operation.AttemptStartedAt ??
+                (operation.AttemptNumber == 1 ? operation.AcceptedAt : null));
 }

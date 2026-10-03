@@ -181,6 +181,103 @@ public sealed class ManagedElsaInstanceApiStoreReadTests
     }
 
     [Fact]
+    public async Task Topology_and_finished_create_lookup_use_only_the_matching_recovery_acceptance()
+    {
+        await using var connection = OpenConnection();
+        await using var db = CreateContext(connection);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Attempt authority workspace");
+        var instance = NewInstance(workspace);
+        instance.ObservedLifecycle = ElsaObservedLifecycle.Provisioning;
+        instance.Health = ElsaInstanceHealth.Unknown;
+        var operation = NewOperation(workspace, instance, BaseTime, ElsaInstanceOperationAction.Create);
+        operation.State = ElsaInstanceOperationState.Running;
+        operation.AttemptNumber = 2;
+        instance.LastOperationId = operation.Id.ToString("D");
+        db.ElsaInstances.Add(instance);
+        db.ElsaInstanceOperations.Add(operation);
+        var recoveryAcceptedAt = BaseTime.AddMinutes(20);
+        db.ElsaInstanceRecoveryRequests.Add(NewRecovery(workspace, instance, operation, 2, recoveryAcceptedAt));
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var store = new EfCoreManagedElsaInstanceApiStore(db);
+        var topology = await store.GetLifecycleTopologyAsync(workspace.Id, instance.Id);
+        var topologyOperation = Assert.Single(topology!.Operations);
+        var finishedCreate = await store.GetOperationAsync(workspace.Id, instance.Id, operation.Id);
+
+        Assert.Equal(2, topologyOperation.AttemptNumber);
+        Assert.Equal(recoveryAcceptedAt, topologyOperation.AttemptStartedAt);
+        Assert.Equal(BaseTime, topologyOperation.AcceptedAt);
+        Assert.Equal(recoveryAcceptedAt, finishedCreate!.AttemptStartedAt);
+
+        operation = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == operation.Id);
+        operation.State = ElsaInstanceOperationState.Succeeded;
+        var legacyOperation = NewOperation(
+            workspace,
+            instance,
+            BaseTime.AddMinutes(30),
+            ElsaInstanceOperationAction.Create);
+        legacyOperation.State = ElsaInstanceOperationState.Running;
+        legacyOperation.AttemptNumber = 2;
+        instance.LastOperationId = legacyOperation.Id.ToString("D");
+        db.ElsaInstanceOperations.Add(legacyOperation);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        topology = await store.GetLifecycleTopologyAsync(workspace.Id, instance.Id);
+        finishedCreate = await store.GetOperationAsync(workspace.Id, instance.Id, legacyOperation.Id);
+        Assert.Null(Assert.Single(topology!.Operations).AttemptStartedAt);
+        Assert.Null(finishedCreate!.AttemptStartedAt);
+
+        legacyOperation = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == legacyOperation.Id);
+        legacyOperation.State = ElsaInstanceOperationState.Succeeded;
+        var retryThreeOperation = NewOperation(
+            workspace,
+            instance,
+            BaseTime.AddMinutes(35),
+            ElsaInstanceOperationAction.Create);
+        retryThreeOperation.State = ElsaInstanceOperationState.Running;
+        retryThreeOperation.AttemptNumber = 3;
+        instance.LastOperationId = retryThreeOperation.Id.ToString("D");
+        db.ElsaInstanceOperations.Add(retryThreeOperation);
+        db.ElsaInstanceRecoveryRequests.Add(
+            NewRecovery(workspace, instance, retryThreeOperation, 3, BaseTime.AddMinutes(36)));
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        topology = await store.GetLifecycleTopologyAsync(workspace.Id, instance.Id);
+        finishedCreate = await store.GetOperationAsync(workspace.Id, instance.Id, retryThreeOperation.Id);
+        Assert.Equal(3, Assert.Single(topology!.Operations).AttemptNumber);
+        Assert.Equal(BaseTime.AddMinutes(36), Assert.Single(topology.Operations).AttemptStartedAt);
+        Assert.Equal(BaseTime.AddMinutes(36), finishedCreate!.AttemptStartedAt);
+
+        retryThreeOperation = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == retryThreeOperation.Id);
+        retryThreeOperation.State = ElsaInstanceOperationState.Succeeded;
+        var firstOperation = NewOperation(
+            workspace,
+            instance,
+            BaseTime.AddMinutes(40),
+            ElsaInstanceOperationAction.Create);
+        firstOperation.State = ElsaInstanceOperationState.Running;
+        instance.LastOperationId = firstOperation.Id.ToString("D");
+        db.ElsaInstanceOperations.Add(firstOperation);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        topology = await store.GetLifecycleTopologyAsync(workspace.Id, instance.Id);
+        finishedCreate = await store.GetOperationAsync(workspace.Id, instance.Id, firstOperation.Id);
+        Assert.Equal(firstOperation.AcceptedAt, Assert.Single(topology!.Operations).AttemptStartedAt);
+        Assert.Equal(firstOperation.AcceptedAt, finishedCreate!.AttemptStartedAt);
+    }
+
+    [Fact]
+    public void Ambiguous_recovery_attempt_starts_resolve_to_unknown()
+    {
+        Assert.Null(EfCoreManagedElsaInstanceApiStore.ResolveRecoveryAttemptStart(
+            [BaseTime.AddMinutes(36), BaseTime.AddMinutes(37)]));
+    }
+
+    [Fact]
     public async Task Lists_audit_newest_first_and_applies_the_requested_limit()
     {
         await using var connection = OpenConnection();
@@ -304,5 +401,25 @@ public sealed class ManagedElsaInstanceApiStoreReadTests
         Sequence = sequence,
         EventType = "instance.seeded",
         OccurredAt = occurredAt
+    };
+
+    private static ElsaInstanceRecoveryRequestEntity NewRecovery(
+        Workspace workspace,
+        ElsaInstanceEntity instance,
+        ElsaInstanceOperationEntity operation,
+        int attemptNumber,
+        DateTimeOffset acceptedAt) => new()
+    {
+        Id = Guid.NewGuid(),
+        OrganizationId = workspace.OrganizationId,
+        WorkspaceId = workspace.Id,
+        InstanceId = instance.Id,
+        OperationId = operation.Id,
+        AttemptNumber = attemptNumber,
+        IdempotencyScope = $"instance/{instance.Id:N}/recover",
+        IdempotencyKey = "recovery-" + Guid.NewGuid().ToString("N"),
+        RequestHash = new string('b', 64),
+        AcceptedAt = acceptedAt,
+        CreatedAt = acceptedAt
     };
 }

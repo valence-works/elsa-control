@@ -18,6 +18,8 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
 
         Assert.Equal(ManagedElsaProvisioningProgressStates.Queued, result.State);
         Assert.Equal(ManagedElsaProvisioningProgressStages.RequestAccepted, result.CurrentStage);
+        Assert.Equal(1, result.AttemptNumber);
+        Assert.Equal(AcceptedAt, result.AttemptStartedAt);
         Assert.Equal(ManagedElsaProvisioningProgressStageStatuses.Current, result.Stages[0].Status);
         Assert.All(result.Stages.Skip(1), stage => Assert.Equal(ManagedElsaProvisioningProgressStageStatuses.Pending, stage.Status));
         Assert.Contains(result.Activity, entry => entry.MessageCode == "request.accepted");
@@ -69,6 +71,42 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
         Assert.Equal(ManagedElsaProvisioningProgressStageStatuses.Completed, result.Stages[3].Status);
         Assert.Equal(ManagedElsaProvisioningProgressStageStatuses.Current, result.Stages[4].Status);
         Assert.Equal(new[] { 1L, 2L, 3L }, result.Activity.Select(entry => entry.Sequence).ToArray());
+    }
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.Foundation, "hosting-foundation")]
+    [InlineData(AzureProviderRunnerStep.AcrPull, "configuration")]
+    [InlineData(AzureProviderRunnerStep.SqlFirewallCleanup, "configuration")]
+    [InlineData(AzureProviderRunnerStep.Workload, "runtime-deployment")]
+    [InlineData(AzureProviderRunnerStep.Health, "health-verification")]
+    [InlineData(AzureProviderRunnerStep.Promotion, "traffic-routing")]
+    public void Current_attempted_step_maps_to_the_customer_stage(
+        AzureProviderRunnerStep attemptedStep,
+        string expectedStage)
+    {
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.Running,
+            provider: Provider(
+                phase: AzureProviderOperationPhase.FoundationReady,
+                attemptedStep: attemptedStep),
+            transitions: [Transition(1, AzureProviderOperationPhase.TrafficPromoted)]);
+
+        Assert.Equal(expectedStage, result.CurrentStage);
+    }
+
+    [Fact]
+    public void Current_attempted_step_wins_over_historical_activity()
+    {
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.Running,
+            provider: Provider(
+                phase: AzureProviderOperationPhase.FoundationReady,
+                attemptedStep: AzureProviderRunnerStep.Workload),
+            transitions: [Transition(1, AzureProviderOperationPhase.TrafficPromoted)]);
+
+        Assert.Equal(ManagedElsaProvisioningProgressStages.RuntimeDeployment, result.CurrentStage);
+        Assert.Equal(ManagedElsaProvisioningProgressStageStatuses.Current, result.Stages[3].Status);
+        Assert.Equal(ManagedElsaProvisioningProgressStageStatuses.Pending, result.Stages[5].Status);
     }
 
     [Fact]
@@ -565,6 +603,52 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
     }
 
     [Fact]
+    public void Unknown_attempted_step_is_uncertain_without_a_guessed_stage()
+    {
+        var unknownStep = (AzureProviderRunnerStep)999;
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.Running,
+            provider: Provider(
+                phase: AzureProviderOperationPhase.FoundationReady,
+                attemptedStep: unknownStep),
+            transitions: [Transition(1, AzureProviderOperationPhase.FoundationReady)]);
+
+        Assert.Equal(ManagedElsaProvisioningProgressStates.Active, result.State);
+        Assert.Null(result.CurrentStage);
+        Assert.All(result.Stages, stage =>
+            Assert.Equal(ManagedElsaProvisioningProgressStageStatuses.Unknown, stage.Status));
+        Assert.DoesNotContain(result.Activity, entry => entry.Status == ManagedElsaProvisioningProgressActivityStatuses.Blocked);
+        Assert.DoesNotContain("999", JsonSerializer.Serialize(result));
+    }
+
+    [Fact]
+    public void Attempt_metadata_uses_current_attempt_without_replacing_original_start()
+    {
+        var attemptStartedAt = AcceptedAt.AddMinutes(20);
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.Running,
+            provider: Provider(),
+            attemptNumber: 2,
+            attemptStartedAt: attemptStartedAt);
+
+        Assert.Equal(2, result.AttemptNumber);
+        Assert.Equal(attemptStartedAt, result.AttemptStartedAt);
+        Assert.Equal(AcceptedAt, result.StartedAt);
+    }
+
+    [Fact]
+    public void Legacy_retry_without_authoritative_attempt_start_stays_unknown()
+    {
+        var result = Project(
+            lifecycleState: ElsaInstanceOperationState.Running,
+            provider: Provider(),
+            attemptNumber: 2);
+
+        Assert.Equal(2, result.AttemptNumber);
+        Assert.Null(result.AttemptStartedAt);
+    }
+
+    [Fact]
     public void Unavailable_history_is_unknown_and_redacted()
     {
         var result = AzureManagedElsaProvisioningProgressProjector.Project(
@@ -987,11 +1071,14 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
         Guid? blockingOperationId = null,
         IReadOnlyList<ElsaInstanceLifecycleTopologyOperation>? topologyOperations = null,
         AzureProviderOperation? blockingProvider = null,
-        IReadOnlyList<AzureProviderOperationTransition>? blockingTransitions = null) =>
+        IReadOnlyList<AzureProviderOperationTransition>? blockingTransitions = null,
+        int attemptNumber = 1,
+        DateTimeOffset? attemptStartedAt = null) =>
         AzureManagedElsaProvisioningProgressProjector.Project(
             new AzureManagedElsaProvisioningProgressProjectionInput(
                 Topology(observedLifecycle, topologyOperations),
-                Lifecycle(lifecycleState, completedAt, failureCode, action, id, organizationId, blockingOperationId),
+                Lifecycle(lifecycleState, completedAt, failureCode, action, id, organizationId, blockingOperationId,
+                    attemptNumber: attemptNumber, attemptStartedAt: attemptStartedAt),
                 provider,
                 transitions,
                 RecoveryReason: recoveryReason,
@@ -1014,10 +1101,13 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
         Guid organizationId = default,
         Guid? blockingOperationId = null,
         DateTimeOffset? acceptedAt = null,
-        string? recoveryReason = null) =>
-        new(id ?? Guid.Parse("33333333-3333-3333-3333-333333333333"), action, state, 1, 1,
+        string? recoveryReason = null,
+        int attemptNumber = 1,
+        DateTimeOffset? attemptStartedAt = null) =>
+        new(id ?? Guid.Parse("33333333-3333-3333-3333-333333333333"), action, state, 1, attemptNumber,
             acceptedAt ?? AcceptedAt, (acceptedAt ?? AcceptedAt).AddSeconds(1), completedAt, null, failureCode, null, null, null,
-            RecoveryReason: recoveryReason, OrganizationId: organizationId, BlockingOperationId: blockingOperationId);
+            RecoveryReason: recoveryReason, OrganizationId: organizationId, BlockingOperationId: blockingOperationId,
+            AttemptStartedAt: attemptStartedAt);
 
     private static AzureProviderOperationTransition Transition(
         long sequence,
@@ -1034,7 +1124,8 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
         DateTimeOffset? createdAt = null,
         DateTimeOffset? heartbeatAt = null,
         DateTimeOffset? updatedAt = null,
-        DateTimeOffset? statusChangedAt = null)
+        DateTimeOffset? statusChangedAt = null,
+        AzureProviderRunnerStep? attemptedStep = null)
     {
         var created = createdAt ?? AcceptedAt;
         var heartbeat = heartbeatAt ?? (status == AzureProviderOperationStatus.Running ? created.AddSeconds(30) : null);
@@ -1045,6 +1136,7 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
             AzureProviderHealth.Healthy, [new AzureProviderDiagnostic("provider.internal.failure", "provider.internal.message")],
             "worker-id", AcceptedAt.AddMinutes(1), heartbeat, created, updatedAt ?? AcceptedAt.AddMinutes(1), completedAt,
             InstanceId: InstanceId, LifecycleAction: ElsaInstanceOperationAction.Create,
+            AttemptedStep: attemptedStep,
             StatusChangedAt: statusChangedAt ?? created);
     }
 

@@ -108,7 +108,25 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
             .SingleOrDefaultAsync(x => x.WorkspaceId == workspaceId &&
                                        x.InstanceId == instanceId &&
                                        x.Id == operationId, cancellationToken);
-        return operation is null || operation.InstanceId is null ? null : MapOperation(operation);
+        if (operation is null || operation.InstanceId is null)
+            return null;
+
+        var mapped = MapOperation(operation);
+        if (mapped.AttemptNumber == 1)
+            return mapped with { AttemptStartedAt = mapped.AcceptedAt };
+
+        if (mapped.AttemptNumber < 1)
+            return mapped;
+
+        var recoveryStarts = await dbContext.ElsaInstanceRecoveryRequests
+            .AsNoTracking()
+            .Where(x => x.WorkspaceId == workspaceId &&
+                        x.InstanceId == instanceId &&
+                        x.OperationId == mapped.Id &&
+                        x.AttemptNumber == mapped.AttemptNumber)
+            .Select(x => x.AcceptedAt)
+            .ToListAsync(cancellationToken);
+        return mapped with { AttemptStartedAt = ResolveRecoveryAttemptStart(recoveryStarts) };
     }
 
     public async Task<ElsaInstanceOperationPage> ListOperationsAsync(
@@ -212,12 +230,10 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
         foreach (var instanceId in latest.Keys.ToArray())
         {
             var operation = latest[instanceId];
-            var attemptStartedAt = recoveryStarts
+            var attemptStartedAt = ResolveRecoveryAttemptStart(recoveryStarts
                 .Where(x => x.OperationId == operation.Id && x.AttemptNumber == operation.AttemptNumber)
-                .Select(x => (DateTimeOffset?)x.AcceptedAt)
-                .OrderByDescending(x => x)
-                .FirstOrDefault();
-            if (attemptStartedAt is not null)
+                .Select(x => x.AcceptedAt));
+            if (operation.AttemptNumber > 1)
                 latest[instanceId] = operation with { AttemptStartedAt = attemptStartedAt };
         }
 
@@ -314,6 +330,19 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
                             run => (run.Status, run.RecoveryReason),
                             cancellationToken);
                 var operationIds = operations.Select(x => x.Id).ToList();
+                var recoveryStarts = await dbContext.ElsaInstanceRecoveryRequests
+                    .AsNoTracking()
+                    .Where(x => x.WorkspaceId == workspaceId &&
+                                x.InstanceId == instanceId &&
+                                x.OrganizationId == instance.OrganizationId &&
+                                operationIds.Contains(x.OperationId))
+                    .Select(x => new { x.OperationId, x.AttemptNumber, x.AcceptedAt })
+                    .ToListAsync(cancellationToken);
+                var recoveryStartsByAttempt = recoveryStarts
+                    .GroupBy(x => (x.OperationId, x.AttemptNumber))
+                    .ToDictionary(
+                        group => group.Key,
+                        group => ResolveRecoveryAttemptStart(group.Select(item => item.AcceptedAt)));
                 var outboxes = operationIds.Count == 0
                     ? []
                     : await dbContext.ElsaInstanceLifecycleOutbox
@@ -362,7 +391,10 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
                         runStatuses.TryGetValue(recoveryRunId, out var recoveryRun)
                             ? recoveryRun.RecoveryReason
                             : null,
-                        operation.OrganizationId);
+                        operation.OrganizationId,
+                        AttemptStartedAt: operation.AttemptNumber == 1
+                            ? operation.AcceptedAt
+                            : recoveryStartsByAttempt.GetValueOrDefault((operation.Id, operation.AttemptNumber)));
                 }).ToList();
                 operationSnapshots = operationSnapshots
                     .Select(operation =>
@@ -591,6 +623,15 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
             UpdatedAt: operation.UpdatedAt,
             ReasonEnteredAt: operation.ReasonEnteredAt,
             RequiresHumanAt: operation.RequiresHumanAt);
+
+    internal static DateTimeOffset? ResolveRecoveryAttemptStart(IEnumerable<DateTimeOffset> acceptedAt)
+    {
+        var values = acceptedAt
+            .Select(value => value.ToUniversalTime())
+            .Distinct()
+            .ToArray();
+        return values.Length == 1 ? values[0] : null;
+    }
 
     private static ElsaInstance? TryMapInstance(Models.ElsaInstanceEntity entity)
     {
