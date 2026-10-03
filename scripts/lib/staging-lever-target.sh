@@ -3,9 +3,9 @@
 # Azure names (ENVIRONMENT_NAME / AZURE_ENV_NAME) must be exactly equal.
 # TARGET_ENVIRONMENT=test is the only GitHub environment that arms the lever.
 # It aliases to valence-control-staging for agreement with Azure names.
-# --environment test and AZURE_ENV_NAME=valence-control-staging stay distinct
-# (rg-test vs rg-valence-control-staging). TARGET_ENVIRONMENT=valence-control-staging
-# does not arm the lever. Any mismatch or non-test target fails closed.
+# Bare --environment test (rg-test) does not arm the lever. The Azure name that
+# arms the lever is valence-control-staging only. Any mismatch or non-test
+# target fails closed.
 
 is_staging_azure_env_name() {
   [ "$1" = "test" ] || [ "$1" = "valence-control-staging" ]
@@ -54,9 +54,9 @@ is_staging_lever_target() {
   if [ -n "${TARGET_ENVIRONMENT:-}" ]; then
     [ "$TARGET_ENVIRONMENT" = "test" ]
   elif [ -n "${ENVIRONMENT_NAME:-}" ]; then
-    is_staging_azure_env_name "$ENVIRONMENT_NAME"
+    [ "$ENVIRONMENT_NAME" = "valence-control-staging" ]
   else
-    is_staging_azure_env_name "${AZURE_ENV_NAME:-}"
+    [ "${AZURE_ENV_NAME:-}" = "valence-control-staging" ]
   fi
 }
 

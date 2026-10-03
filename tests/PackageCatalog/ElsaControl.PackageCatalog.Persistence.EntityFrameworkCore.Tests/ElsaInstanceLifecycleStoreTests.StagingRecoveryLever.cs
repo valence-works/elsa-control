@@ -604,6 +604,18 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             expected: typeof(StagingRecoveryLifecycleLeverPersistenceException));
 
     [Fact]
+    public async Task Staging_recovery_lever_reset_classifies_concurrency_as_conflict() =>
+        await AssertResetClassifiesAsync(
+            new DbUpdateConcurrencyException("concurrency"),
+            expected: typeof(ElsaInstanceLifecycleConflictException));
+
+    [Fact]
+    public async Task Staging_recovery_lever_reset_classifies_unique_violation_as_conflict() =>
+        await AssertResetClassifiesAsync(
+            new DbUpdateException("unique", new SqliteException("UNIQUE constraint failed", 19, 2067)),
+            expected: typeof(ElsaInstanceLifecycleConflictException));
+
+    [Fact]
     public async Task Staging_recovery_lever_reset_classifies_generic_db_exception_as_unavailable() =>
         await AssertResetClassifiesAsync(
             new SqliteException("disk I/O error", 10),
