@@ -964,7 +964,8 @@ public sealed class AzureElsaInstanceProvider(
                 finalizationInProgress || providerOperationInProgress
                     ? ElsaInstanceCleanupObservationKind.InProgress
                     : ElsaInstanceCleanupObservationKind.Unknown,
-                LastProviderProgressAt(pending));
+                LastProviderProgressAt(pending),
+                CleanupProgressReceipt(pending));
         }
     }
 
@@ -1166,20 +1167,29 @@ public sealed class AzureElsaInstanceProvider(
         ElsaInstanceCleanupRequest request,
         string code,
         ElsaInstanceCleanupObservationKind kind = ElsaInstanceCleanupObservationKind.Unknown,
-        DateTimeOffset? lastProviderProgressAt = null) =>
-        new(kind, request.OperationId, request.AttemptNumber, code, LastProviderProgressAt: lastProviderProgressAt);
+        DateTimeOffset? lastProviderProgressAt = null,
+        string? progressReceipt = null) =>
+        new(kind, request.OperationId, request.AttemptNumber, code,
+            LastProviderProgressAt: lastProviderProgressAt,
+            ProgressReceipt: progressReceipt);
 
-    internal static DateTimeOffset LastProviderProgressAt(AzureProviderOperation operation)
+    /// <summary>
+    /// Verified provider progress only: Status or Phase change. Never CreatedAt,
+    /// HeartbeatAt, or a restamped ARM read.
+    /// </summary>
+    internal static DateTimeOffset? LastProviderProgressAt(AzureProviderOperation operation)
     {
         ArgumentNullException.ThrowIfNull(operation);
-        var latest = operation.CreatedAt;
-        if (operation.StatusChangedAt is { } statusChanged && statusChanged > latest)
-            latest = statusChanged;
-        if (operation.HeartbeatAt is { } heartbeat && heartbeat > latest)
-            latest = heartbeat;
-        if (operation.LastArmObservedAt is { } armObserved && armObserved > latest)
-            latest = armObserved;
-        return latest;
+        return operation.ProgressChangedAt ?? operation.StatusChangedAt;
+    }
+
+    internal static string CleanupProgressReceipt(AzureProviderOperation operation)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        var resources = operation.Resources;
+        var canonical =
+            $"{operation.Status}\n{operation.Phase}\n{operation.AttemptNumber}\n{resources.ResourceGroupName}\n{resources.FoundationDeploymentId}\n{resources.WorkloadDeploymentId}\n{resources.WorkloadResourceId}\n{resources.WorkloadRevisionName}\n{resources.StableTrafficRevisionName}\n{resources.WorkloadIdentityResourceId}\n{resources.KeyVaultResourceId}\n{resources.SqlServerResourceId}\n{resources.ContainerAppsEnvironmentResourceId}\n{resources.RegistryResourceId}\n{resources.AcrPullDeploymentId}\n{operation.Endpoint}\n";
+        return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(canonical)));
     }
 
     /// <summary>

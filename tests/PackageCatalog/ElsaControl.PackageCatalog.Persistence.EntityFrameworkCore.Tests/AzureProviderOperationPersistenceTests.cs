@@ -1179,14 +1179,50 @@ public sealed class AzureProviderOperationPersistenceTests : IDisposable
         var heartbeat = Assert.IsType<AzureProviderOperation>(await store.HeartbeatAsync(
             _workspaceId, created.Id, "lease", TimeSpan.FromMinutes(30), now.AddMinutes(2), claimed.Version));
         Assert.Equal(now.AddSeconds(5), heartbeat.StatusChangedAt);
+        Assert.Equal(now.AddSeconds(5), heartbeat.ProgressChangedAt);
         Assert.Equal(now.AddMinutes(2), heartbeat.UpdatedAt);
+        Assert.Equal(now.AddMinutes(2), heartbeat.HeartbeatAt);
         Assert.Equal(AzureProviderOperationStatus.Running, heartbeat.Status);
 
         var finalized = Assert.IsType<AzureProviderOperation>(await store.FinalizeAsync(
             _workspaceId, created.Id, "lease", AzureProviderOperationStatus.Succeeded, "operation.succeeded",
             now.AddMinutes(8), heartbeat.Version));
         Assert.Equal(now.AddMinutes(8), finalized.StatusChangedAt);
+        Assert.Equal(now.AddMinutes(8), finalized.ProgressChangedAt);
         Assert.Equal(AzureProviderOperationStatus.Succeeded, finalized.Status);
+    }
+
+    [Fact]
+    public async Task ProgressChangedAt_moves_on_phase_change_not_heartbeat_or_arm_restamp()
+    {
+        var now = DateTimeOffset.Parse("2026-10-03T10:00:00Z");
+        using var db = CreateContext();
+        var store = new AzureProviderOperationStore(db);
+        var created = await store.CreateOrGetAsync(Request(), now);
+        Assert.Equal(now, created.ProgressChangedAt);
+        var claimed = Assert.IsType<AzureProviderOperation>(await store.ClaimAsync(
+            _workspaceId, created.Id, "worker", "lease", TimeSpan.FromMinutes(30), now.AddSeconds(5)));
+        Assert.Equal(now.AddSeconds(5), claimed.ProgressChangedAt);
+
+        var heartbeat = Assert.IsType<AzureProviderOperation>(await store.HeartbeatAsync(
+            _workspaceId, created.Id, "lease", TimeSpan.FromMinutes(30), now.AddMinutes(2), claimed.Version));
+        Assert.Equal(claimed.ProgressChangedAt, heartbeat.ProgressChangedAt);
+        Assert.Equal(now.AddMinutes(2), heartbeat.HeartbeatAt);
+
+        var phase = Assert.IsType<AzureProviderOperation>(await store.CheckpointAsync(
+            _workspaceId, created.Id, "lease",
+            new(AzureProviderOperationPhase.CleanupSubmitted, "azure.cleanup.submitted",
+                "Cleanup submitted.", new(), null, AzureProviderHealth.Unknown, []),
+            now.AddMinutes(3), heartbeat.Version));
+        Assert.Equal(AzureProviderOperationPhase.CleanupSubmitted, phase.Phase);
+        Assert.Equal(AzureProviderOperationStatus.Running, phase.Status);
+        Assert.Equal(claimed.StatusChangedAt, phase.StatusChangedAt);
+        Assert.Equal(now.AddMinutes(3), phase.ProgressChangedAt);
+
+        await store.RecordArmObservationClockAsync(_workspaceId, created.Id, now.AddMinutes(4), 60);
+        var afterArm = await store.GetAsync(_workspaceId, created.Id);
+        Assert.Equal(now.AddMinutes(4), afterArm!.LastArmObservedAt);
+        Assert.Equal(now.AddMinutes(3), afterArm.ProgressChangedAt);
     }
 
     [Fact]

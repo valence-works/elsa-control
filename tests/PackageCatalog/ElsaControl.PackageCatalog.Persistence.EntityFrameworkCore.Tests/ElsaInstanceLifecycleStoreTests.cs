@@ -1547,62 +1547,188 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
-    public async Task Claimed_delete_reports_running_while_provider_cleanup_progresses_and_escalates_only_when_progress_stops()
+    public async Task Heartbeating_cleanup_with_unchanged_receipt_parks_as_stale()
     {
-        // #637: Accepted stayed visible while Azure was CleanupSubmitted. This is
-        // a projection/progress-bound gap, not the #602 If-Match version-conflict loop.
-        await using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        await using var db = CreateMigratedContext(connection);
-        await db.Database.MigrateAsync();
-        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Provider progress deletion workspace");
-        await CompleteManagedRunAsync(db, accepted.Operation.Id, accepted.Instance.Id);
-        var current = await CreateStore(db).GetInstanceAsync(workspace.Id, accepted.Instance.Id);
-        var deletion = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now.AddMinutes(2)))
-            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
-                db, workspace.Id, accepted.Instance.Id, current!.Version, "progress-delete", Now.AddMinutes(2)));
-        var clock = new MutableTimeProvider(Now.AddMinutes(3));
-        var lastProgress = clock.GetUtcNow();
-        var port = new ScriptedProgressCleanupPort(
-            () => new ElsaInstanceCleanupObservation(
-                ElsaInstanceCleanupObservationKind.InProgress,
-                deletion.Operation.Id,
-                deletion.Operation.AttemptNumber,
-                "deletion.provider-cleanup-pending",
-                LastProviderProgressAt: lastProgress));
-
-        for (var cycle = 0; cycle < 6; cycle++)
+        // #637 / Architect: HeartbeatAt is lease liveness, not verified progress.
+        var (db, deletion, clock) = await QueueClaimedDeleteAsync("Heartbeat stale deletion workspace");
+        await using (db)
         {
-            lastProgress = clock.GetUtcNow();
-            var progressing = await new ElsaInstanceDeletionWorker(
+            var receipt = new string('1', 64);
+            var port = new ScriptedProgressCleanupPort(
+                () => new ElsaInstanceCleanupObservation(
+                    ElsaInstanceCleanupObservationKind.InProgress,
+                    deletion.Operation.Id,
+                    deletion.Operation.AttemptNumber,
+                    "deletion.provider-cleanup-pending",
+                    ProgressReceipt: receipt));
+
+            var first = await new ElsaInstanceDeletionWorker(
+                    new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance, clock),
+                    port,
+                    clock)
+                .ProcessAvailableAsync("deletion-progress-worker");
+            Assert.Empty(first.Results);
+            var running = await db.ElsaInstanceOperations.AsNoTracking()
+                .SingleAsync(x => x.Id == deletion.Operation.Id);
+            Assert.Equal(ElsaInstanceOperationState.Running, running.State);
+            Assert.Equal(receipt, running.LastVerifiedProgressReceipt);
+
+            clock.Advance(ElsaInstanceDeletionWorker.ProviderProgressStaleAfter + TimeSpan.FromSeconds(1));
+            var stalled = await new ElsaInstanceDeletionWorker(
                     new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance, clock),
                     port,
                     clock)
                 .ProcessAvailableAsync("deletion-progress-worker");
 
-            Assert.Empty(progressing.Results);
-            var operation = await db.ElsaInstanceOperations.AsNoTracking()
+            Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Failed, Assert.Single(stalled.Results).Outcome);
+            var recovered = await db.ElsaInstanceOperations.AsNoTracking()
                 .SingleAsync(x => x.Id == deletion.Operation.Id);
-            Assert.Equal(ElsaInstanceOperationState.Running, operation.State);
-            Assert.Equal("deletion.provider-cleanup-pending", operation.DeletionDiagnosticCode);
-            Assert.NotEqual(ElsaInstanceOperationState.RecoveryRequired, operation.State);
-            Assert.NotEqual(ElsaInstanceOperationState.Accepted, operation.State);
-            clock.Advance(TimeSpan.FromMinutes(10));
+            Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, recovered.State);
+            Assert.Equal("lifecycle.deletion.provider-progress-stale", recovered.DeletionDiagnosticCode);
+            Assert.Equal("lifecycle.deletion.provider-progress-stale", recovered.FailureCode);
+            Assert.NotNull(recovered.RequiresHumanAt);
         }
+    }
 
-        clock.Advance(ElsaInstanceDeletionWorker.ProviderProgressStaleAfter + TimeSpan.FromSeconds(1));
-        var stalled = await new ElsaInstanceDeletionWorker(
-                new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance, clock),
-                port,
-                clock)
-            .ProcessAvailableAsync("deletion-progress-worker");
+    [Fact]
+    public async Task Slow_cleanup_with_advancing_inventory_receipt_stays_running_past_the_bound()
+    {
+        // #637: QA's ~50-minute Delete was advancing Azure cleanup, not silence.
+        var (db, deletion, clock) = await QueueClaimedDeleteAsync("Advancing cleanup deletion workspace");
+        await using (db)
+        {
+            var cycle = 0;
+            var port = new ScriptedProgressCleanupPort(
+                () => new ElsaInstanceCleanupObservation(
+                    ElsaInstanceCleanupObservationKind.InProgress,
+                    deletion.Operation.Id,
+                    deletion.Operation.AttemptNumber,
+                    "deletion.provider-cleanup-pending",
+                    LastProviderProgressAt: clock.GetUtcNow(),
+                    ProgressReceipt: new string((char)('1' + cycle), 64)));
 
-        Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Failed, Assert.Single(stalled.Results).Outcome);
-        var recovered = await db.ElsaInstanceOperations.AsNoTracking()
-            .SingleAsync(x => x.Id == deletion.Operation.Id);
-        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, recovered.State);
-        Assert.Equal("deletion.provider-progress-stale", recovered.DeletionDiagnosticCode);
-        Assert.Equal("deletion.provider-progress-stale", recovered.FailureCode);
+            for (; cycle < 7; cycle++)
+            {
+                var progressing = await new ElsaInstanceDeletionWorker(
+                        new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance, clock),
+                        port,
+                        clock)
+                    .ProcessAvailableAsync("deletion-progress-worker");
+
+                Assert.Empty(progressing.Results);
+                var operation = await db.ElsaInstanceOperations.AsNoTracking()
+                    .SingleAsync(x => x.Id == deletion.Operation.Id);
+                Assert.Equal(ElsaInstanceOperationState.Running, operation.State);
+                Assert.Equal("deletion.provider-cleanup-pending", operation.DeletionDiagnosticCode);
+                Assert.NotEqual(ElsaInstanceOperationState.Accepted, operation.State);
+                clock.Advance(TimeSpan.FromMinutes(10));
+            }
+
+            var stillRunning = await db.ElsaInstanceOperations.AsNoTracking()
+                .SingleAsync(x => x.Id == deletion.Operation.Id);
+            Assert.Equal(ElsaInstanceOperationState.Running, stillRunning.State);
+            Assert.True(clock.GetUtcNow() - stillRunning.StartedAt!.Value > ElsaInstanceDeletionWorker.ProviderProgressStaleAfter);
+        }
+    }
+
+    [Fact]
+    public async Task Operations_in_flight_without_progress_timestamp_parks_as_blocked_at_the_bound()
+    {
+        var (db, deletion, clock) = await QueueClaimedDeleteAsync("Operations in flight deletion workspace");
+        await using (db)
+        {
+            var port = new ScriptedProgressCleanupPort(
+                () => new ElsaInstanceCleanupObservation(
+                    ElsaInstanceCleanupObservationKind.InProgress,
+                    deletion.Operation.Id,
+                    deletion.Operation.AttemptNumber,
+                    "assignment.rebind.operations-inflight"));
+
+            var first = await new ElsaInstanceDeletionWorker(
+                    new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance, clock),
+                    port,
+                    clock)
+                .ProcessAvailableAsync("deletion-progress-worker");
+            Assert.Empty(first.Results);
+            var running = await db.ElsaInstanceOperations.AsNoTracking()
+                .SingleAsync(x => x.Id == deletion.Operation.Id);
+            Assert.Equal(ElsaInstanceOperationState.Running, running.State);
+            Assert.Null(running.LastVerifiedProgressAt);
+
+            clock.Advance(ElsaInstanceDeletionWorker.ProviderProgressStaleAfter + TimeSpan.FromSeconds(1));
+            var stalled = await new ElsaInstanceDeletionWorker(
+                    new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance, clock),
+                    port,
+                    clock)
+                .ProcessAvailableAsync("deletion-progress-worker");
+
+            Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Failed, Assert.Single(stalled.Results).Outcome);
+            var recovered = await db.ElsaInstanceOperations.AsNoTracking()
+                .SingleAsync(x => x.Id == deletion.Operation.Id);
+            Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, recovered.State);
+            Assert.Equal("lifecycle.deletion.blocked-by-operation-in-flight", recovered.DeletionDiagnosticCode);
+            Assert.Equal("lifecycle.deletion.blocked-by-operation-in-flight", recovered.FailureCode);
+            Assert.NotNull(recovered.RequiresHumanAt);
+        }
+    }
+
+    [Fact]
+    public async Task Phase_only_receipt_change_raises_last_verified_progress()
+    {
+        var (db, deletion, clock) = await QueueClaimedDeleteAsync("Phase-only progress deletion workspace");
+        await using (db)
+        {
+            var firstReceipt = new string('a', 64);
+            var first = await new ElsaInstanceDeletionWorker(
+                    new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance, clock),
+                    new ScriptedProgressCleanupPort(() => new ElsaInstanceCleanupObservation(
+                        ElsaInstanceCleanupObservationKind.InProgress,
+                        deletion.Operation.Id,
+                        deletion.Operation.AttemptNumber,
+                        "deletion.provider-cleanup-pending",
+                        ProgressReceipt: firstReceipt)),
+                    clock)
+                .ProcessAvailableAsync("deletion-progress-worker");
+            Assert.Empty(first.Results);
+            var afterFirst = await db.ElsaInstanceOperations.AsNoTracking()
+                .SingleAsync(x => x.Id == deletion.Operation.Id);
+            Assert.Equal(firstReceipt, afterFirst.LastVerifiedProgressReceipt);
+            var firstProgress = afterFirst.LastVerifiedProgressAt;
+
+            clock.Advance(TimeSpan.FromMinutes(15));
+            var phaseReceipt = new string('b', 64);
+            var second = await new ElsaInstanceDeletionWorker(
+                    new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance, clock),
+                    new ScriptedProgressCleanupPort(() => new ElsaInstanceCleanupObservation(
+                        ElsaInstanceCleanupObservationKind.InProgress,
+                        deletion.Operation.Id,
+                        deletion.Operation.AttemptNumber,
+                        "deletion.provider-cleanup-pending",
+                        ProgressReceipt: phaseReceipt)),
+                    clock)
+                .ProcessAvailableAsync("deletion-progress-worker");
+            Assert.Empty(second.Results);
+            var afterPhase = await db.ElsaInstanceOperations.AsNoTracking()
+                .SingleAsync(x => x.Id == deletion.Operation.Id);
+            Assert.Equal(ElsaInstanceOperationState.Running, afterPhase.State);
+            Assert.Equal(phaseReceipt, afterPhase.LastVerifiedProgressReceipt);
+            Assert.True(afterPhase.LastVerifiedProgressAt > firstProgress);
+        }
+    }
+
+    private async Task<(CatalogDbContext Db, ElsaInstanceLifecycleAcceptance Deletion, MutableTimeProvider Clock)> QueueClaimedDeleteAsync(string workspaceName)
+    {
+        var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, workspaceName);
+        await CompleteManagedRunAsync(db, accepted.Operation.Id, accepted.Instance.Id);
+        var current = await CreateStore(db).GetInstanceAsync(workspace.Id, accepted.Instance.Id);
+        var deletion = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now.AddMinutes(2)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, current!.Version, "progress-delete", Now.AddMinutes(2)));
+        return (db, deletion, new MutableTimeProvider(Now.AddMinutes(3)));
     }
 
     [Fact]
@@ -2971,6 +3097,8 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     [InlineData(ManagedElsaReasonCodeCatalog.AssignmentRebindAmbiguous)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionRecoveryAuthorityUnavailable)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionRecoveryPlanUnavailable)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight)]
     public async Task Delete_park_codes_that_need_a_person_stamp_RequiresHumanAt_immediately(string diagnosticCode)
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

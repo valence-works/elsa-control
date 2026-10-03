@@ -1653,7 +1653,10 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 return new ElsaInstanceDeletionWorkItem(MapOutbox(candidate), MapOperation(operation), mappedInstance,
                     local, latestRunId, leaseToken, leaseVersion)
                 {
-                    RecoveryRequestId = recoveryRequestId
+                    RecoveryRequestId = recoveryRequestId,
+                    RunningSince = operation.StartedAt,
+                    LastVerifiedProgressAt = operation.LastVerifiedProgressAt,
+                    LastVerifiedProgressReceipt = operation.LastVerifiedProgressReceipt
                 };
             },
                 async (_, verificationCancellationToken) =>
@@ -1749,6 +1752,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 .SetProperty(operation => operation.LeaseExpiresAt, nowUtc.Add(DeletionDeferralDelay))
                 .SetProperty(operation => operation.HeartbeatAt, nowUtc)
                 .SetProperty(operation => operation.DeletionDiagnosticCode, diagnosticCode)
+                .SetProperty(operation => operation.LastVerifiedProgressAt, item.LastVerifiedProgressAt)
+                .SetProperty(operation => operation.LastVerifiedProgressReceipt, item.LastVerifiedProgressReceipt)
                 .SetProperty(operation => operation.UpdatedAt, nowUtc), cancellationToken);
         return deferred == 1;
     }

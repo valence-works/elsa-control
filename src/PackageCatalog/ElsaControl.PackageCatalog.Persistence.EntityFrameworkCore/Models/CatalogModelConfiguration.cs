@@ -950,6 +950,7 @@ internal sealed class AzureProviderOperationConfiguration : IEntityTypeConfigura
         ConfigureDateTime(builder.Property(x => x.CreatedAt));
         ConfigureDateTime(builder.Property(x => x.UpdatedAt));
         ConfigureDateTime(builder.Property(x => x.StatusChangedAt));
+        ConfigureDateTime(builder.Property(x => x.ProgressChangedAt));
         ConfigureNullableDateTime(builder.Property(x => x.CompletedAt));
         ConfigureNullableDateTime(builder.Property(x => x.LeaseExpiresAt));
         ConfigureNullableDateTime(builder.Property(x => x.HeartbeatAt));
@@ -1286,6 +1287,8 @@ internal sealed class ElsaInstanceOperationConfiguration : IEntityTypeConfigurat
         builder.Property(x => x.DeletionEvidenceReference).HasMaxLength(2048);
         builder.Property(x => x.DeletionEvidenceDigest).HasMaxLength(71);
         builder.Property(x => x.DeletionDiagnosticCode).HasMaxLength(128);
+        builder.Property(x => x.LastVerifiedProgressAt).HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null, value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
+        builder.Property(x => x.LastVerifiedProgressReceipt).HasMaxLength(64);
         builder.Property(x => x.CreatedAt).HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
         builder.Property(x => x.UpdatedAt).HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
         builder.Property(x => x.ReasonEnteredAt).HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null, value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);

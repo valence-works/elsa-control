@@ -716,6 +716,16 @@ Delete, assignment, workspace, organization, target and provider scope.
 
 Provider RecoveryRequired, failed/unavailable observations and correlation failures
 remain on the explicit recovery path; the ordinary worker does not replay them.
+
+A stuck provider runner that is still heartbeating does not count as verified
+cleanup progress. After 60 minutes with no Status, Phase, or remaining-inventory
+receipt change, the lifecycle Delete parks as `RecoveryRequired` with
+`lifecycle.deletion.provider-progress-stale` or
+`lifecycle.deletion.blocked-by-operation-in-flight`. Operator Recover on that
+target can still return InProgress until the executor lease expires and the
+abandon path releases the in-flight operation. Deletion-worker lease fencing
+stays deferred; do not treat a live executor heartbeat as proof that Azure
+moved.
 Delete idempotency lineage accepts the exact lifecycle root and canonical retry-ID
 segments. Very long legacy retry chains that collapse into an unattributable hashed
 key require explicit operator recovery, even if provider cleanup succeeded. Do not
