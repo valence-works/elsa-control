@@ -22,6 +22,7 @@ MAIN_BICEP = ROOT / "infra" / "main.bicep"
 MAIN_PARAMETERS = ROOT / "infra" / "main.parameters.json"
 REGENERATE_INFRA = ROOT / "dev" / "regenerate-infra.sh"
 PATCH_API_IDENTITY = ROOT / "dev" / "patch-api-provisioner-identity.py"
+PATCH_CONTROL_SQL_SKU = ROOT / "dev" / "patch-control-sql-sku.py"
 APP_SERVICE_DOC = ROOT / "docs" / "deployment" / "azure-app-service.md"
 # Hand-maintained directories dev/regenerate-infra.sh must carry across a regeneration.
 PRESERVED_INFRA_DIRECTORIES = ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry", "control-deploy-identity", "control-worker-composition", "control-egress")
@@ -473,6 +474,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("empty(provisioner_identity_outputs_id)", module)
         self.assertIn("'${provisioner_identity_outputs_id}': { }", module)
         self.assertIn("patch-api-provisioner-identity.py", regeneration)
+        self.assertIn("patch-control-sql-sku.py", regeneration)
         for directory in PRESERVED_INFRA_DIRECTORIES:
             self.assertIn(directory, regeneration)
         self.assertNotIn("dashboard", module.lower())
@@ -623,6 +625,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         (temporary / "infra").mkdir()
         shutil.copy2(REGENERATE_INFRA, temporary / "dev" / "regenerate-infra.sh")
         shutil.copy2(PATCH_API_IDENTITY, temporary / "dev" / "patch-api-provisioner-identity.py")
+        shutil.copy2(PATCH_CONTROL_SQL_SKU, temporary / "dev" / "patch-control-sql-sku.py")
         for relative_path in PRESERVED_INFRA_DIRECTORIES:
             directory = temporary / "infra" / relative_path
             directory.mkdir(parents=True)

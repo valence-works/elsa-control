@@ -256,12 +256,19 @@ export ENVIRONMENT_NAME LOCATION AZURE_PRINCIPAL_ID
 BASE_PAYLOAD="$(python3 - <<'PY'
 import json
 import os
+import sys
+from pathlib import Path
 
-print(json.dumps({
+sys.path.insert(0, str(Path("scripts") / "lib"))
+from control_sql_sku import sku_parameters
+
+payload = {
     "environmentName": os.environ["ENVIRONMENT_NAME"],
     "location": os.environ["LOCATION"],
     "principalId": os.environ["AZURE_PRINCIPAL_ID"],
-}))
+}
+payload.update(sku_parameters(os.environ["ENVIRONMENT_NAME"]))
+print(json.dumps(payload))
 PY
 )"
 write_parameters "$BASE_PARAMETERS_FILE" "$BASE_PAYLOAD"

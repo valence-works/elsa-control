@@ -63,6 +63,9 @@ azd infra generate --force --no-prompt
 echo "Re-applying the optional API provisioner identity parameter..."
 python3 dev/patch-api-provisioner-identity.py
 
+echo "Re-applying Control Catalog SQL SKU parameters..."
+python3 dev/patch-control-sql-sku.py
+
 if [ -d infra/api-roles-control-sql ]; then
     echo "Stripping the broken api-roles-control-sql module..."
     python3 - <<'PY'

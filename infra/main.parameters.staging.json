@@ -2,29 +2,29 @@
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
   "contentVersion": "1.0.0.0",
   "parameters": {
-    "principalId": {
-      "value": "${AZURE_PRINCIPAL_ID}"
-    },
     "environmentName": {
-      "value": "${AZURE_ENV_NAME}"
+      "value": "valence-control-staging"
     },
     "location": {
-      "value": "${AZURE_LOCATION}"
+      "value": "westeurope"
+    },
+    "principalId": {
+      "value": ""
     },
     "sqlDatabaseSkuName": {
-      "value": ""
+      "value": "S0"
     },
     "sqlDatabaseSkuTier": {
-      "value": ""
+      "value": "Standard"
     },
     "sqlDatabaseSkuFamily": {
       "value": ""
     },
     "sqlDatabaseSkuCapacity": {
-      "value": 0
+      "value": 10
     },
     "sqlDatabaseMaxSizeBytes": {
-      "value": ""
+      "value": "268435456000"
     }
   }
 }
