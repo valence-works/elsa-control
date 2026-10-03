@@ -273,6 +273,18 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         self.assertIn("Staging lever target names disagree", refused.stderr)
         self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", refused.stdout + refused.stderr)
 
+    def test_refuses_when_environment_name_is_test_and_azure_env_name_is_staging(self) -> None:
+        environment = self.environment()
+        environment["AZURE_ENV_NAME"] = "valence-control-staging"
+        environment["STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED"] = "true"
+        environment["STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS"] = (
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        result = self.run_deploy(environment, "--environment", "test")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("Staging lever target names disagree", result.stderr)
+        self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
+
     def test_treats_a_false_or_empty_lever_flag_as_unset_on_production(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)

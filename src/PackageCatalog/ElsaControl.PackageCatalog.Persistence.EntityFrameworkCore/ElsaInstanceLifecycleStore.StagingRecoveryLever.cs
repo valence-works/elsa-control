@@ -211,10 +211,15 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
             dbContext.ChangeTracker.Clear();
             throw Conflict("An instance operation is already active.", ElsaInstanceLifecycleConflictReason.OperationActive);
         }
-        catch (Exception exception) when (exception is DbUpdateException or DbException)
+        catch (DbUpdateException exception) when (EfCoreDatabaseExceptionPolicy.IsUniqueViolation(exception))
         {
             dbContext.ChangeTracker.Clear();
             throw Conflict("An instance operation is already active.", ElsaInstanceLifecycleConflictReason.OperationActive);
+        }
+        catch (Exception exception) when (exception is DbUpdateException or DbException)
+        {
+            dbContext.ChangeTracker.Clear();
+            throw PersistenceUnavailable(exception);
         }
     }
 
@@ -335,12 +340,20 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
             dbContext.ChangeTracker.Clear();
             throw Conflict("An instance operation is already active.", ElsaInstanceLifecycleConflictReason.OperationActive);
         }
-        catch (Exception exception) when (exception is DbUpdateException or DbException)
+        catch (DbUpdateException exception) when (EfCoreDatabaseExceptionPolicy.IsUniqueViolation(exception))
         {
             dbContext.ChangeTracker.Clear();
             throw Conflict("An instance operation is already active.", ElsaInstanceLifecycleConflictReason.OperationActive);
         }
+        catch (Exception exception) when (exception is DbUpdateException or DbException)
+        {
+            dbContext.ChangeTracker.Clear();
+            throw PersistenceUnavailable(exception);
+        }
     }
+
+    private static StagingRecoveryLifecycleLeverPersistenceException PersistenceUnavailable(Exception exception) =>
+        new("The staging recovery lifecycle lever could not persist the requested change.", exception);
 
     private static void RestoreObservedReady(ElsaInstanceEntity instance)
     {

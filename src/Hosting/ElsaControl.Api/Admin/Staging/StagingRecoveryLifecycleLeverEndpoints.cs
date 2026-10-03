@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Security.Claims;
 using System.Text.Json;
 using ElsaControl.Api.Authentication;
@@ -5,6 +6,7 @@ using ElsaControl.Api.OrganizationBilling;
 using ElsaControl.Api.Workspace;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Api.Admin.Staging;
@@ -45,6 +47,10 @@ public static class StagingRecoveryLifecycleLeverEndpoints
                     {
                         return InvalidState("The state machine refused the recovery-required transition.");
                     }
+                    catch (Exception exception) when (IsPersistenceFailure(exception))
+                    {
+                        return PersistenceUnavailable();
+                    }
                     catch (JsonException)
                     {
                         return ReasonNotAllowed();
@@ -82,6 +88,10 @@ public static class StagingRecoveryLifecycleLeverEndpoints
                     {
                         return InvalidState("The state machine refused the staging lever reset.");
                     }
+                    catch (Exception exception) when (IsPersistenceFailure(exception))
+                    {
+                        return PersistenceUnavailable();
+                    }
                 })
             .RequireAuthorization(AdminAuthorization.Policy)
             .WithTags("Staging Lifecycle Lever");
@@ -111,6 +121,21 @@ public static class StagingRecoveryLifecycleLeverEndpoints
             StagingRecoveryLifecycleLeverDefaults.ReasonNotAllowedCode,
             "The staging recovery lifecycle lever reason is not allowed.",
             StatusCodes.Status400BadRequest);
+
+    private static bool IsPersistenceFailure(Exception exception) =>
+        exception is StagingRecoveryLifecycleLeverPersistenceException
+            or DbUpdateException
+            or DbException;
+
+    private static IResult PersistenceUnavailable() =>
+        Results.Problem(
+            title: "The staging recovery lifecycle lever is temporarily unavailable.",
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            extensions: new Dictionary<string, object?>
+            {
+                ["code"] = StagingRecoveryLifecycleLeverDefaults.UnavailableCode,
+                ["retryable"] = true
+            });
 
     private static async Task<string?> ReadReasonAsync(HttpContext context, CancellationToken cancellationToken)
     {

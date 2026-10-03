@@ -65,3 +65,15 @@ public sealed record StagingRecoveryLifecycleLeverCommit(
     ElsaInstance Instance,
     ElsaInstanceOperation Operation,
     string Reason = StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode);
+
+/// <summary>
+/// Persistence failed while firing or resetting the staging recovery lever.
+/// Callers must surface this as a retryable 5xx, never as a 409 state conflict.
+/// </summary>
+public sealed class StagingRecoveryLifecycleLeverPersistenceException : Exception
+{
+    public StagingRecoveryLifecycleLeverPersistenceException(string message, Exception? innerException = null)
+        : base(message, innerException)
+    {
+    }
+}

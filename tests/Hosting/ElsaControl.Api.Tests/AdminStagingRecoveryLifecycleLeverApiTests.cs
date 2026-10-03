@@ -15,6 +15,7 @@ using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using WorkspaceEntity = ElsaControl.PackageCatalog.Core.Accounts.Workspace;
 
 namespace ElsaControl.Api.Tests;
@@ -484,7 +485,8 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
         bool billingEnabled = false,
         bool stripeEnabled = true,
         string? stripeSecretKey = TestSecretKey,
-        IReadOnlyDictionary<string, string?>? additionalConfiguration = null)
+        IReadOnlyDictionary<string, string?>? additionalConfiguration = null,
+        Action<IServiceCollection>? configureServices = null)
     {
         var configuration = new Dictionary<string, string?>
         {
@@ -503,7 +505,7 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
                 configuration[key] = value;
         }
 
-        return new ControlApiTestApplication(configuration);
+        return new ControlApiTestApplication(configuration, configureServices);
     }
 
     private static HttpClient Operator(ControlApiTestApplication app)
@@ -624,6 +626,34 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Equal(StagingRecoveryLifecycleLeverDefaults.ReasonNotAllowedCode, await ProblemCodeAsync(response));
         await AssertLeverDidNotFireAsync(app, AllowlistedInstanceId);
+    }
+
+    [Fact]
+    public async Task Persistence_failure_returns_503_and_not_409()
+    {
+        await using var app = CreateApp(
+            recoveryEnabled: true,
+            allowlisted: AllowlistedInstanceId,
+            configureServices: services =>
+            {
+                services.RemoveAll<IStagingRecoveryLifecycleLeverStore>();
+                services.AddSingleton<IStagingRecoveryLifecycleLeverStore>(new PersistenceFailureStore());
+            });
+        await SeedReadyInstanceAsync(app, AllowlistedInstanceId);
+
+        var fire = await PostAsync(Operator(app), AllowlistedInstanceId);
+        var reset = await PostResetAsync(Operator(app), AllowlistedInstanceId);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, fire.StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, reset.StatusCode);
+        var fireBody = await fire.Content.ReadFromJsonAsync<JsonElement>();
+        var resetBody = await reset.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(StagingRecoveryLifecycleLeverDefaults.UnavailableCode, fireBody.GetProperty("code").GetString());
+        Assert.Equal(StagingRecoveryLifecycleLeverDefaults.UnavailableCode, resetBody.GetProperty("code").GetString());
+        Assert.True(fireBody.GetProperty("retryable").GetBoolean());
+        Assert.True(resetBody.GetProperty("retryable").GetBoolean());
+        await AssertLeverDidNotFireAsync(app, AllowlistedInstanceId);
+        Assert.Equal(0, await CountResetAsync(app, AllowlistedInstanceId));
     }
 
     [Fact]
@@ -1072,6 +1102,26 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
 
     private static async Task<string?> ProblemCodeAsync(HttpResponseMessage response) =>
         (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString();
+
+    private sealed class PersistenceFailureStore : IStagingRecoveryLifecycleLeverStore
+    {
+        public Task<StagingRecoveryLifecycleLeverCommit> AcceptReconcileAndRequireRecoveryAsync(
+            Guid instanceId,
+            string? operatorSubject,
+            string reason = StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode,
+            CancellationToken cancellationToken = default) =>
+            throw new DbUpdateException(
+                "The catalog write failed.",
+                new InvalidOperationException("persistence-unavailable"));
+
+        public Task<StagingRecoveryLifecycleLeverCommit> ResetLeverParkedReconcileAsync(
+            Guid instanceId,
+            string? operatorSubject,
+            CancellationToken cancellationToken = default) =>
+            throw new DbUpdateException(
+                "The catalog write failed.",
+                new InvalidOperationException("persistence-unavailable"));
+    }
 
     private sealed class FailIfCalledReconciliationPort : IElsaInstanceProviderReconciliationPort
     {

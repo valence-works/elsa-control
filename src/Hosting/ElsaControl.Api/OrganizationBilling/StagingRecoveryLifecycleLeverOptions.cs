@@ -9,6 +9,7 @@ public static class StagingRecoveryLifecycleLeverDefaults
     public const string DisabledCode = "staging.recovery-lifecycle-lever.disabled";
     public const string InstanceNotAllowedCode = "staging.recovery-lifecycle-lever.instance-not-allowed";
     public const string ReasonNotAllowedCode = "staging.recovery-lifecycle-lever.reason-not-allowed";
+    public const string UnavailableCode = "staging.recovery-lifecycle-lever.unavailable";
     public const string TransitionCode = StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode;
     public const string UncertainCode = StagingRecoveryLifecycleLeverStoreDefaults.UncertainCode;
     public const string FiredEventType = StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType;
