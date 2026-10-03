@@ -253,6 +253,30 @@ public sealed class ManagedElsaReasonCodeCatalogTests
     }
 
     [Fact]
+    public void Stale_temporary_park_then_azure_auto_resume_restarts_the_clock()
+    {
+        var stale = ManagedElsaReasonClock.Advance(
+            null,
+            ManagedElsaReasonCodeCatalog.ProviderReconciliationRequired,
+            null,
+            null,
+            Now,
+            restartClock: false);
+        var resumed = ManagedElsaReasonClock.Advance(
+            ManagedElsaReasonCodeCatalog.ProviderReconciliationRequired,
+            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+            stale.ReasonEnteredAt,
+            stale.RequiresHumanAt,
+            Now.AddMinutes(11),
+            restartClock: false);
+
+        Assert.Equal(Now, stale.ReasonEnteredAt);
+        Assert.Null(stale.RequiresHumanAt);
+        Assert.Equal(Now.AddMinutes(11), resumed.ReasonEnteredAt);
+        Assert.Null(resumed.RequiresHumanAt);
+    }
+
+    [Fact]
     public void Resume_or_recover_restarts_the_clock_and_clears_the_flag()
     {
         var parked = ManagedElsaReasonClock.Advance(
