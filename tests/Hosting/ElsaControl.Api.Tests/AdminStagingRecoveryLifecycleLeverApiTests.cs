@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
@@ -153,30 +154,38 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
 
         await using var scope = app.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
-        // TODO(#660): replace UpdatedAt with ReasonEnteredAt once the catalog lands.
-        // TODO(#660): use GetRequiredService so reconcile ticks always run after Azure lifecycle is on.
         var enteredAt = await ScalarStringAsync(
             db,
-            "SELECT UpdatedAt FROM ElsaInstanceOperations WHERE Id = @id",
+            "SELECT ReasonEnteredAt FROM ElsaInstanceOperations WHERE Id = @id",
             ("@id", body.OperationId));
+        Assert.False(string.IsNullOrEmpty(enteredAt));
+        Assert.True(string.IsNullOrEmpty(await ScalarStringAsync(
+            db,
+            "SELECT RequiresHumanAt FROM ElsaInstanceOperations WHERE Id = @id",
+            ("@id", body.OperationId))));
         Assert.True(string.IsNullOrEmpty(await ScalarStringAsync(
             db,
             "SELECT DeploymentRunId FROM ElsaInstanceOperations WHERE Id = @id",
             ("@id", body.OperationId))));
+        Assert.Equal(
+            StagingRecoveryLifecycleLeverDefaults.UncertainCode,
+            await ScalarStringAsync(
+                db,
+                "SELECT ReconciliationDiagnosticCode FROM ElsaInstanceOperations WHERE Id = @id",
+                ("@id", body.OperationId)));
 
         var pending = scope.ServiceProvider.GetRequiredService<IElsaInstanceProviderPendingOperationStore>();
         var targets = scope.ServiceProvider.GetRequiredService<IElsaInstanceProviderReconciliationStore>();
-        var reconciler = scope.ServiceProvider.GetService<IElsaInstanceProviderReconciliationService>();
+        var provider = new FailIfCalledReconciliationPort();
+        var reconciler = new ElsaInstanceProviderReconciliationService(targets, provider);
         for (var tick = 0; tick < 3; tick++)
         {
             var pendingOperations = await pending.ListPendingProviderOperationsAsync(64);
             Assert.DoesNotContain(pendingOperations, operation => operation.OperationId == body.OperationId);
             Assert.Null(await targets.GetTargetAsync(body.WorkspaceId, body.OperationId));
-            if (reconciler is not null)
-            {
-                await Assert.ThrowsAsync<KeyNotFoundException>(() =>
-                    reconciler.ReconcileAsync(body.WorkspaceId, body.OperationId));
-            }
+            await Assert.ThrowsAsync<KeyNotFoundException>(() =>
+                reconciler.ReconcileAsync(body.WorkspaceId, body.OperationId));
+            Assert.Equal(0, provider.Calls);
         }
 
         Assert.Equal(
@@ -192,10 +201,16 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
                 "SELECT FailureCode FROM ElsaInstanceOperations WHERE Id = @id",
                 ("@id", body.OperationId)));
         Assert.Equal(
+            StagingRecoveryLifecycleLeverDefaults.UncertainCode,
+            await ScalarStringAsync(
+                db,
+                "SELECT ReconciliationDiagnosticCode FROM ElsaInstanceOperations WHERE Id = @id",
+                ("@id", body.OperationId)));
+        Assert.Equal(
             enteredAt,
             await ScalarStringAsync(
                 db,
-                "SELECT UpdatedAt FROM ElsaInstanceOperations WHERE Id = @id",
+                "SELECT ReasonEnteredAt FROM ElsaInstanceOperations WHERE Id = @id",
                 ("@id", body.OperationId)));
         await AssertFiredOnceAsync(
             app,
@@ -354,7 +369,16 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
             ElsaInstanceOperationState.Succeeded));
         await AssertResetOnceAsync(app, AllowlistedInstanceId, firstBody.OperationId);
         await AssertNoRetryEvidenceAsync(app, firstBody.OperationId);
-        await ObserveHealthyAsync(app, AllowlistedInstanceId);
+
+        var refusedBeforeObservation = await PostAsync(client, AllowlistedInstanceId);
+        Assert.Equal(HttpStatusCode.Conflict, refusedBeforeObservation.StatusCode);
+        var monitor = new ElsaInstanceHealthMonitor(
+            new ElsaInstanceHealthMonitorOptions { Enabled = true, MaxJitter = TimeSpan.Zero });
+        var probe = new HealthyLeverProbe();
+        await ObserveHealthyThroughMonitorAsync(app, AllowlistedInstanceId, monitor, probe, expectedTransitions: 0);
+        var refusedBeforeThreshold = await PostAsync(client, AllowlistedInstanceId);
+        Assert.Equal(HttpStatusCode.Conflict, refusedBeforeThreshold.StatusCode);
+        await ObserveHealthyThroughMonitorAsync(app, AllowlistedInstanceId, monitor, probe, expectedTransitions: 1);
 
         var second = await PostAsync(client, AllowlistedInstanceId);
         if (second.StatusCode != HttpStatusCode.OK)
@@ -579,6 +603,30 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
     }
 
     [Fact]
+    public async Task Fire_refuses_a_chunked_disallowed_reason_without_content_length()
+    {
+        await using var app = CreateApp(recoveryEnabled: true, allowlisted: AllowlistedInstanceId);
+        await SeedReadyInstanceAsync(app, AllowlistedInstanceId);
+        using var content = new StreamContent(
+            new MemoryStream(Encoding.UTF8.GetBytes("""{"reason":"auto-resume-exhausted"}""")));
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        content.Headers.ContentLength = null;
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"/api/staging/lifecycle-lever/instances/{AllowlistedInstanceId:D}/recovery-required")
+        {
+            Content = content
+        };
+        request.Headers.TransferEncodingChunked = true;
+
+        var response = await Operator(app).SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(StagingRecoveryLifecycleLeverDefaults.ReasonNotAllowedCode, await ProblemCodeAsync(response));
+        await AssertLeverDidNotFireAsync(app, AllowlistedInstanceId);
+    }
+
+    [Fact]
     public async Task Reset_refuses_a_non_allowlisted_instance_without_writes()
     {
         await using var app = CreateApp(recoveryEnabled: true, allowlisted: AllowlistedInstanceId);
@@ -719,24 +767,51 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
         var observedHealth = health ?? (deleted ? ElsaInstanceHealth.Unknown : ElsaInstanceHealth.Healthy);
         Assert.Equal(1, await ExecuteAsync(
             db,
-            "UPDATE ElsaInstances SET ObservedLifecycle = @observed, DesiredLifecycle = @desired, Health = @health WHERE Id = @id",
+            "UPDATE ElsaInstances SET ObservedLifecycle = @observed, DesiredLifecycle = @desired, Health = @health, CurrentDeploymentId = @deploymentId, CurrentDeploymentEndpointUri = @endpoint WHERE Id = @id",
             ("@observed", observedLifecycle.ToString()),
             ("@desired", desired.ToString()),
             ("@health", observedHealth.ToString()),
+            ("@deploymentId", deleted ? string.Empty : "deployment-lever"),
+            ("@endpoint", deleted ? string.Empty : "https://e1234567890abcde-app.region.azurecontainerapps.io"),
             ("@id", instanceId)));
+        if (deleted)
+        {
+            Assert.Equal(1, await ExecuteAsync(
+                db,
+                "UPDATE ElsaInstances SET CurrentDeploymentId = NULL, CurrentDeploymentEndpointUri = NULL WHERE Id = @id",
+                ("@id", instanceId)));
+        }
         db.ChangeTracker.Clear();
     }
 
-    private static async Task ObserveHealthyAsync(ControlApiTestApplication app, Guid instanceId)
+    private static async Task ObserveHealthyThroughMonitorAsync(
+        ControlApiTestApplication app,
+        Guid instanceId,
+        ElsaInstanceHealthMonitor monitor,
+        IElsaInstanceProviderHealthProbePort probe,
+        int expectedTransitions)
     {
         await using var scope = app.Services.CreateAsyncScope();
+        var store = scope.ServiceProvider.GetRequiredService<IElsaInstanceHealthMonitorStore>();
         var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
-        Assert.Equal(1, await ExecuteAsync(
+        var workspaceId = await ScalarGuidAsync(
             db,
-            "UPDATE ElsaInstances SET Health = @health WHERE Id = @id",
-            ("@health", ElsaInstanceHealth.Healthy.ToString()),
-            ("@id", instanceId)));
-        db.ChangeTracker.Clear();
+            "SELECT WorkspaceId FROM ElsaInstances WHERE Id = @id",
+            ("@id", instanceId));
+        var target = await store.GetHealthMonitorTargetAsync(workspaceId, instanceId);
+        Assert.NotNull(target);
+        var evaluation = await monitor.EvaluateAsync(target, store, probe);
+        Assert.Equal(
+            expectedTransitions == 0
+                ? ElsaInstanceHealthMonitorOutcome.Unchanged
+                : ElsaInstanceHealthMonitorOutcome.Transitioned,
+            evaluation.Outcome);
+        var after = await store.GetHealthMonitorTargetAsync(workspaceId, instanceId);
+        Assert.NotNull(after);
+        Assert.Equal(
+            expectedTransitions == 0 ? ElsaInstanceHealth.Unknown : ElsaInstanceHealth.Healthy,
+            after.Health);
+        Assert.Equal(ElsaObservedLifecycle.Ready, after.ObservedLifecycle);
     }
 
     private static async Task AssertFiredOnceAsync(
@@ -769,11 +844,15 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
                 "SELECT FailureCode FROM ElsaInstanceOperations WHERE Id = @id",
                 ("@id", persistedOperationId)));
         Assert.Equal(
-            StagingRecoveryLifecycleLeverDefaults.TransitionCode,
+            failureCode,
             await ScalarStringAsync(
                 db,
                 "SELECT ReconciliationDiagnosticCode FROM ElsaInstanceOperations WHERE Id = @id",
                 ("@id", persistedOperationId)));
+        Assert.False(string.IsNullOrEmpty(await ScalarStringAsync(
+            db,
+            "SELECT ReasonEnteredAt FROM ElsaInstanceOperations WHERE Id = @id",
+            ("@id", persistedOperationId))));
         Assert.Equal(1, await CountFiredAsync(app, instanceId, persistedOperationId));
         Assert.Equal(
             failureCode,
@@ -863,6 +942,14 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
                 db,
                 "SELECT Health FROM ElsaInstances WHERE Id = @id",
                 ("@id", instanceId)));
+        Assert.True(string.IsNullOrEmpty(await ScalarStringAsync(
+            db,
+            "SELECT ReasonEnteredAt FROM ElsaInstanceOperations WHERE Id = @id",
+            ("@id", operationId))));
+        Assert.True(string.IsNullOrEmpty(await ScalarStringAsync(
+            db,
+            "SELECT RequiresHumanAt FROM ElsaInstanceOperations WHERE Id = @id",
+            ("@id", operationId))));
     }
 
     private static async Task AssertNoRetryEvidenceAsync(ControlApiTestApplication app, Guid operationId)
@@ -985,6 +1072,27 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
 
     private static async Task<string?> ProblemCodeAsync(HttpResponseMessage response) =>
         (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString();
+
+    private sealed class FailIfCalledReconciliationPort : IElsaInstanceProviderReconciliationPort
+    {
+        public int Calls { get; private set; }
+
+        public Task<ElsaInstanceProviderObservation> ObserveAsync(
+            ElsaInstanceProviderReconciliationRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            throw new InvalidOperationException("The reconciler must not observe a run-less lever park.");
+        }
+    }
+
+    private sealed class HealthyLeverProbe : IElsaInstanceProviderHealthProbePort
+    {
+        public Task<ElsaInstanceHealthProbeResult> ProbeAsync(
+            ElsaInstanceHealthProbeRequest request,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new ElsaInstanceHealthProbeResult(ElsaInstanceHealth.Healthy, "azure.health.healthy"));
+    }
 
     private sealed class EmptyLifecycleResolutionInputSource : IElsaInstanceLifecycleResolutionInputSource
     {

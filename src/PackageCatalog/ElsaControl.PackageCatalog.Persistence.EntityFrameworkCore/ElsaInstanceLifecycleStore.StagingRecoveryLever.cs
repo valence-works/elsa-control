@@ -137,15 +137,17 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                         now);
                     operationEntity.FailureCode = reason;
                     operationEntity.FailureSummary = reason;
-                    operationEntity.ReconciliationDiagnosticCode =
-                        StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode;
+                    operationEntity.ReconciliationDiagnosticCode = reason;
                     operationEntity.CompletedAt = null;
+                    ApplyReasonClock(
+                        operationEntity,
+                        previousCode: null,
+                        nextCode: reason,
+                        now,
+                        restartClock: true);
                     instanceEntity.ObservedLifecycle = ElsaObservedLifecycle.Unknown;
                     instanceEntity.Health = ElsaInstanceHealth.Unknown;
                     instanceEntity.UpdatedAt = now;
-                    // TODO(#660): stamp ReasonEnteredAt (and RequiresHumanAt for the
-                    // immediate class) in this same compare-and-set once the catalog lands.
-                    // Do not hide run-less lever parks from the #660/#662 scan.
 
                     await dbContext.ElsaInstanceAuditEvents.AddAsync(
                         await CreateAuditEventAsync(
@@ -263,7 +265,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                         !StagingRecoveryLifecycleLeverStoreDefaults.IsAllowedReason(operationEntity.FailureCode) ||
                         !string.Equals(
                             operationEntity.ReconciliationDiagnosticCode,
-                            StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode,
+                            operationEntity.FailureCode,
                             StringComparison.Ordinal) ||
                         operationEntity.DeploymentRunId is not null ||
                         operationEntity.ReconciliationRetryEvidenceReference is not null ||
@@ -278,10 +280,16 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                         ElsaInstanceOperationState.Succeeded,
                         now);
                     operationEntity.CompletedAt = now;
+                    ApplyReasonClock(
+                        operationEntity,
+                        CurrentParkReason(operationEntity, null),
+                        nextCode: null,
+                        now,
+                        restartClock: true);
+                    operationEntity.ReasonEnteredAt = null;
+                    operationEntity.RequiresHumanAt = null;
                     RestoreObservedReady(instanceEntity);
                     instanceEntity.UpdatedAt = now;
-                    // TODO(#660): clear RequiresHumanAt / ReasonEnteredAt in this
-                    // same transaction as TransitionTo(Succeeded) once those columns exist.
 
                     var reset = await CreateAuditEventAsync(
                         instanceEntity,

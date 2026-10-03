@@ -4,11 +4,11 @@ namespace ElsaControl.Deployment.Core.Instances;
 
 public static class StagingRecoveryLifecycleLeverStoreDefaults
 {
-    public const string TransitionCode = "staging.lever.recovery-required";
-    public const string UncertainCode = "provider.submission.uncertain";
-    public const string FiredEventType = "staging.lever.fired";
-    public const string ResetEventType = "staging.lever.reset";
-    public const string ResetCode = "staging.lever.reset";
+    public const string TransitionCode = ManagedElsaReasonCodeCatalog.StagingLeverRecoveryRequired;
+    public const string UncertainCode = ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain;
+    public const string FiredEventType = ManagedElsaReasonCodeCatalog.StagingLeverFired;
+    public const string ResetEventType = ManagedElsaReasonCodeCatalog.StagingLeverReset;
+    public const string ResetCode = ManagedElsaReasonCodeCatalog.StagingLeverReset;
     public const string RecoveryRequiredEventType = "lifecycle.recovery-required";
     public const string AcceptedEventType = "lifecycle.accepted";
 

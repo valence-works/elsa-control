@@ -46,6 +46,14 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, operation.State);
         Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode, operation.FailureCode);
         Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode, operation.ReconciliationDiagnosticCode);
+        Assert.Equal(
+            ManagedElsaReasonClass.NeedsPerson,
+            ManagedElsaReasonCodeCatalog.Classify(
+                ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                    operation.FailureCode,
+                    operation.ReconciliationDiagnosticCode)));
+        Assert.NotNull(operation.ReasonEnteredAt);
+        Assert.Equal(operation.ReasonEnteredAt, operation.RequiresHumanAt);
         Assert.Null(operation.DeploymentRunId);
 
         var events = await db.ElsaInstanceAuditEvents.AsNoTracking()
@@ -96,10 +104,17 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             .SingleAsync(x => x.Id == parked.Operation.Id);
         Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, operation.State);
         Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.UncertainCode, operation.FailureCode);
-        Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode, operation.ReconciliationDiagnosticCode);
+        Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.UncertainCode, operation.ReconciliationDiagnosticCode);
+        Assert.Equal(
+            ManagedElsaReasonClass.Temporary,
+            ManagedElsaReasonCodeCatalog.Classify(
+                ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                    operation.FailureCode,
+                    operation.ReconciliationDiagnosticCode)));
         Assert.Null(operation.DeploymentRunId);
-        // TODO(#660): replace UpdatedAt with ReasonEnteredAt once the catalog lands.
-        var enteredAt = operation.UpdatedAt;
+        Assert.NotNull(operation.ReasonEnteredAt);
+        Assert.Null(operation.RequiresHumanAt);
+        var enteredAt = operation.ReasonEnteredAt;
 
         Assert.Null(await store.GetTargetAsync(workspace.Id, parked.Operation.Id));
         Assert.DoesNotContain(
@@ -111,11 +126,17 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             .SingleAsync(x => x.Id == parked.Operation.Id);
         Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, afterTicks.State);
         Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.UncertainCode, afterTicks.FailureCode);
-        Assert.Equal(enteredAt, afterTicks.UpdatedAt);
+        Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.UncertainCode, afterTicks.ReconciliationDiagnosticCode);
+        Assert.Equal(enteredAt, afterTicks.ReasonEnteredAt);
+        Assert.Null(afterTicks.RequiresHumanAt);
         Assert.Null(afterTicks.DeploymentRunId);
 
         var reset = await store.ResetLeverParkedReconcileAsync(created.Instance.Id, "api-key");
         Assert.Equal(ElsaInstanceOperationState.Succeeded, reset.Operation.State);
+        var afterReset = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == reset.Operation.Id);
+        Assert.Null(afterReset.ReasonEnteredAt);
+        Assert.Null(afterReset.RequiresHumanAt);
     }
 
     [Fact]
@@ -201,6 +222,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 CreateIntent(), "create-staging-recovery-reset"));
         await CompleteOperationAsync(db, created.Operation.Id);
         await SetObservedAsync(db, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy);
+        await AttachCurrentDeploymentAsync(db, created.Instance.Id);
 
         var store = CreateStore(db);
         var parked = await store.AcceptReconcileAndRequireRecoveryAsync(created.Instance.Id, "api-key");
@@ -238,8 +260,25 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                             x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.ResetEventType)
                 .ToListAsync());
         Assert.Equal(StagingRecoveryLifecycleLeverStoreDefaults.ResetCode, resetEvent.DiagnosticCode);
+        var afterReset = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == reset.Operation.Id);
+        Assert.Null(afterReset.ReasonEnteredAt);
+        Assert.Null(afterReset.RequiresHumanAt);
 
-        await SetObservedAsync(db, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy);
+        var monitor = new ElsaInstanceHealthMonitor(
+            new ElsaInstanceHealthMonitorOptions { Enabled = true, MaxJitter = TimeSpan.Zero },
+            new FixedTimeProvider(Now));
+        var probe = new HealthyLeverProbe();
+        var beforeObservation = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            store.AcceptReconcileAndRequireRecoveryAsync(created.Instance.Id, "api-key"));
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.InvalidState, beforeObservation.Reason);
+
+        await ObserveHealthyThroughMonitorAsync(store, monitor, probe, workspace.Id, created.Instance.Id, expectedTransitions: 0);
+        var beforeThreshold = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            store.AcceptReconcileAndRequireRecoveryAsync(created.Instance.Id, "api-key"));
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.InvalidState, beforeThreshold.Reason);
+
+        await ObserveHealthyThroughMonitorAsync(store, monitor, probe, workspace.Id, created.Instance.Id, expectedTransitions: 1);
         var second = await store.AcceptReconcileAndRequireRecoveryAsync(created.Instance.Id, "api-key");
         Assert.NotEqual(parked.Operation.Id, second.Operation.Id);
         Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, second.Operation.State);
@@ -347,27 +386,64 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
-    public async Task Staging_recovery_lever_reset_refuses_a_run_backed_uncertain_park_without_a_fired_row()
+    public async Task Staging_recovery_lever_reset_refuses_a_real_run_backed_uncertain_park()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
         await using var db = CreateMigratedContext(connection);
         await db.Database.MigrateAsync();
-        var workspace = await CreateWorkspaceAsync(db, "Run backed uncertain park workspace");
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Real run backed uncertain park");
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+        await store.CommitProviderSubmissionAsync(new(
+            workspace.Id,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            "provider-submission-uncertain",
+            Now));
+
+        var parked = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, parked.State);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, parked.FailureCode);
+        Assert.NotNull(parked.DeploymentRunId);
+        Assert.Equal(
+            0,
+            await db.ElsaInstanceAuditEvents.CountAsync(x =>
+                x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType));
+
+        await AssertResetRefusedWithoutWritesAsync(db, accepted.Instance.Id, accepted.Operation.Id);
+    }
+
+    [Fact]
+    public async Task Staging_recovery_lever_reset_refuses_a_lever_park_when_only_a_deployment_run_is_set()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Lever park with deployment run workspace");
         var created = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now))
             .CreateAsync(new ElsaInstanceCreateRequest(
-                workspace.OrganizationId, workspace.Id, "Managed Elsa", "run-backed-uncertain-park",
-                CreateIntent(), "create-run-backed-uncertain-park"));
+                workspace.OrganizationId, workspace.Id, "Managed Elsa", "lever-park-with-run",
+                CreateIntent(), "create-lever-park-with-run"));
         await CompleteOperationAsync(db, created.Operation.Id);
         await SetObservedAsync(db, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy);
 
-        var operationId = await SeedLeverShapedParkAsync(
-            db,
-            created.Instance,
-            StagingRecoveryLifecycleLeverStoreDefaults.UncertainCode,
-            deploymentRunId: Guid.NewGuid());
+        var parked = await CreateStore(db).AcceptReconcileAndRequireRecoveryAsync(created.Instance.Id, "api-key");
+        db.ChangeTracker.Clear();
+        var operation = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == parked.Operation.Id);
+        operation.DeploymentRunId = Guid.NewGuid();
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
 
-        await AssertResetRefusedWithoutWritesAsync(db, created.Instance.Id, operationId);
+        await AssertResetRefusedWithoutWritesAsync(db, created.Instance.Id, parked.Operation.Id);
+        Assert.Equal(
+            1,
+            await db.ElsaInstanceAuditEvents.CountAsync(x =>
+                x.OperationId == parked.Operation.Id &&
+                x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType));
     }
 
     [Fact]
@@ -460,6 +536,50 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.ResetEventType));
     }
 
+    private const string LeverEndpoint = "https://e1234567890abcde-app.region.azurecontainerapps.io";
+
+    private static async Task AttachCurrentDeploymentAsync(CatalogDbContext db, Guid instanceId)
+    {
+        db.ChangeTracker.Clear();
+        var instance = await db.ElsaInstances.SingleAsync(x => x.Id == instanceId);
+        instance.CurrentDeploymentId = "deployment-lever";
+        instance.CurrentDeploymentEndpointUri = LeverEndpoint;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+    }
+
+    private static async Task ObserveHealthyThroughMonitorAsync(
+        IElsaInstanceHealthMonitorStore store,
+        ElsaInstanceHealthMonitor monitor,
+        IElsaInstanceProviderHealthProbePort probe,
+        Guid workspaceId,
+        Guid instanceId,
+        int expectedTransitions)
+    {
+        var target = await store.GetHealthMonitorTargetAsync(workspaceId, instanceId);
+        Assert.NotNull(target);
+        var evaluation = await monitor.EvaluateAsync(target, store, probe);
+        Assert.Equal(
+            expectedTransitions == 0
+                ? ElsaInstanceHealthMonitorOutcome.Unchanged
+                : ElsaInstanceHealthMonitorOutcome.Transitioned,
+            evaluation.Outcome);
+        var after = await store.GetHealthMonitorTargetAsync(workspaceId, instanceId);
+        Assert.NotNull(after);
+        Assert.Equal(
+            expectedTransitions == 0 ? ElsaInstanceHealth.Unknown : ElsaInstanceHealth.Healthy,
+            after.Health);
+        Assert.Equal(ElsaObservedLifecycle.Ready, after.ObservedLifecycle);
+    }
+
+    private sealed class HealthyLeverProbe : IElsaInstanceProviderHealthProbePort
+    {
+        public Task<ElsaInstanceHealthProbeResult> ProbeAsync(
+            ElsaInstanceHealthProbeRequest request,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new ElsaInstanceHealthProbeResult(ElsaInstanceHealth.Healthy, "azure.health.healthy"));
+    }
+
     private static async Task SetObservedAsync(
         CatalogDbContext db,
         Guid instanceId,
@@ -498,7 +618,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             AcceptedAt = Now,
             FailureCode = failureCode,
             FailureSummary = failureCode,
-            ReconciliationDiagnosticCode = StagingRecoveryLifecycleLeverStoreDefaults.TransitionCode,
+            ReconciliationDiagnosticCode = failureCode,
             DeploymentRunId = deploymentRunId,
             CreatedAt = Now,
             UpdatedAt = Now

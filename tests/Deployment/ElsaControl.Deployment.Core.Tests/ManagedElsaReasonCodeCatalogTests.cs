@@ -84,6 +84,8 @@ public sealed class ManagedElsaReasonCodeCatalogTests
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationAmbiguous, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderIdentityBindingMissing, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.StagingLeverRecoveryRequired, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.StagingLeverFired, ManagedElsaReasonClass.HealthyHandOff)]
+    [InlineData(ManagedElsaReasonCodeCatalog.StagingLeverReset, ManagedElsaReasonClass.HealthyHandOff)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionLocalAbsent, ManagedElsaReasonClass.HealthyHandOff)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderConfirmedAbsent, ManagedElsaReasonClass.HealthyHandOff)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderUnavailable, ManagedElsaReasonClass.Temporary)]
@@ -158,6 +160,34 @@ public sealed class ManagedElsaReasonCodeCatalogTests
             ManagedElsaReasonCodeCatalog.SelectCurrentReason(
                 null, null, ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted));
         Assert.Null(ManagedElsaReasonCodeCatalog.SelectCurrentReason(null, null, "Worker heartbeat became stale."));
+    }
+
+    [Fact]
+    public void Uncertain_lever_park_class_follows_the_chosen_operation_reason()
+    {
+        Assert.Equal(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
+            ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
+                ManagedElsaReasonCodeCatalog.StagingLeverRecoveryRequired));
+        Assert.Equal(
+            ManagedElsaReasonClass.Temporary,
+            ManagedElsaReasonCodeCatalog.Classify(
+                ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                    ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
+                    ManagedElsaReasonCodeCatalog.StagingLeverRecoveryRequired)));
+        Assert.Equal(
+            ManagedElsaReasonClass.Temporary,
+            ManagedElsaReasonCodeCatalog.Classify(
+                ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                    ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
+                    ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain)));
+        Assert.Equal(
+            ManagedElsaReasonClass.NeedsPerson,
+            ManagedElsaReasonCodeCatalog.Classify(
+                ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                    ManagedElsaReasonCodeCatalog.StagingLeverRecoveryRequired,
+                    ManagedElsaReasonCodeCatalog.StagingLeverRecoveryRequired)));
     }
 
     [Fact]
