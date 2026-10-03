@@ -6,13 +6,37 @@ namespace ElsaControl.Deployment.Core.Tests;
 internal static class ManagedElsaReasonLiteralScanner
 {
     /// <summary>
-    /// Production park-reason families. Keep this aligned with
-    /// <see cref="ManagedElsaReasonCodeCatalog.DefinedCodes"/> so a new
-    /// family cannot land in the catalog (or in src) unseen.
+    /// Park-reason families the completeness scan must see. A new family
+    /// cannot land in the catalog or as a quoted production write unseen.
     /// </summary>
+    internal static readonly string[] ReasonFamilyPrefixes =
+    [
+        "provider.submission.",
+        "provider.reconciliation.",
+        "provider.identity-binding",
+        "azure.deployment.",
+        "azure.recovery.",
+        "staging.lever.",
+        "deletion."
+    ];
+
+    /// <summary>
+    /// Park codes whose family also contains non-park runner vocabulary.
+    /// Keep these exact so <c>azure.promotion.candidate-*</c> stays out.
+    /// </summary>
+    internal static readonly string[] ReasonExactCodes =
+    [
+        ManagedElsaReasonCodeCatalog.AzurePromotionUncertain,
+        ManagedElsaReasonCodeCatalog.AzurePromotionRollbackUncertain
+    ];
+
     internal static readonly Regex ProductionReasonLiteral = new(
-        """"(provider\.(?:submission|reconciliation|identity-binding)[a-z0-9.-]*|azure\.deployment\.[a-z0-9.-]+|azure\.recovery\.[a-z0-9.-]+|azure\.promotion\.(?:uncertain|rollback-uncertain)|staging\.lever\.[a-z0-9.-]+)"""",
+        BuildPattern(),
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    internal static bool IsCataloguedFamily(string code) =>
+        ReasonFamilyPrefixes.Any(prefix => code.StartsWith(prefix, StringComparison.Ordinal)) ||
+        ReasonExactCodes.Contains(code, StringComparer.Ordinal);
 
     internal static IReadOnlyList<string> FindUncatalogued(string sourceText)
     {
@@ -40,5 +64,13 @@ internal static class ManagedElsaReasonLiteralScanner
         }
 
         return missing.ToArray();
+    }
+
+    private static string BuildPattern()
+    {
+        var families = string.Join("|", ReasonFamilyPrefixes.Select(prefix =>
+            Regex.Escape(prefix) + "[a-z0-9.-]*"));
+        var exacts = string.Join("|", ReasonExactCodes.Select(Regex.Escape));
+        return "\"(" + families + "|" + exacts + ")\"";
     }
 }

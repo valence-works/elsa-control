@@ -75,7 +75,7 @@ public sealed class ElsaInstanceDeletionWorker(
         if (item.CanFinalizeLocally)
         {
             observation = new(ElsaInstanceCleanupObservationKind.ConfirmedAbsent, item.Operation.Id,
-                item.Operation.AttemptNumber, "deletion.local.absent");
+                item.Operation.AttemptNumber, ElsaInstanceDeletionDiagnosticCodes.LocalAbsent);
         }
         else
         {
@@ -110,7 +110,7 @@ public sealed class ElsaInstanceDeletionWorker(
             catch (Exception)
             {
                 observation = new(ElsaInstanceCleanupObservationKind.Unavailable, item.Operation.Id,
-                    item.Operation.AttemptNumber, "deletion.provider.unavailable");
+                    item.Operation.AttemptNumber, ElsaInstanceDeletionDiagnosticCodes.ProviderUnavailable);
             }
         }
 
@@ -141,7 +141,7 @@ public sealed class ElsaInstanceDeletionWorker(
             return result;
         }
 
-        var code = correlated ? observation.DiagnosticCode : "deletion.correlation.invalid";
+        var code = correlated ? observation.DiagnosticCode : ElsaInstanceDeletionDiagnosticCodes.CorrelationInvalid;
         return await store.RequireDeletionRecoveryAsync(new(
             item.Instance.WorkspaceId, item.Instance.Id, item.Operation.Id, item.Outbox.Id,
             item.Instance.Version, item.Operation.AttemptNumber, item.CorrelatedRunId, workerId,
@@ -154,12 +154,12 @@ public sealed class ElsaInstanceDeletionWorker(
             item.Outbox.Id == Guid.Empty || item.Operation.Id == Guid.Empty || item.Instance.Id == Guid.Empty ||
             item.Instance.WorkspaceId == Guid.Empty || string.IsNullOrWhiteSpace(item.LeaseToken) || item.LeaseVersion < 1)
             return null;
-        var canonical = $"deletion.item.invalid\n{item.Outbox.Id:D}\n{item.Operation.Id:D}\n{item.Instance.Id:D}\n";
+        var canonical = $"{ElsaInstanceDeletionDiagnosticCodes.ItemInvalid}\n{item.Outbox.Id:D}\n{item.Operation.Id:D}\n{item.Instance.Id:D}\n";
         var fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
         return new(item.Instance.WorkspaceId, item.Instance.Id, item.Operation.Id, item.Outbox.Id,
             Math.Max(1, item.Instance.Version), Math.Max(1, item.Operation.AttemptNumber), item.CorrelatedRunId,
             workerId, item.LeaseToken, Math.Max(1, item.LeaseVersion), fingerprint,
-            "deletion.item.invalid", _timeProvider.GetUtcNow());
+            ElsaInstanceDeletionDiagnosticCodes.ItemInvalid, _timeProvider.GetUtcNow());
     }
 
     private async Task<ElsaInstanceCleanupObservation> CleanupWithLeaseAsync(
@@ -227,6 +227,6 @@ public sealed class ElsaInstanceDeletionWorker(
             ElsaInstanceLifecycleWorkerOutcome.Conflict,
             item.Operation,
             item.Instance,
-            FailureCode: "deletion.claim.conflict",
+            FailureCode: ElsaInstanceDeletionDiagnosticCodes.ClaimConflict,
             FailureSummary: "Deletion work item ownership changed before completion.");
 }

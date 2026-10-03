@@ -94,6 +94,27 @@ public static class ManagedElsaReasonCodeCatalog
     public const string AzurePromotionUncertain = "azure.promotion.uncertain";
     public const string AzurePromotionRollbackUncertain = "azure.promotion.rollback-uncertain";
     public const string StagingLeverRecoveryRequired = "staging.lever.recovery-required";
+    public const string DeletionLocalAbsent = "deletion.local.absent";
+    public const string DeletionProviderConfirmedAbsent = "deletion.provider-confirmed-absent";
+    public const string DeletionProviderUnavailable = "deletion.provider.unavailable";
+    public const string DeletionAzureProviderUnavailable = "deletion.provider-unavailable";
+    public const string DeletionProviderCleanupPending = "deletion.provider-cleanup-pending";
+    public const string DeletionProviderAssignmentUnavailable = "deletion.provider-assignment-unavailable";
+    public const string DeletionProviderEvidenceUnavailable = "deletion.provider-evidence-unavailable";
+    public const string DeletionProviderPlanUnavailable = "deletion.provider-plan-unavailable";
+    public const string DeletionRecoveryCapabilityUnavailable = "deletion.recovery.capability-unavailable";
+    public const string DeletionRecoveryAssignmentIncomplete = "deletion.recovery.assignment-incomplete";
+    public const string DeletionClaimConflict = "deletion.claim.conflict";
+    public const string DeletionCorrelationInvalid = "deletion.correlation.invalid";
+    public const string DeletionItemInvalid = "deletion.item.invalid";
+    public const string DeletionProviderAssignmentInvalid = "deletion.provider-assignment-invalid";
+    public const string DeletionProviderCorrelationInvalid = "deletion.provider-correlation-invalid";
+    public const string DeletionProviderCleanupFailed = "deletion.provider-cleanup-failed";
+    public const string DeletionRecoveryAuthorityUnavailable = "deletion.recovery.authority-unavailable";
+    public const string DeletionRecoveryPlanUnavailable = "deletion.recovery.plan-unavailable";
+    public const string DeletionRecoveryAssignmentInvalid = "deletion.recovery.assignment-invalid";
+    public const string DeletionRecoveryClaimLost = "deletion.recovery.claim-lost";
+    public const string DeletionPredecessorRecoverySuperseded = "deletion.predecessor-recovery-superseded";
 
     public static readonly FrozenDictionary<string, ManagedElsaReasonCode> ByCode =
         new ManagedElsaReasonCode[]
@@ -155,7 +176,28 @@ public static class ManagedElsaReasonCodeCatalog
             new(AzureRecoveryPlanUnavailable, ManagedElsaReasonClass.NeedsPerson),
             new(AzureRecoveryPlanMismatch, ManagedElsaReasonClass.NeedsPerson),
             new(AzureRecoveryStateInvalid, ManagedElsaReasonClass.NeedsPerson),
-            new(StagingLeverRecoveryRequired, ManagedElsaReasonClass.NeedsPerson)
+            new(StagingLeverRecoveryRequired, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionLocalAbsent, ManagedElsaReasonClass.HealthyHandOff),
+            new(DeletionProviderConfirmedAbsent, ManagedElsaReasonClass.HealthyHandOff),
+            new(DeletionProviderUnavailable, ManagedElsaReasonClass.Temporary),
+            new(DeletionAzureProviderUnavailable, ManagedElsaReasonClass.Temporary),
+            new(DeletionProviderCleanupPending, ManagedElsaReasonClass.Temporary),
+            new(DeletionProviderAssignmentUnavailable, ManagedElsaReasonClass.Temporary),
+            new(DeletionProviderEvidenceUnavailable, ManagedElsaReasonClass.Temporary),
+            new(DeletionProviderPlanUnavailable, ManagedElsaReasonClass.Temporary),
+            new(DeletionRecoveryCapabilityUnavailable, ManagedElsaReasonClass.Temporary),
+            new(DeletionRecoveryAssignmentIncomplete, ManagedElsaReasonClass.Temporary),
+            new(DeletionClaimConflict, ManagedElsaReasonClass.Temporary),
+            new(DeletionCorrelationInvalid, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionItemInvalid, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionProviderAssignmentInvalid, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionProviderCorrelationInvalid, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionProviderCleanupFailed, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionRecoveryAuthorityUnavailable, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionRecoveryPlanUnavailable, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionRecoveryAssignmentInvalid, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionRecoveryClaimLost, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionPredecessorRecoverySuperseded, ManagedElsaReasonClass.NeedsPerson)
         }.ToFrozenDictionary(entry => entry.Code, StringComparer.Ordinal);
 
     public static IReadOnlyList<string> DefinedCodes { get; } =

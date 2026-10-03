@@ -20,12 +20,6 @@ public sealed class AddElsaInstanceOperationReasonClock : Migration
             table: "ElsaInstanceOperations",
             type: "bigint",
             nullable: true);
-        migrationBuilder.Sql(
-            """
-            UPDATE ElsaInstanceOperations
-            SET ReasonEnteredAt = COALESCE(UpdatedAt, StartedAt, AcceptedAt)
-            WHERE State = 'RecoveryRequired' AND ReasonEnteredAt IS NULL;
-            """);
     }
 
     protected override void Down(MigrationBuilder migrationBuilder)

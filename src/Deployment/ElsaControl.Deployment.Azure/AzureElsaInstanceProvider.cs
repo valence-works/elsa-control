@@ -796,7 +796,7 @@ public sealed class AzureElsaInstanceProvider(
 
         if (request.PlacementAssignment is null ||
             !Guid.TryParseExact(request.PlacementAssignment.AssignmentId, "D", out var assignmentId))
-            return CleanupUnknown(request, "deletion.provider-assignment-unavailable");
+            return CleanupUnknown(request, ElsaInstanceDeletionDiagnosticCodes.ProviderAssignmentUnavailable);
 
         try
         {
@@ -819,12 +819,12 @@ public sealed class AzureElsaInstanceProvider(
             assignment.WorkspaceId != request.WorkspaceId ||
             assignment.InstanceId != request.InstanceId ||
             !string.Equals(assignment.WorkloadName, WorkloadName(request.InstanceId), StringComparison.OrdinalIgnoreCase))
-            return CleanupUnknown(request, "deletion.provider-assignment-invalid", ElsaInstanceCleanupObservationKind.Ambiguous);
+            return CleanupUnknown(request, ElsaInstanceDeletionDiagnosticCodes.ProviderAssignmentInvalid, ElsaInstanceCleanupObservationKind.Ambiguous);
 
         var scopeCurrent = string.Equals(assignment.ProviderScopeFingerprint,
             NormalizeScope(_options.ProviderScopeFingerprint), StringComparison.Ordinal);
         if (!scopeCurrent && assignment.State != AzureProviderAssignmentState.Deleted)
-            return CleanupUnknown(request, "deletion.provider-assignment-invalid", ElsaInstanceCleanupObservationKind.Ambiguous);
+            return CleanupUnknown(request, ElsaInstanceDeletionDiagnosticCodes.ProviderAssignmentInvalid, ElsaInstanceCleanupObservationKind.Ambiguous);
 
         // A completed provider delete can be observed again after the lifecycle worker
         // restarts or loses its response. Observe its durable evidence without reserving
@@ -835,7 +835,7 @@ public sealed class AzureElsaInstanceProvider(
                 ? await operationStore.GetAsync(request.WorkspaceId, operationId, cancellationToken)
                 : null;
             if (!AzureProviderDeleteRecoverySupport.IsConfirmedAbsentAssignment(assignment))
-                return CleanupUnknown(request, "deletion.provider-evidence-unavailable");
+                return CleanupUnknown(request, ElsaInstanceDeletionDiagnosticCodes.ProviderEvidenceUnavailable);
             if (!scopeCurrent)
             {
                 // A template/tool rotation can leave a completed Delete on the old scope.
@@ -851,9 +851,9 @@ public sealed class AzureElsaInstanceProvider(
                     !AzureProviderDeleteRecoverySupport.IsTerminalVerifiedCleanupEligible(completed, assignment) ||
                     !AzureProviderOperationValidation.IsLifecycleDeleteIdempotencyKey(
                         completed!.IdempotencyKey, request.OperationId))
-                    return CleanupUnknown(request, "deletion.provider-correlation-invalid", ElsaInstanceCleanupObservationKind.Ambiguous);
+                    return CleanupUnknown(request, ElsaInstanceDeletionDiagnosticCodes.ProviderCorrelationInvalid, ElsaInstanceCleanupObservationKind.Ambiguous);
                 return new(ElsaInstanceCleanupObservationKind.ConfirmedAbsent, request.OperationId,
-                    request.AttemptNumber, "deletion.provider-confirmed-absent");
+                    request.AttemptNumber, ElsaInstanceDeletionDiagnosticCodes.ProviderConfirmedAbsent);
             }
             if (completed is not null)
             {
@@ -861,7 +861,7 @@ public sealed class AzureElsaInstanceProvider(
                 // Keep correlated InProgress/Unknown/ConfirmedAbsent. Only an
                 // uncorrelated LastOperationId may fall back to assignment inventory.
                 if (observed.Kind != ElsaInstanceCleanupObservationKind.Ambiguous ||
-                    !string.Equals(observed.DiagnosticCode, "deletion.provider-correlation-invalid", StringComparison.Ordinal))
+                    !string.Equals(observed.DiagnosticCode, ElsaInstanceDeletionDiagnosticCodes.ProviderCorrelationInvalid, StringComparison.Ordinal))
                     return observed;
             }
 
@@ -869,7 +869,7 @@ public sealed class AzureElsaInstanceProvider(
                 ElsaInstanceCleanupObservationKind.ConfirmedAbsent,
                 request.OperationId,
                 request.AttemptNumber,
-                "deletion.provider-confirmed-absent");
+                ElsaInstanceDeletionDiagnosticCodes.ProviderConfirmedAbsent);
         }
 
         var reconcile = await operationStore.GetLatestReconcileAsync(
@@ -887,7 +887,7 @@ public sealed class AzureElsaInstanceProvider(
             !await ScopeIsCurrentAsync(
                 request.WorkspaceId, reconcile.ProviderAssignmentId, reconcile.ProviderScopeFingerprint, cancellationToken) ||
             AzureProviderOperationService.TryRestorePlan(reconcile, _providerScope) is not { } plan)
-            return CleanupUnknown(request, "deletion.provider-plan-unavailable");
+            return CleanupUnknown(request, ElsaInstanceDeletionDiagnosticCodes.ProviderPlanUnavailable);
 
         AzureProviderOperation operation;
         try
@@ -911,7 +911,7 @@ public sealed class AzureElsaInstanceProvider(
         }
         catch (Exception)
         {
-            return CleanupUnknown(request, "deletion.provider-unavailable");
+            return CleanupUnknown(request, ElsaInstanceDeletionDiagnosticCodes.AzureProviderUnavailable);
         }
 
         return await ObserveCleanupAsync(request, assignment, operation, cancellationToken);
@@ -933,7 +933,7 @@ public sealed class AzureElsaInstanceProvider(
             !string.Equals(observed.TargetKey, WorkloadName(request.InstanceId), StringComparison.OrdinalIgnoreCase) ||
             !await ScopeIsCurrentAsync(
                 request.WorkspaceId, observed.ProviderAssignmentId, observed.ProviderScopeFingerprint, cancellationToken))
-            return CleanupUnknown(request, "deletion.provider-correlation-invalid", ElsaInstanceCleanupObservationKind.Ambiguous);
+            return CleanupUnknown(request, ElsaInstanceDeletionDiagnosticCodes.ProviderCorrelationInvalid, ElsaInstanceCleanupObservationKind.Ambiguous);
 
         var cleanupInventoryCleared =
             observed.Resources == new AzureProviderResourceReferences(assignment.ResourceGroupName) &&
@@ -942,7 +942,7 @@ public sealed class AzureElsaInstanceProvider(
                observed.Phase == AzureProviderOperationPhase.CleanupVerified &&
                cleanupInventoryCleared
             ? new(ElsaInstanceCleanupObservationKind.ConfirmedAbsent, request.OperationId,
-                request.AttemptNumber, "deletion.provider-confirmed-absent")
+                request.AttemptNumber, ElsaInstanceDeletionDiagnosticCodes.ProviderConfirmedAbsent)
             : ObservePendingCleanup(observed, cleanupInventoryCleared);
 
         ElsaInstanceCleanupObservation ObservePendingCleanup(
@@ -956,8 +956,8 @@ public sealed class AzureElsaInstanceProvider(
             var providerOperationInProgress = assignment.State != AzureProviderAssignmentState.Deleted &&
                 pending.Status is AzureProviderOperationStatus.Accepted or AzureProviderOperationStatus.Queued or AzureProviderOperationStatus.Running;
             var diagnosticCode = pending.Status is AzureProviderOperationStatus.Failed or AzureProviderOperationStatus.Cancelled
-                ? "deletion.provider-cleanup-failed"
-                : "deletion.provider-cleanup-pending";
+                ? ElsaInstanceDeletionDiagnosticCodes.ProviderCleanupFailed
+                : ElsaInstanceDeletionDiagnosticCodes.ProviderCleanupPending;
             return CleanupUnknown(
                 request,
                 diagnosticCode,
@@ -976,7 +976,7 @@ public sealed class AzureElsaInstanceProvider(
         EnsureEnabled();
 
         if (_executor is null || operationStore is not IAzureProviderDeleteRecoveryStore recoveryStore)
-            return CleanupUnknown(request.Cleanup, "deletion.recovery.capability-unavailable", ElsaInstanceCleanupObservationKind.Unavailable);
+            return CleanupUnknown(request.Cleanup, ElsaInstanceDeletionDiagnosticCodes.RecoveryCapabilityUnavailable, ElsaInstanceCleanupObservationKind.Unavailable);
 
         try
         {
@@ -1004,7 +1004,7 @@ public sealed class AzureElsaInstanceProvider(
             request.Cleanup.OperationId,
             cancellationToken);
         if (authority is null)
-            return CleanupUnknown(request.Cleanup, "deletion.recovery.authority-unavailable", ElsaInstanceCleanupObservationKind.Ambiguous);
+            return CleanupUnknown(request.Cleanup, ElsaInstanceDeletionDiagnosticCodes.RecoveryAuthorityUnavailable, ElsaInstanceCleanupObservationKind.Ambiguous);
 
         var operation = await operationStore.GetAsync(
             request.Cleanup.WorkspaceId,
@@ -1012,14 +1012,14 @@ public sealed class AzureElsaInstanceProvider(
             cancellationToken);
         var plan = operation is null ? null : AzureProviderOperationService.TryRestorePlan(operation, _providerScope);
         if (plan is null)
-            return CleanupUnknown(request.Cleanup, "deletion.recovery.plan-unavailable", ElsaInstanceCleanupObservationKind.Ambiguous);
+            return CleanupUnknown(request.Cleanup, ElsaInstanceDeletionDiagnosticCodes.RecoveryPlanUnavailable, ElsaInstanceCleanupObservationKind.Ambiguous);
 
         var assignment = await assignmentStore.GetAsync(
             request.Cleanup.WorkspaceId,
             authority.ProviderAssignmentId,
             cancellationToken);
         if (!IsAssignmentBound(assignment))
-            return CleanupUnknown(request.Cleanup, "deletion.recovery.assignment-invalid", ElsaInstanceCleanupObservationKind.Ambiguous);
+            return CleanupUnknown(request.Cleanup, ElsaInstanceDeletionDiagnosticCodes.RecoveryAssignmentInvalid, ElsaInstanceCleanupObservationKind.Ambiguous);
 
         var result = await _executor.RecoverDeleteAsync(
             new AzureProviderDeleteRecoveryClaimRequest(
@@ -1035,19 +1035,19 @@ public sealed class AzureElsaInstanceProvider(
             plan,
             cancellationToken);
         if (result is null)
-            return CleanupUnknown(request.Cleanup, "deletion.recovery.claim-lost", ElsaInstanceCleanupObservationKind.Ambiguous);
+            return CleanupUnknown(request.Cleanup, ElsaInstanceDeletionDiagnosticCodes.RecoveryClaimLost, ElsaInstanceCleanupObservationKind.Ambiguous);
 
         assignment = await assignmentStore.GetAsync(
             request.Cleanup.WorkspaceId, authority.ProviderAssignmentId, cancellationToken);
         if (!IsAssignmentBound(assignment))
-            return CleanupUnknown(request.Cleanup, "deletion.recovery.assignment-invalid", ElsaInstanceCleanupObservationKind.Ambiguous);
+            return CleanupUnknown(request.Cleanup, ElsaInstanceDeletionDiagnosticCodes.RecoveryAssignmentInvalid, ElsaInstanceCleanupObservationKind.Ambiguous);
 
         // Both a fresh claim and a post-claim replay must pass the same exact cleanup classifier.
         // In particular, a successful executor outcome is not absence evidence by itself.
         if (result.Operation.Status == AzureProviderOperationStatus.Succeeded &&
             (assignment!.State != AzureProviderAssignmentState.Deleted ||
              assignment.Resources != new AzureProviderResourceReferences(assignment.ResourceGroupName)))
-            return CleanupUnknown(request.Cleanup, "deletion.recovery.assignment-incomplete");
+            return CleanupUnknown(request.Cleanup, ElsaInstanceDeletionDiagnosticCodes.RecoveryAssignmentIncomplete);
         return await ObserveCleanupAsync(request.Cleanup, assignment!, result.Operation, cancellationToken);
 
         bool IsAssignmentBound(AzureProviderResourceAssignment? candidate) =>
