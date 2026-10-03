@@ -1442,6 +1442,7 @@ internal sealed class ElsaInstanceRecoveryRequiredAlertOutboxConfiguration
         builder.ToTable("ElsaInstanceRecoveryRequiredAlertOutbox");
         builder.HasKey(x => x.Id);
         builder.Property(x => x.DedupeIdentity).HasMaxLength(64).IsRequired();
+        builder.Property(x => x.LeasedBy).HasMaxLength(64);
         builder.Property(x => x.CreatedAt).HasConversion(
             value => value.UtcTicks,
             value => new DateTimeOffset(value, TimeSpan.Zero));
@@ -1449,6 +1450,9 @@ internal sealed class ElsaInstanceRecoveryRequiredAlertOutboxConfiguration
             value => value.HasValue ? value.Value.UtcTicks : (long?)null,
             value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
         builder.Property(x => x.NextAttemptAt).HasConversion(
+            value => value.HasValue ? value.Value.UtcTicks : (long?)null,
+            value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
+        builder.Property(x => x.LeasedUntil).HasConversion(
             value => value.HasValue ? value.Value.UtcTicks : (long?)null,
             value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
         builder.HasIndex(x => new { x.OperationId, x.AttemptNumber }).IsUnique();

@@ -138,6 +138,44 @@ public sealed class ManagedLifecycleRecoveryRequiredAlertTests
     }
 
     [Fact]
+    public void Activity_sender_without_transport_ack_is_not_delivery()
+    {
+        using var capture = new AlertCapture();
+        var sender = new ActivityRecoveryRequiredAlertSender();
+        var workspaceId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa5");
+        var instanceId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb5");
+        var operationId = Guid.Parse("cccccccc-cccc-cccc-cccc-ccccccccccc5");
+        var runId = Guid.Parse("dddddddd-dddd-dddd-dddd-ddddddddddd5");
+        var dedupe = ManagedLifecycleRecoveryRequiredAlert.ComputeDedupeIdentity(
+            workspaceId, instanceId, operationId, 1, runId);
+
+        Assert.False(sender.Send(new RecoveryRequiredAlertDispatch(
+            workspaceId, instanceId, operationId, 1, runId, dedupe)));
+        var activity = Assert.Single(capture.Entered);
+        Assert.Equal(dedupe, activity.GetTagItem(ManagedLifecycleTelemetry.DedupeIdentityTag));
+    }
+
+    [Fact]
+    public void Activity_sender_acks_when_the_exporter_flushes_or_email_accepts()
+    {
+        var workspaceId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa6");
+        var instanceId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb6");
+        var operationId = Guid.Parse("cccccccc-cccc-cccc-cccc-ccccccccccc6");
+        var item = new RecoveryRequiredAlertDispatch(
+            workspaceId,
+            instanceId,
+            operationId,
+            1,
+            null,
+            ManagedLifecycleRecoveryRequiredAlert.ComputeDedupeIdentity(
+                workspaceId, instanceId, operationId, 1));
+
+        Assert.True(new ActivityRecoveryRequiredAlertSender(new StaticAck(true)).Send(item));
+        Assert.True(new ActivityRecoveryRequiredAlertSender(email: new StaticEmail(true)).Send(item));
+        Assert.False(new ActivityRecoveryRequiredAlertSender(new StaticAck(false)).Send(item));
+    }
+
+    [Fact]
     public void Entry_event_carries_only_the_fixed_reason_and_opaque_ids()
     {
         using var capture = new AlertCapture();
@@ -203,6 +241,16 @@ public sealed class ManagedLifecycleRecoveryRequiredAlertTests
         var dedupe = Assert.IsType<string>(activity.GetTagItem(ManagedLifecycleTelemetry.DedupeIdentityTag));
         Assert.Equal(64, dedupe.Length);
         Assert.All(dedupe, character => Assert.True(char.IsAsciiHexDigit(character)));
+    }
+
+    private sealed class StaticAck(bool acknowledged) : IRecoveryRequiredAlertTransportAck
+    {
+        public bool TryAcknowledge() => acknowledged;
+    }
+
+    private sealed class StaticEmail(bool accepted) : IRecoveryRequiredAlertEmailTransport
+    {
+        public bool TryAccept(RecoveryRequiredAlertDispatch item) => accepted;
     }
 
     private static ElsaInstanceIntent Intent() => new(

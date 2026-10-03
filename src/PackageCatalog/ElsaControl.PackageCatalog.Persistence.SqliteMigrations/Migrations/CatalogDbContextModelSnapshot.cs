@@ -3367,6 +3367,13 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<Guid>("InstanceId")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("LeasedBy")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("LeasedUntil")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long?>("NextAttemptAt")
                         .HasColumnType("INTEGER");
 
@@ -3374,6 +3381,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<Guid>("OrganizationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("RunId")
                         .HasColumnType("TEXT");
 
                     b.Property<long?>("SentAt")

@@ -235,7 +235,8 @@ internal sealed class ElsaInstanceLifecycleOutboxEntity
 /// <see cref="ElsaInstanceOperationEntity.RequiresHumanAt"/> goes from empty
 /// to a timestamp. Payload columns are append-only; delivery columns
 /// (<see cref="SentAt"/>, <see cref="DeliveryAttempts"/>,
-/// <see cref="NextAttemptAt"/>) may be updated by the dispatcher.
+/// <see cref="NextAttemptAt"/>, <see cref="LeasedUntil"/>,
+/// <see cref="LeasedBy"/>) may be updated by the dispatcher.
 /// </summary>
 internal sealed class ElsaInstanceRecoveryRequiredAlertOutboxEntity
 {
@@ -247,11 +248,14 @@ internal sealed class ElsaInstanceRecoveryRequiredAlertOutboxEntity
     public Guid OperationId { get; set; }
     public ElsaInstanceOperationEntity? Operation { get; set; }
     public int AttemptNumber { get; set; }
+    public Guid? RunId { get; set; }
     public string DedupeIdentity { get; set; } = "";
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset? SentAt { get; set; }
     public int DeliveryAttempts { get; set; }
     public DateTimeOffset? NextAttemptAt { get; set; }
+    public DateTimeOffset? LeasedUntil { get; set; }
+    public string? LeasedBy { get; set; }
 }
 
 internal sealed class ElsaInstanceOperationEntity

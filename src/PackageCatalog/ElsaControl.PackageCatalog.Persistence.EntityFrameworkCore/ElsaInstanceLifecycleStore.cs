@@ -7,10 +7,13 @@ using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Cockpit;
 using ElsaControl.Deployment.Core.Instances;
+using ElsaControl.Deployment.Core.Telemetry;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using ElsaControl.RuntimeBuilder.Abstractions.Plans;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 
@@ -26,7 +29,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
     IElsaInstanceLifecycleResolutionInputSource resolutionInputSource,
     TimeProvider? timeProvider = null,
     IElsaInstanceCommercialGate? commercialGate = null,
-    IAzureProviderRecoveryObservationStore? recoveryObservationStore = null) :
+    IAzureProviderRecoveryObservationStore? recoveryObservationStore = null,
+    ILogger<EfCoreElsaInstanceLifecycleStore>? logger = null) :
     IElsaInstanceLifecycleStore,
     IElsaInstanceLifecycleWorkerStore,
     IElsaInstanceProviderSubmissionStore,
@@ -41,6 +45,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
     private readonly IElsaInstanceCommercialGate _commercialGate = commercialGate ?? new EfCoreElsaInstanceCommercialGate(dbContext, timeProvider);
     private readonly IAzureProviderRecoveryObservationStore? _recoveryObservationStore = recoveryObservationStore;
+    private readonly ILogger _logger = logger ?? NullLogger<EfCoreElsaInstanceLifecycleStore>.Instance;
     private static readonly TimeSpan WorkerLeaseDuration = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan DeletionDeferralDelay = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan[] IdempotencyReplayLookupDelays =
@@ -156,8 +161,23 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         foreach (var operationId in candidateIds)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (await TryAdvanceDueHumanRequiredClockAsync(operationId, now, cancellationToken))
-                advanced++;
+            try
+            {
+                if (await TryAdvanceDueHumanRequiredClockAsync(operationId, now, cancellationToken))
+                    advanced++;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                _logger.LogError(
+                    exception,
+                    "Managed Elsa RecoveryRequired clock scan failed for operation {OperationId}.",
+                    operationId);
+                ManagedLifecycleTelemetry.RecordRecoveryRequiredClockScanFailure();
+            }
         }
 
         return advanced;

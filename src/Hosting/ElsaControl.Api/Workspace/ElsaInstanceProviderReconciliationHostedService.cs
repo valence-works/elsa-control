@@ -69,10 +69,8 @@ public sealed class ElsaInstanceProviderReconciliationHostedService(
         var reconciler = scope.ServiceProvider.GetRequiredService<IElsaInstanceProviderReconciliationService>();
         var commercialGate = scope.ServiceProvider.GetService<IElsaInstanceCommercialGate>();
         var entitlementHoldStore = scope.ServiceProvider.GetService<IElsaInstanceEntitlementHoldStore>();
-        await reconciler.AdvanceDueHumanRequiredClocksAsync(stoppingToken);
-        var dispatcher = scope.ServiceProvider.GetService<IRecoveryRequiredAlertOutboxDispatcher>();
-        if (dispatcher is not null)
-            await dispatcher.DispatchPendingAsync(32, stoppingToken);
+        await AdvanceDueHumanRequiredClocksSafelyAsync(reconciler, stoppingToken);
+        await DispatchRecoveryRequiredAlertsSafelyAsync(scope.ServiceProvider, stoppingToken);
         var operations = await pending.ListPendingProviderOperationsAsync(64, stoppingToken);
         foreach (var operation in operations)
         {
@@ -86,6 +84,47 @@ public sealed class ElsaInstanceProviderReconciliationHostedService(
                 commercialGate,
                 entitlementHoldStore,
                 stoppingToken);
+        }
+    }
+
+    private async Task AdvanceDueHumanRequiredClocksSafelyAsync(
+        IElsaInstanceProviderReconciliationService reconciler,
+        CancellationToken stoppingToken)
+    {
+        try
+        {
+            await reconciler.AdvanceDueHumanRequiredClocksAsync(stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(exception, "Managed Elsa RecoveryRequired clock scan failed.");
+            ManagedLifecycleTelemetry.RecordRecoveryRequiredClockScanFailure();
+        }
+    }
+
+    private async Task DispatchRecoveryRequiredAlertsSafelyAsync(
+        IServiceProvider services,
+        CancellationToken stoppingToken)
+    {
+        var dispatcher = services.GetService<IRecoveryRequiredAlertOutboxDispatcher>();
+        if (dispatcher is null)
+            return;
+
+        try
+        {
+            await dispatcher.DispatchPendingAsync(32, stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(exception, "RecoveryRequired alert outbox dispatch failed.");
         }
     }
 

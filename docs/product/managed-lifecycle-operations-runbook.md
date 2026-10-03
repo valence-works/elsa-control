@@ -478,11 +478,15 @@ email itself and does not page.
 
 The event is flushed only after the catalog persist commits. A failed
 commit emits nothing. The same transaction writes one outbox row; a
-dispatcher then sends the span, retries with exponential backoff, and
-marks `SentAt` when delivery succeeds. A crash after commit leaves
-`SentAt` empty, so the next hosted tick still delivers. The Azure
-Monitor exporter uses `MaxRetries = 0` and `DisableOfflineStorage =
-true`; a missing email is therefore not proof that no engine is parked.
+dispatcher then sends the span with the identity persisted on that row,
+retries with exponential backoff, and marks `SentAt` only after the
+exporter `ForceFlush` succeeds or a configured email transport accepts
+the send. Creating an in-memory span is not delivery. A crash or a
+failed acknowledgement leaves `SentAt` empty, so the next hosted tick
+still delivers. Two dispatch loops claim a row with a short lease so
+only one sender runs. The Azure Monitor exporter uses `MaxRetries = 0`
+and `DisableOfflineStorage = true`; a missing email is therefore not
+proof that no engine is parked.
 
 The [managed telemetry sink](../../infra/managed-telemetry/README.md)
 defines one scheduled query rule and one email-only action group per

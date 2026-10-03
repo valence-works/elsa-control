@@ -36,6 +36,10 @@ public static class ManagedLifecycleAzureMonitorTelemetryExtensions
             throw new InvalidOperationException("Managed lifecycle Azure Monitor telemetry is already registered.");
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton<ManagedLifecycleAzureMonitorTelemetrySinkFactory>();
+        builder.Services.AddSingleton(services =>
+            services.GetRequiredService<ManagedLifecycleAzureMonitorTelemetrySinkFactory>().Create(options));
+        builder.Services.AddSingleton<IRecoveryRequiredAlertTransportAck>(services =>
+            services.GetRequiredService<ManagedLifecycleAzureMonitorTelemetrySink>());
         builder.Services.AddSingleton<ManagedLifecycleAzureMonitorTelemetryLifetime>();
         builder.Services.AddHostedService(services =>
             services.GetRequiredService<ManagedLifecycleAzureMonitorTelemetryLifetime>());
@@ -337,10 +341,9 @@ internal sealed class ManagedLifecycleAzureMonitorTelemetrySinkFactory
 }
 
 internal sealed class ManagedLifecycleAzureMonitorTelemetryLifetime(
-    ManagedLifecycleAzureMonitorTelemetryOptions options,
-    ManagedLifecycleAzureMonitorTelemetrySinkFactory sinkFactory) : IHostedService, IDisposable
+    ManagedLifecycleAzureMonitorTelemetrySink sink) : IHostedService, IDisposable
 {
-    private readonly ManagedLifecycleAzureMonitorTelemetrySink _sink = sinkFactory.Create(options);
+    private readonly ManagedLifecycleAzureMonitorTelemetrySink _sink = sink;
 
     public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
@@ -353,7 +356,7 @@ internal sealed class ManagedLifecycleAzureMonitorTelemetryLifetime(
     public void Dispose() => _sink.Dispose();
 }
 
-internal sealed class ManagedLifecycleAzureMonitorTelemetrySink : IDisposable
+internal sealed class ManagedLifecycleAzureMonitorTelemetrySink : IDisposable, IRecoveryRequiredAlertTransportAck
 {
     private readonly MeterProvider? _meterProvider;
     private readonly TracerProvider? _tracerProvider;
@@ -366,6 +369,8 @@ internal sealed class ManagedLifecycleAzureMonitorTelemetrySink : IDisposable
         _meterProvider = meterProvider;
         _tracerProvider = tracerProvider;
     }
+
+    bool IRecoveryRequiredAlertTransportAck.TryAcknowledge() => ForceFlush();
 
     internal bool ForceFlush()
     {

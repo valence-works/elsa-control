@@ -243,7 +243,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         {
             PrepareForSave();
             var result = base.SaveChanges(acceptAllChangesOnSuccess);
-            FlushRecoveryRequiredAlertsIfCommitted();
+            TryFlushRecoveryRequiredAlertsIfCommitted();
             return result;
         }
         catch
@@ -268,7 +268,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         {
             PrepareForSave();
             var result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
-            FlushRecoveryRequiredAlertsIfCommitted();
+            TryFlushRecoveryRequiredAlertsIfCommitted();
             return result;
         }
         catch
@@ -321,11 +321,13 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             return;
 
         var createdAt = operation.RequiresHumanAt.Value.ToUniversalTime();
+        var runId = operation.DeploymentRunId;
         var dedupe = ManagedLifecycleRecoveryRequiredAlert.ComputeDedupeIdentity(
             operation.WorkspaceId,
             instanceId,
             operation.Id,
-            operation.AttemptNumber);
+            operation.AttemptNumber,
+            runId);
         ElsaInstanceRecoveryRequiredAlertOutbox.Add(new Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity
         {
             Id = Guid.NewGuid(),
@@ -334,6 +336,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             InstanceId = instanceId,
             OperationId = operation.Id,
             AttemptNumber = operation.AttemptNumber,
+            RunId = runId,
             DedupeIdentity = dedupe,
             CreatedAt = createdAt
         });
@@ -342,7 +345,8 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             instanceId,
             operation.Id,
             operation.AttemptNumber,
-            operation.DeploymentRunId));
+            runId,
+            dedupe));
     }
 
     /// <summary>
@@ -356,47 +360,42 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     /// commits. Call only from <c>ExecuteInTransactionCoreAsync</c> after
     /// <c>CommitAsync</c> succeeds.
     /// </summary>
-    internal void FlushRecoveryRequiredAlertsAfterCommit() => FlushRecoveryRequiredAlerts();
+    internal void FlushRecoveryRequiredAlertsAfterCommit() => TryFlushRecoveryRequiredAlerts();
 
-    private void FlushRecoveryRequiredAlertsIfCommitted()
+    private void TryFlushRecoveryRequiredAlertsIfCommitted()
     {
         // An explicit catalog transaction commits later. Emitting here would
         // send a span for a row that can still roll back or be retried.
         if (Database.CurrentTransaction is not null)
             return;
-        FlushRecoveryRequiredAlerts();
+        TryFlushRecoveryRequiredAlerts();
     }
 
-    private void FlushRecoveryRequiredAlerts()
+    /// <summary>
+    /// Emits the immediate span with the identity persisted on the outbox
+    /// row. Delivery acknowledgement and <c>SentAt</c> stay on the
+    /// dispatcher so a successful catalog save is never reported as failed.
+    /// </summary>
+    private void TryFlushRecoveryRequiredAlerts()
     {
-        foreach (var candidate in _pendingRecoveryRequiredAlerts)
-            ManagedLifecycleRecoveryRequiredAlert.RecordEntered(
-                candidate.WorkspaceId,
-                candidate.InstanceId,
-                candidate.OperationId,
-                candidate.AttemptNumber,
-                candidate.RunId);
-        MarkPendingRecoveryRequiredAlertsSent();
-        ClearRecoveryRequiredAlerts();
-    }
-
-    private void MarkPendingRecoveryRequiredAlertsSent()
-    {
-        if (_pendingRecoveryRequiredAlerts.Count == 0)
-            return;
-
-        var now = DateTimeOffset.UtcNow;
-        foreach (var candidate in _pendingRecoveryRequiredAlerts)
+        try
         {
-            ElsaInstanceRecoveryRequiredAlertOutbox
-                .Where(row =>
-                    row.OperationId == candidate.OperationId &&
-                    row.AttemptNumber == candidate.AttemptNumber &&
-                    row.SentAt == null)
-                .ExecuteUpdate(setters => setters
-                    .SetProperty(row => row.SentAt, now)
-                    .SetProperty(row => row.DeliveryAttempts, row => row.DeliveryAttempts + 1)
-                    .SetProperty(row => row.NextAttemptAt, (DateTimeOffset?)null));
+            foreach (var candidate in _pendingRecoveryRequiredAlerts)
+                ManagedLifecycleRecoveryRequiredAlert.RecordEntered(
+                    candidate.WorkspaceId,
+                    candidate.InstanceId,
+                    candidate.OperationId,
+                    candidate.AttemptNumber,
+                    candidate.RunId,
+                    candidate.DedupeIdentity);
+        }
+        catch
+        {
+            // The outbox row is committed. The dispatcher retries delivery.
+        }
+        finally
+        {
+            ClearRecoveryRequiredAlerts();
         }
     }
 
@@ -407,7 +406,8 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         Guid InstanceId,
         Guid OperationId,
         int AttemptNumber,
-        Guid? RunId);
+        Guid? RunId,
+        string DedupeIdentity);
 
     /// <summary>
     /// Runs the persistence guards over the changes detected once, at the start of the pass. With automatic detection on,
@@ -821,7 +821,9 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             if (changedProperties.Any(property => property is not (
                     nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.SentAt) or
                     nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.DeliveryAttempts) or
-                    nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.NextAttemptAt))))
+                    nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.NextAttemptAt) or
+                    nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.LeasedUntil) or
+                    nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.LeasedBy))))
                 throw new InvalidOperationException("RecoveryRequired alert outbox payload is append-only.");
 
             var originalSentAt = (DateTimeOffset?)entry.Property(nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.SentAt)).OriginalValue;

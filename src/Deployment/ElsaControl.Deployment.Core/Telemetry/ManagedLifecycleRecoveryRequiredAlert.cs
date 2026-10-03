@@ -20,17 +20,21 @@ public static class ManagedLifecycleRecoveryRequiredAlert
         Guid instanceId,
         Guid operationId,
         int attemptNumber,
-        Guid? runId = null)
+        Guid? runId = null,
+        string? persistedDedupeIdentity = null)
     {
         if (workspaceId == Guid.Empty || instanceId == Guid.Empty || operationId == Guid.Empty || attemptNumber < 1)
             return;
 
+        var dedupe = string.IsNullOrWhiteSpace(persistedDedupeIdentity)
+            ? ComputeDedupeIdentity(workspaceId, instanceId, operationId, attemptNumber, runId)
+            : persistedDedupeIdentity;
         ManagedLifecycleTelemetry.RecordRecoveryRequiredEntered(
             workspaceId,
             instanceId,
             operationId,
             ReasonCode,
-            ComputeDedupeIdentity(workspaceId, instanceId, operationId, attemptNumber, runId));
+            dedupe);
     }
 
     public static string ComputeDedupeIdentity(

@@ -30,6 +30,8 @@ public static class ManagedLifecycleTelemetry
     public const string RetryCounterName = "managed_lifecycle.operations.retries";
     public const string DurationHistogramName = "managed_lifecycle.operations.duration";
     public const string EndpointHealthCounterName = "managed_lifecycle.endpoint.health.evaluations";
+    public const string RecoveryRequiredClockScanFailureCounterName =
+        "managed_lifecycle.recovery_required.clock_scan.failures";
 
     public const string ActionTag = "action";
     public const string OutcomeTag = "outcome";
@@ -112,6 +114,13 @@ public static class ManagedLifecycleTelemetry
         EndpointHealthCounterName,
         "{evaluation}",
         "Provider-neutral endpoint health evaluations.");
+    private static readonly Counter<long> RecoveryRequiredClockScanFailureCounter = Meter.CreateCounter<long>(
+        RecoveryRequiredClockScanFailureCounterName,
+        "{failure}",
+        "RecoveryRequired clock-scan rows that failed without stalling reconciliation.");
+
+    public static void RecordRecoveryRequiredClockScanFailure() =>
+        RecoveryRequiredClockScanFailureCounter.Add(1);
 
     public static ManagedLifecycleTelemetryOperation StartOperation(
         string activityName,

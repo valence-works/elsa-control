@@ -3387,6 +3387,13 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<Guid>("InstanceId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("LeasedBy")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<long?>("LeasedUntil")
+                        .HasColumnType("bigint");
+
                     b.Property<long?>("NextAttemptAt")
                         .HasColumnType("bigint");
 
@@ -3394,6 +3401,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         .HasColumnType("uniqueidentifier");
 
                     b.Property<Guid>("OrganizationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("RunId")
                         .HasColumnType("uniqueidentifier");
 
                     b.Property<long?>("SentAt")

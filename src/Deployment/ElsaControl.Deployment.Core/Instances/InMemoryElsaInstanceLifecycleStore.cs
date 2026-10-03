@@ -451,41 +451,51 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                          .Where(candidate => candidate.State == ElsaInstanceOperationState.RecoveryRequired)
                          .OrderBy(candidate => candidate.Id))
             {
-                if (advanced >= limit)
-                    break;
-                var clock = _clocks.GetValueOrDefault(operation.Id);
-                if (clock.RequiresHumanAt is not null)
-                    continue;
-                if (!_instances.TryGetValue(operation.InstanceId, out var instance))
-                    continue;
-                var diagnostic = _reconciliationResults.TryGetValue(operation.Id, out var stored)
-                    ? stored.Result.DiagnosticCode
-                    : _failures.TryGetValue(operation.Id, out var failure) ? failure.Code : null;
-                if (clock.ReasonEnteredAt is null)
+                try
                 {
-                    ApplyParkClock(
-                        operation,
-                        instance.WorkspaceId,
-                        diagnostic,
-                        diagnostic,
-                        restartClock: false,
-                        now);
-                    clock = _clocks.GetValueOrDefault(operation.Id);
-                }
+                    if (advanced >= limit)
+                        break;
+                    var clock = _clocks.GetValueOrDefault(operation.Id);
+                    var beforeHumanAt = clock.RequiresHumanAt;
+                    if (beforeHumanAt is not null)
+                        continue;
+                    if (!_instances.TryGetValue(operation.InstanceId, out var instance))
+                        continue;
+                    var diagnostic = _reconciliationResults.TryGetValue(operation.Id, out var stored)
+                        ? stored.Result.DiagnosticCode
+                        : _failures.TryGetValue(operation.Id, out var failure) ? failure.Code : null;
+                    if (clock.ReasonEnteredAt is null)
+                    {
+                        ApplyParkClock(
+                            operation,
+                            instance.WorkspaceId,
+                            diagnostic,
+                            diagnostic,
+                            restartClock: false,
+                            now);
+                        clock = _clocks.GetValueOrDefault(operation.Id);
+                    }
 
-                if (string.IsNullOrWhiteSpace(diagnostic) ||
-                    !ManagedElsaReasonCodeCatalog.RequiresHuman(diagnostic, clock.ReasonEnteredAt, now))
-                    continue;
-                var before = clock.RequiresHumanAt;
-                ApplyParkClock(
-                    operation,
-                    instance.WorkspaceId,
-                    diagnostic,
-                    diagnostic,
-                    restartClock: false,
-                    now);
-                if (_clocks.GetValueOrDefault(operation.Id).RequiresHumanAt is not null && before is null)
-                    advanced++;
+                    if (!ManagedElsaReasonCodeCatalog.RequiresHuman(diagnostic, clock.ReasonEnteredAt, now))
+                        continue;
+                    if (clock.RequiresHumanAt is null)
+                    {
+                        ApplyParkClock(
+                            operation,
+                            instance.WorkspaceId,
+                            diagnostic,
+                            diagnostic,
+                            restartClock: false,
+                            now);
+                    }
+
+                    if (_clocks.GetValueOrDefault(operation.Id).RequiresHumanAt is not null && beforeHumanAt is null)
+                        advanced++;
+                }
+                catch
+                {
+                    ManagedLifecycleTelemetry.RecordRecoveryRequiredClockScanFailure();
+                }
             }
 
             return Task.FromResult(advanced);
@@ -524,11 +534,22 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         _clocks[operation.Id] = next;
         if (!newlyHuman || !_alertOutbox.Add((operation.Id, operation.AttemptNumber)))
             return;
+        Guid? runId = null;
+        foreach (var stored in _deploymentRuns.Values)
+        {
+            if (stored.Operation.Id == operation.Id)
+            {
+                runId = stored.Run.Id;
+                break;
+            }
+        }
+
         ManagedLifecycleRecoveryRequiredAlert.RecordEntered(
             workspaceId,
             operation.InstanceId,
             operation.Id,
-            operation.AttemptNumber);
+            operation.AttemptNumber,
+            runId);
     }
 
     private static ElsaInstance WithVersion(ElsaInstance instance, int version) => ElsaInstance.Hydrate(
