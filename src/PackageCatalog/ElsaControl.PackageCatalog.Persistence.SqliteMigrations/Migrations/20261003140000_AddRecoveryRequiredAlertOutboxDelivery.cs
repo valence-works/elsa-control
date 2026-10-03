@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore.Migrations;
 namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations;
 
 [DbContext(typeof(CatalogDbContext))]
-[Migration("20261003120000_AddRecoveryRequiredAlertOutboxDelivery")]
+[Migration("20261003140000_AddRecoveryRequiredAlertOutboxDelivery")]
 public sealed class AddRecoveryRequiredAlertOutboxDelivery : Migration
 {
     protected override void Up(MigrationBuilder migrationBuilder)

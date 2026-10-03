@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore.Migrations;
 namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations;
 
 [DbContext(typeof(CatalogDbContext))]
-[Migration("20261003120001_AddRecoveryRequiredAlertOutboxDelivery")]
+[Migration("20261003140001_AddRecoveryRequiredAlertOutboxDelivery")]
 public sealed class AddRecoveryRequiredAlertOutboxDelivery : Migration
 {
     protected override void Up(MigrationBuilder migrationBuilder)
