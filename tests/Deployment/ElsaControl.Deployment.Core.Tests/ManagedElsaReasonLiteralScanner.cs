@@ -18,6 +18,7 @@ internal static class ManagedElsaReasonLiteralScanner
         "azure.recovery.",
         "staging.lever.",
         "deletion.",
+        "lifecycle.deletion.",
         "assignment.rebind."
     ];
 

@@ -180,6 +180,7 @@ public sealed record AzureProviderOperation(
     bool ManagedHandoff = false,
     bool ManagedHandoffStudioGrants = false,
     DateTimeOffset? StatusChangedAt = null,
+    DateTimeOffset? ProgressChangedAt = null,
     DateTimeOffset? AttemptedStepStartedAt = null,
     DateTimeOffset? LastArmObservedAt = null,
     int AutoResumeCount = 0,

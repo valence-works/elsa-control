@@ -1593,6 +1593,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<long>("StatusChangedAt")
                         .HasColumnType("bigint");
 
+                    b.Property<long>("ProgressChangedAt")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("TargetKey")
                         .IsRequired()
                         .HasMaxLength(128)
@@ -3664,6 +3667,13 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
 
                     b.Property<Guid?>("InstanceId")
                         .HasColumnType("uniqueidentifier");
+
+                    b.Property<long?>("LastVerifiedProgressAt")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("LastVerifiedProgressReceipt")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
 
                     b.Property<long?>("LeaseExpiresAt")
                         .HasColumnType("bigint");

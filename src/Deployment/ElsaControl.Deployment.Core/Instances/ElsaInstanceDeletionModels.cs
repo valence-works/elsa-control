@@ -21,6 +21,8 @@ public static class ElsaInstanceDeletionDiagnosticCodes
     public const string ProviderUnavailable = ManagedElsaReasonCodeCatalog.DeletionProviderUnavailable;
     public const string AzureProviderUnavailable = ManagedElsaReasonCodeCatalog.DeletionAzureProviderUnavailable;
     public const string ProviderCleanupPending = ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending;
+    public const string ProviderProgressStale = ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale;
+    public const string BlockedByOperationInFlight = ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight;
     public const string ProviderAssignmentUnavailable = ManagedElsaReasonCodeCatalog.DeletionProviderAssignmentUnavailable;
     public const string ProviderEvidenceUnavailable = ManagedElsaReasonCodeCatalog.DeletionProviderEvidenceUnavailable;
     public const string ProviderPlanUnavailable = ManagedElsaReasonCodeCatalog.DeletionProviderPlanUnavailable;
@@ -89,13 +91,18 @@ public sealed record ElsaInstanceCleanupObservation(
     Guid OperationId,
     int AttemptNumber,
     string DiagnosticCode,
-    ElsaInstanceCleanupEvidence? Evidence = null)
+    ElsaInstanceCleanupEvidence? Evidence = null,
+    DateTimeOffset? LastProviderProgressAt = null,
+    string? ProgressReceipt = null)
 {
     public void Validate()
     {
         if (!Enum.IsDefined(Kind) || OperationId == Guid.Empty || AttemptNumber < 1 ||
             string.IsNullOrWhiteSpace(DiagnosticCode) || DiagnosticCode.Length > 128 ||
             DiagnosticCode.Any(x => !(char.IsAsciiLetterLower(x) || char.IsAsciiDigit(x) || x is '.' or '-')))
+            throw new InvalidOperationException("Cleanup observation is invalid.");
+        if (ProgressReceipt is not null &&
+            (ProgressReceipt.Length != 64 || ProgressReceipt.AsSpan().ContainsAnyExcept("0123456789abcdef")))
             throw new InvalidOperationException("Cleanup observation is invalid.");
     }
 
@@ -140,6 +147,15 @@ public sealed record ElsaInstanceDeletionWorkItem(
     /// recovery claim from the mutable operation alone.
     /// </summary>
     public Guid? RecoveryRequestId { get; init; }
+
+    /// <summary>When this Delete first became Running. The no-progress clock starts here.</summary>
+    public DateTimeOffset? RunningSince { get; init; }
+
+    /// <summary>Monotonic verified provider progress. Never a heartbeat or guess.</summary>
+    public DateTimeOffset? LastVerifiedProgressAt { get; init; }
+
+    /// <summary>Last Status/Phase/inventory receipt that raised <see cref="LastVerifiedProgressAt"/>.</summary>
+    public string? LastVerifiedProgressReceipt { get; init; }
 
     public void Validate()
     {

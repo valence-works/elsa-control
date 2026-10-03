@@ -10,6 +10,19 @@ public sealed class ElsaInstanceDeletionWorker(
     TimeProvider? timeProvider = null,
     IElsaInstanceProviderDeleteRecoveryPort? deleteRecoveryPort = null)
 {
+    /// <summary>
+    /// Escalate only when verified provider progress has been silent.
+    /// QA's ~50-minute Delete (#508) was wall-clock Azure cleanup, including
+    /// Log Analytics workspace deletion. The cleanup runner does not persist
+    /// live ARM remaining-resource lists during that wait, so Status, Phase,
+    /// and the durable persisted-resource receipt can stay unchanged until
+    /// CleanupVerified. A 30-minute bound would park that healthy path. 60
+    /// minutes covers the observed 50-minute window with margin. Heartbeats,
+    /// CreatedAt, restamped ARM reads, and metadata-only checkpoints never
+    /// reset this clock.
+    /// </summary>
+    public static readonly TimeSpan ProviderProgressStaleAfter = TimeSpan.FromMinutes(60);
+
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
     private readonly IElsaInstanceProviderDeleteRecoveryPort? _deleteRecoveryPort = deleteRecoveryPort;
 
@@ -119,7 +132,18 @@ public sealed class ElsaInstanceDeletionWorker(
         var fingerprint = observation.ComputeFingerprint();
         if (correlated && observation.Kind == ElsaInstanceCleanupObservationKind.InProgress)
         {
-            if (!await store.DeferDeletionAsync(item, workerId, _timeProvider.GetUtcNow(),
+            var now = _timeProvider.GetUtcNow();
+            var progressing = ApplyVerifiedProgress(item, observation, now);
+            if (HasStaleProviderProgress(progressing, now))
+            {
+                return await store.RequireDeletionRecoveryAsync(new(
+                    item.Instance.WorkspaceId, item.Instance.Id, item.Operation.Id, item.Outbox.Id,
+                    item.Instance.Version, item.Operation.AttemptNumber, item.CorrelatedRunId, workerId,
+                    item.LeaseToken, item.LeaseVersion, fingerprint,
+                    StaleProgressCode(observation), now), cancellationToken);
+            }
+
+            if (!await store.DeferDeletionAsync(progressing, workerId, now,
                     observation.DiagnosticCode, cancellationToken))
                 throw new ElsaInstanceLifecycleConflictException(
                     "Deletion work item changed before async cleanup could be deferred.");
@@ -221,6 +245,62 @@ public sealed class ElsaInstanceDeletionWorker(
             ElsaInstanceDeletionOutcome.RecoveryRequired => ElsaInstanceLifecycleWorkerOutcome.Failed,
             _ => ElsaInstanceLifecycleWorkerOutcome.Conflict
         }, result.Operation, result.Instance, FailureCode: result.DiagnosticCode);
+
+    public static ElsaInstanceDeletionWorkItem ApplyVerifiedProgress(
+        ElsaInstanceDeletionWorkItem item,
+        ElsaInstanceCleanupObservation observation,
+        DateTimeOffset now)
+    {
+        var lastVerified = item.LastVerifiedProgressAt;
+        var receipt = item.LastVerifiedProgressReceipt;
+        var nowUtc = now.ToUniversalTime();
+        DateTimeOffset? candidate = null;
+
+        if (!string.IsNullOrWhiteSpace(observation.ProgressReceipt) &&
+            !string.Equals(observation.ProgressReceipt, receipt, StringComparison.Ordinal))
+        {
+            // A differing receipt is verified progress at the observation time.
+            // Do not adopt an older or future Status/Phase stamp from the same
+            // observation: that would rewind the monotonic clock, treat a real
+            // inventory change as already stale, or extend the bound by skew.
+            receipt = observation.ProgressReceipt;
+            candidate = nowUtc;
+        }
+        else if (observation.LastProviderProgressAt is { } progress)
+        {
+            var progressUtc = progress.ToUniversalTime();
+            if (progressUtc <= nowUtc)
+                candidate = progressUtc;
+        }
+
+        if (candidate is { } verified &&
+            (lastVerified is null || verified > lastVerified.Value.ToUniversalTime()))
+            lastVerified = verified;
+
+        return item with
+        {
+            LastVerifiedProgressAt = lastVerified,
+            LastVerifiedProgressReceipt = receipt
+        };
+    }
+
+    public static bool HasStaleProviderProgress(
+        ElsaInstanceDeletionWorkItem item,
+        DateTimeOffset now)
+    {
+        var origin = item.LastVerifiedProgressAt ?? item.RunningSince;
+        if (origin is null)
+            return false;
+        if (item.RunningSince is { } running && running.ToUniversalTime() > origin.Value.ToUniversalTime())
+            origin = running;
+        return now.ToUniversalTime() - origin.Value.ToUniversalTime() > ProviderProgressStaleAfter;
+    }
+
+    private static string StaleProgressCode(ElsaInstanceCleanupObservation observation) =>
+        string.Equals(observation.DiagnosticCode, ManagedElsaReasonCodeCatalog.AssignmentRebindOperationsInFlight, StringComparison.Ordinal) ||
+        string.Equals(observation.DiagnosticCode, ElsaInstanceDeletionDiagnosticCodes.BlockedByOperationInFlight, StringComparison.Ordinal)
+            ? ElsaInstanceDeletionDiagnosticCodes.BlockedByOperationInFlight
+            : ElsaInstanceDeletionDiagnosticCodes.ProviderProgressStale;
 
     private static ElsaInstanceLifecycleWorkerResult? TryConflict(ElsaInstanceDeletionWorkItem item) =>
         item.Operation is null || item.Instance is null ? null : new(

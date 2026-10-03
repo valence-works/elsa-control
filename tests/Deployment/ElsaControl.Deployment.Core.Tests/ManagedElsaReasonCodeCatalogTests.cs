@@ -29,6 +29,7 @@ public sealed class ManagedElsaReasonCodeCatalogTests
         }
 
         Assert.Contains("deletion.", ManagedElsaReasonLiteralScanner.ReasonFamilyPrefixes, StringComparer.Ordinal);
+        Assert.Contains("lifecycle.deletion.", ManagedElsaReasonLiteralScanner.ReasonFamilyPrefixes, StringComparer.Ordinal);
         Assert.Contains("assignment.rebind.", ManagedElsaReasonLiteralScanner.ReasonFamilyPrefixes, StringComparer.Ordinal);
         Assert.Equal(ManagedElsaReasonCodeCatalog.DefinedCodes.Count, ManagedElsaReasonCodeCatalog.ByCode.Count);
     }
@@ -95,6 +96,8 @@ public sealed class ManagedElsaReasonCodeCatalogTests
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderUnavailable, ManagedElsaReasonClass.Temporary)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionAzureProviderUnavailable, ManagedElsaReasonClass.Temporary)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending, ManagedElsaReasonClass.Temporary)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderUncertain, ManagedElsaReasonClass.Temporary)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionRecoveryAuthorityUnavailable, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionRecoveryPlanUnavailable, ManagedElsaReasonClass.NeedsPerson)]

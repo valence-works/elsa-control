@@ -177,6 +177,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
 
                 providerOperation.Status = AzureProviderOperationStatus.Running;
                 providerOperation.StatusChangedAt = nowUtc;
+                providerOperation.ProgressChangedAt = nowUtc;
                 providerOperation.WorkerId = request.WorkerId;
                 providerOperation.LeaseTokenHash = Hash(request.LeaseToken);
                 providerOperation.CompletionLeaseTokenHash = null;
@@ -507,6 +508,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
                         supersededHeldOperationId = heldSafeExit.Id;
                         heldSafeExit.Status = AzureProviderOperationStatus.Cancelled;
                         heldSafeExit.StatusChangedAt = now;
+                        heldSafeExit.ProgressChangedAt = now;
                         heldSafeExit.CompletedAt = now;
                         heldSafeExit.UpdatedAt = now;
                         heldSafeExit.Version++;
@@ -578,6 +580,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
                     CreatedAt = now,
                     UpdatedAt = now,
                     StatusChangedAt = now,
+                    ProgressChangedAt = now,
                     ResourceGroupName = previousResources?.Resources.ResourceGroupName,
                     FoundationDeploymentId = previousResources?.Resources.FoundationDeploymentId,
                     WorkloadDeploymentId = previousResources?.Resources.WorkloadDeploymentId,
@@ -879,6 +882,9 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
                     .SetProperty(x => x.StatusChangedAt, x => x.Status == AzureProviderOperationStatus.RecoveryRequired
                         ? x.StatusChangedAt
                         : now)
+                    .SetProperty(x => x.ProgressChangedAt, x => x.Status == AzureProviderOperationStatus.RecoveryRequired
+                        ? x.ProgressChangedAt
+                        : now)
                     .SetProperty(x => x.CompletedAt, x => x.Status == AzureProviderOperationStatus.RecoveryRequired ? null : now)
                     .SetProperty(x => x.UpdatedAt, now)
                     .SetProperty(x => x.Version, x => x.Version + 1)
@@ -954,6 +960,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
                     "The managed-instance provider operation is missing its durable identity binding.";
                 entity.Status = AzureProviderOperationStatus.RecoveryRequired;
                 entity.StatusChangedAt = now;
+                entity.ProgressChangedAt = now;
                 entity.CompletedAt = null;
                 entity.UpdatedAt = now;
                 entity.Version++;
@@ -979,6 +986,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
 
             entity.Status = AzureProviderOperationStatus.EntitlementHeld;
             entity.StatusChangedAt = now;
+            entity.ProgressChangedAt = now;
             entity.CompletedAt = null;
             entity.UpdatedAt = now;
             entity.Version++;
@@ -1027,6 +1035,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(x => x.Status, AzureProviderOperationStatus.Running)
                     .SetProperty(x => x.StatusChangedAt, now)
+                    .SetProperty(x => x.ProgressChangedAt, now)
                     .SetProperty(x => x.WorkerId, workerId)
                     .SetProperty(x => x.LeaseTokenHash, hash)
                     .SetProperty(x => x.CompletionLeaseTokenHash, (string?)null)
@@ -1115,6 +1124,11 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             return ToModel(entity);
         if (entity.AttemptedStep != checkpoint.AttemptedStep)
             entity.AttemptedStepStartedAt = now;
+        // Verified progress is Status/Phase or persisted inventory only. Transition
+        // code, diagnostics, health, attempted step, and endpoint restamps still
+        // persist, but they do not satisfy the no-progress bound.
+        if (entity.Phase != checkpoint.Phase || !ResourcesEqual(entity, resources))
+            entity.ProgressChangedAt = now;
         entity.Phase = checkpoint.Phase; entity.AttemptedStep = checkpoint.AttemptedStep;
         entity.CheckpointSequence++; entity.Version++; entity.UpdatedAt = now;
         entity.ResourceGroupName = resources.ResourceGroupName; entity.FoundationDeploymentId = resources.FoundationDeploymentId;
@@ -1169,7 +1183,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             if (assignment.OrganizationId != entity.OrganizationId || assignment.InstanceId != entity.InstanceId)
                 throw new InvalidOperationException("The Azure provider assignment binding is invalid.");
         }
-        entity.Status = status; entity.StatusChangedAt = now; entity.UpdatedAt = now; entity.Version++;
+        entity.Status = status; entity.StatusChangedAt = now; entity.ProgressChangedAt = now; entity.UpdatedAt = now; entity.Version++;
         // Recovery-required operations stay reservable for operator reconciliation, so they are
         // never stamped as completed regardless of which transition produced the status.
         entity.CompletedAt = status is AzureProviderOperationStatus.RecoveryRequired or AzureProviderOperationStatus.EntitlementHeld ? null : now;
@@ -1211,6 +1225,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
                 var changed = await db.AzureProviderOperations.Where(x => x.Id == candidate.Id && x.Status == AzureProviderOperationStatus.Running && x.Version == candidate.Version && x.LeaseExpiresAt != null && x.LeaseExpiresAt <= now)
                     .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.Status, AzureProviderOperationStatus.RecoveryRequired)
                         .SetProperty(x => x.StatusChangedAt, now)
+                        .SetProperty(x => x.ProgressChangedAt, now)
                         .SetProperty(x => x.UpdatedAt, now).SetProperty(x => x.Version, x => x.Version + 1)
                         .SetProperty(x => x.LeaseTokenHash, (string?)null).SetProperty(x => x.LeaseExpiresAt, (DateTimeOffset?)null)
                         .SetProperty(x => x.WorkerId, (string?)null)
@@ -1735,6 +1750,7 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             x.ManagedHandoff,
             x.ManagedHandoffStudioGrants,
             StatusChangedAt: x.StatusChangedAt,
+            ProgressChangedAt: x.ProgressChangedAt,
             AttemptedStepStartedAt: x.AttemptedStepStartedAt,
             LastArmObservedAt: x.LastArmObservedAt,
             AutoResumeCount: x.AutoResumeCount,

@@ -1561,6 +1561,13 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             endpoint: null);
     }
 
+    /// <summary>
+    /// Live ARM inventory stays local to this call. Discrete deletes (ACR role,
+    /// ACR deployment, resource group, vault, soft-deleted Log Analytics) are
+    /// observed here and only the final Completed/CleanupVerified result is
+    /// returned to the executor. No shrinking ARM list is checkpointed during
+    /// the CleanupSubmitted wait; the lifecycle Delete bound covers that silence.
+    /// </summary>
     private async Task<AzureProviderRunnerResult> RunCleanupAsync(
         AzureProviderRunnerCommand command,
         CancellationToken cancellationToken)

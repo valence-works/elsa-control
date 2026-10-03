@@ -1099,6 +1099,8 @@ public sealed class AzureElsaInstanceProviderTests
             "deletion.provider-cleanup-pending", result.DiagnosticCode);
         Assert.Equal(lifecycleOperationId, result.OperationId);
         Assert.Equal(3, result.AttemptNumber);
+        if (expectedKind == ElsaInstanceCleanupObservationKind.InProgress)
+            Assert.Equal(AzureElsaInstanceProvider.LastProviderProgressAt(delete), result.LastProviderProgressAt);
         if (alreadyDeleted)
         {
             Assert.Empty(service.DeleteSubmissions);
@@ -1116,6 +1118,66 @@ public sealed class AzureElsaInstanceProviderTests
             Assert.Equal(plan.Fingerprint, submission.Plan.Fingerprint);
             Assert.Equal(AzureElsaInstanceProvider.IdempotencyKey(lifecycleOperationId), submission.IdempotencyKey);
         }
+    }
+
+    [Fact]
+    public void LastProviderProgressAt_is_status_or_phase_progress_never_heartbeat_or_arm_restamp()
+    {
+        var created = DateTimeOffset.Parse("2026-10-03T10:00:00Z");
+        var operation = CreateOperation(Guid.NewGuid(), Translate("5.0", "5.0.0"), Guid.NewGuid()) with
+        {
+            CreatedAt = created,
+            StatusChangedAt = created.AddMinutes(1),
+            ProgressChangedAt = created.AddMinutes(5),
+            HeartbeatAt = created.AddMinutes(40),
+            LastArmObservedAt = created.AddMinutes(40),
+            UpdatedAt = created.AddMinutes(40),
+            Resources = new(
+                ResourceGroupName: "rg-safe",
+                FoundationDeploymentId: "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-safe/providers/Microsoft.Resources/deployments/foundation",
+                AcrPullRoleAssignmentId: "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-reg/providers/Microsoft.ContainerRegistry/registries/reg/providers/Microsoft.Authorization/roleAssignments/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                RegistryResourceId: "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-reg/providers/Microsoft.ContainerRegistry/registries/reg")
+        };
+
+        Assert.Equal(created.AddMinutes(5), AzureElsaInstanceProvider.LastProviderProgressAt(operation));
+        Assert.NotEqual(operation.HeartbeatAt, AzureElsaInstanceProvider.LastProviderProgressAt(operation));
+        Assert.NotEqual(operation.LastArmObservedAt, AzureElsaInstanceProvider.LastProviderProgressAt(operation));
+        Assert.NotEqual(operation.CreatedAt, AzureElsaInstanceProvider.LastProviderProgressAt(operation));
+
+        var shrinking = operation with
+        {
+            Phase = AzureProviderOperationPhase.CleanupSubmitted,
+            Resources = new(WorkloadResourceId: null)
+        };
+        Assert.NotEqual(
+            AzureElsaInstanceProvider.CleanupProgressReceipt(operation),
+            AzureElsaInstanceProvider.CleanupProgressReceipt(shrinking));
+
+        var persistedRoleCleared = operation with
+        {
+            Resources = operation.Resources with { AcrPullRoleAssignmentId = null }
+        };
+        Assert.NotEqual(
+            AzureElsaInstanceProvider.CleanupProgressReceipt(operation),
+            AzureElsaInstanceProvider.CleanupProgressReceipt(persistedRoleCleared));
+
+        var metadataOnly = operation with
+        {
+            HeartbeatAt = created.AddMinutes(50),
+            LastArmObservedAt = created.AddMinutes(50),
+            UpdatedAt = created.AddMinutes(50)
+        };
+        Assert.Equal(
+            AzureElsaInstanceProvider.CleanupProgressReceipt(operation),
+            AzureElsaInstanceProvider.CleanupProgressReceipt(metadataOnly));
+
+        var endpointOnly = operation with
+        {
+            Endpoint = "https://runtime.example.test/"
+        };
+        Assert.Equal(
+            AzureElsaInstanceProvider.CleanupProgressReceipt(operation),
+            AzureElsaInstanceProvider.CleanupProgressReceipt(endpointOnly));
     }
 
     [Fact]

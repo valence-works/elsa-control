@@ -963,7 +963,9 @@ public sealed class AzureElsaInstanceProvider(
                 diagnosticCode,
                 finalizationInProgress || providerOperationInProgress
                     ? ElsaInstanceCleanupObservationKind.InProgress
-                    : ElsaInstanceCleanupObservationKind.Unknown);
+                    : ElsaInstanceCleanupObservationKind.Unknown,
+                LastProviderProgressAt(pending),
+                CleanupProgressReceipt(pending));
         }
     }
 
@@ -1164,8 +1166,40 @@ public sealed class AzureElsaInstanceProvider(
     private static ElsaInstanceCleanupObservation CleanupUnknown(
         ElsaInstanceCleanupRequest request,
         string code,
-        ElsaInstanceCleanupObservationKind kind = ElsaInstanceCleanupObservationKind.Unknown) =>
-        new(kind, request.OperationId, request.AttemptNumber, code);
+        ElsaInstanceCleanupObservationKind kind = ElsaInstanceCleanupObservationKind.Unknown,
+        DateTimeOffset? lastProviderProgressAt = null,
+        string? progressReceipt = null) =>
+        new(kind, request.OperationId, request.AttemptNumber, code,
+            LastProviderProgressAt: lastProviderProgressAt,
+            ProgressReceipt: progressReceipt);
+
+    /// <summary>
+    /// Verified provider progress only: Status or Phase change. Never CreatedAt,
+    /// HeartbeatAt, or a restamped ARM read.
+    /// </summary>
+    internal static DateTimeOffset? LastProviderProgressAt(AzureProviderOperation operation)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        return operation.ProgressChangedAt ?? operation.StatusChangedAt;
+    }
+
+    /// <summary>
+    /// Durable fingerprint of Status, Phase, attempt, and persisted resource
+    /// locators. Endpoint is correlation metadata, not verified progress — an
+    /// endpoint-only restamp must not change this receipt. This is not a live
+    /// ARM remaining-resource inventory: <c>RunCleanupAsync</c> keeps live Azure
+    /// inventory local until the final CleanupVerified write. The 60-minute
+    /// Delete bound covers the CleanupSubmitted wait, during which no
+    /// mid-cleanup ARM list is persisted.
+    /// </summary>
+    internal static string CleanupProgressReceipt(AzureProviderOperation operation)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        var resources = operation.Resources;
+        var canonical =
+            $"{operation.Status}\n{operation.Phase}\n{operation.AttemptNumber}\n{resources.ResourceGroupName}\n{resources.FoundationDeploymentId}\n{resources.WorkloadDeploymentId}\n{resources.WorkloadResourceId}\n{resources.WorkloadRevisionName}\n{resources.StableTrafficRevisionName}\n{resources.WorkloadIdentityResourceId}\n{resources.WorkloadIdentityClientId}\n{resources.WorkloadIdentityPrincipalId}\n{resources.KeyVaultResourceId}\n{resources.KeyVaultUri}\n{resources.SqlServerResourceId}\n{resources.SqlServerFqdn}\n{resources.ContainerAppsEnvironmentResourceId}\n{resources.RegistryResourceId}\n{resources.AcrPullDeploymentId}\n{resources.AcrPullRoleAssignmentId}\n";
+        return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(canonical)));
+    }
 
     /// <summary>
     /// A succeeded operation whose plan configured the handoff has deployed and promoted a revision carrying it:

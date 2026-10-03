@@ -78,6 +78,215 @@ public sealed class ElsaInstanceDeletionWorkerTests
     }
 
     [Fact]
+    public async Task Stale_provider_progress_requires_recovery_instead_of_deferral()
+    {
+        var item = WorkItem(local: false);
+        var store = new RecordingStore(item);
+        var port = new RecordingPort(new(
+            ElsaInstanceCleanupObservationKind.InProgress, item.Operation.Id,
+            item.Operation.AttemptNumber, "deletion.provider-cleanup-pending",
+            LastProviderProgressAt: Now - ElsaInstanceDeletionWorker.ProviderProgressStaleAfter - TimeSpan.FromSeconds(1)));
+
+        var result = await new ElsaInstanceDeletionWorker(store, port, new FixedTimeProvider(Now))
+            .ProcessAvailableAsync("delete-worker");
+
+        Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Failed, Assert.Single(result.Results).Outcome);
+        Assert.Equal(0, store.Deferrals);
+        Assert.Null(store.Commit);
+        Assert.Equal("lifecycle.deletion.provider-progress-stale", store.Failure!.DiagnosticCode);
+    }
+
+    [Fact]
+    public async Task Heartbeating_executor_with_unchanged_receipt_parks_as_stale()
+    {
+        var item = WorkItem(local: false) with
+        {
+            RunningSince = Now - ElsaInstanceDeletionWorker.ProviderProgressStaleAfter - TimeSpan.FromSeconds(1),
+            LastVerifiedProgressAt = Now - ElsaInstanceDeletionWorker.ProviderProgressStaleAfter - TimeSpan.FromSeconds(1),
+            LastVerifiedProgressReceipt = Receipt('1')
+        };
+        var store = new RecordingStore(item);
+        var port = new RecordingPort(new(
+            ElsaInstanceCleanupObservationKind.InProgress, item.Operation.Id,
+            item.Operation.AttemptNumber, "deletion.provider-cleanup-pending",
+            ProgressReceipt: Receipt('1')));
+
+        var result = await new ElsaInstanceDeletionWorker(store, port, new FixedTimeProvider(Now))
+            .ProcessAvailableAsync("delete-worker");
+
+        Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Failed, Assert.Single(result.Results).Outcome);
+        Assert.Equal(0, store.Deferrals);
+        Assert.Equal("lifecycle.deletion.provider-progress-stale", store.Failure!.DiagnosticCode);
+    }
+
+    [Fact]
+    public async Task Slow_cleanup_with_advancing_receipt_is_not_parked()
+    {
+        var receipt = Receipt('1');
+        var item = WorkItem(local: false) with
+        {
+            RunningSince = Now - TimeSpan.FromMinutes(70),
+            LastVerifiedProgressAt = Now - TimeSpan.FromMinutes(70),
+            LastVerifiedProgressReceipt = receipt
+        };
+        var store = new DeferredStore(item, Now);
+        var port = new RecordingPort(new(
+            ElsaInstanceCleanupObservationKind.InProgress, item.Operation.Id,
+            item.Operation.AttemptNumber, "deletion.provider-cleanup-pending",
+            LastProviderProgressAt: Now,
+            ProgressReceipt: Receipt('2')));
+
+        var result = await new ElsaInstanceDeletionWorker(store, port, new FixedTimeProvider(Now))
+            .ProcessAvailableAsync("delete-worker");
+
+        Assert.Empty(result.Results);
+        Assert.Equal(1, store.Deferrals);
+        Assert.Null(store.Failure);
+    }
+
+    [Fact]
+    public async Task Operations_in_flight_without_timestamp_parks_as_blocked_at_the_bound()
+    {
+        var item = WorkItem(local: false) with
+        {
+            RunningSince = Now - ElsaInstanceDeletionWorker.ProviderProgressStaleAfter - TimeSpan.FromSeconds(1)
+        };
+        var store = new RecordingStore(item);
+        var port = new RecordingPort(new(
+            ElsaInstanceCleanupObservationKind.InProgress, item.Operation.Id,
+            item.Operation.AttemptNumber, "assignment.rebind.operations-inflight"));
+
+        var result = await new ElsaInstanceDeletionWorker(store, port, new FixedTimeProvider(Now))
+            .ProcessAvailableAsync("delete-worker");
+
+        Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Failed, Assert.Single(result.Results).Outcome);
+        Assert.Equal(0, store.Deferrals);
+        Assert.Equal("lifecycle.deletion.blocked-by-operation-in-flight", store.Failure!.DiagnosticCode);
+    }
+
+    [Fact]
+    public async Task Phase_only_receipt_change_advances_the_progress_clock()
+    {
+        var item = WorkItem(local: false) with
+        {
+            RunningSince = Now - TimeSpan.FromMinutes(70),
+            LastVerifiedProgressAt = Now - TimeSpan.FromMinutes(70),
+            LastVerifiedProgressReceipt = Receipt('a')
+        };
+        var advanced = ElsaInstanceDeletionWorker.ApplyVerifiedProgress(
+            item,
+            new(ElsaInstanceCleanupObservationKind.InProgress, item.Operation.Id,
+                item.Operation.AttemptNumber, "deletion.provider-cleanup-pending",
+                ProgressReceipt: Receipt('b')),
+            Now);
+
+        Assert.Equal(Receipt('b'), advanced.LastVerifiedProgressReceipt);
+        Assert.Equal(Now, advanced.LastVerifiedProgressAt);
+        Assert.False(ElsaInstanceDeletionWorker.HasStaleProviderProgress(advanced, Now));
+    }
+
+    [Fact]
+    public void Changed_receipt_with_older_status_time_does_not_move_the_clock_backwards()
+    {
+        var previous = Now - TimeSpan.FromMinutes(10);
+        var item = WorkItem(local: false) with
+        {
+            RunningSince = Now - TimeSpan.FromMinutes(20),
+            LastVerifiedProgressAt = previous,
+            LastVerifiedProgressReceipt = Receipt('1')
+        };
+
+        var advanced = ElsaInstanceDeletionWorker.ApplyVerifiedProgress(
+            item,
+            new(ElsaInstanceCleanupObservationKind.InProgress, item.Operation.Id,
+                item.Operation.AttemptNumber, "deletion.provider-cleanup-pending",
+                LastProviderProgressAt: Now - TimeSpan.FromMinutes(90),
+                ProgressReceipt: Receipt('2')),
+            Now);
+
+        Assert.Equal(Receipt('2'), advanced.LastVerifiedProgressReceipt);
+        Assert.Equal(Now, advanced.LastVerifiedProgressAt);
+        Assert.True(advanced.LastVerifiedProgressAt > previous);
+        Assert.False(ElsaInstanceDeletionWorker.HasStaleProviderProgress(advanced, Now));
+    }
+
+    [Fact]
+    public void Changed_receipt_does_not_adopt_a_future_provider_timestamp()
+    {
+        var item = WorkItem(local: false) with
+        {
+            RunningSince = Now - TimeSpan.FromMinutes(20),
+            LastVerifiedProgressAt = Now - TimeSpan.FromMinutes(10),
+            LastVerifiedProgressReceipt = Receipt('1')
+        };
+
+        var advanced = ElsaInstanceDeletionWorker.ApplyVerifiedProgress(
+            item,
+            new(ElsaInstanceCleanupObservationKind.InProgress, item.Operation.Id,
+                item.Operation.AttemptNumber, "deletion.provider-cleanup-pending",
+                LastProviderProgressAt: Now.AddDays(1),
+                ProgressReceipt: Receipt('2')),
+            Now);
+
+        Assert.Equal(Receipt('2'), advanced.LastVerifiedProgressReceipt);
+        Assert.Equal(Now, advanced.LastVerifiedProgressAt);
+        Assert.False(ElsaInstanceDeletionWorker.HasStaleProviderProgress(advanced, Now));
+    }
+
+    [Fact]
+    public async Task Changed_receipt_with_unchanged_old_status_time_counts_as_progress()
+    {
+        var oldStatus = Now - TimeSpan.FromMinutes(70);
+        var item = WorkItem(local: false) with
+        {
+            RunningSince = oldStatus,
+            LastVerifiedProgressAt = oldStatus,
+            LastVerifiedProgressReceipt = Receipt('1')
+        };
+        var store = new DeferredStore(item, Now);
+        var port = new RecordingPort(new(
+            ElsaInstanceCleanupObservationKind.InProgress, item.Operation.Id,
+            item.Operation.AttemptNumber, "deletion.provider-cleanup-pending",
+            LastProviderProgressAt: oldStatus,
+            ProgressReceipt: Receipt('2')));
+
+        var result = await new ElsaInstanceDeletionWorker(store, port, new FixedTimeProvider(Now))
+            .ProcessAvailableAsync("delete-worker");
+
+        Assert.Empty(result.Results);
+        Assert.Equal(1, store.Deferrals);
+        Assert.Null(store.Failure);
+        Assert.False(ElsaInstanceDeletionWorker.HasStaleProviderProgress(
+            ElsaInstanceDeletionWorker.ApplyVerifiedProgress(
+                item,
+                new(ElsaInstanceCleanupObservationKind.InProgress, item.Operation.Id,
+                    item.Operation.AttemptNumber, "deletion.provider-cleanup-pending",
+                    LastProviderProgressAt: oldStatus,
+                    ProgressReceipt: Receipt('2')),
+                Now),
+            Now));
+    }
+
+    [Fact]
+    public async Task Recent_provider_progress_is_deferred_and_not_escalated()
+    {
+        var item = WorkItem(local: false);
+        var store = new DeferredStore(item, Now);
+        var port = new RecordingPort(new(
+            ElsaInstanceCleanupObservationKind.InProgress, item.Operation.Id,
+            item.Operation.AttemptNumber, "deletion.provider-cleanup-pending",
+            LastProviderProgressAt: Now - TimeSpan.FromMinutes(10)));
+
+        var result = await new ElsaInstanceDeletionWorker(store, port, new FixedTimeProvider(Now))
+            .ProcessAvailableAsync("delete-worker");
+
+        Assert.Empty(result.Results);
+        Assert.Equal(1, store.Deferrals);
+        Assert.Null(store.Failure);
+        Assert.Equal("deletion.provider-cleanup-pending", store.DeferredDiagnosticCode);
+    }
+
+    [Fact]
     public async Task In_progress_cleanup_is_deferred_then_same_delete_completes_on_next_poll()
     {
         var item = WorkItem(local: false);
@@ -310,6 +519,8 @@ public sealed class ElsaInstanceDeletionWorkerTests
         new ElsaPlacementIntent("managed", "westeurope", "dedicated", "small", "public", "managed"));
 
     private static string Digest(char value) => "sha256:" + new string(value, 64);
+
+    private static string Receipt(char value) => new string(value, 64);
 
     private sealed class RecordingPort(
         ElsaInstanceCleanupObservation first,

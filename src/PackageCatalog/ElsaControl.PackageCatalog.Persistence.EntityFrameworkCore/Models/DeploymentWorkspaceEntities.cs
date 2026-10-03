@@ -310,6 +310,12 @@ internal sealed class ElsaInstanceOperationEntity
     public string? DeletionEvidenceReference { get; set; }
     public string? DeletionEvidenceDigest { get; set; }
     public string? DeletionDiagnosticCode { get; set; }
+    /// <summary>
+    /// Later of Running-since and the last verified Status/Phase/receipt change.
+    /// Never a worker or executor heartbeat.
+    /// </summary>
+    public DateTimeOffset? LastVerifiedProgressAt { get; set; }
+    public string? LastVerifiedProgressReceipt { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     /// <summary>

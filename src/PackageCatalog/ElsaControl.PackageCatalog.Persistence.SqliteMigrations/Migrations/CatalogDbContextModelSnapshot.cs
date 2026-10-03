@@ -1577,6 +1577,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<long>("StatusChangedAt")
                         .HasColumnType("INTEGER");
 
+                    b.Property<long>("ProgressChangedAt")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("TargetKey")
                         .IsRequired()
                         .HasMaxLength(128)
@@ -3641,6 +3644,13 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<Guid?>("InstanceId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("LastVerifiedProgressAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("LastVerifiedProgressReceipt")
+                        .HasMaxLength(64)
                         .HasColumnType("TEXT");
 
                     b.Property<long?>("LeaseExpiresAt")

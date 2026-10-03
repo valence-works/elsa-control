@@ -59,6 +59,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
     private readonly Dictionary<Guid, StoredReconciliationResult> _reconciliationResults = [];
     private readonly Dictionary<Guid, StoredDeletionResult> _deletionResults = [];
     private readonly Dictionary<Guid, ElsaInstanceRecoveryRequestEnvelope> _recoveryRequests = [];
+    private readonly Dictionary<Guid, DeletionProgressClock> _deletionClocks = [];
 
     public IReadOnlyCollection<ElsaInstance> Instances
     {
@@ -1131,12 +1132,18 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                     continue;
                 var claim = new LifecycleClaim(workerId.Trim(), CreateLeaseToken(),
                     existingClaim is null ? 1 : checked(existingClaim.Version + 1), nowUtc.Add(WorkerLeaseDuration));
-                if (operation.State == ElsaInstanceOperationState.Queued)
+                if (operation.State is ElsaInstanceOperationState.Accepted or ElsaInstanceOperationState.Queued)
                 {
                     operation = operation.TransitionTo(ElsaInstanceOperationState.Running);
                     _operations[operation.Id] = operation;
                 }
                 _claims[operation.Id] = claim;
+                if (!_deletionClocks.TryGetValue(operation.Id, out var clock) || clock.RunningSince is null)
+                    _deletionClocks[operation.Id] = (clock ?? new DeletionProgressClock(null, null, null)) with
+                    {
+                        RunningSince = nowUtc
+                    };
+                clock = _deletionClocks[operation.Id];
                 var correlatedRun = _deploymentRuns.Values
                     .Where(x => x.InstanceId == instance.Id)
                     .OrderByDescending(x => x.Run.CreatedAt)
@@ -1146,7 +1153,12 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                     instance.CurrentDeploymentReference is null && instance.PlacementAssignmentReference is null &&
                     instance.ElsaTenantReference is null;
                 return Task.FromResult<ElsaInstanceDeletionWorkItem?>(new(
-                    outbox, operation, instance, local, correlatedRun, claim.Token, claim.Version));
+                    outbox, operation, instance, local, correlatedRun, claim.Token, claim.Version)
+                {
+                    RunningSince = clock.RunningSince,
+                    LastVerifiedProgressAt = clock.LastVerifiedProgressAt,
+                    LastVerifiedProgressReceipt = clock.LastVerifiedProgressReceipt
+                });
             }
             return Task.FromResult<ElsaInstanceDeletionWorkItem?>(null);
         }
@@ -1204,9 +1216,22 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 claim.Version != item.LeaseVersion || claim.ExpiresAt <= now.ToUniversalTime())
                 return Task.FromResult(false);
 
+            if (operation.State == ElsaInstanceOperationState.Accepted)
+            {
+                operation = operation.TransitionTo(ElsaInstanceOperationState.Running);
+                _operations[operation.Id] = operation;
+            }
             _claims[item.Operation.Id] = claim with
             {
                 ExpiresAt = now.ToUniversalTime().Add(DeletionDeferralDelay)
+            };
+            if (!_deletionClocks.TryGetValue(item.Operation.Id, out var clock))
+                clock = new DeletionProgressClock(now.ToUniversalTime(), null, null);
+            _deletionClocks[item.Operation.Id] = clock with
+            {
+                RunningSince = clock.RunningSince ?? now.ToUniversalTime(),
+                LastVerifiedProgressAt = item.LastVerifiedProgressAt ?? clock.LastVerifiedProgressAt,
+                LastVerifiedProgressReceipt = item.LastVerifiedProgressReceipt ?? clock.LastVerifiedProgressReceipt
             };
             return Task.FromResult(true);
         }
@@ -1583,6 +1608,11 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         Convert.ToHexStringLower(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
 
     private sealed record LifecycleClaim(string WorkerId, string Token, int Version, DateTimeOffset ExpiresAt);
+
+    private sealed record DeletionProgressClock(
+        DateTimeOffset? RunningSince,
+        DateTimeOffset? LastVerifiedProgressAt,
+        string? LastVerifiedProgressReceipt);
 
     private sealed record StoredReconciliationResult(
         string EvidenceFingerprint,

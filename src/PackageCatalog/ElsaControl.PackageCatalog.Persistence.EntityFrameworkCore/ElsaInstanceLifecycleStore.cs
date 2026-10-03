@@ -1616,7 +1616,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 operation.HeartbeatAt = nowUtc;
                 operation.StartedAt ??= nowUtc;
                 operation.UpdatedAt = nowUtc;
-                if (operation.State == ElsaInstanceOperationState.Queued)
+                if (operation.State is ElsaInstanceOperationState.Accepted or ElsaInstanceOperationState.Queued)
                     operation.State = ElsaInstanceOperationState.Running;
 
                 var latestRunId = await dbContext.DeploymentRuns
@@ -1653,7 +1653,10 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 return new ElsaInstanceDeletionWorkItem(MapOutbox(candidate), MapOperation(operation), mappedInstance,
                     local, latestRunId, leaseToken, leaseVersion)
                 {
-                    RecoveryRequestId = recoveryRequestId
+                    RecoveryRequestId = recoveryRequestId,
+                    RunningSince = operation.StartedAt,
+                    LastVerifiedProgressAt = operation.LastVerifiedProgressAt,
+                    LastVerifiedProgressReceipt = operation.LastVerifiedProgressReceipt
                 };
             },
                 async (_, verificationCancellationToken) =>
@@ -1745,9 +1748,12 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     outbox.Action == ElsaInstanceOperationAction.Delete &&
                     outbox.RequestHash == operation.RequestHash))
             .ExecuteUpdateAsync(updates => updates
+                .SetProperty(operation => operation.State, ElsaInstanceOperationState.Running)
                 .SetProperty(operation => operation.LeaseExpiresAt, nowUtc.Add(DeletionDeferralDelay))
                 .SetProperty(operation => operation.HeartbeatAt, nowUtc)
                 .SetProperty(operation => operation.DeletionDiagnosticCode, diagnosticCode)
+                .SetProperty(operation => operation.LastVerifiedProgressAt, item.LastVerifiedProgressAt)
+                .SetProperty(operation => operation.LastVerifiedProgressReceipt, item.LastVerifiedProgressReceipt)
                 .SetProperty(operation => operation.UpdatedAt, nowUtc), cancellationToken);
         return deferred == 1;
     }

@@ -50,6 +50,7 @@ public sealed class AzureProviderOperationMigrationTests
         Assert.Contains("SqlWorkflowPackageVersion", columns);
         Assert.Contains("SqlQuartzPackageVersion", columns);
         Assert.Contains("StatusChangedAt", columns);
+        Assert.Contains("ProgressChangedAt", columns);
         Assert.Contains("ManagedHandoffStudioGrants", columns);
         Assert.Contains("AttemptedStepStartedAt", columns);
         Assert.Contains("LastArmObservedAt", columns);
