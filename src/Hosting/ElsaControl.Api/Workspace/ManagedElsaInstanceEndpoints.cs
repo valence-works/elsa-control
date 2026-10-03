@@ -940,14 +940,16 @@ public static class ManagedElsaInstanceEndpoints
     internal static ManagedElsaInstanceOperationResponse ToOperationResponse(Guid workspaceId, Guid instanceId, ElsaInstanceOperationSummary operation) =>
         new(operation.Id, instanceId, operation.Action, operation.State, operation.ExpectedVersion, operation.AttemptNumber,
             operation.AcceptedAt, operation.StartedAt, operation.CompletedAt, operation.DesiredStateRevisionId,
-            operation.ResolvedPlanId, operation.DeploymentRunId, operation.FailureCode, operation.ReconciledObservedLifecycle,
+            operation.ResolvedPlanId, operation.DeploymentRunId,
+            ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation.FailureCode),
+            operation.ReconciledObservedLifecycle,
             operation.ReconciledHealth, new Dictionary<string, string>
             {
                 ["self"] = $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations/{operation.Id:D}",
                 ["instance"] = $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}"
             })
         {
-            ReasonCode = operation.ReasonCode
+            ReasonCode = ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation)
         };
 
     internal static ManagedElsaInstanceDeleteOperationResponse ToDeleteOperationResponse(ElsaInstanceOperationSummary operation) =>
@@ -1110,6 +1112,7 @@ public sealed record ManagedElsaInstanceDeleteOperationResponse(Guid OperationId
 }
 public sealed record ManagedElsaInstanceOperationResponse(Guid Id, Guid InstanceId, ElsaInstanceOperationAction Action, ElsaInstanceOperationState State, int ExpectedVersion, int AttemptNumber, DateTimeOffset AcceptedAt, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, string? DesiredStateRevisionId, string? ResolvedPlanId, Guid? DeploymentRunId, string? FailureCode, ElsaObservedLifecycle? ReconciledObservedLifecycle, ElsaInstanceHealth? ReconciledHealth, IReadOnlyDictionary<string, string> Links)
 {
+    /// <summary>Allowlisted cleanup, progress, or recovery code. Never a provider diagnostic.</summary>
     public string? ReasonCode { get; init; }
 }
 public sealed record ManagedElsaInstanceIdentityBindingResponse(string Audience, string CanonicalCallbackUri, string VerifiedEndpointOrigin, int BindingVersion, DateTimeOffset ChangedAt);

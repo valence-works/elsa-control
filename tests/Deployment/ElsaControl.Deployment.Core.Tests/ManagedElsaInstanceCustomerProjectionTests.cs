@@ -647,6 +647,8 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
     [InlineData("Worker heartbeat became stale.")]
     [InlineData("azure.deployment.failed")]
     [InlineData("deletion.provider-correlation-invalid")]
+    [InlineData("provider.reconciliation.unsupported-synthetic")]
+    [InlineData("azure.recovery.step-unsupported")]
     public void Customer_safe_operation_reason_drops_provider_inventory_and_diagnostics(string raw)
     {
         Assert.Null(ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(raw));
@@ -654,6 +656,52 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
             ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending,
             ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(
                 ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending));
+    }
+
+    [Theory]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending)]
+    public void Customer_safe_operation_reason_keeps_allowlisted_failure_and_reason_codes(string reasonCode)
+    {
+        var now = Now;
+        var operation = new ElsaInstanceOperationSummary(
+            Guid.Parse("40000000-0000-0000-0000-000000000001"),
+            Guid.Parse("30000000-0000-0000-0000-000000000001"),
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            1, 1, now, now, null, null, null, null,
+            reasonCode,
+            ElsaObservedLifecycle.Unknown,
+            ElsaInstanceHealth.Unknown,
+            ReasonCode: reasonCode,
+            UpdatedAt: now, ReasonEnteredAt: now, RequiresHumanAt: now);
+
+        Assert.Equal(reasonCode, ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation));
+        Assert.Equal(reasonCode, ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation.FailureCode));
+        Assert.Equal(reasonCode, ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation.ReasonCode));
+    }
+
+    [Fact]
+    public void Customer_safe_operation_reason_drops_unsupported_failure_without_stripping_allowlisted_reason()
+    {
+        var now = Now;
+        var operation = new ElsaInstanceOperationSummary(
+            Guid.Parse("40000000-0000-0000-0000-000000000001"),
+            Guid.Parse("30000000-0000-0000-0000-000000000001"),
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            1, 1, now, now, null, null, null, null,
+            "provider.reconciliation.unsupported-synthetic",
+            ElsaObservedLifecycle.Unknown,
+            ElsaInstanceHealth.Unknown,
+            ReasonCode: ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending,
+            UpdatedAt: now, ReasonEnteredAt: now, RequiresHumanAt: now);
+
+        Assert.Null(ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation.FailureCode));
+        Assert.Equal(
+            ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending,
+            ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation));
     }
 
     [Fact]

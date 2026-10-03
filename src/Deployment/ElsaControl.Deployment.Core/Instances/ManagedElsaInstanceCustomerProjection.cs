@@ -229,9 +229,9 @@ public static class ManagedElsaInstanceCustomerProjection
         };
 
     /// <summary>
-    /// Allowlisted cleanup, progress, and recovery codes for customer Delete
-    /// and list contracts. Unknown provider diagnostics, Azure inventory, and
-    /// resource identifiers are discarded.
+    /// Allowlisted cleanup, progress, and recovery codes for customer Delete,
+    /// generic operation, and list contracts. Unknown provider diagnostics,
+    /// Azure inventory, and resource identifiers are discarded.
     /// </summary>
     public static string? CustomerSafeOperationReason(string? reasonCode) =>
         !string.IsNullOrWhiteSpace(reasonCode) && CustomerSafeOperationReasonCodes.Contains(reasonCode)

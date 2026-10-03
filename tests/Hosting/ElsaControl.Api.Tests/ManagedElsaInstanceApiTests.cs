@@ -3426,6 +3426,144 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Generic_operation_dto_redacts_unsupported_provider_diagnostics()
+    {
+        const string unsupportedReason = "provider.reconciliation.unsupported-synthetic";
+        const string unsupportedFailure = "provider.private-secret-value";
+        var app = await PrepareApplicationAsync([]);
+        var owner = app.CreateTrustedWorkspaceClient("generic-operation-redact-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(owner, workspaceId, "generic-operation-redact");
+        Assert.Null(created.Operation.ReasonCode);
+        Assert.Null(created.Operation.FailureCode);
+        Assert.DoesNotContain(unsupportedReason, created.Operation.Links["self"], StringComparison.Ordinal);
+        await PersistParkedOperationDiagnosticsAsync(
+            app, created.Instance.InstanceId, created.Operation.Id, unsupportedReason, unsupportedFailure);
+
+        var detailPath = $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations/{created.Operation.Id:D}";
+        using var detail = await owner.GetAsync(detailPath);
+        Assert.Equal(HttpStatusCode.OK, detail.StatusCode);
+        Assert.Equal(created.Instance.ETag, detail.Headers.ETag?.Tag);
+        var detailJson = await detail.Content.ReadAsStringAsync();
+        var detailBody = System.Text.Json.JsonSerializer.Deserialize<ManagedElsaInstanceOperationResponse>(
+            detailJson, ControlApiTestApplication.JsonOptions);
+        Assert.Null(detailBody!.ReasonCode);
+        Assert.Null(detailBody.FailureCode);
+        Assert.DoesNotContain(unsupportedReason, detailJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(unsupportedFailure, detailJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("/subscriptions/", detailJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("resourceGroups", detailJson, StringComparison.OrdinalIgnoreCase);
+
+        using var list = await owner.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations");
+        Assert.Equal(HttpStatusCode.OK, list.StatusCode);
+        var listJson = await list.Content.ReadAsStringAsync();
+        var listed = Assert.Single((await list.Content.ReadControlJsonAsync<ManagedElsaInstanceOperationListResponse>())!.Items);
+        Assert.Equal(created.Operation.Id, listed.Id);
+        Assert.Null(listed.ReasonCode);
+        Assert.Null(listed.FailureCode);
+        Assert.DoesNotContain(unsupportedReason, listJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(unsupportedFailure, listJson, StringComparison.Ordinal);
+
+        await app.AddWorkspaceMemberAsync(workspaceId, "generic-operation-redact-reader", WorkspaceRole.Reader);
+        using var readerDetail = await app.CreateTrustedWorkspaceClient("generic-operation-redact-reader")
+            .GetAsync(detailPath);
+        Assert.Equal(HttpStatusCode.OK, readerDetail.StatusCode);
+        var readerBody = await readerDetail.Content.ReadControlJsonAsync<ManagedElsaInstanceOperationResponse>();
+        Assert.Null(readerBody!.ReasonCode);
+        Assert.Null(readerBody.FailureCode);
+
+        var outsider = app.CreateTrustedWorkspaceClient("generic-operation-redact-outsider");
+        var otherWorkspaceId = await outsider.GetDefaultWorkspaceIdAsync();
+        using var crossWorkspace = await outsider.GetAsync(
+            $"/api/workspaces/{otherWorkspaceId:D}/instances/{created.Instance.InstanceId:D}/operations/{created.Operation.Id:D}");
+        using var nonMember = await app.CreateControlIdentityClient(subject: "generic-operation-redact-nonmember")
+            .GetAsync(detailPath);
+        Assert.Equal(HttpStatusCode.NotFound, crossWorkspace.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, nonMember.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending)]
+    public async Task Generic_operation_dto_keeps_allowlisted_reason_and_failure_codes(string reasonCode)
+    {
+        var slug = $"generic-operation-allow-{reasonCode.Split('.')[^1]}";
+        var app = await PrepareApplicationAsync([]);
+        var owner = app.CreateTrustedWorkspaceClient($"{slug}-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(owner, workspaceId, slug);
+        Assert.Null(created.Operation.ReasonCode);
+        Assert.Null(created.Operation.FailureCode);
+        await PersistParkedOperationDiagnosticsAsync(
+            app, created.Instance.InstanceId, created.Operation.Id, reasonCode, reasonCode);
+
+        var detailPath = $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations/{created.Operation.Id:D}";
+        using var detail = await owner.GetAsync(detailPath);
+        Assert.Equal(HttpStatusCode.OK, detail.StatusCode);
+        var detailBody = await detail.Content.ReadControlJsonAsync<ManagedElsaInstanceOperationResponse>();
+        Assert.Equal(reasonCode, detailBody!.ReasonCode);
+        Assert.Equal(reasonCode, detailBody.FailureCode);
+
+        using var list = await owner.GetAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/operations");
+        var listed = Assert.Single((await list.Content.ReadControlJsonAsync<ManagedElsaInstanceOperationListResponse>())!.Items);
+        Assert.Equal(reasonCode, listed.ReasonCode);
+        Assert.Equal(reasonCode, listed.FailureCode);
+
+        await app.AddWorkspaceMemberAsync(workspaceId, $"{slug}-reader", WorkspaceRole.Reader);
+        using var readerDetail = await app.CreateTrustedWorkspaceClient($"{slug}-reader").GetAsync(detailPath);
+        var readerBody = await readerDetail.Content.ReadControlJsonAsync<ManagedElsaInstanceOperationResponse>();
+        Assert.Equal(HttpStatusCode.OK, readerDetail.StatusCode);
+        Assert.Equal(reasonCode, readerBody!.ReasonCode);
+        Assert.Equal(reasonCode, readerBody.FailureCode);
+
+        var outsider = app.CreateTrustedWorkspaceClient($"{slug}-outsider");
+        var otherWorkspaceId = await outsider.GetDefaultWorkspaceIdAsync();
+        using var crossWorkspace = await outsider.GetAsync(
+            $"/api/workspaces/{otherWorkspaceId:D}/instances/{created.Instance.InstanceId:D}/operations/{created.Operation.Id:D}");
+        using var nonMember = await app.CreateControlIdentityClient(subject: $"{slug}-nonmember")
+            .GetAsync(detailPath);
+        Assert.Equal(HttpStatusCode.NotFound, crossWorkspace.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, nonMember.StatusCode);
+    }
+
+    [Fact]
+    public void Generic_operation_mapper_allowlists_reason_and_failure_codes()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var workspaceId = Guid.Parse("20000000-0000-0000-0000-000000000001");
+        var instanceId = Guid.Parse("30000000-0000-0000-0000-000000000001");
+        var unsupported = new ElsaInstanceOperationSummary(
+            Guid.Parse("40000000-0000-0000-0000-000000000001"),
+            instanceId,
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            1, 1, now, now, null, null, null, null,
+            "provider.reconciliation.unsupported-synthetic",
+            ElsaObservedLifecycle.Unknown,
+            ElsaInstanceHealth.Unknown,
+            ReasonCode: "azure.recovery.step-unsupported",
+            UpdatedAt: now, ReasonEnteredAt: now, RequiresHumanAt: now);
+        var allowlisted = unsupported with
+        {
+            FailureCode = ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending,
+            ReasonCode = ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight
+        };
+
+        var leaked = ManagedElsaInstanceEndpoints.ToOperationResponse(workspaceId, instanceId, unsupported);
+        Assert.Null(leaked.ReasonCode);
+        Assert.Null(leaked.FailureCode);
+
+        var kept = ManagedElsaInstanceEndpoints.ToOperationResponse(workspaceId, instanceId, allowlisted);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight, kept.ReasonCode);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending, kept.FailureCode);
+    }
+
+    [Fact]
     public void Canonical_projection_hides_binding_unless_instance_is_running_ready_and_healthy()
     {
         var instanceId = Guid.NewGuid();
@@ -4224,6 +4362,37 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         return document.RootElement.TryGetProperty("title", out var title)
             ? title.GetString() ?? string.Empty
             : string.Empty;
+    }
+
+    private static async Task PersistParkedOperationDiagnosticsAsync(
+        ControlApiTestApplication app,
+        Guid instanceId,
+        Guid operationId,
+        string reasonCode,
+        string failureCode)
+    {
+        var ticks = DateTimeOffset.UtcNow.UtcTicks;
+        const string azureInventory =
+            "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-customer/providers/Microsoft.App/containerApps/app";
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstances
+            SET ObservedLifecycle = {ElsaObservedLifecycle.Unknown.ToString()}
+            WHERE Id = {instanceId}
+            """);
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstanceOperations
+            SET State = {ElsaInstanceOperationState.RecoveryRequired.ToString()},
+                CompletedAt = NULL,
+                FailureCode = {failureCode},
+                ReconciliationDiagnosticCode = {reasonCode},
+                DeletionDiagnosticCode = {reasonCode},
+                DeletionEvidenceReference = {azureInventory},
+                ReasonEnteredAt = {ticks},
+                RequiresHumanAt = {ticks}
+            WHERE Id = {operationId}
+            """);
     }
 
     private static async Task ParkHumanRequiredCreateAsync(
