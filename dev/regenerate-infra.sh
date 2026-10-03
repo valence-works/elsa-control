@@ -64,6 +64,11 @@ echo "Re-applying the optional API provisioner identity parameter..."
 python3 dev/patch-api-provisioner-identity.py
 
 echo "Re-applying Control Catalog SQL SKU parameters..."
+# Recreates infra/main.parameters.staging.json and
+# infra/main.parameters.production.json. Those files are not in
+# preserved_infra_paths: restore runs on EXIT after this patch, and a
+# preserve-then-restore of generated paths would collide. Aspire does not
+# emit them, so the patch is the durable recreate after `rm -rf infra`.
 python3 dev/patch-control-sql-sku.py
 
 if [ -d infra/api-roles-control-sql ]; then

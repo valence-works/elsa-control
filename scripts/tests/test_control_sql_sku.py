@@ -21,7 +21,9 @@ from control_sql_sku import (  # noqa: E402
     STAGING_ENVIRONMENT_NAMES,
     STAGING_MAX_SIZE_BYTES,
     STAGING_SKU,
+    production_parameters_document,
     sku_parameters,
+    staging_parameters_document,
 )
 
 MAIN_BICEP = ROOT / "infra" / "main.bicep"
@@ -91,6 +93,8 @@ class ControlSqlSkuTests(unittest.TestCase):
             self.assertIn(name, azd)
         self.assertEqual("", azd["sqlDatabaseSkuName"]["value"])
         self.assertEqual(0, azd["sqlDatabaseSkuCapacity"]["value"])
+        self.assertEqual(staging_parameters_document(), json.loads(STAGING_PARAMETERS.read_text()))
+        self.assertEqual(production_parameters_document(), json.loads(PRODUCTION_PARAMETERS.read_text()))
 
     def test_templates_parameterize_sku_and_keep_production_defaults(self) -> None:
         main = MAIN_BICEP.read_text()
@@ -119,6 +123,10 @@ class ControlSqlSkuTests(unittest.TestCase):
 
         self.assertIn("from control_sql_sku import sku_parameters", deploy)
         self.assertIn("patch-control-sql-sku.py", regenerate)
+        self.assertIn("main.parameters.staging.json", regenerate)
+        self.assertIn("main.parameters.production.json", regenerate)
+        self.assertNotIn("main.parameters.staging.json", regenerate.split("preserved_infra_paths=(", 1)[1].split(")", 1)[0])
+        self.assertNotIn("main.parameters.production.json", regenerate.split("preserved_infra_paths=(", 1)[1].split(")", 1)[0])
 
     def test_regenerate_patch_is_idempotent_and_rewrites_generated_gp(self) -> None:
         generated_module = """@description('The location for the resource(s) to be deployed.')
@@ -180,6 +188,12 @@ module control_sql 'control-sql/control-sql.module.bicep' = {
             script = root / "dev" / "patch-control-sql-sku.py"
             script.parent.mkdir()
             script.write_text(PATCH.read_text())
+            lib_dir = root / "scripts" / "lib"
+            lib_dir.mkdir(parents=True)
+            shutil.copy2(ROOT / "scripts" / "lib" / "control_sql_sku.py", lib_dir / "control_sql_sku.py")
+            (root / "infra" / "main.parameters.staging.json").write_text(
+                json.dumps({"parameters": {"sqlDatabaseSkuName": {"value": "GP_S_Gen5"}}})
+            )
             result = subprocess.run(
                 [sys.executable, str(script)],
                 cwd=root,
@@ -197,6 +211,14 @@ module control_sql 'control-sql/control-sql.module.bicep' = {
             self.assertIn("resolvedSqlDatabaseSkuName", patched_main)
             self.assertIn("valence-control-staging", patched_main)
             self.assertEqual("", patched_parameters["sqlDatabaseSkuName"]["value"])
+            self.assertEqual(
+                staging_parameters_document(),
+                json.loads((root / "infra" / "main.parameters.staging.json").read_text()),
+            )
+            self.assertEqual(
+                production_parameters_document(),
+                json.loads((root / "infra" / "main.parameters.production.json").read_text()),
+            )
 
             again = subprocess.run(
                 [sys.executable, str(script)],

@@ -9,6 +9,7 @@ for that file.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 
@@ -16,6 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "infra" / "control-sql" / "control-sql.module.bicep"
 MAIN = ROOT / "infra" / "main.bicep"
 PARAMETERS = ROOT / "infra" / "main.parameters.json"
+STAGING_PARAMETERS = ROOT / "infra" / "main.parameters.staging.json"
+PRODUCTION_PARAMETERS = ROOT / "infra" / "main.parameters.production.json"
+
+sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+from control_sql_sku import production_parameters_document, staging_parameters_document
 
 SKU_PARAMS = """
 @description('Azure SQL Catalog service objective (SKU name). Production default is GP_S_Gen5.')
@@ -191,6 +197,25 @@ def patch_parameters(document: dict) -> dict:
     return document
 
 
+def write_json(path: Path, document: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, indent=2) + "\n")
+
+
+def write_environment_parameter_files() -> None:
+    """Recreate the hand-authored SKU overlays after `rm -rf infra`.
+
+    Aspire generate does not emit these files. They are not in the regenerate
+    preserve list because restore runs on EXIT after this patch; recreating
+    them here is the durable path.
+    """
+
+    if not (ROOT / "infra").exists():
+        return
+    write_json(STAGING_PARAMETERS, staging_parameters_document())
+    write_json(PRODUCTION_PARAMETERS, production_parameters_document())
+
+
 def main() -> None:
     if MODULE.exists():
         MODULE.write_text(patch_module(MODULE.read_text()))
@@ -198,7 +223,8 @@ def main() -> None:
         MAIN.write_text(patch_main(MAIN.read_text()))
     if PARAMETERS.exists():
         document = json.loads(PARAMETERS.read_text())
-        PARAMETERS.write_text(json.dumps(patch_parameters(document), indent=2) + "\n")
+        write_json(PARAMETERS, patch_parameters(document))
+    write_environment_parameter_files()
 
 
 if __name__ == "__main__":

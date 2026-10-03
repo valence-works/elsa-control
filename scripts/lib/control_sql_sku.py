@@ -9,6 +9,10 @@ from __future__ import annotations
 
 from typing import Mapping
 
+PARAMETER_SCHEMA = "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#"
+STAGING_ENVIRONMENT_NAME = "valence-control-staging"
+STAGING_LOCATION = "westeurope"
+
 
 STAGING_ENVIRONMENT_NAMES = frozenset({"test", "valence-control-staging"})
 STAGING_MAX_SIZE_BYTES = "268435456000"
@@ -44,3 +48,32 @@ def is_staging_sql_environment(environment_name: str) -> bool:
 
 def as_json_object(parameters: Mapping[str, object]) -> dict[str, object]:
     return dict(parameters)
+
+
+def _parameter_values(values: Mapping[str, object]) -> dict[str, dict[str, object]]:
+    return {name: {"value": value} for name, value in values.items()}
+
+
+def staging_parameters_document() -> dict[str, object]:
+    """ARM parameter file for valence-control-staging Catalog S0 / 250 GiB."""
+
+    return {
+        "$schema": PARAMETER_SCHEMA,
+        "contentVersion": "1.0.0.0",
+        "parameters": {
+            "environmentName": {"value": STAGING_ENVIRONMENT_NAME},
+            "location": {"value": STAGING_LOCATION},
+            "principalId": {"value": ""},
+            **_parameter_values(STAGING_SKU),
+        },
+    }
+
+
+def production_parameters_document() -> dict[str, object]:
+    """ARM parameter overlay that keeps production on GP_S_Gen5_1."""
+
+    return {
+        "$schema": PARAMETER_SCHEMA,
+        "contentVersion": "1.0.0.0",
+        "parameters": _parameter_values(PRODUCTION_SKU),
+    }
