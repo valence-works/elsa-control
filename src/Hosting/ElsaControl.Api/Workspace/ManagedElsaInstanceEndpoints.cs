@@ -22,7 +22,7 @@ public static class ManagedElsaInstanceEndpoints
         "This engine changed since you opened this page. Review its current state, then confirm Delete again if you still want to delete it.";
     internal const string SystemOnlyVersionConflictCode = "instance.version-conflict";
     internal const string SystemOnlyVersionConflictDetail =
-        "We couldn't start deleting this engine. Please try again. If it keeps failing, contact support.";
+        "We couldn't start deleting this engine. Please try again. If it keeps failing, email hello@valence.works with this engine's name and we'll help during business hours.";
 
     private static readonly ManagedElsaInstanceLaunchProfile InitialLaunchProfile = new(
         "West Europe Dedicated", "Managed hosting in West Europe.",
