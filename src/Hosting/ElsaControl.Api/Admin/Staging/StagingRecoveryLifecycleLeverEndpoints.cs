@@ -7,6 +7,7 @@ using ElsaControl.Api.Workspace;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Api.Admin.Staging;
@@ -125,7 +126,8 @@ public static class StagingRecoveryLifecycleLeverEndpoints
     private static bool IsPersistenceFailure(Exception exception) =>
         exception is StagingRecoveryLifecycleLeverPersistenceException
             or DbUpdateException
-            or DbException;
+            or DbException
+            or RetryLimitExceededException;
 
     private static IResult PersistenceUnavailable() =>
         Results.Problem(

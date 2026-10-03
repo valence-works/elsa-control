@@ -1,3 +1,4 @@
+using System.Data.Common;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Instances;
@@ -5,6 +6,8 @@ using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 
@@ -536,7 +539,165 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.ResetEventType));
     }
 
+    [Fact]
+    public void Staging_recovery_lever_maps_concurrency_to_operation_active()
+    {
+        var mapped = EfCoreElsaInstanceLifecycleStore.MapStagingRecoveryLeverPersistenceFailure(
+            new DbUpdateConcurrencyException("concurrency"));
+
+        var conflict = Assert.IsType<ElsaInstanceLifecycleConflictException>(mapped);
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.OperationActive, conflict.Reason);
+    }
+
+    [Fact]
+    public void Staging_recovery_lever_maps_unique_violation_to_operation_active()
+    {
+        var mapped = EfCoreElsaInstanceLifecycleStore.MapStagingRecoveryLeverPersistenceFailure(
+            new DbUpdateException("unique", new SqliteException("UNIQUE constraint failed", 19, 2067)));
+
+        var conflict = Assert.IsType<ElsaInstanceLifecycleConflictException>(mapped);
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.OperationActive, conflict.Reason);
+    }
+
+    [Fact]
+    public void Staging_recovery_lever_maps_generic_db_exception_to_persistence_unavailable()
+    {
+        var inner = new SqliteException("disk I/O error", 10);
+        var mapped = EfCoreElsaInstanceLifecycleStore.MapStagingRecoveryLeverPersistenceFailure(inner);
+
+        var persistence = Assert.IsType<StagingRecoveryLifecycleLeverPersistenceException>(mapped);
+        Assert.Same(inner, persistence.InnerException);
+    }
+
+    [Fact]
+    public void Staging_recovery_lever_maps_retry_limit_exceeded_to_persistence_unavailable()
+    {
+        var exhausted = new RetryLimitExceededException("The execution strategy retries were exhausted.");
+        var mapped = EfCoreElsaInstanceLifecycleStore.MapStagingRecoveryLeverPersistenceFailure(exhausted);
+
+        var persistence = Assert.IsType<StagingRecoveryLifecycleLeverPersistenceException>(mapped);
+        Assert.Same(exhausted, persistence.InnerException);
+    }
+
+    [Fact]
+    public async Task Staging_recovery_lever_fire_classifies_concurrency_as_conflict() =>
+        await AssertFireClassifiesAsync(
+            new DbUpdateConcurrencyException("concurrency"),
+            expected: typeof(ElsaInstanceLifecycleConflictException));
+
+    [Fact]
+    public async Task Staging_recovery_lever_fire_classifies_unique_violation_as_conflict() =>
+        await AssertFireClassifiesAsync(
+            new DbUpdateException("unique", new SqliteException("UNIQUE constraint failed", 19, 2067)),
+            expected: typeof(ElsaInstanceLifecycleConflictException));
+
+    [Fact]
+    public async Task Staging_recovery_lever_fire_classifies_generic_db_exception_as_unavailable() =>
+        await AssertFireClassifiesAsync(
+            new SqliteException("disk I/O error", 10),
+            expected: typeof(StagingRecoveryLifecycleLeverPersistenceException));
+
+    [Fact]
+    public async Task Staging_recovery_lever_fire_classifies_retry_limit_exceeded_as_unavailable() =>
+        await AssertFireClassifiesAsync(
+            new RetryLimitExceededException("The execution strategy retries were exhausted."),
+            expected: typeof(StagingRecoveryLifecycleLeverPersistenceException));
+
+    [Fact]
+    public async Task Staging_recovery_lever_reset_classifies_generic_db_exception_as_unavailable() =>
+        await AssertResetClassifiesAsync(
+            new SqliteException("disk I/O error", 10),
+            expected: typeof(StagingRecoveryLifecycleLeverPersistenceException));
+
+    [Fact]
+    public async Task Staging_recovery_lever_reset_classifies_retry_limit_exceeded_as_unavailable() =>
+        await AssertResetClassifiesAsync(
+            new RetryLimitExceededException("The execution strategy retries were exhausted."),
+            expected: typeof(StagingRecoveryLifecycleLeverPersistenceException));
+
     private const string LeverEndpoint = "https://e1234567890abcde-app.region.azurecontainerapps.io";
+
+    private static async Task AssertFireClassifiesAsync(Exception thrown, Type expected)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        Guid instanceId;
+        await using (var setup = CreateMigratedContext(connection))
+        {
+            await setup.Database.MigrateAsync();
+            var workspace = await CreateWorkspaceAsync(setup, "Lever persistence classification workspace");
+            var created = await new ElsaInstanceLifecycleService(CreateStore(setup), new FixedTimeProvider(Now))
+                .CreateAsync(new ElsaInstanceCreateRequest(
+                    workspace.OrganizationId, workspace.Id, "Managed Elsa", "lever-persistence-fire",
+                    CreateIntent(), "create-lever-persistence-fire"));
+            await CompleteOperationAsync(setup, created.Operation.Id);
+            await SetObservedAsync(setup, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy);
+            instanceId = created.Instance.Id;
+        }
+
+        await using var db = CreateThrowingContext(connection, thrown);
+        var error = await Assert.ThrowsAsync(expected, () =>
+            CreateStore(db).AcceptReconcileAndRequireRecoveryAsync(instanceId, "operator"));
+        if (error is ElsaInstanceLifecycleConflictException conflict)
+            Assert.Equal(ElsaInstanceLifecycleConflictReason.OperationActive, conflict.Reason);
+        Assert.Equal(0, await db.ElsaInstanceAuditEvents.CountAsync(x =>
+            x.InstanceId == instanceId &&
+            x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.FiredEventType));
+    }
+
+    private static async Task AssertResetClassifiesAsync(Exception thrown, Type expected)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        Guid instanceId;
+        await using (var setup = CreateMigratedContext(connection))
+        {
+            await setup.Database.MigrateAsync();
+            var workspace = await CreateWorkspaceAsync(setup, "Lever persistence reset workspace");
+            var created = await new ElsaInstanceLifecycleService(CreateStore(setup), new FixedTimeProvider(Now))
+                .CreateAsync(new ElsaInstanceCreateRequest(
+                    workspace.OrganizationId, workspace.Id, "Managed Elsa", "lever-persistence-reset",
+                    CreateIntent(), "create-lever-persistence-reset"));
+            await CompleteOperationAsync(setup, created.Operation.Id);
+            await SetObservedAsync(setup, created.Instance.Id, ElsaObservedLifecycle.Ready, ElsaInstanceHealth.Healthy);
+            await CreateStore(setup).AcceptReconcileAndRequireRecoveryAsync(created.Instance.Id, "setup");
+            instanceId = created.Instance.Id;
+        }
+
+        await using var db = CreateThrowingContext(connection, thrown);
+        var error = await Assert.ThrowsAsync(expected, () =>
+            CreateStore(db).ResetLeverParkedReconcileAsync(instanceId, "operator"));
+        if (error is ElsaInstanceLifecycleConflictException conflict)
+            Assert.Equal(ElsaInstanceLifecycleConflictReason.OperationActive, conflict.Reason);
+        Assert.Equal(0, await db.ElsaInstanceAuditEvents.CountAsync(x =>
+            x.InstanceId == instanceId &&
+            x.EventType == StagingRecoveryLifecycleLeverStoreDefaults.ResetEventType));
+    }
+
+    private static CatalogDbContext CreateThrowingContext(SqliteConnection connection, Exception thrown)
+    {
+        var options = new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(
+                connection,
+                sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .AddInterceptors(new ThrowOnSaveInterceptor(thrown))
+            .Options;
+        return new CatalogDbContext(options);
+    }
+
+    private sealed class ThrowOnSaveInterceptor(Exception thrown) : SaveChangesInterceptor
+    {
+        public override InterceptionResult<int> SavingChanges(
+            DbContextEventData eventData,
+            InterceptionResult<int> result) =>
+            throw thrown;
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default) =>
+            throw thrown;
+    }
 
     private static async Task AttachCurrentDeploymentAsync(CatalogDbContext db, Guid instanceId)
     {

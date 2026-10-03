@@ -8,6 +8,7 @@ using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 
@@ -206,20 +207,10 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
             dbContext.ChangeTracker.Clear();
             throw;
         }
-        catch (DbUpdateConcurrencyException)
+        catch (Exception exception) when (IsStagingRecoveryLeverPersistenceFailure(exception))
         {
             dbContext.ChangeTracker.Clear();
-            throw Conflict("An instance operation is already active.", ElsaInstanceLifecycleConflictReason.OperationActive);
-        }
-        catch (DbUpdateException exception) when (EfCoreDatabaseExceptionPolicy.IsUniqueViolation(exception))
-        {
-            dbContext.ChangeTracker.Clear();
-            throw Conflict("An instance operation is already active.", ElsaInstanceLifecycleConflictReason.OperationActive);
-        }
-        catch (Exception exception) when (exception is DbUpdateException or DbException)
-        {
-            dbContext.ChangeTracker.Clear();
-            throw PersistenceUnavailable(exception);
+            throw MapStagingRecoveryLeverPersistenceFailure(exception);
         }
     }
 
@@ -335,25 +326,26 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
             dbContext.ChangeTracker.Clear();
             throw;
         }
-        catch (DbUpdateConcurrencyException)
+        catch (Exception exception) when (IsStagingRecoveryLeverPersistenceFailure(exception))
         {
             dbContext.ChangeTracker.Clear();
-            throw Conflict("An instance operation is already active.", ElsaInstanceLifecycleConflictReason.OperationActive);
-        }
-        catch (DbUpdateException exception) when (EfCoreDatabaseExceptionPolicy.IsUniqueViolation(exception))
-        {
-            dbContext.ChangeTracker.Clear();
-            throw Conflict("An instance operation is already active.", ElsaInstanceLifecycleConflictReason.OperationActive);
-        }
-        catch (Exception exception) when (exception is DbUpdateException or DbException)
-        {
-            dbContext.ChangeTracker.Clear();
-            throw PersistenceUnavailable(exception);
+            throw MapStagingRecoveryLeverPersistenceFailure(exception);
         }
     }
 
-    private static StagingRecoveryLifecycleLeverPersistenceException PersistenceUnavailable(Exception exception) =>
-        new("The staging recovery lifecycle lever could not persist the requested change.", exception);
+    internal static bool IsStagingRecoveryLeverPersistenceFailure(Exception exception) =>
+        exception is DbUpdateException or DbException or RetryLimitExceededException;
+
+    internal static Exception MapStagingRecoveryLeverPersistenceFailure(Exception exception)
+    {
+        if (exception is DbUpdateConcurrencyException)
+            return Conflict("An instance operation is already active.", ElsaInstanceLifecycleConflictReason.OperationActive);
+        if (exception is DbUpdateException update && EfCoreDatabaseExceptionPolicy.IsUniqueViolation(update))
+            return Conflict("An instance operation is already active.", ElsaInstanceLifecycleConflictReason.OperationActive);
+        return new StagingRecoveryLifecycleLeverPersistenceException(
+            "The staging recovery lifecycle lever could not persist the requested change.",
+            exception);
+    }
 
     private static void RestoreObservedReady(ElsaInstanceEntity instance)
     {

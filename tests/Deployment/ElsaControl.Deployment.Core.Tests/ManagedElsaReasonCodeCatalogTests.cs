@@ -46,15 +46,19 @@ public sealed class ManagedElsaReasonCodeCatalogTests
         const string plantedRecovery = "azure.recovery.planted-uncatalogued";
         const string plantedDeletion = "deletion.planted-uncatalogued";
         const string plantedRebind = "assignment.rebind.planted-uncatalogued";
+        const string plantedLever = "staging.lever.planted-uncatalogued";
         Assert.False(ManagedElsaReasonCodeCatalog.TryGet(plantedRecovery, out _));
         Assert.False(ManagedElsaReasonCodeCatalog.TryGet(plantedDeletion, out _));
         Assert.False(ManagedElsaReasonCodeCatalog.TryGet(plantedRebind, out _));
+        Assert.False(ManagedElsaReasonCodeCatalog.TryGet(plantedLever, out _));
         Assert.Equal(plantedRecovery, Assert.Single(ManagedElsaReasonLiteralScanner.FindUncatalogued(
             $"operation.ReconciliationDiagnosticCode = \"{plantedRecovery}\";")));
         Assert.Equal(plantedDeletion, Assert.Single(ManagedElsaReasonLiteralScanner.FindUncatalogued(
             $"operation.ReconciliationDiagnosticCode = \"{plantedDeletion}\";")));
         Assert.Equal(plantedRebind, Assert.Single(ManagedElsaReasonLiteralScanner.FindUncatalogued(
             $"operation.ReconciliationDiagnosticCode = \"{plantedRebind}\";")));
+        Assert.Equal(plantedLever, Assert.Single(ManagedElsaReasonLiteralScanner.FindUncatalogued(
+            $"operation.ReconciliationDiagnosticCode = \"{plantedLever}\";")));
         Assert.Empty(ManagedElsaReasonLiteralScanner.FindUncatalogued(
             $"operation.ReconciliationDiagnosticCode = \"{ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted}\";"));
     }

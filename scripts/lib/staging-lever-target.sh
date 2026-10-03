@@ -1,10 +1,11 @@
 # Shared staging-target predicate for operator levers.
 # Explicit --environment / TARGET_ENVIRONMENT wins over AZURE_ENV_NAME.
 # Azure names (ENVIRONMENT_NAME / AZURE_ENV_NAME) must be exactly equal.
-# TARGET_ENVIRONMENT=test is the GitHub environment alias for
-# valence-control-staging only; --environment test and
-# AZURE_ENV_NAME=valence-control-staging stay distinct (rg-test vs
-# rg-valence-control-staging). Any mismatch or non-test target fails closed.
+# TARGET_ENVIRONMENT=test is the only GitHub environment that arms the lever.
+# It aliases to valence-control-staging for agreement with Azure names.
+# --environment test and AZURE_ENV_NAME=valence-control-staging stay distinct
+# (rg-test vs rg-valence-control-staging). TARGET_ENVIRONMENT=valence-control-staging
+# does not arm the lever. Any mismatch or non-test target fails closed.
 
 is_staging_azure_env_name() {
   [ "$1" = "test" ] || [ "$1" = "valence-control-staging" ]
@@ -51,7 +52,7 @@ is_staging_lever_target() {
     return 1
   fi
   if [ -n "${TARGET_ENVIRONMENT:-}" ]; then
-    [ "$TARGET_ENVIRONMENT" = "test" ] || is_staging_azure_env_name "$TARGET_ENVIRONMENT"
+    [ "$TARGET_ENVIRONMENT" = "test" ]
   elif [ -n "${ENVIRONMENT_NAME:-}" ]; then
     is_staging_azure_env_name "$ENVIRONMENT_NAME"
   else
