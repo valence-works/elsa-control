@@ -4299,13 +4299,6 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         public override DateTimeOffset GetUtcNow() => now;
     }
 
-    private sealed class MutableTimeProvider(DateTimeOffset utcNow) : TimeProvider
-    {
-        public override DateTimeOffset GetUtcNow() => utcNow;
-
-        public void Advance(TimeSpan duration) => utcNow += duration;
-    }
-
     private static CatalogDbContext CreateMigratedContext(SqliteConnection connection)
     {
         var options = new DbContextOptionsBuilder<CatalogDbContext>()
