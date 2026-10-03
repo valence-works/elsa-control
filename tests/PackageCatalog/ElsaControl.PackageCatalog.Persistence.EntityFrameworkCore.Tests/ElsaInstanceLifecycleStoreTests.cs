@@ -2907,6 +2907,45 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(failedAt, parked.RequiresHumanAt);
     }
 
+    [Theory]
+    [InlineData(ManagedElsaReasonCodeCatalog.AssignmentRebindPlacementMismatch)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AssignmentRebindAmbiguous)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionRecoveryAuthorityUnavailable)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionRecoveryPlanUnavailable)]
+    public async Task Delete_park_codes_that_need_a_person_stamp_RequiresHumanAt_immediately(string diagnosticCode)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Delete park " + diagnosticCode);
+        var service = new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now));
+        var created = await service.CreateAsync(new ElsaInstanceCreateRequest(
+            workspace.OrganizationId, workspace.Id, "Delete NeedsPerson Elsa", "delete-needs-person-elsa", WorkerIntent(), "delete-needs-person-create"));
+        var deletion = await service.DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+            db, workspace.Id, created.Instance.Id, created.Instance.Version, "delete-needs-person"));
+        await CompleteOperationAsync(db, created.Operation.Id);
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now.AddMinutes(1)));
+        var claimed = await store.TryClaimNextDeletionAsync("deletion-worker", Now.AddMinutes(1));
+        Assert.NotNull(claimed);
+        var failedAt = Now.AddMinutes(2);
+        await store.RequireDeletionRecoveryAsync(new ElsaInstanceDeletionFailure(
+            workspace.Id, created.Instance.Id, deletion.Operation.Id,
+            claimed!.Outbox.Id, claimed.Instance.Version, claimed.Operation.AttemptNumber,
+            claimed.CorrelatedRunId, "deletion-worker", claimed.LeaseToken, claimed.LeaseVersion,
+            new string('f', 64), diagnosticCode, failedAt));
+
+        db.ChangeTracker.Clear();
+        var parked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == deletion.Operation.Id);
+        Assert.Equal(diagnosticCode, parked.ReconciliationDiagnosticCode);
+        Assert.Equal(ManagedElsaReasonClass.NeedsPerson, ManagedElsaReasonCodeCatalog.Classify(parked.ReconciliationDiagnosticCode));
+        Assert.Equal(failedAt, parked.ReasonEnteredAt);
+        Assert.Equal(failedAt, parked.RequiresHumanAt);
+        Assert.True(ManagedElsaReasonCodeCatalog.RequiresHuman(
+            parked.ReconciliationDiagnosticCode, parked.ReasonEnteredAt, failedAt));
+    }
+
     [Fact]
     public async Task Repeated_retry_safe_evidence_does_not_bump_version_and_admin_recover_stays_available()
     {

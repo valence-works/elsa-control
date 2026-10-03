@@ -29,6 +29,7 @@ public sealed class ManagedElsaReasonCodeCatalogTests
         }
 
         Assert.Contains("deletion.", ManagedElsaReasonLiteralScanner.ReasonFamilyPrefixes, StringComparer.Ordinal);
+        Assert.Contains("assignment.rebind.", ManagedElsaReasonLiteralScanner.ReasonFamilyPrefixes, StringComparer.Ordinal);
         Assert.Equal(ManagedElsaReasonCodeCatalog.DefinedCodes.Count, ManagedElsaReasonCodeCatalog.ByCode.Count);
     }
 
@@ -44,12 +45,16 @@ public sealed class ManagedElsaReasonCodeCatalogTests
     {
         const string plantedRecovery = "azure.recovery.planted-uncatalogued";
         const string plantedDeletion = "deletion.planted-uncatalogued";
+        const string plantedRebind = "assignment.rebind.planted-uncatalogued";
         Assert.False(ManagedElsaReasonCodeCatalog.TryGet(plantedRecovery, out _));
         Assert.False(ManagedElsaReasonCodeCatalog.TryGet(plantedDeletion, out _));
+        Assert.False(ManagedElsaReasonCodeCatalog.TryGet(plantedRebind, out _));
         Assert.Equal(plantedRecovery, Assert.Single(ManagedElsaReasonLiteralScanner.FindUncatalogued(
             $"operation.ReconciliationDiagnosticCode = \"{plantedRecovery}\";")));
         Assert.Equal(plantedDeletion, Assert.Single(ManagedElsaReasonLiteralScanner.FindUncatalogued(
             $"operation.ReconciliationDiagnosticCode = \"{plantedDeletion}\";")));
+        Assert.Equal(plantedRebind, Assert.Single(ManagedElsaReasonLiteralScanner.FindUncatalogued(
+            $"operation.ReconciliationDiagnosticCode = \"{plantedRebind}\";")));
         Assert.Empty(ManagedElsaReasonLiteralScanner.FindUncatalogued(
             $"operation.ReconciliationDiagnosticCode = \"{ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted}\";"));
     }
@@ -85,12 +90,15 @@ public sealed class ManagedElsaReasonCodeCatalogTests
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionAzureProviderUnavailable, ManagedElsaReasonClass.Temporary)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending, ManagedElsaReasonClass.Temporary)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderUncertain, ManagedElsaReasonClass.Temporary)]
-    [InlineData(ManagedElsaReasonCodeCatalog.DeletionRecoveryAuthorityUnavailable, ManagedElsaReasonClass.Temporary)]
-    [InlineData(ManagedElsaReasonCodeCatalog.DeletionRecoveryPlanUnavailable, ManagedElsaReasonClass.Temporary)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionRecoveryAuthorityUnavailable, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionRecoveryPlanUnavailable, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionCorrelationInvalid, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderCleanupFailed, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderAmbiguous, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionPredecessorRecoverySuperseded, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AssignmentRebindOperationsInFlight, ManagedElsaReasonClass.Temporary)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AssignmentRebindPlacementMismatch, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AssignmentRebindAmbiguous, ManagedElsaReasonClass.NeedsPerson)]
     public void Catalogued_codes_have_the_architect_class(string code, ManagedElsaReasonClass expected)
     {
         Assert.Equal(expected, ManagedElsaReasonCodeCatalog.Classify(code));

@@ -120,6 +120,9 @@ public static class ManagedElsaReasonCodeCatalog
     public const string DeletionProviderAbsent = "deletion.provider.absent";
     public const string DeletionProviderAmbiguous = "deletion.provider.ambiguous";
     public const string DeletionProviderFinalizationPending = "deletion.provider-finalization-pending";
+    public const string AssignmentRebindOperationsInFlight = "assignment.rebind.operations-inflight";
+    public const string AssignmentRebindPlacementMismatch = "assignment.rebind.placement-mismatch";
+    public const string AssignmentRebindAmbiguous = "assignment.rebind.ambiguous";
 
     public static readonly FrozenDictionary<string, ManagedElsaReasonCode> ByCode =
         new ManagedElsaReasonCode[]
@@ -196,8 +199,6 @@ public static class ManagedElsaReasonCodeCatalog
             new(DeletionProviderUncertain, ManagedElsaReasonClass.Temporary),
             new(DeletionProviderUnknown, ManagedElsaReasonClass.Temporary),
             new(DeletionProviderFinalizationPending, ManagedElsaReasonClass.Temporary),
-            new(DeletionRecoveryAuthorityUnavailable, ManagedElsaReasonClass.Temporary),
-            new(DeletionRecoveryPlanUnavailable, ManagedElsaReasonClass.Temporary),
             new(DeletionProviderAbsent, ManagedElsaReasonClass.HealthyHandOff),
             new(DeletionCorrelationInvalid, ManagedElsaReasonClass.NeedsPerson),
             new(DeletionItemInvalid, ManagedElsaReasonClass.NeedsPerson),
@@ -207,7 +208,12 @@ public static class ManagedElsaReasonCodeCatalog
             new(DeletionProviderAmbiguous, ManagedElsaReasonClass.NeedsPerson),
             new(DeletionRecoveryAssignmentInvalid, ManagedElsaReasonClass.NeedsPerson),
             new(DeletionRecoveryClaimLost, ManagedElsaReasonClass.NeedsPerson),
-            new(DeletionPredecessorRecoverySuperseded, ManagedElsaReasonClass.NeedsPerson)
+            new(DeletionPredecessorRecoverySuperseded, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionRecoveryAuthorityUnavailable, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionRecoveryPlanUnavailable, ManagedElsaReasonClass.NeedsPerson),
+            new(AssignmentRebindOperationsInFlight, ManagedElsaReasonClass.Temporary),
+            new(AssignmentRebindPlacementMismatch, ManagedElsaReasonClass.NeedsPerson),
+            new(AssignmentRebindAmbiguous, ManagedElsaReasonClass.NeedsPerson)
         }.ToFrozenDictionary(entry => entry.Code, StringComparer.Ordinal);
 
     public static IReadOnlyList<string> DefinedCodes { get; } =

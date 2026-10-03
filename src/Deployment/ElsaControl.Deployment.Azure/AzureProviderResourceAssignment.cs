@@ -1,3 +1,5 @@
+using ElsaControl.Deployment.Core.Instances;
+
 namespace ElsaControl.Deployment.Azure;
 
 /// <summary>
@@ -98,9 +100,9 @@ public sealed record AzureProviderAssignmentRebindRecord(
 
 public static class AzureProviderAssignmentRebindDiagnostics
 {
-    public const string OperationsInFlight = "assignment.rebind.operations-inflight";
-    public const string PlacementMismatch = "assignment.rebind.placement-mismatch";
-    public const string Ambiguous = "assignment.rebind.ambiguous";
+    public const string OperationsInFlight = ManagedElsaReasonCodeCatalog.AssignmentRebindOperationsInFlight;
+    public const string PlacementMismatch = ManagedElsaReasonCodeCatalog.AssignmentRebindPlacementMismatch;
+    public const string Ambiguous = ManagedElsaReasonCodeCatalog.AssignmentRebindAmbiguous;
 }
 
 /// <summary>
