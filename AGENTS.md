@@ -24,6 +24,15 @@
 - codex/021-identity-tenancy: Added C# on .NET 10. + ASP.NET Core authentication/authorization, ASP.NET Core cookies, JWT bearer validation, EF Core, existing `ElsaControl.PackageCatalog.*` account/workspace services, xUnit and its built-in assertions for tests.
 
 <!-- MANUAL ADDITIONS START -->
+## Advisory PR reviewers
+
+Read [`.github/reviewers.md`](.github/reviewers.md) **before opening any PR**. That file is the live list.
+
+1. Request a review from **exactly one** advisory reviewer marked live there. Candidates: Greptile, GitHub Copilot Code Review, and Cursor Bugbot. If only one is live, use it; otherwise rotate or pick by fit. If none is live, note that on the PR and proceed to the Code Review gate.
+2. Codex never reviews or approves its own PRs.
+3. The picked reviewer is advisory only. The merge gate stays an **APPROVE from the separate Elsa Control Code Review agent** (a GitHub PR review) on the **exact head SHA**, plus green required CI on that SHA. The control-room's own review never counts. A push after an APPROVE makes it stale. Hand advisory findings to Elsa Control Code Review before it verdicts. Merges also need Sipke's explicit yes unless and until he confirms a standing rule in the CEO chat. Deploys, live billing, and destructive actions always need his explicit yes. Stay consistent with the merge-authority comment on issue #508 (comment [5969355661](https://github.com/valence-works/elsa-control/issues/508#issuecomment-5969355661)).
+4. Keep the live list current. Whenever a reviewer is added, removed, enabled, or disabled, update `.github/reviewers.md` in the same change.
+
 ## Issue Bus
 
 Leaf work follows the Issue Bus v1 protocol in `docs/product/issue-bus.md`. Worker lanes:
