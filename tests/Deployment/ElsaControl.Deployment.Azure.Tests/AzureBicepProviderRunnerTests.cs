@@ -11,6 +11,28 @@ namespace ElsaControl.Deployment.Azure.Tests;
 public sealed class AzureBicepProviderRunnerTests : IDisposable
 {
     private const string OwnedGroupTags = "{\"managed-by\":\"elsa-control\",\"owner\":\"elsa-control\",\"workload-name\":\"proof\",\"sqlBootstrapObjectId\":\"11111111-1111-1111-1111-111111111111\"}";
+    private const string EmptyDeletedWorkspaces = """{"value":[]}""";
+    private const string ProofLogsWorkspaceId = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/proof-rg/providers/Microsoft.OperationalInsights/workspaces/proof-logs";
+    private const string SoftDeletedProofLogs = """{"value":[{"id":"/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/proof-rg/providers/Microsoft.OperationalInsights/workspaces/proof-logs","name":"proof-logs"}]}""";
+
+    private static bool IsDeletedWorkspacesQuery(string[] args) =>
+        args.Contains("rest") && args.Any(argument => argument.Contains("deletedWorkspaces", StringComparison.Ordinal));
+
+    private static bool IsLogAnalyticsWorkspaceDelete(string[] args) =>
+        args.Contains("monitor") && args.Contains("log-analytics") && args.Contains("workspace") && args.Contains("delete");
+
+    private static bool IsLogAnalyticsWorkspaceShow(string[] args) =>
+        args.Contains("monitor") && args.Contains("log-analytics") && args.Contains("workspace") && args.Contains("show");
+
+    private static void WorkspaceShowNotFound(FakeCommandProcess process) =>
+        process.Status(
+            IsLogAnalyticsWorkspaceShow,
+            AzureCommandProcessStatus.Failed,
+            AzureCommandProcessFailureKind.NonZeroExitCode,
+            AzureBicepProviderRunner.AzureCliResourceNotFoundExitCode);
+
+    private static void WorkspaceShowPresent(FakeCommandProcess process) =>
+        process.Success(IsLogAnalyticsWorkspaceShow, ProofLogsWorkspaceId);
 
     private const string HealthyCandidateRevision = "{\"active\":true,\"health\":\"Healthy\",\"fqdn\":\"proof-app--candidate.hash.azurecontainerapps.io\"}";
 
@@ -1935,6 +1957,254 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Cleanup_does_not_force_delete_the_workspace_when_ownership_checks_fail()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("resource") && args.Contains("list"),
+            "[{\"id\":\"" + ProofLogsWorkspaceId + "\",\"type\":\"Microsoft.OperationalInsights/workspaces\"}," +
+            "{\"id\":\"/subscriptions/99999999-9999-9999-9999-999999999999/resourceGroups/foreign/providers/Microsoft.App/containerApps/other\",\"type\":\"Microsoft.App/containerApps\"}]");
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Failed, result.Outcome);
+        Assert.Equal("azure.cleanup.ownership-unverified", result.Code);
+        Assert.DoesNotContain(process.Calls, IsLogAnalyticsWorkspaceDelete);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("group") && call.Contains("delete"));
+    }
+
+    [Fact]
+    public async Task Cleanup_force_deletes_the_workspace_before_the_resource_group()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("resource") && args.Contains("list"),
+            "[{\"id\":\"" + ProofLogsWorkspaceId + "\",\"type\":\"Microsoft.OperationalInsights/workspaces\"}]");
+        WorkspaceShowPresent(process);
+        process.Success(IsLogAnalyticsWorkspaceDelete);
+        WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
+        process.Success(args => args.Contains("group") && args.Contains("delete"));
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "false");
+        process.Success(args => args.Contains("list-deleted"), "[]");
+        process.Success(args => args.Contains("list-deleted"), "[]");
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
+        var workspaceDelete = process.Calls.FindIndex(IsLogAnalyticsWorkspaceDelete);
+        var groupDelete = process.Calls.FindIndex(call => call.Contains("group") && call.Contains("delete"));
+        Assert.True(workspaceDelete >= 0);
+        Assert.True(groupDelete > workspaceDelete);
+        Assert.Contains(process.Calls[workspaceDelete], argument => argument == "--force");
+        Assert.Contains(process.Calls[workspaceDelete], argument => argument == "true");
+    }
+
+    [Fact]
+    public async Task Cleanup_keeps_the_engine_out_of_deleted_when_the_workspace_is_soft_deleted()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "false");
+        process.Success(args => args.Contains("list-deleted"), "[]");
+        process.Success(args => args.Contains("list-deleted"), "[]");
+        process.Success(IsDeletedWorkspacesQuery, SoftDeletedProofLogs);
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal(AzureBicepProviderRunner.LogAnalyticsWorkspaceSoftDeletedCode, result.Code);
+        Assert.False(result.OwnedResourcesAbsent);
+        Assert.DoesNotContain(process.Calls, IsLogAnalyticsWorkspaceDelete);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("group") && call.Contains("delete"));
+    }
+
+    [Fact]
+    public async Task Cleanup_is_uncertain_when_workspace_show_fails_without_not_found()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("resource") && args.Contains("list"),
+            "[{\"id\":\"" + ProofLogsWorkspaceId + "\",\"type\":\"Microsoft.OperationalInsights/workspaces\"}]");
+        process.Failure(IsLogAnalyticsWorkspaceShow);
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal("azure.cleanup.log-analytics-workspace-observation-uncertain", result.Code);
+        Assert.DoesNotContain(process.Calls, IsLogAnalyticsWorkspaceDelete);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("group") && call.Contains("delete"));
+    }
+
+    [Fact]
+    public async Task Cleanup_is_uncertain_when_workspace_show_is_ambiguous()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "[]");
+        process.Status(
+            IsLogAnalyticsWorkspaceShow,
+            AzureCommandProcessStatus.TimedOut,
+            AzureCommandProcessFailureKind.TimedOut);
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal("azure.cleanup.log-analytics-workspace-observation-uncertain", result.Code);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("group") && call.Contains("delete"));
+    }
+
+    [Fact]
+    public async Task Cleanup_is_uncertain_when_workspace_show_succeeds_without_an_id()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "[]");
+        process.Success(IsLogAnalyticsWorkspaceShow, "   ");
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal("azure.cleanup.log-analytics-workspace-observation-uncertain", result.Code);
+        Assert.DoesNotContain(process.Calls, IsLogAnalyticsWorkspaceDelete);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("group") && call.Contains("delete"));
+    }
+
+    [Fact]
+    public async Task Cleanup_is_uncertain_when_force_delete_cannot_prove_workspace_absence()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("resource") && args.Contains("list"),
+            "[{\"id\":\"" + ProofLogsWorkspaceId + "\",\"type\":\"Microsoft.OperationalInsights/workspaces\"}]");
+        WorkspaceShowPresent(process);
+        process.Success(IsLogAnalyticsWorkspaceDelete);
+        process.Failure(IsLogAnalyticsWorkspaceShow);
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal("azure.cleanup.log-analytics-workspace-uncertain", result.Code);
+        Assert.Contains(process.Calls, IsLogAnalyticsWorkspaceDelete);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("group") && call.Contains("delete"));
+    }
+
+    [Fact]
+    public async Task Cleanup_is_uncertain_when_force_delete_leaves_the_workspace_present()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("resource") && args.Contains("list"),
+            "[{\"id\":\"" + ProofLogsWorkspaceId + "\",\"type\":\"Microsoft.OperationalInsights/workspaces\"}]");
+        WorkspaceShowPresent(process);
+        process.Failure(IsLogAnalyticsWorkspaceDelete);
+        WorkspaceShowPresent(process);
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal("azure.cleanup.log-analytics-workspace-uncertain", result.Code);
+        Assert.False(result.OwnedResourcesAbsent);
+        Assert.Contains(process.Calls, IsLogAnalyticsWorkspaceDelete);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("group") && call.Contains("delete"));
+    }
+
+    [Fact]
+    public async Task Cleanup_keeps_the_resource_group_when_the_workspace_is_already_soft_deleted()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "[]");
+        WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, SoftDeletedProofLogs);
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal(AzureBicepProviderRunner.LogAnalyticsWorkspaceSoftDeletedCode, result.Code);
+        Assert.False(result.OwnedResourcesAbsent);
+        Assert.DoesNotContain(process.Calls, IsLogAnalyticsWorkspaceDelete);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("group") && call.Contains("delete"));
+    }
+
+    [Fact]
+    public async Task Cleanup_is_uncertain_when_deleted_workspaces_listing_fails_before_resource_group_delete()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "[]");
+        WorkspaceShowNotFound(process);
+        process.Failure(IsDeletedWorkspacesQuery);
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal(AzureBicepProviderRunner.LogAnalyticsWorkspaceDeletedListUncertainCode, result.Code);
+        Assert.NotEqual(AzureBicepProviderRunner.LogAnalyticsWorkspaceSoftDeletedCode, result.Code);
+        Assert.False(result.OwnedResourcesAbsent);
+        Assert.DoesNotContain(process.Calls, IsLogAnalyticsWorkspaceDelete);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("group") && call.Contains("delete"));
+    }
+
+    [Fact]
+    public async Task Cleanup_is_uncertain_when_deleted_workspaces_listing_fails_after_vault_purge()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "[]");
+        WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
+        process.Success(args => args.Contains("group") && args.Contains("delete"));
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "false");
+        process.Success(args => args.Contains("list-deleted"), "[]");
+        process.Success(args => args.Contains("list-deleted"), "[]");
+        process.Failure(IsDeletedWorkspacesQuery);
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal(AzureBicepProviderRunner.LogAnalyticsWorkspaceDeletedListUncertainCode, result.Code);
+        Assert.NotEqual(AzureBicepProviderRunner.LogAnalyticsWorkspaceSoftDeletedCode, result.Code);
+        Assert.Contains(process.Calls, call => call.Contains("group") && call.Contains("delete"));
+    }
+
+    [Fact]
+    public async Task Cleanup_force_deletes_a_workspace_omitted_from_an_owned_inventory()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("resource") && args.Contains("list"), "[]");
+        WorkspaceShowPresent(process);
+        process.Success(IsLogAnalyticsWorkspaceDelete);
+        WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
+        process.Success(args => args.Contains("group") && args.Contains("delete"));
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "false");
+        process.Success(args => args.Contains("list-deleted"), "[]");
+        process.Success(args => args.Contains("list-deleted"), "[]");
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
+
+        var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
+
+        Assert.Equal(AzureProviderRunnerOutcome.Completed, result.Outcome);
+        var workspaceDelete = process.Calls.FindIndex(IsLogAnalyticsWorkspaceDelete);
+        var groupDelete = process.Calls.FindIndex(call => call.Contains("group") && call.Contains("delete"));
+        Assert.True(workspaceDelete >= 0);
+        Assert.True(groupDelete > workspaceDelete);
+    }
+
+    [Fact]
     public async Task Cleanup_does_not_reject_owned_child_resources_under_governed_roots()
     {
         var process = new FakeCommandProcess();
@@ -1945,6 +2215,8 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
             "[{\"id\":\"" + _fixture.FoundationResources.SqlServerResourceId + "/databases/elsa\",\"type\":\"Microsoft.Sql/servers/databases\"}]");
         process.Success(args => args.Contains("role") && args.Contains("assignment") && args.Contains("list"), "[]");
         process.Success(args => args.Contains("deployment") && args.Contains("group") && args.Contains("delete"));
+        WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
         process.Success(args => args.Contains("group") && args.Contains("delete"));
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
@@ -1959,10 +2231,13 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
         process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
         process.Success(args => args.Contains("resource") && args.Contains("list"), "[]");
+        WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
         process.Success(args => args.Contains("group") && args.Contains("delete"));
         process.Success(args => args.Contains("group") && args.Contains("exists"), "false");
         process.Success(args => args.Contains("list-deleted"), "[]");
         process.Success(args => args.Contains("list-deleted"), "[]");
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup));
 
@@ -1978,12 +2253,15 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
         process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
         process.Success(args => args.Contains("resource") && args.Contains("list"), "[]");
+        WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
         process.Success(args => args.Contains("group") && args.Contains("delete"));
         process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
         process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
         process.Success(args => args.Contains("group") && args.Contains("exists"), "false");
         process.Success(args => args.Contains("list-deleted"), "[]");
         process.Success(args => args.Contains("list-deleted"), "[]");
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
 
         var result = await fixture.Runner(process).RunAsync(
             fixture.Command(AzureProviderRunnerStep.Cleanup, new(ResourceGroupName: "proof-rg")));
@@ -2027,10 +2305,13 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("role") && args.Contains("list"), "[]");
         process.Success(args => args.Contains("deployment") && args.Contains("delete"));
         process.Success(args => args.Contains("deployment") && args.Contains("list"), "[]");
+        WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
         process.Success(args => args.Contains("group") && args.Contains("delete"));
         process.Success(args => args.Contains("group") && args.Contains("exists"), "false");
         process.Success(args => args.Contains("list-deleted"), "[]");
         process.Success(args => args.Contains("list-deleted"), "[]");
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
         var partial = _fixture.FoundationResources with { WorkloadIdentityPrincipalId = null };
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup, partial));
@@ -3184,10 +3465,13 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("role") && args.Contains("list"), "[]");
         process.Success(args => args.Contains("deployment") && args.Contains("delete"));
         process.Success(args => args.Contains("deployment") && args.Contains("list"), "[]");
+        WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
         process.Success(args => args.Contains("group") && args.Contains("delete"));
         process.Success(args => args.Contains("group") && args.Contains("exists"), "false");
         process.Success(args => args.Contains("list-deleted"), "[]");
         process.Success(args => args.Contains("list-deleted"), "[]");
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
         var resources = _fixture.FoundationResources with
         {
             RegistryResourceId = _fixture.RegistryId,
@@ -3224,6 +3508,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("deployment") && args.Contains("list"), "[]");
         process.Success(args => args.Contains("list-deleted"), "[]");
         process.Success(args => args.Contains("list-deleted"), "[]");
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup, _fixture.FoundationResources));
 
@@ -3285,10 +3570,13 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
             "[{\"id\":\"" + _fixture.FoundationResources.WorkloadIdentityResourceId + "\",\"type\":\"Microsoft.ManagedIdentity/userAssignedIdentities\"}]");
         process.Failure(args => args.Contains("role") && args.Contains("list"));
         process.Success(args => args.Contains("group") && args.Contains("exists") && args.Contains("registry-rg"), "false");
+        WorkspaceShowNotFound(process);
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
         process.Success(args => args.Contains("group") && args.Contains("delete"));
         process.Success(args => args.Contains("group") && args.Contains("exists") && args.Contains("proof-rg"), "false");
         process.Success(args => args.Contains("list-deleted"), "[]");
         process.Success(args => args.Contains("list-deleted"), "[]");
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup, _fixture.FoundationResources));
 
@@ -3307,6 +3595,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("deployment") && args.Contains("list"), "[]");
         process.Success(args => args.Contains("list-deleted"), "[{\"name\":\"proof-kv\",\"properties\":{\"location\":\"westeurope\",\"vaultId\":\"/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/other/providers/Microsoft.KeyVault/vaults/proof-kv\"}}]");
         process.Success(args => args.Contains("list-deleted"), "[{\"name\":\"proof-kv\",\"properties\":{\"location\":\"westeurope\",\"vaultId\":\"/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/other/providers/Microsoft.KeyVault/vaults/proof-kv\"}}]");
+        process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
 
         var result = await _fixture.Runner(process).RunAsync(_fixture.Command(AzureProviderRunnerStep.Cleanup, _fixture.FoundationResources));
 

@@ -43,10 +43,10 @@ public sealed class ManagedLifecycleOperationalHealthEvaluator
         ManagedLifecycleOperationalHealthSnapshot snapshot,
         DateTimeOffset now)
     {
-        // RecoveryRequired is an explicit durable state. It must remain visible
-        // even when another projection also reports a failure or an unknown fact.
-        if (snapshot.Operation?.State == ElsaInstanceOperationState.RecoveryRequired ||
-            snapshot.Run?.Status == WorkspaceDeploymentRunStatus.RecoveryRequired)
+        // Human-required parks follow RequiresHumanAt, not RecoveryRequired
+        // state alone. Auto-resuming and temporary parks stay off this status
+        // until the catalog sets the flag.
+        if (IsHumanRequired(snapshot))
             return (
                 ManagedLifecycleOperationalHealthStatus.RecoveryRequired,
                 ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired);
@@ -130,8 +130,7 @@ public sealed class ManagedLifecycleOperationalHealthEvaluator
     {
         var alerts = new List<ManagedLifecycleOperationalHealthAlert>();
 
-        if (snapshot.Operation?.State == ElsaInstanceOperationState.RecoveryRequired ||
-            snapshot.Run?.Status == WorkspaceDeploymentRunStatus.RecoveryRequired)
+        if (IsHumanRequired(snapshot))
             alerts.Add(CreateAlert(
                 snapshot,
                 ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired,
@@ -183,6 +182,9 @@ public sealed class ManagedLifecycleOperationalHealthEvaluator
 
         return alerts.ToArray();
     }
+
+    private static bool IsHumanRequired(ManagedLifecycleOperationalHealthSnapshot snapshot) =>
+        snapshot.Operation is { State: ElsaInstanceOperationState.RecoveryRequired, RequiresHumanAt: not null };
 
     private bool IsRetryExhausted(ManagedLifecycleOperationalHealthSnapshot snapshot)
     {

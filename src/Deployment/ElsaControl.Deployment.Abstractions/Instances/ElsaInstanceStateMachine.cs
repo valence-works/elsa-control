@@ -48,7 +48,8 @@ public sealed record ElsaInstanceOperation
         DateTimeOffset acceptedAt,
         string? recoveryIdempotencyScope = null,
         string? recoveryIdempotencyKey = null,
-        string? recoveryRequestHash = null)
+        string? recoveryRequestHash = null,
+        int? recoveryExpectedVersion = null)
     {
         Id = id;
         InstanceId = instanceId;
@@ -63,6 +64,7 @@ public sealed record ElsaInstanceOperation
         RecoveryIdempotencyScope = recoveryIdempotencyScope;
         RecoveryIdempotencyKey = recoveryIdempotencyKey;
         RecoveryRequestHash = recoveryRequestHash;
+        RecoveryExpectedVersion = recoveryExpectedVersion;
     }
 
     public Guid Id { get; }
@@ -88,6 +90,16 @@ public sealed record ElsaInstanceOperation
     public string? RecoveryIdempotencyScope { get; private init; }
     public string? RecoveryIdempotencyKey { get; private init; }
     public string? RecoveryRequestHash { get; private init; }
+
+    /// <summary>
+    /// Version a customer or operator Recover was accepted against.
+    /// Recover mutates this row in place and leaves
+    /// <see cref="ExpectedVersion"/> at the original accept, so Delete
+    /// If-Match rebase uses this stamp. System auto-resume does not
+    /// stamp a new marker; it preserves an existing customer or
+    /// operator marker so a later stale Delete still 412s.
+    /// </summary>
+    public int? RecoveryExpectedVersion { get; private init; }
 
     public bool HoldsReservation => ElsaInstanceOperationGuard.IsActive(State);
 
@@ -141,7 +153,8 @@ public sealed record ElsaInstanceOperation
         DateTimeOffset acceptedAt,
         string? recoveryIdempotencyScope = null,
         string? recoveryIdempotencyKey = null,
-        string? recoveryRequestHash = null)
+        string? recoveryRequestHash = null,
+        int? recoveryExpectedVersion = null)
     {
         if (id == Guid.Empty)
             throw new ArgumentException("Operation ID is required.", nameof(id));
@@ -153,6 +166,8 @@ public sealed record ElsaInstanceOperation
             throw new ArgumentOutOfRangeException(nameof(expectedVersion), "Expected version must be positive.");
         if (attemptNumber < 1)
             throw new ArgumentOutOfRangeException(nameof(attemptNumber), "Attempt number must be positive.");
+        if (recoveryExpectedVersion is { } recoveredVersion && recoveredVersion < 1)
+            throw new ArgumentOutOfRangeException(nameof(recoveryExpectedVersion), "Recovery expected version must be positive.");
         if (state == ElsaInstanceOperationState.WaitingForPriorOperation &&
             action != ElsaInstanceOperationAction.Delete)
             throw new ArgumentException("Only delete operations can wait for a prior operation.", nameof(state));
@@ -172,7 +187,8 @@ public sealed record ElsaInstanceOperation
             acceptedAt.ToUniversalTime(),
             recoveryIdempotencyScope is null ? null : ElsaInstanceReferenceValue.RequireOperationScope(recoveryIdempotencyScope, nameof(recoveryIdempotencyScope)),
             recoveryIdempotencyKey is null ? null : ElsaInstanceReferenceValue.RequireOperationKey(recoveryIdempotencyKey, nameof(recoveryIdempotencyKey)),
-            recoveryRequestHash is null ? null : ElsaInstanceReferenceValue.RequireCanonicalHash(recoveryRequestHash, nameof(recoveryRequestHash)));
+            recoveryRequestHash is null ? null : ElsaInstanceReferenceValue.RequireCanonicalHash(recoveryRequestHash, nameof(recoveryRequestHash)),
+            recoveryExpectedVersion);
     }
 
     public ElsaInstanceOperation TransitionTo(ElsaInstanceOperationState next)
@@ -189,18 +205,73 @@ public sealed record ElsaInstanceOperation
     /// Recovery is explicit: an uncertain operation cannot be retried by directly
     /// inserting another queued operation.
     /// </summary>
-    public ElsaInstanceOperation Recover(string idempotencyScope, string idempotencyKey, string requestHash)
+    public ElsaInstanceOperation Recover(
+        string idempotencyScope,
+        string idempotencyKey,
+        string requestHash,
+        int? recoveryExpectedVersion)
     {
         if (State != ElsaInstanceOperationState.RecoveryRequired)
             throw new InvalidOperationException("Only a recovery-required operation can be recovered.");
+        if (recoveryExpectedVersion is { } version && version < 1)
+            throw new ArgumentOutOfRangeException(nameof(recoveryExpectedVersion), "Recovery expected version must be positive.");
         return this with
         {
             State = ElsaInstanceOperationState.Queued,
             AttemptNumber = checked(AttemptNumber + 1),
             RecoveryIdempotencyScope = ElsaInstanceReferenceValue.RequireOperationScope(idempotencyScope, nameof(idempotencyScope)),
             RecoveryIdempotencyKey = ElsaInstanceReferenceValue.RequireOperationKey(idempotencyKey, nameof(idempotencyKey)),
-            RecoveryRequestHash = ElsaInstanceReferenceValue.RequireCanonicalHash(requestHash, nameof(requestHash))
+            RecoveryRequestHash = ElsaInstanceReferenceValue.RequireCanonicalHash(requestHash, nameof(requestHash)),
+            // System auto-resume passes null and must keep a prior customer/
+            // operator marker. A later customer/operator Recover advances it.
+            RecoveryExpectedVersion = MergeRecoveryExpectedVersion(recoveryExpectedVersion, RecoveryExpectedVersion)
         };
+    }
+
+    /// <summary>
+    /// One merge for Recover and both stores so a later #671 rebase
+    /// conflicts in one place. Incoming customer/operator stamps win;
+    /// a null incoming auto-resume keeps the existing marker.
+    /// </summary>
+    public static int? MergeRecoveryExpectedVersion(int? incoming, int? existing) => incoming ?? existing;
+
+    /// <summary>
+    /// Persistence resume may see a null incoming stamp from system
+    /// auto-resume. Keep the stored customer or operator marker.
+    /// </summary>
+    public ElsaInstanceOperation WithPreservedRecoveryExpectedVersion(int? existing) =>
+        this with { RecoveryExpectedVersion = MergeRecoveryExpectedVersion(RecoveryExpectedVersion, existing) };
+
+    public bool BlocksDeleteRebaseAt(int version) =>
+        (IsCustomerOrOperatorMutation(Action) && ExpectedVersion >= version) ||
+        RecoveryExpectedVersion >= version;
+
+    /// <summary>
+    /// System-only accepted operations that may rebase a stale Delete If-Match.
+    /// Provider receipts, lifecycle/status transitions, and telemetry bump
+    /// Version without writing an operation and therefore never appear here.
+    /// Unknown future actions are not on this list.
+    /// </summary>
+    public static readonly ElsaInstanceOperationAction[] SystemOnlyLifecycleActions =
+        [ElsaInstanceOperationAction.Reconcile];
+
+    public static bool IsSystemOnlyLifecycleAction(ElsaInstanceOperationAction action)
+    {
+        ElsaInstanceValue.RequireEnum(action, nameof(action));
+        return SystemOnlyLifecycleActions.Contains(action);
+    }
+
+    /// <summary>
+    /// Customer and operator mutations that must not be skipped by a Delete
+    /// If-Match rebase. Create founds the instance and is not a later mutation.
+    /// Anything that is not Create and not on
+    /// <see cref="SystemOnlyLifecycleActions"/> counts as a customer change.
+    /// </summary>
+    public static bool IsCustomerOrOperatorMutation(ElsaInstanceOperationAction action)
+    {
+        ElsaInstanceValue.RequireEnum(action, nameof(action));
+        return action != ElsaInstanceOperationAction.Create &&
+               !IsSystemOnlyLifecycleAction(action);
     }
 
     public static bool CanTransition(ElsaInstanceOperationState current, ElsaInstanceOperationState next)
@@ -438,7 +509,8 @@ public static class ElsaInstanceStateMachine
         ElsaInstanceIntent? requestedIntent = null,
         bool minorApproved = false,
         bool migrationAuthorized = false,
-        string? idempotencyScope = null)
+        string? idempotencyScope = null,
+        bool recordCustomerRecovery = true)
     {
         ArgumentNullException.ThrowIfNull(instance);
 
@@ -469,7 +541,20 @@ public static class ElsaInstanceStateMachine
                                     instance.Intent.DesiredLifecycle == ElsaDesiredLifecycle.Deleting
                 ? instance
                 : RequestReconciliation(instance);
-            return new ElsaInstanceTransitionResult(recoveredInstance, activeOperation.Recover(operationScope, key, hash));
+            // Customer Recover is a later mutation. Advance the aggregate so a
+            // Delete If-Match captured before Recover is stale. Delete recovery
+            // keeps the cleanup aggregate in place.
+            if (activeOperation.Action != ElsaInstanceOperationAction.Delete &&
+                instance.Intent.DesiredLifecycle != ElsaDesiredLifecycle.Deleting &&
+                recoveredInstance.Version == instance.Version)
+                recoveredInstance = recoveredInstance with { Version = checked(instance.Version + 1) };
+            return new ElsaInstanceTransitionResult(
+                recoveredInstance,
+                activeOperation.Recover(
+                    operationScope,
+                    key,
+                    hash,
+                    recordCustomerRecovery ? expected : null));
         }
 
         if (activeOperation is not null && ElsaInstanceOperationGuard.IsIdempotentReplay(activeOperation, operationScope, key, hash))

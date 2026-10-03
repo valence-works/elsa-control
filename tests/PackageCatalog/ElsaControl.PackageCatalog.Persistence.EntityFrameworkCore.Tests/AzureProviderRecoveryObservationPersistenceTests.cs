@@ -581,10 +581,13 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
             instance.Version,
             "customer-recover-after-cap",
             "customer-recover"));
+        // Recovery request hash includes the original If-Match. Replay must
+        // reprint that same expected version even if Recover advanced the
+        // aggregate (for example when a no-op reconcile left UpdatedAt stale).
         var replay = await lifecycle.RecoverAsync(new ElsaInstanceLifecycleRequest(
             fixture.Workspace.Id,
             fixture.InstanceId,
-            first.Instance.Version,
+            instance.Version,
             "customer-recover-after-cap",
             "customer-recover"));
 

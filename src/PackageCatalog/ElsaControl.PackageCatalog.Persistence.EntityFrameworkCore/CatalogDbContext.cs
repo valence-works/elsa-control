@@ -5,6 +5,7 @@ using System.Text.Json;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Instances;
+using ElsaControl.Deployment.Core.Telemetry;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Manifests;
 using ElsaControl.PackageCatalog.Core.Accounts;
@@ -20,6 +21,7 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options) : DbContext(options)
 {
     private readonly HashSet<(Guid SubscriptionId, string Property)> _lifecycleDeadlineOverrides = [];
+    private readonly List<RecoveryRequiredAlertCandidate> _pendingRecoveryRequiredAlerts = [];
 
     public DbSet<PackageSource> PackageSources => Set<PackageSource>();
     public DbSet<Package> Packages => Set<Package>();
@@ -54,6 +56,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     internal DbSet<Models.ElsaInstanceProvisioningContextEntity> ElsaInstanceProvisioningContexts => Set<Models.ElsaInstanceProvisioningContextEntity>();
     internal DbSet<Models.ElsaInstanceIntentRevisionEntity> ElsaInstanceIntentRevisions => Set<Models.ElsaInstanceIntentRevisionEntity>();
     internal DbSet<Models.ElsaInstanceLifecycleOutboxEntity> ElsaInstanceLifecycleOutbox => Set<Models.ElsaInstanceLifecycleOutboxEntity>();
+    internal DbSet<Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity> ElsaInstanceRecoveryRequiredAlertOutbox => Set<Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity>();
     internal DbSet<Models.ElsaInstanceOperationEntity> ElsaInstanceOperations => Set<Models.ElsaInstanceOperationEntity>();
     internal DbSet<Models.ElsaInstanceRecoveryRequestEntity> ElsaInstanceRecoveryRequests => Set<Models.ElsaInstanceRecoveryRequestEntity>();
     internal DbSet<Models.ElsaInstanceResolvedPlanEntity> ElsaInstanceResolvedPlans => Set<Models.ElsaInstanceResolvedPlanEntity>();
@@ -151,6 +154,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         modelBuilder.ApplyConfiguration(new Models.ElsaInstanceProvisioningContextConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ElsaInstanceIntentRevisionConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ElsaInstanceLifecycleOutboxConfiguration());
+        modelBuilder.ApplyConfiguration(new Models.ElsaInstanceRecoveryRequiredAlertOutboxConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ElsaInstanceOperationConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ElsaInstanceRecoveryRequestConfiguration());
         modelBuilder.ApplyConfiguration(new Models.ElsaInstanceResolvedPlanConfiguration());
@@ -238,7 +242,14 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         try
         {
             PrepareForSave();
-            return base.SaveChanges(acceptAllChangesOnSuccess);
+            var result = base.SaveChanges(acceptAllChangesOnSuccess);
+            TryFlushRecoveryRequiredAlertsIfCommitted();
+            return result;
+        }
+        catch
+        {
+            ClearRecoveryRequiredAlerts();
+            throw;
         }
         finally
         {
@@ -256,7 +267,14 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         try
         {
             PrepareForSave();
-            return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+            var result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+            TryFlushRecoveryRequiredAlertsIfCommitted();
+            return result;
+        }
+        catch
+        {
+            ClearRecoveryRequiredAlerts();
+            throw;
         }
         finally
         {
@@ -280,6 +298,112 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     }
 
     internal void ClearLifecycleDeadlineOverrides() => _lifecycleDeadlineOverrides.Clear();
+
+    private void QueueRecoveryRequiredAlertIfRequiresHuman(
+        Microsoft.EntityFrameworkCore.ChangeTracking.EntityEntry<Models.ElsaInstanceOperationEntity> entry)
+    {
+        var operation = entry.Entity;
+        DateTimeOffset? original = entry.State == EntityState.Added
+            ? null
+            : (DateTimeOffset?)entry.Property(nameof(Models.ElsaInstanceOperationEntity.RequiresHumanAt)).OriginalValue;
+        if (original is not null || operation.RequiresHumanAt is null)
+            return;
+        if (operation.WorkspaceId == Guid.Empty ||
+            operation.InstanceId is not { } instanceId ||
+            instanceId == Guid.Empty ||
+            operation.AttemptNumber < 1)
+            return;
+        if (ChangeTracker.Entries<Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity>()
+            .Any(existing =>
+                existing.State == EntityState.Added &&
+                existing.Entity.OperationId == operation.Id &&
+                existing.Entity.AttemptNumber == operation.AttemptNumber))
+            return;
+
+        var createdAt = operation.RequiresHumanAt.Value.ToUniversalTime();
+        var runId = operation.DeploymentRunId;
+        var dedupe = ManagedLifecycleRecoveryRequiredAlert.ComputeDedupeIdentity(
+            operation.WorkspaceId,
+            instanceId,
+            operation.Id,
+            operation.AttemptNumber,
+            runId);
+        ElsaInstanceRecoveryRequiredAlertOutbox.Add(new Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = operation.OrganizationId,
+            WorkspaceId = operation.WorkspaceId,
+            InstanceId = instanceId,
+            OperationId = operation.Id,
+            AttemptNumber = operation.AttemptNumber,
+            RunId = runId,
+            DedupeIdentity = dedupe,
+            CreatedAt = createdAt
+        });
+        _pendingRecoveryRequiredAlerts.Add(new RecoveryRequiredAlertCandidate(
+            operation.WorkspaceId,
+            instanceId,
+            operation.Id,
+            operation.AttemptNumber,
+            runId,
+            dedupe));
+    }
+
+    /// <summary>
+    /// Drops queued RecoveryRequired alerts at the start of a transaction
+    /// attempt. A failed attempt must leave nothing behind for the next one.
+    /// </summary>
+    internal void ResetRecoveryRequiredAlerts() => ClearRecoveryRequiredAlerts();
+
+    /// <summary>
+    /// Nudges the dispatcher after the catalog transaction commits. The
+    /// dispatcher is the only sender. Call only from
+    /// <c>ExecuteInTransactionCoreAsync</c> after <c>CommitAsync</c>
+    /// succeeds.
+    /// </summary>
+    internal void FlushRecoveryRequiredAlertsAfterCommit() => TryFlushRecoveryRequiredAlerts();
+
+    private void TryFlushRecoveryRequiredAlertsIfCommitted()
+    {
+        // An explicit catalog transaction commits later. Nudging here would
+        // ask the dispatcher to send a row that can still roll back.
+        if (Database.CurrentTransaction is not null)
+            return;
+        TryFlushRecoveryRequiredAlerts();
+    }
+
+    /// <summary>
+    /// Asks the dispatcher to run now. This path does not emit the span;
+    /// the outbox row is already committed and the dispatcher owns send
+    /// plus acknowledgement.
+    /// </summary>
+    private void TryFlushRecoveryRequiredAlerts()
+    {
+        try
+        {
+            if (_pendingRecoveryRequiredAlerts.Count > 0)
+                RecoveryRequiredAlertDispatchSignal.Instance.Notify();
+        }
+        catch
+        {
+            // The outbox row is committed. The next dispatcher tick still
+            // delivers.
+        }
+        finally
+        {
+            ClearRecoveryRequiredAlerts();
+        }
+    }
+
+    private void ClearRecoveryRequiredAlerts() => _pendingRecoveryRequiredAlerts.Clear();
+
+    private readonly record struct RecoveryRequiredAlertCandidate(
+        Guid WorkspaceId,
+        Guid InstanceId,
+        Guid OperationId,
+        int AttemptNumber,
+        Guid? RunId,
+        string DedupeIdentity);
 
     /// <summary>
     /// Runs the persistence guards over the changes detected once, at the start of the pass. With automatic detection on,
@@ -307,6 +431,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             EnsureElsaInstanceIntentRevisionsAreAppendOnly();
             EnsureElsaInstanceProvisioningContextsAreAppendOnly();
             EnsureElsaInstanceLifecycleOutboxIsAppendOnly();
+            EnsureElsaInstanceRecoveryRequiredAlertOutboxIsAppendOnly();
             EnsureElsaInstanceResolvedPlansAreAppendOnly();
             EnsureElsaInstanceRecoveryRequestsAreAppendOnly();
             EnsureManagedElsaHandoffRowsAreAppendOnly();
@@ -677,6 +802,37 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             throw new InvalidOperationException("Elsa instance provisioning contexts are immutable.");
     }
 
+    private void EnsureElsaInstanceRecoveryRequiredAlertOutboxIsAppendOnly()
+    {
+        foreach (var entry in ChangeTracker.Entries<Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity>()
+                     .Where(x => x.State is EntityState.Modified or EntityState.Deleted))
+        {
+            if (entry.State == EntityState.Deleted)
+                throw new InvalidOperationException("RecoveryRequired alert outbox records are append-only.");
+
+            var changedProperties = entry.Properties
+                .Where(property => property.IsModified)
+                .Select(property => property.Metadata.Name)
+                .ToArray();
+            if (changedProperties.Any(property => property is not (
+                    nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.SentAt) or
+                    nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.DeliveryAttempts) or
+                    nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.NextAttemptAt) or
+                    nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.LeasedUntil) or
+                    nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.LeasedBy))))
+                throw new InvalidOperationException("RecoveryRequired alert outbox payload is append-only.");
+
+            var originalSentAt = (DateTimeOffset?)entry.Property(nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.SentAt)).OriginalValue;
+            var currentSentAt = entry.Entity.SentAt;
+            if (originalSentAt is not null && originalSentAt != currentSentAt)
+                throw new InvalidOperationException("RecoveryRequired alert outbox delivery is append-only.");
+
+            var originalAttempts = (int)entry.Property(nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.DeliveryAttempts)).OriginalValue!;
+            if (entry.Entity.DeliveryAttempts < originalAttempts)
+                throw new InvalidOperationException("RecoveryRequired alert outbox delivery attempts cannot decrease.");
+        }
+    }
+
     private void EnsureElsaInstanceLifecycleOutboxIsAppendOnly()
     {
         foreach (var entry in ChangeTracker.Entries<Models.ElsaInstanceLifecycleOutboxEntity>()
@@ -951,8 +1107,10 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             }
         }
 
-        foreach (var entry in ChangeTracker.Entries<Models.ElsaInstanceOperationEntity>()
-                     .Where(x => x.State is EntityState.Added or EntityState.Modified))
+        var operationEntries = ChangeTracker.Entries<Models.ElsaInstanceOperationEntity>()
+            .Where(x => x.State is EntityState.Added or EntityState.Modified)
+            .ToList();
+        foreach (var entry in operationEntries)
         {
             var operation = entry.Entity;
             EnsureDefined(operation.Action, nameof(operation.Action));
@@ -1062,6 +1220,9 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
                     throw new InvalidOperationException("Instance operation attempt number cannot decrease.");
             }
         }
+
+        foreach (var entry in operationEntries)
+            QueueRecoveryRequiredAlertIfRequiresHuman(entry);
 
 
         foreach (var entry in ChangeTracker.Entries<Models.ElsaInstanceRecoveryRequestEntity>()

@@ -66,6 +66,16 @@ jobs:
       # Guid.NewGuid() on first Cloud sign-in, so its id is recorded on `test`
       # as STAGING_SMOKE_OWNER_ORGANIZATION_ID rather than as a source constant.
       EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ vars.EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS }}
+      # RecoveryRequired Azure Monitor email. Staging never uses the production
+      # mailbox. infra mode passes the matching variable into
+      # scripts/deploy-managed-telemetry.sh.
+      STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT: ${{ vars.STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT }}
+      PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT: ${{ vars.PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT }}
+      MANAGED_TELEMETRY_WORKSPACE_NAME: ${{ vars.MANAGED_TELEMETRY_WORKSPACE_NAME }}
+      MANAGED_TELEMETRY_APPLICATION_INSIGHTS_NAME: ${{ vars.MANAGED_TELEMETRY_APPLICATION_INSIGHTS_NAME }}
+      MANAGED_TELEMETRY_API_IDENTITY_NAME: ${{ vars.MANAGED_TELEMETRY_API_IDENTITY_NAME }}
+      MANAGED_TELEMETRY_API_IDENTITY_RESOURCE_GROUP: ${{ vars.MANAGED_TELEMETRY_API_IDENTITY_RESOURCE_GROUP }}
+      MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED: ${{ vars.MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED }}
       STAGING_BILLING_LIFECYCLE_LEVER_ENABLED: ${{ vars.STAGING_BILLING_LIFECYCLE_LEVER_ENABLED }}
       STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS: ${{ vars.STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS }}
       STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED: ${{ vars.STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED }}
@@ -346,6 +356,29 @@ jobs:
             )
             if [ "$TARGET_ENVIRONMENT" = "test" ]; then
               required+=(AZURE_PROVISIONER_IDENTITY_ID)
+            fi
+            if [ "$TARGET_ENVIRONMENT" = "test" ] || [ "$TARGET_ENVIRONMENT" = "production" ]; then
+              required+=(
+                MANAGED_TELEMETRY_WORKSPACE_NAME
+                MANAGED_TELEMETRY_APPLICATION_INSIGHTS_NAME
+                MANAGED_TELEMETRY_API_IDENTITY_NAME
+                MANAGED_TELEMETRY_API_IDENTITY_RESOURCE_GROUP
+              )
+              if [ "$TARGET_ENVIRONMENT" = "test" ]; then
+                required+=(
+                  STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT
+                  PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT
+                )
+              else
+                required+=(PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT)
+              fi
+              if [ "$TARGET_ENVIRONMENT" = "test" ] &&
+                 [ -n "${STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT:-}" ] &&
+                 [ -n "${PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT:-}" ] &&
+                 [ "$STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT" = "$PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT" ]; then
+                echo "::error::Staging RecoveryRequired alerts must not use the production mailbox."
+                exit 1
+              fi
             fi
           fi
 
@@ -975,17 +1008,26 @@ jobs:
             fi
             pairing_before_count="${pairing_before_count:-0}"
           fi
+          azure_monitor_settings=()
+          if [ "${TARGET_ENVIRONMENT:-}" = "test" ]; then
+            azure_monitor_settings+=("ManagedLifecycleTelemetry__AzureMonitor__Environment=staging")
+          elif [ "${TARGET_ENVIRONMENT:-}" = "production" ]; then
+            azure_monitor_settings+=("ManagedLifecycleTelemetry__AzureMonitor__Environment=production")
+          fi
+          if [ -n "${MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED:-}" ]; then
+            azure_monitor_settings+=("ManagedLifecycleTelemetry__AzureMonitor__Enabled=$MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED")
+          fi
           if [ "$DEPLOY_MODE" = "infra" ]; then
             az webapp config appsettings set \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_WEBAPP_NAME" \
-              --settings Application__BuildNumber="$application_build_number" "${cloud_account_settings[@]}" \
+              --settings Application__BuildNumber="$application_build_number" "${cloud_account_settings[@]}" "${azure_monitor_settings[@]}" \
               --output none
           else
             az webapp config appsettings set \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_WEBAPP_NAME" \
-              --settings AZURE_TOKEN_CREDENTIALS=prod Application__BuildNumber="$application_build_number" "${cloud_account_settings[@]}" \
+              --settings AZURE_TOKEN_CREDENTIALS=prod Application__BuildNumber="$application_build_number" "${cloud_account_settings[@]}" "${azure_monitor_settings[@]}" \
               --output none
           fi
           PAIRING_BEFORE_COUNT="$pairing_before_count" scripts/apply-external-engine-pairing-settings.sh
@@ -996,6 +1038,14 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --name "$AZURE_WEBAPP_NAME" \
             --output none
+
+      - name: Deploy managed telemetry sink
+        id: managed-telemetry
+        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.DEPLOY_MODE == 'infra' && (env.TARGET_ENVIRONMENT == 'test' || env.TARGET_ENVIRONMENT == 'production') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/deploy-managed-telemetry.sh
 
       - name: Reconcile staging Stripe billing
         id: staging-stripe

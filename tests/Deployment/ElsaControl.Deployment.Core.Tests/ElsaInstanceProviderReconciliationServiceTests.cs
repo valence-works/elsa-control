@@ -60,6 +60,77 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
     }
 
     [Fact]
+    public async Task No_op_in_progress_ticks_do_not_advance_instance_version()
+    {
+        var (store, accepted) = await RecoveryTargetAsync();
+        var first = new ElsaInstanceProviderObservation(
+            ElsaInstanceProviderObservationKind.Confirmed,
+            ElsaObservedLifecycle.Provisioning,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "observation-provisioning-1");
+        var second = new ElsaInstanceProviderObservation(
+            ElsaInstanceProviderObservationKind.Confirmed,
+            ElsaObservedLifecycle.Provisioning,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "observation-provisioning-2");
+
+        var service = Service(store, new QueuePort(first, second));
+        var changed = await service.ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+        var versionAfterChange = store.Instances.Single().Version;
+        var noOp = await service.ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+
+        Assert.Equal(ElsaObservedLifecycle.Provisioning, changed.Projection.ObservedLifecycle);
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, noOp.Outcome);
+        Assert.False(noOp.Replayed);
+        Assert.Equal(versionAfterChange, noOp.Projection.InstanceVersion);
+        Assert.Equal(versionAfterChange, store.Instances.Single().Version);
+    }
+
+    [Fact]
+    public async Task Delete_is_accepted_after_no_op_reconcile_ticks_keep_if_match_valid()
+    {
+        var (store, accepted, authority) = await RecoveryTargetWithAuthorityAsync();
+        var first = new ElsaInstanceProviderObservation(
+            ElsaInstanceProviderObservationKind.Confirmed,
+            ElsaObservedLifecycle.Provisioning,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "observation-provisioning-1");
+        var second = new ElsaInstanceProviderObservation(
+            ElsaInstanceProviderObservationKind.Confirmed,
+            ElsaObservedLifecycle.Provisioning,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "observation-provisioning-2");
+        var service = Service(store, new QueuePort(first, second));
+        await service.ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+        var versionBeforeNoOp = store.Instances.Single().Version;
+        await service.ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+        Assert.Equal(versionBeforeNoOp, store.Instances.Single().Version);
+
+        var confirmationId = Guid.NewGuid();
+        var actorAccountId = Guid.NewGuid();
+        authority.Add(new ActionConfirmation(
+            confirmationId,
+            WorkspaceId,
+            ConfirmationActionType.DeleteManagedInstance,
+            accepted.Instance.Id.ToString("D"),
+            actorAccountId,
+            Now,
+            Now.AddMinutes(5),
+            null));
+        var deletion = await new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now))
+            .DeleteAsync(new(
+                WorkspaceId,
+                accepted.Instance.Id,
+                versionBeforeNoOp,
+                "delete-after-no-op-reconcile",
+                DeleteConfirmationId: confirmationId,
+                ActorAccountId: actorAccountId));
+
+        Assert.Equal(ElsaInstanceOperationAction.Delete, deletion.Operation.Action);
+        Assert.NotEqual(ElsaInstanceOperationState.Failed, deletion.Operation.State);
+    }
+
+    [Fact]
     public async Task Retry_safety_is_explicit_but_does_not_trigger_a_blind_retry()
     {
         var (store, accepted) = await RecoveryTargetAsync();
@@ -104,6 +175,7 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
         Assert.Equal(accepted.Operation.Id, resumed.Id);
         Assert.Equal(ElsaInstanceOperationState.Queued, resumed.State);
         Assert.Equal(accepted.Operation.AttemptNumber + 1, resumed.AttemptNumber);
+        Assert.Null(resumed.RecoveryExpectedVersion);
         var recovery = Assert.Single(store.RecoveryRequests);
         Assert.Equal(accepted.Operation.Id, recovery.OperationId);
         Assert.Equal($"auto-resume.{accepted.Operation.Id:N}.1", recovery.IdempotencyKey);
@@ -132,7 +204,7 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
             accepted.Instance.Id,
             retrySafe.Projection.InstanceVersion,
             $"auto-resume.{accepted.Operation.Id:N}.1",
-            "auto-resume",
+            "pre-consumed-auto-resume-key",
             ActorAccountId: null,
             ExpectedOperationId: accepted.Operation.Id));
         store.MarkRecoveryRequired(accepted.Operation.Id);
@@ -288,7 +360,74 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
             ExpectedOperationId: accepted.Operation.Id));
 
         Assert.Equal(ElsaInstanceOperationState.Queued, recovered.Operation.State);
+        Assert.Equal(result.Projection.InstanceVersion, recovered.Operation.RecoveryExpectedVersion);
         Assert.Equal(3, port.AutoResumeCount);
+    }
+
+    [Fact]
+    public async Task Auto_resume_after_customer_recover_preserves_the_marker_and_blocks_stale_delete()
+    {
+        var (store, accepted, authority) = await RecoveryTargetWithAuthorityAsync();
+        var readVersion = accepted.Instance.Version;
+        var lifecycle = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var retrySafe = await new ElsaInstanceProviderReconciliationService(
+                store,
+                new RecordingPort(new ElsaInstanceProviderObservation(
+                    ElsaInstanceProviderObservationKind.Confirmed,
+                    ElsaObservedLifecycle.Provisioning,
+                    ElsaInstanceProviderHealthGate.Unknown,
+                    "observation-before-customer-recover",
+                    OpaqueEvidence(autoResume: false))),
+                new StaticTimeProvider(Now),
+                lifecycle)
+            .ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+        var recovered = await lifecycle.RecoverAsync(new ElsaInstanceLifecycleRequest(
+            WorkspaceId,
+            accepted.Instance.Id,
+            retrySafe.Projection.InstanceVersion,
+            "customer-recover-before-auto-resume",
+            ActorAccountId: Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+            ExpectedOperationId: accepted.Operation.Id));
+        Assert.Equal(retrySafe.Projection.InstanceVersion, recovered.Operation.RecoveryExpectedVersion);
+        store.MarkRecoveryRequired(accepted.Operation.Id);
+        var port = new ChargingPort(
+            new ElsaInstanceProviderObservation(
+                ElsaInstanceProviderObservationKind.Confirmed,
+                ElsaObservedLifecycle.Provisioning,
+                ElsaInstanceProviderHealthGate.Unknown,
+                "observation-auto-resume-after-customer",
+                OpaqueEvidence(autoResume: true)));
+
+        var resumed = await new ElsaInstanceProviderReconciliationService(
+                store, port, new StaticTimeProvider(Now), lifecycle)
+            .ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+
+        var parked = Assert.Single(store.Operations);
+        Assert.Equal(ElsaInstanceOperationState.Queued, parked.State);
+        Assert.Equal(recovered.Operation.RecoveryExpectedVersion, parked.RecoveryExpectedVersion);
+        Assert.Equal(1, port.AutoResumeCount);
+        var current = store.Instances.Single();
+        var confirmationId = Guid.NewGuid();
+        authority.Add(new ActionConfirmation(
+            confirmationId,
+            WorkspaceId,
+            ConfirmationActionType.DeleteManagedInstance,
+            current.Id.ToString("D"),
+            Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+            Now,
+            Now.AddMinutes(5),
+            null));
+
+        var conflict = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            lifecycle.DeleteAsync(new ElsaInstanceLifecycleRequest(
+                WorkspaceId, current.Id, current.Version, "delete-after-preserved-recover",
+                DeleteConfirmationId: confirmationId,
+                ActorAccountId: Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                CanonicalExpectedVersion: readVersion)));
+
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.ChangedSinceRead, conflict.Reason);
+        Assert.DoesNotContain(store.Operations, operation => operation.Action == ElsaInstanceOperationAction.Delete);
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, resumed.Outcome);
     }
 
     [Fact]
@@ -308,6 +447,29 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
 
         Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, result.Outcome);
         Assert.Equal("azure.deployment.failed", result.DiagnosticCode);
+        Assert.False(result.RetrySafe);
+    }
+
+    [Theory]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled)]
+    public async Task Azure_park_reason_reaches_the_lifecycle_in_one_reconcile(string parkCode)
+    {
+        var (store, accepted) = await RecoveryTargetAsync();
+        var observation = new ElsaInstanceProviderObservation(
+            ElsaInstanceProviderObservationKind.Ambiguous,
+            ElsaObservedLifecycle.Unknown,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "observation-azure-park")
+        {
+            ReasonCode = parkCode
+        };
+
+        var result = await Service(store, new RecordingPort(observation)).ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(parkCode, result.DiagnosticCode);
         Assert.False(result.RetrySafe);
     }
 

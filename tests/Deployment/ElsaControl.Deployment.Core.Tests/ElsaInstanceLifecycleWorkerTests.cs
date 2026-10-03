@@ -814,6 +814,15 @@ public sealed class ElsaInstanceLifecycleWorkerTests
             ElsaInstanceOperationAction? action = null, string? idempotencyScope = null, CancellationToken cancellationToken = default) =>
             _inner.FindOperationByKeyAsync(workspaceId, idempotencyKey, instanceId, action, idempotencyScope, cancellationToken);
 
+        public Task<bool> HasCustomerMutationAtOrAfterVersionAsync(
+            Guid workspaceId,
+            Guid instanceId,
+            int version,
+            Guid? exceptOperationId = null,
+            CancellationToken cancellationToken = default) =>
+            _inner.HasCustomerMutationAtOrAfterVersionAsync(
+                workspaceId, instanceId, version, exceptOperationId, cancellationToken);
+
         public Task<ElsaInstanceLifecycleWorkItem?> TryClaimNextAsync(string workerId, DateTimeOffset now, CancellationToken cancellationToken = default) =>
             _inner.TryClaimNextAsync(workerId, now, cancellationToken);
 

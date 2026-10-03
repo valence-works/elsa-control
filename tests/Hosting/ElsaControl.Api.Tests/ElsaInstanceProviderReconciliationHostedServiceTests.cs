@@ -24,6 +24,27 @@ public sealed partial class ElsaInstanceProviderReconciliationHostedServiceTests
     private static readonly Guid WorkspaceId = Guid.Parse("11111111-1111-1111-1111-111111111111");
     private static readonly Guid OperationId = Guid.Parse("22222222-2222-2222-2222-222222222222");
 
+    [Fact]
+    public async Task RecoveryRequired_scan_failure_does_not_block_reconciliation()
+    {
+        var provider = new RecordingSubmissionPort();
+        var reconciler = new RecordingReconciliationService
+        {
+            ClockScanFailure = new InvalidOperationException("The RecoveryRequired clock scan failed.")
+        };
+        await using var services = CreateServices(provider, reconciler, [Pending(withSubmission: true)]);
+        var logger = new RecordingLogger();
+
+        await CreateHostedService(services, logger: logger).ProcessPendingAsync(CancellationToken.None);
+
+        Assert.Equal(1, reconciler.ClockScanCalls);
+        Assert.Equal(1, provider.Calls);
+        Assert.Equal(1, reconciler.Calls);
+        var error = Assert.Single(logger.Messages, message => message.Level == LogLevel.Error);
+        Assert.Equal("Managed Elsa RecoveryRequired clock scan failed.", error.Message);
+        Assert.IsType<InvalidOperationException>(error.Exception);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -944,7 +965,17 @@ public sealed partial class ElsaInstanceProviderReconciliationHostedServiceTests
     private sealed class RecordingReconciliationService : IElsaInstanceProviderReconciliationService
     {
         public int Calls { get; private set; }
+        public int ClockScanCalls { get; private set; }
+        public Exception? ClockScanFailure { get; init; }
         public List<(Guid WorkspaceId, Guid OperationId)> Requests { get; } = [];
+
+        public Task<int> AdvanceDueHumanRequiredClocksAsync(CancellationToken cancellationToken = default)
+        {
+            ClockScanCalls++;
+            if (ClockScanFailure is not null)
+                return Task.FromException<int>(ClockScanFailure);
+            return Task.FromResult(0);
+        }
 
         public Task<ElsaInstanceProviderReconciliationResult> ReconcileAsync(
             Guid workspaceId,

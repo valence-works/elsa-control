@@ -35,4 +35,15 @@ public interface IElsaInstanceProviderReconciliationStore
         string? reasonCode,
         CancellationToken cancellationToken = default) =>
         Task.CompletedTask;
+
+    /// <summary>
+    /// Compare-and-set <c>RequiresHumanAt</c> on RecoveryRequired parks whose
+    /// catalog class is past the 10-minute window. Does not require a
+    /// deployment run, so run-less lever parks can still alert exactly once.
+    /// </summary>
+    Task<int> AdvanceDueHumanRequiredClocksAsync(
+        DateTimeOffset now,
+        int limit = 64,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(0);
 }

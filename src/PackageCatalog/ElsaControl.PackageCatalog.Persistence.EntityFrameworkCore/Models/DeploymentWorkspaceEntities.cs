@@ -230,6 +230,34 @@ internal sealed class ElsaInstanceLifecycleOutboxEntity
     public string? QuarantineCode { get; set; }
 }
 
+/// <summary>
+/// Operator-alert outbox. One row per operation attempt when
+/// <see cref="ElsaInstanceOperationEntity.RequiresHumanAt"/> goes from empty
+/// to a timestamp. Payload columns are append-only; delivery columns
+/// (<see cref="SentAt"/>, <see cref="DeliveryAttempts"/>,
+/// <see cref="NextAttemptAt"/>, <see cref="LeasedUntil"/>,
+/// <see cref="LeasedBy"/>) may be updated by the dispatcher.
+/// </summary>
+internal sealed class ElsaInstanceRecoveryRequiredAlertOutboxEntity
+{
+    public Guid Id { get; set; }
+    public Guid OrganizationId { get; set; }
+    public Guid WorkspaceId { get; set; }
+    public Guid InstanceId { get; set; }
+    public ElsaInstanceEntity? Instance { get; set; }
+    public Guid OperationId { get; set; }
+    public ElsaInstanceOperationEntity? Operation { get; set; }
+    public int AttemptNumber { get; set; }
+    public Guid? RunId { get; set; }
+    public string DedupeIdentity { get; set; } = "";
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset? SentAt { get; set; }
+    public int DeliveryAttempts { get; set; }
+    public DateTimeOffset? NextAttemptAt { get; set; }
+    public DateTimeOffset? LeasedUntil { get; set; }
+    public string? LeasedBy { get; set; }
+}
+
 internal sealed class ElsaInstanceOperationEntity
 {
     public Guid Id { get; set; }
@@ -247,6 +275,12 @@ internal sealed class ElsaInstanceOperationEntity
     public string? RecoveryIdempotencyKey { get; set; }
     public string? RecoveryRequestHash { get; set; }
     public int ExpectedVersion { get; set; }
+    /// <summary>
+    /// Version the latest Recover was accepted against. Null until Recover
+    /// mutates this row. Used by Delete If-Match rebase; the original
+    /// <see cref="ExpectedVersion"/> stays at the founding accept.
+    /// </summary>
+    public int? RecoveryExpectedVersion { get; set; }
     public ElsaInstanceOperationState State { get; set; }
     public int AttemptNumber { get; set; }
     public DateTimeOffset AcceptedAt { get; set; }

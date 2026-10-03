@@ -45,7 +45,7 @@ public static class ManagedElsaInstanceCustomerProjection
         if (HasStoredTerminalPriority(stored) || desiredLifecycle == ElsaDesiredLifecycle.Deleting)
             return stored;
 
-        if (IsParkedProvisioningRecovery(activeOperation, now ?? DateTimeOffset.UtcNow))
+        if (IsParkedProvisioningRecovery(activeOperation))
             return ElsaObservedLifecycle.RecoveryRequired;
 
         if (stored != ElsaObservedLifecycle.Unknown)
@@ -213,17 +213,9 @@ public static class ManagedElsaInstanceCustomerProjection
             or ElsaObservedLifecycle.Deleting
             or ElsaObservedLifecycle.Deleted;
 
-    private static bool IsParkedProvisioningRecovery(
-        ActiveLifecycleOperation? activeOperation,
-        DateTimeOffset now) =>
-        activeOperation is { State: ElsaInstanceOperationState.RecoveryRequired } parked &&
-        IsProvisioningAction(parked.Action) &&
-        (parked.RequiresHumanAt is not null ||
-         ManagedElsaReasonCodeCatalog.RequiresHuman(
-            parked.ParkReason,
-            parked.FailureCode,
-            parked.ReasonEnteredAt,
-            now));
+    private static bool IsParkedProvisioningRecovery(ActiveLifecycleOperation? activeOperation) =>
+        activeOperation is { State: ElsaInstanceOperationState.RecoveryRequired, RequiresHumanAt: not null } parked &&
+        IsProvisioningAction(parked.Action);
 
     private static ActiveLifecycleOperation? ToActive(ElsaInstanceOperationSummary? operation) =>
         operation is null
