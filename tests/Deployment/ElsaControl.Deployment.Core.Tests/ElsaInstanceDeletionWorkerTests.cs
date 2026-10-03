@@ -186,6 +186,65 @@ public sealed class ElsaInstanceDeletionWorkerTests
     }
 
     [Fact]
+    public void Changed_receipt_with_older_status_time_does_not_move_the_clock_backwards()
+    {
+        var previous = Now - TimeSpan.FromMinutes(10);
+        var item = WorkItem(local: false) with
+        {
+            RunningSince = Now - TimeSpan.FromMinutes(20),
+            LastVerifiedProgressAt = previous,
+            LastVerifiedProgressReceipt = Receipt('1')
+        };
+
+        var advanced = ElsaInstanceDeletionWorker.ApplyVerifiedProgress(
+            item,
+            new(ElsaInstanceCleanupObservationKind.InProgress, item.Operation.Id,
+                item.Operation.AttemptNumber, "deletion.provider-cleanup-pending",
+                LastProviderProgressAt: Now - TimeSpan.FromMinutes(90),
+                ProgressReceipt: Receipt('2')),
+            Now);
+
+        Assert.Equal(Receipt('2'), advanced.LastVerifiedProgressReceipt);
+        Assert.Equal(Now, advanced.LastVerifiedProgressAt);
+        Assert.True(advanced.LastVerifiedProgressAt > previous);
+        Assert.False(ElsaInstanceDeletionWorker.HasStaleProviderProgress(advanced, Now));
+    }
+
+    [Fact]
+    public async Task Changed_receipt_with_unchanged_old_status_time_counts_as_progress()
+    {
+        var oldStatus = Now - TimeSpan.FromMinutes(70);
+        var item = WorkItem(local: false) with
+        {
+            RunningSince = oldStatus,
+            LastVerifiedProgressAt = oldStatus,
+            LastVerifiedProgressReceipt = Receipt('1')
+        };
+        var store = new DeferredStore(item, Now);
+        var port = new RecordingPort(new(
+            ElsaInstanceCleanupObservationKind.InProgress, item.Operation.Id,
+            item.Operation.AttemptNumber, "deletion.provider-cleanup-pending",
+            LastProviderProgressAt: oldStatus,
+            ProgressReceipt: Receipt('2')));
+
+        var result = await new ElsaInstanceDeletionWorker(store, port, new FixedTimeProvider(Now))
+            .ProcessAvailableAsync("delete-worker");
+
+        Assert.Empty(result.Results);
+        Assert.Equal(1, store.Deferrals);
+        Assert.Null(store.Failure);
+        Assert.False(ElsaInstanceDeletionWorker.HasStaleProviderProgress(
+            ElsaInstanceDeletionWorker.ApplyVerifiedProgress(
+                item,
+                new(ElsaInstanceCleanupObservationKind.InProgress, item.Operation.Id,
+                    item.Operation.AttemptNumber, "deletion.provider-cleanup-pending",
+                    LastProviderProgressAt: oldStatus,
+                    ProgressReceipt: Receipt('2')),
+                Now),
+            Now));
+    }
+
+    [Fact]
     public async Task Recent_provider_progress_is_deferred_and_not_escalated()
     {
         var item = WorkItem(local: false);

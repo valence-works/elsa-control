@@ -251,16 +251,30 @@ public sealed class ElsaInstanceDeletionWorker(
     {
         var lastVerified = item.LastVerifiedProgressAt;
         var receipt = item.LastVerifiedProgressReceipt;
+        var nowUtc = now.ToUniversalTime();
+        DateTimeOffset? candidate = null;
+
         if (!string.IsNullOrWhiteSpace(observation.ProgressReceipt) &&
             !string.Equals(observation.ProgressReceipt, receipt, StringComparison.Ordinal))
         {
+            // A differing receipt is verified progress at the observation time.
+            // Do not adopt an older Status/Phase stamp from the same observation:
+            // that would move the monotonic clock backwards or treat a real
+            // inventory change as already stale.
             receipt = observation.ProgressReceipt;
-            lastVerified = observation.LastProviderProgressAt ?? now.ToUniversalTime();
+            candidate = nowUtc;
         }
 
-        if (observation.LastProviderProgressAt is { } progress &&
-            (lastVerified is null || progress.ToUniversalTime() > lastVerified.Value.ToUniversalTime()))
-            lastVerified = progress.ToUniversalTime();
+        if (observation.LastProviderProgressAt is { } progress)
+        {
+            var progressUtc = progress.ToUniversalTime();
+            if (candidate is null || progressUtc > candidate.Value)
+                candidate = progressUtc;
+        }
+
+        if (candidate is { } verified &&
+            (lastVerified is null || verified > lastVerified.Value.ToUniversalTime()))
+            lastVerified = verified;
 
         return item with
         {
