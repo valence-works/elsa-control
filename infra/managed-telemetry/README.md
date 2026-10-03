@@ -37,14 +37,19 @@ Microsoft documents [Entra-authenticated ingestion and the required scoped role]
    the template and inspects the actual generated resource/role boundary, including
    the RecoveryRequired scheduled query rule and email action group.
 2. Resolve and verify the intended Control subscription, resource group, existing
-   API identity, supported sink region, and resource names. Infra deploy of
-   `azure-api-deploy.yml` runs `scripts/deploy-managed-telemetry.sh`, which
-   passes `environment=staging` plus `STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT`
+   API identity, supported sink region, and resource names. The separately
+   guarded `telemetry` deploy mode of `azure-api-deploy.yml` runs
+   `scripts/deploy-managed-telemetry.sh` at resource-group scope (`what-if`
+   then `create`). It does not run subscription-scoped `infra/main.bicep`.
+   Full infra mode is unchanged and remains #705. The script passes
+   `environment=staging` plus `STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT`
    on `test`, and `environment=production` plus
    `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT` on `production`. An unset
    recipient fails the deploy. Staging also requires
    `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT` to be visible and different
-   so the mailbox cannot silently reuse production.
+   so the mailbox cannot silently reuse production. A read-only preflight
+   checks the Monitoring Metrics Publisher assignment on the Insights
+   component and fails closed with the exact grant when it is missing.
    Do not rely on the CLI's default subscription. Review every proposed change
    before deployment. A local `az deployment group what-if` must pass the same
    `environment` and `recoveryRequiredAlertEmail` parameters.

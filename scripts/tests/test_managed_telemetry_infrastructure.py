@@ -176,6 +176,10 @@ class ManagedTelemetryInfrastructureTests(unittest.TestCase):
     def test_publisher_is_bound_to_existing_identity_at_exact_component_scope(self):
         role = self.resources["Microsoft.Authorization/roleAssignments"]
         self.assertEqual("[resourceId('Microsoft.Insights/components', parameters('applicationInsightsName'))]", role["scope"])
+        self.assertEqual("[parameters('assignMonitoringMetricsPublisher')]", role.get("condition"))
+        assign = self.template["parameters"]["assignMonitoringMetricsPublisher"]
+        self.assertEqual("bool", assign["type"])
+        self.assertIs(False, assign["defaultValue"])
         props = role["properties"]
         self.assertEqual("ServicePrincipal", props["principalType"])
         self.assertIn("MonitoringMetricsPublisherRoleId", props["roleDefinitionId"])
@@ -183,6 +187,8 @@ class ManagedTelemetryInfrastructureTests(unittest.TestCase):
                          self.template["variables"]["MonitoringMetricsPublisherRoleId"])
         self.assertIn("Microsoft.ManagedIdentity/userAssignedIdentities", props["principalId"])
         self.assertNotIn("principalId", self.template["parameters"])
+        self.assertIn("assignMonitoringMetricsPublisher", self.source)
+        self.assertIn("if (assignMonitoringMetricsPublisher)", self.source)
 
     def test_no_app_mutation_key_output_or_anonymous_dashboard_is_introduced(self):
         serialized = json.dumps(self.template)

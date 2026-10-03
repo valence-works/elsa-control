@@ -497,7 +497,22 @@ fi
             self.source,
         )
         self.assertIn("scripts/deploy-managed-telemetry.sh", self.source)
+        self.assertIn("scripts/deploy-managed-telemetry.sh --what-if", self.source)
+        self.assertIn("Preview managed telemetry sink", self.source)
         self.assertIn("Deploy managed telemetry sink", self.source)
+        self.assertIn("- telemetry", self.source)
+        self.assertIn("app|infra|telemetry|build|promote", self.source)
+        self.assertIn("env.DEPLOY_MODE != 'telemetry'", self.source)
+        self.assertIn("(env.DEPLOY_MODE == 'telemetry' || env.DEPLOY_MODE == 'infra')", self.source)
+        self.assertIn('elif [ "$DEPLOY_MODE" = "app" ]; then', self.source)
+        self.assertIn("scripts/deploy-azure-elsa-control.sh", self.source)
+        deploy_start = self.source.index("      - name: Deploy API app")
+        deploy_end = self.source.index("\n      - name:", deploy_start)
+        deploy_step = self.source[deploy_start:deploy_end]
+        self.assertIn('elif [ "$DEPLOY_MODE" = "app" ]; then', deploy_step)
+        self.assertIn("docker build", deploy_step)
+        self.assertIn("az webapp sitecontainers update", deploy_step)
+        self.assertNotIn("telemetry", deploy_step.split('elif [ "$DEPLOY_MODE" = "app" ]; then', 1)[1][:400])
         self.assertIn("ManagedLifecycleTelemetry__AzureMonitor__Environment=staging", self.source)
         self.assertIn("ManagedLifecycleTelemetry__AzureMonitor__Environment=production", self.source)
         self.assertIn("MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED", self.source)
@@ -1029,6 +1044,74 @@ fi
             self.assertNotEqual(0, reused.returncode)
             self.assertIn("must not use the production mailbox", reused.stdout + reused.stderr)
 
+    def test_telemetry_mode_is_separately_guarded_from_app_and_full_infra(self) -> None:
+        check_start = self.source.index("        run: |\n", self.source.index("      - name: Check deployment configuration"))
+        check_end = self.source.index("\n      - name:", check_start)
+        check_script = dedent(self.source[check_start + len("        run: |\n") : check_end])
+        check_script = check_script.replace("${{ github.event_name }}", "workflow_dispatch")
+        environment = os.environ.copy() | {
+            "TARGET_ENVIRONMENT": "test",
+            "DEPLOY_MODE": "telemetry",
+            "AZURE_CLIENT_ID": "00000000-0000-0000-0000-000000000001",
+            "AZURE_TENANT_ID": "00000000-0000-0000-0000-000000000002",
+            "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
+            "AZURE_LOCATION": "westeurope",
+            "AZURE_RESOURCE_GROUP": "rg-test",
+            "MANAGED_TELEMETRY_WORKSPACE_NAME": "law-staging",
+            "MANAGED_TELEMETRY_APPLICATION_INSIGHTS_NAME": "appi-staging",
+            "MANAGED_TELEMETRY_API_IDENTITY_NAME": "id-api-staging",
+            "MANAGED_TELEMETRY_API_IDENTITY_RESOURCE_GROUP": "rg-test",
+            "STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT": "staging-ops@example.test",
+            "PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT": "prod-ops@example.test",
+        }
+        with tempfile.NamedTemporaryFile() as output, tempfile.NamedTemporaryFile() as github_env:
+            environment["GITHUB_OUTPUT"] = output.name
+            environment["GITHUB_ENV"] = github_env.name
+            configured = subprocess.run(
+                ["bash", "-c", check_script],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, configured.returncode, configured.stdout + configured.stderr)
+            self.assertIn("deploy_configured=true", Path(output.name).read_text())
+
+            environment["STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT"] = "prod-ops@example.test"
+            reused = subprocess.run(
+                ["bash", "-c", check_script],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(0, reused.returncode)
+            self.assertIn("must not use the production mailbox", reused.stdout + reused.stderr)
+
+            environment["STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT"] = "staging-ops@example.test"
+            environment["TARGET_ENVIRONMENT"] = "development"
+            rejected = subprocess.run(
+                ["bash", "-c", check_script],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(0, rejected.returncode)
+            self.assertIn("Telemetry-only deploy is limited to test or production", rejected.stdout + rejected.stderr)
+
+        self.assertIn("env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry'", self.source)
+        self.assertNotIn(
+            "scripts/deploy-azure-elsa-control.sh",
+            self.source[self.source.index("      - name: Preview managed telemetry sink"):],
+        )
+        preview = self.source[
+            self.source.index("      - name: Preview managed telemetry sink"):
+            self.source.index("      - name: Deploy managed telemetry sink")
+        ]
+        self.assertIn("scripts/deploy-managed-telemetry.sh --what-if", preview)
+        self.assertNotIn("scripts/deploy-azure-elsa-control.sh", preview)
+
     def test_managed_telemetry_deploy_passes_the_environment_recipient(self) -> None:
         script = ROOT / "scripts" / "deploy-managed-telemetry.sh"
         self.assertTrue(script.is_file())
@@ -1037,17 +1120,44 @@ fi
         self.assertIn('recipient_var=PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT', source)
         self.assertIn('environment="$environment"', source)
         self.assertIn('recoveryRequiredAlertEmail="$recipient"', source)
+        self.assertIn("assignMonitoringMetricsPublisher=false", source)
+        self.assertIn("az deployment group what-if", source)
+        self.assertIn("az deployment group create", source)
         self.assertIn("infra/managed-telemetry/main.bicep", source)
+        self.assertNotIn("deployment sub", source)
         self.assertNotIn("echo \"$recipient\"", source)
         self.assertNotIn("echo \"$STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT\"", source)
+        self.assertLess(source.index("az deployment group what-if"), source.index("az deployment group create"))
+        self.assertIn("Do not grant subscription-scope rights or Authorization write to the deploy identity.", source)
         self.assertIn(
             "Staging RecoveryRequired alerts require PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT so the mailbox cannot silently reuse production.",
             source,
         )
 
+        principal_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        role_id = "3913510d-42f4-4e42-8a64-420c390055eb"
+        insights_scope = (
+            "/subscriptions/00000000-0000-0000-0000-000000000003/resourceGroups/rg-test"
+            "/providers/Microsoft.Insights/components/appi-test"
+        )
+        matching_assignment = json.dumps(
+            [
+                {
+                    "principalId": principal_id,
+                    "roleDefinitionId": (
+                        "/subscriptions/00000000-0000-0000-0000-000000000003"
+                        f"/providers/Microsoft.Authorization/roleDefinitions/{role_id}"
+                    ),
+                    "scope": insights_scope,
+                }
+            ]
+        )
+
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             call_log = temp_path / "az-calls"
+            assignments_file = temp_path / "assignments.json"
+            assignments_file.write_text(matching_assignment)
             fake_az = temp_path / "az"
             fake_az.write_text(
                 """#!/usr/bin/env bash
@@ -1055,6 +1165,20 @@ set -euo pipefail
 printf '%s\\n' "$*" >> "${AZ_CALL_LOG:?}"
 case "$*" in
   'account set --subscription '*) exit 0 ;;
+  'identity show '*)
+    if [ "${AZ_IDENTITY_FAIL:-}" = "1" ]; then
+      exit 3
+    fi
+    printf '%s\\n' "${AZ_PRINCIPAL_ID:?}"
+    exit 0
+    ;;
+  'role assignment list '*)
+    if [ "${AZ_ROLE_LIST_FAIL:-}" = "1" ]; then
+      exit 3
+    fi
+    cat "${AZ_ASSIGNMENTS_FILE:?}"
+    exit 0
+    ;;
   'deployment group create '*|'deployment group what-if '*) exit 0 ;;
   *) exit 41 ;;
 esac
@@ -1062,13 +1186,15 @@ esac
             )
             fake_az.chmod(0o755)
 
-            def run_script(**extra: str) -> subprocess.CompletedProcess[str]:
+            def run_script(*args: str, **extra: str) -> subprocess.CompletedProcess[str]:
                 call_log.write_text("")
                 environment = os.environ.copy()
                 environment.update(
                     {
                         "PATH": f"{temp_path}{os.pathsep}{environment['PATH']}",
                         "AZ_CALL_LOG": str(call_log),
+                        "AZ_ASSIGNMENTS_FILE": str(assignments_file),
+                        "AZ_PRINCIPAL_ID": principal_id,
                         "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
                         "AZURE_RESOURCE_GROUP": "rg-test",
                         "AZURE_LOCATION": "westeurope",
@@ -1080,7 +1206,7 @@ esac
                 )
                 environment.update(extra)
                 return subprocess.run(
-                    [str(script)],
+                    [str(script), *args],
                     env=environment,
                     capture_output=True,
                     text=True,
@@ -1111,10 +1237,33 @@ esac
             )
             self.assertEqual(0, staging.returncode, staging.stdout + staging.stderr)
             staging_calls = call_log.read_text()
+            self.assertIn("identity show", staging_calls)
+            self.assertIn("role assignment list", staging_calls)
+            self.assertIn(f"--scope {insights_scope}", staging_calls)
+            self.assertIn("deployment group what-if", staging_calls)
             self.assertIn("deployment group create", staging_calls)
+            self.assertLess(
+                staging_calls.index("deployment group what-if"),
+                staging_calls.index("deployment group create"),
+            )
             self.assertIn("environment=staging", staging_calls)
             self.assertIn("recoveryRequiredAlertEmail=staging-ops@example.test", staging_calls)
+            self.assertIn("assignMonitoringMetricsPublisher=false", staging_calls)
+            self.assertNotIn("deployment sub", staging_calls)
+            self.assertNotIn("role assignment create", staging_calls)
             self.assertNotIn("staging-ops@example.test", staging.stdout + staging.stderr)
+            self.assertIn("skipping role assignment create", staging.stdout + staging.stderr)
+
+            preview = run_script(
+                "--what-if",
+                TARGET_ENVIRONMENT="test",
+                STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT="staging-ops@example.test",
+                PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT="prod-ops@example.test",
+            )
+            self.assertEqual(0, preview.returncode, preview.stdout + preview.stderr)
+            preview_calls = call_log.read_text()
+            self.assertIn("deployment group what-if", preview_calls)
+            self.assertNotIn("deployment group create", preview_calls)
 
             reused = run_script(
                 TARGET_ENVIRONMENT="test",
@@ -1140,7 +1289,37 @@ esac
             production_calls = call_log.read_text()
             self.assertIn("environment=production", production_calls)
             self.assertIn("recoveryRequiredAlertEmail=prod-ops@example.test", production_calls)
+            self.assertIn("deployment group what-if", production_calls)
+            self.assertIn("deployment group create", production_calls)
             self.assertNotIn("prod-ops@example.test", production.stdout + production.stderr)
+
+            assignments_file.write_text("[]")
+            missing_assignment = run_script(
+                TARGET_ENVIRONMENT="test",
+                STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT="staging-ops@example.test",
+                PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT="prod-ops@example.test",
+            )
+            self.assertNotEqual(0, missing_assignment.returncode)
+            missing_output = missing_assignment.stdout + missing_assignment.stderr
+            self.assertIn(f"principal={principal_id}", missing_output)
+            self.assertIn("role=Monitoring Metrics Publisher", missing_output)
+            self.assertIn(role_id, missing_output)
+            self.assertIn(f"scope={insights_scope}", missing_output)
+            self.assertIn("Do not grant subscription-scope rights", missing_output)
+            self.assertNotIn("deployment group what-if", call_log.read_text())
+            self.assertNotIn("deployment group create", call_log.read_text())
+
+            assignments_file.write_text(matching_assignment)
+            identity_missing = run_script(
+                TARGET_ENVIRONMENT="production",
+                PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT="prod-ops@example.test",
+                AZ_IDENTITY_FAIL="1",
+            )
+            self.assertNotEqual(0, identity_missing.returncode)
+            identity_output = identity_missing.stdout + identity_missing.stderr
+            self.assertIn("role=Monitoring Metrics Publisher", identity_output)
+            self.assertIn(f"scope={insights_scope}", identity_output)
+            self.assertNotIn("deployment group create", call_log.read_text())
 
     def test_promotion_reads_back_exact_runtime_before_settings_or_restart(self) -> None:
         deploy_start = self.source.index(

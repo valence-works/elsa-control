@@ -521,8 +521,8 @@ Who reads the mailbox: the operator named in
 named in `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT` for production.
 Never put an address in committed config, and never point staging at the
 production ops mailbox. `scripts/deploy-managed-telemetry.sh` (invoked by
-`azure-api-deploy.yml` in infra mode) refuses an unset recipient. Staging
-infra fails closed unless `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT`
+`azure-api-deploy.yml` in telemetry mode) refuses an unset recipient. Staging
+telemetry fails closed unless `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT`
 is also visible and differs from the staging mailbox.
 
 Until #508 GO row 26 (AC5) is proven on staging, keep the business-day
@@ -551,10 +551,11 @@ Required operator steps before the first live email (Sipke):
    to `staging` or `production` automatically. The Enabled flag is not
    turned on by default; an API without a connection string fails closed
    if Enabled is true.
-4. Run infra deploy so `scripts/deploy-managed-telemetry.sh` creates the
-   environment-scoped rule and action group. Prove one `AppDependencies`
-   row for a known RecoveryRequired entry in the staging workspace before
-   treating the mailbox as live.
+4. Run telemetry-only deploy so `scripts/deploy-managed-telemetry.sh` creates
+   the environment-scoped rule and action group. Do not use infra mode for
+   this sink; subscription-scoped `infra/main.bicep` is #705. Prove one
+   `AppDependencies` row for a known RecoveryRequired entry in the staging
+   workspace before treating the mailbox as live.
 
 ## Enabling the production workers (#264, #315)
 
