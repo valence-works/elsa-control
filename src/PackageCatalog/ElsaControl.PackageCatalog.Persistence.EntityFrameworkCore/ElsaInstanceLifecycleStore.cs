@@ -138,14 +138,14 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         var dueBefore = now - ManagedElsaReasonCodeCatalog.HumanRequiredAfter;
         dbContext.ChangeTracker.Clear();
         // Temporary and auto-resuming parks become due at ReasonEnteredAt + 10m.
-        // ApplyDueReasonClockAsync re-checks the catalog class before CAS.
+        // A missing ReasonEnteredAt is included so the scan can start that clock
+        // now. ApplyDueReasonClockAsync re-checks the catalog class before CAS.
         var candidateIds = await dbContext.ElsaInstanceOperations
             .AsNoTracking()
             .Where(operation =>
                 operation.State == ElsaInstanceOperationState.RecoveryRequired &&
                 operation.RequiresHumanAt == null &&
-                operation.ReasonEnteredAt != null &&
-                operation.ReasonEnteredAt <= dueBefore)
+                (operation.ReasonEnteredAt == null || operation.ReasonEnteredAt <= dueBefore))
             .OrderBy(operation => operation.ReasonEnteredAt)
             .ThenBy(operation => operation.Id)
             .Select(operation => operation.Id)
@@ -3855,16 +3855,16 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         }
 
         var reason = CurrentParkReason(operation, runReason);
-        if (string.IsNullOrWhiteSpace(reason) ||
-            !ManagedElsaReasonCodeCatalog.RequiresHuman(reason, operation.ReasonEnteredAt, now))
-            return false;
-
+        var beforeEnteredAt = operation.ReasonEnteredAt;
+        var beforeHumanAt = operation.RequiresHumanAt;
         ApplyReasonClock(operation, reason, reason, now, restartClock: false);
-        if (operation.RequiresHumanAt is null)
+        var stampedOrigin = beforeEnteredAt is null && operation.ReasonEnteredAt is not null;
+        var newlyHuman = beforeHumanAt is null && operation.RequiresHumanAt is not null;
+        if (!stampedOrigin && !newlyHuman)
             return false;
 
         await dbContext.SaveChangesAsync(cancellationToken);
-        return true;
+        return newlyHuman;
     }
 
     internal static void ApplyReasonClock(

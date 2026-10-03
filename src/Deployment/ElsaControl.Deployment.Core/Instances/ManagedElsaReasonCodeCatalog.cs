@@ -300,9 +300,13 @@ public readonly record struct ManagedElsaReasonClockState(
 
 /// <summary>
 /// Advances <see cref="ManagedElsaReasonClockState.ReasonEnteredAt"/> only when
-/// the catalog class changes or a resume/Recover happens. Sets
-/// <see cref="ManagedElsaReasonClockState.RequiresHumanAt"/> once when the
-/// catalog says a person is required. #662 owns compare-and-set plus outbox.
+/// the park leaves the deferred 10-minute window or a resume/Recover happens.
+/// Temporary and auto-resuming Azure observations share that window so a flap
+/// between them does not restart the clock. A missing
+/// <see cref="ManagedElsaReasonClockState.ReasonEnteredAt"/> starts the clock
+/// now. Sets <see cref="ManagedElsaReasonClockState.RequiresHumanAt"/> once
+/// when the catalog says a person is required. #662 owns compare-and-set plus
+/// outbox.
 /// </summary>
 public static class ManagedElsaReasonClock
 {
@@ -327,7 +331,9 @@ public static class ManagedElsaReasonClock
 
         var previousClass = ManagedElsaReasonCodeCatalog.Classify(previousCode);
         var nextClass = ManagedElsaReasonCodeCatalog.Classify(nextCode);
-        var enteredAt = reasonEnteredAt is null || previousClass != nextClass ? now : reasonEnteredAt;
+        var enteredAt = reasonEnteredAt is null || !SharesDeferredHumanRequiredClock(previousClass, nextClass)
+            ? now
+            : reasonEnteredAt;
         if (requiresHumanAt is not null)
             return new(enteredAt, requiresHumanAt);
 
@@ -335,4 +341,13 @@ public static class ManagedElsaReasonClock
             enteredAt,
             ManagedElsaReasonCodeCatalog.RequiresHuman(nextCode, enteredAt, now) ? now : null);
     }
+
+    private static bool SharesDeferredHumanRequiredClock(
+        ManagedElsaReasonClass left,
+        ManagedElsaReasonClass right) =>
+        left == right ||
+        (IsDeferredHumanRequired(left) && IsDeferredHumanRequired(right));
+
+    private static bool IsDeferredHumanRequired(ManagedElsaReasonClass value) =>
+        value is ManagedElsaReasonClass.Temporary or ManagedElsaReasonClass.AutoResuming;
 }

@@ -461,6 +461,18 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 var diagnostic = _reconciliationResults.TryGetValue(operation.Id, out var stored)
                     ? stored.Result.DiagnosticCode
                     : _failures.TryGetValue(operation.Id, out var failure) ? failure.Code : null;
+                if (clock.ReasonEnteredAt is null)
+                {
+                    ApplyParkClock(
+                        operation,
+                        instance.WorkspaceId,
+                        diagnostic,
+                        diagnostic,
+                        restartClock: false,
+                        now);
+                    clock = _clocks.GetValueOrDefault(operation.Id);
+                }
+
                 if (string.IsNullOrWhiteSpace(diagnostic) ||
                     !ManagedElsaReasonCodeCatalog.RequiresHuman(diagnostic, clock.ReasonEnteredAt, now))
                     continue;

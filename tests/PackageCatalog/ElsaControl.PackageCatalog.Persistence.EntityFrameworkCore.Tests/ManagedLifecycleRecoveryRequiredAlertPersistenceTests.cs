@@ -342,6 +342,208 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
+    public async Task Real_ef_scan_leaves_requires_human_null_at_nine_minutes_and_flips_at_ten()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        Guid workspaceId;
+        Guid instanceId;
+        Guid operationId;
+        int attemptNumber;
+        await using (var seed = CreateMigratedContext(connection))
+        {
+            await seed.Database.MigrateAsync();
+            var (workspace, accepted) = await QueueManagedLifecycleRunAsync(seed, "Alert real-ef scan");
+            var store = new EfCoreElsaInstanceLifecycleStore(
+                seed, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+            await store.CommitProviderSubmissionAsync(new(
+                workspace.Id,
+                accepted.Instance.Id,
+                accepted.Operation.Id,
+                accepted.Operation.AttemptNumber,
+                "provider-submission-uncertain",
+                Now));
+            workspaceId = workspace.Id;
+            instanceId = accepted.Instance.Id;
+            operationId = accepted.Operation.Id;
+            attemptNumber = accepted.Operation.AttemptNumber;
+        }
+
+        await using (var atNine = CreateMigratedContext(connection))
+        {
+            var store = new EfCoreElsaInstanceLifecycleStore(
+                atNine, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now.AddMinutes(9)));
+            Assert.Equal(0, await store.AdvanceDueHumanRequiredClocksAsync(Now.AddMinutes(9)));
+        }
+
+        await using (var verifyNine = CreateMigratedContext(connection))
+        {
+            var parked = await verifyNine.ElsaInstanceOperations.AsNoTracking()
+                .SingleAsync(x => x.Id == operationId);
+            Assert.Equal(Now, parked.ReasonEnteredAt);
+            Assert.Null(parked.RequiresHumanAt);
+            Assert.Empty(verifyNine.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking());
+        }
+
+        using var capture = new RecoveryRequiredAlertCapture(workspaceId);
+        await using (var atTen = CreateMigratedContext(connection))
+        {
+            var store = new EfCoreElsaInstanceLifecycleStore(
+                atTen, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now.AddMinutes(10)));
+            Assert.Equal(1, await store.AdvanceDueHumanRequiredClocksAsync(Now.AddMinutes(10)));
+        }
+
+        await using (var verifyTen = CreateMigratedContext(connection))
+        {
+            var parked = await verifyTen.ElsaInstanceOperations.AsNoTracking()
+                .SingleAsync(x => x.Id == operationId);
+            Assert.Equal(Now, parked.ReasonEnteredAt);
+            Assert.Equal(Now.AddMinutes(10), parked.RequiresHumanAt);
+            var alert = Assert.Single(await verifyTen.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking().ToListAsync());
+            Assert.Equal(operationId, alert.OperationId);
+            Assert.Equal(instanceId, alert.InstanceId);
+            Assert.Equal(attemptNumber, alert.AttemptNumber);
+            Assert.Equal(
+                ManagedLifecycleRecoveryRequiredAlert.ComputeDedupeIdentity(
+                    workspaceId, instanceId, operationId, attemptNumber),
+                alert.DedupeIdentity);
+        }
+
+        Assert.Single(capture.Entered);
+    }
+
+    [Fact]
+    public async Task Missing_reason_entered_at_scan_starts_the_clock_now_on_real_ef()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        Guid operationId;
+        var stampAt = Now.AddMinutes(4);
+        await using (var seed = CreateMigratedContext(connection))
+        {
+            await seed.Database.MigrateAsync();
+            var (workspace, accepted) = await QueueManagedLifecycleRunAsync(seed, "Alert missing clock");
+            var store = new EfCoreElsaInstanceLifecycleStore(
+                seed, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+            await store.CommitProviderSubmissionAsync(new(
+                workspace.Id,
+                accepted.Instance.Id,
+                accepted.Operation.Id,
+                accepted.Operation.AttemptNumber,
+                "provider-submission-uncertain",
+                Now));
+            operationId = accepted.Operation.Id;
+            await seed.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE ElsaInstanceOperations SET ReasonEnteredAt = NULL, RequiresHumanAt = NULL WHERE Id = {operationId}");
+        }
+
+        await using (var stamp = CreateMigratedContext(connection))
+        {
+            var parked = await stamp.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == operationId);
+            Assert.Null(parked.ReasonEnteredAt);
+            Assert.Null(parked.RequiresHumanAt);
+            var store = new EfCoreElsaInstanceLifecycleStore(
+                stamp, EmptyResolutionInputSource.Instance, new FixedTimeProvider(stampAt));
+            Assert.Equal(0, await store.AdvanceDueHumanRequiredClocksAsync(stampAt));
+        }
+
+        await using (var verifyStamp = CreateMigratedContext(connection))
+        {
+            var parked = await verifyStamp.ElsaInstanceOperations.AsNoTracking()
+                .SingleAsync(x => x.Id == operationId);
+            Assert.Equal(stampAt, parked.ReasonEnteredAt);
+            Assert.Null(parked.RequiresHumanAt);
+            Assert.Empty(verifyStamp.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking());
+        }
+
+        await using (var atTen = CreateMigratedContext(connection))
+        {
+            var store = new EfCoreElsaInstanceLifecycleStore(
+                atTen, EmptyResolutionInputSource.Instance, new FixedTimeProvider(
+                    stampAt + ManagedElsaReasonCodeCatalog.HumanRequiredAfter));
+            Assert.Equal(1, await store.AdvanceDueHumanRequiredClocksAsync(
+                stampAt + ManagedElsaReasonCodeCatalog.HumanRequiredAfter));
+        }
+
+        await using (var verifyTen = CreateMigratedContext(connection))
+        {
+            var parked = await verifyTen.ElsaInstanceOperations.AsNoTracking()
+                .SingleAsync(x => x.Id == operationId);
+            Assert.Equal(stampAt, parked.ReasonEnteredAt);
+            Assert.Equal(stampAt + ManagedElsaReasonCodeCatalog.HumanRequiredAfter, parked.RequiresHumanAt);
+            Assert.Equal(1, await verifyTen.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+        }
+    }
+
+    [Fact]
+    public async Task Flapping_azure_observations_keep_the_reason_clock_and_alert_once()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Alert azure flap");
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+        await store.CommitProviderSubmissionAsync(new(
+            workspace.Id,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            "provider-operation-accepted",
+            Now));
+        using var capture = new RecoveryRequiredAlertCapture(workspace.Id);
+
+        await ReconcileParkAsync(
+            store, workspace.Id, accepted, ManagedElsaReasonCodeCatalog.AzureDeploymentFailed, Now.AddMinutes(1));
+        var first = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(Now.AddMinutes(1), first.ReasonEnteredAt);
+        Assert.Null(first.RequiresHumanAt);
+        Assert.Empty(capture.Entered);
+
+        await ReconcileParkAsync(
+            store,
+            workspace.Id,
+            accepted,
+            ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable,
+            Now.AddMinutes(6));
+        var flapped = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable, flapped.ReconciliationDiagnosticCode);
+        Assert.Equal(first.ReasonEnteredAt, flapped.ReasonEnteredAt);
+        Assert.Null(flapped.RequiresHumanAt);
+        Assert.Empty(capture.Entered);
+        Assert.Empty(db.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking());
+
+        await ReconcileParkAsync(
+            store,
+            workspace.Id,
+            accepted,
+            ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInProgress,
+            Now.AddMinutes(9));
+        Assert.Equal(
+            first.ReasonEnteredAt,
+            (await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id)).ReasonEnteredAt);
+        Assert.Null((await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id)).RequiresHumanAt);
+
+        await ReconcileParkAsync(
+            store,
+            workspace.Id,
+            accepted,
+            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+            Now.AddMinutes(1) + ManagedElsaReasonCodeCatalog.HumanRequiredAfter);
+        var due = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(first.ReasonEnteredAt, due.ReasonEnteredAt);
+        Assert.Equal(Now.AddMinutes(1) + ManagedElsaReasonCodeCatalog.HumanRequiredAfter, due.RequiresHumanAt);
+        Assert.Single(capture.Entered);
+        var alert = Assert.Single(await db.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking().ToListAsync());
+        Assert.Equal(accepted.Operation.AttemptNumber, alert.AttemptNumber);
+        Assert.Equal(
+            ManagedLifecycleRecoveryRequiredAlert.ComputeDedupeIdentity(
+                workspace.Id, accepted.Instance.Id, accepted.Operation.Id, accepted.Operation.AttemptNumber),
+            alert.DedupeIdentity);
+    }
+
+    [Fact]
     public async Task Two_dbcontexts_racing_the_ten_minute_scan_write_exactly_one_outbox_row()
     {
         var path = Path.Combine(Path.GetTempPath(), $"elsa-rr-clock-scan-{Guid.NewGuid():N}.db");
