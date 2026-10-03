@@ -176,6 +176,34 @@ public sealed class ManagedLifecycleRecoveryRequiredAlertTests
     }
 
     [Fact]
+    public void Export_wait_and_lease_are_derived_from_one_timeout_budget()
+    {
+        Assert.Equal(RecoveryRequiredAlertBackoff.AckTimeout, RecoveryRequiredAlertBackoff.ExportTimeout);
+        Assert.Equal(RecoveryRequiredAlertBackoff.AckTimeout, RecoveryRequiredAlertBackoff.WaitTimeout);
+        Assert.Equal(RecoveryRequiredAlertBackoff.WaitTimeout, RecoveryRequiredAlertBackoff.SendTimeout);
+        Assert.True(RecoveryRequiredAlertBackoff.ExportTimeout <= RecoveryRequiredAlertBackoff.WaitTimeout);
+        Assert.True(RecoveryRequiredAlertBackoff.WaitTimeout < RecoveryRequiredAlertBackoff.LeaseDuration);
+    }
+
+    [Fact]
+    public void Activity_sender_watches_before_emitting_the_span()
+    {
+        using var capture = new AlertCapture();
+        var ack = new OrderAck();
+        var workspaceId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa8");
+        var instanceId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb8");
+        var operationId = Guid.Parse("cccccccc-cccc-cccc-cccc-ccccccccccc8");
+        var dedupe = ManagedLifecycleRecoveryRequiredAlert.ComputeDedupeIdentity(
+            workspaceId, instanceId, operationId, 1);
+
+        Assert.True(new ActivityRecoveryRequiredAlertSender(ack).Send(new RecoveryRequiredAlertDispatch(
+            workspaceId, instanceId, operationId, 1, null, dedupe)));
+        Assert.Equal(["watch", "ack"], ack.Events);
+        Assert.Single(capture.Entered);
+        Assert.Equal(dedupe, ack.LastIdentity);
+    }
+
+    [Fact]
     public void Activity_sender_asks_the_ack_for_the_persisted_dedupe_identity()
     {
         var workspaceId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa7");
@@ -271,6 +299,21 @@ public sealed class ManagedLifecycleRecoveryRequiredAlertTests
         public bool TryAcknowledge(string dedupeIdentity)
         {
             LastIdentity = dedupeIdentity;
+            return !string.IsNullOrWhiteSpace(dedupeIdentity);
+        }
+    }
+
+    private sealed class OrderAck : IRecoveryRequiredAlertTransportAck
+    {
+        public List<string> Events { get; } = [];
+        public string? LastIdentity { get; private set; }
+
+        public void Watch(string dedupeIdentity) => Events.Add("watch");
+
+        public bool TryAcknowledge(string dedupeIdentity)
+        {
+            LastIdentity = dedupeIdentity;
+            Events.Add("ack");
             return !string.IsNullOrWhiteSpace(dedupeIdentity);
         }
     }

@@ -32,13 +32,18 @@ public sealed record ElsaInstanceRecoveryRequestEnvelope(
 /// </summary>
 public sealed class InMemoryElsaInstanceLifecycleStore(
     TimeProvider? timeProvider = null,
-    IElsaInstanceDeleteConfirmationAuthority? deleteConfirmationAuthority = null)
+    IElsaInstanceDeleteConfirmationAuthority? deleteConfirmationAuthority = null,
+    Action<Exception, Guid>? clockScanFailed = null)
     : IElsaInstanceLifecycleStore, IElsaInstanceLifecycleWorkerStore, IElsaInstanceProviderSubmissionStore, IElsaInstanceProviderPendingOperationStore, IElsaInstanceProviderReconciliationStore, IElsaInstanceDeletionStore
 {
     private static readonly TimeSpan WorkerLeaseDuration = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan DeletionDeferralDelay = TimeSpan.FromMinutes(1);
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
     private readonly IElsaInstanceDeleteConfirmationAuthority? _deleteConfirmationAuthority = deleteConfirmationAuthority;
+    private readonly Action<Exception, Guid>? _clockScanFailed = clockScanFailed;
+
+    /// <summary>Test seam: invoked once per selected clock-scan candidate.</summary>
+    public Action<Guid>? ClockScanProbe { get; set; }
     private readonly object _gate = new();
     private readonly Dictionary<Guid, ElsaInstance> _instances = [];
     private readonly Dictionary<Guid, ElsaInstanceOperation> _operations = [];
@@ -454,14 +459,20 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         lock (_gate)
         {
             var advanced = 0;
-            foreach (var operation in _operations.Values
-                         .Where(candidate => candidate.State == ElsaInstanceOperationState.RecoveryRequired)
-                         .OrderBy(candidate => candidate.Id))
+            var candidates = RecoveryRequiredHumanClockScan.SelectCandidates(
+                    _operations.Values.Where(candidate =>
+                        candidate.State == ElsaInstanceOperationState.RecoveryRequired),
+                    candidate => _clocks.GetValueOrDefault(candidate.Id).RequiresHumanAt,
+                    candidate => _clocks.GetValueOrDefault(candidate.Id).ReasonEnteredAt,
+                    candidate => candidate.Id,
+                    now,
+                    limit)
+                .ToArray();
+            foreach (var operation in candidates)
             {
                 try
                 {
-                    if (advanced >= limit)
-                        break;
+                    ClockScanProbe?.Invoke(operation.Id);
                     var clock = _clocks.GetValueOrDefault(operation.Id);
                     var beforeHumanAt = clock.RequiresHumanAt;
                     if (beforeHumanAt is not null)
@@ -497,9 +508,9 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                     if (_clocks.GetValueOrDefault(operation.Id).RequiresHumanAt is not null && beforeHumanAt is null)
                         advanced++;
                 }
-                catch
+                catch (Exception exception)
                 {
-                    ManagedLifecycleTelemetry.RecordRecoveryRequiredClockScanFailure();
+                    RecoveryRequiredHumanClockScan.RecordFailure(operation.Id, exception, _clockScanFailed);
                 }
             }
 

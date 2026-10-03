@@ -54,7 +54,7 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryTests : IDisposable
 
         Assert.Equal(0, processor.FlushCount);
         Assert.Equal(1, processor.ShutdownCount);
-        Assert.InRange(processor.ShutdownTimeout, 0, 5000);
+        Assert.InRange(processor.ShutdownTimeout, 0, ManagedLifecycleAzureMonitorTelemetryOptions.FlushTimeoutMilliseconds);
         Assert.False(sink.ForceFlush());
     }
 
@@ -370,6 +370,180 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryTests : IDisposable
         var dedupe = properties.GetProperty("dedupe_identity").GetString();
         Assert.Equal(64, dedupe!.Length);
         Assert.All(dedupe, character => Assert.True(char.IsAsciiHexDigit(character)));
+        var envelope = Assert.Single(
+            handler.Payloads.SelectMany(ReadEnvelopeItems),
+            item => item.GetProperty("data").GetProperty("baseType").GetString() == "RemoteDependencyData" &&
+                    item.GetProperty("data").GetProperty("baseData").GetProperty("name").GetString() ==
+                    ManagedLifecycleTelemetry.RecoveryRequiredEnteredActivityName);
+        AssertCloudRole(envelope);
+    }
+
+    [Fact]
+    public void Exported_recovery_required_telemetry_carries_cloud_role_and_role_instance()
+    {
+        var options = new ManagedLifecycleAzureMonitorTelemetryOptions
+        {
+            Enabled = true,
+            ConnectionString = ValidConnectionString.Replace(
+                "00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000018"),
+            ManagedIdentityClientId = "00000000-0000-0000-0000-000000000002"
+        };
+        using var handler = new RecordingIngestionHandler();
+        using var client = new HttpClient(handler);
+        using var sink = new ManagedLifecycleAzureMonitorTelemetrySinkFactory()
+            .Create(options, new RecordingCredential(), new HttpClientTransport(client));
+        var workspaceId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa18");
+        var instanceId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb18");
+        var operationId = Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccc18");
+
+        ManagedLifecycleRecoveryRequiredAlert.RecordEntered(workspaceId, instanceId, operationId, 1);
+        Assert.True(sink.ForceFlush());
+
+        var envelope = Assert.Single(
+            handler.Payloads.SelectMany(ReadEnvelopeItems),
+            item => item.GetProperty("data").GetProperty("baseType").GetString() == "RemoteDependencyData" &&
+                    item.GetProperty("data").GetProperty("baseData").GetProperty("name").GetString() ==
+                    ManagedLifecycleTelemetry.RecoveryRequiredEnteredActivityName);
+        AssertCloudRole(envelope);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    public void Real_exporter_http_failure_leaves_the_alert_unacked_then_succeeds_on_retry(HttpStatusCode failure)
+    {
+        var options = new ManagedLifecycleAzureMonitorTelemetryOptions
+        {
+            Enabled = true,
+            ConnectionString = ValidConnectionString.Replace(
+                "00000000-0000-0000-0000-000000000001",
+                failure == HttpStatusCode.Unauthorized
+                    ? "00000000-0000-0000-0000-000000000019"
+                    : "00000000-0000-0000-0000-00000000001a"),
+            ManagedIdentityClientId = "00000000-0000-0000-0000-000000000002"
+        };
+        using var handler = new ScriptedStatusIngestionHandler(failure, HttpStatusCode.OK);
+        using var client = new HttpClient(handler);
+        using var sink = new ManagedLifecycleAzureMonitorTelemetrySinkFactory()
+            .Create(options, new RecordingCredential(), new HttpClientTransport(client));
+        IRecoveryRequiredAlertTransportAck ack = sink;
+        var workspaceId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa19");
+        var instanceId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb19");
+        var operationId = Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccc19");
+        var item = new RecoveryRequiredAlertDispatch(
+            workspaceId,
+            instanceId,
+            operationId,
+            1,
+            null,
+            ManagedLifecycleRecoveryRequiredAlert.ComputeDedupeIdentity(
+                workspaceId, instanceId, operationId, 1));
+        var sender = new ActivityRecoveryRequiredAlertSender(ack);
+
+        Assert.False(sender.Send(item));
+        Assert.True(sender.Send(item));
+        Assert.Equal(2, handler.Statuses.Count);
+    }
+
+    [Fact]
+    public void Mixed_batch_applies_one_export_result_to_every_alert_identity()
+    {
+        var ack = new RecoveryRequiredAlertExportAck();
+        var results = new Queue<ExportResult>([ExportResult.Failure, ExportResult.Success]);
+        var exporter = new RecoveryRequiredAlertExportAckExporter(
+            new ScriptedExporter(() => results.Dequeue()),
+            ack);
+        using var provider = Sdk.CreateTracerProviderBuilder()
+            .AddSource(ManagedLifecycleTelemetry.ActivitySourceName)
+            .SetSampler(new AlwaysOnSampler())
+            .AddProcessor(new BatchActivityExportProcessor(
+                exporter, maxQueueSize: 32, scheduledDelayMilliseconds: 60_000,
+                exporterTimeoutMilliseconds: 5_000, maxExportBatchSize: 16))
+            .Build();
+        IRecoveryRequiredAlertTransportAck transport = new ManagedLifecycleAzureMonitorTelemetrySink(null, provider, ack);
+        var first = DispatchItem("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa20", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb20", "cccccccc-cccc-cccc-cccc-cccccccccc20");
+        var second = DispatchItem("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa21", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb21", "cccccccc-cccc-cccc-cccc-cccccccccc21");
+
+        Assert.False(AcknowledgePair(transport, first, second));
+        Assert.True(AcknowledgePair(transport, first, second));
+        Assert.Empty(results);
+    }
+
+    [Fact]
+    public void Concurrent_sends_map_each_identity_to_its_own_batch_result()
+    {
+        var ack = new RecoveryRequiredAlertExportAck();
+        var exporter = new RecoveryRequiredAlertExportAckExporter(new ScriptedExporter(() => ExportResult.Success), ack);
+        using var provider = Sdk.CreateTracerProviderBuilder()
+            .AddSource(ManagedLifecycleTelemetry.ActivitySourceName)
+            .SetSampler(new AlwaysOnSampler())
+            .AddProcessor(new BatchActivityExportProcessor(
+                exporter, maxQueueSize: 32, scheduledDelayMilliseconds: 60_000,
+                exporterTimeoutMilliseconds: 5_000, maxExportBatchSize: 8))
+            .Build();
+        IRecoveryRequiredAlertTransportAck transport = new ManagedLifecycleAzureMonitorTelemetrySink(null, provider, ack);
+        var items = new[]
+        {
+            DispatchItem("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa23", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb23", "cccccccc-cccc-cccc-cccc-cccccccccc23"),
+            DispatchItem("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa24", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb24", "cccccccc-cccc-cccc-cccc-cccccccccc24"),
+            DispatchItem("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa25", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb25", "cccccccc-cccc-cccc-cccc-cccccccccc25")
+        };
+        var sender = new ActivityRecoveryRequiredAlertSender(transport);
+        var accepted = 0;
+        Parallel.ForEach(items, item =>
+        {
+            if (sender.Send(item))
+                Interlocked.Increment(ref accepted);
+        });
+        Assert.Equal(items.Length, accepted);
+    }
+
+    [Fact]
+    public void Watch_does_not_erase_a_recorded_success_and_await_sees_a_slow_export()
+    {
+        var ack = new RecoveryRequiredAlertExportAck();
+        ack.Record(["already-sent"], ExportResult.Success);
+        ack.Watch("already-sent");
+        Assert.True(ack.WaitForSuccess("already-sent", TimeSpan.Zero));
+
+        var exporter = new RecoveryRequiredAlertExportAckExporter(
+            new DelayedExporter(TimeSpan.FromMilliseconds(1200), ExportResult.Success),
+            ack);
+        using var provider = Sdk.CreateTracerProviderBuilder()
+            .AddSource(ManagedLifecycleTelemetry.ActivitySourceName)
+            .SetSampler(new AlwaysOnSampler())
+            .AddProcessor(new BatchActivityExportProcessor(
+                exporter, maxQueueSize: 16, scheduledDelayMilliseconds: 60_000,
+                exporterTimeoutMilliseconds: 5_000, maxExportBatchSize: 8))
+            .Build();
+        IRecoveryRequiredAlertTransportAck transport = new ManagedLifecycleAzureMonitorTelemetrySink(null, provider, ack);
+        var item = DispatchItem("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa22", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb22", "cccccccc-cccc-cccc-cccc-cccccccccc22");
+        Assert.True(new ActivityRecoveryRequiredAlertSender(transport).Send(item));
+    }
+
+    [Fact]
+    public void Await_timeout_without_a_result_is_not_success()
+    {
+        var ack = new RecoveryRequiredAlertExportAck();
+        ack.Watch("pending-identity");
+        Assert.False(ack.WaitForSuccess("pending-identity", TimeSpan.FromMilliseconds(20)));
+        ack.Record(["pending-identity"], ExportResult.Success);
+        ack.Watch("pending-identity");
+        Assert.True(ack.WaitForSuccess("pending-identity", TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void Export_wait_and_lease_share_one_timeout_budget()
+    {
+        Assert.True(RecoveryRequiredAlertBackoff.ExportTimeout <= RecoveryRequiredAlertBackoff.WaitTimeout);
+        Assert.True(RecoveryRequiredAlertBackoff.WaitTimeout < RecoveryRequiredAlertBackoff.LeaseDuration);
+        Assert.Equal(
+            RecoveryRequiredAlertBackoff.ExportTimeout.TotalMilliseconds,
+            ManagedLifecycleAzureMonitorTelemetryOptions.ExportTimeoutMilliseconds);
+        Assert.Equal(
+            RecoveryRequiredAlertBackoff.WaitTimeout.TotalMilliseconds,
+            ManagedLifecycleAzureMonitorTelemetryOptions.FlushTimeoutMilliseconds);
+        Assert.Equal(RecoveryRequiredAlertBackoff.SendTimeout, RecoveryRequiredAlertBackoff.WaitTimeout);
     }
 
     [Fact]
@@ -534,6 +708,56 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryTests : IDisposable
     private const string ValidConnectionString =
         "InstrumentationKey=00000000-0000-0000-0000-000000000001;IngestionEndpoint=https://westeurope-1.in.applicationinsights.azure.com/";
 
+    private static RecoveryRequiredAlertDispatch DispatchItem(string workspace, string instance, string operation)
+    {
+        var workspaceId = Guid.Parse(workspace);
+        var instanceId = Guid.Parse(instance);
+        var operationId = Guid.Parse(operation);
+        return new RecoveryRequiredAlertDispatch(
+            workspaceId,
+            instanceId,
+            operationId,
+            1,
+            null,
+            ManagedLifecycleRecoveryRequiredAlert.ComputeDedupeIdentity(
+                workspaceId, instanceId, operationId, 1));
+    }
+
+    private static bool AcknowledgePair(
+        IRecoveryRequiredAlertTransportAck transport,
+        RecoveryRequiredAlertDispatch first,
+        RecoveryRequiredAlertDispatch second)
+    {
+        transport.Watch(first.DedupeIdentity);
+        transport.Watch(second.DedupeIdentity);
+        ManagedLifecycleRecoveryRequiredAlert.RecordEntered(
+            first.WorkspaceId, first.InstanceId, first.OperationId, first.AttemptNumber, first.RunId, first.DedupeIdentity);
+        ManagedLifecycleRecoveryRequiredAlert.RecordEntered(
+            second.WorkspaceId, second.InstanceId, second.OperationId, second.AttemptNumber, second.RunId, second.DedupeIdentity);
+        using (ManagedLifecycleTelemetry.StartOperation(
+                   ManagedLifecycleTelemetry.WorkerActivityName, ElsaInstanceOperationAction.Create,
+                   ElsaDesiredLifecycle.Running, ElsaObservedLifecycle.Ready,
+                   ElsaInstanceHealth.Healthy, ElsaInstanceOperationState.Running))
+        {
+        }
+
+        var firstAcked = transport.TryAcknowledge(first.DedupeIdentity);
+        var secondAcked = transport.TryAcknowledge(second.DedupeIdentity);
+        Assert.Equal(firstAcked, secondAcked);
+        return firstAcked;
+    }
+
+    private static void AssertCloudRole(JsonElement envelope)
+    {
+        var tags = envelope.GetProperty("tags");
+        Assert.Equal(
+            $"[{ManagedLifecycleAzureMonitorTelemetryOptions.ServiceNamespace}]/{ManagedLifecycleAzureMonitorTelemetryOptions.CloudRoleName}",
+            tags.GetProperty("ai.cloud.role").GetString());
+        Assert.Equal(
+            ManagedLifecycleAzureMonitorTelemetryOptions.CloudRoleInstance,
+            tags.GetProperty("ai.cloud.roleInstance").GetString());
+    }
+
     private static HostApplicationBuilder CreateBuilder(IReadOnlyDictionary<string, string?> values)
     {
         var builder = new HostApplicationBuilder(new HostApplicationBuilderSettings { DisableDefaults = true });
@@ -568,6 +792,15 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryTests : IDisposable
     private sealed class ScriptedExporter(Func<ExportResult> next) : BaseExporter<Activity>
     {
         public override ExportResult Export(in Batch<Activity> batch) => next();
+    }
+
+    private sealed class DelayedExporter(TimeSpan delay, ExportResult result) : BaseExporter<Activity>
+    {
+        public override ExportResult Export(in Batch<Activity> batch)
+        {
+            Thread.Sleep(delay);
+            return result;
+        }
     }
 
     private sealed class RecordingShutdownProcessor : BaseProcessor<Activity>
@@ -623,6 +856,19 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryTests : IDisposable
         {
             Abort();
             _cleanup.Dispose();
+        }
+    }
+
+    private sealed class ScriptedStatusIngestionHandler(params HttpStatusCode[] statuses) : HttpMessageHandler
+    {
+        private readonly ConcurrentQueue<HttpStatusCode> _remaining = new(statuses);
+        public ConcurrentQueue<HttpStatusCode> Statuses { get; } = new();
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var status = _remaining.TryDequeue(out var next) ? next : HttpStatusCode.OK;
+            Statuses.Enqueue(status);
+            return Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent("{}") });
         }
     }
 

@@ -140,21 +140,22 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             throw new ArgumentOutOfRangeException(nameof(limit));
 
         now = now.ToUniversalTime();
-        var dueBefore = now - ManagedElsaReasonCodeCatalog.HumanRequiredAfter;
+        var dueBefore = RecoveryRequiredHumanClockScan.DueBefore(now);
         dbContext.ChangeTracker.Clear();
         // Temporary and auto-resuming parks become due at ReasonEnteredAt + 10m.
         // A missing ReasonEnteredAt is included so the scan can start that clock
         // now. ApplyDueReasonClockAsync re-checks the catalog class before CAS.
-        var candidateIds = await dbContext.ElsaInstanceOperations
-            .AsNoTracking()
-            .Where(operation =>
-                operation.State == ElsaInstanceOperationState.RecoveryRequired &&
-                operation.RequiresHumanAt == null &&
-                (operation.ReasonEnteredAt == null || operation.ReasonEnteredAt <= dueBefore))
-            .OrderBy(operation => operation.ReasonEnteredAt)
-            .ThenBy(operation => operation.Id)
+        var candidateIds = await RecoveryRequiredHumanClockScan.ApplyCandidateOrderAndLimit(
+                dbContext.ElsaInstanceOperations
+                    .AsNoTracking()
+                    .Where(operation =>
+                        operation.State == ElsaInstanceOperationState.RecoveryRequired &&
+                        operation.RequiresHumanAt == null &&
+                        (operation.ReasonEnteredAt == null || operation.ReasonEnteredAt <= dueBefore)),
+                operation => operation.ReasonEnteredAt,
+                operation => operation.Id,
+                limit)
             .Select(operation => operation.Id)
-            .Take(limit)
             .ToListAsync(cancellationToken);
 
         var advanced = 0;
@@ -172,11 +173,13 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             }
             catch (Exception exception)
             {
-                _logger.LogError(
+                RecoveryRequiredHumanClockScan.RecordFailure(
+                    operationId,
                     exception,
-                    "Managed Elsa RecoveryRequired clock scan failed for operation {OperationId}.",
-                    operationId);
-                ManagedLifecycleTelemetry.RecordRecoveryRequiredClockScanFailure();
+                    (fault, id) => _logger.LogError(
+                        fault,
+                        RecoveryRequiredHumanClockScan.FailureLogMessage,
+                        id));
             }
         }
 

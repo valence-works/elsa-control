@@ -27,6 +27,14 @@ public interface IRecoveryRequiredAlertSender
 /// </summary>
 public interface IRecoveryRequiredAlertTransportAck
 {
+    /// <summary>
+    /// Registers interest in this identity before the span is emitted so a
+    /// concurrent flush cannot record Success that a later watch would erase.
+    /// </summary>
+    void Watch(string dedupeIdentity)
+    {
+    }
+
     bool TryAcknowledge(string dedupeIdentity);
 }
 
@@ -79,7 +87,14 @@ public static class RecoveryRequiredAlertBackoff
 {
     public static readonly TimeSpan Initial = TimeSpan.FromSeconds(1);
     public static readonly TimeSpan Cap = TimeSpan.FromMinutes(5);
-    public static readonly TimeSpan SendTimeout = TimeSpan.FromMilliseconds(5_000);
+    /// <summary>
+    /// Single timeout budget. Export, flush/await, and the lease send window
+    /// are derived from this value so export ≤ wait &lt; lease.
+    /// </summary>
+    public static readonly TimeSpan AckTimeout = TimeSpan.FromSeconds(10);
+    public static readonly TimeSpan ExportTimeout = AckTimeout;
+    public static readonly TimeSpan WaitTimeout = AckTimeout;
+    public static readonly TimeSpan SendTimeout = WaitTimeout;
     public static readonly TimeSpan LeaseMargin = TimeSpan.FromSeconds(5);
     public static readonly TimeSpan LeaseDuration = SendTimeout + LeaseMargin;
 
@@ -100,6 +115,7 @@ public sealed class ActivityRecoveryRequiredAlertSender(
         if (string.IsNullOrWhiteSpace(item.DedupeIdentity))
             return false;
 
+        ack?.Watch(item.DedupeIdentity);
         ManagedLifecycleRecoveryRequiredAlert.RecordEntered(
             item.WorkspaceId,
             item.InstanceId,

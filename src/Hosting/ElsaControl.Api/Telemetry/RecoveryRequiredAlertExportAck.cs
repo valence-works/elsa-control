@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Reflection;
 using ElsaControl.Deployment.Core.Telemetry;
 using OpenTelemetry;
 
@@ -16,14 +15,20 @@ internal sealed class RecoveryRequiredAlertExportAck
     private readonly ConcurrentDictionary<string, ExportResult> _results = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, TaskCompletionSource<ExportResult>> _waiters = new(StringComparer.Ordinal);
 
-    public void BeginWatch(string dedupeIdentity)
+    public void Watch(string dedupeIdentity)
     {
         if (string.IsNullOrWhiteSpace(dedupeIdentity))
             return;
 
-        _results.TryRemove(dedupeIdentity, out _);
-        _waiters[dedupeIdentity] = new TaskCompletionSource<ExportResult>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
+        // A recorded result is authoritative. Never erase Success (or Failure)
+        // when a later watch starts — that is the ForceFlush-before-watch race.
+        if (_results.ContainsKey(dedupeIdentity))
+            return;
+
+        _waiters.GetOrAdd(
+            dedupeIdentity,
+            static _ => new TaskCompletionSource<ExportResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously));
     }
 
     public void Record(IEnumerable<string> identities, ExportResult result)
@@ -34,50 +39,92 @@ internal sealed class RecoveryRequiredAlertExportAck
                 continue;
 
             _results[identity] = result;
-            if (_waiters.TryRemove(identity, out var waiter))
+            if (_waiters.TryGetValue(identity, out var waiter))
                 waiter.TrySetResult(result);
         }
     }
 
-    public bool TryTakeSuccess(string dedupeIdentity)
+    public bool WaitForSuccess(string dedupeIdentity, TimeSpan timeout)
     {
         if (string.IsNullOrWhiteSpace(dedupeIdentity))
             return false;
-        if (_results.TryGetValue(dedupeIdentity, out var recorded))
+
+        if (TryRead(dedupeIdentity, out var recorded))
+        {
+            Prune(dedupeIdentity);
             return recorded == ExportResult.Success;
+        }
+
+        if (!_waiters.TryGetValue(dedupeIdentity, out var waiter))
+            return false;
+
+        var remaining = timeout < TimeSpan.Zero ? TimeSpan.Zero : timeout;
+        try
+        {
+            if (!waiter.Task.Wait(remaining))
+                return false;
+        }
+        catch (AggregateException)
+        {
+            return false;
+        }
+
+        if (!waiter.Task.IsCompletedSuccessfully)
+            return false;
+
+        var result = waiter.Task.Result;
+        Prune(dedupeIdentity);
+        return result == ExportResult.Success;
+    }
+
+    private bool TryRead(string dedupeIdentity, out ExportResult result)
+    {
+        if (_results.TryGetValue(dedupeIdentity, out result))
+            return true;
         if (_waiters.TryGetValue(dedupeIdentity, out var waiter) &&
             waiter.Task.IsCompletedSuccessfully)
-            return waiter.Task.Result == ExportResult.Success;
+        {
+            result = waiter.Task.Result;
+            return true;
+        }
+
+        result = default;
         return false;
+    }
+
+    private void Prune(string dedupeIdentity)
+    {
+        _results.TryRemove(dedupeIdentity, out _);
+        _waiters.TryRemove(dedupeIdentity, out _);
     }
 }
 
 /// <summary>
 /// Forwards each batch to the real Azure Monitor exporter and records that
 /// batch's <see cref="ExportResult"/> against the alert identities in it.
+/// The wrapper is the registered exporter so the SDK sets
+/// <see cref="BaseExporter{T}.ParentProvider"/> on it. The inner exporter
+/// resolves the same resource from a sibling SDK registration.
 /// Exporter retries stay at zero so the outbox owns retry.
 /// </summary>
 internal sealed class RecoveryRequiredAlertExportAckExporter : BaseExporter<Activity>
 {
-    private static readonly MethodInfo? SetParentProviderMethod =
-        typeof(BaseExporter<Activity>).GetMethod(
-            "SetParentProvider",
-            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-
     private readonly BaseExporter<Activity> _inner;
     private readonly RecoveryRequiredAlertExportAck _ack;
+    private readonly bool _ownsInner;
 
     public RecoveryRequiredAlertExportAckExporter(
         BaseExporter<Activity> inner,
-        RecoveryRequiredAlertExportAck ack)
+        RecoveryRequiredAlertExportAck ack,
+        bool ownsInner = true)
     {
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
         _ack = ack ?? throw new ArgumentNullException(nameof(ack));
+        _ownsInner = ownsInner;
     }
 
     public override ExportResult Export(in Batch<Activity> batch)
     {
-        EnsureInnerParentProvider();
         // Processor batches are single-pass circular buffers. Copy first so
         // the real exporter still sees the same activities we ack against.
         var count = (int)Math.Clamp(batch.Count, 0, int.MaxValue);
@@ -109,29 +156,16 @@ internal sealed class RecoveryRequiredAlertExportAckExporter : BaseExporter<Acti
         return result;
     }
 
-    protected override bool OnForceFlush(int timeoutMilliseconds)
-    {
-        EnsureInnerParentProvider();
-        return _inner.ForceFlush(timeoutMilliseconds);
-    }
+    protected override bool OnForceFlush(int timeoutMilliseconds) =>
+        _inner.ForceFlush(timeoutMilliseconds);
 
-    protected override bool OnShutdown(int timeoutMilliseconds)
-    {
-        EnsureInnerParentProvider();
-        return _inner.Shutdown(timeoutMilliseconds);
-    }
+    protected override bool OnShutdown(int timeoutMilliseconds) =>
+        _inner.Shutdown(timeoutMilliseconds);
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing)
+        if (disposing && _ownsInner)
             _inner.Dispose();
         base.Dispose(disposing);
-    }
-
-    private void EnsureInnerParentProvider()
-    {
-        if (ParentProvider is null || ReferenceEquals(_inner.ParentProvider, ParentProvider))
-            return;
-        SetParentProviderMethod?.Invoke(_inner, [ParentProvider]);
     }
 }

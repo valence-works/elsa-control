@@ -1240,6 +1240,247 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
+    public async Task Stale_owners_mark_sent_is_rejected_after_takeover()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"elsa-rr-stale-mark-{Guid.NewGuid():N}.db");
+        var options = ClockRaceOptions(path);
+        try
+        {
+            await using (var seed = new CatalogDbContext(options))
+            {
+                await seed.Database.MigrateAsync();
+                await seed.Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL;");
+                var (workspace, accepted) = await QueueManagedLifecycleRunAsync(seed, "Alert stale mark-sent");
+                var store = new EfCoreElsaInstanceLifecycleStore(
+                    seed, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+                await store.CommitProviderSubmissionAsync(new(
+                    workspace.Id,
+                    accepted.Instance.Id,
+                    accepted.Operation.Id,
+                    accepted.Operation.AttemptNumber,
+                    "provider-submission-uncertain",
+                    Now));
+                seed.ChangeTracker.Clear();
+                var parked = await seed.ElsaInstanceOperations.AsNoTracking()
+                    .SingleAsync(x => x.Id == accepted.Operation.Id);
+                SeedPendingAlert(seed, parked);
+                await seed.SaveChangesAsync();
+            }
+
+            var clock = new MutableTimeProvider(Now);
+            var stale = new HoldThenAckSender();
+            await using var first = new CatalogDbContext(options);
+            await using var second = new CatalogDbContext(options);
+            var staleDispatch = Task.Run(() =>
+                new EfCoreRecoveryRequiredAlertOutboxDispatcher(first, stale, clock)
+                    .DispatchPendingAsync());
+            await stale.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            clock.Advance(RecoveryRequiredAlertBackoff.LeaseDuration + TimeSpan.FromSeconds(1));
+            var owner = new AcknowledgingAlertSender();
+            Assert.Equal(1, await new EfCoreRecoveryRequiredAlertOutboxDispatcher(second, owner, clock)
+                .DispatchPendingAsync());
+            stale.Release();
+            Assert.Equal(0, await staleDispatch.WaitAsync(TimeSpan.FromSeconds(5)));
+            await using var verify = new CatalogDbContext(options);
+            var row = await verify.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking().SingleAsync();
+            Assert.NotNull(row.SentAt);
+            Assert.Equal(1, owner.Sends);
+            Assert.Equal(1, stale.Sends);
+            Assert.Equal(1, row.DeliveryAttempts);
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task Stale_owners_delivery_failure_does_not_clear_the_new_lease()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"elsa-rr-stale-fail-{Guid.NewGuid():N}.db");
+        var options = ClockRaceOptions(path);
+        try
+        {
+            await using (var seed = new CatalogDbContext(options))
+            {
+                await seed.Database.MigrateAsync();
+                await seed.Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL;");
+                var (workspace, accepted) = await QueueManagedLifecycleRunAsync(seed, "Alert stale failure");
+                var store = new EfCoreElsaInstanceLifecycleStore(
+                    seed, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+                await store.CommitProviderSubmissionAsync(new(
+                    workspace.Id,
+                    accepted.Instance.Id,
+                    accepted.Operation.Id,
+                    accepted.Operation.AttemptNumber,
+                    "provider-submission-uncertain",
+                    Now));
+                seed.ChangeTracker.Clear();
+                var parked = await seed.ElsaInstanceOperations.AsNoTracking()
+                    .SingleAsync(x => x.Id == accepted.Operation.Id);
+                SeedPendingAlert(seed, parked);
+                await seed.SaveChangesAsync();
+            }
+
+            var clock = new MutableTimeProvider(Now);
+            var stale = new HoldThenFailSender();
+            var owner = new HoldThenAckSender();
+            await using var first = new CatalogDbContext(options);
+            await using var second = new CatalogDbContext(options);
+            var staleDispatch = Task.Run(() =>
+                new EfCoreRecoveryRequiredAlertOutboxDispatcher(first, stale, clock)
+                    .DispatchPendingAsync());
+            await stale.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            clock.Advance(RecoveryRequiredAlertBackoff.LeaseDuration + TimeSpan.FromSeconds(1));
+            var ownerDispatch = Task.Run(() =>
+                new EfCoreRecoveryRequiredAlertOutboxDispatcher(second, owner, clock)
+                    .DispatchPendingAsync());
+            await owner.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await using (var mid = new CatalogDbContext(options))
+            {
+                var held = await mid.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking().SingleAsync();
+                Assert.NotNull(held.LeasedBy);
+                Assert.Null(held.SentAt);
+                stale.Release();
+                Assert.Equal(0, await staleDispatch.WaitAsync(TimeSpan.FromSeconds(5)));
+                var afterStale = await mid.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking().SingleAsync();
+                Assert.Equal(held.LeasedBy, afterStale.LeasedBy);
+                Assert.NotNull(afterStale.LeasedUntil);
+                Assert.Null(afterStale.SentAt);
+                Assert.Equal(0, afterStale.DeliveryAttempts);
+            }
+
+            owner.Release();
+            Assert.Equal(1, await ownerDispatch.WaitAsync(TimeSpan.FromSeconds(5)));
+            await using var verify = new CatalogDbContext(options);
+            Assert.NotNull((await verify.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking().SingleAsync()).SentAt);
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task Two_dispatch_loops_with_an_advancing_clock_deliver_each_row_once()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"elsa-rr-advancing-clock-{Guid.NewGuid():N}.db");
+        var options = ClockRaceOptions(path);
+        try
+        {
+            var outboxIds = new List<Guid>();
+            await using (var seed = new CatalogDbContext(options))
+            {
+                await seed.Database.MigrateAsync();
+                await seed.Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL;");
+                for (var index = 0; index < 3; index++)
+                {
+                    var (workspace, accepted) = await QueueManagedLifecycleRunAsync(
+                        seed, $"Alert advancing clock {index}");
+                    var store = new EfCoreElsaInstanceLifecycleStore(
+                        seed, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+                    await store.CommitProviderSubmissionAsync(new(
+                        workspace.Id,
+                        accepted.Instance.Id,
+                        accepted.Operation.Id,
+                        accepted.Operation.AttemptNumber,
+                        "provider-submission-uncertain",
+                        Now));
+                    seed.ChangeTracker.Clear();
+                    var parked = await seed.ElsaInstanceOperations.AsNoTracking()
+                        .SingleAsync(x => x.Id == accepted.Operation.Id);
+                    outboxIds.Add(SeedPendingAlert(seed, parked).Id);
+                    await seed.SaveChangesAsync();
+                    seed.ChangeTracker.Clear();
+                }
+            }
+
+            var clock = new MutableTimeProvider(Now);
+            var step = RecoveryRequiredAlertBackoff.LeaseDuration / 2 + TimeSpan.FromSeconds(1);
+            var firstSender = new ClockAdvancingAlertSender(clock, step);
+            var secondSender = new ClockAdvancingAlertSender(clock, step);
+            await using var first = new CatalogDbContext(options);
+            await using var second = new CatalogDbContext(options);
+            var delivered = await Task.WhenAll(
+                new EfCoreRecoveryRequiredAlertOutboxDispatcher(first, firstSender, clock).DispatchPendingAsync(),
+                new EfCoreRecoveryRequiredAlertOutboxDispatcher(second, secondSender, clock).DispatchPendingAsync());
+
+            Assert.Equal(3, delivered.Sum());
+            Assert.Equal(3, firstSender.Sends + secondSender.Sends);
+            Assert.True(step * 3 > RecoveryRequiredAlertBackoff.LeaseDuration);
+            await using var verify = new CatalogDbContext(options);
+            var rows = await verify.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking()
+                .Where(row => outboxIds.Contains(row.Id))
+                .ToListAsync();
+            Assert.Equal(3, rows.Count);
+            Assert.All(rows, row => Assert.NotNull(row.SentAt));
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task In_memory_and_ef_scans_share_order_limit_and_logging()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var first = await QueueManagedLifecycleRunAsync(db, "Alert scan order first");
+        var second = await QueueManagedLifecycleRunAsync(db, "Alert scan order second");
+        var third = await QueueManagedLifecycleRunAsync(db, "Alert scan order third");
+        await new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now))
+            .CommitProviderSubmissionAsync(new(
+                first.Workspace.Id, first.Accepted.Instance.Id, first.Accepted.Operation.Id,
+                first.Accepted.Operation.AttemptNumber, "provider-submission-uncertain", Now));
+        await new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now.AddMinutes(1)))
+            .CommitProviderSubmissionAsync(new(
+                second.Workspace.Id, second.Accepted.Instance.Id, second.Accepted.Operation.Id,
+                second.Accepted.Operation.AttemptNumber, "provider-submission-uncertain", Now.AddMinutes(1)));
+        await new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now.AddMinutes(2)))
+            .CommitProviderSubmissionAsync(new(
+                third.Workspace.Id, third.Accepted.Instance.Id, third.Accepted.Operation.Id,
+                third.Accepted.Operation.AttemptNumber, "provider-submission-uncertain", Now.AddMinutes(2)));
+
+        var dueAt = Now.AddMinutes(2) + ManagedElsaReasonCodeCatalog.HumanRequiredAfter;
+        Assert.Equal(1, await new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(dueAt))
+            .AdvanceDueHumanRequiredClocksAsync(dueAt, limit: 1));
+        var flagged = await db.ElsaInstanceOperations.AsNoTracking()
+            .Where(operation => operation.RequiresHumanAt != null)
+            .Select(operation => operation.Id)
+            .ToListAsync();
+        Assert.Equal([first.Accepted.Operation.Id], flagged);
+
+        var faults = new List<(Exception Exception, Guid OperationId)>();
+        var memory = new InMemoryElsaInstanceLifecycleStore(
+            new FixedTimeProvider(Now),
+            clockScanFailed: (exception, id) => faults.Add((exception, id)));
+        var memoryService = new ElsaInstanceLifecycleService(memory, new FixedTimeProvider(Now));
+        var created = await memoryService.CreateAsync(new ElsaInstanceCreateRequest(
+            Guid.Parse("20000000-0000-0000-0000-000000000031"),
+            Guid.Parse("10000000-0000-0000-0000-000000000031"),
+            "Scan memory order",
+            "scan-memory-order",
+            WorkerIntent(),
+            "scan-memory-order-create"));
+        memory.MarkRecoveryRequired(created.Operation.Id, ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain);
+        memory.ClockScanProbe = _ => throw new InvalidOperationException("memory scan fault");
+        Assert.Equal(0, await memory.AdvanceDueHumanRequiredClocksAsync(dueAt, limit: 1));
+        Assert.Null(memory.GetReasonClock(created.Operation.Id).RequiresHumanAt);
+        Assert.Equal(created.Operation.Id, Assert.Single(faults).OperationId);
+        Assert.Contains("{OperationId}", RecoveryRequiredHumanClockScan.FailureLogMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Outbox_dispatcher_leaves_row_pending_when_ack_crashes_then_resends()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -1763,6 +2004,67 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             throw new OperationCanceledException();
     }
 
+    private sealed class HoldThenAckSender : IRecoveryRequiredAlertSender
+    {
+        public int Sends { get; private set; }
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Release() => _release.TrySetResult();
+
+        public bool Send(RecoveryRequiredAlertDispatch item)
+        {
+            Started.TrySetResult();
+            if (!_release.Task.Wait(TimeSpan.FromSeconds(10)))
+                throw new TimeoutException("The held alert sender was not released.");
+            Sends++;
+            ManagedLifecycleRecoveryRequiredAlert.RecordEntered(
+                item.WorkspaceId,
+                item.InstanceId,
+                item.OperationId,
+                item.AttemptNumber,
+                item.RunId,
+                item.DedupeIdentity);
+            return true;
+        }
+    }
+
+    private sealed class HoldThenFailSender : IRecoveryRequiredAlertSender
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Release() => _release.TrySetResult();
+
+        public bool Send(RecoveryRequiredAlertDispatch item)
+        {
+            Started.TrySetResult();
+            if (!_release.Task.Wait(TimeSpan.FromSeconds(10)))
+                throw new TimeoutException("The held alert sender was not released.");
+            return false;
+        }
+    }
+
+    private sealed class ClockAdvancingAlertSender(MutableTimeProvider clock, TimeSpan step)
+        : IRecoveryRequiredAlertSender
+    {
+        public int Sends { get; private set; }
+
+        public bool Send(RecoveryRequiredAlertDispatch item)
+        {
+            clock.Advance(step);
+            Sends++;
+            ManagedLifecycleRecoveryRequiredAlert.RecordEntered(
+                item.WorkspaceId,
+                item.InstanceId,
+                item.OperationId,
+                item.AttemptNumber,
+                item.RunId,
+                item.DedupeIdentity);
+            return true;
+        }
+    }
+
     private sealed class CrashBeforeAckSender : IRecoveryRequiredAlertSender
     {
         public int Sends { get; private set; }
@@ -1808,11 +2110,11 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
 
     private sealed class MutableTimeProvider(DateTimeOffset now) : TimeProvider
     {
-        private DateTimeOffset _now = now;
+        private long _utcTicks = now.UtcTicks;
 
-        public void Advance(TimeSpan delta) => _now = _now.Add(delta);
+        public void Advance(TimeSpan delta) => Interlocked.Add(ref _utcTicks, delta.Ticks);
 
-        public override DateTimeOffset GetUtcNow() => _now;
+        public override DateTimeOffset GetUtcNow() => new(Interlocked.Read(ref _utcTicks), TimeSpan.Zero);
     }
 
     private sealed class TransientCommitException : Exception;

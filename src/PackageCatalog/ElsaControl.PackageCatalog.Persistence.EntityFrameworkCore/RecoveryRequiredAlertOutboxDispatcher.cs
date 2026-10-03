@@ -135,18 +135,30 @@ public sealed class EfCoreRecoveryRequiredAlertOutboxDispatcher(
         CancellationToken cancellationToken)
     {
         dbContext.ChangeTracker.Clear();
-        var retry = await dbContext.ElsaInstanceRecoveryRequiredAlertOutbox
-            .SingleOrDefaultAsync(
-                candidate => candidate.Id == id &&
-                             candidate.SentAt == null &&
-                             candidate.LeasedBy == _owner,
-                cancellationToken);
-        if (retry is null)
+        var snapshot = await dbContext.ElsaInstanceRecoveryRequiredAlertOutbox
+            .AsNoTracking()
+            .Where(candidate =>
+                candidate.Id == id &&
+                candidate.SentAt == null &&
+                candidate.LeasedBy == _owner)
+            .Select(candidate => new { candidate.DeliveryAttempts })
+            .SingleOrDefaultAsync(cancellationToken);
+        if (snapshot is null)
             return;
-        retry.DeliveryAttempts += 1;
-        retry.NextAttemptAt = now + RecoveryRequiredAlertBackoff.Delay(retry.DeliveryAttempts);
-        retry.LeasedUntil = null;
-        retry.LeasedBy = null;
-        await dbContext.SaveChangesAsync(cancellationToken);
+
+        var attempts = snapshot.DeliveryAttempts + 1;
+        var nextAttemptAt = now + RecoveryRequiredAlertBackoff.Delay(attempts);
+        await dbContext.ElsaInstanceRecoveryRequiredAlertOutbox
+            .Where(row =>
+                row.Id == id &&
+                row.SentAt == null &&
+                row.LeasedBy == _owner)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(row => row.DeliveryAttempts, attempts)
+                    .SetProperty(row => row.NextAttemptAt, nextAttemptAt)
+                    .SetProperty(row => row.LeasedUntil, (DateTimeOffset?)null)
+                    .SetProperty(row => row.LeasedBy, (string?)null),
+                cancellationToken);
     }
 }
