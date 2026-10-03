@@ -376,7 +376,28 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
                 candidate.OperationId,
                 candidate.AttemptNumber,
                 candidate.RunId);
+        MarkPendingRecoveryRequiredAlertsSent();
         ClearRecoveryRequiredAlerts();
+    }
+
+    private void MarkPendingRecoveryRequiredAlertsSent()
+    {
+        if (_pendingRecoveryRequiredAlerts.Count == 0)
+            return;
+
+        var now = DateTimeOffset.UtcNow;
+        foreach (var candidate in _pendingRecoveryRequiredAlerts)
+        {
+            ElsaInstanceRecoveryRequiredAlertOutbox
+                .Where(row =>
+                    row.OperationId == candidate.OperationId &&
+                    row.AttemptNumber == candidate.AttemptNumber &&
+                    row.SentAt == null)
+                .ExecuteUpdate(setters => setters
+                    .SetProperty(row => row.SentAt, now)
+                    .SetProperty(row => row.DeliveryAttempts, row => row.DeliveryAttempts + 1)
+                    .SetProperty(row => row.NextAttemptAt, (DateTimeOffset?)null));
+        }
     }
 
     private void ClearRecoveryRequiredAlerts() => _pendingRecoveryRequiredAlerts.Clear();
@@ -398,7 +419,6 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     /// </summary>
     private void PrepareForSave()
     {
-        _pendingRecoveryRequiredAlerts.Clear();
         var autoDetectChanges = ChangeTracker.AutoDetectChangesEnabled;
         if (autoDetectChanges)
             ChangeTracker.DetectChanges();
@@ -788,9 +808,31 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
 
     private void EnsureElsaInstanceRecoveryRequiredAlertOutboxIsAppendOnly()
     {
-        if (ChangeTracker.Entries<Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity>()
-            .Any(x => x.State is EntityState.Modified or EntityState.Deleted))
-            throw new InvalidOperationException("RecoveryRequired alert outbox records are append-only.");
+        foreach (var entry in ChangeTracker.Entries<Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity>()
+                     .Where(x => x.State is EntityState.Modified or EntityState.Deleted))
+        {
+            if (entry.State == EntityState.Deleted)
+                throw new InvalidOperationException("RecoveryRequired alert outbox records are append-only.");
+
+            var changedProperties = entry.Properties
+                .Where(property => property.IsModified)
+                .Select(property => property.Metadata.Name)
+                .ToArray();
+            if (changedProperties.Any(property => property is not (
+                    nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.SentAt) or
+                    nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.DeliveryAttempts) or
+                    nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.NextAttemptAt))))
+                throw new InvalidOperationException("RecoveryRequired alert outbox payload is append-only.");
+
+            var originalSentAt = (DateTimeOffset?)entry.Property(nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.SentAt)).OriginalValue;
+            var currentSentAt = entry.Entity.SentAt;
+            if (originalSentAt is not null && originalSentAt != currentSentAt)
+                throw new InvalidOperationException("RecoveryRequired alert outbox delivery is append-only.");
+
+            var originalAttempts = (int)entry.Property(nameof(Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity.DeliveryAttempts)).OriginalValue!;
+            if (entry.Entity.DeliveryAttempts < originalAttempts)
+                throw new InvalidOperationException("RecoveryRequired alert outbox delivery attempts cannot decrease.");
+        }
     }
 
     private void EnsureElsaInstanceLifecycleOutboxIsAppendOnly()

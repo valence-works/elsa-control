@@ -58,7 +58,10 @@ public sealed class ManagedLifecycleOperationalHealthEvaluatorTests
     {
         var snapshot = Snapshot(
             providerObservationKind: ElsaInstanceProviderObservationKind.Unknown,
-            operation: Operation(ElsaInstanceOperationState.RecoveryRequired, diagnosticCode: "provider.uncertain"),
+            operation: Operation(
+                ElsaInstanceOperationState.RecoveryRequired,
+                diagnosticCode: "provider.uncertain",
+                requiresHumanAt: Now),
             run: Run(WorkspaceDeploymentRunStatus.Failed, diagnosticCode: "deployment.apply.failed"));
 
         var result = Evaluate(snapshot);
@@ -272,7 +275,10 @@ public sealed class ManagedLifecycleOperationalHealthEvaluatorTests
     public void Recovery_and_retry_exhaustion_are_both_reported_as_alerts()
     {
         var result = Evaluate(
-            Snapshot(operation: Operation(ElsaInstanceOperationState.RecoveryRequired, attemptNumber: 3)),
+            Snapshot(operation: Operation(
+                ElsaInstanceOperationState.RecoveryRequired,
+                attemptNumber: 3,
+                requiresHumanAt: Now)),
             new ManagedLifecycleOperationalHealthOptions { MaxAttempts = 3 });
 
         Assert.Equal(ManagedLifecycleOperationalHealthStatus.RecoveryRequired, result.Status);
@@ -363,6 +369,52 @@ public sealed class ManagedLifecycleOperationalHealthEvaluatorTests
             providerDiagnosticCode,
             reconciledAt);
 
+    [Fact]
+    public void Recovery_required_without_requires_human_at_is_not_critical()
+    {
+        var result = Evaluate(Snapshot(
+            operation: Operation(
+                ElsaInstanceOperationState.RecoveryRequired,
+                diagnosticCode: ManagedElsaReasonCodeCatalog.AzureDeploymentFailed)));
+
+        Assert.NotEqual(ManagedLifecycleOperationalHealthStatus.RecoveryRequired, result.Status);
+        Assert.DoesNotContain(
+            result.Alerts,
+            alert => alert.Code == ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired);
+    }
+
+    [Fact]
+    public void Temporary_human_required_park_is_a_warning()
+    {
+        var result = Evaluate(Snapshot(
+            operation: Operation(
+                ElsaInstanceOperationState.RecoveryRequired,
+                diagnosticCode: ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
+                requiresHumanAt: Now)));
+
+        Assert.Equal(ManagedLifecycleOperationalHealthStatus.RecoveryRequired, result.Status);
+        var alert = Assert.Single(
+            result.Alerts,
+            candidate => candidate.Code == ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired);
+        Assert.Equal(ManagedLifecycleOperationalHealthAlertSeverity.Warning, alert.Severity);
+    }
+
+    [Fact]
+    public void Needs_person_park_is_critical()
+    {
+        var result = Evaluate(Snapshot(
+            operation: Operation(
+                ElsaInstanceOperationState.RecoveryRequired,
+                diagnosticCode: ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted,
+                requiresHumanAt: Now)));
+
+        Assert.Equal(ManagedLifecycleOperationalHealthStatus.RecoveryRequired, result.Status);
+        var alert = Assert.Single(
+            result.Alerts,
+            candidate => candidate.Code == ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired);
+        Assert.Equal(ManagedLifecycleOperationalHealthAlertSeverity.Critical, alert.Severity);
+    }
+
     private static ManagedLifecycleOperationSnapshot Operation(
         ElsaInstanceOperationState state,
         int attemptNumber = 1,
@@ -370,8 +422,9 @@ public sealed class ManagedLifecycleOperationalHealthEvaluatorTests
         DateTimeOffset? startedAt = null,
         string? diagnosticCode = null,
         DateTimeOffset? heartbeatAt = null,
-        DateTimeOffset? lastProgressAt = null) =>
-        new(OperationId, state, attemptNumber, acceptedAt ?? Now, startedAt, diagnosticCode, heartbeatAt, lastProgressAt);
+        DateTimeOffset? lastProgressAt = null,
+        DateTimeOffset? requiresHumanAt = null) =>
+        new(OperationId, state, attemptNumber, acceptedAt ?? Now, startedAt, diagnosticCode, heartbeatAt, lastProgressAt, requiresHumanAt);
 
     private static ManagedLifecycleRunSnapshot Run(
         WorkspaceDeploymentRunStatus status,

@@ -1445,9 +1445,16 @@ internal sealed class ElsaInstanceRecoveryRequiredAlertOutboxConfiguration
         builder.Property(x => x.CreatedAt).HasConversion(
             value => value.UtcTicks,
             value => new DateTimeOffset(value, TimeSpan.Zero));
+        builder.Property(x => x.SentAt).HasConversion(
+            value => value.HasValue ? value.Value.UtcTicks : (long?)null,
+            value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
+        builder.Property(x => x.NextAttemptAt).HasConversion(
+            value => value.HasValue ? value.Value.UtcTicks : (long?)null,
+            value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
         builder.HasIndex(x => new { x.OperationId, x.AttemptNumber }).IsUnique();
         builder.HasIndex(x => new { x.WorkspaceId, x.CreatedAt });
         builder.HasIndex(x => new { x.OrganizationId, x.WorkspaceId, x.InstanceId });
+        builder.HasIndex(x => new { x.SentAt, x.NextAttemptAt });
         builder.HasOne<Organization>().WithMany().HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Restrict);
         builder.HasOne<Workspace>().WithMany()
             .HasForeignKey(x => new { x.OrganizationId, x.WorkspaceId })

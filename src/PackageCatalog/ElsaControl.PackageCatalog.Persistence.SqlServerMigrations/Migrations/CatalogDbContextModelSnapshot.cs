@@ -3381,14 +3381,23 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("nvarchar(64)");
 
+                    b.Property<int>("DeliveryAttempts")
+                        .HasColumnType("int");
+
                     b.Property<Guid>("InstanceId")
                         .HasColumnType("uniqueidentifier");
+
+                    b.Property<long?>("NextAttemptAt")
+                        .HasColumnType("bigint");
 
                     b.Property<Guid>("OperationId")
                         .HasColumnType("uniqueidentifier");
 
                     b.Property<Guid>("OrganizationId")
                         .HasColumnType("uniqueidentifier");
+
+                    b.Property<long?>("SentAt")
+                        .HasColumnType("bigint");
 
                     b.Property<Guid>("WorkspaceId")
                         .HasColumnType("uniqueidentifier");
@@ -3399,6 +3408,8 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
 
                     b.HasIndex("OperationId", "AttemptNumber")
                         .IsUnique();
+
+                    b.HasIndex("SentAt", "NextAttemptAt");
 
                     b.HasIndex("OrganizationId", "WorkspaceId", "InstanceId");
 

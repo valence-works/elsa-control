@@ -137,6 +137,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         now = now.ToUniversalTime();
         var dueBefore = now - ManagedElsaReasonCodeCatalog.HumanRequiredAfter;
         dbContext.ChangeTracker.Clear();
+        // Temporary and auto-resuming parks become due at ReasonEnteredAt + 10m.
+        // ApplyDueReasonClockAsync re-checks the catalog class before CAS.
         var candidateIds = await dbContext.ElsaInstanceOperations
             .AsNoTracking()
             .Where(operation =>

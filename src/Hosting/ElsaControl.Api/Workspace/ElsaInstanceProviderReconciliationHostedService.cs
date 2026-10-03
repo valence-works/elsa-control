@@ -1,5 +1,6 @@
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Abstractions.Instances;
+using ElsaControl.Deployment.Core.Telemetry;
 using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Api.Workspace;
@@ -69,6 +70,9 @@ public sealed class ElsaInstanceProviderReconciliationHostedService(
         var commercialGate = scope.ServiceProvider.GetService<IElsaInstanceCommercialGate>();
         var entitlementHoldStore = scope.ServiceProvider.GetService<IElsaInstanceEntitlementHoldStore>();
         await reconciler.AdvanceDueHumanRequiredClocksAsync(stoppingToken);
+        var dispatcher = scope.ServiceProvider.GetService<IRecoveryRequiredAlertOutboxDispatcher>();
+        if (dispatcher is not null)
+            await dispatcher.DispatchPendingAsync(32, stoppingToken);
         var operations = await pending.ListPendingProviderOperationsAsync(64, stoppingToken);
         foreach (var operation in operations)
         {

@@ -3361,14 +3361,23 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("TEXT");
 
+                    b.Property<int>("DeliveryAttempts")
+                        .HasColumnType("INTEGER");
+
                     b.Property<Guid>("InstanceId")
                         .HasColumnType("TEXT");
+
+                    b.Property<long?>("NextAttemptAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<Guid>("OperationId")
                         .HasColumnType("TEXT");
 
                     b.Property<Guid>("OrganizationId")
                         .HasColumnType("TEXT");
+
+                    b.Property<long?>("SentAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<Guid>("WorkspaceId")
                         .HasColumnType("TEXT");
@@ -3379,6 +3388,8 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                     b.HasIndex("OperationId", "AttemptNumber")
                         .IsUnique();
+
+                    b.HasIndex("SentAt", "NextAttemptAt");
 
                     b.HasIndex("OrganizationId", "WorkspaceId", "InstanceId");
 

@@ -231,9 +231,11 @@ internal sealed class ElsaInstanceLifecycleOutboxEntity
 }
 
 /// <summary>
-/// Append-only operator-alert outbox. One row per operation attempt when
+/// Operator-alert outbox. One row per operation attempt when
 /// <see cref="ElsaInstanceOperationEntity.RequiresHumanAt"/> goes from empty
-/// to a timestamp. Flushed only after the catalog commit succeeds.
+/// to a timestamp. Payload columns are append-only; delivery columns
+/// (<see cref="SentAt"/>, <see cref="DeliveryAttempts"/>,
+/// <see cref="NextAttemptAt"/>) may be updated by the dispatcher.
 /// </summary>
 internal sealed class ElsaInstanceRecoveryRequiredAlertOutboxEntity
 {
@@ -247,6 +249,9 @@ internal sealed class ElsaInstanceRecoveryRequiredAlertOutboxEntity
     public int AttemptNumber { get; set; }
     public string DedupeIdentity { get; set; } = "";
     public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset? SentAt { get; set; }
+    public int DeliveryAttempts { get; set; }
+    public DateTimeOffset? NextAttemptAt { get; set; }
 }
 
 internal sealed class ElsaInstanceOperationEntity

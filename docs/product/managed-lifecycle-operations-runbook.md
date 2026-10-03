@@ -477,10 +477,12 @@ not carry names, messages, endpoints, or secrets. Control does not send
 email itself and does not page.
 
 The event is flushed only after the catalog persist commits. A failed
-commit emits nothing. Delivery is at most once: the exporter uses
-`MaxRetries = 0` and `DisableOfflineStorage = true`, and a lost commit
-acknowledgement after `CommitAsync` does not flush. A missing email is
-therefore not proof that no engine is parked.
+commit emits nothing. The same transaction writes one outbox row; a
+dispatcher then sends the span, retries with exponential backoff, and
+marks `SentAt` when delivery succeeds. A crash after commit leaves
+`SentAt` empty, so the next hosted tick still delivers. The Azure
+Monitor exporter uses `MaxRetries = 0` and `DisableOfflineStorage =
+true`; a missing email is therefore not proof that no engine is parked.
 
 The [managed telemetry sink](../../infra/managed-telemetry/README.md)
 defines one scheduled query rule and one email-only action group per
