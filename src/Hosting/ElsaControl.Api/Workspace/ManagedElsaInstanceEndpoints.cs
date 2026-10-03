@@ -878,8 +878,12 @@ public static class ManagedElsaInstanceEndpoints
             openable ? currentIdentity!.CallbackUri.AbsoluteUri : null,
             ManagedElsaInstanceCustomerProjection.UnavailableReason(
                 canOpen, healthy, handoffConfigured, currentIdentity is not null, observedLifecycle,
-                handoffUnavailableReason: HandoffUnavailableReason))
+                handoffUnavailableReason: HandoffUnavailableReason,
+                activeOperation: activeOperation))
         {
+            UnavailableReasonCode = ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
+                canOpen, healthy, handoffConfigured, currentIdentity is not null, observedLifecycle,
+                activeOperation),
             Version = instance.Version,
             ETag = ETag(instance.Version),
             DesiredStateRevisionId = instance.DesiredStateRevisionId?.Value,
@@ -936,23 +940,28 @@ public static class ManagedElsaInstanceEndpoints
     internal static ManagedElsaInstanceOperationResponse ToOperationResponse(Guid workspaceId, Guid instanceId, ElsaInstanceOperationSummary operation) =>
         new(operation.Id, instanceId, operation.Action, operation.State, operation.ExpectedVersion, operation.AttemptNumber,
             operation.AcceptedAt, operation.StartedAt, operation.CompletedAt, operation.DesiredStateRevisionId,
-            operation.ResolvedPlanId, operation.DeploymentRunId, operation.FailureCode, operation.ReconciledObservedLifecycle,
+            operation.ResolvedPlanId, operation.DeploymentRunId,
+            ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation.FailureCode),
+            operation.ReconciledObservedLifecycle,
             operation.ReconciledHealth, new Dictionary<string, string>
             {
                 ["self"] = $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations/{operation.Id:D}",
                 ["instance"] = $"/api/workspaces/{workspaceId:D}/instances/{instanceId:D}"
             })
         {
-            ReasonCode = operation.ReasonCode
+            ReasonCode = ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation.ReasonCode)
         };
 
     internal static ManagedElsaInstanceDeleteOperationResponse ToDeleteOperationResponse(ElsaInstanceOperationSummary operation) =>
-        new(operation.Id, operation.State, operation.AcceptedAt, operation.StartedAt, operation.CompletedAt);
+        new(operation.Id, operation.State, operation.AcceptedAt, operation.StartedAt, operation.CompletedAt)
+        {
+            ReasonCode = ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation)
+        };
 
     internal static ElsaInstanceAuditEventSummary RedactAudit(ElsaInstanceAuditEventSummary audit) =>
         audit with { OperatorSubject = null };
 
-    private static ManagedElsaInstanceResponse ToLegacyResponse(ManagedElsaInstanceSummary summary, bool canOpen, bool controlHandoffEnabled)
+    internal static ManagedElsaInstanceResponse ToLegacyResponse(ManagedElsaInstanceSummary summary, bool canOpen, bool controlHandoffEnabled)
     {
         var healthy = summary.DesiredLifecycle == ElsaDesiredLifecycle.Running && summary.ObservedLifecycle == ElsaObservedLifecycle.Ready && summary.Health == ElsaInstanceHealth.Healthy;
         var openable = canOpen && healthy && controlHandoffEnabled && summary.Audience is not null && summary.CallbackUri is not null;
@@ -964,6 +973,9 @@ public static class ManagedElsaInstanceEndpoints
                 summary.ObservedLifecycle,
                 identityUnavailableReason: "The current instance binding is unavailable."))
         {
+            UnavailableReasonCode = ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
+                canOpen, healthy, controlHandoffEnabled, summary.Audience is not null && summary.CallbackUri is not null,
+                summary.ObservedLifecycle),
             CreatedAt = summary.CreatedAt,
             UpdatedAt = summary.UpdatedAt
         };
@@ -1093,9 +1105,14 @@ public sealed record ManagedElsaInstanceLaunchProfile(
     string DomainOutcome);
 public sealed record ManagedElsaInstanceAcceptedResponse(ManagedElsaInstanceResponse Instance, ManagedElsaInstanceOperationResponse Operation, IReadOnlyDictionary<string, string> Links);
 public sealed record ManagedElsaInstanceDeleteAcceptedResponse(Guid OperationId, ElsaInstanceOperationState State, DateTimeOffset AcceptedAt, string OperationUrl);
-public sealed record ManagedElsaInstanceDeleteOperationResponse(Guid OperationId, ElsaInstanceOperationState State, DateTimeOffset AcceptedAt, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt);
+public sealed record ManagedElsaInstanceDeleteOperationResponse(Guid OperationId, ElsaInstanceOperationState State, DateTimeOffset AcceptedAt, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt)
+{
+    /// <summary>Allowlisted cleanup, progress, or recovery code. Never a provider diagnostic.</summary>
+    public string? ReasonCode { get; init; }
+}
 public sealed record ManagedElsaInstanceOperationResponse(Guid Id, Guid InstanceId, ElsaInstanceOperationAction Action, ElsaInstanceOperationState State, int ExpectedVersion, int AttemptNumber, DateTimeOffset AcceptedAt, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, string? DesiredStateRevisionId, string? ResolvedPlanId, Guid? DeploymentRunId, string? FailureCode, ElsaObservedLifecycle? ReconciledObservedLifecycle, ElsaInstanceHealth? ReconciledHealth, IReadOnlyDictionary<string, string> Links)
 {
+    /// <summary>Allowlisted cleanup, progress, or recovery code. Never a provider diagnostic.</summary>
     public string? ReasonCode { get; init; }
 }
 public sealed record ManagedElsaInstanceIdentityBindingResponse(string Audience, string CanonicalCallbackUri, string VerifiedEndpointOrigin, int BindingVersion, DateTimeOffset ChangedAt);
@@ -1138,6 +1155,8 @@ internal sealed record IdempotencyKeyReadResult(IdempotencyKeyState State, strin
 
 public sealed record ManagedElsaInstanceResponse(Guid OrganizationId, Guid InstanceId, string Name, string Slug, ElsaDesiredLifecycle DesiredLifecycle, ElsaObservedLifecycle ObservedLifecycle, ElsaInstanceHealth Health, bool CanOpen, string? Audience, string? RedirectUri, string? UnavailableReason)
 {
+    /// <summary>Stable, customer-safe code for <see cref="UnavailableReason"/>; never a provider diagnostic.</summary>
+    public string? UnavailableReasonCode { get; init; }
     public int Version { get; init; }
     public string ETag { get; init; } = "";
     public string? DesiredStateRevisionId { get; init; }

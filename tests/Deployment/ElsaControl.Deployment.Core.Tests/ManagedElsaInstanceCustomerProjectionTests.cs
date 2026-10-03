@@ -239,7 +239,11 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
             ManagedElsaInstanceCustomerProjection.CustomerLabel(projected));
         Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReasonCode, reasonCodeOnWire);
         Assert.Equal("instance.recovery-required", reasonCodeOnWire);
-        Assert.Equal(ManagedElsaInstanceCustomerProjection.GenericUnavailableReason, reason);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason, reason);
+        Assert.DoesNotContain("Valence Works has been alerted", reason, StringComparison.Ordinal);
+        Assert.Contains("paused", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Refresh", reason, StringComparison.Ordinal);
+        Assert.Contains("operation reference", reason, StringComparison.Ordinal);
         Assert.DoesNotContain("Failed", reason, StringComparison.Ordinal);
         Assert.DoesNotContain("Failed", reasonCodeOnWire, StringComparison.Ordinal);
         Assert.DoesNotContain(reasonCode, reason, StringComparison.Ordinal);
@@ -555,6 +559,152 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
         Assert.True(ManagedElsaInstanceCustomerProjection.IsCustomerHealthy(
             instance.DesiredLifecycle, listed.ObservedLifecycle, instance.Health));
         Assert.Null(ManagedElsaInstanceCustomerProjection.CustomerLabel(detail));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("pending")]
+    [InlineData("unacknowledged")]
+    [InlineData("disabled")]
+    public void Recovery_required_copy_never_claims_an_operator_alert_for_unverified_delivery(string? delivery)
+    {
+        _ = delivery;
+        var reason = ManagedElsaInstanceCustomerProjection.UnavailableReason(
+            canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false,
+            ElsaObservedLifecycle.RecoveryRequired);
+
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason, reason);
+        Assert.DoesNotContain("alerted", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("has been notified", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("paused", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Refresh", reason, StringComparison.Ordinal);
+        Assert.Contains("support", reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Reader_not_authorized_wins_over_recovery_required_and_parked_delete_copy()
+    {
+        var now = Now;
+        var parkedDelete = new ElsaInstanceOperationSummary(
+            Guid.Parse("40000000-0000-0000-0000-000000000001"),
+            Guid.Parse("30000000-0000-0000-0000-000000000001"),
+            ElsaInstanceOperationAction.Delete,
+            ElsaInstanceOperationState.RecoveryRequired,
+            1, 1, now, now, null, null, null, null, null, null, null,
+            ReasonCode: ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale,
+            UpdatedAt: now, ReasonEnteredAt: now, RequiresHumanAt: now);
+
+        Assert.Equal("Not authorized to open this instance.",
+            ManagedElsaInstanceCustomerProjection.UnavailableReason(
+                canOpen: false, healthy: false, handoffConfigured: false, hasIdentity: false,
+                ElsaObservedLifecycle.RecoveryRequired));
+        Assert.Equal("not-authorized",
+            ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
+                canOpen: false, healthy: false, handoffConfigured: false, hasIdentity: false,
+                ElsaObservedLifecycle.RecoveryRequired, parkedDelete));
+        Assert.Equal("Not authorized to open this instance.",
+            ManagedElsaInstanceCustomerProjection.UnavailableReason(
+                canOpen: false, healthy: false, handoffConfigured: false, hasIdentity: false,
+                ElsaObservedLifecycle.Deleting, activeOperation: parkedDelete));
+    }
+
+    [Theory]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale)]
+    public void Parked_delete_uses_truthful_copy_and_allowlisted_reason(string reasonCode)
+    {
+        var now = Now;
+        var operation = new ElsaInstanceOperationSummary(
+            Guid.Parse("40000000-0000-0000-0000-000000000001"),
+            Guid.Parse("30000000-0000-0000-0000-000000000001"),
+            ElsaInstanceOperationAction.Delete,
+            ElsaInstanceOperationState.RecoveryRequired,
+            1, 1, now, now, null, null, null, null,
+            "provider.private-secret-value",
+            ElsaObservedLifecycle.Deleting,
+            ElsaInstanceHealth.Unknown,
+            ReasonCode: reasonCode,
+            UpdatedAt: now, ReasonEnteredAt: now, RequiresHumanAt: now);
+
+        Assert.True(ManagedElsaInstanceCustomerProjection.IsParkedCustomerDelete(operation));
+        Assert.Equal(reasonCode, ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation));
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.ParkedDeleteUnavailableReason,
+            ManagedElsaInstanceCustomerProjection.UnavailableReason(
+                canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false,
+                ElsaObservedLifecycle.Deleting, activeOperation: operation));
+        Assert.Equal(reasonCode,
+            ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
+                canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false,
+                ElsaObservedLifecycle.Deleting, operation));
+        Assert.DoesNotContain("alerted", ManagedElsaInstanceCustomerProjection.ParkedDeleteUnavailableReason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Deleting", ManagedElsaInstanceCustomerProjection.ParkedDeleteUnavailableReason, StringComparison.Ordinal);
+        Assert.DoesNotContain("provider.private-secret-value",
+            ManagedElsaInstanceCustomerProjection.ParkedDeleteUnavailableReason, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-customer/providers/Microsoft.App/containerApps/app")]
+    [InlineData("Worker heartbeat became stale.")]
+    [InlineData("azure.deployment.failed")]
+    [InlineData("deletion.provider-correlation-invalid")]
+    [InlineData("provider.reconciliation.unsupported-synthetic")]
+    [InlineData("azure.recovery.step-unsupported")]
+    public void Customer_safe_operation_reason_drops_provider_inventory_and_diagnostics(string raw)
+    {
+        Assert.Null(ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(raw));
+        Assert.Equal(
+            ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending,
+            ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(
+                ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending));
+    }
+
+    [Theory]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale)]
+    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending)]
+    [InlineData(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReasonCode)]
+    [InlineData(ElsaInstanceCommercialOperation.EntitlementRequired)]
+    [InlineData(ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded)]
+    public void Customer_safe_operation_reason_keeps_allowlisted_failure_and_reason_codes(string reasonCode)
+    {
+        var now = Now;
+        var operation = new ElsaInstanceOperationSummary(
+            Guid.Parse("40000000-0000-0000-0000-000000000001"),
+            Guid.Parse("30000000-0000-0000-0000-000000000001"),
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            1, 1, now, now, null, null, null, null,
+            reasonCode,
+            ElsaObservedLifecycle.Unknown,
+            ElsaInstanceHealth.Unknown,
+            ReasonCode: reasonCode,
+            UpdatedAt: now, ReasonEnteredAt: now, RequiresHumanAt: now);
+
+        Assert.Equal(reasonCode, ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation));
+        Assert.Equal(reasonCode, ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation.FailureCode));
+        Assert.Equal(reasonCode, ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation.ReasonCode));
+    }
+
+    [Fact]
+    public void Customer_safe_operation_reason_drops_unsupported_failure_without_stripping_allowlisted_reason()
+    {
+        var now = Now;
+        var operation = new ElsaInstanceOperationSummary(
+            Guid.Parse("40000000-0000-0000-0000-000000000001"),
+            Guid.Parse("30000000-0000-0000-0000-000000000001"),
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            1, 1, now, now, null, null, null, null,
+            "provider.reconciliation.unsupported-synthetic",
+            ElsaObservedLifecycle.Unknown,
+            ElsaInstanceHealth.Unknown,
+            ReasonCode: ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending,
+            UpdatedAt: now, ReasonEnteredAt: now, RequiresHumanAt: now);
+
+        Assert.Null(ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation.FailureCode));
+        Assert.Equal(
+            ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending,
+            ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation));
     }
 
     [Fact]
