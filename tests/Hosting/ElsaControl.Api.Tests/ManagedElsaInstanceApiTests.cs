@@ -3321,8 +3321,13 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(listed.UnavailableReasonCode, detailBody.UnavailableReasonCode);
         Assert.Equal(listed.UnavailableReasonCode, overview.Summary.UnavailableReason);
         Assert.DoesNotContain("Valence Works has been alerted", listed.UnavailableReason, StringComparison.Ordinal);
+        Assert.DoesNotContain("waiting for Valence Works", listed.UnavailableReason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("resume", listed.UnavailableReason, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("alerted", listed.UnavailableReason, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Failed", listed.UnavailableReason, StringComparison.Ordinal);
+        Assert.Contains("hello@valence.works", listed.UnavailableReason, StringComparison.Ordinal);
+        Assert.Contains("business hours", listed.UnavailableReason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Refresh", listed.UnavailableReason, StringComparison.Ordinal);
         Assert.False(listed.CanOpen);
 
         await app.AddWorkspaceMemberAsync(workspaceId, $"parked-unknown-{alertDelivery}-reader", WorkspaceRole.Reader);

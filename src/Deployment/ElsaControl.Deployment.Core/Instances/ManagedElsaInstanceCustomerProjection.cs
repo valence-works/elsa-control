@@ -20,8 +20,9 @@ public static class ManagedElsaInstanceCustomerProjection
     public const string UnknownUnavailableReason =
         "Control cannot determine this instance's state. Refresh to retry observation, or recover the instance if it remains unknown.";
     public const string RecoveryRequiredUnavailableReason =
-        "The latest operation on this instance paused and is waiting for Valence Works to resume it. " +
-        "Refresh to check again, or quote the operation reference if you contact support.";
+        "The latest operation on this engine paused. Refresh to check again. " +
+        "If it stays paused, email hello@valence.works with the operation reference. " +
+        "Support is available during business hours.";
     public const string ParkedDeleteUnavailableReason =
         "Deletion needs operator recovery. Contact support. " +
         "Refresh to check again, or quote the operation reference if you contact support.";

@@ -241,9 +241,13 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
         Assert.Equal("instance.recovery-required", reasonCodeOnWire);
         Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason, reason);
         Assert.DoesNotContain("Valence Works has been alerted", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("waiting for Valence Works", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("resume", reason, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("paused", reason, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("Refresh", reason, StringComparison.Ordinal);
+        Assert.Contains("hello@valence.works", reason, StringComparison.Ordinal);
         Assert.Contains("operation reference", reason, StringComparison.Ordinal);
+        Assert.Contains("business hours", reason, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Failed", reason, StringComparison.Ordinal);
         Assert.DoesNotContain("Failed", reasonCodeOnWire, StringComparison.Ordinal);
         Assert.DoesNotContain(reasonCode, reason, StringComparison.Ordinal);
@@ -576,9 +580,40 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
         Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason, reason);
         Assert.DoesNotContain("alerted", reason, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("has been notified", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("waiting for Valence Works", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("resume", reason, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("paused", reason, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("Refresh", reason, StringComparison.Ordinal);
+        Assert.Contains("hello@valence.works", reason, StringComparison.Ordinal);
+        Assert.Contains("operation reference", reason, StringComparison.Ordinal);
+        Assert.Contains("business hours", reason, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("support", reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Recovery_required_copy_is_the_hosted_first_publish_sentence_and_delete_park_is_unchanged()
+    {
+        const string expected =
+            "The latest operation on this engine paused. Refresh to check again. " +
+            "If it stays paused, email hello@valence.works with the operation reference. " +
+            "Support is available during business hours.";
+
+        Assert.Equal(expected, ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason);
+        Assert.DoesNotContain("Valence Works is", expected, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("waiting for", expected, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("resume", expected, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("alerted", expected, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Failed", expected, StringComparison.Ordinal);
+        Assert.DoesNotContain("soon", expected, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("minute", expected, StringComparison.OrdinalIgnoreCase);
+
+        Assert.Equal(
+            "Deletion needs operator recovery. Contact support. " +
+            "Refresh to check again, or quote the operation reference if you contact support.",
+            ManagedElsaInstanceCustomerProjection.ParkedDeleteUnavailableReason);
+        Assert.NotEqual(
+            ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason,
+            ManagedElsaInstanceCustomerProjection.ParkedDeleteUnavailableReason);
     }
 
     [Fact]
