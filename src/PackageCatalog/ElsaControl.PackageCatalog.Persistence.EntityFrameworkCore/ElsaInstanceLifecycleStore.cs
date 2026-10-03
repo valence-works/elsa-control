@@ -1796,6 +1796,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 operation.UpdatedAt = recoveryAt;
                 await dbContext.SaveChangesAsync(cancellationToken);
             }
+            var previousReason = CurrentParkReason(operation, null);
             operation.State = ElsaInstanceOperationState.RecoveryRequired;
             operation.FailureCode = failure.DiagnosticCode;
             operation.FailureSummary = failure.DiagnosticCode;
@@ -1805,7 +1806,14 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             operation.HeartbeatAt = null;
             operation.DeletionEvidenceFingerprint = failure.EvidenceFingerprint;
             operation.DeletionDiagnosticCode = failure.DiagnosticCode;
+            operation.ReconciliationDiagnosticCode = failure.DiagnosticCode;
             operation.UpdatedAt = recoveryAt;
+            ApplyReasonClock(
+                operation,
+                previousReason,
+                CurrentParkReason(operation, null),
+                recoveryAt,
+                restartClock: false);
             var audit = await CreateAuditEventAsync(instance, operation,
                 instance.ObservedLifecycle, failure.FailedAt, cancellationToken, "lifecycle.deletion-recovery-required",
                 failure.ExpectedRunId, diagnosticCode: failure.DiagnosticCode);
@@ -2213,6 +2221,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     operation.FailureSummary = null;
                     operation.UpdatedAt = commit.SubmittedAt.ToUniversalTime();
                     run.RecoveryReason = ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted;
+                    operation.ReconciliationDiagnosticCode = ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted;
                     ApplyReasonClock(
                         operation,
                         previousUncertainReason,
@@ -2257,6 +2266,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             run.RecoveryReason = commit.CorrelationId == "provider-submission-uncertain"
                 ? ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain
                 : ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted;
+            operation.ReconciliationDiagnosticCode = run.RecoveryReason;
             ApplyReasonClock(
                 operation,
                 previousReason,
@@ -2731,6 +2741,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             await dbContext.ElsaInstanceRecoveryRequests.AddAsync(recovery, cancellationToken);
             existingOperation.FailureCode = null;
             existingOperation.FailureSummary = null;
+            existingOperation.ReconciliationDiagnosticCode = null;
             if (existingOperation.DeploymentRunId is { } deploymentRunId)
             {
                 var run = await dbContext.DeploymentRuns

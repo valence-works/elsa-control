@@ -94,6 +94,35 @@ public static class ManagedElsaReasonCodeCatalog
     public const string AzurePromotionUncertain = "azure.promotion.uncertain";
     public const string AzurePromotionRollbackUncertain = "azure.promotion.rollback-uncertain";
     public const string StagingLeverRecoveryRequired = "staging.lever.recovery-required";
+    public const string DeletionLocalAbsent = "deletion.local.absent";
+    public const string DeletionProviderConfirmedAbsent = "deletion.provider-confirmed-absent";
+    public const string DeletionProviderUnavailable = "deletion.provider.unavailable";
+    public const string DeletionAzureProviderUnavailable = "deletion.provider-unavailable";
+    public const string DeletionProviderCleanupPending = "deletion.provider-cleanup-pending";
+    public const string DeletionProviderAssignmentUnavailable = "deletion.provider-assignment-unavailable";
+    public const string DeletionProviderEvidenceUnavailable = "deletion.provider-evidence-unavailable";
+    public const string DeletionProviderPlanUnavailable = "deletion.provider-plan-unavailable";
+    public const string DeletionRecoveryCapabilityUnavailable = "deletion.recovery.capability-unavailable";
+    public const string DeletionRecoveryAssignmentIncomplete = "deletion.recovery.assignment-incomplete";
+    public const string DeletionClaimConflict = "deletion.claim.conflict";
+    public const string DeletionCorrelationInvalid = "deletion.correlation.invalid";
+    public const string DeletionItemInvalid = "deletion.item.invalid";
+    public const string DeletionProviderAssignmentInvalid = "deletion.provider-assignment-invalid";
+    public const string DeletionProviderCorrelationInvalid = "deletion.provider-correlation-invalid";
+    public const string DeletionProviderCleanupFailed = "deletion.provider-cleanup-failed";
+    public const string DeletionRecoveryAuthorityUnavailable = "deletion.recovery.authority-unavailable";
+    public const string DeletionRecoveryPlanUnavailable = "deletion.recovery.plan-unavailable";
+    public const string DeletionRecoveryAssignmentInvalid = "deletion.recovery.assignment-invalid";
+    public const string DeletionRecoveryClaimLost = "deletion.recovery.claim-lost";
+    public const string DeletionPredecessorRecoverySuperseded = "deletion.predecessor-recovery-superseded";
+    public const string DeletionProviderUncertain = "deletion.provider.uncertain";
+    public const string DeletionProviderUnknown = "deletion.provider.unknown";
+    public const string DeletionProviderAbsent = "deletion.provider.absent";
+    public const string DeletionProviderAmbiguous = "deletion.provider.ambiguous";
+    public const string DeletionProviderFinalizationPending = "deletion.provider-finalization-pending";
+    public const string AssignmentRebindOperationsInFlight = "assignment.rebind.operations-inflight";
+    public const string AssignmentRebindPlacementMismatch = "assignment.rebind.placement-mismatch";
+    public const string AssignmentRebindAmbiguous = "assignment.rebind.ambiguous";
 
     public static readonly FrozenDictionary<string, ManagedElsaReasonCode> ByCode =
         new ManagedElsaReasonCode[]
@@ -120,16 +149,13 @@ public static class ManagedElsaReasonCodeCatalog
             new(AzureRecoveryAutoResumeAccepted, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoveryFoundationObserved, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoveryFoundationOutputsUnavailable, ManagedElsaReasonClass.AutoResuming),
-            new(AzureRecoveryFoundationOutputsInvalid, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoveryWorkloadInProgress, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoveryWorkloadObserved, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoveryWorkloadOutputsUnavailable, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoveryWorkloadRevisionUnavailable, ManagedElsaReasonClass.AutoResuming),
-            new(AzureRecoveryWorkloadOutputsInvalid, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoveryAcrPullObserved, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoverySeedSecretsObserved, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoverySeedSecretsAbsent, ManagedElsaReasonClass.AutoResuming),
-            new(AzureRecoverySeedSecretsPartial, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoverySqlFirewallCreateObserved, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoverySqlFirewallCleanupObserved, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoverySqlBootstrapObserved, ManagedElsaReasonClass.AutoResuming),
@@ -148,6 +174,9 @@ public static class ManagedElsaReasonCodeCatalog
             new(AzureRecoveryAutoResumeConflict, ManagedElsaReasonClass.NeedsPerson),
             new(AzureRecoveryAutoResumeRejected, ManagedElsaReasonClass.NeedsPerson),
             new(AzureRecoveryObservationAmbiguous, ManagedElsaReasonClass.NeedsPerson),
+            new(AzureRecoveryFoundationOutputsInvalid, ManagedElsaReasonClass.NeedsPerson),
+            new(AzureRecoveryWorkloadOutputsInvalid, ManagedElsaReasonClass.NeedsPerson),
+            new(AzureRecoverySeedSecretsPartial, ManagedElsaReasonClass.NeedsPerson),
             new(AzureRecoveryStepUnsupported, ManagedElsaReasonClass.NeedsPerson),
             new(AzureRecoveryAssignmentInvalid, ManagedElsaReasonClass.NeedsPerson),
             new(AzureRecoveryAssignmentMismatch, ManagedElsaReasonClass.NeedsPerson),
@@ -155,7 +184,36 @@ public static class ManagedElsaReasonCodeCatalog
             new(AzureRecoveryPlanUnavailable, ManagedElsaReasonClass.NeedsPerson),
             new(AzureRecoveryPlanMismatch, ManagedElsaReasonClass.NeedsPerson),
             new(AzureRecoveryStateInvalid, ManagedElsaReasonClass.NeedsPerson),
-            new(StagingLeverRecoveryRequired, ManagedElsaReasonClass.NeedsPerson)
+            new(StagingLeverRecoveryRequired, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionLocalAbsent, ManagedElsaReasonClass.HealthyHandOff),
+            new(DeletionProviderConfirmedAbsent, ManagedElsaReasonClass.HealthyHandOff),
+            new(DeletionProviderUnavailable, ManagedElsaReasonClass.Temporary),
+            new(DeletionAzureProviderUnavailable, ManagedElsaReasonClass.Temporary),
+            new(DeletionProviderCleanupPending, ManagedElsaReasonClass.Temporary),
+            new(DeletionProviderAssignmentUnavailable, ManagedElsaReasonClass.Temporary),
+            new(DeletionProviderEvidenceUnavailable, ManagedElsaReasonClass.Temporary),
+            new(DeletionProviderPlanUnavailable, ManagedElsaReasonClass.Temporary),
+            new(DeletionRecoveryCapabilityUnavailable, ManagedElsaReasonClass.Temporary),
+            new(DeletionRecoveryAssignmentIncomplete, ManagedElsaReasonClass.Temporary),
+            new(DeletionClaimConflict, ManagedElsaReasonClass.Temporary),
+            new(DeletionProviderUncertain, ManagedElsaReasonClass.Temporary),
+            new(DeletionProviderUnknown, ManagedElsaReasonClass.Temporary),
+            new(DeletionProviderFinalizationPending, ManagedElsaReasonClass.Temporary),
+            new(DeletionProviderAbsent, ManagedElsaReasonClass.HealthyHandOff),
+            new(DeletionCorrelationInvalid, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionItemInvalid, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionProviderAssignmentInvalid, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionProviderCorrelationInvalid, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionProviderCleanupFailed, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionProviderAmbiguous, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionRecoveryAssignmentInvalid, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionRecoveryClaimLost, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionPredecessorRecoverySuperseded, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionRecoveryAuthorityUnavailable, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionRecoveryPlanUnavailable, ManagedElsaReasonClass.NeedsPerson),
+            new(AssignmentRebindOperationsInFlight, ManagedElsaReasonClass.Temporary),
+            new(AssignmentRebindPlacementMismatch, ManagedElsaReasonClass.NeedsPerson),
+            new(AssignmentRebindAmbiguous, ManagedElsaReasonClass.NeedsPerson)
         }.ToFrozenDictionary(entry => entry.Code, StringComparer.Ordinal);
 
     public static IReadOnlyList<string> DefinedCodes { get; } =
