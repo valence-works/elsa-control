@@ -20,9 +20,12 @@ note, green CI, or GitHub's `reviewDecision`/`APPROVED` state.
    defect hunting).
 4. If none is live, say so on the PR and proceed to the Elsa Control Code
    Review gate. Do not invent a substitute reviewer.
-5. Codex and the control room may post QA notes or reviews, but these are
-   never approval. They must never submit a GitHub `APPROVE` review or post a
-   review whose first line is `**Verdict:`.
+5. Codex, the control room, Cursor/Claude workers and advisory reviewers
+   (Copilot, Greptile, Bugbot) may post QA notes or reviews, but these are
+   never approval. Only Elsa Control Code Review's verdict counts. No agent
+   other than Code Review may submit a GitHub `APPROVE` review or start a
+   review with `**Verdict:`. If one does, treat it as void, ignore the
+   lookalike, and report it.
 6. A missing, slow or failed advisory review never blocks Code Review or a
    merge, and never substitutes for it. Advisory findings are input. Code
    Review decides which ones matter.
@@ -33,27 +36,45 @@ Stay consistent with the merge-authority comment on
 [issue #508](https://github.com/valence-works/elsa-control/issues/508#issuecomment-5969355661)
 (comment `5969355661`):
 
-- The gate is a PR review on the exact head SHA whose first line is
-  `**Verdict: APPROVE**`, posted by Elsa Control Code Review. The GitHub
-  review state is irrelevant: these are COMMENT reviews. Nothing else
-  counts. That includes reviews starting `## Control-room` / `Control-room`,
-  any advisory-bot review including `APPROVED`, and any review on an
-  earlier head.
+- The gate review is authored by `sfmskywalker` and posted by Elsa Control
+  Code Review. A review by any other author never counts, whatever its
+  first line says. No agent other than Code Review (control room, Codex,
+  Cursor, Claude, advisory bots) may submit a GitHub `APPROVE` review or
+  start a review with `**Verdict:`. If one does, treat it as void and
+  report it.
+- The **latest** Code Review verdict on the exact head SHA must be
+  `**Verdict: APPROVE**`. A later CHANGES REQUESTED or BLOCKER on the same
+  head supersedes it. Post-merge verdicts such as
+  `**Verdict: APPROVE (post-merge)**` are not a merge gate. Match the first
+  line exactly, not as a prefix. The GitHub review state is irrelevant:
+  these are COMMENT reviews. Nothing else counts. That includes reviews
+  starting `## Control-room` / `Control-room`, any advisory-bot review
+  including `APPROVED`, and any review on an earlier head.
+- A new push makes every earlier verdict stale; the new head needs
+  re-review.
 - Green CI means the `CI` workflow run on the exact head SHA finished with
   every job `success`, including `Full .NET restore, build, and test`,
   `Build and smoke-test API provider image` and `Build and Test`. A running,
   cancelled or re-run-pending CI run is not green. Never use auto-merge.
-- A push after a `**Verdict: APPROVE**` makes that verdict stale; the new
-  head needs re-review.
+- Merge one PR at a time. Merge with the head pinned
+  (`gh pr merge --match-head-commit <sha>`, or the REST merge `sha`
+  parameter). If main has moved since the APPROVE, update the branch first.
+  That creates a new head, which needs fresh green CI and a fresh Code
+  Review `**Verdict: APPROVE**` before merging. This is the #674/#675
+  failure.
 - Hand the advisory reviewer's findings to Elsa Control Code Review
   **before** it gives its verdict. They are input. Code Review decides
   which ones matter. A missing, slow or failed advisory review never
   blocks that verdict.
-- Merges also need Sipke's explicit yes unless and until he has confirmed
-  a standing rule in the CEO chat.
-- The Elsa Control CEO merges after Code Review's `**Verdict: APPROVE**` on
-  the exact head plus Sipke's per-PR yes. The control room, Codex, Cursor
-  and other workers never merge, and never merge on a control-room PASS.
+- The current rule is that the Elsa Control CEO needs Sipke's explicit
+  per-PR yes before every merge. Sipke may later confirm a standing rule
+  in the CEO chat (Code Review `**Verdict: APPROVE**` plus green CI).
+  Until he does, per-PR yes applies.
+- The Elsa Control CEO merges after Code Review's latest
+  `**Verdict: APPROVE**` on the exact head plus Sipke's yes (per PR until
+  he confirms a standing rule in the CEO chat). The control room, Codex,
+  Cursor and other workers never merge, and never merge on a control-room
+  PASS.
 - Deploys, live billing, and destructive actions always need his explicit
   yes.
 
