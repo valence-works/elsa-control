@@ -37,6 +37,11 @@ public static class ElsaInstanceDeletionDiagnosticCodes
     public const string RecoveryAssignmentInvalid = ManagedElsaReasonCodeCatalog.DeletionRecoveryAssignmentInvalid;
     public const string RecoveryClaimLost = ManagedElsaReasonCodeCatalog.DeletionRecoveryClaimLost;
     public const string PredecessorRecoverySuperseded = ManagedElsaReasonCodeCatalog.DeletionPredecessorRecoverySuperseded;
+    public const string ProviderUncertain = ManagedElsaReasonCodeCatalog.DeletionProviderUncertain;
+    public const string ProviderUnknown = ManagedElsaReasonCodeCatalog.DeletionProviderUnknown;
+    public const string ProviderAbsent = ManagedElsaReasonCodeCatalog.DeletionProviderAbsent;
+    public const string ProviderAmbiguous = ManagedElsaReasonCodeCatalog.DeletionProviderAmbiguous;
+    public const string ProviderFinalizationPending = ManagedElsaReasonCodeCatalog.DeletionProviderFinalizationPending;
 }
 
 public sealed record ElsaInstanceCleanupEvidence

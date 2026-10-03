@@ -115,6 +115,11 @@ public static class ManagedElsaReasonCodeCatalog
     public const string DeletionRecoveryAssignmentInvalid = "deletion.recovery.assignment-invalid";
     public const string DeletionRecoveryClaimLost = "deletion.recovery.claim-lost";
     public const string DeletionPredecessorRecoverySuperseded = "deletion.predecessor-recovery-superseded";
+    public const string DeletionProviderUncertain = "deletion.provider.uncertain";
+    public const string DeletionProviderUnknown = "deletion.provider.unknown";
+    public const string DeletionProviderAbsent = "deletion.provider.absent";
+    public const string DeletionProviderAmbiguous = "deletion.provider.ambiguous";
+    public const string DeletionProviderFinalizationPending = "deletion.provider-finalization-pending";
 
     public static readonly FrozenDictionary<string, ManagedElsaReasonCode> ByCode =
         new ManagedElsaReasonCode[]
@@ -188,13 +193,18 @@ public static class ManagedElsaReasonCodeCatalog
             new(DeletionRecoveryCapabilityUnavailable, ManagedElsaReasonClass.Temporary),
             new(DeletionRecoveryAssignmentIncomplete, ManagedElsaReasonClass.Temporary),
             new(DeletionClaimConflict, ManagedElsaReasonClass.Temporary),
+            new(DeletionProviderUncertain, ManagedElsaReasonClass.Temporary),
+            new(DeletionProviderUnknown, ManagedElsaReasonClass.Temporary),
+            new(DeletionProviderFinalizationPending, ManagedElsaReasonClass.Temporary),
+            new(DeletionRecoveryAuthorityUnavailable, ManagedElsaReasonClass.Temporary),
+            new(DeletionRecoveryPlanUnavailable, ManagedElsaReasonClass.Temporary),
+            new(DeletionProviderAbsent, ManagedElsaReasonClass.HealthyHandOff),
             new(DeletionCorrelationInvalid, ManagedElsaReasonClass.NeedsPerson),
             new(DeletionItemInvalid, ManagedElsaReasonClass.NeedsPerson),
             new(DeletionProviderAssignmentInvalid, ManagedElsaReasonClass.NeedsPerson),
             new(DeletionProviderCorrelationInvalid, ManagedElsaReasonClass.NeedsPerson),
             new(DeletionProviderCleanupFailed, ManagedElsaReasonClass.NeedsPerson),
-            new(DeletionRecoveryAuthorityUnavailable, ManagedElsaReasonClass.NeedsPerson),
-            new(DeletionRecoveryPlanUnavailable, ManagedElsaReasonClass.NeedsPerson),
+            new(DeletionProviderAmbiguous, ManagedElsaReasonClass.NeedsPerson),
             new(DeletionRecoveryAssignmentInvalid, ManagedElsaReasonClass.NeedsPerson),
             new(DeletionRecoveryClaimLost, ManagedElsaReasonClass.NeedsPerson),
             new(DeletionPredecessorRecoverySuperseded, ManagedElsaReasonClass.NeedsPerson)
