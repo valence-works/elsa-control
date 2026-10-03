@@ -198,6 +198,9 @@ public sealed class AzureElsaInstanceProvider(
                 retryEvidence?.Evidence)
             {
                 ReasonCode = retryEvidence?.ReasonCode
+                    ?? (operation.Status == AzureProviderOperationStatus.RecoveryRequired
+                        ? ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable
+                        : null)
             }
         };
     }

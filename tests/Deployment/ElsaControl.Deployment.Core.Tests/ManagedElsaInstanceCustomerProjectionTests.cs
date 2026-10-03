@@ -444,6 +444,24 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
     }
 
     [Fact]
+    public void Azure_park_without_recovery_evidence_is_temporary_and_needs_a_person_at_the_window()
+    {
+        var instance = Instance(ElsaObservedLifecycle.Provisioning);
+        var operation = Operation(
+            instance.Id,
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable,
+            parkedAt: Now);
+
+        Assert.Equal(ElsaObservedLifecycle.Provisioning,
+            ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation, Now));
+        Assert.Equal(ElsaObservedLifecycle.RecoveryRequired,
+            ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(
+                instance, operation, Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter));
+    }
+
+    [Fact]
     public void Auto_resuming_park_projects_recovery_required_after_the_window()
     {
         var instance = Instance(ElsaObservedLifecycle.Provisioning);
