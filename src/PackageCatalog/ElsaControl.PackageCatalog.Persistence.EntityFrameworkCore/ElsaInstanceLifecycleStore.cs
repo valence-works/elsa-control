@@ -2701,7 +2701,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         existingOperation.RecoveryRequestHash = requestedOperation.RecoveryRequestHash;
         if (isRecoveryResume)
         {
-            existingOperation.RecoveryExpectedVersion = requestedOperation.RecoveryExpectedVersion;
+            existingOperation.RecoveryExpectedVersion = ElsaInstanceOperation.MergeRecoveryExpectedVersion(
+                requestedOperation.RecoveryExpectedVersion, existingOperation.RecoveryExpectedVersion);
             ApplyReasonClock(existingOperation, CurrentParkReason(existingOperation, null), nextCode: null, requestedAt, restartClock: true);
             var deleteAuthority = existingOperation.Action == ElsaInstanceOperationAction.Delete
                 ? await CaptureAzureDeleteRecoveryAuthorityAsync(

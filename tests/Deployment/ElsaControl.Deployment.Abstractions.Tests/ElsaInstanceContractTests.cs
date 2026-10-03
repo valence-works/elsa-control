@@ -389,6 +389,42 @@ public sealed class ElsaInstanceContractTests
     }
 
     [Fact]
+    public void Auto_resume_recover_preserves_an_existing_recovery_expected_version()
+    {
+        var instance = CreateInstance(ElsaObservedLifecycle.Failed);
+        var stamped = OperationFor(instance, ElsaInstanceOperationState.RecoveryRequired)
+            .Recover("instance/recover", "customer-recover", Hash('c'), instance.Version)
+            .TransitionTo(ElsaInstanceOperationState.Running)
+            .TransitionTo(ElsaInstanceOperationState.RecoveryRequired);
+
+        var result = ElsaInstanceStateMachine.Request(
+            instance,
+            ElsaInstanceOperationAction.Recover,
+            stamped,
+            recordCustomerRecovery: false);
+
+        Assert.Equal(instance.Version, result.Operation.RecoveryExpectedVersion);
+    }
+
+    [Fact]
+    public void Later_customer_recover_advances_recovery_expected_version()
+    {
+        var instance = CreateInstance(ElsaObservedLifecycle.Failed);
+        var first = OperationFor(instance, ElsaInstanceOperationState.RecoveryRequired);
+        var recovered = ElsaInstanceStateMachine.Request(instance, ElsaInstanceOperationAction.Recover, first);
+        var parked = recovered.Operation
+            .TransitionTo(ElsaInstanceOperationState.Running)
+            .TransitionTo(ElsaInstanceOperationState.RecoveryRequired);
+
+        // Request Recover already advanced the aggregate; a later customer Recover
+        // stamps the newer expected version instead of keeping the first marker.
+        var result = ElsaInstanceStateMachine.Request(recovered.Instance, ElsaInstanceOperationAction.Recover, parked);
+
+        Assert.True(result.Operation.RecoveryExpectedVersion > recovered.Operation.RecoveryExpectedVersion);
+        Assert.Equal(recovered.Instance.Version, result.Operation.RecoveryExpectedVersion);
+    }
+
+    [Fact]
     public void Recovering_delete_reuses_operation_without_reconciling_to_provisioning()
     {
         var instance = CreateInstance(ElsaObservedLifecycle.Unknown);

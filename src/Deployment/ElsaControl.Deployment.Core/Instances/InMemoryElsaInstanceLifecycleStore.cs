@@ -688,7 +688,10 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                     throw new ElsaInstanceDeleteConfirmationException();
 
                 if (isRecoveryResume)
+                {
+                    operation = operation.WithPreservedRecoveryExpectedVersion(storedOperation.RecoveryExpectedVersion);
                     AppendRecoveryRequest(instance, operation, outbox.CreatedAt);
+                }
                 _instances[instance.Id] = instance;
                 _operations[operation.Id] = operation;
                 return Task.FromResult(new ElsaInstanceLifecycleAcceptance(instance, operation, existingOutbox, false));

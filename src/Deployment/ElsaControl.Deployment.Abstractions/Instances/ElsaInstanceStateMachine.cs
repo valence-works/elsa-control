@@ -95,8 +95,9 @@ public sealed record ElsaInstanceOperation
     /// Version a customer or operator Recover was accepted against.
     /// Recover mutates this row in place and leaves
     /// <see cref="ExpectedVersion"/> at the original accept, so Delete
-    /// If-Match rebase uses this stamp. System auto-resume leaves it
-    /// null so a stale Delete can still rebase.
+    /// If-Match rebase uses this stamp. System auto-resume does not
+    /// stamp a new marker; it preserves an existing customer or
+    /// operator marker so a later stale Delete still 412s.
     /// </summary>
     public int? RecoveryExpectedVersion { get; private init; }
 
@@ -221,9 +222,25 @@ public sealed record ElsaInstanceOperation
             RecoveryIdempotencyScope = ElsaInstanceReferenceValue.RequireOperationScope(idempotencyScope, nameof(idempotencyScope)),
             RecoveryIdempotencyKey = ElsaInstanceReferenceValue.RequireOperationKey(idempotencyKey, nameof(idempotencyKey)),
             RecoveryRequestHash = ElsaInstanceReferenceValue.RequireCanonicalHash(requestHash, nameof(requestHash)),
-            RecoveryExpectedVersion = recoveryExpectedVersion
+            // System auto-resume passes null and must keep a prior customer/
+            // operator marker. A later customer/operator Recover advances it.
+            RecoveryExpectedVersion = MergeRecoveryExpectedVersion(recoveryExpectedVersion, RecoveryExpectedVersion)
         };
     }
+
+    /// <summary>
+    /// One merge for Recover and both stores so a later #671 rebase
+    /// conflicts in one place. Incoming customer/operator stamps win;
+    /// a null incoming auto-resume keeps the existing marker.
+    /// </summary>
+    public static int? MergeRecoveryExpectedVersion(int? incoming, int? existing) => incoming ?? existing;
+
+    /// <summary>
+    /// Persistence resume may see a null incoming stamp from system
+    /// auto-resume. Keep the stored customer or operator marker.
+    /// </summary>
+    public ElsaInstanceOperation WithPreservedRecoveryExpectedVersion(int? existing) =>
+        this with { RecoveryExpectedVersion = MergeRecoveryExpectedVersion(RecoveryExpectedVersion, existing) };
 
     public bool BlocksDeleteRebaseAt(int version) =>
         (IsCustomerOrOperatorMutation(Action) && ExpectedVersion >= version) ||

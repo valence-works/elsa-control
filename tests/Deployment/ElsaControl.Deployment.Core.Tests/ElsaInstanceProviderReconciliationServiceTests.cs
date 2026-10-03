@@ -365,6 +365,72 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
     }
 
     [Fact]
+    public async Task Auto_resume_after_customer_recover_preserves_the_marker_and_blocks_stale_delete()
+    {
+        var (store, accepted, authority) = await RecoveryTargetWithAuthorityAsync();
+        var readVersion = accepted.Instance.Version;
+        var lifecycle = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var retrySafe = await new ElsaInstanceProviderReconciliationService(
+                store,
+                new RecordingPort(new ElsaInstanceProviderObservation(
+                    ElsaInstanceProviderObservationKind.Confirmed,
+                    ElsaObservedLifecycle.Provisioning,
+                    ElsaInstanceProviderHealthGate.Unknown,
+                    "observation-before-customer-recover",
+                    OpaqueEvidence(autoResume: false))),
+                new StaticTimeProvider(Now),
+                lifecycle)
+            .ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+        var recovered = await lifecycle.RecoverAsync(new ElsaInstanceLifecycleRequest(
+            WorkspaceId,
+            accepted.Instance.Id,
+            retrySafe.Projection.InstanceVersion,
+            "customer-recover-before-auto-resume",
+            ActorAccountId: Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+            ExpectedOperationId: accepted.Operation.Id));
+        Assert.Equal(retrySafe.Projection.InstanceVersion, recovered.Operation.RecoveryExpectedVersion);
+        store.MarkRecoveryRequired(accepted.Operation.Id);
+        var port = new ChargingPort(
+            new ElsaInstanceProviderObservation(
+                ElsaInstanceProviderObservationKind.Confirmed,
+                ElsaObservedLifecycle.Provisioning,
+                ElsaInstanceProviderHealthGate.Unknown,
+                "observation-auto-resume-after-customer",
+                OpaqueEvidence(autoResume: true)));
+
+        var resumed = await new ElsaInstanceProviderReconciliationService(
+                store, port, new StaticTimeProvider(Now), lifecycle)
+            .ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+
+        var parked = Assert.Single(store.Operations);
+        Assert.Equal(ElsaInstanceOperationState.Queued, parked.State);
+        Assert.Equal(recovered.Operation.RecoveryExpectedVersion, parked.RecoveryExpectedVersion);
+        Assert.Equal(1, port.AutoResumeCount);
+        var current = store.Instances.Single();
+        var confirmationId = Guid.NewGuid();
+        authority.Add(new ActionConfirmation(
+            confirmationId,
+            WorkspaceId,
+            ConfirmationActionType.DeleteManagedInstance,
+            current.Id.ToString("D"),
+            Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+            Now,
+            Now.AddMinutes(5),
+            null));
+
+        var conflict = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            lifecycle.DeleteAsync(new ElsaInstanceLifecycleRequest(
+                WorkspaceId, current.Id, current.Version, "delete-after-preserved-recover",
+                DeleteConfirmationId: confirmationId,
+                ActorAccountId: Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                CanonicalExpectedVersion: readVersion)));
+
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.ChangedSinceRead, conflict.Reason);
+        Assert.DoesNotContain(store.Operations, operation => operation.Action == ElsaInstanceOperationAction.Delete);
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, resumed.Outcome);
+    }
+
+    [Fact]
     public async Task Operator_visible_reason_is_committed_for_in_progress_recovery()
     {
         var (store, accepted) = await RecoveryTargetAsync();

@@ -50,7 +50,8 @@ public interface IElsaInstanceLifecycleStore
     /// Customer or operator Recover mutates the parked row in place, so a
     /// <see cref="ElsaInstanceOperation.RecoveryExpectedVersion"/> at or
     /// after <paramref name="version"/> also counts. System auto-resume
-    /// does not stamp and does not count.
+    /// does not stamp a new marker; it preserves an existing customer or
+    /// operator marker and therefore still counts when one is present.
     /// <paramref name="exceptOperationId"/> excludes the Delete being
     /// recovered or replayed.
     /// </summary>
