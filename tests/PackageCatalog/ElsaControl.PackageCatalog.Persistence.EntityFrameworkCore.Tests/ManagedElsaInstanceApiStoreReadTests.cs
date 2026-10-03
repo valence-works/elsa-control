@@ -27,6 +27,8 @@ public sealed class ManagedElsaInstanceApiStoreReadTests
         parked.State = ElsaInstanceOperationState.RecoveryRequired;
         parked.StartedAt = BaseTime;
         parked.ReconciliationDiagnosticCode = "azure.recovery.auto-resume-exhausted";
+        parked.ReasonEnteredAt = BaseTime;
+        parked.RequiresHumanAt = BaseTime;
         instance.LastOperationId = parked.Id.ToString("D");
         db.ElsaInstanceOperations.Add(parked);
         await db.SaveChangesAsync();
@@ -88,6 +90,8 @@ public sealed class ManagedElsaInstanceApiStoreReadTests
         parked.State = ElsaInstanceOperationState.RecoveryRequired;
         parked.StartedAt = BaseTime;
         parked.ReconciliationDiagnosticCode = ElsaInstanceProviderReconciliationService.AutoResumeExhaustedCode;
+        parked.ReasonEnteredAt = BaseTime;
+        parked.RequiresHumanAt = BaseTime;
         instance.LastOperationId = parked.Id.ToString("D");
         db.ElsaInstanceOperations.Add(parked);
         await db.SaveChangesAsync();

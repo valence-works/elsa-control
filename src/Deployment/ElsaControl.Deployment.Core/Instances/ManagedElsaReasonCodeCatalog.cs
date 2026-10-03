@@ -300,9 +300,14 @@ public readonly record struct ManagedElsaReasonClockState(
 
 /// <summary>
 /// Advances <see cref="ManagedElsaReasonClockState.ReasonEnteredAt"/> only when
-/// the catalog class changes or a resume/Recover happens. Sets
-/// <see cref="ManagedElsaReasonClockState.RequiresHumanAt"/> once when the
-/// catalog says a person is required. #662 owns compare-and-set plus outbox.
+/// the park leaves the deferred 10-minute window or a resume/Recover happens.
+/// Same-class parks keep the clock. Temporary and auto-resuming Azure
+/// observations also share that window so a flap between them does not
+/// restart it. A missing
+/// <see cref="ManagedElsaReasonClockState.ReasonEnteredAt"/> starts the clock
+/// now. Sets <see cref="ManagedElsaReasonClockState.RequiresHumanAt"/> once
+/// when the catalog says a person is required. #662 owns compare-and-set plus
+/// outbox.
 /// </summary>
 public static class ManagedElsaReasonClock
 {
@@ -325,9 +330,9 @@ public static class ManagedElsaReasonClock
                 ManagedElsaReasonCodeCatalog.RequiresHuman(nextCode, now, now) ? now : null);
         }
 
-        var previousClass = ManagedElsaReasonCodeCatalog.Classify(previousCode);
-        var nextClass = ManagedElsaReasonCodeCatalog.Classify(nextCode);
-        var enteredAt = reasonEnteredAt is null || previousClass != nextClass ? now : reasonEnteredAt;
+        var enteredAt = reasonEnteredAt is null || !SharesDeferredHumanRequiredClock(previousCode, nextCode)
+            ? now
+            : reasonEnteredAt;
         if (requiresHumanAt is not null)
             return new(enteredAt, requiresHumanAt);
 
@@ -335,4 +340,27 @@ public static class ManagedElsaReasonClock
             enteredAt,
             ManagedElsaReasonCodeCatalog.RequiresHuman(nextCode, enteredAt, now) ? now : null);
     }
+
+    private static bool SharesDeferredHumanRequiredClock(string? previousCode, string? nextCode)
+    {
+        var left = ManagedElsaReasonCodeCatalog.Classify(previousCode);
+        var right = ManagedElsaReasonCodeCatalog.Classify(nextCode);
+        if (left == right)
+            return true;
+
+        // Azure Temporary ↔ AutoResuming flaps share the 10-minute window.
+        // A stale Temporary park that later sees an Azure auto-resume is a
+        // new observation and restarts the clock.
+        return IsDeferredHumanRequired(left) &&
+               IsDeferredHumanRequired(right) &&
+               IsAzureObservation(previousCode) &&
+               IsAzureObservation(nextCode);
+    }
+
+    private static bool IsDeferredHumanRequired(ManagedElsaReasonClass value) =>
+        value is ManagedElsaReasonClass.Temporary or ManagedElsaReasonClass.AutoResuming;
+
+    private static bool IsAzureObservation(string? code) =>
+        !string.IsNullOrWhiteSpace(code) &&
+        code.StartsWith("azure.", StringComparison.Ordinal);
 }

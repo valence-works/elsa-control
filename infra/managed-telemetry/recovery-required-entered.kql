@@ -1,0 +1,11 @@
+// First-ingestion gate over the 1-hour rule window. One email per
+// RecoveryRequired entry. A resend more than 1 hour after first ingestion
+// can email again. {{environment}} is replaced by the Bicep environment
+// parameter at compile time.
+AppDependencies
+| where Name == 'managed_lifecycle.recovery_required.entered'
+| where tostring(Properties.environment) == '{{environment}}'
+| extend identity = tostring(Properties.dedupe_identity)
+| where isnotempty(identity)
+| summarize firstIngested = min(ingestion_time()) by identity
+| where firstIngested > ago(5m)

@@ -199,6 +199,84 @@ public sealed class ManagedElsaReasonCodeCatalogTests
     }
 
     [Fact]
+    public void Missing_reason_entered_at_starts_the_clock_now()
+    {
+        Assert.False(ManagedElsaReasonCodeCatalog.RequiresHuman(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain, null, Now.AddMinutes(30)));
+        var stamped = ManagedElsaReasonClock.Advance(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
+            reasonEnteredAt: null,
+            requiresHumanAt: null,
+            Now.AddMinutes(3),
+            restartClock: false);
+
+        Assert.Equal(Now.AddMinutes(3), stamped.ReasonEnteredAt);
+        Assert.Null(stamped.RequiresHumanAt);
+    }
+
+    [Fact]
+    public void Flapping_azure_observations_keep_the_deferred_clock()
+    {
+        var first = ManagedElsaReasonClock.Advance(
+            null, ManagedElsaReasonCodeCatalog.AzureDeploymentFailed, null, null, Now, restartClock: false);
+        var flapped = ManagedElsaReasonClock.Advance(
+            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+            ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable,
+            first.ReasonEnteredAt,
+            first.RequiresHumanAt,
+            Now.AddMinutes(5),
+            restartClock: false);
+        var back = ManagedElsaReasonClock.Advance(
+            ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable,
+            ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInProgress,
+            flapped.ReasonEnteredAt,
+            flapped.RequiresHumanAt,
+            Now.AddMinutes(8),
+            restartClock: false);
+        var atBound = ManagedElsaReasonClock.Advance(
+            ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInProgress,
+            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+            back.ReasonEnteredAt,
+            back.RequiresHumanAt,
+            Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter,
+            restartClock: false);
+
+        Assert.Equal(Now, first.ReasonEnteredAt);
+        Assert.Null(first.RequiresHumanAt);
+        Assert.Equal(Now, flapped.ReasonEnteredAt);
+        Assert.Null(flapped.RequiresHumanAt);
+        Assert.Equal(Now, back.ReasonEnteredAt);
+        Assert.Null(back.RequiresHumanAt);
+        Assert.Equal(Now, atBound.ReasonEnteredAt);
+        Assert.Equal(Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter, atBound.RequiresHumanAt);
+    }
+
+    [Fact]
+    public void Stale_temporary_park_then_azure_auto_resume_restarts_the_clock()
+    {
+        var stale = ManagedElsaReasonClock.Advance(
+            null,
+            ManagedElsaReasonCodeCatalog.ProviderReconciliationRequired,
+            null,
+            null,
+            Now,
+            restartClock: false);
+        var resumed = ManagedElsaReasonClock.Advance(
+            ManagedElsaReasonCodeCatalog.ProviderReconciliationRequired,
+            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+            stale.ReasonEnteredAt,
+            stale.RequiresHumanAt,
+            Now.AddMinutes(11),
+            restartClock: false);
+
+        Assert.Equal(Now, stale.ReasonEnteredAt);
+        Assert.Null(stale.RequiresHumanAt);
+        Assert.Equal(Now.AddMinutes(11), resumed.ReasonEnteredAt);
+        Assert.Null(resumed.RequiresHumanAt);
+    }
+
+    [Fact]
     public void Resume_or_recover_restarts_the_clock_and_clears_the_flag()
     {
         var parked = ManagedElsaReasonClock.Advance(

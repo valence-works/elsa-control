@@ -4,8 +4,12 @@
 operator response. This is the operational baseline for [#222](https://github.com/valence-works/elsa-control/issues/222).
 
 **Important:** the controlled fixtures and tests behind this runbook are not
-production availability evidence. They do not establish a 99.9% SLO, an alert
-delivery guarantee, or a provider-specific production support commitment.
+production availability evidence. They do not establish a 99.9% SLO or a
+provider-specific production support commitment. RecoveryRequired now has a
+Control-owned structured event and one Azure Monitor email rule; live mailbox
+proof is still open under [#657](https://github.com/valence-works/elsa-control/issues/657)
+(#508 GO row 26). Keep the business-day RecoveryRequired check until that proof
+passes. Customer copy must not say "has been alerted" until then.
 
 ## Operator contract
 
@@ -441,8 +445,116 @@ Validate this runbook against controlled persistence/API fixtures for:
 - rollback selection and restore-to-new escalation without source mutation.
 
 These checks prove deterministic contracts and safe response paths. They are not
-production SLO measurements and do not establish Azure Monitor, PagerDuty, or
-another vendor's alerting/delivery behavior.
+production SLO measurements and do not replace the live mailbox proof for
+RecoveryRequired alert delivery.
+
+## RecoveryRequired operator alert (#657)
+
+Control writes exactly one structured activity,
+`managed_lifecycle.recovery_required.entered`, when `RequiresHumanAt`
+goes from empty to a timestamp. That compare-and-set happens in the
+lifecycle persist when the catalog says a person is required — a
+needs-a-person-now reason (including unknown codes and
+`azure.recovery.auto-resume-exhausted`), or a temporary / auto-resuming
+reason that has sat 10 minutes since `ReasonEnteredAt`. The same
+transaction appends one outbox row keyed by operation and attempt; the
+span is flushed only after that commit. Auto-resuming #601 parks under
+the resume cap do not set the flag. Healthy hand-off, reads, health
+refreshes, unchanged-fingerprint reconciler re-ticks that are still
+inside the window, heartbeats, and checkpoints do not emit. Recover
+clears the flag; a later human-required park emits one new event. A
+run-less park is included by the 10-minute clock scan; it does not need
+a deployment run.
+
+The activity is an `ActivityKind.Internal` span on
+`ElsaControl.ManagedLifecycle`. The Azure Monitor exporter writes it to
+the Log Analytics `AppDependencies` table with `Name` equal to
+`managed_lifecycle.recovery_required.entered`. Tags are the fixed reason
+code `managed.lifecycle.recovery-required`, opaque
+workspace/instance/operation IDs, the SHA-256 health-alert dedupe
+identity, and the environment marker (`staging` or `production`). It does
+not carry names, messages, endpoints, or secrets. Control does not send
+email itself and does not page.
+
+The event is flushed only after the catalog persist commits. A failed
+commit emits nothing. The same transaction writes one outbox row; a
+dispatcher then sends the span with the identity persisted on that row,
+retries with exponential backoff, and marks `SentAt` only after the
+exporter `ForceFlush` succeeds or a configured email transport accepts
+the send. Creating an in-memory span is not delivery. A crash or a
+failed acknowledgement leaves `SentAt` empty, so the next hosted tick
+still delivers. Two dispatch loops claim a row with a short lease so
+only one sender runs. The Azure Monitor exporter uses `MaxRetries = 0`
+and `DisableOfflineStorage = true`; a missing email is therefore not
+proof that no engine is parked.
+
+The [managed telemetry sink](../../infra/managed-telemetry/README.md)
+defines one scheduled query rule and one email-only action group per
+environment. Names include the environment
+(`ag-recovery-required-staging` / `qr-recovery-required-entered-staging`,
+and the production pair) so Incremental deploys cannot overwrite each
+other. The rule is stateless (`autoMitigate: false`): one Fired email per
+RecoveryRequired entry, and no Resolved email. It queries
+`AppDependencies` for the event name, filters `Properties.environment`
+to the sink environment, looks back one hour (`windowSize PT1H`) at a
+5-minute frequency, groups by `Properties.dedupe_identity`, and alerts
+only when `min(ingestion_time())` is within `ago(5m)`. Split-by-dimension
+on that identity means N entries in one slot send N emails. A resend of
+the same entry more than 1 hour after first ingestion can email again.
+The query lives in
+[`recovery-required-entered.kql`](../../infra/managed-telemetry/recovery-required-entered.kql);
+Bicep and the fixture test load that file.
+
+Azure Monitor's log-alert docs define frequency as how often the query
+runs, not a pinned clock, and they document retries after late
+*ingestion*. They do not say whether a late evaluation can skip an entry
+when the `ago(5m)` gate equals the 5-minute frequency. That skip is an
+accepted launch residual.
+See [Create a log search alert rule](https://learn.microsoft.com/en-us/azure/azure-monitor/alerts/alerts-create-log-alert-rule)
+and [Troubleshoot log alerts](https://learn.microsoft.com/en-us/azure/azure-monitor/alerts/alerts-troubleshoot-log).
+The backstop is the same `RequiresHumanAt` flag: it drives Needs
+attention in Cloud and the operator health evaluator, so a skipped email
+still shows on the console and in the business-day check.
+
+Who reads the mailbox: the operator named in
+`STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT` for staging, and the operator
+named in `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT` for production.
+Never put an address in committed config, and never point staging at the
+production ops mailbox. `scripts/deploy-managed-telemetry.sh` (invoked by
+`azure-api-deploy.yml` in infra mode) refuses an unset recipient. Staging
+infra fails closed unless `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT`
+is also visible and differs from the staging mailbox.
+
+Until #508 GO row 26 (AC5) is proven on staging, keep the business-day
+manual RecoveryRequired check: inspect the health projection and the
+mailbox. Do not change customer-facing copy to say "has been alerted".
+
+Required operator steps before the first live email (Sipke):
+
+1. Set `STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT` on the `test` GitHub
+   environment and `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT` on
+   `production`. They must differ. Staging infra also needs the production
+   mailbox visible on `test` so the equality check can fail closed.
+2. Set `MANAGED_TELEMETRY_WORKSPACE_NAME`,
+   `MANAGED_TELEMETRY_APPLICATION_INSIGHTS_NAME`,
+   `MANAGED_TELEMETRY_API_IDENTITY_NAME`, and
+   `MANAGED_TELEMETRY_API_IDENTITY_RESOURCE_GROUP` on each environment
+   that deploys the sink.
+3. Enable the exporter on the target API: set
+   `MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED=true` (applied as
+   `ManagedLifecycleTelemetry:AzureMonitor:Enabled`), plus
+   `ManagedLifecycleTelemetry:AzureMonitor:ConnectionString` and
+   `ManagedLifecycleTelemetry:AzureMonitor:ManagedIdentityClientId` from
+   the reviewed sink component. Set
+   `APPLICATIONINSIGHTS_STATSBEAT_DISABLED=true` on the process. The
+   deploy workflow sets `ManagedLifecycleTelemetry:AzureMonitor:Environment`
+   to `staging` or `production` automatically. The Enabled flag is not
+   turned on by default; an API without a connection string fails closed
+   if Enabled is true.
+4. Run infra deploy so `scripts/deploy-managed-telemetry.sh` creates the
+   environment-scoped rule and action group. Prove one `AppDependencies`
+   row for a known RecoveryRequired entry in the staging workspace before
+   treating the mailbox as live.
 
 ## Enabling the production workers (#264, #315)
 

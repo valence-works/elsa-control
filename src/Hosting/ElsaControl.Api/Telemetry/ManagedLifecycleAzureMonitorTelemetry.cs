@@ -27,6 +27,7 @@ public static class ManagedLifecycleAzureMonitorTelemetryExtensions
         ArgumentNullException.ThrowIfNull(builder);
 
         var options = ManagedLifecycleAzureMonitorTelemetryOptions.Read(builder.Configuration);
+        ManagedLifecycleTelemetry.ConfigureAlertEnvironment(options.Environment);
         if (!options.Enabled)
             return builder;
 
@@ -35,6 +36,10 @@ public static class ManagedLifecycleAzureMonitorTelemetryExtensions
             throw new InvalidOperationException("Managed lifecycle Azure Monitor telemetry is already registered.");
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton<ManagedLifecycleAzureMonitorTelemetrySinkFactory>();
+        builder.Services.AddSingleton(services =>
+            services.GetRequiredService<ManagedLifecycleAzureMonitorTelemetrySinkFactory>().Create(options));
+        builder.Services.AddSingleton<IRecoveryRequiredAlertTransportAck>(services =>
+            services.GetRequiredService<ManagedLifecycleAzureMonitorTelemetrySink>());
         builder.Services.AddSingleton<ManagedLifecycleAzureMonitorTelemetryLifetime>();
         builder.Services.AddHostedService(services =>
             services.GetRequiredService<ManagedLifecycleAzureMonitorTelemetryLifetime>());
@@ -49,18 +54,28 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryOptions
     public const string EnabledConfigurationKey = ConfigurationSection + ":Enabled";
     public const string ConnectionStringConfigurationKey = ConfigurationSection + ":ConnectionString";
     public const string ManagedIdentityClientIdConfigurationKey = ConfigurationSection + ":ManagedIdentityClientId";
+    public const string EnvironmentConfigurationKey = ConfigurationSection + ":Environment";
 
     // These bounds are code-owned deliberately. An operator can select the sink and its
     // metadata, but cannot turn it into an unbounded transport or queue through configuration.
+    // Export, flush/await, and the lease send window share one budget so
+    // export ≤ wait < lease.
     internal const int ExportIntervalMilliseconds = 60_000;
-    internal const int ExportTimeoutMilliseconds = 10_000;
-    internal const int FlushTimeoutMilliseconds = 5_000;
+    internal static readonly int ExportTimeoutMilliseconds =
+        (int)RecoveryRequiredAlertBackoff.ExportTimeout.TotalMilliseconds;
+    internal static readonly int FlushTimeoutMilliseconds =
+        (int)RecoveryRequiredAlertBackoff.WaitTimeout.TotalMilliseconds;
     internal const int TraceMaxQueueSize = 512;
     internal const int TraceMaxBatchSize = 128;
+    internal const string CloudRoleName = "elsa-control-api";
+    internal const string CloudRoleInstance = "managed-lifecycle";
+    internal const string ServiceNamespace = "elsa-control";
+    internal const string ServiceVersion = "1";
 
     public bool Enabled { get; init; }
     public string? ConnectionString { get; init; }
     public string? ManagedIdentityClientId { get; init; }
+    public string? Environment { get; init; }
 
     internal static ManagedLifecycleAzureMonitorTelemetryOptions Read(IConfiguration configuration)
     {
@@ -71,7 +86,8 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryOptions
         {
             return new ManagedLifecycleAzureMonitorTelemetryOptions
             {
-                Enabled = false
+                Enabled = false,
+                Environment = ReadEnvironment(section)
             };
         }
 
@@ -82,12 +98,22 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryOptions
         {
             Enabled = enabled,
             ConnectionString = section[nameof(ConnectionString)],
-            ManagedIdentityClientId = section[nameof(ManagedIdentityClientId)]
+            ManagedIdentityClientId = section[nameof(ManagedIdentityClientId)],
+            Environment = ReadEnvironment(section)
         };
+    }
+
+    private static string? ReadEnvironment(IConfiguration section)
+    {
+        var environment = section[nameof(Environment)]?.Trim();
+        return string.IsNullOrWhiteSpace(environment) ? null : environment;
     }
 
     public void Validate()
     {
+        if (Environment is { Length: > 0 } &&
+            Environment is not (ManagedLifecycleTelemetry.StagingEnvironment or ManagedLifecycleTelemetry.ProductionEnvironment))
+            throw Invalid("environment_invalid");
         if (!Enabled)
             return;
 
@@ -246,11 +272,19 @@ internal sealed class ManagedLifecycleAzureMonitorTelemetrySinkFactory
         var traceExporter = default(AzureMonitorTraceExporter);
         MeterProvider? meterProvider = null;
         TracerProvider? tracerProvider = null;
+        TracerProvider? traceResourceHost = null;
         try
         {
             credential = new ManagedLifecycleBoundedCredential(credential);
             metricExporter = new AzureMonitorMetricExporter(CreateExporterOptions(options, credential, transport));
             traceExporter = new AzureMonitorTraceExporter(CreateExporterOptions(options, credential, transport));
+            // Register the inner Azure exporter with the SDK so SetParentProvider
+            // assigns the same resource the wrapper's provider uses. No reflection.
+            // This host never adds a source, so it does not export.
+            traceResourceHost = Sdk.CreateTracerProviderBuilder()
+                .SetResourceBuilder(CreateResourceBuilder())
+                .AddProcessor(new SimpleActivityExportProcessor(traceExporter))
+                .Build();
             meterProvider = Sdk.CreateMeterProviderBuilder()
                 .SetResourceBuilder(CreateResourceBuilder())
                 .AddMeter(ManagedLifecycleTelemetry.MeterName)
@@ -262,6 +296,7 @@ internal sealed class ManagedLifecycleAzureMonitorTelemetrySinkFactory
                     TemporalityPreference = MetricReaderTemporalityPreference.Delta
                 })
                 .Build();
+            var exportAck = new RecoveryRequiredAlertExportAck();
             tracerProvider = Sdk.CreateTracerProviderBuilder()
                 .SetResourceBuilder(CreateResourceBuilder())
                 .AddSource(ManagedLifecycleTelemetry.ActivitySourceName)
@@ -269,19 +304,21 @@ internal sealed class ManagedLifecycleAzureMonitorTelemetrySinkFactory
                 // This provider subscribes only to the dedicated lifecycle source.
                 .SetSampler(new AlwaysOnSampler())
                 .AddProcessor(new BatchActivityExportProcessor(
-                    traceExporter,
+                    new RecoveryRequiredAlertExportAckExporter(traceExporter, exportAck, ownsInner: false),
                     ManagedLifecycleAzureMonitorTelemetryOptions.TraceMaxQueueSize,
                     ManagedLifecycleAzureMonitorTelemetryOptions.ExportIntervalMilliseconds,
                     ManagedLifecycleAzureMonitorTelemetryOptions.ExportTimeoutMilliseconds,
                     ManagedLifecycleAzureMonitorTelemetryOptions.TraceMaxBatchSize))
                 .Build();
-            return new ManagedLifecycleAzureMonitorTelemetrySink(meterProvider, tracerProvider);
+            return new ManagedLifecycleAzureMonitorTelemetrySink(
+                meterProvider, tracerProvider, exportAck, traceResourceHost);
         }
         catch (Exception)
         {
             if (meterProvider is not null) meterProvider.Dispose();
             else metricExporter?.Dispose();
             if (tracerProvider is not null) tracerProvider.Dispose();
+            if (traceResourceHost is not null) traceResourceHost.Dispose();
             else traceExporter?.Dispose();
             // Exporter constructors can include configuration details in their exceptions. The
             // process must fail closed with a stable, value-free diagnostic instead.
@@ -316,17 +353,16 @@ internal sealed class ManagedLifecycleAzureMonitorTelemetrySinkFactory
 
     private static ResourceBuilder CreateResourceBuilder() =>
         ResourceBuilder.CreateEmpty().AddService(
-            serviceName: "elsa-control-api",
-            serviceNamespace: "elsa-control",
-            serviceInstanceId: "managed-lifecycle",
-            serviceVersion: "1");
+            serviceName: ManagedLifecycleAzureMonitorTelemetryOptions.CloudRoleName,
+            serviceNamespace: ManagedLifecycleAzureMonitorTelemetryOptions.ServiceNamespace,
+            serviceInstanceId: ManagedLifecycleAzureMonitorTelemetryOptions.CloudRoleInstance,
+            serviceVersion: ManagedLifecycleAzureMonitorTelemetryOptions.ServiceVersion);
 }
 
 internal sealed class ManagedLifecycleAzureMonitorTelemetryLifetime(
-    ManagedLifecycleAzureMonitorTelemetryOptions options,
-    ManagedLifecycleAzureMonitorTelemetrySinkFactory sinkFactory) : IHostedService, IDisposable
+    ManagedLifecycleAzureMonitorTelemetrySink sink) : IHostedService, IDisposable
 {
-    private readonly ManagedLifecycleAzureMonitorTelemetrySink _sink = sinkFactory.Create(options);
+    private readonly ManagedLifecycleAzureMonitorTelemetrySink _sink = sink;
 
     public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
@@ -339,27 +375,60 @@ internal sealed class ManagedLifecycleAzureMonitorTelemetryLifetime(
     public void Dispose() => _sink.Dispose();
 }
 
-internal sealed class ManagedLifecycleAzureMonitorTelemetrySink : IDisposable
+internal sealed class ManagedLifecycleAzureMonitorTelemetrySink : IDisposable, IRecoveryRequiredAlertTransportAck
 {
     private readonly MeterProvider? _meterProvider;
     private readonly TracerProvider? _tracerProvider;
+    private readonly RecoveryRequiredAlertExportAck? _exportAck;
+    private readonly IDisposable? _traceResourceHost;
     private int _disposed;
 
     internal ManagedLifecycleAzureMonitorTelemetrySink(
         MeterProvider? meterProvider,
-        TracerProvider? tracerProvider)
+        TracerProvider? tracerProvider,
+        RecoveryRequiredAlertExportAck? exportAck = null,
+        IDisposable? traceResourceHost = null)
     {
         _meterProvider = meterProvider;
         _tracerProvider = tracerProvider;
+        _exportAck = exportAck;
+        _traceResourceHost = traceResourceHost;
     }
 
-    internal bool ForceFlush()
+    void IRecoveryRequiredAlertTransportAck.Watch(string dedupeIdentity) =>
+        _exportAck?.Watch(dedupeIdentity);
+
+    bool IRecoveryRequiredAlertTransportAck.TryAcknowledge(string dedupeIdentity)
     {
-        if (Volatile.Read(ref _disposed) != 0)
+        if (string.IsNullOrWhiteSpace(dedupeIdentity) || _exportAck is null)
             return false;
 
         var deadline = Stopwatch.GetTimestamp() +
                        (long)(ManagedLifecycleAzureMonitorTelemetryOptions.FlushTimeoutMilliseconds / 1000.0 * Stopwatch.Frequency);
+        try
+        {
+            ForceFlush(deadline);
+        }
+        catch
+        {
+            return false;
+        }
+
+        return _exportAck.WaitForSuccess(dedupeIdentity, RemainingTime(deadline));
+    }
+
+    internal bool ForceFlush()
+    {
+        var deadline = Stopwatch.GetTimestamp() +
+                       (long)(ManagedLifecycleAzureMonitorTelemetryOptions.FlushTimeoutMilliseconds / 1000.0 * Stopwatch.Frequency);
+        return ForceFlush(deadline);
+    }
+
+    private bool ForceFlush(long deadline)
+    {
+        if (Volatile.Read(ref _disposed) != 0)
+            return false;
+
         var traceFlushed = _tracerProvider?.ForceFlush(RemainingMilliseconds(deadline)) ?? true;
         var meterFlushed = _meterProvider?.ForceFlush(RemainingMilliseconds(deadline)) ?? true;
         return traceFlushed && meterFlushed;
@@ -382,11 +451,18 @@ internal sealed class ManagedLifecycleAzureMonitorTelemetrySink : IDisposable
         _meterProvider?.Shutdown(cancellationToken.IsCancellationRequested ? 0 : RemainingMilliseconds(deadline));
         _tracerProvider?.Dispose();
         _meterProvider?.Dispose();
+        _traceResourceHost?.Dispose();
     }
 
     private static int RemainingMilliseconds(long deadline)
     {
-        var remaining = Stopwatch.GetElapsedTime(Stopwatch.GetTimestamp(), deadline);
+        var remaining = RemainingTime(deadline);
         return (int)Math.Clamp(remaining.TotalMilliseconds, 1, ManagedLifecycleAzureMonitorTelemetryOptions.FlushTimeoutMilliseconds);
+    }
+
+    private static TimeSpan RemainingTime(long deadline)
+    {
+        var remaining = Stopwatch.GetElapsedTime(Stopwatch.GetTimestamp(), deadline);
+        return remaining < TimeSpan.Zero ? TimeSpan.Zero : remaining;
     }
 }

@@ -34,16 +34,41 @@ Microsoft documents [Entra-authenticated ingestion and the required scoped role]
 ## Validation and rollout
 
 1. Run `python3 scripts/tests/test_managed_telemetry_infrastructure.py`. It compiles
-   the template and inspects the actual generated resource/role boundary.
+   the template and inspects the actual generated resource/role boundary, including
+   the RecoveryRequired scheduled query rule and email action group.
 2. Resolve and verify the intended Control subscription, resource group, existing
-   API identity, supported sink region, and resource names. Pass those explicit
-   values to a scoped `az deployment group what-if`; do not rely on the CLI's
-   default subscription. Review every proposed change before deployment.
+   API identity, supported sink region, and resource names. Infra deploy of
+   `azure-api-deploy.yml` runs `scripts/deploy-managed-telemetry.sh`, which
+   passes `environment=staging` plus `STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT`
+   on `test`, and `environment=production` plus
+   `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT` on `production`. An unset
+   recipient fails the deploy. Staging also requires
+   `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT` to be visible and different
+   so the mailbox cannot silently reuse production.
+   Do not rely on the CLI's default subscription. Review every proposed change
+   before deployment. A local `az deployment group what-if` must pass the same
+   `environment` and `recoveryRequiredAlertEmail` parameters.
 3. Deploy only this reviewed template in Incremental mode. Verify the exact identity
-   role, local-auth disablement, workspace linkage and quota/retention settings.
+   role, local-auth disablement, workspace linkage, quota/retention settings, the
+   environment-scoped `qr-recovery-required-entered-{environment}` rule, and the
+   `ag-recovery-required-{environment}` action group bound to the pipeline-supplied
+   mailbox. The rule queries the Log Analytics `AppDependencies` table for
+   `Name == 'managed_lifecycle.recovery_required.entered'`, filters
+   `Properties.environment`, looks back 1 hour every 5 minutes, splits by
+   identity, and is stateless (`autoMitigate: false`). One email per
+   RecoveryRequired entry. A resend of the same entry more than an hour
+   after its first ingestion can email again. The template has no default
+   email and no paging receivers.
 4. Enable the reviewed source exporter only through the existing immutable API
-   image promotion and migration-compatibility gates. The live API's classic Docker
-   mode must not be converted to site containers to enable observability.
+   image promotion and migration-compatibility gates. Per environment, set
+   `ManagedLifecycleTelemetry:AzureMonitor:Enabled=true` (the deploy workflow
+   applies `MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED` when that variable is set),
+   the reviewed connection string and API managed-identity client id, and
+   `APPLICATIONINSIGHTS_STATSBEAT_DISABLED=true`. The workflow also sets
+   `ManagedLifecycleTelemetry:AzureMonitor:Environment` to `staging` or
+   `production`. Delivery is at most once (exporter `MaxRetries = 0`, no
+   offline storage). The live API's classic Docker mode must not be converted
+   to site containers to enable observability.
 5. Prove positive managed-identity ingestion and negative unauthorized ingestion,
    then positive authorized-operator access to the workspace/Application Insights
    queries and negative access for an account outside the operator role. Verify

@@ -9,6 +9,7 @@ using ElsaControl.Deployment.Abstractions.Azure;
 using ElsaControl.Deployment.Core.Cockpit;
 using ElsaControl.Deployment.Core.ExternalConnections;
 using ElsaControl.Deployment.Core.Instances;
+using ElsaControl.Deployment.Core.Telemetry;
 using ElsaControl.Deployment.Core.Provisioning;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.Deployment.Azure;
@@ -394,6 +395,12 @@ builder.Services.AddScoped<IElsaInstanceProviderPendingOperationStore>(services 
 builder.Services.AddScoped<IElsaInstanceProviderReconciliationStore>(services => services.GetRequiredService<EfCoreElsaInstanceLifecycleStore>());
 builder.Services.AddScoped<IElsaInstanceDeletionStore>(services => services.GetRequiredService<EfCoreElsaInstanceLifecycleStore>());
 builder.Services.AddScoped<IElsaInstanceHealthMonitorStore>(services => services.GetRequiredService<EfCoreElsaInstanceLifecycleStore>());
+builder.Services.AddSingleton<IRecoveryRequiredAlertDispatchSignal>(_ =>
+    RecoveryRequiredAlertDispatchSignal.Instance);
+builder.Services.AddSingleton<IRecoveryRequiredAlertSender>(services =>
+    new ActivityRecoveryRequiredAlertSender(
+        services.GetService<IRecoveryRequiredAlertTransportAck>()));
+builder.Services.AddScoped<IRecoveryRequiredAlertOutboxDispatcher, EfCoreRecoveryRequiredAlertOutboxDispatcher>();
 builder.Services.Configure<ElsaInstancePlanAuthorityOptions>(
     builder.Configuration.GetSection(ElsaInstancePlanAuthorityOptions.ConfigurationSection));
 var azureInstanceLifecycleConfigured = builder.Configuration.GetValue<bool>(
@@ -599,6 +606,8 @@ if (instanceLifecycleWorkerEnabled && !builder.Environment.IsEnvironment("Testin
     builder.Services.AddHostedService<ElsaInstanceLifecycleHostedService>();
 if (instanceLifecycleWorkerEnabled && azureInstanceLifecycleEnabled && !builder.Environment.IsEnvironment("Testing"))
     builder.Services.AddHostedService<ElsaInstanceProviderReconciliationHostedService>();
+if (instanceLifecycleWorkerEnabled && !builder.Environment.IsEnvironment("Testing"))
+    builder.Services.AddHostedService<RecoveryRequiredAlertOutboxHostedService>();
 if (instanceLifecycleWorkerEnabled && azureInstanceLifecycleEnabled && !builder.Environment.IsEnvironment("Testing"))
     builder.Services.AddHostedService<ElsaInstanceDeletionHostedService>();
 ElsaInstanceHealthMonitorComposition.AddHealthMonitor(
