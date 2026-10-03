@@ -2175,7 +2175,11 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
             .Distinct(StringComparer.Ordinal)
             .Order(StringComparer.Ordinal)
             .ToArray();
-        var classified = new[]
+        // Customer and operator routes must record a mutation that blocks a
+        // stale Delete rebase. The staging recovery lever is intentionally
+        // separate: it records a system-only Reconcile operation and must not
+        // be treated as a customer/operator mutation by the rebase guard.
+        var customerOrOperatorRoutes = new[]
         {
             "PATCH /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}",
             "POST /api/admin/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/operations/{operationId:guid}/recover",
@@ -2186,7 +2190,22 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
             "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/operations",
             "POST /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/restart"
         };
+        var systemOnlyRoutes = new[]
+        {
+            "POST /api/staging/lifecycle-lever/instances/{instanceId:guid}/recovery-required",
+            "POST /api/staging/lifecycle-lever/instances/{instanceId:guid}/reset"
+        };
+        var classified = customerOrOperatorRoutes
+            .Concat(systemOnlyRoutes)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
         Assert.Equal(classified, discovered);
+        Assert.Equal(
+            systemOnlyRoutes.Order(StringComparer.Ordinal),
+            discovered.Where(route => route.Contains("/api/staging/lifecycle-lever/", StringComparison.Ordinal))
+                .Order(StringComparer.Ordinal));
+        Assert.True(ElsaInstanceOperation.IsSystemOnlyLifecycleAction(ElsaInstanceOperationAction.Reconcile));
+        Assert.False(ElsaInstanceOperation.IsCustomerOrOperatorMutation(ElsaInstanceOperationAction.Reconcile));
 
         var owner = app.CreateTrustedWorkspaceClient("managed-instance-mutation-guard");
         var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
