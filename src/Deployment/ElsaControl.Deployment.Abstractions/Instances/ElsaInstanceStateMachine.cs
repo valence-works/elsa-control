@@ -288,6 +288,7 @@ public sealed record ElsaInstanceOperation
             (ElsaInstanceOperationState.Accepted, ElsaInstanceOperationState.Cancelled) => true,
             (ElsaInstanceOperationState.WaitingForPriorOperation, ElsaInstanceOperationState.Accepted) => true,
             (ElsaInstanceOperationState.WaitingForPriorOperation, ElsaInstanceOperationState.Queued) => true,
+            (ElsaInstanceOperationState.WaitingForPriorOperation, ElsaInstanceOperationState.Running) => true,
             (ElsaInstanceOperationState.WaitingForPriorOperation, ElsaInstanceOperationState.Failed) => true,
             (ElsaInstanceOperationState.WaitingForPriorOperation, ElsaInstanceOperationState.Cancelled) => true,
             (ElsaInstanceOperationState.Queued, ElsaInstanceOperationState.Running) => true,
