@@ -687,6 +687,28 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
     }
 
     [Fact]
+    public void Recovery_required_copy_with_empty_operation_id_uses_the_signed_no_reference_sentence()
+    {
+        const string noReference =
+            "The last change to this engine didn't finish on its own. Email hello@valence.works with this engine's name and we'll help during business hours.";
+        var operation = Operation(
+            Guid.Parse("30000000-0000-0000-0000-000000000001"),
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired) with
+        { Id = Guid.Empty };
+
+        var reason = ManagedElsaInstanceCustomerProjection.UnavailableReason(
+            canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false,
+            ElsaObservedLifecycle.RecoveryRequired, activeOperation: operation);
+
+        Assert.Equal(noReference, reason);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason, reason);
+        Assert.DoesNotContain("00000000-0000-0000-0000-000000000000", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("{operationId}", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("reference", reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Reader_not_authorized_wins_over_recovery_required_and_parked_delete_copy()
     {
         var now = Now;
