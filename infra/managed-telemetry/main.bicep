@@ -39,7 +39,10 @@ var recoveryRequiredEventName = 'managed_lifecycle.recovery_required.entered'
 var recoveryRequiredActionGroupName = 'ag-recovery-required-${environment}'
 var recoveryRequiredAlertRuleName = 'qr-recovery-required-entered-${environment}'
 var recoveryRequiredActionGroupShortName = environment == 'production' ? 'rr-prod' : 'rr-staging'
-var recoveryRequiredAlertQuery = 'AppDependencies\n| where Name == \'managed_lifecycle.recovery_required.entered\'\n| where tostring(Properties.environment) == \'${environment}\'\n| where isnotempty(tostring(Properties.dedupe_identity))\n| where ingestion_time() > ago(5m)\n| summarize by tostring(Properties.dedupe_identity)'
+// recovery-required-entered.kql is the source of truth. Tests load the same
+// file. One email per RecoveryRequired entry. A resend of the same entry more
+// than an hour after its first ingestion can email again.
+var recoveryRequiredAlertQuery = replace(loadTextContent('recovery-required-entered.kql'), '{{environment}}', environment)
 
 resource apiIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
   name: apiIdentityName
@@ -120,11 +123,11 @@ resource recoveryRequiredAlertRule 'Microsoft.Insights/scheduledQueryRules@2023-
   tags: tags
   properties: {
     displayName: 'RecoveryRequired entered (${environment})'
-    description: 'Fires when Control writes ${recoveryRequiredEventName} for ${environment}. Stateless: one email per actual RecoveryRequired entry. Staging and production use separate recipients, names, and environment filters.'
+    description: 'Fires when Control writes ${recoveryRequiredEventName} for ${environment}. One email per RecoveryRequired entry. A resend of the same entry more than an hour after its first ingestion can email again. Staging and production use separate recipients, names, and environment filters.'
     severity: 1
     enabled: true
     evaluationFrequency: 'PT5M'
-    windowSize: 'PT15M'
+    windowSize: 'PT1H'
     autoMitigate: false
     scopes: [
       workspace.id
@@ -139,6 +142,15 @@ resource recoveryRequiredAlertRule 'Microsoft.Insights/scheduledQueryRules@2023-
           timeAggregation: 'Count'
           operator: 'GreaterThanOrEqual'
           threshold: 1
+          dimensions: [
+            {
+              name: 'identity'
+              operator: 'Include'
+              values: [
+                '*'
+              ]
+            }
+          ]
           failingPeriods: {
             numberOfEvaluationPeriods: 1
             minFailingPeriodsToAlert: 1

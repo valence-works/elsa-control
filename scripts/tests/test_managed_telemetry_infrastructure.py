@@ -2,14 +2,127 @@
 """Compile and inspect the managed lifecycle telemetry sink boundary."""
 
 import json
+import re
 import shutil
 import subprocess
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 MAIN = ROOT / "infra/managed-telemetry/main.bicep"
+QUERY = ROOT / "infra/managed-telemetry/recovery-required-entered.kql"
+ENVIRONMENT_PLACEHOLDER = "{{environment}}"
+EVENT_NAME = "managed_lifecycle.recovery_required.entered"
+
+
+def load_rule_query(environment: str) -> str:
+    if not QUERY.is_file():
+        raise AssertionError("RecoveryRequired alert query source is missing")
+    return QUERY.read_text().replace(ENVIRONMENT_PLACEHOLDER, environment)
+
+
+def _unquote(value: str):
+    if (value.startswith("'") and value.endswith("'")) or (value.startswith('"') and value.endswith('"')):
+        return value[1:-1]
+    return value
+
+
+def _resolve(expr: str, row: dict, now: datetime):
+    expr = expr.strip()
+    if (expr.startswith("'") and expr.endswith("'")) or (expr.startswith('"') and expr.endswith('"')):
+        return expr[1:-1]
+    ago = re.fullmatch(r"ago\((\d+)m\)", expr)
+    if ago:
+        return now - timedelta(minutes=int(ago.group(1)))
+    if expr == "ingestion_time()":
+        return row["ingestion_time"]
+    tostring = re.fullmatch(r"tostring\((.+)\)", expr)
+    if tostring:
+        value = _resolve(tostring.group(1), row, now)
+        return "" if value is None else str(value)
+    nonempty = re.fullmatch(r"isnotempty\((.+)\)", expr)
+    if nonempty:
+        value = _resolve(nonempty.group(1), row, now)
+        return value not in (None, "")
+    if "." in expr:
+        current = row
+        for part in expr.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return None
+            current = current[part]
+        return current
+    if expr in row:
+        return row[expr]
+    return _unquote(expr)
+
+
+def _compare(expr: str, row: dict, now: datetime) -> bool:
+    for operator in ("==", ">"):
+        if operator not in expr:
+            continue
+        left, right = expr.split(operator, 1)
+        left_value = _resolve(left, row, now)
+        right_value = _resolve(right, row, now)
+        if operator == "==":
+            return left_value == right_value
+        return left_value > right_value
+    return bool(_resolve(expr, row, now))
+
+
+def run_rule_query(rows, environment="staging", now=None):
+    """Execute the shared KQL source against an in-memory AppDependencies fixture."""
+    now = now or datetime.now(timezone.utc)
+    stages = []
+    for raw in load_rule_query(environment).splitlines():
+        line = raw.split("//", 1)[0].strip()
+        if not line:
+            continue
+        stages.append(line)
+    if not stages or stages[0] != "AppDependencies":
+        raise AssertionError("RecoveryRequired query must start from AppDependencies")
+
+    current = [dict(row) for row in rows]
+    for stage in stages[1:]:
+        if not stage.startswith("|"):
+            raise AssertionError(f"Unsupported KQL stage: {stage}")
+        body = stage[1:].strip()
+        if body.startswith("where "):
+            current = [row for row in current if _compare(body[len("where "):], row, now)]
+            continue
+        if body.startswith("extend "):
+            name, expr = body[len("extend "):].split("=", 1)
+            for row in current:
+                row[name.strip()] = _resolve(expr, row, now)
+            continue
+        summarized = re.fullmatch(
+            r"summarize (\w+) = min\((.+)\) by (\w+)",
+            body,
+        )
+        if summarized:
+            alias, expr, key = summarized.groups()
+            grouped = {}
+            for row in current:
+                grouped.setdefault(row[key], []).append(row)
+            current = [
+                {key: identity, alias: min(_resolve(expr, row, now) for row in group)}
+                for identity, group in grouped.items()
+            ]
+            continue
+        raise AssertionError(f"Unsupported KQL stage: {stage}")
+    return current
+
+
+def dependency(identity, ingested_at, environment="staging", name=EVENT_NAME):
+    return {
+        "Name": name,
+        "Properties": {
+            "environment": environment,
+            "dedupe_identity": identity,
+        },
+        "ingestion_time": ingested_at,
+    }
 
 
 class ManagedTelemetryInfrastructureTests(unittest.TestCase):
@@ -106,24 +219,45 @@ class ManagedTelemetryInfrastructureTests(unittest.TestCase):
         self.assertEqual(1, rule["severity"])
         self.assertFalse(rule["autoMitigate"])
         self.assertEqual("PT5M", rule["evaluationFrequency"])
-        self.assertEqual("PT15M", rule["windowSize"])
-        self.assertGreaterEqual(rule["criteria"]["allOf"][0]["threshold"], 1)
+        self.assertEqual("PT1H", rule["windowSize"])
+        condition = rule["criteria"]["allOf"][0]
+        self.assertGreaterEqual(condition["threshold"], 1)
+        self.assertEqual("identity", condition["dimensions"][0]["name"])
+        self.assertEqual("Include", condition["dimensions"][0]["operator"])
+        self.assertEqual(["*"], condition["dimensions"][0]["values"])
         self.assertIn(
             "variables('recoveryRequiredActionGroupName')",
             json.dumps(rule["actions"]))
+        self.assertIn("One email per RecoveryRequired entry", rule["description"])
+        self.assertIn(
+            "more than an hour after its first ingestion can email again",
+            rule["description"])
+        self.assertNotIn("one email per actual RecoveryRequired entry", self.source)
 
     def test_recovery_required_query_is_app_dependencies_on_the_emitted_event(self):
         query = self.template["variables"]["recoveryRequiredAlertQuery"]
         serialized = json.dumps(self.template)
-        self.assertIn("AppDependencies", query)
-        self.assertIn("Name == ''managed_lifecycle.recovery_required.entered''", query)
-        self.assertIn("Properties.environment", query)
-        self.assertIn("Properties.dedupe_identity", query)
-        self.assertIn("ingestion_time()", query)
-        self.assertNotIn("customEvents", query)
-        self.assertNotIn("union", query)
-        self.assertNotIn("TimeGenerated", query)
-        self.assertNotIn(" or name == ", query)
+        source_query = QUERY.read_text()
+        loaded_name = re.search(r"variables\('([^']+)'\)", query)
+        self.assertIsNotNone(loaded_name)
+        loaded_query = self.template["variables"][loaded_name.group(1)]
+        self.assertEqual(source_query, loaded_query)
+        self.assertIn("loadTextContent('recovery-required-entered.kql')", self.source)
+        self.assertIn(ENVIRONMENT_PLACEHOLDER, source_query)
+        self.assertIn("firstIngested = min(ingestion_time()) by identity", source_query)
+        self.assertIn("firstIngested > ago(5m)", source_query)
+        self.assertIn("AppDependencies", loaded_query)
+        self.assertIn("Name == 'managed_lifecycle.recovery_required.entered'", loaded_query)
+        self.assertIn("Properties.environment", loaded_query)
+        self.assertIn("Properties.dedupe_identity", loaded_query)
+        self.assertIn("ingestion_time()", loaded_query)
+        self.assertIn("firstIngested", loaded_query)
+        self.assertNotIn("customEvents", loaded_query)
+        self.assertNotIn("union", loaded_query)
+        self.assertNotIn("TimeGenerated", loaded_query)
+        self.assertNotIn(" or name == ", loaded_query)
+        self.assertIn("[replace(", query)
+        self.assertIn("{{environment}}", query)
         self.assertIn("parameters('environment')", serialized)
         environment = self.template["parameters"]["environment"]
         self.assertNotIn("defaultValue", environment)
@@ -149,6 +283,59 @@ class ManagedTelemetryInfrastructureTests(unittest.TestCase):
         self.assertIn("PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT", self.source)
         self.assertNotIn("sipke", self.source.lower())
         self.assertNotIn("@valence", self.source.lower())
+
+
+class RecoveryRequiredAlertQueryTests(unittest.TestCase):
+    def test_bicep_and_fixture_load_the_same_query_file(self):
+        source = MAIN.read_text()
+        query = QUERY.read_text()
+        self.assertIn("loadTextContent('recovery-required-entered.kql')", source)
+        self.assertIn(ENVIRONMENT_PLACEHOLDER, query)
+        self.assertIn("firstIngested = min(ingestion_time()) by identity", query)
+        self.assertIn("firstIngested > ago(5m)", query)
+        self.assertIn("One email per RecoveryRequired entry", source)
+        self.assertIn(
+            "more than an hour after its first ingestion can email again",
+            source,
+        )
+        self.assertNotIn("one email per actual RecoveryRequired entry", source)
+
+    def test_rule_query_datatable_fixture_covers_first_ingestion_gating(self):
+        now = datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc)
+        first_slot = now - timedelta(minutes=7)
+        second_slot = now - timedelta(minutes=2)
+        resend_20m = now - timedelta(minutes=20)
+        recovered = now - timedelta(minutes=40)
+
+        consecutive_first = run_rule_query(
+            [dependency("entry-a", second_slot)],
+            now=now,
+        )
+        self.assertEqual(["entry-a"], [row["identity"] for row in consecutive_first])
+
+        consecutive_resend = run_rule_query(
+            [dependency("entry-a", first_slot), dependency("entry-a", second_slot)],
+            now=now,
+        )
+        self.assertEqual([], consecutive_resend)
+
+        twenty_minute_resend = run_rule_query(
+            [dependency("entry-b", resend_20m), dependency("entry-b", second_slot)],
+            now=now,
+        )
+        self.assertEqual([], twenty_minute_resend)
+
+        two_identities = run_rule_query(
+            [dependency("entry-c", second_slot), dependency("entry-d", second_slot)],
+            now=now,
+        )
+        self.assertCountEqual(["entry-c", "entry-d"], [row["identity"] for row in two_identities])
+
+        after_recover = run_rule_query(
+            [dependency("entry-e-attempt-1", recovered), dependency("entry-e-attempt-2", second_slot)],
+            now=now,
+        )
+        self.assertEqual(["entry-e-attempt-2"], [row["identity"] for row in after_recover])
 
 
 if __name__ == "__main__":

@@ -54,9 +54,11 @@ Microsoft documents [Entra-authenticated ingestion and the required scoped role]
    `ag-recovery-required-{environment}` action group bound to the pipeline-supplied
    mailbox. The rule queries the Log Analytics `AppDependencies` table for
    `Name == 'managed_lifecycle.recovery_required.entered'`, filters
-   `Properties.environment`, looks back 15 minutes every 5 minutes, and is
-   stateless (`autoMitigate: false`). The template has no default email and
-   no paging receivers.
+   `Properties.environment`, looks back 1 hour every 5 minutes, splits by
+   identity, and is stateless (`autoMitigate: false`). One email per
+   RecoveryRequired entry. A resend of the same entry more than an hour
+   after its first ingestion can email again. The template has no default
+   email and no paging receivers.
 4. Enable the reviewed source exporter only through the existing immutable API
    image promotion and migration-compatibility gates. Per environment, set
    `ManagedLifecycleTelemetry:AzureMonitor:Enabled=true` (the deploy workflow

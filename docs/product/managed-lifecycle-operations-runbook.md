@@ -494,12 +494,27 @@ environment. Names include the environment
 (`ag-recovery-required-staging` / `qr-recovery-required-entered-staging`,
 and the production pair) so Incremental deploys cannot overwrite each
 other. The rule is stateless (`autoMitigate: false`): one Fired email per
-evaluation that sees a new dedupe identity, and no Resolved email. It
-queries `AppDependencies` for the event name, filters
-`Properties.environment` to the sink environment, looks back 15 minutes
-at a 5-minute frequency, and uses `ingestion_time() > ago(5m)` plus
-`summarize` on `Properties.dedupe_identity` so exporter batching (60 s)
-and ingestion delay do not drop or double a row.
+RecoveryRequired entry, and no Resolved email. It queries
+`AppDependencies` for the event name, filters `Properties.environment`
+to the sink environment, looks back one hour (`windowSize PT1H`) at a
+5-minute frequency, groups by `Properties.dedupe_identity`, and alerts
+only when `min(ingestion_time())` is within `ago(5m)`. Split-by-dimension
+on that identity means N entries in one slot send N emails. A resend of
+the same entry more than 1 hour after first ingestion can email again.
+The query lives in
+[`recovery-required-entered.kql`](../../infra/managed-telemetry/recovery-required-entered.kql);
+Bicep and the fixture test load that file.
+
+Azure Monitor's log-alert docs define frequency as how often the query
+runs, not a pinned clock, and they document retries after late
+*ingestion*. They do not say whether a late evaluation can skip an entry
+when the `ago(5m)` gate equals the 5-minute frequency. That skip is an
+accepted launch residual.
+See [Create a log search alert rule](https://learn.microsoft.com/en-us/azure/azure-monitor/alerts/alerts-create-log-alert-rule)
+and [Troubleshoot log alerts](https://learn.microsoft.com/en-us/azure/azure-monitor/alerts/alerts-troubleshoot-log).
+The backstop is the same `RequiresHumanAt` flag: it drives Needs
+attention in Cloud and the operator health evaluator, so a skipped email
+still shows on the console and in the business-day check.
 
 Who reads the mailbox: the operator named in
 `STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT` for staging, and the operator
