@@ -43,10 +43,23 @@ class DeployAzureElsaControlTests(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
             "printf '%s\\n' \"$*\" >> \"${AZ_CALL_LOG:?}\"\n"
+            "dump_parameters() {\n"
+            "  local arg params=''\n"
+            "  for arg in \"$@\"; do\n"
+            "    case \"$arg\" in\n"
+            "      @*) params=\"${arg#@}\" ;;\n"
+            "    esac\n"
+            "  done\n"
+            "  if [ -n \"$params\" ]; then\n"
+            "    printf 'BASE_PARAMETERS ' >> \"${AZ_CALL_LOG}\"\n"
+            "    cat \"$params\" >> \"${AZ_CALL_LOG}\"\n"
+            "    printf '\\n' >> \"${AZ_CALL_LOG}\"\n"
+            "  fi\n"
+            "}\n"
             "case \"$*\" in\n"
             "  'account set --subscription '*) exit 0 ;;\n"
-            "  'deployment sub what-if '*) exit 0 ;;\n"
-            "  'deployment sub create '*) exit 0 ;;\n"
+            "  'deployment sub what-if '*) dump_parameters \"$@\" ; exit 0 ;;\n"
+            "  'deployment sub create '*) dump_parameters \"$@\" ; exit 0 ;;\n"
             "  *) exit 41 ;;\n"
             "esac\n"
         )
@@ -83,6 +96,7 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         self.assertEqual(3, self.source.count("is_staging_billing_lever_target"))
         self.assertIn("EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS\" ]] && ! is_staging_billing_lever_target", self.source)
         self.assertNotIn("is_staging_pairing_allowlist_target", self.source)
+        self.assertIn("from control_sql_sku import sku_parameters", self.source)
         self.assertIn("IMAGE=\"$IMAGE_REPOSITORY@$IMAGE_DIGEST\"", self.source)
         self.assertIn("AZURE_CONTAINER_REGISTRY_ENDPOINT", self.source)
         self.assertIn("CONTROL_SQL_SQLSERVERFQDN", self.source)
@@ -354,8 +368,14 @@ class DeployAzureElsaControlTests(unittest.TestCase):
             environment["TARGET_ENVIRONMENT"] = "production"
             result = self.run_deploy(environment, "--environment", "elsa-control", "--what-if")
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-            self.assertIn("deployment sub what-if", call_log.read_text())
-            self.assertNotIn("stagingrecoverylever", call_log.read_text())
+            calls = call_log.read_text()
+            self.assertIn("deployment sub what-if", calls)
+            self.assertNotIn("stagingrecoverylever", calls)
+            self.assertIn('"sqlDatabaseSkuName": {"value": "GP_S_Gen5"}', calls)
+            self.assertIn('"sqlDatabaseSkuTier": {"value": "GeneralPurpose"}', calls)
+            self.assertIn('"sqlDatabaseSkuFamily": {"value": "Gen5"}', calls)
+            self.assertIn('"sqlDatabaseMaxSizeBytes": {"value": "0"}', calls)
+            self.assertNotIn('"S0"', calls)
 
     def test_refuses_when_target_environment_is_test_and_environment_name_is_test(self) -> None:
         environment = self.environment()
@@ -439,6 +459,10 @@ class DeployAzureElsaControlTests(unittest.TestCase):
             self.assertIn("deployment sub what-if", calls)
             self.assertIn("--template-file infra/main.bicep", calls)
             self.assertNotIn("deployment group", calls)
+            self.assertIn('"sqlDatabaseSkuName": {"value": "S0"}', calls)
+            self.assertIn('"sqlDatabaseSkuTier": {"value": "Standard"}', calls)
+            self.assertIn('"sqlDatabaseMaxSizeBytes": {"value": "268435456000"}', calls)
+            self.assertNotIn("GP_S_Gen5", calls)
 
     def test_missing_base_output_fails_before_image_build(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

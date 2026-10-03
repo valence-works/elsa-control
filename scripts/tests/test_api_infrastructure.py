@@ -22,6 +22,8 @@ MAIN_BICEP = ROOT / "infra" / "main.bicep"
 MAIN_PARAMETERS = ROOT / "infra" / "main.parameters.json"
 REGENERATE_INFRA = ROOT / "dev" / "regenerate-infra.sh"
 PATCH_API_IDENTITY = ROOT / "dev" / "patch-api-provisioner-identity.py"
+PATCH_CONTROL_SQL_SKU = ROOT / "dev" / "patch-control-sql-sku.py"
+CONTROL_SQL_SKU_LIB = ROOT / "scripts" / "lib" / "control_sql_sku.py"
 APP_SERVICE_DOC = ROOT / "docs" / "deployment" / "azure-app-service.md"
 # Hand-maintained directories dev/regenerate-infra.sh must carry across a regeneration.
 PRESERVED_INFRA_DIRECTORIES = ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry", "control-deploy-identity", "control-worker-composition", "control-egress")
@@ -473,6 +475,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("empty(provisioner_identity_outputs_id)", module)
         self.assertIn("'${provisioner_identity_outputs_id}': { }", module)
         self.assertIn("patch-api-provisioner-identity.py", regeneration)
+        self.assertIn("patch-control-sql-sku.py", regeneration)
         for directory in PRESERVED_INFRA_DIRECTORIES:
             self.assertIn(directory, regeneration)
         self.assertNotIn("dashboard", module.lower())
@@ -623,6 +626,10 @@ class ApiInfrastructureTests(unittest.TestCase):
         (temporary / "infra").mkdir()
         shutil.copy2(REGENERATE_INFRA, temporary / "dev" / "regenerate-infra.sh")
         shutil.copy2(PATCH_API_IDENTITY, temporary / "dev" / "patch-api-provisioner-identity.py")
+        shutil.copy2(PATCH_CONTROL_SQL_SKU, temporary / "dev" / "patch-control-sql-sku.py")
+        lib_dir = temporary / "scripts" / "lib"
+        lib_dir.mkdir(parents=True)
+        shutil.copy2(CONTROL_SQL_SKU_LIB, lib_dir / "control_sql_sku.py")
         for relative_path in PRESERVED_INFRA_DIRECTORIES:
             directory = temporary / "infra" / relative_path
             directory.mkdir(parents=True)
@@ -651,6 +658,12 @@ class ApiInfrastructureTests(unittest.TestCase):
             }
         )
         (temporary / "generated-main.parameters.json").write_text(json.dumps(generated_parameters))
+        (temporary / "infra" / "main.parameters.staging.json").write_text(
+            json.dumps({"parameters": {"sqlDatabaseSkuName": {"value": "GP_S_Gen5"}}})
+        )
+        (temporary / "infra" / "main.parameters.production.json").write_text(
+            json.dumps({"parameters": {"sqlDatabaseSkuName": {"value": "S0"}}})
+        )
         (temporary / "collision.marker").write_text("generated-collision")
         fake_bin = temporary / "bin"
         fake_bin.mkdir()
@@ -703,6 +716,39 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("param provisioner_identity_outputs_id string = ''", (project / "infra/api/api-website.module.bicep").read_text())
         self.assertNotIn("param adminApiKey string", (project / "infra/main.bicep").read_text())
         self.assertNotIn("adminApiKey", json.loads((project / "infra/main.parameters.json").read_text())["parameters"])
+        staging = json.loads((project / "infra/main.parameters.staging.json").read_text())["parameters"]
+        production = json.loads((project / "infra/main.parameters.production.json").read_text())["parameters"]
+        self.assertEqual("S0", staging["sqlDatabaseSkuName"]["value"])
+        self.assertEqual("Standard", staging["sqlDatabaseSkuTier"]["value"])
+        self.assertEqual(10, staging["sqlDatabaseSkuCapacity"]["value"])
+        self.assertEqual("268435456000", staging["sqlDatabaseMaxSizeBytes"]["value"])
+        self.assertEqual("GP_S_Gen5", production["sqlDatabaseSkuName"]["value"])
+        self.assertEqual("GeneralPurpose", production["sqlDatabaseSkuTier"]["value"])
+        self.assertEqual("0", production["sqlDatabaseMaxSizeBytes"]["value"])
+
+    def test_regeneration_recreates_control_sql_sku_parameter_files_after_infra_wipe(self) -> None:
+        """Aspire generate deletes infra/; the SKU patch must recreate the overlays."""
+
+        result, project = self.run_regeneration_fixture("success")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        staging_path = project / "infra/main.parameters.staging.json"
+        production_path = project / "infra/main.parameters.production.json"
+        self.assertTrue(staging_path.exists(), "staging SKU parameter file must survive regenerate")
+        self.assertTrue(production_path.exists(), "production SKU parameter file must survive regenerate")
+        staging = json.loads(staging_path.read_text())["parameters"]
+        production = json.loads(production_path.read_text())["parameters"]
+        self.assertEqual("S0", staging["sqlDatabaseSkuName"]["value"])
+        self.assertEqual("Standard", staging["sqlDatabaseSkuTier"]["value"])
+        self.assertEqual("", staging["sqlDatabaseSkuFamily"]["value"])
+        self.assertEqual(10, staging["sqlDatabaseSkuCapacity"]["value"])
+        self.assertEqual("268435456000", staging["sqlDatabaseMaxSizeBytes"]["value"])
+        self.assertEqual("valence-control-staging", staging["environmentName"]["value"])
+        self.assertEqual("GP_S_Gen5", production["sqlDatabaseSkuName"]["value"])
+        self.assertEqual("Gen5", production["sqlDatabaseSkuFamily"]["value"])
+        self.assertEqual(1, production["sqlDatabaseSkuCapacity"]["value"])
+        self.assertEqual("0", production["sqlDatabaseMaxSizeBytes"]["value"])
+        self.assertNotIn("environmentName", production)
 
     def test_regeneration_failure_restores_all_manual_authority_directories(self) -> None:
         result, project = self.run_regeneration_fixture("failure")

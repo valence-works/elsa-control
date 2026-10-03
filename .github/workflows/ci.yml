@@ -34,6 +34,7 @@ jobs:
           python3 scripts/tests/test_azure_api_deploy_workflow.py
           python3 scripts/tests/test_azure_api_candidate.py
           python3 scripts/tests/test_deploy_azure_elsa_control.py
+          python3 scripts/tests/test_control_sql_sku.py
 
       - name: Validate production Azure image and template contracts
         run: |
@@ -80,6 +81,8 @@ jobs:
           az bicep build --file infra/azure-workload-proof/recovery-database.bicep --stdout >/dev/null
           az bicep build --file infra/azure-workload-proof/acr-pull-role.bicep --stdout >/dev/null
           az bicep build --file infra/azure-lighthouse/v1/main.bicep --stdout >/dev/null
+          az bicep build --file infra/main.bicep --stdout >/dev/null
+          az bicep build --file infra/control-sql/control-sql.module.bicep --stdout >/dev/null
 
   api-image:
     name: Build and smoke-test API provider image
