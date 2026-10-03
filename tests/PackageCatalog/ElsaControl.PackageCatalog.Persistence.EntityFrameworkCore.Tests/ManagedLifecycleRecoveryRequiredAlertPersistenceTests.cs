@@ -142,7 +142,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             claim.LeaseToken,
             claim.LeaseVersion,
             new string('a', 64),
-            "deletion.provider.unavailable",
+            ManagedElsaReasonCodeCatalog.DeletionCorrelationInvalid,
             Now.AddMinutes(1));
 
         var recovered = await store.RequireDeletionRecoveryAsync(failure);
