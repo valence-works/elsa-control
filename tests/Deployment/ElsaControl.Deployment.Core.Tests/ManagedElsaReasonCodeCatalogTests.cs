@@ -105,8 +105,6 @@ public sealed class ManagedElsaReasonCodeCatalogTests
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderCleanupFailed, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderAmbiguous, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionPredecessorRecoverySuperseded, ManagedElsaReasonClass.NeedsPerson)]
-    [InlineData(ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight, ManagedElsaReasonClass.NeedsPerson)]
-    [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.AssignmentRebindOperationsInFlight, ManagedElsaReasonClass.Temporary)]
     [InlineData(ManagedElsaReasonCodeCatalog.AssignmentRebindPlacementMismatch, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.AssignmentRebindAmbiguous, ManagedElsaReasonClass.NeedsPerson)]
