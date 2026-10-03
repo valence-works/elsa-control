@@ -25,6 +25,10 @@ public sealed class ElsaInstanceProviderReconciliationService(
 
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
 
+    public Task<int> AdvanceDueHumanRequiredClocksAsync(
+        CancellationToken cancellationToken = default) =>
+        store.AdvanceDueHumanRequiredClocksAsync(_timeProvider.GetUtcNow(), 64, cancellationToken);
+
     public async Task<ElsaInstanceProviderReconciliationResult> ReconcileAsync(
         Guid workspaceId,
         Guid operationId,

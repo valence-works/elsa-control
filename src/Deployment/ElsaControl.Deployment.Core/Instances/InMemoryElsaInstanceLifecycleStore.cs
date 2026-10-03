@@ -361,6 +361,17 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 }
                 else
                 {
+                    if (_operations.TryGetValue(commit.OperationId, out var replayOperation))
+                    {
+                        ApplyParkClock(
+                            replayOperation,
+                            commit.WorkspaceId,
+                            replay.Result.DiagnosticCode,
+                            replay.Result.DiagnosticCode,
+                            restartClock: false,
+                            commit.ReconciledAt);
+                    }
+
                     return Task.FromResult(replay.Result with { Replayed = true });
                 }
             }
@@ -423,6 +434,52 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         return Task.CompletedTask;
     }
 
+    public Task<int> AdvanceDueHumanRequiredClocksAsync(
+        DateTimeOffset now,
+        int limit = 64,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (limit is < 1 or > 256)
+            throw new ArgumentOutOfRangeException(nameof(limit));
+
+        now = now.ToUniversalTime();
+        lock (_gate)
+        {
+            var advanced = 0;
+            foreach (var operation in _operations.Values
+                         .Where(candidate => candidate.State == ElsaInstanceOperationState.RecoveryRequired)
+                         .OrderBy(candidate => candidate.Id))
+            {
+                if (advanced >= limit)
+                    break;
+                var clock = _clocks.GetValueOrDefault(operation.Id);
+                if (clock.RequiresHumanAt is not null)
+                    continue;
+                if (!_instances.TryGetValue(operation.InstanceId, out var instance))
+                    continue;
+                var diagnostic = _reconciliationResults.TryGetValue(operation.Id, out var stored)
+                    ? stored.Result.DiagnosticCode
+                    : _failures.TryGetValue(operation.Id, out var failure) ? failure.Code : null;
+                if (string.IsNullOrWhiteSpace(diagnostic) ||
+                    !ManagedElsaReasonCodeCatalog.RequiresHuman(diagnostic, clock.ReasonEnteredAt, now))
+                    continue;
+                var before = clock.RequiresHumanAt;
+                ApplyParkClock(
+                    operation,
+                    instance.WorkspaceId,
+                    diagnostic,
+                    diagnostic,
+                    restartClock: false,
+                    now);
+                if (_clocks.GetValueOrDefault(operation.Id).RequiresHumanAt is not null && before is null)
+                    advanced++;
+            }
+
+            return Task.FromResult(advanced);
+        }
+    }
+
     private static ElsaInstanceProviderReconciliationProjection Projection(
         ElsaInstanceProviderReconciliationCommit commit,
         int instanceVersion) => new(
@@ -440,7 +497,8 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         Guid workspaceId,
         string? previousCode,
         string? nextCode,
-        bool restartClock)
+        bool restartClock,
+        DateTimeOffset? now = null)
     {
         var current = _clocks.GetValueOrDefault(operation.Id);
         var next = ManagedElsaReasonClock.Advance(
@@ -448,7 +506,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             nextCode,
             current.ReasonEnteredAt,
             current.RequiresHumanAt,
-            _timeProvider.GetUtcNow(),
+            now ?? _timeProvider.GetUtcNow(),
             restartClock);
         var newlyHuman = current.RequiresHumanAt is null && next.RequiresHumanAt is not null;
         _clocks[operation.Id] = next;

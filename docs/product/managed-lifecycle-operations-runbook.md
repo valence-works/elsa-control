@@ -451,13 +451,20 @@ RecoveryRequired alert delivery.
 ## RecoveryRequired operator alert (#657)
 
 Control writes exactly one structured activity,
-`managed_lifecycle.recovery_required.entered`, when an operation actually
-enters `RecoveryRequired`. The write happens inside the same compare-and-set
-as the state change (the Azure provider transition row, or a lifecycle
-entry that is not the post-submit hand-off). Reads, health refreshes,
-reconciler re-ticks, heartbeats, checkpoints, and the
-`azure.recovery.auto-resume-exhausted` reason write do not emit it.
-Recover followed by a later entry emits one new event.
+`managed_lifecycle.recovery_required.entered`, when `RequiresHumanAt`
+goes from empty to a timestamp. That compare-and-set happens in the
+lifecycle persist when the catalog says a person is required — a
+needs-a-person-now reason (including unknown codes and
+`azure.recovery.auto-resume-exhausted`), or a temporary / auto-resuming
+reason that has sat 10 minutes since `ReasonEnteredAt`. The same
+transaction appends one outbox row keyed by operation and attempt; the
+span is flushed only after that commit. Auto-resuming #601 parks under
+the resume cap do not set the flag. Healthy hand-off, reads, health
+refreshes, unchanged-fingerprint reconciler re-ticks that are still
+inside the window, heartbeats, and checkpoints do not emit. Recover
+clears the flag; a later human-required park emits one new event. A
+run-less park is included by the 10-minute clock scan; it does not need
+a deployment run.
 
 The activity is an `ActivityKind.Internal` span on
 `ElsaControl.ManagedLifecycle`. The Azure Monitor exporter writes it to

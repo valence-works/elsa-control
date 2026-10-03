@@ -68,6 +68,7 @@ public sealed class ElsaInstanceProviderReconciliationHostedService(
         var reconciler = scope.ServiceProvider.GetRequiredService<IElsaInstanceProviderReconciliationService>();
         var commercialGate = scope.ServiceProvider.GetService<IElsaInstanceCommercialGate>();
         var entitlementHoldStore = scope.ServiceProvider.GetService<IElsaInstanceEntitlementHoldStore>();
+        await reconciler.AdvanceDueHumanRequiredClocksAsync(stoppingToken);
         var operations = await pending.ListPendingProviderOperationsAsync(64, stoppingToken);
         foreach (var operation in operations)
         {

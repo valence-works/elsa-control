@@ -36,18 +36,23 @@ case "$target" in
     ;;
 esac
 
-recipient="${!recipient_var:-}"
+recipient="$(printf '%s' "${!recipient_var:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 if [ -z "$recipient" ]; then
   echo "::error::${recipient_var} must be set for ${target}; refusing to deploy RecoveryRequired alerts." >&2
   exit 1
 fi
 
+normalize_mailbox() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
 if [ "$environment" = "staging" ]; then
-  if [ -z "${PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT:-}" ]; then
+  production_recipient="$(printf '%s' "${PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  if [ -z "$production_recipient" ]; then
     echo "::error::Staging RecoveryRequired alerts require PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT so the mailbox cannot silently reuse production." >&2
     exit 1
   fi
-  if [ "$recipient" = "${PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT}" ]; then
+  if [ "$(normalize_mailbox "$recipient")" = "$(normalize_mailbox "$production_recipient")" ]; then
     echo "::error::Staging RecoveryRequired alerts must not use PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT." >&2
     exit 1
   fi

@@ -636,6 +636,14 @@ esac
             self.assertNotEqual(0, reused.returncode)
             self.assertIn("must not use PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT", reused.stdout + reused.stderr)
 
+            reused_case = run_script(
+                TARGET_ENVIRONMENT="test",
+                STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT="  Ops@Example.TEST  ",
+                PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT="ops@example.test",
+            )
+            self.assertNotEqual(0, reused_case.returncode)
+            self.assertIn("must not use PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT", reused_case.stdout + reused_case.stderr)
+
             production = run_script(
                 TARGET_ENVIRONMENT="production",
                 PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT="prod-ops@example.test",

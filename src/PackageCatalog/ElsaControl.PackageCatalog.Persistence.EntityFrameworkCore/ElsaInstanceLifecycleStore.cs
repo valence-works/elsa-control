@@ -126,6 +126,41 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         dbContext.ChangeTracker.Clear();
     }
 
+    public async Task<int> AdvanceDueHumanRequiredClocksAsync(
+        DateTimeOffset now,
+        int limit = 64,
+        CancellationToken cancellationToken = default)
+    {
+        if (limit is < 1 or > 256)
+            throw new ArgumentOutOfRangeException(nameof(limit));
+
+        now = now.ToUniversalTime();
+        var dueBefore = now - ManagedElsaReasonCodeCatalog.HumanRequiredAfter;
+        dbContext.ChangeTracker.Clear();
+        var candidateIds = await dbContext.ElsaInstanceOperations
+            .AsNoTracking()
+            .Where(operation =>
+                operation.State == ElsaInstanceOperationState.RecoveryRequired &&
+                operation.RequiresHumanAt == null &&
+                operation.ReasonEnteredAt != null &&
+                operation.ReasonEnteredAt <= dueBefore)
+            .OrderBy(operation => operation.ReasonEnteredAt)
+            .ThenBy(operation => operation.Id)
+            .Select(operation => operation.Id)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+
+        var advanced = 0;
+        foreach (var operationId in candidateIds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (await TryAdvanceDueHumanRequiredClockAsync(operationId, now, cancellationToken))
+                advanced++;
+        }
+
+        return advanced;
+    }
+
     public async Task<ElsaInstanceProviderReconciliationResult> CommitAsync(
         ElsaInstanceProviderReconciliationCommit commit,
         CancellationToken cancellationToken = default)
@@ -154,9 +189,10 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     commit.Operation.State == ElsaInstanceOperationState.RecoveryRequired &&
                     string.Equals(current.ReconciliationEvidenceFingerprint, commit.EvidenceFingerprint, StringComparison.Ordinal))
                 {
-                    var replayOperation = await dbContext.ElsaInstanceOperations.AsNoTracking()
+                    var replayOperation = await dbContext.ElsaInstanceOperations
                         .SingleAsync(x => x.WorkspaceId == commit.WorkspaceId && x.Id == commit.OperationId,
                             cancellationToken);
+                    await ApplyDueReasonClockAsync(replayOperation, commit.ReconciledAt, cancellationToken);
                     return ReconciliationResult(replayOperation, replayed: true);
                 }
 
@@ -3763,6 +3799,71 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             operation.FailureCode,
             operation.ReconciliationDiagnosticCode,
             runRecoveryReason);
+
+    private async Task<bool> TryAdvanceDueHumanRequiredClockAsync(
+        Guid operationId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        dbContext.ChangeTracker.Clear();
+        try
+        {
+            return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+            {
+                var operation = await dbContext.ElsaInstanceOperations
+                    .SingleOrDefaultAsync(
+                        candidate => candidate.Id == operationId &&
+                                     candidate.State == ElsaInstanceOperationState.RecoveryRequired &&
+                                     candidate.RequiresHumanAt == null,
+                        cancellationToken);
+                if (operation is null)
+                    return false;
+                return await ApplyDueReasonClockAsync(operation, now, cancellationToken);
+            }, cancellationToken);
+        }
+        catch (ElsaInstanceLifecycleConflictException)
+        {
+            dbContext.ChangeTracker.Clear();
+            return false;
+        }
+        catch (Exception exception) when (exception is DbUpdateConcurrencyException or DbUpdateException or DbException)
+        {
+            dbContext.ChangeTracker.Clear();
+            return false;
+        }
+    }
+
+    private async Task<bool> ApplyDueReasonClockAsync(
+        ElsaInstanceOperationEntity operation,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (operation.State != ElsaInstanceOperationState.RecoveryRequired ||
+            operation.RequiresHumanAt is not null)
+            return false;
+
+        string? runReason = null;
+        if (operation.DeploymentRunId is { } runId)
+        {
+            runReason = await dbContext.DeploymentRuns
+                .AsNoTracking()
+                .Where(run => run.Id == runId && run.WorkspaceId == operation.WorkspaceId)
+                .Select(run => run.RecoveryReason)
+                .SingleOrDefaultAsync(cancellationToken);
+        }
+
+        var reason = CurrentParkReason(operation, runReason);
+        if (string.IsNullOrWhiteSpace(reason) ||
+            !ManagedElsaReasonCodeCatalog.RequiresHuman(reason, operation.ReasonEnteredAt, now))
+            return false;
+
+        ApplyReasonClock(operation, reason, reason, now, restartClock: false);
+        if (operation.RequiresHumanAt is null)
+            return false;
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return true;
+    }
 
     internal static void ApplyReasonClock(
         ElsaInstanceOperationEntity operation,
