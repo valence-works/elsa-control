@@ -18,6 +18,7 @@ using ElsaControl.PackageCatalog.Abstractions.Compatibility;
 using ElsaControl.Api.Admin.Application;
 using ElsaControl.Api.Admin.Organizations;
 using ElsaControl.Api.Admin.Workspaces;
+using ElsaControl.Api.Admin.Staging;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Catalog;
 using ElsaControl.Api.Cloud;
@@ -287,6 +288,9 @@ builder.Services.Configure<OrganizationBillingLifecycleWorkerOptions>(
 builder.Services.Configure<StagingBillingLifecycleLeverOptions>(
     builder.Configuration.GetSection(StagingBillingLifecycleLeverOptions.ConfigurationSection));
 builder.Services.AddHostedService<StagingBillingLifecycleLeverConfigurationValidator>();
+builder.Services.Configure<StagingRecoveryLifecycleLeverOptions>(
+    builder.Configuration.GetSection(StagingRecoveryLifecycleLeverOptions.ConfigurationSection));
+builder.Services.AddHostedService<StagingRecoveryLifecycleLeverConfigurationValidator>();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<AdminApiKeyValidator>();
 builder.Services.AddSingleton<BuilderClientApiKeyValidator>();
@@ -352,6 +356,7 @@ builder.Services.AddScoped<IOrganizationBillingLifecycleStore>(services =>
 builder.Services.AddScoped<IOrganizationBillingLifecycleDeadlineStore>(services =>
     services.GetRequiredService<OrganizationBillingStore>());
 builder.Services.AddScoped<StagingBillingLifecycleLever>();
+builder.Services.AddScoped<StagingRecoveryLifecycleLever>();
 builder.Services.AddScoped<IOrganizationInternalEntitlementStore>(services =>
     services.GetRequiredService<OrganizationBillingStore>());
 builder.Services.AddScoped<OrganizationInternalEntitlementService>();
@@ -401,6 +406,7 @@ builder.Services.AddSingleton<IRecoveryRequiredAlertSender>(services =>
     new ActivityRecoveryRequiredAlertSender(
         services.GetService<IRecoveryRequiredAlertTransportAck>()));
 builder.Services.AddScoped<IRecoveryRequiredAlertOutboxDispatcher, EfCoreRecoveryRequiredAlertOutboxDispatcher>();
+builder.Services.AddScoped<IStagingRecoveryLifecycleLeverStore>(services => services.GetRequiredService<EfCoreElsaInstanceLifecycleStore>());
 builder.Services.Configure<ElsaInstancePlanAuthorityOptions>(
     builder.Configuration.GetSection(ElsaInstancePlanAuthorityOptions.ConfigurationSection));
 var azureInstanceLifecycleConfigured = builder.Configuration.GetValue<bool>(
@@ -790,6 +796,7 @@ app.MapAdminOrganizationEndpoints();
 app.MapAdminOrganizationInternalEntitlementEndpoints();
 app.MapAdminOrganizationAzureBoundEntitlementEndpoints();
 app.MapAdminOrganizationBillingLifecycleLeverEndpoints();
+app.MapStagingRecoveryLifecycleLeverEndpoints();
 app.MapAdminReleaseCatalogEndpoints();
 app.MapConsoleLogStreaming();
 if (adminConsoleAssetsExist)

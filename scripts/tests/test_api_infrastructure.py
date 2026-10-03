@@ -58,6 +58,9 @@ def parameter_file(
     pairing_allowed_organization_ids: str = "",
     staging_billing_lever_enabled: bool = False,
     staging_billing_lever_allowed_organization_ids: str = "",
+    staging_recovery_lever_enabled: bool = False,
+    staging_recovery_lever_allowed_instance_ids: str = "",
+    staging_smoke_owner_instance_id: str = "",
 ) -> str:
     """Return a synthetic, non-secret parameter file for Bicep snapshot evaluation."""
 
@@ -85,10 +88,13 @@ def parameter_file(
         "api_egress_subnet_id": egress_subnet_id,
         "pairingallowedorganizationids_value": pairing_allowed_organization_ids,
         "stagingbillingleverallowedorganizationids_value": staging_billing_lever_allowed_organization_ids,
+        "stagingrecoveryleverallowedinstanceids_value": staging_recovery_lever_allowed_instance_ids,
+        "stagingsmokeownerinstanceid_value": staging_smoke_owner_instance_id,
     }
     lines = [f"using '{using_path}'", ""]
     lines.extend(f"param {name} = '{value}'" for name, value in values.items())
     lines.append(f"param stagingbillingleverenabled_value = {'true' if staging_billing_lever_enabled else 'false'}")
+    lines.append(f"param stagingrecoveryleverenabled_value = {'true' if staging_recovery_lever_enabled else 'false'}")
     return "\n".join(lines) + "\n"
 
 
@@ -114,6 +120,9 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertFalse(any(name.startswith("ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__") for name in settings))
         self.assertNotIn("Billing__StagingLifecycleLever__Enabled", settings)
         self.assertFalse(any(name.startswith("Billing__StagingLifecycleLever__AllowedOrganizationIds__") for name in settings))
+        self.assertNotIn("Staging__RecoveryLifecycleLever__Enabled", settings)
+        self.assertFalse(any(name.startswith("Staging__RecoveryLifecycleLever__AllowedInstanceIds__") for name in settings))
+        self.assertNotIn("Staging__RecoveryLifecycleLever__SmokeOwnerInstanceId", settings)
 
     @staticmethod
     def generated_api_module() -> str:
@@ -163,9 +172,15 @@ class ApiInfrastructureTests(unittest.TestCase):
             re.DOTALL,
         )
         generated = lever_parameter.sub("", generated, count=1)
+        recovery_parameter = re.compile(
+            r"\n@description\('When true, emit Staging:RecoveryLifecycleLever:Enabled\..*?"
+            r"\nvar stagingRecoveryLeverSettings = concat\(stagingRecoveryLeverEnabledSettings, stagingRecoveryLeverSmokeOwnerSettings, stagingRecoveryLeverAllowlistSettings\)\n",
+            re.DOTALL,
+        )
+        generated = recovery_parameter.sub("", generated, count=1)
         generated = generated.replace("      appSettings: concat(\n        [", "      appSettings: [", 1)
         generated = generated.replace(
-            "        ],\n        pairingAllowlistSettings,\n        stagingBillingLeverSettings)",
+            "        ],\n        pairingAllowlistSettings,\n        stagingBillingLeverSettings,\n        stagingRecoveryLeverSettings)",
             "      ]",
             1,
         )
@@ -209,6 +224,9 @@ class ApiInfrastructureTests(unittest.TestCase):
         pairing_allowed_organization_ids: str = "",
         staging_billing_lever_enabled: bool = False,
         staging_billing_lever_allowed_organization_ids: str = "",
+        staging_recovery_lever_enabled: bool = False,
+        staging_recovery_lever_allowed_instance_ids: str = "",
+        staging_smoke_owner_instance_id: str = "",
     ) -> dict:
         """Evaluate the actual module with Bicep's offline deployment snapshot."""
 
@@ -225,6 +243,9 @@ class ApiInfrastructureTests(unittest.TestCase):
                 pairing_allowed_organization_ids,
                 staging_billing_lever_enabled,
                 staging_billing_lever_allowed_organization_ids,
+                staging_recovery_lever_enabled,
+                staging_recovery_lever_allowed_instance_ids,
+                staging_smoke_owner_instance_id,
             )
         )
         result = subprocess.run(
@@ -314,6 +335,45 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertEqual(on_settings["Billing__StagingLifecycleLever__Enabled"], "true")
         self.assertEqual(on_settings["Billing__StagingLifecycleLever__AllowedOrganizationIds__0"], first)
         self.assertEqual(on_settings["Billing__StagingLifecycleLever__AllowedOrganizationIds__1"], second)
+        self.assertNotIn("Staging__RecoveryLifecycleLever__Enabled", on_settings)
+        self.assertFalse(any(name.startswith("Staging__RecoveryLifecycleLever__AllowedInstanceIds__") for name in on_settings))
+
+    def test_bicep_module_emits_staging_recovery_lever_settings_only_when_set(self) -> None:
+        first = "11111111-1111-1111-1111-111111111111"
+        second = "22222222-2222-2222-2222-222222222222"
+        smoke = "33333333-3333-3333-3333-333333333333"
+        with tempfile.TemporaryDirectory() as temporary:
+            off = self.webapp(self.snapshot(Path(temporary), ""))
+            on = self.webapp(
+                self.snapshot(
+                    Path(temporary),
+                    "",
+                    staging_recovery_lever_enabled=True,
+                    staging_recovery_lever_allowed_instance_ids=f"{first},{second}",
+                    staging_smoke_owner_instance_id=smoke,
+                )
+            )
+            billing_only = self.webapp(
+                self.snapshot(
+                    Path(temporary),
+                    "",
+                    staging_billing_lever_enabled=True,
+                    staging_billing_lever_allowed_organization_ids=first,
+                )
+            )
+        off_settings = {setting["name"]: setting["value"] for setting in off["properties"]["siteConfig"]["appSettings"]}
+        on_settings = {setting["name"]: setting["value"] for setting in on["properties"]["siteConfig"]["appSettings"]}
+        billing_settings = {setting["name"]: setting["value"] for setting in billing_only["properties"]["siteConfig"]["appSettings"]}
+        self.assertNotIn("Staging__RecoveryLifecycleLever__Enabled", off_settings)
+        self.assertFalse(any(name.startswith("Staging__RecoveryLifecycleLever__AllowedInstanceIds__") for name in off_settings))
+        self.assertNotIn("Staging__RecoveryLifecycleLever__SmokeOwnerInstanceId", off_settings)
+        self.assertEqual(on_settings["Staging__RecoveryLifecycleLever__Enabled"], "true")
+        self.assertEqual(on_settings["Staging__RecoveryLifecycleLever__AllowedInstanceIds__0"], first)
+        self.assertEqual(on_settings["Staging__RecoveryLifecycleLever__AllowedInstanceIds__1"], second)
+        self.assertEqual(on_settings["Staging__RecoveryLifecycleLever__SmokeOwnerInstanceId"], smoke)
+        self.assertNotIn("Billing__StagingLifecycleLever__Enabled", on_settings)
+        self.assertNotIn("Staging__RecoveryLifecycleLever__Enabled", billing_settings)
+        self.assertFalse(any(name.startswith("Staging__RecoveryLifecycleLever__AllowedInstanceIds__") for name in billing_settings))
 
     def test_bicep_module_drops_empty_pairing_allowlist_entries(self) -> None:
         first = "11111111-1111-1111-1111-111111111111"
@@ -481,6 +541,9 @@ class ApiInfrastructureTests(unittest.TestCase):
         regenerated = template.replace("param pairingallowedorganizationids_value = ''\n", "", 1)
         regenerated = regenerated.replace("param stagingbillingleverenabled_value = false\n", "", 1)
         regenerated = regenerated.replace("param stagingbillingleverallowedorganizationids_value = ''\n", "", 1)
+        regenerated = regenerated.replace("param stagingrecoveryleverenabled_value = false\n", "", 1)
+        regenerated = regenerated.replace("param stagingrecoveryleverallowedinstanceids_value = ''\n", "", 1)
+        regenerated = regenerated.replace("param stagingsmokeownerinstanceid_value = ''\n", "", 1)
         regenerated = regenerated.replace("param cloudaccountissuer_value = ''\n", "", 1)
         regenerated = egress_block.sub("", provisioner_block.sub("", regenerated, count=1), count=1)
         self.assertNotIn("provisioner_identity_outputs_id", regenerated)
@@ -489,6 +552,9 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertNotIn("pairingallowedorganizationids_value", regenerated)
         self.assertNotIn("stagingbillingleverenabled_value", regenerated)
         self.assertNotIn("stagingbillingleverallowedorganizationids_value", regenerated)
+        self.assertNotIn("stagingrecoveryleverenabled_value", regenerated)
+        self.assertNotIn("stagingrecoveryleverallowedinstanceids_value", regenerated)
+        self.assertNotIn("stagingsmokeownerinstanceid_value", regenerated)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             module_fixture = root / "infra" / "api" / "api-website.module.bicep"
@@ -506,6 +572,9 @@ class ApiInfrastructureTests(unittest.TestCase):
             self.assertEqual(1, template_fixture.read_text().count("param pairingallowedorganizationids_value = ''"))
             self.assertEqual(1, template_fixture.read_text().count("param stagingbillingleverenabled_value = false"))
             self.assertEqual(1, template_fixture.read_text().count("param stagingbillingleverallowedorganizationids_value = ''"))
+            self.assertEqual(1, template_fixture.read_text().count("param stagingrecoveryleverenabled_value = false"))
+            self.assertEqual(1, template_fixture.read_text().count("param stagingrecoveryleverallowedinstanceids_value = ''"))
+            self.assertEqual(1, template_fixture.read_text().count("param stagingsmokeownerinstanceid_value = ''"))
 
     def test_regeneration_rejects_unknown_catalog_authentication_without_partial_write(self) -> None:
         generated = self.generated_api_module().replace("Active Directory Default", "Unexpected Authentication")

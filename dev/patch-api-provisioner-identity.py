@@ -151,10 +151,56 @@ def patch_module(content: str) -> str:
         "\n"
         "var stagingBillingLeverSettings = concat(stagingBillingLeverEnabledSettings, stagingBillingLeverAllowlistSettings)\n"
     )
+    recovery_enabled_parameter = "param stagingrecoveryleverenabled_value bool = false"
+    recovery_allowlist_parameter = "param stagingrecoveryleverallowedinstanceids_value string = ''"
+    recovery_smoke_parameter = "param stagingsmokeownerinstanceid_value string = ''"
+    recovery_enabled_description = (
+        "@description('When true, emit Staging:RecoveryLifecycleLever:Enabled. "
+        "Staging only; production must stay false.')"
+    )
+    recovery_allowlist_description = (
+        "@description('Comma-separated instance GUIDs the staging recovery "
+        "lifecycle lever may target. Empty refuses every instance. Staging "
+        "only; production must stay empty.')"
+    )
+    recovery_smoke_description = (
+        "@description('Hosted smoke-owner instance GUID the staging recovery "
+        "lever must refuse. Staging only; production must stay empty.')"
+    )
+    recovery_vars = (
+        "var stagingRecoveryLeverAllowedInstanceIds = empty(stagingrecoveryleverallowedinstanceids_value)\n"
+        "  ? []\n"
+        "  : filter(map(split(stagingrecoveryleverallowedinstanceids_value, ','), id => trim(id)), id => !empty(id))\n"
+        "\n"
+        "var stagingRecoveryLeverEnabledSettings = stagingrecoveryleverenabled_value ? [\n"
+        "  {\n"
+        "    name: 'Staging__RecoveryLifecycleLever__Enabled'\n"
+        "    value: 'true'\n"
+        "  }\n"
+        "] : []\n"
+        "\n"
+        "var stagingRecoveryLeverSmokeOwnerSettings = empty(stagingsmokeownerinstanceid_value) ? [] : [\n"
+        "  {\n"
+        "    name: 'Staging__RecoveryLifecycleLever__SmokeOwnerInstanceId'\n"
+        "    value: stagingsmokeownerinstanceid_value\n"
+        "  }\n"
+        "]\n"
+        "\n"
+        "var stagingRecoveryLeverAllowlistSettings = [for (instanceId, i) in stagingRecoveryLeverAllowedInstanceIds: {\n"
+        "  name: 'Staging__RecoveryLifecycleLever__AllowedInstanceIds__${i}'\n"
+        "  value: instanceId\n"
+        "}]\n"
+        "\n"
+        "var stagingRecoveryLeverSettings = concat(stagingRecoveryLeverEnabledSettings, stagingRecoveryLeverSmokeOwnerSettings, stagingRecoveryLeverAllowlistSettings)\n"
+    )
     lever_block = (
         f"{lever_enabled_description}\n{lever_enabled_parameter}\n\n"
         f"{lever_allowlist_description}\n{lever_allowlist_parameter}\n\n"
-        f"{lever_vars}"
+        f"{lever_vars}\n"
+        f"{recovery_enabled_description}\n{recovery_enabled_parameter}\n\n"
+        f"{recovery_allowlist_description}\n{recovery_allowlist_parameter}\n\n"
+        f"{recovery_smoke_description}\n{recovery_smoke_parameter}\n\n"
+        f"{recovery_vars}"
     )
     content = replace_once(
         content,
@@ -223,7 +269,7 @@ def patch_module(content: str) -> str:
         "generated appSettings array open for the pairing allowlist",
     )
     pairing_settings_close = (
-        "        ],\n        pairingAllowlistSettings,\n        stagingBillingLeverSettings)"
+        "        ],\n        pairingAllowlistSettings,\n        stagingBillingLeverSettings,\n        stagingRecoveryLeverSettings)"
     )
     content = replace_once(
         content,
@@ -261,6 +307,9 @@ def patch_parameter_template(parameters: str) -> str:
     lever_block = (
         "param stagingbillingleverenabled_value = false\n"
         "param stagingbillingleverallowedorganizationids_value = ''\n"
+        "param stagingrecoveryleverenabled_value = false\n"
+        "param stagingrecoveryleverallowedinstanceids_value = ''\n"
+        "param stagingsmokeownerinstanceid_value = ''\n"
     )
     parameters = replace_once(
         parameters, "provisioner_identity_outputs_id", anchor, anchor + provisioner_block,

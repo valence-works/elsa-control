@@ -383,6 +383,52 @@ any other target. The Hosted smoke owner organization
 allowlist. List an organization only when its contact address is a harness
 mailbox, never a real person.
 
+### Staging recovery lifecycle lever
+
+Control can accept a normal `Reconcile` on a staging allowlisted instance and
+move it to `RecoveryRequired` through the real transition methods. The lever
+stays off unless both of these are true:
+
+- The deploy pipeline set `Staging:RecoveryLifecycleLever:Enabled` and
+  `Staging:RecoveryLifecycleLever:AllowedInstanceIds`. Those settings are
+  emitted only from `stagingrecoveryleverenabled_value` and
+  `stagingrecoveryleverallowedinstanceids_value`, which default to off and
+  empty.
+- Control's configured Stripe secret key starts with `sk_test_`. The prefix is
+  compared only; the key is never logged.
+
+This lever has its own flag and instance allowlist. The billing lever and this
+lever never enable each other. The Hosted smoke owner instance
+(`STAGING_SMOKE_OWNER_INSTANCE_ID`) must not appear on the allowlist.
+
+The fire endpoint accepts an optional `reason`. Only two values are allowed:
+`staging.lever.recovery-required` (the default when omitted) and
+`provider.submission.uncertain`. Any other value is refused. Both go through
+the real transition and write `staging.lever.fired`. An uncertain lever park
+has no provider correlation, so reconcile ticks cannot converge it.
+
+A lever-parked `Reconcile` has no provider retry observation, so production
+`Recover` refuses it. That is the provider-ledger safety boundary. Row 26
+re-entry uses the staging-only reset, not production Recover:
+
+1. `POST /api/staging/lifecycle-lever/instances/{id}/recovery-required`
+2. `POST /api/staging/lifecycle-lever/instances/{id}/reset` — transitions
+   `RecoveryRequired` to `Succeeded` through `TransitionTo` when the park is
+   lever-owned (diagnostic `staging.lever.recovery-required`) and has no
+   provider correlation
+3. Fire again
+
+Do not attach fabricated `provider.reconciliation.retry-safe` evidence. The
+reset is gated by the same flag, `sk_test_` prefix, instance allowlist, and
+smoke-owner deny as the fire endpoint.
+
+Set the **`test` GitHub environment** variables
+`STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED`,
+`STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS`, and
+`STAGING_SMOKE_OWNER_INSTANCE_ID`. The Azure Control API Deploy workflow
+passes them only for `test` and fails if any of those variables is set for
+any other target.
+
 ### Multi-tenant Microsoft Entra sign-in (guided design partners)
 
 Control can accept work or school sign-ins from customer Microsoft Entra tenants, so a

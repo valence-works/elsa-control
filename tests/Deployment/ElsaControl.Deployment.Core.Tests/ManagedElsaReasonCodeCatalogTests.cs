@@ -46,15 +46,19 @@ public sealed class ManagedElsaReasonCodeCatalogTests
         const string plantedRecovery = "azure.recovery.planted-uncatalogued";
         const string plantedDeletion = "deletion.planted-uncatalogued";
         const string plantedRebind = "assignment.rebind.planted-uncatalogued";
+        const string plantedLever = "staging.lever.planted-uncatalogued";
         Assert.False(ManagedElsaReasonCodeCatalog.TryGet(plantedRecovery, out _));
         Assert.False(ManagedElsaReasonCodeCatalog.TryGet(plantedDeletion, out _));
         Assert.False(ManagedElsaReasonCodeCatalog.TryGet(plantedRebind, out _));
+        Assert.False(ManagedElsaReasonCodeCatalog.TryGet(plantedLever, out _));
         Assert.Equal(plantedRecovery, Assert.Single(ManagedElsaReasonLiteralScanner.FindUncatalogued(
             $"operation.ReconciliationDiagnosticCode = \"{plantedRecovery}\";")));
         Assert.Equal(plantedDeletion, Assert.Single(ManagedElsaReasonLiteralScanner.FindUncatalogued(
             $"operation.ReconciliationDiagnosticCode = \"{plantedDeletion}\";")));
         Assert.Equal(plantedRebind, Assert.Single(ManagedElsaReasonLiteralScanner.FindUncatalogued(
             $"operation.ReconciliationDiagnosticCode = \"{plantedRebind}\";")));
+        Assert.Equal(plantedLever, Assert.Single(ManagedElsaReasonLiteralScanner.FindUncatalogued(
+            $"operation.ReconciliationDiagnosticCode = \"{plantedLever}\";")));
         Assert.Empty(ManagedElsaReasonLiteralScanner.FindUncatalogued(
             $"operation.ReconciliationDiagnosticCode = \"{ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted}\";"));
     }
@@ -84,6 +88,8 @@ public sealed class ManagedElsaReasonCodeCatalogTests
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationAmbiguous, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderIdentityBindingMissing, ManagedElsaReasonClass.NeedsPerson)]
     [InlineData(ManagedElsaReasonCodeCatalog.StagingLeverRecoveryRequired, ManagedElsaReasonClass.NeedsPerson)]
+    [InlineData(ManagedElsaReasonCodeCatalog.StagingLeverFired, ManagedElsaReasonClass.HealthyHandOff)]
+    [InlineData(ManagedElsaReasonCodeCatalog.StagingLeverReset, ManagedElsaReasonClass.HealthyHandOff)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionLocalAbsent, ManagedElsaReasonClass.HealthyHandOff)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderConfirmedAbsent, ManagedElsaReasonClass.HealthyHandOff)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderUnavailable, ManagedElsaReasonClass.Temporary)]
@@ -158,6 +164,34 @@ public sealed class ManagedElsaReasonCodeCatalogTests
             ManagedElsaReasonCodeCatalog.SelectCurrentReason(
                 null, null, ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted));
         Assert.Null(ManagedElsaReasonCodeCatalog.SelectCurrentReason(null, null, "Worker heartbeat became stale."));
+    }
+
+    [Fact]
+    public void Uncertain_lever_park_class_follows_the_chosen_operation_reason()
+    {
+        Assert.Equal(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
+            ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
+                ManagedElsaReasonCodeCatalog.StagingLeverRecoveryRequired));
+        Assert.Equal(
+            ManagedElsaReasonClass.Temporary,
+            ManagedElsaReasonCodeCatalog.Classify(
+                ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                    ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
+                    ManagedElsaReasonCodeCatalog.StagingLeverRecoveryRequired)));
+        Assert.Equal(
+            ManagedElsaReasonClass.Temporary,
+            ManagedElsaReasonCodeCatalog.Classify(
+                ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                    ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
+                    ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain)));
+        Assert.Equal(
+            ManagedElsaReasonClass.NeedsPerson,
+            ManagedElsaReasonCodeCatalog.Classify(
+                ManagedElsaReasonCodeCatalog.SelectCurrentReason(
+                    ManagedElsaReasonCodeCatalog.StagingLeverRecoveryRequired,
+                    ManagedElsaReasonCodeCatalog.StagingLeverRecoveryRequired)));
     }
 
     [Fact]

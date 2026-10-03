@@ -8,7 +8,7 @@ public static class StagingBillingLifecycleLeverDefaults
     public const string DisabledCode = "billing.staging-lifecycle-lever.disabled";
     public const string OrganizationNotAllowedCode = "billing.staging-lifecycle-lever.organization-not-allowed";
     public const string DeadlineNotApplicableCode = "billing.staging-lifecycle-lever.deadline-not-applicable";
-    public const string StripeTestSecretKeyPrefix = "sk_test_";
+    public const string StripeTestSecretKeyPrefix = StagingLifecycleLeverGate.StripeTestSecretKeyPrefix;
 }
 
 public sealed class StagingBillingLifecycleLeverOptions

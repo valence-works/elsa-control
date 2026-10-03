@@ -78,7 +78,10 @@ jobs:
       MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED: ${{ vars.MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED }}
       STAGING_BILLING_LIFECYCLE_LEVER_ENABLED: ${{ vars.STAGING_BILLING_LIFECYCLE_LEVER_ENABLED }}
       STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS: ${{ vars.STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS }}
+      STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED: ${{ vars.STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED }}
+      STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS: ${{ vars.STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS }}
       STAGING_SMOKE_OWNER_ORGANIZATION_ID: ${{ vars.STAGING_SMOKE_OWNER_ORGANIZATION_ID }}
+      STAGING_SMOKE_OWNER_INSTANCE_ID: ${{ vars.STAGING_SMOKE_OWNER_INSTANCE_ID }}
       CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
       EXPECTED_CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
       DOTNET_NOLOGO: true
@@ -250,8 +253,82 @@ jobs:
               exit 1
             fi
           fi
+          recovery_enabled_raw="${STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED:-}"
+          recovery_allowlist_raw="${STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS:-}"
+          recovery_allowlist_count=0
+          recovery_normalized=""
+          recovery_enabled=""
+          if [ -n "$recovery_enabled_raw" ] || [ -n "$recovery_allowlist_raw" ] || [ -n "${STAGING_SMOKE_OWNER_INSTANCE_ID:-}" ]; then
+            if [ "$TARGET_ENVIRONMENT" != "test" ]; then
+              echo "::error::STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED, STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS, and STAGING_SMOKE_OWNER_INSTANCE_ID must be unset for ${TARGET_ENVIRONMENT}; production ships the lever off."
+              exit 1
+            fi
+          fi
+          if [ -n "$recovery_enabled_raw" ]; then
+            case "${recovery_enabled_raw,,}" in
+              true) recovery_enabled=true ;;
+              false) recovery_enabled="" ;;
+              *)
+                echo "::error::STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED must be true or false."
+                exit 1
+                ;;
+            esac
+          fi
+          if [ -n "$recovery_allowlist_raw" ]; then
+            if [[ "$recovery_allowlist_raw" =~ (^|,)[[:space:]]*(,|$) ]]; then
+              echo "::error::STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS contains an empty instance id."
+              exit 1
+            fi
+            IFS=',' read -r -a recovery_entries <<< "$recovery_allowlist_raw"
+            for entry in "${recovery_entries[@]}"; do
+              trimmed="${entry#"${entry%%[![:space:]]*}"}"
+              trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+              if [ -z "$trimmed" ]; then
+                echo "::error::STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS contains an empty instance id."
+                exit 1
+              fi
+              if [[ ! "$trimmed" =~ $pairing_guid_pattern ]] || [ "$trimmed" = "00000000-0000-0000-0000-000000000000" ]; then
+                echo "::error::STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS contains an entry that is not a GUID instance id."
+                exit 1
+              fi
+              if [ -n "$recovery_normalized" ]; then
+                recovery_normalized+=","
+              fi
+              recovery_normalized+="$trimmed"
+              recovery_allowlist_count=$((recovery_allowlist_count + 1))
+            done
+          fi
+          if [ -n "${GITHUB_OUTPUT:-}" ]; then
+            {
+              printf 'staging_recovery_lever_enabled=%s\n' "$recovery_enabled"
+              printf 'staging_recovery_lever_allowlist_count=%s\n' "$recovery_allowlist_count"
+              printf 'staging_recovery_lever_allowlist=%s\n' "$recovery_normalized"
+            } >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "${GITHUB_ENV:-}" ]; then
+            printf 'STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED=%s\n' "$recovery_enabled" >> "$GITHUB_ENV"
+            printf 'STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS=%s\n' "$recovery_normalized" >> "$GITHUB_ENV"
+          fi
+
+          smoke_owner_instance_id="${STAGING_SMOKE_OWNER_INSTANCE_ID:-}"
+          if [ "$TARGET_ENVIRONMENT" = "test" ] && [ "$recovery_allowlist_count" -gt 0 ]; then
+            if [ -z "$smoke_owner_instance_id" ]; then
+              echo "::error::STAGING_SMOKE_OWNER_INSTANCE_ID must be set on the test environment so the staging recovery lifecycle lever allowlist can be checked against the Hosted smoke owner instance."
+              exit 1
+            fi
+            if [[ ! "$smoke_owner_instance_id" =~ $pairing_guid_pattern ]] || [ "$smoke_owner_instance_id" = "00000000-0000-0000-0000-000000000000" ]; then
+              echo "::error::STAGING_SMOKE_OWNER_INSTANCE_ID must be a GUID instance id."
+              exit 1
+            fi
+            if [[ ",${recovery_normalized,,}," == *",${smoke_owner_instance_id,,},"* ]]; then
+              echo "::error::STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS must not include the staging Hosted smoke owner instance."
+              exit 1
+            fi
+          fi
+
           echo "External-engine pairing allowlist: ${pairing_allowlist_count} organization id(s)."
           echo "Staging billing lifecycle lever: enabled=${lever_enabled}; allowlist=${lever_allowlist_count} organization id(s)."
+          echo "Staging recovery lifecycle lever: enabled=${recovery_enabled}; allowlist=${recovery_allowlist_count} instance id(s)."
 
           required=(
             AZURE_CLIENT_ID
@@ -772,6 +849,9 @@ jobs:
           EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ steps.deployment-config.outputs.pairing_allowlist }}
           STAGING_BILLING_LIFECYCLE_LEVER_ENABLED: ${{ steps.deployment-config.outputs.staging_billing_lever_enabled }}
           STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS: ${{ steps.deployment-config.outputs.staging_billing_lever_allowlist }}
+          STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED: ${{ steps.deployment-config.outputs.staging_recovery_lever_enabled }}
+          STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS: ${{ steps.deployment-config.outputs.staging_recovery_lever_allowlist }}
+          STAGING_SMOKE_OWNER_INSTANCE_ID: ${{ vars.STAGING_SMOKE_OWNER_INSTANCE_ID }}
         shell: bash
         run: |
           set -euo pipefail
@@ -952,6 +1032,7 @@ jobs:
           fi
           PAIRING_BEFORE_COUNT="$pairing_before_count" scripts/apply-external-engine-pairing-settings.sh
           scripts/apply-staging-billing-lifecycle-lever-settings.sh
+          scripts/apply-staging-recovery-lifecycle-lever-settings.sh
 
           az webapp restart \
             --resource-group "$AZURE_RESOURCE_GROUP" \
