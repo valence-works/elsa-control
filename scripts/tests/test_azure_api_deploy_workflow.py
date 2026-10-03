@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,14 @@ from textwrap import dedent
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "azure-api-deploy.yml"
+PRODUCTION_BILLING_FIXTURE = {
+    "STRIPE_PRODUCTION_PRICE_ID": "price_livefixture",
+    "CONTROL_PRODUCTION_WEBHOOK_URL": "https://control.example.test/api/billing/webhooks/stripe",
+    "AZURE_EXPECTED_PRODUCTION_PORTAL_RETURN_URL": "https://control.example.test/billing",
+    "AZURE_EXPECTED_PRODUCTION_CHECKOUT_SUCCESS_URL": "https://cloud.example.test/checkout/return?session_id={CHECKOUT_SESSION_ID}",
+    "AZURE_EXPECTED_PRODUCTION_CHECKOUT_CANCEL_URL": "https://cloud.example.test/dashboard/billing",
+    "AZURE_EXPECTED_PRODUCTION_CLOUD_PORTAL_RETURN_URL": "https://cloud.example.test/dashboard",
+}
 
 
 class AzureApiDeployWorkflowTests(unittest.TestCase):
@@ -80,10 +89,323 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertIn('--image "$PREVIOUS_SITECONTAINER_IMAGE"', self.source)
         self.assertIn("steps.deploy-api.outcome == 'failure'", self.source)
         self.assertIn("steps.health-gate.outcome == 'failure'", self.source)
+        self.assertIn("steps.managed-telemetry.outcome == 'failure'", self.source)
+        self.assertIn("steps.production-billing-capture.outcome == 'success'", self.source)
         self.assertIn(
             "Restore previous API deployment after deployment, configuration, or health failure",
             self.source,
         )
+
+    def test_production_billing_capture_restore_and_cleanup_surround_replacement(self) -> None:
+        capture_start = self.source.index("      - name: Capture production Stripe billing settings before replacement")
+        deploy_start = self.source.index("      - name: Deploy API app")
+        rollback_start = self.source.index("      - name: Restore previous API deployment")
+        cleanup_start = self.source.index("      - name: Clean up captured production Stripe billing settings")
+        self.assertLess(capture_start, deploy_start)
+        self.assertLess(deploy_start, rollback_start)
+        self.assertLess(rollback_start, cleanup_start)
+        rollback_end = self.source.index("\n      - name:", rollback_start + 1)
+        rollback = self.source[rollback_start:rollback_end]
+        self.assertIn('python3 scripts/production_stripe_reconcile.py --reapply "$PRODUCTION_BILLING_CAPTURE_PATH"', rollback)
+        self.assertIn("--audit-capture", self.source)
+        self.assertIn('rm -f -- "$PRODUCTION_BILLING_CAPTURE_PATH"', self.source)
+
+    def test_deploy_blocks_preserve_billing_with_fake_provider_for_each_mutating_mode(self) -> None:
+        """Execute the workflow shell blocks with safe fake providers."""
+
+        def step_script(step_name: str) -> str:
+            start = self.source.index(f"      - name: {step_name}")
+            run_start = self.source.index("        run: |\n", start) + len("        run: |\n")
+            end = self.source.find("\n      - name:", run_start)
+            if end == -1:
+                end = len(self.source)
+            return dedent(self.source[run_start:end])
+
+        deploy_script = step_script("Deploy API app").replace(
+            "${{ steps.current-deployment.outputs.deployment_mode }}", "classic"
+        )
+        capture_script = step_script("Capture production Stripe billing settings before replacement")
+        audit_script = step_script("Audit production Stripe billing")
+        health_script = step_script("Verify deployed API health")
+        rollback_script = step_script("Restore previous API deployment after deployment, configuration, or health failure")
+        cleanup_script = step_script("Clean up captured production Stripe billing settings")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            bin_path = temporary_path / "bin"
+            bin_path.mkdir()
+            events_path = temporary_path / "events.log"
+            state_path = temporary_path / "state.json"
+            capture_path = temporary_path / "production-billing.json"
+            state_path.write_text(json.dumps({"runtime": "DOCKER|old-image"}))
+
+            def write_executable(name: str, contents: str) -> None:
+                path = bin_path / name
+                path.write_text(contents)
+                path.chmod(0o700)
+
+            write_executable(
+                "az",
+                f'''#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+events = Path({str(events_path)!r})
+state_path = Path({str(state_path)!r})
+args = sys.argv[1:]
+state = json.loads(state_path.read_text())
+
+def record(value):
+    with events.open("a", encoding="utf-8") as handle:
+        handle.write(value + "\\n")
+
+if args[:3] == ["webapp", "config", "appsettings"] and "list" in args:
+    query = args[args.index("--query") + 1] if "--query" in args else ""
+    record("appsettings-list")
+    print("0" if "length(@)" in query else "")
+elif args[:3] == ["webapp", "config", "appsettings"] and "set" in args:
+    record("appsettings-set")
+    if os.environ.get("FAIL_BEFORE_REAPPLY") == "1":
+        raise SystemExit(41)
+elif args[:3] == ["webapp", "config", "appsettings"] and "delete" in args:
+    record("appsettings-delete")
+elif args[:3] == ["webapp", "config", "set"]:
+    runtime = args[args.index("--linux-fx-version") + 1]
+    state["runtime"] = runtime
+    state_path.write_text(json.dumps(state))
+    record("old-runtime-restored")
+elif args[:3] == ["webapp", "config", "container"] and "set" in args:
+    image = args[args.index("--container-image-name") + 1]
+    state["runtime"] = "DOCKER|" + image
+    state_path.write_text(json.dumps(state))
+    record("runtime-replaced")
+elif args[:3] == ["webapp", "sitecontainers", "update"]:
+    image = args[args.index("--image") + 1]
+    state["runtime"] = image
+    state_path.write_text(json.dumps(state))
+    record("runtime-replaced")
+elif args[:3] == ["webapp", "config", "show"]:
+    record("runtime-read")
+    print(state["runtime"])
+elif args[:3] == ["webapp", "sitecontainers", "show"]:
+    record("runtime-read")
+    print(state["runtime"])
+elif args[:2] == ["webapp", "restart"]:
+    record("restart")
+elif args[:2] == ["webapp", "show"]:
+    record("health-host-read")
+    print("production-api.azurewebsites.net")
+else:
+    record("az:" + (args[0] if args else "empty"))
+''',
+            )
+            write_executable(
+                "docker",
+                f'''#!/usr/bin/env bash
+set -euo pipefail
+printf 'docker:%s\\n' "$1" >> {str(events_path)!r}
+''',
+            )
+            write_executable(
+                "infra-replacement",
+                f'''#!/usr/bin/env bash
+set -euo pipefail
+printf 'infra-replaced\\n' >> {str(events_path)!r}
+if [ "${{FAIL_INFRA:-0}}" = 1 ]; then
+  exit 43
+fi
+''',
+            )
+            real_python = sys.executable
+            write_executable(
+                "python3",
+                f'''#!{real_python}
+import os
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+if args and args[0].endswith("scripts/production_stripe_reconcile.py"):
+    operation = "audit" if "--audit" in args else "capture" if "--capture" in args else "reapply"
+    with Path({str(events_path)!r}).open("a", encoding="utf-8") as handle:
+        handle.write(operation + "\\n")
+    if operation == "capture":
+        destination = Path(args[args.index("--capture") + 1])
+        destination.write_text("fake-private-capture")
+    if operation == "reapply" and os.environ.get("FAIL_REAPPLY") == "1":
+        raise SystemExit(47)
+    if operation == "audit" and os.environ.get("FAIL_AUDIT") == "1":
+        raise SystemExit(53)
+    raise SystemExit(0)
+os.execv({real_python!r}, [{real_python!r}, *args])
+''',
+            )
+            write_executable(
+                "curl",
+                '''#!/usr/bin/env bash
+set -euo pipefail
+output=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then output="$2"; shift 2; continue; fi
+  shift
+done
+if [ "${ROLLBACK_HEALTH:-0}" = 1 ]; then
+  printf '{"status":"ok","buildNumber":"88"}' > "$output"
+  printf '200'
+else
+  printf '{"status":"unhealthy"}' > "$output"
+  printf '500'
+fi
+''',
+            )
+            write_executable("sleep", "#!/usr/bin/env bash\nexit 0\n")
+
+            base_environment = os.environ.copy()
+            base_environment.update(
+                {
+                    "PATH": f"{bin_path}:{base_environment['PATH']}",
+                    "TARGET_ENVIRONMENT": "production",
+                    "AZURE_ENV_NAME": "production",
+                    "AZURE_RESOURCE_GROUP": "rg-production",
+                    "AZURE_WEBAPP_NAME": "production-api",
+                    "AZURE_LOCATION": "westeurope",
+                    "AZURE_SUBSCRIPTION_ID": "subscription",
+                    "AZURE_CONTAINER_REGISTRY_ENDPOINT": "registry.azurecr.io",
+                    "GITHUB_SHA": "a" * 40,
+                    "GITHUB_RUN_NUMBER": "101",
+                    "VALIDATED_CANDIDATE_IMAGE": "registry.azurecr.io/elsa-control/api@sha256:" + "b" * 64,
+                    "VALIDATED_CANDIDATE_BUILD_NUMBER": "99",
+                    "PRODUCTION_BILLING_CAPTURE_PATH": str(capture_path),
+                    "BILLING_EXPECTED_MODE": "live",
+                    "EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS": "",
+                    "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED": "",
+                    "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS": "",
+                    "STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED": "",
+                    "STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS": "",
+                    "STAGING_SMOKE_OWNER_INSTANCE_ID": "",
+                }
+            )
+
+            def run_shell(script: str, *, mode: str, **extra: str) -> subprocess.CompletedProcess[str]:
+                environment = base_environment | {"DEPLOY_MODE": mode, **extra}
+                return subprocess.run(
+                    ["bash", "-c", script],
+                    cwd=ROOT,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            def events() -> list[str]:
+                return events_path.read_text().splitlines() if events_path.exists() else []
+
+            rollback_environment = {
+                "PREVIOUS_DEPLOYMENT_MODE": "classic",
+                "PREVIOUS_LINUX_FX_VERSION": "DOCKER|old-image",
+                "PREVIOUS_SITECONTAINER_IMAGE": "",
+                "PREVIOUS_BUILD_NUMBER": "88",
+                "PREVIOUS_BUILD_NUMBER_PRESENT": "true",
+                "PREVIOUS_HEALTH_BUILD_NUMBER": "88",
+                "PREVIOUS_HEALTH_IMAGE_ID": "",
+                "ROLLBACK_HEALTH": "1",
+            }
+
+            def run_rollback(mode: str) -> subprocess.CompletedProcess[str]:
+                return run_shell(rollback_script, mode=mode, **rollback_environment)
+
+            for mode in ("app", "infra", "promote"):
+                events_path.write_text("")
+                state_path.write_text(json.dumps({"runtime": "DOCKER|old-image"}))
+                capture = run_shell(capture_script, mode=mode)
+                self.assertEqual(0, capture.returncode, capture.stderr)
+                self.assertTrue(capture_path.exists())
+
+                mode_script = deploy_script.replace(
+                    "scripts/deploy-azure-elsa-control.sh", str(bin_path / "infra-replacement")
+                )
+                result = run_shell(mode_script, mode=mode)
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                observed = events()
+                replacement = "infra-replaced" if mode == "infra" else "runtime-replaced"
+                self.assertLess(observed.index("capture"), observed.index(replacement))
+                self.assertLess(observed.index(replacement), observed.index("reapply"))
+                self.assertIn("restart", observed, observed)
+                self.assertLess(observed.index("reapply"), observed.index("restart"))
+                if mode == "app":
+                    self.assertIn("docker:build", observed)
+                else:
+                    self.assertNotIn("docker:build", observed)
+
+            events_path.write_text("")
+            state_path.write_text(json.dumps({"runtime": "DOCKER|old-image"}))
+            self.assertEqual(0, run_shell(capture_script, mode="infra").returncode)
+            failed_replacement = run_shell(
+                deploy_script.replace(
+                    "scripts/deploy-azure-elsa-control.sh", str(bin_path / "infra-replacement")
+                ),
+                mode="infra",
+                FAIL_INFRA="1",
+            )
+            self.assertNotEqual(0, failed_replacement.returncode)
+            self.assertNotIn("reapply", events())
+            self.assertTrue(capture_path.exists())
+            rollback = run_rollback("infra")
+            self.assertEqual(0, rollback.returncode, rollback.stdout + rollback.stderr)
+            observed = events()
+            self.assertLess(observed.index("reapply"), observed.index("old-runtime-restored"))
+            self.assertLess(observed.index("old-runtime-restored"), observed.index("restart"))
+            self.assertEqual(0, run_shell(cleanup_script, mode="infra").returncode)
+            self.assertFalse(capture_path.exists())
+
+            events_path.write_text("")
+            state_path.write_text(json.dumps({"runtime": "DOCKER|old-image"}))
+            self.assertEqual(0, run_shell(capture_script, mode="app").returncode)
+            failed_reapply = run_shell(deploy_script, mode="app", FAIL_REAPPLY="1")
+            self.assertNotEqual(0, failed_reapply.returncode)
+            self.assertIn("reapply", events())
+            self.assertNotIn("restart", events())
+            self.assertEqual(0, run_shell(cleanup_script, mode="app").returncode)
+            self.assertFalse(capture_path.exists())
+
+            events_path.write_text("")
+            capture_path.write_text("fake-private-capture")
+            failed_audit = run_shell(audit_script, mode="app", FAIL_AUDIT="1")
+            self.assertNotEqual(0, failed_audit.returncode)
+            self.assertIn("audit", events())
+            rollback = run_rollback("app")
+            self.assertEqual(0, rollback.returncode, rollback.stdout + rollback.stderr)
+            observed = events()
+            self.assertLess(observed.index("audit"), observed.index("reapply"))
+            self.assertLess(observed.index("reapply"), observed.index("old-runtime-restored"))
+            self.assertEqual(0, run_shell(cleanup_script, mode="app").returncode)
+            self.assertFalse(capture_path.exists())
+
+            events_path.write_text("")
+            capture_path.write_text("fake-private-capture")
+            failed_health = run_shell(health_script, mode="app")
+            self.assertNotEqual(0, failed_health.returncode)
+            self.assertIn("health-host-read", events())
+            rollback = run_rollback("app")
+            self.assertEqual(0, rollback.returncode, rollback.stdout + rollback.stderr)
+            observed = events()
+            self.assertLess(observed.index("reapply"), observed.index("old-runtime-restored"))
+            self.assertLess(observed.index("old-runtime-restored"), observed.index("restart"))
+            self.assertEqual(0, run_shell(cleanup_script, mode="app").returncode)
+            self.assertFalse(capture_path.exists())
+
+    def test_build_mode_skips_production_capture_reapply_and_audit_steps(self) -> None:
+        for step_name in (
+            "Capture production Stripe billing settings before replacement",
+            "Deploy API app",
+            "Audit production Stripe billing",
+        ):
+            start = self.source.index(f"      - name: {step_name}")
+            end = self.source.find("\n      - name:", start + 1)
+            step = self.source[start : len(self.source) if end == -1 else end]
+            self.assertIn("env.DEPLOY_MODE != 'build'", step)
 
     def test_staged_candidate_contract_is_immutable_and_separate_from_app_mutation(self) -> None:
         self.assertIn("candidate_run_id:", self.source)
@@ -196,6 +518,7 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
                     "GITHUB_ENV": github_env.name,
                 }
             )
+            base_environment.update(PRODUCTION_BILLING_FIXTURE)
 
             for issuer in (
                 "https://jhrcnclyydzngnyvhdht.supabase.co/auth/v1",
@@ -292,6 +615,8 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
                 environment = os.environ.copy()
                 environment.update(base)
                 environment.update(extra)
+                if environment.get("TARGET_ENVIRONMENT") == "production":
+                    environment.update(PRODUCTION_BILLING_FIXTURE)
                 environment["GITHUB_OUTPUT"] = output.name
                 environment["GITHUB_ENV"] = github_env.name
                 result = subprocess.run(
@@ -399,6 +724,8 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
                 environment = os.environ.copy()
                 environment.update(base)
                 environment.update(extra)
+                if environment.get("TARGET_ENVIRONMENT") == "production":
+                    environment.update(PRODUCTION_BILLING_FIXTURE)
                 environment["GITHUB_OUTPUT"] = output.name
                 environment["GITHUB_ENV"] = github_env.name
                 result = subprocess.run(
@@ -512,6 +839,8 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
                 environment = os.environ.copy()
                 environment.update(base)
                 environment.update(extra)
+                if environment.get("TARGET_ENVIRONMENT") == "production":
+                    environment.update(PRODUCTION_BILLING_FIXTURE)
                 environment["GITHUB_OUTPUT"] = output.name
                 environment["GITHUB_ENV"] = github_env.name
                 result = subprocess.run(
@@ -1419,6 +1748,7 @@ else:
             "AZURE_WEBAPP_NAME": "prod-api",
             "TARGET_ENVIRONMENT": "production",
         }
+        base.update(PRODUCTION_BILLING_FIXTURE)
 
         with tempfile.NamedTemporaryFile() as output, tempfile.NamedTemporaryFile() as github_env:
             environment = os.environ.copy()

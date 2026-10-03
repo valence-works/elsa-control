@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Workspace;
+using ElsaControl.Billing.Stripe;
 using ElsaControl.Deployment.Core.Cockpit;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Packages;
@@ -67,7 +68,8 @@ internal sealed class ControlApiTestApplication : WebApplicationFactory<Program>
                 [$"{ControlIdentityDefaults.ConfigurationSection}:ClientSecret"] = "",
                 [$"{ControlIdentityDefaults.ConfigurationSection}:RequireHttpsMetadata"] = "false",
                 [TrustedHeaderWorkspaceIdentityReader.EnabledConfigurationKey] = "true",
-                [TrustedHeaderWorkspaceIdentityReader.AllowedProxyNetworksConfigurationKey] = "127.0.0.1/32,::1/128"
+                [TrustedHeaderWorkspaceIdentityReader.AllowedProxyNetworksConfigurationKey] = "127.0.0.1/32,::1/128",
+                [StripeBillingOptions.ExpectedModeConfigurationKey] = StripeBillingOptions.TestMode
             };
             foreach (var (key, value) in _configuration)
                 values[key] = value;

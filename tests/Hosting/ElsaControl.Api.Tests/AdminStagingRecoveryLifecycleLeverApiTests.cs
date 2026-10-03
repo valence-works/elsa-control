@@ -8,6 +8,7 @@ using ElsaControl.Api.Admin.Staging;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.OrganizationBilling;
 using ElsaControl.Api.Workspace;
+using ElsaControl.Billing.Stripe;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.PackageCatalog.Core.Accounts;
@@ -242,12 +243,21 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
     [InlineData("")]
     [InlineData("  ")]
     [InlineData("sk_live_x")]
-    public async Task Flag_on_without_a_stripe_test_secret_key_is_disabled(string secretKey)
+    public async Task Flag_on_without_a_stripe_test_secret_key_fails_closed(string secretKey)
     {
         await using var app = CreateApp(
             recoveryEnabled: true,
             allowlisted: AllowlistedInstanceId,
             stripeSecretKey: secretKey);
+
+        if (StripeBillingOptions.GetKeyMode(secretKey) is null)
+        {
+            var startupFailure = Assert.Throws<InvalidOperationException>(() => app.CreateClient());
+            if (!string.IsNullOrWhiteSpace(secretKey))
+                Assert.DoesNotContain(secretKey, startupFailure.Message, StringComparison.Ordinal);
+            return;
+        }
+
         await SeedReadyInstanceAsync(app, AllowlistedInstanceId);
 
         var response = await PostAsync(Operator(app), AllowlistedInstanceId);
@@ -488,11 +498,13 @@ public sealed class AdminStagingRecoveryLifecycleLeverApiTests
         IReadOnlyDictionary<string, string?>? additionalConfiguration = null,
         Action<IServiceCollection>? configureServices = null)
     {
+        var stripeMode = StripeBillingOptions.GetKeyMode(stripeSecretKey);
         var configuration = new Dictionary<string, string?>
         {
             [$"{StagingRecoveryLifecycleLeverOptions.ConfigurationSection}:Enabled"] = recoveryEnabled ? "true" : "false",
             [$"{StagingBillingLifecycleLeverOptions.ConfigurationSection}:Enabled"] = billingEnabled ? "true" : "false",
             ["Billing:Stripe:Enabled"] = stripeEnabled ? "true" : "false",
+            [StripeBillingOptions.ExpectedModeConfigurationKey] = stripeMode ?? StripeBillingOptions.TestMode,
             ["Billing:Stripe:SecretKey"] = stripeSecretKey
         };
         if (allowlisted is { } instanceId)
