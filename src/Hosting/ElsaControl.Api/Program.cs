@@ -283,6 +283,7 @@ builder.Services.Configure<ReleaseCatalogAdmissionOptions>(
     builder.Configuration.GetSection(ReleaseCatalogAdmissionOptions.ConfigurationSection));
 builder.Services.Configure<StripeBillingOptions>(
     builder.Configuration.GetSection(StripeBillingOptions.ConfigurationSection));
+builder.Services.AddHostedService<StripeBillingConfigurationValidator>();
 builder.Services.Configure<OrganizationBillingLifecycleWorkerOptions>(
     builder.Configuration.GetSection(OrganizationBillingLifecycleWorkerOptions.ConfigurationSection));
 builder.Services.Configure<StagingBillingLifecycleLeverOptions>(

@@ -3,8 +3,17 @@ namespace ElsaControl.Billing.Stripe;
 public sealed class StripeBillingOptions
 {
     public const string ConfigurationSection = "Billing:Stripe";
+    public const string ExpectedModeConfigurationKey = ConfigurationSection + ":ExpectedMode";
+    public const string TestMode = "test";
+    public const string LiveMode = "live";
 
     public bool Enabled { get; set; }
+    /// <summary>
+    /// The deployment target's authoritative Stripe account mode. This value is
+    /// supplied by the deployment pipeline because ASPNETCORE_ENVIRONMENT is
+    /// shared by staging and production hosting.
+    /// </summary>
+    public string? ExpectedMode { get; set; }
     public string? SecretKey { get; set; }
     public string? WebhookSigningSecret { get; set; }
     public string? DefaultPriceId { get; set; }
@@ -15,6 +24,56 @@ public sealed class StripeBillingOptions
 
     public bool IsProviderReady =>
         Enabled && !string.IsNullOrWhiteSpace(SecretKey);
+
+    public IEnumerable<string> ValidateExpectedMode()
+    {
+        if (!Enabled)
+            yield break;
+
+        if (string.IsNullOrWhiteSpace(SecretKey))
+        {
+            yield return $"{ConfigurationSection}:SecretKey is required when billing is enabled.";
+            yield break;
+        }
+
+        var expectedMode = NormalizeMode(ExpectedMode);
+        if (expectedMode is null)
+        {
+            yield return $"{ExpectedModeConfigurationKey} must be explicitly set to 'test' or 'live' when billing is enabled.";
+            yield break;
+        }
+
+        var actualMode = GetKeyMode(SecretKey);
+        if (actualMode is null)
+        {
+            yield return $"{ConfigurationSection}:SecretKey must use a supported Stripe test or live key prefix.";
+            yield break;
+        }
+
+        if (!string.Equals(expectedMode, actualMode, StringComparison.Ordinal))
+            yield return $"{ExpectedModeConfigurationKey} does not match the configured Stripe key mode.";
+    }
+
+    public static string? NormalizeMode(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        TestMode or "staging" => TestMode,
+        LiveMode or "production" => LiveMode,
+        _ => null
+    };
+
+    public static string? GetKeyMode(string? value)
+    {
+        if (value is null)
+            return null;
+
+        return HasValuePrefix(value, "sk_test_") ? TestMode
+            : HasValuePrefix(value, "sk_live_") || HasValuePrefix(value, "rk_live_")
+                ? LiveMode
+                : null;
+
+        static bool HasValuePrefix(string candidate, string prefix) =>
+            candidate.StartsWith(prefix, StringComparison.Ordinal) && candidate.Length > prefix.Length;
+    }
 
     public bool IsCheckoutConfigured =>
         IsProviderReady &&

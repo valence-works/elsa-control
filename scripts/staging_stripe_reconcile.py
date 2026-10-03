@@ -72,9 +72,17 @@ class ReconciliationError(RuntimeError):
     """A safe, non-provider-specific reconciliation failure."""
 
 
+def require_secret_prefix(value: str, *, name: str, prefixes: Sequence[str], mode: str) -> None:
+    if not value or not any(value.startswith(prefix) and len(value) > len(prefix) for prefix in prefixes):
+        raise ReconciliationError(f"{name} is not a {mode}-mode credential")
+
+
 def require_test_secret(value: str, *, name: str, prefix: str) -> None:
-    if not value or not value.startswith(prefix) or len(value) == len(prefix):
-        raise ReconciliationError(f"{name} is not a test-mode credential")
+    require_secret_prefix(value, name=name, prefixes=(prefix,), mode="test")
+
+
+def require_live_secret(value: str, *, name: str) -> None:
+    require_secret_prefix(value, name=name, prefixes=("sk_live_", "rk_live_"), mode="live")
 
 
 def require_test_object(value: Mapping[str, Any], *, kind: str) -> None:
@@ -118,8 +126,13 @@ Transport = Callable[[str, str, Mapping[str, Any] | None, str | None], Mapping[s
 class StripeApi:
     """Small dependency-free Stripe API client with no response logging."""
 
-    def __init__(self, secret_key: str, transport: Transport | None = None) -> None:
-        require_test_secret(secret_key, name="STRIPE_SECRET_KEY", prefix=TEST_SECRET_PREFIX)
+    def __init__(
+        self,
+        secret_key: str,
+        transport: Transport | None = None,
+        validator: Callable[[str], None] | None = None,
+    ) -> None:
+        (validator or (lambda value: require_test_secret(value, name="STRIPE_SECRET_KEY", prefix=TEST_SECRET_PREFIX)))(secret_key)
         self._secret_key = secret_key
         self._transport = transport or self._request
 
@@ -376,9 +389,22 @@ class AzureWebApp:
         individual settings when a later setting is invalid.
         """
 
-        if not settings or any(not name or not isinstance(value, str) for name, value in settings.items()):
+        self.apply_billing_setting_records(
+            {name: AzureAppSetting(value, False) for name, value in settings.items()}
+        )
+
+    def apply_billing_setting_records(self, settings: Mapping[str, AzureAppSetting]) -> None:
+        """Apply values and slot metadata together through one private payload."""
+
+        if not settings or any(
+            not name or not isinstance(record, AzureAppSetting) or not isinstance(record.value, str)
+            for name, record in settings.items()
+        ):
             raise ReconciliationError("Azure billing settings payload is invalid")
-        payload = [{"name": name, "value": value, "slotSetting": False} for name, value in settings.items()]
+        payload = [
+            {"name": name, "value": record.value, "slotSetting": record.slot_setting}
+            for name, record in settings.items()
+        ]
         path: Path | None = None
         try:
             descriptor, raw_path = tempfile.mkstemp(prefix="elsa-control-staging-billing-", suffix=".json")

@@ -4,6 +4,7 @@ using System.Text.Json;
 using ElsaControl.Api.Admin.Organizations;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.OrganizationBilling;
+using ElsaControl.Billing.Stripe;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using Microsoft.AspNetCore.Routing;
@@ -98,13 +99,22 @@ public sealed class AdminOrganizationBillingLifecycleLeverApiTests
     [InlineData("")]
     [InlineData("  ")]
     [InlineData("sk_live_x")]
-    public async Task Flag_on_without_a_stripe_test_secret_key_is_disabled(string secretKey)
+    public async Task Flag_on_without_a_stripe_test_secret_key_fails_closed(string secretKey)
     {
         await using var app = CreateApp(
             enabled: true,
             allowlisted: AllowlistedOrganizationId,
             stripeEnabled: true,
             stripeSecretKey: secretKey);
+
+        if (StripeBillingOptions.GetKeyMode(secretKey) is null)
+        {
+            var startupFailure = Assert.Throws<InvalidOperationException>(() => app.CreateClient());
+            if (!string.IsNullOrWhiteSpace(secretKey))
+                Assert.DoesNotContain(secretKey, startupFailure.Message, StringComparison.Ordinal);
+            return;
+        }
+
         await SeedPastDueAsync(app, AllowlistedOrganizationId);
 
         var response = await PostAsync(Operator(app), AllowlistedOrganizationId);
@@ -300,10 +310,12 @@ public sealed class AdminOrganizationBillingLifecycleLeverApiTests
         string? stripeSecretKey = TestSecretKey,
         IReadOnlyDictionary<string, string?>? additionalConfiguration = null)
     {
+        var stripeMode = StripeBillingOptions.GetKeyMode(stripeSecretKey);
         var configuration = new Dictionary<string, string?>
         {
             [$"{StagingBillingLifecycleLeverOptions.ConfigurationSection}:Enabled"] = enabled ? "true" : "false",
             ["Billing:Stripe:Enabled"] = stripeEnabled ? "true" : "false",
+            [StripeBillingOptions.ExpectedModeConfigurationKey] = stripeMode ?? StripeBillingOptions.TestMode,
             ["Billing:Stripe:SecretKey"] = stripeSecretKey
         };
         if (allowlisted is { } organizationId)
