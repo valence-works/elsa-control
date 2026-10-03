@@ -3196,7 +3196,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, response.ObservedLifecycle);
         Assert.Equal(ElsaInstanceHealth.Unknown, response.Health);
         Assert.False(response.CanOpen);
-        Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason, response.UnavailableReason);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.FormatRecoveryRequiredUnavailableReason(operation.Id), response.UnavailableReason);
         Assert.Equal("instance.recovery-required", response.UnavailableReasonCode);
         Assert.DoesNotContain("Failed", response.UnavailableReason, StringComparison.Ordinal);
         Assert.NotEqual(ManagedElsaInstanceCustomerProjection.ProvisioningUnavailableReason, response.UnavailableReason);
@@ -3221,7 +3221,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(list.CanOpen, detail.CanOpen);
         Assert.Equal(list.CanOpen, overview.Summary.CanOpen);
         Assert.Equal("instance.recovery-required", overview.Summary.UnavailableReason);
-        Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason, list.UnavailableReason);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.FormatRecoveryRequiredUnavailableReason(operation.Id), list.UnavailableReason);
         Assert.Equal(overview.Summary.UnavailableReason, list.UnavailableReasonCode);
         Assert.DoesNotContain("Failed", list.UnavailableReason, StringComparison.Ordinal);
         Assert.Equal(ManagedElsaInstanceCustomerProjection.NeedsAttentionLabel,
@@ -3315,14 +3315,24 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, listed.ObservedLifecycle);
         Assert.Equal(listed.ObservedLifecycle, detailBody!.ObservedLifecycle);
         Assert.Equal(listed.ObservedLifecycle, overview!.Summary.ObservedLifecycle);
-        Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason, listed.UnavailableReason);
+        Assert.Equal(
+            ManagedElsaInstanceCustomerProjection.FormatRecoveryRequiredUnavailableReason(created.Operation.Id),
+            listed.UnavailableReason);
         Assert.Equal(listed.UnavailableReason, detailBody.UnavailableReason);
         Assert.Equal("instance.recovery-required", listed.UnavailableReasonCode);
         Assert.Equal(listed.UnavailableReasonCode, detailBody.UnavailableReasonCode);
         Assert.Equal(listed.UnavailableReasonCode, overview.Summary.UnavailableReason);
         Assert.DoesNotContain("Valence Works has been alerted", listed.UnavailableReason, StringComparison.Ordinal);
+        Assert.DoesNotContain("waiting for Valence Works", listed.UnavailableReason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("resume", listed.UnavailableReason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("paused", listed.UnavailableReason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Refresh to check again", listed.UnavailableReason, StringComparison.Ordinal);
+        Assert.DoesNotContain("operator recovery", listed.UnavailableReason, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("alerted", listed.UnavailableReason, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Failed", listed.UnavailableReason, StringComparison.Ordinal);
+        Assert.Contains("hello@valence.works", listed.UnavailableReason, StringComparison.Ordinal);
+        Assert.Contains($"with reference {created.Operation.Id:D}", listed.UnavailableReason, StringComparison.Ordinal);
+        Assert.Contains("business hours", listed.UnavailableReason, StringComparison.OrdinalIgnoreCase);
         Assert.False(listed.CanOpen);
 
         await app.AddWorkspaceMemberAsync(workspaceId, $"parked-unknown-{alertDelivery}-reader", WorkspaceRole.Reader);
@@ -3371,7 +3381,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason, legacyProjected.UnavailableReason);
         Assert.Equal("instance.recovery-required", legacyProjected.UnavailableReasonCode);
         Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, canonicalParked.ObservedLifecycle);
-        Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason, canonicalParked.UnavailableReason);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.FormatRecoveryRequiredUnavailableReason(parkedOperation.Id), canonicalParked.UnavailableReason);
         Assert.DoesNotContain("alerted", canonicalParked.UnavailableReason, StringComparison.OrdinalIgnoreCase);
         Assert.NotEqual(legacyUnknown.ObservedLifecycle, canonicalParked.ObservedLifecycle);
     }
@@ -3456,9 +3466,13 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(ElsaDesiredLifecycle.Deleting, listed.DesiredLifecycle);
         Assert.Equal(ElsaInstanceOperationAction.Delete, listed.ActiveOperation?.Action);
         Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, listed.ActiveOperation?.State);
-        Assert.Equal(ManagedElsaInstanceCustomerProjection.ParkedDeleteUnavailableReason, listed.UnavailableReason);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.ParkedDeleteUnavailableReason(accepted.OperationId), listed.UnavailableReason);
         Assert.Equal(reasonCode, listed.UnavailableReasonCode);
         Assert.DoesNotContain("alerted", listed.UnavailableReason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("paused", listed.UnavailableReason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Refresh to check again", listed.UnavailableReason, StringComparison.Ordinal);
+        Assert.DoesNotContain("waiting for Valence Works", listed.UnavailableReason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("operator recovery", listed.UnavailableReason, StringComparison.OrdinalIgnoreCase);
         Assert.False(listed.CanOpen);
 
         await app.AddWorkspaceMemberAsync(workspaceId, $"parked-delete-{reasonCode.Split('.')[^1]}-reader", WorkspaceRole.Reader);

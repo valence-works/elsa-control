@@ -20,11 +20,7 @@ public static class ManagedElsaInstanceCustomerProjection
     public const string UnknownUnavailableReason =
         "Control cannot determine this instance's state. Refresh to retry observation, or recover the instance if it remains unknown.";
     public const string RecoveryRequiredUnavailableReason =
-        "The latest operation on this instance paused and is waiting for Valence Works to resume it. " +
-        "Refresh to check again, or quote the operation reference if you contact support.";
-    public const string ParkedDeleteUnavailableReason =
-        "Deletion needs operator recovery. Contact support. " +
-        "Refresh to check again, or quote the operation reference if you contact support.";
+        "The last change to this engine didn't finish on its own. Email hello@valence.works with this engine's name and we'll help during business hours.";
     public const string RecoveryRequiredUnavailableReasonCode = "instance.recovery-required";
     public const string ProvisioningUnavailableReasonCode = "instance.provisioning";
     public const string FailedUnavailableReasonCode = "instance.failed";
@@ -159,10 +155,14 @@ public static class ManagedElsaInstanceCustomerProjection
         ElsaInstanceValue.RequireEnum(observedLifecycle, nameof(observedLifecycle));
         if (!canOpen)
             return unauthorizedReason;
-        if (IsParkedCustomerDelete(activeOperation))
-            return ParkedDeleteUnavailableReason;
+        if (activeOperation is { } parkedDelete && IsParkedCustomerDelete(parkedDelete))
+            return ParkedDeleteUnavailableReason(parkedDelete.Id);
         if (observedLifecycle == ElsaObservedLifecycle.RecoveryRequired)
-            return RecoveryRequiredUnavailableReason;
+        {
+            return activeOperation is { Id: var operationId } && operationId != Guid.Empty
+                ? FormatRecoveryRequiredUnavailableReason(operationId)
+                : RecoveryRequiredUnavailableReason;
+        }
         if (observedLifecycle is ElsaObservedLifecycle.Pending or
             ElsaObservedLifecycle.Provisioning or
             ElsaObservedLifecycle.Updating or
@@ -265,6 +265,12 @@ public static class ManagedElsaInstanceCustomerProjection
             operation?.FailureCode,
             operation?.ReasonCode,
             operation?.RecoveryReason));
+
+    public static string FormatRecoveryRequiredUnavailableReason(Guid operationId) =>
+        $"The last change to this engine didn't finish on its own. Email hello@valence.works with reference {operationId:D} and we'll help during business hours.";
+
+    public static string ParkedDeleteUnavailableReason(Guid operationId) =>
+        $"Deletion of this engine didn't finish on its own. Email hello@valence.works with reference {operationId:D} and we'll help during business hours.";
 
     public static bool IsParkedCustomerDelete(ElsaInstanceOperationSummary? operation) =>
         operation is

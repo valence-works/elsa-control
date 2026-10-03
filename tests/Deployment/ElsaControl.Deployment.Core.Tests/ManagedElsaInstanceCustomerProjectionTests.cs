@@ -227,7 +227,8 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
         var projected = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation);
         var applied = ManagedElsaInstanceCustomerProjection.Apply(instance, operation);
         var reason = ManagedElsaInstanceCustomerProjection.UnavailableReason(
-            canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false, projected);
+            canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false, projected,
+            activeOperation: operation);
         var reasonCodeOnWire = ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
             canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false, projected);
 
@@ -239,11 +240,16 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
             ManagedElsaInstanceCustomerProjection.CustomerLabel(projected));
         Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReasonCode, reasonCodeOnWire);
         Assert.Equal("instance.recovery-required", reasonCodeOnWire);
-        Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason, reason);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.FormatRecoveryRequiredUnavailableReason(operation.Id), reason);
         Assert.DoesNotContain("Valence Works has been alerted", reason, StringComparison.Ordinal);
-        Assert.Contains("paused", reason, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("Refresh", reason, StringComparison.Ordinal);
-        Assert.Contains("operation reference", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("waiting for Valence Works", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("resume", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("paused", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Refresh to check again", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("operator recovery", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("hello@valence.works", reason, StringComparison.Ordinal);
+        Assert.Contains($"with reference {operation.Id:D}", reason, StringComparison.Ordinal);
+        Assert.Contains("business hours", reason, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Failed", reason, StringComparison.Ordinal);
         Assert.DoesNotContain("Failed", reasonCodeOnWire, StringComparison.Ordinal);
         Assert.DoesNotContain(reasonCode, reason, StringComparison.Ordinal);
@@ -284,6 +290,11 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
                 ElsaObservedLifecycle.RecoveryRequired));
         Assert.NotEqual(
             ManagedElsaInstanceCustomerProjection.ProvisioningUnavailableReason,
+            ManagedElsaInstanceCustomerProjection.UnavailableReason(
+                canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false,
+                ElsaObservedLifecycle.RecoveryRequired));
+        Assert.Equal(
+            ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason,
             ManagedElsaInstanceCustomerProjection.UnavailableReason(
                 canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false,
                 ElsaObservedLifecycle.RecoveryRequired));
@@ -569,16 +580,110 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
     public void Recovery_required_copy_never_claims_an_operator_alert_for_unverified_delivery(string? delivery)
     {
         _ = delivery;
+        var operationId = Guid.Parse("40000000-0000-0000-0000-000000000001");
+        var operation = Operation(
+            Guid.Parse("30000000-0000-0000-0000-000000000001"),
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired);
+        operation = operation with { Id = operationId };
         var reason = ManagedElsaInstanceCustomerProjection.UnavailableReason(
             canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false,
-            ElsaObservedLifecycle.RecoveryRequired);
+            ElsaObservedLifecycle.RecoveryRequired, activeOperation: operation);
 
-        Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason, reason);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.FormatRecoveryRequiredUnavailableReason(operationId), reason);
         Assert.DoesNotContain("alerted", reason, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("has been notified", reason, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("paused", reason, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("Refresh", reason, StringComparison.Ordinal);
-        Assert.Contains("support", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("waiting for Valence Works", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("resume", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("paused", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Refresh to check again", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("operator recovery", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("hello@valence.works", reason, StringComparison.Ordinal);
+        Assert.Contains($"with reference {operationId:D}", reason, StringComparison.Ordinal);
+        Assert.Contains("business hours", reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Parked_engine_copy_is_the_three_signed_hosted_sentences()
+    {
+        var operationId = Guid.Parse("40000000-0000-0000-0000-000000000001");
+        const string recoveryRequiredWithoutReference =
+            "The last change to this engine didn't finish on its own. Email hello@valence.works with this engine's name and we'll help during business hours.";
+        const string recoveryRequiredWithReference =
+            "The last change to this engine didn't finish on its own. Email hello@valence.works with reference 40000000-0000-0000-0000-000000000001 and we'll help during business hours.";
+        const string parkedDeleteWithReference =
+            "Deletion of this engine didn't finish on its own. Email hello@valence.works with reference 40000000-0000-0000-0000-000000000001 and we'll help during business hours.";
+
+        Assert.Equal(
+            recoveryRequiredWithoutReference,
+            ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason);
+        Assert.Equal(
+            recoveryRequiredWithReference,
+            ManagedElsaInstanceCustomerProjection.FormatRecoveryRequiredUnavailableReason(operationId));
+        Assert.Equal(
+            parkedDeleteWithReference,
+            ManagedElsaInstanceCustomerProjection.ParkedDeleteUnavailableReason(operationId));
+
+        Assert.Equal(
+            recoveryRequiredWithoutReference,
+            ManagedElsaInstanceCustomerProjection.UnavailableReason(
+                canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false,
+                ElsaObservedLifecycle.RecoveryRequired));
+        Assert.Equal(
+            recoveryRequiredWithReference,
+            ManagedElsaInstanceCustomerProjection.UnavailableReason(
+                canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false,
+                ElsaObservedLifecycle.RecoveryRequired,
+                activeOperation: Operation(
+                    Guid.Parse("30000000-0000-0000-0000-000000000001"),
+                    ElsaInstanceOperationAction.Create,
+                    ElsaInstanceOperationState.RecoveryRequired) with
+                { Id = operationId }));
+
+        var parkedDelete = new ElsaInstanceOperationSummary(
+            operationId,
+            Guid.Parse("30000000-0000-0000-0000-000000000001"),
+            ElsaInstanceOperationAction.Delete,
+            ElsaInstanceOperationState.RecoveryRequired,
+            1, 1, Now, Now, null, null, null, null, null, null, null,
+            ReasonCode: ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale,
+            UpdatedAt: Now, ReasonEnteredAt: Now, RequiresHumanAt: Now);
+        Assert.Equal(
+            parkedDeleteWithReference,
+            ManagedElsaInstanceCustomerProjection.UnavailableReason(
+                canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false,
+                ElsaObservedLifecycle.Deleting, activeOperation: parkedDelete));
+
+        foreach (var sentence in new[]
+                 {
+                     recoveryRequiredWithoutReference, recoveryRequiredWithReference, parkedDeleteWithReference
+                 })
+        {
+            Assert.DoesNotContain("paused", sentence, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Refresh to check again", sentence, StringComparison.Ordinal);
+            Assert.DoesNotContain("waiting for Valence Works", sentence, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("operator recovery", sentence, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("{operationId}", sentence, StringComparison.Ordinal);
+            Assert.DoesNotContain("alerted", sentence, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Failed", sentence, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void Recovery_required_copy_without_an_operation_never_mentions_a_reference()
+    {
+        var reason = ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason;
+
+        Assert.Equal(
+            "The last change to this engine didn't finish on its own. Email hello@valence.works with this engine's name and we'll help during business hours.",
+            reason);
+        Assert.Equal(
+            reason,
+            ManagedElsaInstanceCustomerProjection.UnavailableReason(
+                canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false,
+                ElsaObservedLifecycle.RecoveryRequired));
+        Assert.DoesNotContain("reference", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("{operationId}", reason, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -628,7 +733,8 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
 
         Assert.True(ManagedElsaInstanceCustomerProjection.IsParkedCustomerDelete(operation));
         Assert.Equal(reasonCode, ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation));
-        Assert.Equal(ManagedElsaInstanceCustomerProjection.ParkedDeleteUnavailableReason,
+        var reason = ManagedElsaInstanceCustomerProjection.ParkedDeleteUnavailableReason(operation.Id);
+        Assert.Equal(reason,
             ManagedElsaInstanceCustomerProjection.UnavailableReason(
                 canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false,
                 ElsaObservedLifecycle.Deleting, activeOperation: operation));
@@ -636,10 +742,11 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
             ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
                 canOpen: true, healthy: false, handoffConfigured: false, hasIdentity: false,
                 ElsaObservedLifecycle.Deleting, operation));
-        Assert.DoesNotContain("alerted", ManagedElsaInstanceCustomerProjection.ParkedDeleteUnavailableReason, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("Deleting", ManagedElsaInstanceCustomerProjection.ParkedDeleteUnavailableReason, StringComparison.Ordinal);
-        Assert.DoesNotContain("provider.private-secret-value",
-            ManagedElsaInstanceCustomerProjection.ParkedDeleteUnavailableReason, StringComparison.Ordinal);
+        Assert.DoesNotContain("alerted", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Deleting", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("paused", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("operator recovery", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("provider.private-secret-value", reason, StringComparison.Ordinal);
     }
 
     [Theory]
