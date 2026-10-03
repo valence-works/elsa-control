@@ -395,10 +395,11 @@ builder.Services.AddScoped<IElsaInstanceProviderPendingOperationStore>(services 
 builder.Services.AddScoped<IElsaInstanceProviderReconciliationStore>(services => services.GetRequiredService<EfCoreElsaInstanceLifecycleStore>());
 builder.Services.AddScoped<IElsaInstanceDeletionStore>(services => services.GetRequiredService<EfCoreElsaInstanceLifecycleStore>());
 builder.Services.AddScoped<IElsaInstanceHealthMonitorStore>(services => services.GetRequiredService<EfCoreElsaInstanceLifecycleStore>());
+builder.Services.AddSingleton<IRecoveryRequiredAlertDispatchSignal>(_ =>
+    RecoveryRequiredAlertDispatchSignal.Instance);
 builder.Services.AddSingleton<IRecoveryRequiredAlertSender>(services =>
     new ActivityRecoveryRequiredAlertSender(
-        services.GetService<IRecoveryRequiredAlertTransportAck>(),
-        services.GetService<IRecoveryRequiredAlertEmailTransport>()));
+        services.GetService<IRecoveryRequiredAlertTransportAck>()));
 builder.Services.AddScoped<IRecoveryRequiredAlertOutboxDispatcher, EfCoreRecoveryRequiredAlertOutboxDispatcher>();
 builder.Services.Configure<ElsaInstancePlanAuthorityOptions>(
     builder.Configuration.GetSection(ElsaInstancePlanAuthorityOptions.ConfigurationSection));

@@ -297,6 +297,38 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryTests : IDisposable
     }
 
     [Fact]
+    public void Exporter_failure_leaves_the_alert_unacked_until_a_later_batch_succeeds()
+    {
+        var results = new Queue<ExportResult>([ExportResult.Failure, ExportResult.Success]);
+        var ack = new RecoveryRequiredAlertExportAck();
+        var exporter = new RecoveryRequiredAlertExportAckExporter(
+            new ScriptedExporter(() => results.Dequeue()),
+            ack);
+        using var provider = Sdk.CreateTracerProviderBuilder()
+            .AddSource(ManagedLifecycleTelemetry.ActivitySourceName)
+            .SetSampler(new AlwaysOnSampler())
+            .AddProcessor(new BatchActivityExportProcessor(exporter, maxQueueSize: 16, scheduledDelayMilliseconds: 60_000, exporterTimeoutMilliseconds: 5_000, maxExportBatchSize: 8))
+            .Build();
+        IRecoveryRequiredAlertTransportAck transport = new ManagedLifecycleAzureMonitorTelemetrySink(null, provider, ack);
+        var workspaceId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa8");
+        var instanceId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb8");
+        var operationId = Guid.Parse("cccccccc-cccc-cccc-cccc-ccccccccccc8");
+        var item = new RecoveryRequiredAlertDispatch(
+            workspaceId,
+            instanceId,
+            operationId,
+            1,
+            null,
+            ManagedLifecycleRecoveryRequiredAlert.ComputeDedupeIdentity(
+                workspaceId, instanceId, operationId, 1));
+        var sender = new ActivityRecoveryRequiredAlertSender(transport);
+
+        Assert.False(sender.Send(item));
+        Assert.True(sender.Send(item));
+        Assert.Empty(results);
+    }
+
+    [Fact]
     public void Recovery_required_entry_is_exported_as_app_dependencies_with_the_activity_name()
     {
         var options = new ManagedLifecycleAzureMonitorTelemetryOptions
@@ -531,6 +563,11 @@ public sealed class ManagedLifecycleAzureMonitorTelemetryTests : IDisposable
 
         public override ValueTask<AccessToken> GetTokenAsync(TokenRequestContext requestContext, CancellationToken cancellationToken)
             => ValueTask.FromResult(GetToken(requestContext, cancellationToken));
+    }
+
+    private sealed class ScriptedExporter(Func<ExportResult> next) : BaseExporter<Activity>
+    {
+        public override ExportResult Export(in Batch<Activity> batch) => next();
     }
 
     private sealed class RecordingShutdownProcessor : BaseProcessor<Activity>

@@ -6,16 +6,20 @@ namespace ElsaControl.Api.Workspace;
 
 /// <summary>
 /// Delivers RecoveryRequired outbox rows that survived catalog commit.
-/// A crash after commit still delivers on the next tick.
+/// A crash after commit still delivers on the next tick or nudge.
 /// </summary>
 public sealed class RecoveryRequiredAlertOutboxHostedService(
     IServiceScopeFactory scopeFactory,
     IOptions<ElsaInstanceLifecycleWorkerOptions> options,
-    ILogger<RecoveryRequiredAlertOutboxHostedService> logger) : BackgroundService
+    ILogger<RecoveryRequiredAlertOutboxHostedService> logger,
+    IRecoveryRequiredAlertDispatchSignal? dispatchSignal = null) : BackgroundService
 {
+    private readonly IRecoveryRequiredAlertDispatchSignal _dispatchSignal =
+        dispatchSignal ?? RecoveryRequiredAlertDispatchSignal.Instance;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var timer = new PeriodicTimer(ElsaInstanceLifecycleHostedService.NormalizePollInterval(options.Value.PollInterval));
+        var interval = ElsaInstanceLifecycleHostedService.NormalizePollInterval(options.Value.PollInterval);
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -33,8 +37,11 @@ public sealed class RecoveryRequiredAlertOutboxHostedService(
 
             try
             {
-                if (!await timer.WaitForNextTickAsync(stoppingToken))
-                    return;
+                using var wait = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                var tick = Task.Delay(interval, wait.Token);
+                var nudged = _dispatchSignal.WaitAsync(wait.Token);
+                await Task.WhenAny(tick, nudged);
+                wait.Cancel();
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {

@@ -49,6 +49,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
     private readonly Dictionary<Guid, ElsaInstanceLifecycleDeploymentRun> _deploymentRuns = [];
     private readonly Dictionary<Guid, ElsaInstanceLifecycleRecordedFailure> _failures = [];
     private readonly Dictionary<Guid, ManagedElsaReasonClockState> _clocks = [];
+    private readonly Dictionary<Guid, string?> _parkReasons = [];
     private readonly HashSet<(Guid OperationId, int AttemptNumber)> _alertOutbox = [];
     private readonly Dictionary<Guid, StoredReconciliationResult> _reconciliationResults = [];
     private readonly Dictionary<Guid, StoredDeletionResult> _deletionResults = [];
@@ -108,6 +109,12 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         }
     }
 
+    public ManagedElsaReasonClockState GetReasonClock(Guid operationId)
+    {
+        lock (_gate)
+            return _clocks.GetValueOrDefault(operationId);
+    }
+
     /// <summary>
     /// Gets the immutable recovery request envelopes accepted by this store.
     /// </summary>
@@ -125,7 +132,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
     /// deterministic core tests. Durable adapters perform the equivalent transition
     /// while retaining their existing deployment-run reservation.
     /// </summary>
-    public void MarkRecoveryRequired(Guid operationId)
+    public void MarkRecoveryRequired(Guid operationId, string? reasonCode = null)
     {
         lock (_gate)
         {
@@ -139,7 +146,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             if (operation.State == ElsaInstanceOperationState.Running)
             {
                 operation = operation.TransitionTo(ElsaInstanceOperationState.RecoveryRequired);
-                ApplyParkClock(operation, instance.WorkspaceId, previousCode: null, nextCode: null, restartClock: false);
+                ApplyParkClock(operation, instance.WorkspaceId, previousCode: null, nextCode: reasonCode, restartClock: false);
             }
             if (operation.State != ElsaInstanceOperationState.RecoveryRequired)
                 throw new ElsaInstanceLifecycleConflictException("Lifecycle operation cannot require provider recovery.");
@@ -461,30 +468,28 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                         continue;
                     if (!_instances.TryGetValue(operation.InstanceId, out var instance))
                         continue;
-                    var diagnostic = _reconciliationResults.TryGetValue(operation.Id, out var stored)
-                        ? stored.Result.DiagnosticCode
-                        : _failures.TryGetValue(operation.Id, out var failure) ? failure.Code : null;
+                    var reason = CurrentParkReason(operation.Id);
                     if (clock.ReasonEnteredAt is null)
                     {
                         ApplyParkClock(
                             operation,
                             instance.WorkspaceId,
-                            diagnostic,
-                            diagnostic,
+                            reason,
+                            reason,
                             restartClock: false,
                             now);
                         clock = _clocks.GetValueOrDefault(operation.Id);
                     }
 
-                    if (!ManagedElsaReasonCodeCatalog.RequiresHuman(diagnostic, clock.ReasonEnteredAt, now))
+                    if (!ManagedElsaReasonCodeCatalog.RequiresHuman(reason, clock.ReasonEnteredAt, now))
                         continue;
                     if (clock.RequiresHumanAt is null)
                     {
                         ApplyParkClock(
                             operation,
                             instance.WorkspaceId,
-                            diagnostic,
-                            diagnostic,
+                            reason,
+                            reason,
                             restartClock: false,
                             now);
                     }
@@ -532,6 +537,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             restartClock);
         var newlyHuman = current.RequiresHumanAt is null && next.RequiresHumanAt is not null;
         _clocks[operation.Id] = next;
+        _parkReasons[operation.Id] = nextCode;
         if (!newlyHuman || !_alertOutbox.Add((operation.Id, operation.AttemptNumber)))
             return;
         Guid? runId = null;
@@ -550,6 +556,20 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             operation.Id,
             operation.AttemptNumber,
             runId);
+    }
+
+    private string? CurrentParkReason(Guid operationId)
+    {
+        var failureCode = _failures.TryGetValue(operationId, out var failure)
+            ? failure.Code
+            : _parkReasons.GetValueOrDefault(operationId);
+        var diagnostic = _reconciliationResults.TryGetValue(operationId, out var stored)
+            ? stored.Result.DiagnosticCode
+            : null;
+        var runReason = _deploymentRuns.Values
+            .FirstOrDefault(candidate => candidate.Operation.Id == operationId)
+            ?.Run.RecoveryReason;
+        return ManagedElsaReasonCodeCatalog.SelectCurrentReason(failureCode, diagnostic, runReason);
     }
 
     private static ElsaInstance WithVersion(ElsaInstance instance, int version) => ElsaInstance.Hydrate(

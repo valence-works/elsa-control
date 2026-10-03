@@ -1,16 +1,20 @@
 using ElsaControl.Deployment.Core.Telemetry;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 
 public sealed class EfCoreRecoveryRequiredAlertOutboxDispatcher(
     CatalogDbContext dbContext,
     IRecoveryRequiredAlertSender sender,
-    TimeProvider? timeProvider = null) : IRecoveryRequiredAlertOutboxDispatcher
+    TimeProvider? timeProvider = null,
+    ILogger<EfCoreRecoveryRequiredAlertOutboxDispatcher>? logger = null) : IRecoveryRequiredAlertOutboxDispatcher
 {
     private readonly IRecoveryRequiredAlertSender _sender =
         sender ?? throw new ArgumentNullException(nameof(sender));
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
+    private readonly ILogger _logger = logger ?? NullLogger<EfCoreRecoveryRequiredAlertOutboxDispatcher>.Instance;
     private readonly string _owner = Guid.NewGuid().ToString("N");
 
     public async Task<int> DispatchPendingAsync(
@@ -20,15 +24,14 @@ public sealed class EfCoreRecoveryRequiredAlertOutboxDispatcher(
         if (limit is < 1 or > 256)
             throw new ArgumentOutOfRangeException(nameof(limit));
 
-        var now = _timeProvider.GetUtcNow().ToUniversalTime();
-        var leaseUntil = now + RecoveryRequiredAlertBackoff.Lease;
         dbContext.ChangeTracker.Clear();
+        var scanNow = _timeProvider.GetUtcNow().ToUniversalTime();
         var dueIds = await dbContext.ElsaInstanceRecoveryRequiredAlertOutbox
             .AsNoTracking()
             .Where(row =>
                 row.SentAt == null &&
-                (row.NextAttemptAt == null || row.NextAttemptAt <= now) &&
-                (row.LeasedUntil == null || row.LeasedUntil < now))
+                (row.NextAttemptAt == null || row.NextAttemptAt <= scanNow) &&
+                (row.LeasedUntil == null || row.LeasedUntil < scanNow))
             .OrderBy(row => row.CreatedAt)
             .ThenBy(row => row.Id)
             .Select(row => row.Id)
@@ -39,6 +42,8 @@ public sealed class EfCoreRecoveryRequiredAlertOutboxDispatcher(
         foreach (var id in dueIds)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var now = _timeProvider.GetUtcNow().ToUniversalTime();
+            var leaseUntil = now + RecoveryRequiredAlertBackoff.LeaseDuration;
             var claimed = await dbContext.ElsaInstanceRecoveryRequiredAlertOutbox
                 .Where(row =>
                     row.Id == id &&
@@ -55,6 +60,7 @@ public sealed class EfCoreRecoveryRequiredAlertOutboxDispatcher(
 
             dbContext.ChangeTracker.Clear();
             var row = await dbContext.ElsaInstanceRecoveryRequiredAlertOutbox
+                .AsNoTracking()
                 .SingleOrDefaultAsync(
                     candidate => candidate.Id == id &&
                                  candidate.SentAt == null &&
@@ -78,12 +84,8 @@ public sealed class EfCoreRecoveryRequiredAlertOutboxDispatcher(
                     continue;
                 }
 
-                row.SentAt = now;
-                row.DeliveryAttempts += 1;
-                row.NextAttemptAt = null;
-                row.LeasedUntil = null;
-                row.LeasedBy = null;
-                await dbContext.SaveChangesAsync(cancellationToken);
+                if (!await TryMarkSentAsync(id, cancellationToken))
+                    continue;
                 delivered++;
             }
             catch (OperationCanceledException)
@@ -99,6 +101,34 @@ public sealed class EfCoreRecoveryRequiredAlertOutboxDispatcher(
         return delivered;
     }
 
+    private async Task<bool> TryMarkSentAsync(Guid id, CancellationToken cancellationToken)
+    {
+        var now = _timeProvider.GetUtcNow().ToUniversalTime();
+        dbContext.ChangeTracker.Clear();
+        var marked = await dbContext.ElsaInstanceRecoveryRequiredAlertOutbox
+            .Where(row =>
+                row.Id == id &&
+                row.SentAt == null &&
+                row.LeasedBy == _owner &&
+                row.LeasedUntil != null &&
+                row.LeasedUntil >= now)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(row => row.SentAt, now)
+                    .SetProperty(row => row.DeliveryAttempts, row => row.DeliveryAttempts + 1)
+                    .SetProperty(row => row.NextAttemptAt, (DateTimeOffset?)null)
+                    .SetProperty(row => row.LeasedUntil, (DateTimeOffset?)null)
+                    .SetProperty(row => row.LeasedBy, (string?)null),
+                cancellationToken);
+        if (marked == 1)
+            return true;
+
+        _logger.LogWarning(
+            "RecoveryRequired alert {AlertId} was not marked sent because the lease owner or expiry did not match.",
+            id);
+        return false;
+    }
+
     private async Task RecordDeliveryFailureAsync(
         Guid id,
         DateTimeOffset now,
@@ -107,7 +137,9 @@ public sealed class EfCoreRecoveryRequiredAlertOutboxDispatcher(
         dbContext.ChangeTracker.Clear();
         var retry = await dbContext.ElsaInstanceRecoveryRequiredAlertOutbox
             .SingleOrDefaultAsync(
-                candidate => candidate.Id == id && candidate.SentAt == null,
+                candidate => candidate.Id == id &&
+                             candidate.SentAt == null &&
+                             candidate.LeasedBy == _owner,
                 cancellationToken);
         if (retry is null)
             return;

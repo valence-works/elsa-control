@@ -156,7 +156,7 @@ public sealed class ManagedLifecycleRecoveryRequiredAlertTests
     }
 
     [Fact]
-    public void Activity_sender_acks_when_the_exporter_flushes_or_email_accepts()
+    public void Activity_sender_acks_only_when_the_exporter_accepts_that_identity()
     {
         var workspaceId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa6");
         var instanceId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb6");
@@ -171,8 +171,23 @@ public sealed class ManagedLifecycleRecoveryRequiredAlertTests
                 workspaceId, instanceId, operationId, 1));
 
         Assert.True(new ActivityRecoveryRequiredAlertSender(new StaticAck(true)).Send(item));
-        Assert.True(new ActivityRecoveryRequiredAlertSender(email: new StaticEmail(true)).Send(item));
         Assert.False(new ActivityRecoveryRequiredAlertSender(new StaticAck(false)).Send(item));
+        Assert.False(new ActivityRecoveryRequiredAlertSender().Send(item with { DedupeIdentity = " " }));
+    }
+
+    [Fact]
+    public void Activity_sender_asks_the_ack_for_the_persisted_dedupe_identity()
+    {
+        var workspaceId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa7");
+        var instanceId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb7");
+        var operationId = Guid.Parse("cccccccc-cccc-cccc-cccc-ccccccccccc7");
+        var dedupe = ManagedLifecycleRecoveryRequiredAlert.ComputeDedupeIdentity(
+            workspaceId, instanceId, operationId, 2);
+        var ack = new RecordingAck();
+
+        Assert.True(new ActivityRecoveryRequiredAlertSender(ack).Send(new RecoveryRequiredAlertDispatch(
+            workspaceId, instanceId, operationId, 2, null, dedupe)));
+        Assert.Equal(dedupe, ack.LastIdentity);
     }
 
     [Fact]
@@ -245,12 +260,19 @@ public sealed class ManagedLifecycleRecoveryRequiredAlertTests
 
     private sealed class StaticAck(bool acknowledged) : IRecoveryRequiredAlertTransportAck
     {
-        public bool TryAcknowledge() => acknowledged;
+        public bool TryAcknowledge(string dedupeIdentity) =>
+            acknowledged && !string.IsNullOrWhiteSpace(dedupeIdentity);
     }
 
-    private sealed class StaticEmail(bool accepted) : IRecoveryRequiredAlertEmailTransport
+    private sealed class RecordingAck : IRecoveryRequiredAlertTransportAck
     {
-        public bool TryAccept(RecoveryRequiredAlertDispatch item) => accepted;
+        public string? LastIdentity { get; private set; }
+
+        public bool TryAcknowledge(string dedupeIdentity)
+        {
+            LastIdentity = dedupeIdentity;
+            return !string.IsNullOrWhiteSpace(dedupeIdentity);
+        }
     }
 
     private static ElsaInstanceIntent Intent() => new(

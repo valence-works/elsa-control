@@ -384,7 +384,7 @@ public sealed class ManagedLifecycleOperationalHealthEvaluatorTests
     }
 
     [Fact]
-    public void Temporary_human_required_park_is_a_warning()
+    public void Temporary_human_required_park_takes_needs_a_person_severity()
     {
         var result = Evaluate(Snapshot(
             operation: Operation(
@@ -396,7 +396,7 @@ public sealed class ManagedLifecycleOperationalHealthEvaluatorTests
         var alert = Assert.Single(
             result.Alerts,
             candidate => candidate.Code == ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired);
-        Assert.Equal(ManagedLifecycleOperationalHealthAlertSeverity.Warning, alert.Severity);
+        Assert.Equal(ManagedLifecycleOperationalHealthAlertSeverity.Critical, alert.Severity);
     }
 
     [Fact]

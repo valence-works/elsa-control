@@ -6,9 +6,9 @@ namespace ElsaControl.Deployment.Core.Telemetry;
 
 /// <summary>
 /// Writes the single operator-alert event after
-/// <c>RequiresHumanAt</c> is set. Callers invoke this only from the
-/// post-commit outbox flush; reads, refreshes, and auto-resume
-/// outcome writes must not call it.
+/// <c>RequiresHumanAt</c> is set. The durable dispatcher is the only
+/// production sender. Reads, refreshes, and auto-resume outcome writes
+/// must not call it.
 /// </summary>
 public static class ManagedLifecycleRecoveryRequiredAlert
 {

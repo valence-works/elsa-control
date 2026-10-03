@@ -134,7 +134,7 @@ public sealed class ManagedLifecycleOperationalHealthEvaluator
             alerts.Add(CreateAlert(
                 snapshot,
                 ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired,
-                SeverityForReason(snapshot.Operation?.DiagnosticCode)));
+                ManagedLifecycleOperationalHealthAlertSeverity.Critical));
 
         if (snapshot.Operation?.State == ElsaInstanceOperationState.Failed)
             alerts.Add(CreateAlert(
@@ -185,14 +185,6 @@ public sealed class ManagedLifecycleOperationalHealthEvaluator
 
     private static bool IsHumanRequired(ManagedLifecycleOperationalHealthSnapshot snapshot) =>
         snapshot.Operation is { State: ElsaInstanceOperationState.RecoveryRequired, RequiresHumanAt: not null };
-
-    private static ManagedLifecycleOperationalHealthAlertSeverity SeverityForReason(string? diagnosticCode) =>
-        ManagedElsaReasonCodeCatalog.Classify(diagnosticCode) switch
-        {
-            ManagedElsaReasonClass.Temporary or ManagedElsaReasonClass.AutoResuming =>
-                ManagedLifecycleOperationalHealthAlertSeverity.Warning,
-            _ => ManagedLifecycleOperationalHealthAlertSeverity.Critical
-        };
 
     private bool IsRetryExhausted(ManagedLifecycleOperationalHealthSnapshot snapshot)
     {

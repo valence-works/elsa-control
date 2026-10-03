@@ -356,42 +356,38 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     internal void ResetRecoveryRequiredAlerts() => ClearRecoveryRequiredAlerts();
 
     /// <summary>
-    /// Emits queued RecoveryRequired alerts after the catalog transaction
-    /// commits. Call only from <c>ExecuteInTransactionCoreAsync</c> after
-    /// <c>CommitAsync</c> succeeds.
+    /// Nudges the dispatcher after the catalog transaction commits. The
+    /// dispatcher is the only sender. Call only from
+    /// <c>ExecuteInTransactionCoreAsync</c> after <c>CommitAsync</c>
+    /// succeeds.
     /// </summary>
     internal void FlushRecoveryRequiredAlertsAfterCommit() => TryFlushRecoveryRequiredAlerts();
 
     private void TryFlushRecoveryRequiredAlertsIfCommitted()
     {
-        // An explicit catalog transaction commits later. Emitting here would
-        // send a span for a row that can still roll back or be retried.
+        // An explicit catalog transaction commits later. Nudging here would
+        // ask the dispatcher to send a row that can still roll back.
         if (Database.CurrentTransaction is not null)
             return;
         TryFlushRecoveryRequiredAlerts();
     }
 
     /// <summary>
-    /// Emits the immediate span with the identity persisted on the outbox
-    /// row. Delivery acknowledgement and <c>SentAt</c> stay on the
-    /// dispatcher so a successful catalog save is never reported as failed.
+    /// Asks the dispatcher to run now. This path does not emit the span;
+    /// the outbox row is already committed and the dispatcher owns send
+    /// plus acknowledgement.
     /// </summary>
     private void TryFlushRecoveryRequiredAlerts()
     {
         try
         {
-            foreach (var candidate in _pendingRecoveryRequiredAlerts)
-                ManagedLifecycleRecoveryRequiredAlert.RecordEntered(
-                    candidate.WorkspaceId,
-                    candidate.InstanceId,
-                    candidate.OperationId,
-                    candidate.AttemptNumber,
-                    candidate.RunId,
-                    candidate.DedupeIdentity);
+            if (_pendingRecoveryRequiredAlerts.Count > 0)
+                RecoveryRequiredAlertDispatchSignal.Instance.Notify();
         }
         catch
         {
-            // The outbox row is committed. The dispatcher retries delivery.
+            // The outbox row is committed. The next dispatcher tick still
+            // delivers.
         }
         finally
         {

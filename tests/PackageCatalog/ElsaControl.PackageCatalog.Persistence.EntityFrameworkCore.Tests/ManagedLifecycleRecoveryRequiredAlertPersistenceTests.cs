@@ -148,6 +148,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var recovered = await store.RequireDeletionRecoveryAsync(failure);
 
         Assert.Equal(ElsaInstanceDeletionOutcome.RecoveryRequired, recovered.Outcome);
+        await DeliverPendingAlertsAsync(db);
         Assert.Single(capture.Entered);
         Assert.Equal(
             ManagedLifecycleTelemetry.RecoveryRequiredEnteredActivityName,
@@ -236,8 +237,9 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(before.ReconciliationVersion, parked.ReconciliationVersion);
         Assert.Equal(instanceBefore.Version, instanceAtBound.Version);
         Assert.Equal(Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter, parked.RequiresHumanAt);
-        Assert.Single(capture.Entered);
         Assert.Equal(1, await db.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+        await DeliverPendingAlertsAsync(db);
+        Assert.Single(capture.Entered);
         Assert.Equal(
             accepted.Operation.AttemptNumber,
             (await db.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking().SingleAsync()).AttemptNumber);
@@ -290,8 +292,9 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
 
         var parked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
         Assert.Equal(Now.AddMinutes(1) + ManagedElsaReasonCodeCatalog.HumanRequiredAfter, parked.RequiresHumanAt);
-        Assert.Single(capture.Entered);
         Assert.Equal(1, await db.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+        await DeliverPendingAlertsAsync(db);
+        Assert.Single(capture.Entered);
     }
 
     [Fact]
@@ -332,8 +335,9 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var flagged = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
         Assert.Equal(Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter, flagged.RequiresHumanAt);
         Assert.Null(flagged.DeploymentRunId);
-        Assert.Single(capture.Entered);
         Assert.Equal(1, await db.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+        await DeliverPendingAlertsAsync(db);
+        Assert.Single(capture.Entered);
 
         Assert.Equal(0, await store.AdvanceDueHumanRequiredClocksAsync(
             Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter + TimeSpan.FromMinutes(1)));
@@ -404,6 +408,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             Assert.Equal(instanceId, alert.InstanceId);
             Assert.Equal(attemptNumber, alert.AttemptNumber);
             Assert.Equal(ExpectedDedupe(parked), alert.DedupeIdentity);
+            await DeliverPendingAlertsAsync(verifyTen);
         }
 
         Assert.Single(capture.Entered);
@@ -531,8 +536,9 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var due = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
         Assert.Equal(first.ReasonEnteredAt, due.ReasonEnteredAt);
         Assert.Equal(Now.AddMinutes(1) + ManagedElsaReasonCodeCatalog.HumanRequiredAfter, due.RequiresHumanAt);
-        Assert.Single(capture.Entered);
         var alert = Assert.Single(await db.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking().ToListAsync());
+        await DeliverPendingAlertsAsync(db);
+        Assert.Single(capture.Entered);
         Assert.Equal(accepted.Operation.AttemptNumber, alert.AttemptNumber);
         Assert.Equal(ExpectedDedupe(due), alert.DedupeIdentity);
     }
@@ -575,9 +581,10 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                     .AdvanceDueHumanRequiredClocksAsync(atBound));
 
             Assert.Equal(1, advanced.Sum());
-            Assert.Single(capture.Entered);
             await using var verify = new CatalogDbContext(options);
             Assert.Equal(1, await verify.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+            await DeliverPendingAlertsAsync(verify);
+            Assert.Single(capture.Entered);
             Assert.Equal(
                 atBound,
                 (await verify.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == operationId)).RequiresHumanAt);
@@ -629,9 +636,10 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 RaceUnchangedParkAsync(second, workspaceId, operationId, observation, atBound));
 
             Assert.Contains(true, outcomes);
-            Assert.Single(capture.Entered);
             await using var verify = new CatalogDbContext(options);
             Assert.Equal(1, await verify.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+            await DeliverPendingAlertsAsync(verify);
+            Assert.Single(capture.Entered);
             var parked = await verify.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == operationId);
             Assert.Equal(atBound, parked.RequiresHumanAt);
         }
@@ -708,8 +716,9 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
 
         var parked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
         Assert.Equal(Now.AddMinutes(1), parked.RequiresHumanAt);
-        Assert.Single(capture.Entered);
         Assert.Equal(1, await db.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+        await DeliverPendingAlertsAsync(db);
+        Assert.Single(capture.Entered);
     }
 
     [Fact]
@@ -735,8 +744,9 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
 
         var parked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
         Assert.Equal(Now.AddMinutes(1), parked.RequiresHumanAt);
-        Assert.Single(capture.Entered);
         Assert.Equal(1, await db.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+        await DeliverPendingAlertsAsync(db);
+        Assert.Single(capture.Entered);
     }
 
     [Fact]
@@ -760,8 +770,9 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
 
         await ReconcileParkAsync(
             store, workspace.Id, accepted, ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted, Now.AddMinutes(1));
-        Assert.Single(capture.Entered);
         Assert.Equal(1, await db.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+        await DeliverPendingAlertsAsync(db);
+        Assert.Single(capture.Entered);
 
         var retrySafe = new ElsaInstanceProviderObservation(
             ElsaInstanceProviderObservationKind.Ambiguous,
@@ -796,8 +807,9 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted,
             Now.AddMinutes(14));
 
-        Assert.Equal(2, capture.Entered.Count);
         Assert.Equal(2, await db.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+        await DeliverPendingAlertsAsync(db);
+        Assert.Equal(2, capture.Entered.Count);
         Assert.Equal(
             new[] { accepted.Operation.AttemptNumber, accepted.Operation.AttemptNumber + 1 },
             await db.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking()
@@ -840,8 +852,9 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(1, await store.AdvanceDueHumanRequiredClocksAsync(
             Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter));
         Assert.NotNull((await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id)).RequiresHumanAt);
-        Assert.Single(capture.Entered);
         Assert.Equal(1, await db.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+        await DeliverPendingAlertsAsync(db);
+        Assert.Single(capture.Entered);
     }
 
     [Fact]
@@ -899,8 +912,9 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             Now.AddMinutes(1) + ManagedElsaReasonCodeCatalog.HumanRequiredAfter));
         Assert.NotNull((await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == deletion.Operation.Id)).RequiresHumanAt);
         Assert.Null((await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == deletion.Operation.Id)).DeploymentRunId);
-        Assert.Single(capture.Entered);
         Assert.Equal(1, await db.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+        await DeliverPendingAlertsAsync(db);
+        Assert.Single(capture.Entered);
     }
 
     [Fact]
@@ -1066,22 +1080,163 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(parked.DeploymentRunId, row.RunId);
         Assert.Equal(ExpectedDedupe(parked), row.DedupeIdentity);
         Assert.Null(row.SentAt);
-        var immediate = Assert.Single(capture.Entered);
-        Assert.Equal(
-            row.DedupeIdentity,
-            immediate.GetTagItem(ManagedLifecycleTelemetry.DedupeIdentityTag));
+        Assert.Empty(capture.Entered);
 
         var dispatcher = new EfCoreRecoveryRequiredAlertOutboxDispatcher(
             db, new AcknowledgingAlertSender(), new FixedTimeProvider(Now));
         Assert.Equal(1, await dispatcher.DispatchPendingAsync());
-        Assert.Equal(2, capture.Entered.Count);
+        Assert.Single(capture.Entered);
         Assert.Equal(
             row.DedupeIdentity,
-            capture.Entered[1].GetTagItem(ManagedLifecycleTelemetry.DedupeIdentityTag));
+            capture.Entered[0].GetTagItem(ManagedLifecycleTelemetry.DedupeIdentityTag));
         var delivered = await db.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking().SingleAsync();
         Assert.NotNull(delivered.SentAt);
         Assert.Equal(row.DedupeIdentity, delivered.DedupeIdentity);
         Assert.Equal(row.RunId, delivered.RunId);
+    }
+
+    [Fact]
+    public async Task Outbox_row_stays_pending_when_the_exporter_returns_failure_then_sends_on_retry()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Alert exporter failure");
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+        await store.CommitProviderSubmissionAsync(new(
+            workspace.Id,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            "provider-submission-uncertain",
+            Now));
+        db.ChangeTracker.Clear();
+        var parked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        SeedPendingAlert(db, parked);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        using var capture = new RecoveryRequiredAlertCapture(workspace.Id);
+        var clock = new MutableTimeProvider(Now);
+        var sender = new ActivityRecoveryRequiredAlertSender(new SequenceAck(false, true));
+        var dispatcher = new EfCoreRecoveryRequiredAlertOutboxDispatcher(db, sender, clock);
+
+        Assert.Equal(0, await dispatcher.DispatchPendingAsync());
+        var pending = await db.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking().SingleAsync();
+        Assert.Null(pending.SentAt);
+        Assert.Equal(1, pending.DeliveryAttempts);
+        Assert.Single(capture.Entered);
+
+        clock.Advance(RecoveryRequiredAlertBackoff.Delay(1));
+        Assert.Equal(1, await new EfCoreRecoveryRequiredAlertOutboxDispatcher(db, sender, clock)
+            .DispatchPendingAsync());
+        var delivered = await db.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking().SingleAsync();
+        Assert.NotNull(delivered.SentAt);
+        Assert.Equal(2, capture.Entered.Count);
+    }
+
+    [Fact]
+    public async Task Two_dispatch_loops_with_slow_sends_deliver_each_row_once()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"elsa-rr-slow-dispatch-{Guid.NewGuid():N}.db");
+        var options = ClockRaceOptions(path);
+        try
+        {
+            var outboxIds = new List<Guid>();
+            await using (var seed = new CatalogDbContext(options))
+            {
+                await seed.Database.MigrateAsync();
+                await seed.Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL;");
+                for (var index = 0; index < 3; index++)
+                {
+                    var (workspace, accepted) = await QueueManagedLifecycleRunAsync(
+                        seed, $"Alert slow race {index}");
+                    var store = new EfCoreElsaInstanceLifecycleStore(
+                        seed, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+                    await store.CommitProviderSubmissionAsync(new(
+                        workspace.Id,
+                        accepted.Instance.Id,
+                        accepted.Operation.Id,
+                        accepted.Operation.AttemptNumber,
+                        "provider-submission-uncertain",
+                        Now));
+                    seed.ChangeTracker.Clear();
+                    var parked = await seed.ElsaInstanceOperations.AsNoTracking()
+                        .SingleAsync(x => x.Id == accepted.Operation.Id);
+                    outboxIds.Add(SeedPendingAlert(seed, parked).Id);
+                    await seed.SaveChangesAsync();
+                    seed.ChangeTracker.Clear();
+                }
+            }
+
+            var firstSender = new SlowAlertSender(TimeSpan.FromMilliseconds(150));
+            var secondSender = new SlowAlertSender(TimeSpan.FromMilliseconds(150));
+            await using var first = new CatalogDbContext(options);
+            await using var second = new CatalogDbContext(options);
+            var delivered = await Task.WhenAll(
+                new EfCoreRecoveryRequiredAlertOutboxDispatcher(
+                    first, firstSender, new FixedTimeProvider(Now)).DispatchPendingAsync(),
+                new EfCoreRecoveryRequiredAlertOutboxDispatcher(
+                    second, secondSender, new FixedTimeProvider(Now)).DispatchPendingAsync());
+
+            Assert.Equal(3, delivered.Sum());
+            Assert.Equal(3, firstSender.Sends + secondSender.Sends);
+            await using var verify = new CatalogDbContext(options);
+            var rows = await verify.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking()
+                .Where(row => outboxIds.Contains(row.Id))
+                .ToListAsync();
+            Assert.Equal(3, rows.Count);
+            Assert.All(rows, row => Assert.NotNull(row.SentAt));
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task Expired_lease_is_taken_over_and_sent_once()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Alert lease takeover");
+        var store = new EfCoreElsaInstanceLifecycleStore(
+            db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now));
+        await store.CommitProviderSubmissionAsync(new(
+            workspace.Id,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            "provider-submission-uncertain",
+            Now));
+        db.ChangeTracker.Clear();
+        var parked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        SeedPendingAlert(db, parked);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        using var capture = new RecoveryRequiredAlertCapture(workspace.Id);
+        var clock = new MutableTimeProvider(Now);
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            new EfCoreRecoveryRequiredAlertOutboxDispatcher(db, new CrashBeforeSendSender(), clock)
+                .DispatchPendingAsync());
+        var held = await db.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking().SingleAsync();
+        Assert.Null(held.SentAt);
+        Assert.NotNull(held.LeasedUntil);
+        Assert.NotNull(held.LeasedBy);
+        Assert.Empty(capture.Entered);
+
+        clock.Advance(RecoveryRequiredAlertBackoff.LeaseDuration + TimeSpan.FromSeconds(1));
+        var retry = new AcknowledgingAlertSender();
+        Assert.Equal(1, await new EfCoreRecoveryRequiredAlertOutboxDispatcher(db, retry, clock)
+            .DispatchPendingAsync());
+        Assert.Equal(1, retry.Sends);
+        var delivered = await db.ElsaInstanceRecoveryRequiredAlertOutbox.AsNoTracking().SingleAsync();
+        Assert.NotNull(delivered.SentAt);
+        Assert.Single(capture.Entered);
     }
 
     [Fact]
@@ -1208,12 +1363,57 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter));
         instance = await db.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == accepted.Instance.Id);
         parked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        await DeliverPendingAlertsAsync(db);
         AssertParity(
             instance,
             parked,
             capture.Entered.Count,
             humanRequired: true,
-            expectedSeverity: ManagedLifecycleOperationalHealthAlertSeverity.Warning);
+            expectedSeverity: ManagedLifecycleOperationalHealthAlertSeverity.Critical);
+
+        using var memoryCapture = new RecoveryRequiredAlertCapture(Guid.Parse("10000000-0000-0000-0000-000000000011"));
+        var memory = new InMemoryElsaInstanceLifecycleStore(new FixedTimeProvider(Now));
+        var memoryService = new ElsaInstanceLifecycleService(memory, new FixedTimeProvider(Now));
+        var created = await memoryService.CreateAsync(new ElsaInstanceCreateRequest(
+            Guid.Parse("20000000-0000-0000-0000-000000000011"),
+            Guid.Parse("10000000-0000-0000-0000-000000000011"),
+            "Alert memory parity",
+            "alert-memory-parity",
+            WorkerIntent(),
+            "alert-memory-parity-create"));
+        memory.MarkRecoveryRequired(
+            created.Operation.Id,
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain);
+        Assert.Equal(0, await memory.AdvanceDueHumanRequiredClocksAsync(
+            Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter - TimeSpan.FromSeconds(1)));
+        Assert.Null(memory.GetReasonClock(created.Operation.Id).RequiresHumanAt);
+        Assert.Empty(memoryCapture.Entered);
+        Assert.Equal(1, await memory.AdvanceDueHumanRequiredClocksAsync(
+            Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter));
+        Assert.Equal(
+            Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter,
+            memory.GetReasonClock(created.Operation.Id).RequiresHumanAt);
+        Assert.Single(memoryCapture.Entered);
+        var memoryEvaluated = new ManagedLifecycleOperationalHealthEvaluator().Evaluate(
+            new ManagedLifecycleOperationalHealthSnapshot(
+                created.Instance.WorkspaceId,
+                created.Instance.Id,
+                ElsaDesiredLifecycle.Running,
+                ElsaObservedLifecycle.Unknown,
+                ElsaInstanceHealth.Unknown,
+                operation: new ManagedLifecycleOperationSnapshot(
+                    created.Operation.Id,
+                    ElsaInstanceOperationState.RecoveryRequired,
+                    created.Operation.AttemptNumber,
+                    Now,
+                    diagnosticCode: ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain,
+                    requiresHumanAt: memory.GetReasonClock(created.Operation.Id).RequiresHumanAt)));
+        Assert.Equal(ManagedLifecycleOperationalHealthStatus.RecoveryRequired, memoryEvaluated.Status);
+        Assert.Equal(
+            ManagedLifecycleOperationalHealthAlertSeverity.Critical,
+            Assert.Single(
+                memoryEvaluated.Alerts,
+                candidate => candidate.Code == ManagedLifecycleOperationalHealthDiagnosticCodes.RecoveryRequired).Severity);
     }
 
     [Fact]
@@ -1285,9 +1485,10 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Equal(1, await retryingStore.AdvanceDueHumanRequiredClocksAsync(
             Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter));
         Assert.Equal(2, interceptor.Attempts);
-        Assert.Single(capture.Entered);
         await using var verify = CreateMigratedContext(connection);
         Assert.Equal(1, await verify.ElsaInstanceRecoveryRequiredAlertOutbox.CountAsync());
+        await DeliverPendingAlertsAsync(verify);
+        Assert.Single(capture.Entered);
         Assert.NotNull((await verify.ElsaInstanceOperations.AsNoTracking().SingleAsync()).RequiresHumanAt);
     }
 
@@ -1478,6 +1679,15 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             parked.AttemptNumber,
             parked.DeploymentRunId);
 
+    private static Task<int> DeliverPendingAlertsAsync(
+        CatalogDbContext db,
+        TimeProvider? clock = null) =>
+        new EfCoreRecoveryRequiredAlertOutboxDispatcher(
+            db,
+            new AcknowledgingAlertSender(),
+            clock ?? new FixedTimeProvider(Now))
+            .DispatchPendingAsync();
+
     private static ElsaInstanceRecoveryRequiredAlertOutboxEntity SeedPendingAlert(
         CatalogDbContext db,
         ElsaInstanceOperationEntity parked)
@@ -1514,6 +1724,43 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
                 item.DedupeIdentity);
             return true;
         }
+    }
+
+    private sealed class SequenceAck(params bool[] results) : IRecoveryRequiredAlertTransportAck
+    {
+        private int _index;
+
+        public bool TryAcknowledge(string dedupeIdentity)
+        {
+            if (string.IsNullOrWhiteSpace(dedupeIdentity) || _index >= results.Length)
+                return false;
+            return results[_index++];
+        }
+    }
+
+    private sealed class SlowAlertSender(TimeSpan delay) : IRecoveryRequiredAlertSender
+    {
+        public int Sends { get; private set; }
+
+        public bool Send(RecoveryRequiredAlertDispatch item)
+        {
+            Thread.Sleep(delay);
+            Sends++;
+            ManagedLifecycleRecoveryRequiredAlert.RecordEntered(
+                item.WorkspaceId,
+                item.InstanceId,
+                item.OperationId,
+                item.AttemptNumber,
+                item.RunId,
+                item.DedupeIdentity);
+            return true;
+        }
+    }
+
+    private sealed class CrashBeforeSendSender : IRecoveryRequiredAlertSender
+    {
+        public bool Send(RecoveryRequiredAlertDispatch item) =>
+            throw new OperationCanceledException();
     }
 
     private sealed class CrashBeforeAckSender : IRecoveryRequiredAlertSender

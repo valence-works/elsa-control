@@ -13,28 +13,52 @@ public interface IRecoveryRequiredAlertOutboxDispatcher
 public interface IRecoveryRequiredAlertSender
 {
     /// <returns>
-    /// <see langword="true"/> when the transport acknowledged delivery.
-    /// Creating an in-memory activity is not an acknowledgement.
+    /// <see langword="true"/> when the transport acknowledged delivery
+    /// for this row's persisted identity. Creating an in-memory activity
+    /// is not an acknowledgement.
     /// </returns>
     bool Send(RecoveryRequiredAlertDispatch item);
 }
 
 /// <summary>
-/// Confirms the Azure Monitor exporter accepted the RecoveryRequired span.
+/// Confirms the Azure Monitor exporter accepted the RecoveryRequired span
+/// for a specific persisted identity. A successful <c>ForceFlush</c> is
+/// not an acknowledgement.
 /// </summary>
 public interface IRecoveryRequiredAlertTransportAck
 {
-    bool TryAcknowledge();
+    bool TryAcknowledge(string dedupeIdentity);
 }
 
 /// <summary>
-/// Confirms a direct email transport accepted the alert when a recipient
-/// is configured. The Azure Monitor action group is the production email
-/// path; this seam exists for hosts that send mail themselves.
+/// Coalescing nudge so catalog commit can ask the dispatcher to run now
+/// without sending the span itself.
 /// </summary>
-public interface IRecoveryRequiredAlertEmailTransport
+public interface IRecoveryRequiredAlertDispatchSignal
 {
-    bool TryAccept(RecoveryRequiredAlertDispatch item);
+    void Notify();
+    Task WaitAsync(CancellationToken cancellationToken = default);
+}
+
+public sealed class RecoveryRequiredAlertDispatchSignal : IRecoveryRequiredAlertDispatchSignal
+{
+    public static RecoveryRequiredAlertDispatchSignal Instance { get; } = new();
+
+    private readonly SemaphoreSlim _signal = new(0, 1);
+
+    public void Notify()
+    {
+        try
+        {
+            _signal.Release();
+        }
+        catch (SemaphoreFullException)
+        {
+        }
+    }
+
+    public Task WaitAsync(CancellationToken cancellationToken = default) =>
+        _signal.WaitAsync(cancellationToken);
 }
 
 public readonly record struct RecoveryRequiredAlertDispatch(
@@ -47,14 +71,17 @@ public readonly record struct RecoveryRequiredAlertDispatch(
 
 /// <summary>
 /// Exponential backoff for undelivered outbox rows. The first retry waits
-/// one second; later retries double up to five minutes. A claim lease
-/// keeps two dispatch loops from sending the same row.
+/// one second; later retries double up to five minutes. A per-row claim
+/// lease covers the send timeout plus margin so two dispatch loops do not
+/// send the same row.
 /// </summary>
 public static class RecoveryRequiredAlertBackoff
 {
     public static readonly TimeSpan Initial = TimeSpan.FromSeconds(1);
     public static readonly TimeSpan Cap = TimeSpan.FromMinutes(5);
-    public static readonly TimeSpan Lease = TimeSpan.FromSeconds(30);
+    public static readonly TimeSpan SendTimeout = TimeSpan.FromMilliseconds(5_000);
+    public static readonly TimeSpan LeaseMargin = TimeSpan.FromSeconds(5);
+    public static readonly TimeSpan LeaseDuration = SendTimeout + LeaseMargin;
 
     public static TimeSpan Delay(int deliveryAttempts)
     {
@@ -66,8 +93,7 @@ public static class RecoveryRequiredAlertBackoff
 }
 
 public sealed class ActivityRecoveryRequiredAlertSender(
-    IRecoveryRequiredAlertTransportAck? ack = null,
-    IRecoveryRequiredAlertEmailTransport? email = null) : IRecoveryRequiredAlertSender
+    IRecoveryRequiredAlertTransportAck? ack = null) : IRecoveryRequiredAlertSender
 {
     public bool Send(RecoveryRequiredAlertDispatch item)
     {
@@ -81,8 +107,6 @@ public sealed class ActivityRecoveryRequiredAlertSender(
             item.AttemptNumber,
             item.RunId,
             item.DedupeIdentity);
-        var flushed = ack?.TryAcknowledge() ?? false;
-        var emailed = email?.TryAccept(item) ?? false;
-        return flushed || emailed;
+        return ack?.TryAcknowledge(item.DedupeIdentity) ?? false;
     }
 }

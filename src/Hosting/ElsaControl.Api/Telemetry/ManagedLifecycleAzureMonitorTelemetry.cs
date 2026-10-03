@@ -280,6 +280,7 @@ internal sealed class ManagedLifecycleAzureMonitorTelemetrySinkFactory
                     TemporalityPreference = MetricReaderTemporalityPreference.Delta
                 })
                 .Build();
+            var exportAck = new RecoveryRequiredAlertExportAck();
             tracerProvider = Sdk.CreateTracerProviderBuilder()
                 .SetResourceBuilder(CreateResourceBuilder())
                 .AddSource(ManagedLifecycleTelemetry.ActivitySourceName)
@@ -287,13 +288,13 @@ internal sealed class ManagedLifecycleAzureMonitorTelemetrySinkFactory
                 // This provider subscribes only to the dedicated lifecycle source.
                 .SetSampler(new AlwaysOnSampler())
                 .AddProcessor(new BatchActivityExportProcessor(
-                    traceExporter,
+                    new RecoveryRequiredAlertExportAckExporter(traceExporter, exportAck),
                     ManagedLifecycleAzureMonitorTelemetryOptions.TraceMaxQueueSize,
                     ManagedLifecycleAzureMonitorTelemetryOptions.ExportIntervalMilliseconds,
                     ManagedLifecycleAzureMonitorTelemetryOptions.ExportTimeoutMilliseconds,
                     ManagedLifecycleAzureMonitorTelemetryOptions.TraceMaxBatchSize))
                 .Build();
-            return new ManagedLifecycleAzureMonitorTelemetrySink(meterProvider, tracerProvider);
+            return new ManagedLifecycleAzureMonitorTelemetrySink(meterProvider, tracerProvider, exportAck);
         }
         catch (Exception)
         {
@@ -360,17 +361,36 @@ internal sealed class ManagedLifecycleAzureMonitorTelemetrySink : IDisposable, I
 {
     private readonly MeterProvider? _meterProvider;
     private readonly TracerProvider? _tracerProvider;
+    private readonly RecoveryRequiredAlertExportAck? _exportAck;
     private int _disposed;
 
     internal ManagedLifecycleAzureMonitorTelemetrySink(
         MeterProvider? meterProvider,
-        TracerProvider? tracerProvider)
+        TracerProvider? tracerProvider,
+        RecoveryRequiredAlertExportAck? exportAck = null)
     {
         _meterProvider = meterProvider;
         _tracerProvider = tracerProvider;
+        _exportAck = exportAck;
     }
 
-    bool IRecoveryRequiredAlertTransportAck.TryAcknowledge() => ForceFlush();
+    bool IRecoveryRequiredAlertTransportAck.TryAcknowledge(string dedupeIdentity)
+    {
+        if (string.IsNullOrWhiteSpace(dedupeIdentity) || _exportAck is null)
+            return false;
+
+        _exportAck.BeginWatch(dedupeIdentity);
+        try
+        {
+            ForceFlush();
+        }
+        catch
+        {
+            return false;
+        }
+
+        return _exportAck.TryTakeSuccess(dedupeIdentity);
+    }
 
     internal bool ForceFlush()
     {
