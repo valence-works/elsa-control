@@ -239,7 +239,9 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
             ManagedElsaInstanceCustomerProjection.CustomerLabel(projected));
         Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReasonCode, reasonCodeOnWire);
         Assert.Equal("instance.recovery-required", reasonCodeOnWire);
-        Assert.Equal(ManagedElsaInstanceCustomerProjection.GenericUnavailableReason, reason);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason, reason);
+        Assert.Contains("Valence Works has been alerted", reason, StringComparison.Ordinal);
+        Assert.Contains("operation reference", reason, StringComparison.Ordinal);
         Assert.DoesNotContain("Failed", reason, StringComparison.Ordinal);
         Assert.DoesNotContain("Failed", reasonCodeOnWire, StringComparison.Ordinal);
         Assert.DoesNotContain(reasonCode, reason, StringComparison.Ordinal);

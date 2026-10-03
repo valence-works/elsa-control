@@ -880,6 +880,8 @@ public static class ManagedElsaInstanceEndpoints
                 canOpen, healthy, handoffConfigured, currentIdentity is not null, observedLifecycle,
                 handoffUnavailableReason: HandoffUnavailableReason))
         {
+            UnavailableReasonCode = ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
+                canOpen, healthy, handoffConfigured, currentIdentity is not null, observedLifecycle),
             Version = instance.Version,
             ETag = ETag(instance.Version),
             DesiredStateRevisionId = instance.DesiredStateRevisionId?.Value,
@@ -964,6 +966,9 @@ public static class ManagedElsaInstanceEndpoints
                 summary.ObservedLifecycle,
                 identityUnavailableReason: "The current instance binding is unavailable."))
         {
+            UnavailableReasonCode = ManagedElsaInstanceCustomerProjection.UnavailableReasonCode(
+                canOpen, healthy, controlHandoffEnabled, summary.Audience is not null && summary.CallbackUri is not null,
+                summary.ObservedLifecycle),
             CreatedAt = summary.CreatedAt,
             UpdatedAt = summary.UpdatedAt
         };
@@ -1138,6 +1143,8 @@ internal sealed record IdempotencyKeyReadResult(IdempotencyKeyState State, strin
 
 public sealed record ManagedElsaInstanceResponse(Guid OrganizationId, Guid InstanceId, string Name, string Slug, ElsaDesiredLifecycle DesiredLifecycle, ElsaObservedLifecycle ObservedLifecycle, ElsaInstanceHealth Health, bool CanOpen, string? Audience, string? RedirectUri, string? UnavailableReason)
 {
+    /// <summary>Stable, customer-safe code for <see cref="UnavailableReason"/>; never a provider diagnostic.</summary>
+    public string? UnavailableReasonCode { get; init; }
     public int Version { get; init; }
     public string ETag { get; init; } = "";
     public string? DesiredStateRevisionId { get; init; }

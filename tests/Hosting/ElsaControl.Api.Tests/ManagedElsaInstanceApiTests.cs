@@ -3137,7 +3137,8 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, response.ObservedLifecycle);
         Assert.Equal(ElsaInstanceHealth.Unknown, response.Health);
         Assert.False(response.CanOpen);
-        Assert.Equal(ManagedElsaInstanceCustomerProjection.GenericUnavailableReason, response.UnavailableReason);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason, response.UnavailableReason);
+        Assert.Equal("instance.recovery-required", response.UnavailableReasonCode);
         Assert.DoesNotContain("Failed", response.UnavailableReason, StringComparison.Ordinal);
         Assert.NotEqual(ManagedElsaInstanceCustomerProjection.ProvisioningUnavailableReason, response.UnavailableReason);
     }
@@ -3161,7 +3162,8 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(list.CanOpen, detail.CanOpen);
         Assert.Equal(list.CanOpen, overview.Summary.CanOpen);
         Assert.Equal("instance.recovery-required", overview.Summary.UnavailableReason);
-        Assert.Equal(ManagedElsaInstanceCustomerProjection.GenericUnavailableReason, list.UnavailableReason);
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReason, list.UnavailableReason);
+        Assert.Equal(overview.Summary.UnavailableReason, list.UnavailableReasonCode);
         Assert.DoesNotContain("Failed", list.UnavailableReason, StringComparison.Ordinal);
         Assert.Equal(ManagedElsaInstanceCustomerProjection.NeedsAttentionLabel,
             ManagedElsaInstanceCustomerProjection.CustomerLabel(list.ObservedLifecycle));
@@ -3187,6 +3189,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(list.CanOpen, overview.Summary.CanOpen);
         Assert.Null(overview.Summary.UnavailableReason);
         Assert.Null(list.UnavailableReason);
+        Assert.Null(list.UnavailableReasonCode);
         Assert.Null(ManagedElsaInstanceCustomerProjection.CustomerLabel(list.ObservedLifecycle));
     }
 
@@ -3203,6 +3206,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(ElsaInstanceHealth.Unknown, response.Health);
         Assert.False(response.CanOpen);
         Assert.Equal(ManagedElsaInstanceCustomerProjection.GenericUnavailableReason, response.UnavailableReason);
+        Assert.Equal("instance.unavailable", response.UnavailableReasonCode);
     }
 
     [Fact]

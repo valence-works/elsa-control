@@ -18,6 +18,9 @@ public static class ManagedElsaInstanceCustomerProjection
         "This instance failed. Refresh for the latest Control outcome, or recover it when it is safe.";
     public const string UnknownUnavailableReason =
         "Control cannot determine this instance's state. Refresh to retry observation, or recover the instance if it remains unknown.";
+    public const string RecoveryRequiredUnavailableReason =
+        "The latest operation on this instance paused and is waiting for Valence Works to resume it. " +
+        "Valence Works has been alerted. Check again later, or quote the operation reference if you contact support.";
     public const string RecoveryRequiredUnavailableReasonCode = "instance.recovery-required";
     public const string NeedsAttentionLabel = "Needs attention";
 
@@ -123,7 +126,7 @@ public static class ManagedElsaInstanceCustomerProjection
         if (!canOpen)
             return unauthorizedReason;
         if (observedLifecycle == ElsaObservedLifecycle.RecoveryRequired)
-            return GenericUnavailableReason;
+            return RecoveryRequiredUnavailableReason;
         if (observedLifecycle is ElsaObservedLifecycle.Pending or
             ElsaObservedLifecycle.Provisioning or
             ElsaObservedLifecycle.Updating or
