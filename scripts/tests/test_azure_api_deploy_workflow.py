@@ -1648,6 +1648,9 @@ if args[:3] == ["webapp", "config", "appsettings"] and "list" in args:
             if empty_mode == "null":
                 print("null")
                 raise SystemExit(0)
+            if empty_mode == "object":
+                print("{{}}")
+                raise SystemExit(0)
         print(json.dumps([
             current
             for name in BILLING_RESTORE_NAMES
@@ -1991,7 +1994,7 @@ printf '200'
             empty_list_cases = []
             for mode in ("app", "promote"):
                 for environment, target in (("test", "test"), ("production", "live")):
-                    for payload in ("empty", "whitespace", "null"):
+                    for payload in ("empty", "whitespace", "null", "object"):
                         empty_list_cases.append((mode, environment, target, payload))
 
             for mode, environment, target, payload in empty_list_cases:
