@@ -3,19 +3,19 @@
   "contentVersion": "1.0.0.0",
   "parameters": {
     "sqlDatabaseSkuName": {
-      "value": "GP_S_Gen5"
+      "value": "S0"
     },
     "sqlDatabaseSkuTier": {
-      "value": "GeneralPurpose"
+      "value": "Standard"
     },
     "sqlDatabaseSkuFamily": {
-      "value": "Gen5"
+      "value": ""
     },
     "sqlDatabaseSkuCapacity": {
-      "value": 1
+      "value": 10
     },
     "sqlDatabaseMaxSizeBytes": {
-      "value": "0"
+      "value": "268435456000"
     }
   }
 }

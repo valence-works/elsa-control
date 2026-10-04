@@ -1,20 +1,20 @@
 @description('The location for the resource(s) to be deployed.')
 param location string = resourceGroup().location
 
-@description('Azure SQL Catalog service objective (SKU name). Production default is GP_S_Gen5.')
-param sqlDatabaseSkuName string = 'GP_S_Gen5'
+@description('Azure SQL Catalog service objective (SKU name). Production default is S0.')
+param sqlDatabaseSkuName string = 'S0'
 
-@description('Azure SQL Catalog edition (SKU tier). Production default is GeneralPurpose.')
-param sqlDatabaseSkuTier string = 'GeneralPurpose'
+@description('Azure SQL Catalog edition (SKU tier). Production default is Standard.')
+param sqlDatabaseSkuTier string = 'Standard'
 
 @description('Azure SQL Catalog SKU family. Leave empty for DTU objectives such as S0.')
-param sqlDatabaseSkuFamily string = 'Gen5'
+param sqlDatabaseSkuFamily string = ''
 
 @description('Azure SQL Catalog SKU capacity (vCores or DTUs).')
-param sqlDatabaseSkuCapacity int = 1
+param sqlDatabaseSkuCapacity int = 10
 
 @description('Azure SQL Catalog max size in bytes. Empty or 0 omits the property. Use a string so 250 GiB (268435456000) is not an ARM 32-bit int.')
-param sqlDatabaseMaxSizeBytes string = '0'
+param sqlDatabaseMaxSizeBytes string = '268435456000'
 
 var serverlessSku = startsWith(sqlDatabaseSkuName, 'GP_S_')
 var catalogMaxSizeBytes = json(empty(sqlDatabaseMaxSizeBytes) ? '0' : sqlDatabaseMaxSizeBytes)

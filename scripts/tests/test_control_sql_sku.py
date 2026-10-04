@@ -58,13 +58,14 @@ class ControlSqlSkuTests(unittest.TestCase):
         self.assertEqual("S0", STAGING_SKU["sqlDatabaseSkuName"])
         self.assertEqual("Standard", STAGING_SKU["sqlDatabaseSkuTier"])
         self.assertEqual(10, STAGING_SKU["sqlDatabaseSkuCapacity"])
-        self.assertEqual("GP_S_Gen5", PRODUCTION_SKU["sqlDatabaseSkuName"])
-        self.assertEqual("GeneralPurpose", PRODUCTION_SKU["sqlDatabaseSkuTier"])
-        self.assertEqual("Gen5", PRODUCTION_SKU["sqlDatabaseSkuFamily"])
-        self.assertEqual(1, PRODUCTION_SKU["sqlDatabaseSkuCapacity"])
-        self.assertEqual("0", PRODUCTION_SKU["sqlDatabaseMaxSizeBytes"])
+        self.assertEqual("S0", PRODUCTION_SKU["sqlDatabaseSkuName"])
+        self.assertEqual("Standard", PRODUCTION_SKU["sqlDatabaseSkuTier"])
+        self.assertEqual("", PRODUCTION_SKU["sqlDatabaseSkuFamily"])
+        self.assertEqual(10, PRODUCTION_SKU["sqlDatabaseSkuCapacity"])
+        self.assertEqual(STAGING_MAX_SIZE_BYTES, PRODUCTION_SKU["sqlDatabaseMaxSizeBytes"])
+        self.assertEqual(STAGING_SKU, PRODUCTION_SKU)
 
-    def test_parameter_files_pin_staging_s0_and_production_gp(self) -> None:
+    def test_parameter_files_pin_staging_and_production_s0(self) -> None:
         staging = json.loads(STAGING_PARAMETERS.read_text())["parameters"]
         production = json.loads(PRODUCTION_PARAMETERS.read_text())["parameters"]
         azd = json.loads(AZD_PARAMETERS.read_text())["parameters"]
@@ -76,11 +77,11 @@ class ControlSqlSkuTests(unittest.TestCase):
         self.assertEqual(10, staging["sqlDatabaseSkuCapacity"]["value"])
         self.assertEqual(STAGING_MAX_SIZE_BYTES, staging["sqlDatabaseMaxSizeBytes"]["value"])
 
-        self.assertEqual("GP_S_Gen5", production["sqlDatabaseSkuName"]["value"])
-        self.assertEqual("GeneralPurpose", production["sqlDatabaseSkuTier"]["value"])
-        self.assertEqual("Gen5", production["sqlDatabaseSkuFamily"]["value"])
-        self.assertEqual(1, production["sqlDatabaseSkuCapacity"]["value"])
-        self.assertEqual("0", production["sqlDatabaseMaxSizeBytes"]["value"])
+        self.assertEqual("S0", production["sqlDatabaseSkuName"]["value"])
+        self.assertEqual("Standard", production["sqlDatabaseSkuTier"]["value"])
+        self.assertEqual("", production["sqlDatabaseSkuFamily"]["value"])
+        self.assertEqual(10, production["sqlDatabaseSkuCapacity"]["value"])
+        self.assertEqual(STAGING_MAX_SIZE_BYTES, production["sqlDatabaseMaxSizeBytes"]["value"])
         self.assertNotIn("environmentName", production)
 
         for name in (
@@ -105,16 +106,17 @@ class ControlSqlSkuTests(unittest.TestCase):
         self.assertIn("param sqlDatabaseSkuName string = ''", main)
         self.assertIn("param sqlDatabaseSkuTier string = ''", main)
         self.assertIn("param sqlDatabaseMaxSizeBytes string = ''", main)
-        self.assertIn("'valence-control-staging'", main)
-        self.assertIn("'test'", main)
-        self.assertIn("useStagingControlSqlSku", main)
+        self.assertIn("? sqlDatabaseSkuName : 'S0'", main)
+        self.assertIn("? sqlDatabaseSkuTier : 'Standard'", main)
         self.assertIn("sqlDatabaseSkuName: resolvedSqlDatabaseSkuName", main)
         self.assertNotIn("name: 'GP_S_Gen5'", main)
+        self.assertNotIn("useStagingControlSqlSku", main)
 
-        self.assertIn("param sqlDatabaseSkuName string = 'GP_S_Gen5'", module)
-        self.assertIn("param sqlDatabaseSkuTier string = 'GeneralPurpose'", module)
-        self.assertIn("param sqlDatabaseSkuFamily string = 'Gen5'", module)
-        self.assertIn("param sqlDatabaseSkuCapacity int = 1", module)
+        self.assertIn("param sqlDatabaseSkuName string = 'S0'", module)
+        self.assertIn("param sqlDatabaseSkuTier string = 'Standard'", module)
+        self.assertIn("param sqlDatabaseSkuFamily string = ''", module)
+        self.assertIn("param sqlDatabaseSkuCapacity int = 10", module)
+        self.assertIn("param sqlDatabaseMaxSizeBytes string = '268435456000'", module)
         self.assertIn("sku: catalogSku", module)
         self.assertIn("properties: catalogProperties", module)
         self.assertIn("startsWith(sqlDatabaseSkuName, 'GP_S_')", module)
@@ -205,11 +207,12 @@ module control_sql 'control-sql/control-sql.module.bicep' = {
             patched_module = module.read_text()
             patched_main = main.read_text()
             patched_parameters = json.loads(parameters.read_text())["parameters"]
-            self.assertIn("param sqlDatabaseSkuName string = 'GP_S_Gen5'", patched_module)
+            self.assertIn("param sqlDatabaseSkuName string = 'S0'", patched_module)
+            self.assertIn("param sqlDatabaseSkuTier string = 'Standard'", patched_module)
             self.assertIn("sku: catalogSku", patched_module)
             self.assertNotIn("name: 'GP_S_Gen5'", patched_module)
             self.assertIn("resolvedSqlDatabaseSkuName", patched_main)
-            self.assertIn("valence-control-staging", patched_main)
+            self.assertIn("? sqlDatabaseSkuName : 'S0'", patched_main)
             self.assertEqual("", patched_parameters["sqlDatabaseSkuName"]["value"])
             self.assertEqual(
                 staging_parameters_document(),
@@ -281,13 +284,49 @@ module control_sql 'control-sql/control-sql.module.bicep' = {
             self.assertEqual(10, params["sqlDatabaseSkuCapacity"]["value"])
             self.assertEqual(STAGING_MAX_SIZE_BYTES, params["sqlDatabaseMaxSizeBytes"]["value"])
 
-    def test_production_wrapper_build_keeps_gp_s_gen5_without_max_size(self) -> None:
+    def test_production_wrapper_build_emits_s0_and_250_gib_without_serverless(self) -> None:
         az = shutil.which("az")
         if az is None:
             self.skipTest("Azure CLI is not installed")
         with tempfile.TemporaryDirectory() as temporary:
             wrapper = Path(temporary) / "production-sql.bicep"
             compiled = Path(temporary) / "production-sql.json"
+            wrapper.write_text(
+                "targetScope = 'resourceGroup'\n"
+                f"module control_sql '{os.path.relpath(MODULE, wrapper.parent)}' = {{\n"
+                "  name: 'control-sql'\n"
+                "  params: {\n"
+                "    location: 'westeurope'\n"
+                "    sqlDatabaseSkuName: 'S0'\n"
+                "    sqlDatabaseSkuTier: 'Standard'\n"
+                "    sqlDatabaseSkuFamily: ''\n"
+                "    sqlDatabaseSkuCapacity: 10\n"
+                f"    sqlDatabaseMaxSizeBytes: '{STAGING_MAX_SIZE_BYTES}'\n"
+                "  }\n"
+                "}\n"
+            )
+            result = subprocess.run(
+                [az, "bicep", "build", "--file", str(wrapper), "--outfile", str(compiled)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            params = nested_module_parameters(json.loads(compiled.read_text()))
+            self.assertEqual("S0", params["sqlDatabaseSkuName"]["value"])
+            self.assertEqual("Standard", params["sqlDatabaseSkuTier"]["value"])
+            self.assertEqual("", params["sqlDatabaseSkuFamily"]["value"])
+            self.assertEqual(10, params["sqlDatabaseSkuCapacity"]["value"])
+            self.assertEqual(STAGING_MAX_SIZE_BYTES, params["sqlDatabaseMaxSizeBytes"]["value"])
+
+    def test_explicit_gp_s_gen5_wrapper_still_compiles_without_max_size(self) -> None:
+        az = shutil.which("az")
+        if az is None:
+            self.skipTest("Azure CLI is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            wrapper = Path(temporary) / "serverless-sql.bicep"
+            compiled = Path(temporary) / "serverless-sql.json"
             wrapper.write_text(
                 "targetScope = 'resourceGroup'\n"
                 f"module control_sql '{os.path.relpath(MODULE, wrapper.parent)}' = {{\n"
@@ -316,6 +355,34 @@ module control_sql 'control-sql/control-sql.module.bicep' = {
             self.assertEqual("Gen5", params["sqlDatabaseSkuFamily"]["value"])
             self.assertEqual(1, params["sqlDatabaseSkuCapacity"]["value"])
             self.assertEqual("0", params["sqlDatabaseMaxSizeBytes"]["value"])
+
+    def test_module_default_build_emits_s0_without_serverless_properties(self) -> None:
+        az = shutil.which("az")
+        if az is None:
+            self.skipTest("Azure CLI is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            compiled = Path(temporary) / "control-sql.json"
+            result = subprocess.run(
+                [az, "bicep", "build", "--file", str(MODULE), "--outfile", str(compiled)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            template = json.loads(compiled.read_text())
+            catalog = next(
+                resource
+                for resource in template["resources"]
+                if resource.get("type") == "Microsoft.Sql/servers/databases"
+            )
+            self.assertEqual("S0", catalog["sku"]["name"])
+            self.assertEqual("Standard", catalog["sku"]["tier"])
+            self.assertEqual(10, catalog["sku"]["capacity"])
+            self.assertNotIn("family", catalog["sku"])
+            self.assertEqual(268435456000, catalog["properties"]["maxSizeBytes"])
+            self.assertNotIn("autoPauseDelay", catalog["properties"])
+            self.assertNotIn("minCapacity", catalog["properties"])
 
 
 if __name__ == "__main__":

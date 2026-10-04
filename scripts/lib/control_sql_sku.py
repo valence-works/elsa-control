@@ -1,8 +1,9 @@
 """Control Catalog SQL SKU parameters for azd and the deploy helper.
 
-Staging/test stay on Standard S0 with a 250 GiB cap. Production keeps the
-existing GP_S_Gen5_1 serverless objective. Max size is a string so the 250 GiB
-byte count (268435456000) never passes through an ARM 32-bit int parameter.
+Staging/test and production Catalog databases use Standard S0 with a 250 GiB
+cap (the S0 included size). Pass GP_S_* only when an environment still needs
+serverless. Max size is a string so the 250 GiB byte count (268435456000)
+never passes through an ARM 32-bit int parameter.
 """
 
 from __future__ import annotations
@@ -16,22 +17,18 @@ STAGING_LOCATION = "westeurope"
 
 STAGING_ENVIRONMENT_NAMES = frozenset({"test", "valence-control-staging"})
 STAGING_MAX_SIZE_BYTES = "268435456000"
+STANDARD_S0_MAX_SIZE_BYTES = STAGING_MAX_SIZE_BYTES
 
-STAGING_SKU: dict[str, object] = {
+STANDARD_S0_SKU: dict[str, object] = {
     "sqlDatabaseSkuName": "S0",
     "sqlDatabaseSkuTier": "Standard",
     "sqlDatabaseSkuFamily": "",
     "sqlDatabaseSkuCapacity": 10,
-    "sqlDatabaseMaxSizeBytes": STAGING_MAX_SIZE_BYTES,
+    "sqlDatabaseMaxSizeBytes": STANDARD_S0_MAX_SIZE_BYTES,
 }
 
-PRODUCTION_SKU: dict[str, object] = {
-    "sqlDatabaseSkuName": "GP_S_Gen5",
-    "sqlDatabaseSkuTier": "GeneralPurpose",
-    "sqlDatabaseSkuFamily": "Gen5",
-    "sqlDatabaseSkuCapacity": 1,
-    "sqlDatabaseMaxSizeBytes": "0",
-}
+STAGING_SKU: dict[str, object] = dict(STANDARD_S0_SKU)
+PRODUCTION_SKU: dict[str, object] = dict(STANDARD_S0_SKU)
 
 
 def sku_parameters(environment_name: str) -> dict[str, object]:
@@ -70,7 +67,7 @@ def staging_parameters_document() -> dict[str, object]:
 
 
 def production_parameters_document() -> dict[str, object]:
-    """ARM parameter overlay that keeps production on GP_S_Gen5_1."""
+    """ARM parameter overlay that pins production to Standard S0 / 250 GiB."""
 
     return {
         "$schema": PARAMETER_SCHEMA,
