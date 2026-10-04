@@ -3,7 +3,8 @@
 # mailbox at resource-group scope. Staging never uses the production recipient.
 # The address is never printed. The Monitoring Metrics Publisher assignment is
 # never created here. A read-only preflight never blocks the what-if; it reports
-# present, missing, component-absent, or error. Create never writes Authorization.
+# present, missing, component-absent, or error. Create refuses state=error after
+# that preview and never writes Authorization.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -241,6 +242,11 @@ if [ "$WHAT_IF" = true ]; then
   exit 0
 fi
 
+if [ "$preflight_state" = "error" ]; then
+  echo "::error::Managed telemetry create refused because the role-assignment preflight could not be verified. Not treating this as a missing role assignment."
+  exit 1
+fi
+
 echo "Creating managed telemetry RecoveryRequired alerts for ${environment}."
 az deployment group create \
   --name "$deployment_name" \
@@ -255,9 +261,5 @@ case "$preflight_state" in
   missing|component-absent)
     echo "::warning::Managed telemetry create finished without a Monitoring Metrics Publisher assignment. Ingestion stays off until a human creates that one grant and a later preflight reports present."
     print_grant "$principal_id"
-    ;;
-  error)
-    echo "::error::Managed telemetry create finished, but the role-assignment preflight could not be verified. Not treating this as a missing role assignment."
-    exit 1
     ;;
 esac

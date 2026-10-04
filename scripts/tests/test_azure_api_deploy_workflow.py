@@ -1809,6 +1809,11 @@ printf '200'
         self.assertIn("Do not grant subscription-scope rights or Authorization write to the deploy identity.", source)
         self.assertIn("An RG-level or subscription-level grant does not satisfy this preflight.", source)
         self.assertIn("Not treating this as a missing role assignment.", source)
+        self.assertIn(
+            "Managed telemetry create refused because the role-assignment preflight could not be verified.",
+            source,
+        )
+        self.assertNotIn("Managed telemetry create finished, but the role-assignment preflight", source)
         self.assertIn("az resource show --ids", source)
         self.assertIn(
             "Staging RecoveryRequired alerts require PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT so the mailbox cannot silently reuse production.",
@@ -1850,6 +1855,10 @@ case "$*" in
     if [ "${AZ_IDENTITY_FAIL:-}" = "1" ]; then
       echo "identity-read-failed" >&2
       exit 3
+    fi
+    if [ "${AZ_IDENTITY_EMPTY:-}" = "1" ]; then
+      printf '\\n'
+      exit 0
     fi
     printf '%s\\n' "${AZ_PRINCIPAL_ID:?}"
     exit 0
@@ -2076,6 +2085,93 @@ esac
             self.assertNotIn("Monitoring Metrics Publisher is not assigned", role_list_output)
             self.assertIn("deployment group what-if", call_log.read_text())
             self.assertNotIn("deployment group create", call_log.read_text())
+
+            def assert_authority_read_error(
+                *args: str,
+                expected: str,
+                refuse_create: bool = False,
+                **extra: str,
+            ) -> None:
+                result = run_script(*args, **extra)
+                output = result.stdout + result.stderr
+                calls = call_log.read_text()
+                self.assertNotEqual(0, result.returncode, output)
+                self.assertIn(expected, output)
+                self.assertIn("Not treating this as a missing role assignment.", output)
+                self.assertNotIn("Monitoring Metrics Publisher is not assigned", output)
+                self.assertNotIn("staging-ops@example.test", output)
+                self.assertNotIn("prod-ops@example.test", output)
+                self.assertIn("deployment group what-if", calls)
+                self.assertNotIn("deployment group create", calls)
+                self.assertNotIn("Creating managed telemetry RecoveryRequired alerts", output)
+                self.assertNotIn("Managed telemetry create finished", output)
+                if refuse_create:
+                    self.assertIn(
+                        "Managed telemetry create refused because the role-assignment preflight could not be verified.",
+                        output,
+                    )
+                else:
+                    self.assertNotIn("Managed telemetry create refused", output)
+
+            preview_env = {
+                "TARGET_ENVIRONMENT": "production",
+                "PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT": "prod-ops@example.test",
+            }
+            create_env = dict(preview_env)
+            identity_error = "Could not read the Control API identity principal (az exit"
+            component_error = "Could not read the Insights component (az exit 4)"
+            role_list_error = "Could not list role assignments on the Insights component (az exit 3)"
+            parse_error = "Could not parse role assignments on the Insights component."
+
+            assert_authority_read_error(
+                TARGET_ENVIRONMENT="production",
+                PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT="prod-ops@example.test",
+                AZ_IDENTITY_FAIL="1",
+                expected=identity_error,
+                refuse_create=True,
+            )
+            assert_authority_read_error(
+                "--what-if",
+                expected=identity_error,
+                AZ_IDENTITY_EMPTY="1",
+                **preview_env,
+            )
+            assert_authority_read_error(
+                expected=identity_error,
+                refuse_create=True,
+                AZ_IDENTITY_EMPTY="1",
+                **create_env,
+            )
+            assert_authority_read_error(
+                "--what-if",
+                expected=component_error,
+                AZ_COMPONENT_FAIL="1",
+                **preview_env,
+            )
+            assert_authority_read_error(
+                expected=component_error,
+                refuse_create=True,
+                AZ_COMPONENT_FAIL="1",
+                **create_env,
+            )
+            assert_authority_read_error(
+                expected=role_list_error,
+                refuse_create=True,
+                AZ_ROLE_LIST_FAIL="1",
+                **create_env,
+            )
+            assignments_file.write_text("{not-json")
+            assert_authority_read_error(
+                "--what-if",
+                expected=parse_error,
+                **preview_env,
+            )
+            assert_authority_read_error(
+                expected=parse_error,
+                refuse_create=True,
+                **create_env,
+            )
+            assignments_file.write_text(matching_assignment)
 
             rg_scope = "/subscriptions/00000000-0000-0000-0000-000000000003/resourceGroups/rg-test"
             assignments_file.write_text(
