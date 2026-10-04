@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import base64
 import copy
-import hashlib
 import importlib.util
 import json
 import os
@@ -52,7 +51,6 @@ SCRIPT = ROOT / "scripts" / "staging-compat-fixture.sh"
 SCREENS = ROOT / "scripts" / "staging-compat-fixture-screens.mjs"
 HANDLER_FIXTURE = ROOT / "scripts" / "tests" / "fixtures" / "elsa-cloud-control-bff-handler.ts"
 APP_SHELL_FIXTURE = ROOT / "scripts" / "tests" / "fixtures" / "elsa-cloud-AppShell.tsx"
-APP_SHELL_HASH = ROOT / "scripts" / "tests" / "fixtures" / "elsa-cloud-AppShell.tsx.sha256"
 DASHBOARD_FIXTURE = ROOT / "scripts" / "tests" / "fixtures" / "elsa-cloud-Dashboard.tsx"
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 TELEMETRY_LINE = (
@@ -530,22 +528,30 @@ class StagingCompatWorkflowTests(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stderr + result.stdout)
             self.assertIn("playwright-ok", result.stdout)
 
+    def first_executable_statement(self, fn_source: str) -> str:
+        body = fn_source.split("{", 1)[1]
+        body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+        body = re.sub(r"//.*?$", "", body, flags=re.M)
+        match = re.search(r"\S.*", body)
+        return match.group(0) if match else ""
+
     def test_playwright_selectors_match_elsa_cloud_app_shell(self) -> None:
         fixture = APP_SHELL_FIXTURE.read_text()
-        digest = hashlib.sha256(fixture.encode("utf-8")).hexdigest()
-        pinned = APP_SHELL_HASH.read_text().split()[0]
-        self.assertEqual(pinned, digest)
+        self.assertIn("blob fa506059", fixture)
         self.assertIn("b8718da7", fixture)
-        self.assertIn("<NavLink", fixture)
+        self.assertIn("selector facts", fixture.lower())
         self.assertIn('aria-label="Open navigation"', fixture)
-        self.assertIn("aria-expanded={drawerOpen}", fixture)
-        self.assertIn('id="app-sidebar"', fixture)
-        self.assertIn('label: "Billing and plans"', fixture)
+        self.assertIn("#app-sidebar", fixture)
+        self.assertIn("Billing and plans", fixture)
         self.assertIn("Sign out", fixture)
-        self.assertIn('className="acct-name"', fixture)
-        self.assertIn('className="avatar"', fixture)
-        self.assertIn('event.key === "Escape"', fixture)
+        self.assertIn(".acct-name", fixture)
+        self.assertIn("aria-hidden", fixture)
+        self.assertNotIn("export function AppShell", fixture)
+        self.assertNotIn("<NavLink", fixture)
+        self.assertNotIn("persistGuideComplete", fixture)
+        self.assertNotIn("drawerOpen", fixture)
         self.assertNotIn('role="menuitem"', fixture)
+        self.assertFalse((APP_SHELL_FIXTURE.parent / "elsa-cloud-AppShell.tsx.sha256").exists())
         self.assertNotIn("openAccountMenu", self.screens)
         self.assertNotIn('getByRole("menuitem"', self.screens)
         self.assertIn('getByRole("link", { name: "Billing and plans", exact: true })', self.screens)
@@ -577,6 +583,10 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         )[0]
         self.assertIn("toggle.click()", open_fn)
         self.assertLess(open_fn.find("if (!viewport?.isMobile)"), open_fn.find("toggle.click()"))
+        self.assertTrue(
+            self.first_executable_statement(open_fn).startswith("if (!viewport?.isMobile)"),
+            "openWorkspaceNavigation must start with the mobile check; an early return would skip the drawer",
+        )
         for fn_name in ("assertArmed", "assertRestored"):
             body = self.screens.split(f"async function {fn_name}", 1)[1].split("async function ", 1)[0]
             self.assertLess(body.find("openWorkspaceNavigation"), body.find("assertSideSurfaces"))
@@ -584,6 +594,28 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         phase = self.screens.split("async function runPhase", 1)[1]
         self.assertRegex(phase, r"await assertArmed\(page, email, viewport\);\n\s+files.push\(await capture")
         self.assertRegex(phase, r"await assertRestored\(page, email, viewport\);\n\s+files.push\(await capture")
+        capture_fn = self.screens.split("async function capture", 1)[1].split("async function ", 1)[0]
+        self.assertIn(".blur()", capture_fn)
+        self.assertLess(capture_fn.find(".blur()"), capture_fn.find("screenshot"))
+
+    def test_restored_hosted_wait_is_scoped_to_main_and_excludes_sidebar_nav(self) -> None:
+        match = re.search(r"const RESTORED_HOSTED = /([^/]+)/([a-z]*)", self.screens)
+        self.assertIsNotNone(match, "RESTORED_HOSTED pattern is missing")
+        flags = re.I if "i" in match.group(2) else 0
+        pattern = re.compile(match.group(1), flags)
+        self.assertIsNone(pattern.search("Existing engines"))
+        self.assertIsNone(pattern.search("Managed engines"))
+        self.assertIsNone(pattern.search("Managed engine actions are temporarily paused"))
+        self.assertIsNotNone(pattern.search("No managed engines"))
+        self.assertNotIn("Existing engines", match.group(1))
+        self.assertNotIn("page.getByText(RESTORED_HOSTED).first()", self.screens)
+        self.assertIn('locator("#main").getByText(RESTORED_HOSTED)', self.screens)
+        assert_restored = self.screens.split("async function assertRestored", 1)[1].split(
+            "async function ", 1
+        )[0]
+        wait = re.search(r"await page\.(.*?RESTORED_HOSTED.*?waitFor)", assert_restored, re.S)
+        self.assertIsNotNone(wait)
+        self.assertIn('locator("#main")', wait.group(1))
 
     def test_telemetry_is_not_used_and_never_queries_azure(self) -> None:
         self.assertNotIn("Report armed-window telemetry", self.source)
