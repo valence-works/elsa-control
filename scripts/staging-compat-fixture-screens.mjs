@@ -22,6 +22,8 @@ const SIDE_SURFACES = "Billing, sign-out, and support remain available";
 // while armed.
 const RESTORED_HOSTED = /No managed engines|Confirm managed engine|Create your first engine|Confirm and create engine|Start Hosted|Hosted subscription|Engine details/i;
 const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i;
+const PII_HIDE_SELECTORS = [".acct-name", ".acct-mail", ".avatar", "#cloud-workspace", ".vh h1"];
+const PII_HIDE_STYLE = `${PII_HIDE_SELECTORS.join(", ")} { visibility: hidden !important; transition: none !important; animation: none !important; }`;
 
 if (process.argv.includes("--prove-load")) {
   if (!chromium || !devices) {
@@ -175,7 +177,59 @@ async function visitBillingAndSupport(page, origin) {
   }
 }
 
-async function capture(page, directory, stem, email) {
+async function collectIdentitySecrets(page, email) {
+  const trimmedEmail = (email ?? "").trim();
+  if (!trimmedEmail) {
+    throw new Error("Identity values were not collected before capture.");
+  }
+  const secrets = [trimmedEmail];
+  for (const selector of [".acct-name", ".acct-mail"]) {
+    const locators = page.locator(selector);
+    const count = await locators.count();
+    let found = false;
+    for (let index = 0; index < count; index += 1) {
+      const text = ((await locators.nth(index).textContent()) ?? "").trim();
+      if (text) {
+        secrets.push(text);
+        found = true;
+      }
+    }
+    if (!found) {
+      throw new Error("Identity values were not collected before capture.");
+    }
+  }
+  return secrets;
+}
+
+async function hidePiiInDom(page) {
+  await page.addStyleTag({ content: PII_HIDE_STYLE });
+}
+
+async function assertNoVisibleIdentity(page, secrets) {
+  const expected = Array.isArray(secrets) ? secrets.map((secret) => (secret ?? "").trim()).filter(Boolean) : [];
+  if (expected.length === 0) {
+    throw new Error("Identity values were not collected before capture.");
+  }
+  for (const secret of expected) {
+    for (const locator of await page.getByText(secret, { exact: false }).all()) {
+      if (await locator.isVisible()) {
+        throw new Error("A customer identity string was still visible at capture time.");
+      }
+    }
+  }
+}
+
+async function redactPiiText(page) {
+  await page.evaluate((selectors) => {
+    for (const selector of selectors) {
+      for (const element of document.querySelectorAll(selector)) {
+        element.textContent = "REDACTED";
+      }
+    }
+  }, PII_HIDE_SELECTORS);
+}
+
+async function capture(page, directory, stem, email, viewport) {
   const file = path.join(directory, `${stem}.png`);
   await page.evaluate(() => {
     const active = document.activeElement;
@@ -183,9 +237,13 @@ async function capture(page, directory, stem, email) {
       active.blur();
     }
   });
+  const secrets = await collectIdentitySecrets(page, email);
+  await hidePiiInDom(page);
+  await assertNoVisibleIdentity(page, secrets);
+  await redactPiiText(page);
   await page.screenshot({
     path: file,
-    fullPage: true,
+    fullPage: Boolean(viewport?.isMobile),
     mask: maskLocators(page, email),
     maskColor: "#6b7280"
   });
@@ -226,17 +284,17 @@ async function runPhase({ phase, origin, email, password, directory, statePath }
           await context.storageState({ path: statePath });
         }
         await assertArmed(page, email, viewport);
-        files.push(await capture(page, directory, `${viewport.name}-armed`, email));
+        files.push(await capture(page, directory, `${viewport.name}-armed`, email, viewport));
         await visitBillingAndSupport(page, origin);
         await page.goto(`${origin}/dashboard`, { waitUntil: "domcontentloaded" });
         await page.reload({ waitUntil: "domcontentloaded" });
         await assertArmed(page, email, viewport);
-        files.push(await capture(page, directory, `${viewport.name}-armed-reload`, email));
+        files.push(await capture(page, directory, `${viewport.name}-armed-reload`, email, viewport));
       } else if (phase === "restored") {
         await page.goto(`${origin}/dashboard`, { waitUntil: "domcontentloaded" });
         await page.reload({ waitUntil: "domcontentloaded" });
         await assertRestored(page, email, viewport);
-        files.push(await capture(page, directory, `${viewport.name}-restored-reload`, email));
+        files.push(await capture(page, directory, `${viewport.name}-restored-reload`, email, viewport));
       } else {
         throw new Error("SCREENSHOT_PHASE must be armed or restored.");
       }
@@ -266,7 +324,72 @@ async function main() {
     files.map((file) => path.basename(file)).join("\n") + "\n",
     "utf8"
   );
-  console.log(`Captured ${files.length} ${phase} screens. Email, display name, and org ids were masked.`);
+  console.log(`Captured ${files.length} ${phase} screens. Identity hidden in DOM and masked.`);
+}
+
+async function provePiiGuard() {
+  const visiblePage = {
+    getByText() {
+      return {
+        async all() {
+          return [{ async isVisible() { return true; } }];
+        }
+      };
+    }
+  };
+  const hiddenPage = {
+    getByText() {
+      return {
+        async all() {
+          return [{ async isVisible() { return false; } }];
+        }
+      };
+    }
+  };
+  let failed = false;
+  try {
+    await assertNoVisibleIdentity(visiblePage, ["compat-user@example.test"]);
+  } catch (error) {
+    failed = true;
+    if (/compat-user@example\.test/i.test(error.message) || /@example\.test/i.test(error.message)) {
+      throw new Error("The identity guard leaked a secret in its error.");
+    }
+    if (!/identity string was still visible/.test(error.message)) {
+      throw error;
+    }
+  }
+  if (!failed) {
+    throw new Error("The identity guard accepted a visible secret.");
+  }
+  await assertNoVisibleIdentity(hiddenPage, ["compat-user@example.test"]);
+  try {
+    await assertNoVisibleIdentity(hiddenPage, []);
+    throw new Error("empty-secrets-miss");
+  } catch (error) {
+    if (error.message === "empty-secrets-miss") {
+      throw error;
+    }
+    if (!/not collected/.test(error.message)) {
+      throw error;
+    }
+  }
+  for (const selector of [".acct-name", ".acct-mail", ".avatar", "#cloud-workspace", ".vh h1"]) {
+    if (!PII_HIDE_SELECTORS.includes(selector) || !PII_HIDE_STYLE.includes(selector)) {
+      throw new Error("The hide style is missing a target selector.");
+    }
+  }
+  if (!/visibility:\s*hidden/i.test(PII_HIDE_STYLE)) {
+    throw new Error("The hide style does not set visibility hidden.");
+  }
+  if (!/transition:\s*none/i.test(PII_HIDE_STYLE) || !/animation:\s*none/i.test(PII_HIDE_STYLE)) {
+    throw new Error("The hide style still allows transitions or animations.");
+  }
+  console.log("pii-guard-ok");
+}
+
+if (process.argv.includes("--prove-pii-guard")) {
+  await provePiiGuard();
+  process.exit(0);
 }
 
 await main();
