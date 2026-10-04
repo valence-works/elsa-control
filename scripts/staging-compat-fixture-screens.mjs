@@ -14,9 +14,13 @@ const ALLOWED_ORIGIN = "https://calm-sand-03964eb03.2.azurestaticapps.net";
 const UPDATE_BANNER = "Service update in progress.";
 const HOSTED_PAUSED = "Managed engine actions are temporarily paused";
 const SIDE_SURFACES = "Billing, sign-out, and support remain available";
-// Restored-only hosted copy. Do not match /Managed engine/ — that also
-// matches the armed paused text and would settle the wait too early.
-const RESTORED_HOSTED = /No managed engines|Confirm managed engine|Create your first engine|Confirm and create engine|Existing engines|Start Hosted/i;
+// Restored-only hosted copy inside #main. Do not match /Managed engine/ —
+// that also matches the armed paused text. Do not match "Existing engines"
+// — that is a sidebar NavLink and would settle (or hang on mobile) before
+// the dashboard content. "Hosted subscription" and "Engine details" cover
+// an entitled Owner and a user who already has an engine; neither renders
+// while armed.
+const RESTORED_HOSTED = /No managed engines|Confirm managed engine|Create your first engine|Confirm and create engine|Start Hosted|Hosted subscription|Engine details/i;
 const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i;
 
 if (process.argv.includes("--prove-load")) {
@@ -71,11 +75,50 @@ async function signIn(page, origin, email, password) {
 function maskLocators(page, email) {
   return [
     page.getByText(email, { exact: false }),
+    page.locator(".acct-name"),
+    page.locator(".acct-mail"),
+    page.locator(".avatar"),
+    page.locator("#cloud-workspace"),
+    page.locator(".vh h1").filter({ hasText: /^Welcome/ }),
     page.getByText(UUID_PATTERN)
   ];
 }
 
-async function assertArmed(page, email) {
+async function openWorkspaceNavigation(page, viewport) {
+  // AppShell (elsa-cloud src/components/app/AppShell.tsx @ b8718da7) has no
+  // account menu. The sidebar is a drawer on mobile, behind the
+  // "Open navigation" button.
+  if (!viewport?.isMobile) {
+    return;
+  }
+  const toggle = page.getByRole("button", { name: "Open navigation" });
+  await toggle.waitFor({ timeout: 45_000 });
+  if ((await toggle.getAttribute("aria-expanded")) !== "true") {
+    await toggle.click();
+  }
+  await page.locator("#app-sidebar").waitFor({ state: "visible", timeout: 45_000 });
+}
+
+async function closeWorkspaceNavigation(page, viewport) {
+  // Close the drawer before capture so masks land on settled layout and the
+  // PNG shows the dashboard, not the sliding 320px sidebar (app.css 0.25s).
+  if (!viewport?.isMobile) {
+    return;
+  }
+  const sidebar = page.locator("#app-sidebar");
+  if (await sidebar.isVisible()) {
+    await page.keyboard.press("Escape");
+    await sidebar.waitFor({ state: "hidden", timeout: 45_000 });
+  }
+}
+
+async function assertSideSurfaces(page) {
+  const sidebar = page.locator("#app-sidebar");
+  await sidebar.getByRole("link", { name: "Billing and plans", exact: true }).waitFor();
+  await sidebar.getByRole("button", { name: "Sign out", exact: true }).waitFor();
+}
+
+async function assertArmed(page, email, viewport) {
   await page.getByText(UPDATE_BANNER, { exact: false }).waitFor({ timeout: 45_000 });
   await page.getByText(HOSTED_PAUSED, { exact: false }).waitFor();
   await page.getByText(SIDE_SURFACES, { exact: false }).waitFor();
@@ -90,18 +133,18 @@ async function assertArmed(page, email) {
       }
     }
   }
-  await openAccountMenu(page, email);
-  await page.getByRole("menuitem", { name: "Billing and plans" }).waitFor();
-  await page.getByRole("menuitem", { name: "Sign out" }).waitFor();
+  await openWorkspaceNavigation(page, viewport);
+  await assertSideSurfaces(page);
   await page.getByRole("link", { name: /hello@valence.works/i }).first().waitFor();
+  await closeWorkspaceNavigation(page, viewport);
 }
 
-async function assertRestored(page, email) {
+async function assertRestored(page, email, viewport) {
   // Wait until the armed copy has cleared so the absence checks do not race
   // the compatibility poll. RESTORED_HOSTED must not match the paused text.
   await page.getByText(UPDATE_BANNER, { exact: true }).waitFor({ state: "hidden", timeout: 45_000 });
   await page.getByText(HOSTED_PAUSED, { exact: false }).waitFor({ state: "hidden", timeout: 45_000 });
-  await page.getByText(RESTORED_HOSTED).first().waitFor({ timeout: 45_000 });
+  await page.locator("#main").getByText(RESTORED_HOSTED).first().waitFor({ timeout: 45_000 });
   if (await page.getByText(UPDATE_BANNER, { exact: true }).count()) {
     throw new Error("The update-in-progress banner was still visible after restore.");
   }
@@ -119,27 +162,9 @@ async function assertRestored(page, email) {
       }
     }
   }
-  await openAccountMenu(page, email);
-  await page.getByRole("menuitem", { name: "Billing and plans" }).waitFor();
-  await page.getByRole("menuitem", { name: "Sign out" }).waitFor();
-}
-
-async function openAccountMenu(page, email) {
-  if (await page.getByRole("menu").count()) {
-    return;
-  }
-  const candidates = [
-    page.getByRole("button", { name: email, exact: false }),
-    page.getByRole("button", { name: /signed in|account|menu/i })
-  ];
-  for (const candidate of candidates) {
-    if (await candidate.count()) {
-      await candidate.first().click();
-      if (await page.getByRole("menu").count()) {
-        return;
-      }
-    }
-  }
+  await openWorkspaceNavigation(page, viewport);
+  await assertSideSurfaces(page);
+  await closeWorkspaceNavigation(page, viewport);
 }
 
 async function visitBillingAndSupport(page, origin) {
@@ -152,6 +177,12 @@ async function visitBillingAndSupport(page, origin) {
 
 async function capture(page, directory, stem, email) {
   const file = path.join(directory, `${stem}.png`);
+  await page.evaluate(() => {
+    const active = document.activeElement;
+    if (active && active !== document.body && typeof active.blur === "function") {
+      active.blur();
+    }
+  });
   await page.screenshot({
     path: file,
     fullPage: true,
@@ -183,6 +214,7 @@ async function runPhase({ phase, origin, email, password, directory, statePath }
         viewport: viewport.viewport,
         isMobile: Boolean(viewport.isMobile),
         hasTouch: Boolean(viewport.hasTouch),
+        reducedMotion: "reduce",
         ignoreHTTPSErrors: false,
         ...(reuseSession ? { storageState: statePath } : {})
       });
@@ -193,17 +225,17 @@ async function runPhase({ phase, origin, email, password, directory, statePath }
         if (statePath) {
           await context.storageState({ path: statePath });
         }
-        await assertArmed(page, email);
+        await assertArmed(page, email, viewport);
         files.push(await capture(page, directory, `${viewport.name}-armed`, email));
         await visitBillingAndSupport(page, origin);
         await page.goto(`${origin}/dashboard`, { waitUntil: "domcontentloaded" });
         await page.reload({ waitUntil: "domcontentloaded" });
-        await assertArmed(page, email);
+        await assertArmed(page, email, viewport);
         files.push(await capture(page, directory, `${viewport.name}-armed-reload`, email));
       } else if (phase === "restored") {
         await page.goto(`${origin}/dashboard`, { waitUntil: "domcontentloaded" });
         await page.reload({ waitUntil: "domcontentloaded" });
-        await assertRestored(page, email);
+        await assertRestored(page, email, viewport);
         files.push(await capture(page, directory, `${viewport.name}-restored-reload`, email));
       } else {
         throw new Error("SCREENSHOT_PHASE must be armed or restored.");
@@ -234,7 +266,7 @@ async function main() {
     files.map((file) => path.basename(file)).join("\n") + "\n",
     "utf8"
   );
-  console.log(`Captured ${files.length} ${phase} screens. Email and org ids were masked.`);
+  console.log(`Captured ${files.length} ${phase} screens. Email, display name, and org ids were masked.`);
 }
 
 await main();
