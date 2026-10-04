@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -50,7 +51,9 @@ WORKFLOW = ROOT / ".github" / "workflows" / "staging-compat-fixture.yml"
 SCRIPT = ROOT / "scripts" / "staging-compat-fixture.sh"
 SCREENS = ROOT / "scripts" / "staging-compat-fixture-screens.mjs"
 HANDLER_FIXTURE = ROOT / "scripts" / "tests" / "fixtures" / "elsa-cloud-control-bff-handler.ts"
-APP_SHELL_FIXTURE = ROOT / "scripts" / "tests" / "fixtures" / "elsa-cloud-app-shell.tsx"
+APP_SHELL_FIXTURE = ROOT / "scripts" / "tests" / "fixtures" / "elsa-cloud-AppShell.tsx"
+APP_SHELL_HASH = ROOT / "scripts" / "tests" / "fixtures" / "elsa-cloud-AppShell.tsx.sha256"
+DASHBOARD_FIXTURE = ROOT / "scripts" / "tests" / "fixtures" / "elsa-cloud-Dashboard.tsx"
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 TELEMETRY_LINE = (
     "telemetry: not used (Architect ruling); no-forward evidence = "
@@ -529,12 +532,19 @@ class StagingCompatWorkflowTests(unittest.TestCase):
 
     def test_playwright_selectors_match_elsa_cloud_app_shell(self) -> None:
         fixture = APP_SHELL_FIXTURE.read_text()
+        digest = hashlib.sha256(fixture.encode("utf-8")).hexdigest()
+        pinned = APP_SHELL_HASH.read_text().split()[0]
+        self.assertEqual(pinned, digest)
         self.assertIn("b8718da7", fixture)
+        self.assertIn("<NavLink", fixture)
         self.assertIn('aria-label="Open navigation"', fixture)
+        self.assertIn("aria-expanded={drawerOpen}", fixture)
         self.assertIn('id="app-sidebar"', fixture)
-        self.assertIn("Billing and plans", fixture)
+        self.assertIn('label: "Billing and plans"', fixture)
         self.assertIn("Sign out", fixture)
         self.assertIn('className="acct-name"', fixture)
+        self.assertIn('className="avatar"', fixture)
+        self.assertIn('event.key === "Escape"', fixture)
         self.assertNotIn('role="menuitem"', fixture)
         self.assertNotIn("openAccountMenu", self.screens)
         self.assertNotIn('getByRole("menuitem"', self.screens)
@@ -543,8 +553,37 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn('getByRole("button", { name: "Open navigation" })', self.screens)
         self.assertIn('locator("#app-sidebar")', self.screens)
         self.assertIn('locator(".acct-name")', self.screens)
+        self.assertIn('locator(".avatar")', self.screens)
+        self.assertIn('locator("#cloud-workspace")', self.screens)
+        self.assertIn('locator(".vh h1").filter({ hasText: /^Welcome/ })', self.screens)
         self.assertIn("openWorkspaceNavigation", self.screens)
+        self.assertIn("closeWorkspaceNavigation", self.screens)
+        self.assertIn('press("Escape")', self.screens)
+        self.assertIn('state: "hidden"', self.screens)
+        self.assertIn('reducedMotion: "reduce"', self.screens)
         self.assertIn("viewport?.isMobile", self.screens)
+        dashboard = DASHBOARD_FIXTURE.read_text()
+        self.assertIn('className="vh"', dashboard)
+        self.assertIn("Welcome to Elsa Cloud", dashboard)
+        self.assertIn('id="cloud-workspace"', dashboard)
+        close_fn = self.screens.split("async function closeWorkspaceNavigation", 1)[1].split(
+            "async function ", 1
+        )[0]
+        self.assertIn('press("Escape")', close_fn)
+        self.assertIn('state: "hidden"', close_fn)
+        self.assertLess(close_fn.find("isVisible"), close_fn.find('press("Escape")'))
+        open_fn = self.screens.split("async function openWorkspaceNavigation", 1)[1].split(
+            "async function ", 1
+        )[0]
+        self.assertIn("toggle.click()", open_fn)
+        self.assertLess(open_fn.find("if (!viewport?.isMobile)"), open_fn.find("toggle.click()"))
+        for fn_name in ("assertArmed", "assertRestored"):
+            body = self.screens.split(f"async function {fn_name}", 1)[1].split("async function ", 1)[0]
+            self.assertLess(body.find("openWorkspaceNavigation"), body.find("assertSideSurfaces"))
+            self.assertLess(body.find("assertSideSurfaces"), body.find("closeWorkspaceNavigation"))
+        phase = self.screens.split("async function runPhase", 1)[1]
+        self.assertRegex(phase, r"await assertArmed\(page, email, viewport\);\n\s+files.push\(await capture")
+        self.assertRegex(phase, r"await assertRestored\(page, email, viewport\);\n\s+files.push\(await capture")
 
     def test_telemetry_is_not_used_and_never_queries_azure(self) -> None:
         self.assertNotIn("Report armed-window telemetry", self.source)

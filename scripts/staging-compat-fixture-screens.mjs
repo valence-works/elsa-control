@@ -73,13 +73,17 @@ function maskLocators(page, email) {
     page.getByText(email, { exact: false }),
     page.locator(".acct-name"),
     page.locator(".acct-mail"),
+    page.locator(".avatar"),
+    page.locator("#cloud-workspace"),
+    page.locator(".vh h1").filter({ hasText: /^Welcome/ }),
     page.getByText(UUID_PATTERN)
   ];
 }
 
 async function openWorkspaceNavigation(page, viewport) {
-  // AppShell (elsa-cloud main b8718da7) has no account menu. The sidebar is
-  // a drawer on mobile, behind the "Open navigation" button.
+  // AppShell (elsa-cloud src/components/app/AppShell.tsx @ b8718da7) has no
+  // account menu. The sidebar is a drawer on mobile, behind the
+  // "Open navigation" button.
   if (!viewport?.isMobile) {
     return;
   }
@@ -89,6 +93,19 @@ async function openWorkspaceNavigation(page, viewport) {
     await toggle.click();
   }
   await page.locator("#app-sidebar").waitFor({ state: "visible", timeout: 45_000 });
+}
+
+async function closeWorkspaceNavigation(page, viewport) {
+  // Close the drawer before capture so masks land on settled layout and the
+  // PNG shows the dashboard, not the sliding 320px sidebar (app.css 0.25s).
+  if (!viewport?.isMobile) {
+    return;
+  }
+  const sidebar = page.locator("#app-sidebar");
+  if (await sidebar.isVisible()) {
+    await page.keyboard.press("Escape");
+    await sidebar.waitFor({ state: "hidden", timeout: 45_000 });
+  }
 }
 
 async function assertSideSurfaces(page) {
@@ -115,6 +132,7 @@ async function assertArmed(page, email, viewport) {
   await openWorkspaceNavigation(page, viewport);
   await assertSideSurfaces(page);
   await page.getByRole("link", { name: /hello@valence.works/i }).first().waitFor();
+  await closeWorkspaceNavigation(page, viewport);
 }
 
 async function assertRestored(page, email, viewport) {
@@ -142,6 +160,7 @@ async function assertRestored(page, email, viewport) {
   }
   await openWorkspaceNavigation(page, viewport);
   await assertSideSurfaces(page);
+  await closeWorkspaceNavigation(page, viewport);
 }
 
 async function visitBillingAndSupport(page, origin) {
@@ -185,6 +204,7 @@ async function runPhase({ phase, origin, email, password, directory, statePath }
         viewport: viewport.viewport,
         isMobile: Boolean(viewport.isMobile),
         hasTouch: Boolean(viewport.hasTouch),
+        reducedMotion: "reduce",
         ignoreHTTPSErrors: false,
         ...(reuseSession ? { storageState: statePath } : {})
       });
