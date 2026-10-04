@@ -554,8 +554,10 @@ Required operator steps before the first live email (Sipke):
 4. After Code Review of that what-if, dispatch a separate run with
    `telemetry_action: create` and `confirm_environment: test`. Create
    deploys the workspace, Insights component, action group, and alert
-   without writing Authorization. If the component was absent or the
-   assignment is missing, the run prints the exact grant to make:
+   without writing Authorization. If the preflight reports `error`, create
+   is refused after the read-only what-if and no deployment create runs.
+   If the component was absent or the assignment is missing, the run prints
+   the exact grant to make:
    principal (API identity object id), role `Monitoring Metrics Publisher`
    (`3913510d-42f4-4e42-8a64-420c390055eb`), and the Insights component
    scope. An RG-level or subscription-level grant does not satisfy the
