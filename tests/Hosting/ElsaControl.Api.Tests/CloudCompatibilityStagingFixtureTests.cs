@@ -208,6 +208,32 @@ public sealed class CloudCompatibilityStagingFixtureTests
     }
 
     [Fact]
+    public async Task Health_omits_the_fixture_when_unset()
+    {
+        await using var app = CreateBffApplication();
+        using var response = await app.CreateClient().GetAsync("/health");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal("ok", payload.RootElement.GetProperty("status").GetString());
+        Assert.Equal(JsonValueKind.Null, payload.RootElement.GetProperty("compatibilityFixture").ValueKind);
+    }
+
+    [Theory]
+    [InlineData(CloudCompatibilityStagingFixture.MissingCapability)]
+    [InlineData(CloudCompatibilityStagingFixture.OlderContract)]
+    public async Task Health_advertises_the_known_fixture_the_process_is_serving(string mode)
+    {
+        await using var app = CreateBffApplication(Fixture(mode));
+        using var response = await app.CreateClient().GetAsync("/health");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal("ok", payload.RootElement.GetProperty("status").GetString());
+        Assert.Equal(mode, payload.RootElement.GetProperty("compatibilityFixture").GetString());
+    }
+
+    [Fact]
     public void Test_environment_is_the_deploy_pipeline_expected_mode()
     {
         Assert.True(CloudCompatibilityStagingFixtureValidator.IsTestEnvironment(

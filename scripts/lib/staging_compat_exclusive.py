@@ -13,6 +13,7 @@ from typing import Any, Iterable, Mapping
 FREEZE_MARKER = re.compile(r"^staging-freeze:\s+(?P<state>on|off)\b", re.IGNORECASE)
 QA_WINDOW_MARKER = re.compile(r"^qa-window:\s+(?P<state>open|closed)\b", re.IGNORECASE)
 PROVE_NAME = re.compile(r"prove", re.IGNORECASE)
+FIXTURE_WORKFLOW = "staging-compat-fixture.yml"
 
 
 def first_nonempty_line(body: str) -> str:
@@ -57,11 +58,16 @@ def conflicting_runs(
             continue
         environment = str(run.get("environment") or "").strip().lower()
         name = str(run.get("name") or "")
-        path = str(run.get("path") or "")
+        path = str(run.get("path") or "").replace("\\", "/")
         status = str(run.get("status") or "").strip().lower()
         if status not in {"in_progress", "queued", "waiting", "pending", "requested"}:
             continue
+        # environment=test is set only for runs mapped from the Deployments API.
+        # Workflow runs have no environment field; never infer it from list-runs.
         if environment == "test":
+            conflicts.append(run_id)
+            continue
+        if path.endswith(FIXTURE_WORKFLOW) or path.endswith("/" + FIXTURE_WORKFLOW):
             conflicts.append(run_id)
             continue
         if PROVE_NAME.search(name) or PROVE_NAME.search(path):

@@ -141,9 +141,35 @@ default_host_name() {
   printf '%s\n' "$host"
 }
 
+known_health_fixture() {
+  case "${1:-}" in
+    ""|missing-capability|older-contract) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Digest is unchanged when only CloudCompatibility__StagingFixture is written.
+# /health.compatibilityFixture is the public signal that the recycled process
+# is actually serving the armed or restored revision. Never echo the value.
+health_fixture_signal() {
+  local response_file="$1"
+  local raw
+  raw="$(jq -r 'if has("compatibilityFixture") and (.compatibilityFixture | type == "string") then .compatibilityFixture else empty end' "$response_file")"
+  if known_health_fixture "$raw"; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+  printf '%s\n' "__unrecognized__"
+}
+
 wait_until_healthy() {
   local expected_digest="$1"
+  local expected_fixture="${2-}"
   local host health_url response_file http_status stable
+  if ! known_health_fixture "$expected_fixture"; then
+    echo "::error::The expected compatibility fixture signal is not recognized."
+    return 1
+  fi
   host="$(default_host_name)"
   health_url="https://${host}/health"
   response_file="$(mktemp)"
@@ -152,18 +178,23 @@ wait_until_healthy() {
   for attempt in $(seq 1 30); do
     if http_status="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' --max-time 10 "$health_url")"; then
       if [ "$http_status" = "200" ] && jq -e '.status == "ok"' "$response_file" >/dev/null 2>&1; then
-        local live_digest
+        local live_digest live_fixture
         live_digest="$(serving_image_digest)"
         if [ "$live_digest" != "$expected_digest" ]; then
           rm -f "$response_file"
           echo "::error::The serving image digest changed; the fixture must keep the same image."
           return 1
         fi
-        stable=$((stable + 1))
-        if [ "$stable" -ge 2 ]; then
-          rm -f "$response_file"
-          echo "Control is healthy on the captured image digest."
-          return 0
+        live_fixture="$(health_fixture_signal "$response_file")"
+        if [ "$live_fixture" = "$expected_fixture" ]; then
+          stable=$((stable + 1))
+          if [ "$stable" -ge 2 ]; then
+            rm -f "$response_file"
+            echo "Control is healthy on the captured image digest and is serving the expected revision."
+            return 0
+          fi
+        else
+          stable=0
         fi
       else
         stable=0
@@ -241,6 +272,45 @@ fetch_issue_state() {
   gh api "repos/${repo}/issues/${issue}" --jq '.state'
 }
 
+extract_run_id_from_url() {
+  local url="$1"
+  if [[ "$url" =~ /actions/runs/([0-9]+) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
+# The list-runs API has no environment filter and workflow runs have no
+# environment field. Resolve active GitHub environment `test` deployments
+# separately and map them to run IDs. Fail closed when a mapping is missing.
+collect_test_environment_run_ids() {
+  local repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required.}"
+  local deployment_id state url run_id count
+  local ids='[]'
+  count=0
+  while IFS= read -r deployment_id && [ "$count" -lt 20 ]; do
+    [[ "$deployment_id" =~ ^[0-9]+$ ]] || continue
+    count=$((count + 1))
+    local statuses
+    statuses="$(gh api "repos/${repo}/deployments/${deployment_id}/statuses?per_page=1")"
+    state="$(printf '%s\n' "$statuses" | jq -r '.[0].state // empty' | tr '[:upper:]' '[:lower:]')"
+    case "$state" in
+      in_progress|queued|pending|waiting) ;;
+      *) continue ;;
+    esac
+    url="$(printf '%s\n' "$statuses" | jq -r '.[0].log_url // .[0].target_url // empty')"
+    if ! run_id="$(extract_run_id_from_url "$url")"; then
+      echo "::error::A test-environment deployment is active but could not be mapped to a workflow run."
+      return 1
+    fi
+    ids="$(jq -cn --argjson existing "$ids" --arg id "$run_id" '$existing + [$id]')"
+  done < <(gh api --paginate \
+    "repos/${repo}/deployments?environment=test&per_page=50" \
+    --jq '.[] | .id')
+  printf '%s\n' "$ids"
+}
+
 collect_runs() {
   local repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required.}"
   local status page_query
@@ -248,18 +318,32 @@ collect_runs() {
   for status in in_progress queued waiting pending requested; do
     page_query="$(gh api --paginate \
       "repos/${repo}/actions/runs?status=${status}&per_page=50" \
-      --jq '.workflow_runs[] | {id, name, path, status, environment: ""}' \
+      --jq '.workflow_runs[] | {id, name, path, status}' \
       | jq -s '.')"
     combined="$(jq -cn --argjson existing "$combined" --argjson page "$page_query" '$existing + $page')"
   done
-  local test_status test_runs
-  for test_status in in_progress queued waiting pending requested; do
-    test_runs="$(gh api --paginate \
-      "repos/${repo}/actions/runs?environment=test&status=${test_status}&per_page=50" \
-      --jq '.workflow_runs[] | {id, name, path, status, environment: "test"}' \
-      | jq -s '.')"
-    combined="$(jq -cn --argjson existing "$combined" --argjson page "$test_runs" '$existing + $page')"
-  done
+  local test_ids
+  test_ids="$(collect_test_environment_run_ids)"
+  combined="$(jq -cn --argjson runs "$combined" --argjson test_ids "$test_ids" '
+    ($test_ids | map(tostring) | unique) as $ids
+    | ($runs | unique_by(.id)
+      | map(
+          (.id | tostring) as $run_id
+          | if ($ids | index($run_id)) != null then
+              . + {environment: "test"}
+            else
+              .
+            end
+        )) as $annotated
+    | ($ids - ($annotated | map(.id | tostring))) as $missing
+    | $annotated + ($missing | map({
+        id: .,
+        name: "",
+        path: "",
+        status: "in_progress",
+        environment: "test"
+      }))
+  ')"
   printf '%s\n' "$combined"
 }
 
@@ -327,7 +411,7 @@ arm() {
     echo "::error::The compatibility fixture setting was not created."
     return 1
   fi
-  wait_until_healthy "$expected_digest"
+  wait_until_healthy "$expected_digest" "$FIXTURE_MODE"
   echo "Armed the compatibility fixture on a new revision of the same image digest."
 }
 
@@ -352,7 +436,7 @@ restore() {
     echo "::error::The compatibility fixture setting is still present after restore."
     return 1
   fi
-  wait_until_healthy "$expected_digest"
+  wait_until_healthy "$expected_digest" ""
   local digest revision names_file
   digest="$(serving_image_digest)"
   revision="$(serving_image_reference)"

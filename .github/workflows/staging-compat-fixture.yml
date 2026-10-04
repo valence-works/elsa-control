@@ -25,6 +25,7 @@ jobs:
     permissions:
       actions: read
       contents: read
+      deployments: read
       id-token: write
       issues: read
     env:

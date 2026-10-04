@@ -740,11 +740,14 @@ app.UseRateLimiter();
 app.UseAuthorization();
 
 app.MapOpenApi();
-app.MapGet("/health", (IConfiguration configuration) =>
+app.MapGet("/health", (IConfiguration configuration, IOptions<CloudCompatibilityOptions> compatibility) =>
 {
     var buildNumber = SafeHealthIdentifier(configuration["Application:BuildNumber"]);
     var imageId = SafeHealthIdentifier(configuration["ELSA_CONTROL_IMAGE_ID"]);
-    return Results.Ok(new { status = "ok", buildNumber, imageId });
+    // Known fixture modes only. Unset/unknown stay null so callers can tell
+    // whether the recycled process is actually serving the armed revision.
+    var compatibilityFixture = compatibility.Value.NormalizedStagingFixture;
+    return Results.Ok(new { status = "ok", buildNumber, imageId, compatibilityFixture });
 });
 app.MapGet("/", () => "Elsa Control API");
 if (adminConsoleDevelopmentUrl is not null)
