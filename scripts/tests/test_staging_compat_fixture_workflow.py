@@ -640,10 +640,16 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         style = re.search(r"const PII_HIDE_STYLE = (`[^`]+`|[^;]+);", source)
         self.assertIsNotNone(style, "PII_HIDE_STYLE is missing")
         self.assertIn("visibility: hidden", source)
+        self.assertIn("transition: none", source)
+        self.assertIn("animation: none", source)
         self.assertIn("addStyleTag", source)
         capture_fn = self.capture_fn(source)
         self.assertIn("hidePiiInDom", capture_fn)
         self.assertIn("assertNoVisibleIdentity", capture_fn)
+        self.assertIn("const secrets = await collectIdentitySecrets(page, email);", capture_fn)
+        self.assertIn("assertNoVisibleIdentity(page, secrets)", capture_fn)
+        self.assertIn("textContent()", source)
+        self.assertNotIn("innerText()", source)
         self.assertLess(capture_fn.find("hidePiiInDom"), capture_fn.find("screenshot"))
         self.assertLess(capture_fn.find("assertNoVisibleIdentity"), capture_fn.find("screenshot"))
 
@@ -681,6 +687,8 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr + result.stdout)
         self.assertIn("pii-guard-ok", result.stdout)
         self.assertNotIn("compat-user@example.test", result.stdout + result.stderr)
+        self.assertIn("Identity hidden in DOM and masked", self.screens)
+        self.assertNotIn("were masked", self.screens)
 
     def test_pii_capture_contracts_fail_under_mutation(self) -> None:
         missing_selector = self.screens.replace('".avatar", ', "")
@@ -707,6 +715,22 @@ class StagingCompatWorkflowTests(unittest.TestCase):
             'throw new Error("visible: " + secrets.join(","));',
         )
         result = self.run_screens_prove(leaky, "--prove-pii-guard")
+        self.assertNotEqual(0, result.returncode)
+        self.assertNotIn("compat-user@example.test", result.stdout + result.stderr)
+        no_transition = self.screens.replace("transition: none !important; ", "")
+        with self.assertRaises(AssertionError):
+            self.assert_pii_hide_style_covers_targets(no_transition)
+        empty_secrets = self.screens.replace(
+            "const secrets = await collectIdentitySecrets(page, email);",
+            "const secrets = [];",
+        )
+        with self.assertRaises(AssertionError):
+            self.assert_pii_hide_style_covers_targets(empty_secrets)
+        vacuous_guard = self.screens.replace(
+            "if (expected.length === 0) {\n    throw new Error(\"Identity values were not collected before capture.\");\n  }",
+            "",
+        )
+        result = self.run_screens_prove(vacuous_guard, "--prove-pii-guard")
         self.assertNotEqual(0, result.returncode)
         self.assertNotIn("compat-user@example.test", result.stdout + result.stderr)
 
