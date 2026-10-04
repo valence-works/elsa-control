@@ -199,26 +199,15 @@ write_summary() {
   fi
   {
     printf '## %s\n\n' "$title"
-    printf -- '- Image digest: `%s`\n' "$digest"
-    printf -- '- Revision: `%s`\n' "$revision"
+    printf -- '- Image digest: %s\n' "$digest"
+    printf -- '- Revision: %s\n' "$revision"
     printf -- '- Env var names:\n'
     while IFS= read -r name; do
       [ -z "$name" ] && continue
-      printf -- '  - `%s`\n' "$name"
+      printf -- '  - %s\n' "$name"
     done < "$names_file"
     printf '\n'
   } >> "$GITHUB_STEP_SUMMARY"
-}
-
-capture_state() {
-  local digest revision names_file
-  digest="$(serving_image_digest)"
-  revision="$(serving_image_reference)"
-  names_file="$(mktemp)"
-  list_setting_names > "$names_file"
-  printf '%s\n' "$digest"
-  printf '%s\n' "$revision"
-  printf '%s\n' "$names_file"
 }
 
 write_state_outputs() {
