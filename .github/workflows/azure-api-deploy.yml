@@ -989,32 +989,64 @@ jobs:
             fi
             billing_restore_records="$(printf '%s' "$billing_restore_records" | jq -c 'if type == "array" then . elif . == null then [] else [.] end')"
             billing_mode_pattern='^(test|live|staging|production)$'
-            billing_enabled_pattern='^(true|false)$'
+
+            # Enablement flags use the same case-insensitive Boolean semantics
+            # as scripts/production_stripe_reconcile.py (.strip().lower()).
+            # Capture still publishes the exact original string.
+            trim_billing_setting() {
+              local raw="$1"
+              raw="${raw#"${raw%%[![:space:]]*}"}"
+              raw="${raw%"${raw##*[![:space:]]}"}"
+              printf '%s' "$raw"
+            }
+            billing_enabled_normalized() {
+              local trimmed
+              trimmed="$(trim_billing_setting "$1")"
+              printf '%s' "${trimmed,,}"
+            }
+            is_billing_enabled_flag() {
+              local normalized
+              normalized="$(billing_enabled_normalized "$1")"
+              [ "$normalized" = "true" ] || [ "$normalized" = "false" ]
+            }
 
             extract_billing_restore_record() {
               printf '%s' "$billing_restore_records" | jq -c --arg name "$1" \
                 '[.[] | select(.name == $name)] | if length == 0 then null else .[0] end'
             }
 
-            billing_restore_value=""
-            publish_billing_restore_output() {
-              local prefix="$1"
-              local setting_name="$2"
-              local record="$3"
-              local pattern="$4"
-              local present="false"
-              local value=""
-              local slot_setting="false"
+            inspect_billing_restore_record() {
+              local record="$1"
+              billing_restore_present="false"
               billing_restore_value=""
+              billing_restore_slot="false"
               if [ -n "$record" ] && [ "$record" != "null" ]; then
-                value="$(printf '%s' "$record" | jq -r '.value // empty')"
-                slot_setting="$(printf '%s' "$record" | jq -r 'if .slotSetting == true then "true" else "false" end')"
-                if [[ ! "$value" =~ $pattern ]]; then
+                billing_restore_value="$(printf '%s' "$record" | jq -r '.value // empty')"
+                billing_restore_slot="$(printf '%s' "$record" | jq -r 'if .slotSetting == true then "true" else "false" end')"
+                billing_restore_present="true"
+              fi
+            }
+
+            require_billing_restore_format() {
+              local setting_name="$1"
+              local value_kind="$2"
+              local value="$3"
+              if [ "$value_kind" = "enabled" ]; then
+                if ! is_billing_enabled_flag "$value"; then
                   echo "::error::The captured ${setting_name} has an unexpected or unsafe format."
                   exit 1
                 fi
-                present="true"
+              elif [[ ! "$value" =~ $billing_mode_pattern ]]; then
+                echo "::error::The captured ${setting_name} has an unexpected or unsafe format."
+                exit 1
               fi
+            }
+
+            publish_billing_restore_output() {
+              local prefix="$1"
+              local present="$2"
+              local value="$3"
+              local slot_setting="$4"
               if [ -n "${GITHUB_OUTPUT:-}" ]; then
                 echo "${prefix}_present=$present" >> "$GITHUB_OUTPUT"
                 if [ "$present" = "true" ]; then
@@ -1022,26 +1054,64 @@ jobs:
                   echo "${prefix}_slot_setting=$slot_setting" >> "$GITHUB_OUTPUT"
                 fi
               fi
-              billing_restore_value="$value"
             }
 
+            # Validate the full restore set before publishing any capture
+            # output so one invalid flag cannot leave a partial prior-state
+            # record for rollback.
             billing_expected_mode_record="$(extract_billing_restore_record "Billing__Stripe__ExpectedMode")"
+            billing_stripe_enabled_record="$(extract_billing_restore_record "Billing__Stripe__Enabled")"
+            billing_lifecycle_enabled_record="$(extract_billing_restore_record "Billing__Lifecycle__Enabled")"
+
+            inspect_billing_restore_record "$billing_expected_mode_record"
+            billing_expected_mode_present="$billing_restore_present"
+            billing_expected_mode_value="$billing_restore_value"
+            billing_expected_mode_slot="$billing_restore_slot"
+            if [ "$billing_expected_mode_present" = "true" ]; then
+              require_billing_restore_format \
+                "Billing__Stripe__ExpectedMode" \
+                "mode" \
+                "$billing_expected_mode_value"
+            fi
+
+            inspect_billing_restore_record "$billing_stripe_enabled_record"
+            billing_stripe_enabled_present="$billing_restore_present"
+            billing_stripe_enabled_value="$billing_restore_value"
+            billing_stripe_enabled_slot="$billing_restore_slot"
+            if [ "$billing_stripe_enabled_present" = "true" ]; then
+              require_billing_restore_format \
+                "Billing__Stripe__Enabled" \
+                "enabled" \
+                "$billing_stripe_enabled_value"
+            fi
+
+            inspect_billing_restore_record "$billing_lifecycle_enabled_record"
+            billing_lifecycle_enabled_present="$billing_restore_present"
+            billing_lifecycle_enabled_value="$billing_restore_value"
+            billing_lifecycle_enabled_slot="$billing_restore_slot"
+            if [ "$billing_lifecycle_enabled_present" = "true" ]; then
+              require_billing_restore_format \
+                "Billing__Lifecycle__Enabled" \
+                "enabled" \
+                "$billing_lifecycle_enabled_value"
+            fi
+
             publish_billing_restore_output \
               "billing_expected_mode" \
-              "Billing__Stripe__ExpectedMode" \
-              "$billing_expected_mode_record" \
-              "$billing_mode_pattern"
-            current_expected_mode="$billing_restore_value"
+              "$billing_expected_mode_present" \
+              "$billing_expected_mode_value" \
+              "$billing_expected_mode_slot"
             publish_billing_restore_output \
               "billing_stripe_enabled" \
-              "Billing__Stripe__Enabled" \
-              "$(extract_billing_restore_record "Billing__Stripe__Enabled")" \
-              "$billing_enabled_pattern"
+              "$billing_stripe_enabled_present" \
+              "$billing_stripe_enabled_value" \
+              "$billing_stripe_enabled_slot"
             publish_billing_restore_output \
               "billing_lifecycle_enabled" \
-              "Billing__Lifecycle__Enabled" \
-              "$(extract_billing_restore_record "Billing__Lifecycle__Enabled")" \
-              "$billing_enabled_pattern"
+              "$billing_lifecycle_enabled_present" \
+              "$billing_lifecycle_enabled_value" \
+              "$billing_lifecycle_enabled_slot"
+            current_expected_mode="$billing_expected_mode_value"
             if [ "$current_expected_mode" = "$BILLING_EXPECTED_MODE" ]; then
               return 0
             fi
@@ -1490,16 +1560,46 @@ jobs:
           # enabled without a valid mode. Secret values stay out of outputs.
           if [ "$DEPLOY_MODE" = "app" ] || [ "$DEPLOY_MODE" = "promote" ]; then
             billing_mode_pattern='^(test|live|staging|production)$'
-            billing_enabled_pattern='^(true|false)$'
+            # Enablement flags use the same case-insensitive Boolean semantics
+            # as scripts/production_stripe_reconcile.py (.strip().lower()).
+            # Restore writes the exact original captured string.
+            trim_billing_setting() {
+              local raw="$1"
+              raw="${raw#"${raw%%[![:space:]]*}"}"
+              raw="${raw%"${raw##*[![:space:]]}"}"
+              printf '%s' "$raw"
+            }
+            billing_enabled_normalized() {
+              local trimmed
+              trimmed="$(trim_billing_setting "$1")"
+              printf '%s' "${trimmed,,}"
+            }
+            is_billing_enabled_flag() {
+              local normalized
+              normalized="$(billing_enabled_normalized "$1")"
+              [ "$normalized" = "true" ] || [ "$normalized" = "false" ]
+            }
+            billing_flag_is_true() {
+              [ "$(billing_enabled_normalized "${1:-}")" = "true" ]
+            }
+            billing_restore_value_ok() {
+              local value_kind="$1"
+              local candidate="$2"
+              if [ "$value_kind" = "enabled" ]; then
+                is_billing_enabled_flag "$candidate"
+              else
+                [[ "$candidate" =~ $billing_mode_pattern ]]
+              fi
+            }
             restore_captured_appsetting() {
               local setting_name="$1"
               local present="$2"
               local value="$3"
               local slot_setting="$4"
-              local pattern="$5"
+              local value_kind="$5"
               local keep_value="${6:-}"
               if [ "$present" = true ]; then
-                if [[ ! "$value" =~ $pattern ]]; then
+                if ! billing_restore_value_ok "$value_kind" "$value"; then
                   echo "::error::Rollback failed: the captured ${setting_name} has an unexpected or unsafe format."
                   exit 1
                 fi
@@ -1517,7 +1617,7 @@ jobs:
                 fi
               elif [ "$present" = false ]; then
                 if [ -n "$keep_value" ]; then
-                  if [[ ! "$keep_value" =~ $pattern ]]; then
+                  if ! billing_restore_value_ok "$value_kind" "$keep_value"; then
                     echo "::error::Rollback failed: the replacement ${setting_name} has an unexpected or unsafe format."
                     exit 1
                   fi
@@ -1543,7 +1643,7 @@ jobs:
             keep_expected_mode=""
             if [ "${PREVIOUS_BILLING_EXPECTED_MODE_PRESENT:-}" = false ] &&
                [ "${PREVIOUS_BILLING_STRIPE_ENABLED_PRESENT:-}" = true ] &&
-               [ "${PREVIOUS_BILLING_STRIPE_ENABLED:-}" = true ]; then
+               billing_flag_is_true "${PREVIOUS_BILLING_STRIPE_ENABLED:-}"; then
               if [ -z "${BILLING_EXPECTED_MODE:-}" ] || [[ ! "$BILLING_EXPECTED_MODE" =~ $billing_mode_pattern ]]; then
                 echo "::error::Rollback failed: captured billing is enabled without a restorable ExpectedMode."
                 exit 1
@@ -1556,19 +1656,19 @@ jobs:
               "${PREVIOUS_BILLING_STRIPE_ENABLED_PRESENT:-}" \
               "${PREVIOUS_BILLING_STRIPE_ENABLED:-}" \
               "${PREVIOUS_BILLING_STRIPE_ENABLED_SLOT_SETTING:-}" \
-              "$billing_enabled_pattern"
+              "enabled"
             restore_captured_appsetting \
               "Billing__Lifecycle__Enabled" \
               "${PREVIOUS_BILLING_LIFECYCLE_ENABLED_PRESENT:-}" \
               "${PREVIOUS_BILLING_LIFECYCLE_ENABLED:-}" \
               "${PREVIOUS_BILLING_LIFECYCLE_ENABLED_SLOT_SETTING:-}" \
-              "$billing_enabled_pattern"
+              "enabled"
             restore_captured_appsetting \
               "Billing__Stripe__ExpectedMode" \
               "${PREVIOUS_BILLING_EXPECTED_MODE_PRESENT:-}" \
               "${PREVIOUS_BILLING_EXPECTED_MODE:-}" \
               "${PREVIOUS_BILLING_EXPECTED_MODE_SLOT_SETTING:-}" \
-              "$billing_mode_pattern" \
+              "mode" \
               "$keep_expected_mode"
           fi
 

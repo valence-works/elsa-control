@@ -200,8 +200,14 @@ enabled without ExpectedMode. Before that write, the workflow captures the
 non-secret restore set: ExpectedMode plus `Billing__Stripe__Enabled` and
 `Billing__Lifecycle__Enabled`, including existence, value, and slot-setting
 metadata. An unreadable settings list aborts before any mutation. Secret
-values are never captured into workflow outputs. If the current ExpectedMode
-already equals the target, the pre-switch write is skipped.
+values are never captured into workflow outputs. Enablement flags are
+accepted with the same case-insensitive Boolean semantics as
+`scripts/production_stripe_reconcile.py` (`.strip().lower()`), so
+`TRUE`/`True`/`true` and `FALSE`/`False`/`false` are valid. Capture and
+restore keep the exact original string. The full restore set is validated
+before any capture output is published, so one invalid flag cannot leave a
+partial prior-state record. If the current ExpectedMode already equals the
+target, the pre-switch write is skipped.
 
 Rollback restores that captured billing pair for every API rollback trigger
 (image-switch / `deploy-api`, staging Stripe configuration, production Stripe
@@ -214,7 +220,8 @@ enablement flags together with ExpectedMode. Prior-absent ExpectedMode plus
 newly enabled billing cannot finish as billing-enabled without a valid mode.
 If the captured prior pair is already billing-enabled without ExpectedMode,
 rollback keeps the target ExpectedMode written this run instead of
-recreating that invalid combination. Production capture/reapply still does
+recreating that invalid combination. That keep-path treats enablement as
+true after the same case-insensitive Boolean check. Production capture/reapply still does
 not include ExpectedMode in the preserved set and does not delete newly
 introduced names, so this dedicated restore remains required there as well.
 The later combined app-settings write still includes ExpectedMode after a
