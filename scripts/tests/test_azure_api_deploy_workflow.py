@@ -15,6 +15,65 @@ from textwrap import dedent
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "azure-api-deploy.yml"
+
+
+def parse_github_output_file(text: str) -> dict[str, str]:
+    """Parse GITHUB_OUTPUT the way actions/runner EnvFileKeyValuePairs does.
+
+    Linux runners split lines on LF only. NAME=VALUE is a single line.
+    NAME<<DELIM records keep the exact bytes between the header newline and
+    the newline that terminates the last content line before DELIM, so
+    leading and trailing CR/LF in the value are preserved. A standalone
+    Boolean line with neither '=' nor '<<' is invalid.
+    """
+
+    parsed: dict[str, str] = {}
+    index = 0
+    length = len(text)
+
+    def read_line() -> tuple[str | None, str | None]:
+        nonlocal index
+        if index >= length:
+            return None, None
+        start = index
+        lf = text.find("\n", index)
+        if lf < 0:
+            index = length
+            return text[start:], None
+        index = lf + 1
+        return text[start:lf], "\n"
+
+    line, _ = read_line()
+    while line is not None:
+        if line != "":
+            equals_index = line.find("=")
+            heredoc_index = line.find("<<")
+            if equals_index >= 0 and (heredoc_index < 0 or equals_index < heredoc_index):
+                key, value = line.split("=", 1)
+                if key == "":
+                    raise ValueError(f"Invalid format '{line}'. Name must not be empty")
+                parsed[key] = value
+            elif heredoc_index >= 0 and (equals_index < 0 or heredoc_index < equals_index):
+                key, delimiter = line.split("<<", 1)
+                if not key or not delimiter:
+                    raise ValueError(
+                        f"Invalid format '{line}'. Name must not be empty and delimiter must not be empty"
+                    )
+                start_index = index
+                end_index = index
+                temp_line, newline = read_line()
+                while temp_line != delimiter:
+                    if temp_line is None:
+                        raise ValueError(f"Invalid value. Matching delimiter not found '{delimiter}'")
+                    if newline is None:
+                        raise ValueError("Invalid value. EOF marker missing new line.")
+                    end_index = index - len(newline)
+                    temp_line, newline = read_line()
+                parsed[key] = text[start_index:end_index] if end_index > start_index else ""
+            else:
+                raise ValueError(f"Invalid format '{line}'")
+        line, _ = read_line()
+    return parsed
 PRODUCTION_BILLING_FIXTURE = {
     "STRIPE_PRODUCTION_PRICE_ID": "price_livefixture",
     "CONTROL_PRODUCTION_WEBHOOK_URL": "https://control.example.test/api/billing/webhooks/stripe",
@@ -29,6 +88,44 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = WORKFLOW.read_text()
+
+    def test_github_output_parser_matches_actions_runner(self) -> None:
+        self.assertEqual(
+            {"billing_stripe_enabled": "TRUE"},
+            parse_github_output_file("billing_stripe_enabled=TRUE\n"),
+        )
+        self.assertEqual(
+            {"billing_stripe_enabled": "\nTRUE"},
+            parse_github_output_file(
+                "billing_stripe_enabled<<EOF\n\nTRUE\nEOF\n"
+            ),
+        )
+        self.assertEqual(
+            {"billing_stripe_enabled": "TRUE\n"},
+            parse_github_output_file(
+                "billing_stripe_enabled<<EOF\nTRUE\n\nEOF\n"
+            ),
+        )
+        self.assertEqual(
+            {"billing_stripe_enabled": "TRUE\r"},
+            parse_github_output_file(
+                "billing_stripe_enabled<<EOF\nTRUE\r\nEOF\n"
+            ),
+        )
+        with self.assertRaises(ValueError):
+            parse_github_output_file("billing_stripe_enabled=\nTRUE\n")
+        with tempfile.NamedTemporaryFile("wb", delete=False) as handle:
+            handle.write(
+                b"billing_stripe_enabled<<EOF\n\rTRUE\nEOF\n"
+                b"billing_lifecycle_enabled<<EOF\nTRUE\r\nEOF\n"
+            )
+            path = Path(handle.name)
+        try:
+            from_file = parse_github_output_file(path.read_bytes().decode("utf-8"))
+            self.assertEqual("\rTRUE", from_file["billing_stripe_enabled"])
+            self.assertEqual("TRUE\r", from_file["billing_lifecycle_enabled"])
+        finally:
+            path.unlink()
 
     def test_capture_supports_classic_and_sitecontainer_runtime_images(self) -> None:
         self.assertIn("image_reference_pattern=", self.source)
@@ -202,13 +299,13 @@ if args[:3] == ["webapp", "config", "appsettings"] and "list" in args:
     if "Billing__Stripe__ExpectedMode" in query:
         current = os.environ.get("CURRENT_EXPECTED_MODE", "")
         if current:
-            print(json.dumps({{
+            print(json.dumps([{{
                 "name": "Billing__Stripe__ExpectedMode",
                 "value": current,
                 "slotSetting": False,
-            }}))
+            }}]))
         else:
-            print("null")
+            print("[]")
     else:
         print("0" if "length(@" in query else "")
 elif args[:3] == ["webapp", "config", "appsettings"] and "set" in args:
@@ -1255,25 +1352,50 @@ fi
         # Deliberate pin update from run 37161715192: app-mode step names and
         # if-conditions stay the same. The only app-path mutation-order change
         # is inside Deploy API app — ExpectedMode is written before the image
-        # switch unless Azure already has the target value. Prior
-        # existence/value/slot metadata is captured first and restored or
-        # deleted on rollback. An unreadable prior state aborts before
-        # mutation. Telemetry still never appears in the rollback condition.
+        # switch unless Azure already has the target value. Prior ExpectedMode
+        # and billing enablement are captured first and restored as a coherent
+        # pair on every API rollback trigger. Enablement flags accept the
+        # same case-insensitive Boolean variants as production reconcile
+        # while restore keeps the exact original string. An unreadable,
+        # empty, or non-array prior state aborts before mutation or
+        # capture publish.
+        # Telemetry still never appears in the rollback condition.
         self.assertNotIn("TELEMETRY_FAILURE_ROLLS_BACK_API", self.source)
         self.assertIn("never rolls back the API in", self.source)
         self.assertIn("production, test, or development", self.source)
         self.assertIn('if [ "$current_expected_mode" = "$BILLING_EXPECTED_MODE" ]; then', self.source)
         self.assertNotIn("later, lower-priority change", self.source)
-        self.assertIn("Could not read Billing__Stripe__ExpectedMode; refusing to mutate the Web App.", self.source)
-        self.assertIn("billing_expected_mode_present=", self.source)
+        self.assertIn("Could not read billing restore settings; refusing to mutate the Web App.", self.source)
+        self.assertIn('echo "${prefix}_present=$present" >> "$GITHUB_OUTPUT"', self.source)
+        self.assertIn('"billing_expected_mode"', self.source)
+        self.assertIn('"billing_stripe_enabled"', self.source)
+        self.assertIn('"billing_lifecycle_enabled"', self.source)
         self.assertIn("PREVIOUS_BILLING_EXPECTED_MODE_PRESENT", self.source)
-        self.assertIn("could not restore the previous Billing__Stripe__ExpectedMode.", self.source)
-        self.assertIn("could not remove the newly introduced Billing__Stripe__ExpectedMode.", self.source)
+        self.assertIn("PREVIOUS_BILLING_STRIPE_ENABLED_PRESENT", self.source)
+        self.assertIn("PREVIOUS_BILLING_LIFECYCLE_ENABLED_PRESENT", self.source)
+        self.assertIn('could not restore the previous ${setting_name}.', self.source)
+        self.assertIn('could not remove the newly introduced ${setting_name}.', self.source)
+        self.assertIn("name=='Billing__Stripe__ExpectedMode' || name=='Billing__Stripe__Enabled' || name=='Billing__Lifecycle__Enabled'", self.source)
+        self.assertIn("Enablement is restored", self.source)
+        self.assertIn("captured billing is enabled without a restorable ExpectedMode", self.source)
+        self.assertIn("scripts/production_stripe_reconcile.py (.strip().lower())", self.source)
+        self.assertIn("is_billing_enabled_flag", self.source)
+        self.assertIn("billing_flag_is_true", self.source)
+        self.assertIn('printf \'%s\' "${trimmed,,}"', self.source)
+        self.assertIn("Validate the full restore set before publishing any capture", self.source)
+        self.assertIn("jq -ce 'if type == \"array\" then . else error(\"not an array\") end'", self.source)
+        self.assertNotIn("elif . == null then [] else [.] end", self.source)
+        self.assertIn("jq -j '.value // empty'", self.source)
+        self.assertIn('printf \'%s<<%s\\n\' "$name" "$delimiter"', self.source)
+        self.assertIn("ELSA_BILLING_CAPTURE_EOF", self.source)
+        self.assertNotIn('echo "${prefix}=$value" >> "$GITHUB_OUTPUT"', self.source)
+        self.assertNotIn("billing_enabled_pattern='^(true|false)$'", self.source)
+        self.assertNotIn('[ "${PREVIOUS_BILLING_STRIPE_ENABLED:-}" = true ]', self.source)
         self.assertIn("PRODUCTION_STRIPE_OUTCOME", self.source)
         self.assertIn("production Stripe audit", self.source)
         expected_mode_list = self.source[
-            self.source.index('if ! billing_expected_mode_record="$(az webapp config appsettings list') :
-            self.source.index("echo \"::error::Could not read Billing__Stripe__ExpectedMode")
+            self.source.index('if ! billing_restore_records="$(az webapp config appsettings list') :
+            self.source.index("echo \"::error::Could not read billing restore settings")
         ]
         self.assertNotIn("|| true", expected_mode_list)
         deploy_start = self.source.index("      - name: Deploy API app")
@@ -1427,7 +1549,7 @@ printf '200'
                     self.assertNotIn("API health gate failed", combined.replace(expected, ""))
 
     def test_expected_mode_rollback_restores_prior_state_after_image_switch_failure(self) -> None:
-        """Stateful fake Azure CLI: capture prior ExpectedMode and restore it."""
+        """Stateful fake Azure CLI: restore ExpectedMode and billing enablement."""
 
         def step_script(step_name: str) -> str:
             start = self.source.index(f"      - name: {step_name}")
@@ -1494,18 +1616,46 @@ def record(value):
 def persist():
     state_path.write_text(json.dumps(state))
 
-def setting_record():
-    return state.setdefault("settings", {{}}).get("Billing__Stripe__ExpectedMode")
+def setting_record(name):
+    return state.setdefault("settings", {{}}).get(name)
+
+BILLING_RESTORE_NAMES = (
+    "Billing__Stripe__ExpectedMode",
+    "Billing__Stripe__Enabled",
+    "Billing__Lifecycle__Enabled",
+)
+BILLING_EVENTS = {{
+    "Billing__Stripe__ExpectedMode": "billing-expected-mode",
+    "Billing__Stripe__Enabled": "billing-stripe-enabled",
+    "Billing__Lifecycle__Enabled": "billing-lifecycle-enabled",
+}}
 
 if args[:3] == ["webapp", "config", "appsettings"] and "list" in args:
     query = args[args.index("--query") + 1] if "--query" in args else ""
     record("appsettings-list")
-    if "Billing__Stripe__ExpectedMode" in query:
+    if any(name in query for name in BILLING_RESTORE_NAMES):
         if os.environ.get("FAIL_SETTINGS_LIST") == "1":
             record("appsettings-list-failed")
             raise SystemExit(17)
-        current = setting_record()
-        print(json.dumps(current) if current else "null")
+        empty_mode = os.environ.get("EMPTY_SETTINGS_LIST", "")
+        if empty_mode:
+            record("appsettings-list-empty-" + empty_mode)
+            if empty_mode == "empty":
+                raise SystemExit(0)
+            if empty_mode == "whitespace":
+                print("   ")
+                raise SystemExit(0)
+            if empty_mode == "null":
+                print("null")
+                raise SystemExit(0)
+            if empty_mode == "object":
+                print("{{}}")
+                raise SystemExit(0)
+        print(json.dumps([
+            current
+            for name in BILLING_RESTORE_NAMES
+            if (current := setting_record(name))
+        ]))
     else:
         print("0" if "length(@" in query else "")
 elif args[:3] == ["webapp", "config", "appsettings"] and "set" in args:
@@ -1520,10 +1670,13 @@ elif args[:3] == ["webapp", "config", "appsettings"] and "set" in args:
             continue
         if collecting and "=" in argument:
             name, value = argument.split("=", 1)
-            if name == "Billing__Stripe__ExpectedMode":
-                record("billing-expected-mode-set")
+            if name in BILLING_EVENTS:
+                record(BILLING_EVENTS[name] + "-set")
                 if collecting == "--slot-settings":
-                    record("billing-expected-mode-slot-set")
+                    record(BILLING_EVENTS[name] + "-slot-set")
+                if name != "Billing__Stripe__ExpectedMode" and os.environ.get("FAIL_ENABLED_RESTORE") == "1":
+                    record("billing-enablement-restore-failed")
+                    raise SystemExit(23)
                 state.setdefault("settings", {{}})[name] = {{
                     "name": name,
                     "value": value,
@@ -1532,10 +1685,16 @@ elif args[:3] == ["webapp", "config", "appsettings"] and "set" in args:
                 persist()
 elif args[:3] == ["webapp", "config", "appsettings"] and "delete" in args:
     record("appsettings-delete")
-    if "Billing__Stripe__ExpectedMode" in args:
-        record("billing-expected-mode-deleted")
-        state.setdefault("settings", {{}}).pop("Billing__Stripe__ExpectedMode", None)
-        persist()
+    for name, prefix in BILLING_EVENTS.items():
+        if name in args:
+            record(prefix + "-deleted")
+            if name != "Billing__Stripe__ExpectedMode" and os.environ.get("FAIL_ENABLED_RESTORE") == "1":
+                record("billing-enablement-restore-failed")
+                raise SystemExit(23)
+            state.setdefault("settings", {{}}).pop(name, None)
+    persist()
+elif args[:2] == ["acr", "login"]:
+    record("acr-login")
 elif args[:3] == ["webapp", "config", "set"]:
     runtime = args[args.index("--linux-fx-version") + 1]
     state["runtime"] = runtime
@@ -1620,14 +1779,19 @@ printf '200'
             def expected_mode() -> dict | None:
                 return settings().get("Billing__Stripe__ExpectedMode")
 
+            def stripe_enabled() -> dict | None:
+                return settings().get("Billing__Stripe__Enabled")
+
+            def lifecycle_enabled() -> dict | None:
+                return settings().get("Billing__Lifecycle__Enabled")
+
             def parse_outputs() -> dict[str, str]:
-                parsed: dict[str, str] = {}
-                if github_output_path.exists():
-                    for line in github_output_path.read_text().splitlines():
-                        if "=" in line:
-                            key, value = line.split("=", 1)
-                            parsed[key] = value
-                return parsed
+                if not github_output_path.exists():
+                    return {}
+                # Decode bytes so universal newlines cannot turn a leading CR
+                # into LF or eat a trailing CR before CRLF. Matches the Linux
+                # runner File.ReadAllText + LF-only ReadLine path.
+                return parse_github_output_file(github_output_path.read_bytes().decode("utf-8"))
 
             def run_shell(script: str, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
                 return subprocess.run(
@@ -1668,7 +1832,13 @@ printf '200'
                 )
                 return environment
 
-            def seed_state(prior: str | None, slot_setting: bool) -> None:
+            def seed_state(
+                prior: str | None,
+                slot_setting: bool,
+                *,
+                prior_enabled: str | None = None,
+                prior_lifecycle: str | None = None,
+            ) -> None:
                 seeded: dict = {"runtime": "DOCKER|old-image", "settings": {}}
                 if prior is not None:
                     seeded["settings"]["Billing__Stripe__ExpectedMode"] = {
@@ -1676,12 +1846,24 @@ printf '200'
                         "value": prior,
                         "slotSetting": slot_setting,
                     }
+                if prior_enabled is not None:
+                    seeded["settings"]["Billing__Stripe__Enabled"] = {
+                        "name": "Billing__Stripe__Enabled",
+                        "value": prior_enabled,
+                        "slotSetting": False,
+                    }
+                if prior_lifecycle is not None:
+                    seeded["settings"]["Billing__Lifecycle__Enabled"] = {
+                        "name": "Billing__Lifecycle__Enabled",
+                        "value": prior_lifecycle,
+                        "slotSetting": False,
+                    }
                 state_path.write_text(json.dumps(seeded))
                 events_path.write_text("")
                 github_output_path.write_text("")
                 capture_path.write_text("fake-private-capture")
 
-            def rollback_environment(deploy_env: dict[str, str]) -> dict[str, str]:
+            def rollback_environment(deploy_env: dict[str, str], **outcomes: str) -> dict[str, str]:
                 outputs = parse_outputs()
                 return deploy_env | {
                     "PREVIOUS_DEPLOYMENT_MODE": "classic",
@@ -1693,6 +1875,7 @@ printf '200'
                     "PREVIOUS_HEALTH_IMAGE_ID": "",
                     "ROLLBACK_HEALTH": "1",
                     "DEPLOY_API_OUTCOME": "failure",
+                    "BILLING_EXPECTED_MODE": deploy_env["BILLING_EXPECTED_MODE"],
                     "PREVIOUS_BILLING_EXPECTED_MODE": outputs.get("billing_expected_mode", ""),
                     "PREVIOUS_BILLING_EXPECTED_MODE_PRESENT": outputs.get(
                         "billing_expected_mode_present", ""
@@ -1700,8 +1883,24 @@ printf '200'
                     "PREVIOUS_BILLING_EXPECTED_MODE_SLOT_SETTING": outputs.get(
                         "billing_expected_mode_slot_setting", ""
                     ),
+                    "PREVIOUS_BILLING_STRIPE_ENABLED": outputs.get("billing_stripe_enabled", ""),
+                    "PREVIOUS_BILLING_STRIPE_ENABLED_PRESENT": outputs.get(
+                        "billing_stripe_enabled_present", ""
+                    ),
+                    "PREVIOUS_BILLING_STRIPE_ENABLED_SLOT_SETTING": outputs.get(
+                        "billing_stripe_enabled_slot_setting", ""
+                    ),
+                    "PREVIOUS_BILLING_LIFECYCLE_ENABLED": outputs.get(
+                        "billing_lifecycle_enabled", ""
+                    ),
+                    "PREVIOUS_BILLING_LIFECYCLE_ENABLED_PRESENT": outputs.get(
+                        "billing_lifecycle_enabled_present", ""
+                    ),
+                    "PREVIOUS_BILLING_LIFECYCLE_ENABLED_SLOT_SETTING": outputs.get(
+                        "billing_lifecycle_enabled_slot_setting", ""
+                    ),
                     "GITHUB_OUTPUT": str(github_output_path),
-                }
+                } | outcomes
 
             for mode, environment, target, prior, slot_setting, kind in mutation_cases:
                 with self.subTest(mode=mode, environment=environment, prior=kind):
@@ -1752,6 +1951,8 @@ printf '200'
                                 "billing-expected-mode-slot-set",
                                 events_path.read_text().splitlines(),
                             )
+                    self.assertIsNone(stripe_enabled())
+                    self.assertIsNone(lifecycle_enabled())
                     if environment == "production":
                         self.assertIn("reapply", events_path.read_text().splitlines())
                     else:
@@ -1771,7 +1972,7 @@ printf '200'
                     self.assertNotEqual(0, deploy.returncode, deploy.stdout + deploy.stderr)
                     combined = deploy.stdout + deploy.stderr
                     self.assertIn(
-                        "Could not read Billing__Stripe__ExpectedMode; refusing to mutate the Web App.",
+                        "Could not read billing restore settings; refusing to mutate the Web App.",
                         combined,
                     )
                     observed = events_path.read_text().splitlines()
@@ -1789,6 +1990,361 @@ printf '200'
                         "billing-expected-mode-deleted",
                         events_path.read_text().splitlines(),
                     )
+
+            empty_list_cases = []
+            for mode in ("app", "promote"):
+                for environment, target in (("test", "test"), ("production", "live")):
+                    for payload in ("empty", "whitespace", "null", "object"):
+                        empty_list_cases.append((mode, environment, target, payload))
+
+            for mode, environment, target, payload in empty_list_cases:
+                with self.subTest(mode=mode, environment=environment, prior=f"empty-list-{payload}"):
+                    seed_state(target, False, prior_enabled="true")
+                    deploy_env = base_environment(
+                        mode=mode, target_environment=environment, billing_mode=target
+                    )
+                    deploy_env["GITHUB_OUTPUT"] = str(github_output_path)
+                    deploy_env["EMPTY_SETTINGS_LIST"] = payload
+                    deploy_env["FAIL_IMAGE_SWITCH"] = "1"
+                    before = {
+                        "mode": expected_mode(),
+                        "stripe": stripe_enabled(),
+                        "lifecycle": lifecycle_enabled(),
+                    }
+                    deploy = run_shell(deploy_script, deploy_env)
+                    self.assertNotEqual(0, deploy.returncode, deploy.stdout + deploy.stderr)
+                    combined = deploy.stdout + deploy.stderr
+                    self.assertIn(
+                        "Could not read billing restore settings; refusing to mutate the Web App.",
+                        combined,
+                    )
+                    observed = events_path.read_text().splitlines()
+                    self.assertIn(f"appsettings-list-empty-{payload}", observed)
+                    self.assertNotIn("appsettings-set", observed)
+                    self.assertNotIn("billing-expected-mode-set", observed)
+                    self.assertNotIn("runtime-replaced", observed)
+                    self.assertNotIn("image-switch-failed", observed)
+                    self.assertEqual(before["mode"], expected_mode())
+                    self.assertEqual(before["stripe"], stripe_enabled())
+                    self.assertEqual(before["lifecycle"], lifecycle_enabled())
+                    outputs = parse_outputs()
+                    self.assertNotIn("billing_expected_mode_present", outputs)
+                    self.assertNotIn("billing_stripe_enabled_present", outputs)
+                    self.assertNotIn("billing_lifecycle_enabled_present", outputs)
+                    self.assertNotIn("billing_expected_mode", outputs)
+                    self.assertNotIn("billing_stripe_enabled", outputs)
+                    self.assertNotIn("billing_lifecycle_enabled", outputs)
+
+                    rollback = run_shell(rollback_script, rollback_environment(deploy_env))
+                    self.assertEqual(0, rollback.returncode, rollback.stdout + rollback.stderr)
+                    self.assertEqual(before["mode"], expected_mode())
+                    self.assertEqual(before["stripe"], stripe_enabled())
+                    self.assertNotIn(
+                        "billing-expected-mode-deleted",
+                        events_path.read_text().splitlines(),
+                    )
+                    self.assertNotIn(
+                        "billing-stripe-enabled-deleted",
+                        events_path.read_text().splitlines(),
+                    )
+
+            boolean_variant_cases = []
+            for mode in ("app", "promote"):
+                for environment, target in (("test", "test"), ("production", "live")):
+                    boolean_variant_cases.append(
+                        (mode, environment, target, "TRUE", "TRUE", "TRUE-TRUE")
+                    )
+            for stripe_flag, lifecycle_flag in (
+                ("True", "True"),
+                ("true", "true"),
+                ("FALSE", "FALSE"),
+                ("False", "False"),
+                ("false", "false"),
+                ("TRUE", "false"),
+                ("true", "FALSE"),
+                (" True ", "TRUE"),
+                ("\nTRUE", "true"),
+                ("TRUE\n", "true"),
+                ("true", "\nTRUE"),
+                ("true", "TRUE\n"),
+                ("\rTRUE", "true"),
+                ("TRUE\r", "true"),
+                ("true", "\rTRUE"),
+                ("true", "TRUE\r"),
+                ("\nTRUE\n", "False"),
+                ("\r\nTrue\r\n", "FALSE"),
+            ):
+                boolean_variant_cases.append(
+                    (
+                        "app",
+                        "test",
+                        "test",
+                        stripe_flag,
+                        lifecycle_flag,
+                        f"{stripe_flag!r}-{lifecycle_flag!r}",
+                    )
+                )
+
+            for mode, environment, target, prior_enabled, prior_lifecycle, kind in boolean_variant_cases:
+                with self.subTest(mode=mode, environment=environment, prior=kind):
+                    seed_state(
+                        target,
+                        False,
+                        prior_enabled=prior_enabled,
+                        prior_lifecycle=prior_lifecycle,
+                    )
+                    deploy_env = base_environment(
+                        mode=mode, target_environment=environment, billing_mode=target
+                    )
+                    deploy_env["GITHUB_OUTPUT"] = str(github_output_path)
+                    deploy_env["FAIL_IMAGE_SWITCH"] = "1"
+                    deploy = run_shell(deploy_script, deploy_env)
+                    self.assertEqual(41, deploy.returncode, deploy.stdout + deploy.stderr)
+                    combined = deploy.stdout + deploy.stderr
+                    self.assertNotIn("unexpected or unsafe format", combined)
+                    observed = events_path.read_text().splitlines()
+                    self.assertIn("image-switch-failed", observed)
+                    self.assertIn("runtime-replaced", observed)
+                    outputs = parse_outputs()
+                    self.assertEqual("true", outputs.get("billing_expected_mode_present"))
+                    self.assertEqual(target, outputs.get("billing_expected_mode"))
+                    self.assertEqual("true", outputs.get("billing_stripe_enabled_present"))
+                    self.assertEqual(prior_enabled, outputs.get("billing_stripe_enabled"))
+                    self.assertEqual("true", outputs.get("billing_lifecycle_enabled_present"))
+                    self.assertEqual(prior_lifecycle, outputs.get("billing_lifecycle_enabled"))
+                    self.assertEqual(prior_enabled, stripe_enabled()["value"])
+                    self.assertEqual(prior_lifecycle, lifecycle_enabled()["value"])
+
+                    rollback = run_shell(rollback_script, rollback_environment(deploy_env))
+                    self.assertEqual(0, rollback.returncode, rollback.stdout + rollback.stderr)
+                    self.assertEqual(prior_enabled, stripe_enabled()["value"])
+                    self.assertEqual(prior_lifecycle, lifecycle_enabled()["value"])
+                    self.assertEqual(target, expected_mode()["value"])
+
+            invalid_enabled_cases = (
+                ("app", "test", "test", "test", "yes", "true", "Billing__Stripe__Enabled"),
+                ("promote", "production", "live", "live", "TRUE", "yes", "Billing__Lifecycle__Enabled"),
+            )
+            for (
+                mode,
+                environment,
+                target,
+                prior,
+                prior_enabled,
+                prior_lifecycle,
+                bad_name,
+            ) in invalid_enabled_cases:
+                with self.subTest(mode=mode, environment=environment, prior=f"invalid-{bad_name}"):
+                    seed_state(
+                        prior,
+                        False,
+                        prior_enabled=prior_enabled,
+                        prior_lifecycle=prior_lifecycle,
+                    )
+                    before = {
+                        "mode": expected_mode(),
+                        "stripe": stripe_enabled(),
+                        "lifecycle": lifecycle_enabled(),
+                    }
+                    deploy_env = base_environment(
+                        mode=mode, target_environment=environment, billing_mode=target
+                    )
+                    deploy_env["GITHUB_OUTPUT"] = str(github_output_path)
+                    deploy_env["FAIL_IMAGE_SWITCH"] = "1"
+                    deploy = run_shell(deploy_script, deploy_env)
+                    self.assertNotEqual(0, deploy.returncode, deploy.stdout + deploy.stderr)
+                    combined = deploy.stdout + deploy.stderr
+                    self.assertIn(
+                        f"The captured {bad_name} has an unexpected or unsafe format.",
+                        combined,
+                    )
+                    observed = events_path.read_text().splitlines()
+                    self.assertNotIn("runtime-replaced", observed)
+                    self.assertNotIn("image-switch-failed", observed)
+                    self.assertNotIn("billing-expected-mode-set", observed)
+                    self.assertEqual(before["mode"], expected_mode())
+                    self.assertEqual(before["stripe"], stripe_enabled())
+                    self.assertEqual(before["lifecycle"], lifecycle_enabled())
+                    outputs = parse_outputs()
+                    self.assertNotIn("billing_expected_mode_present", outputs)
+                    self.assertNotIn("billing_stripe_enabled_present", outputs)
+                    self.assertNotIn("billing_lifecycle_enabled_present", outputs)
+                    self.assertNotIn("billing_expected_mode", outputs)
+                    self.assertNotIn("billing_stripe_enabled", outputs)
+                    self.assertNotIn("billing_lifecycle_enabled", outputs)
+
+            def apply_reconcile_mutation(*, partial: bool = False) -> None:
+                state = json.loads(state_path.read_text())
+                settings = state.setdefault("settings", {})
+                settings["Billing__Stripe__Enabled"] = {
+                    "name": "Billing__Stripe__Enabled",
+                    "value": "true",
+                    "slotSetting": False,
+                }
+                if not partial:
+                    settings["Billing__Lifecycle__Enabled"] = {
+                        "name": "Billing__Lifecycle__Enabled",
+                        "value": "true",
+                        "slotSetting": False,
+                    }
+                    settings["Billing__Stripe__SecretKey"] = {
+                        "name": "Billing__Stripe__SecretKey",
+                        "value": "sk_test_synthetic",
+                        "slotSetting": False,
+                    }
+                state_path.write_text(json.dumps(state))
+                with events_path.open("a", encoding="utf-8") as handle:
+                    handle.write("staging-reconcile-mutated\n")
+                    if partial:
+                        handle.write("staging-reconcile-partial\n")
+
+            def assert_no_secrets(result: subprocess.CompletedProcess[str]) -> None:
+                combined = result.stdout + result.stderr
+                self.assertNotIn("sk_test_synthetic", combined)
+                self.assertNotIn("sk_live_", combined)
+                self.assertNotIn("whsec_", combined)
+
+            post_reconcile_cases = [
+                ("app", "test", "test", None, False, None, "health", "absent-mode-new-billing"),
+                ("promote", "test", "test", None, False, None, "health", "absent-mode-new-billing"),
+                ("app", "test", "test", None, False, None, "staging", "absent-mode-partial"),
+                ("promote", "test", "test", None, False, None, "staging", "absent-mode-partial"),
+                ("app", "test", "test", "test", True, None, "health", "present-mode-new-billing"),
+                ("app", "test", "test", "test", False, "true", "health", "matching-mode-already-enabled"),
+                ("app", "test", "test", None, False, "true", "health", "absent-mode-already-enabled"),
+                ("app", "test", "test", None, False, "TRUE", "health", "absent-mode-already-enabled-TRUE"),
+                ("promote", "test", "test", None, False, "True", "health", "absent-mode-already-enabled-True"),
+                ("app", "test", "test", None, False, "\nTRUE", "health", "absent-mode-already-enabled-LF-TRUE"),
+                ("promote", "test", "test", "live", True, None, "health", "different-mode-new-billing"),
+                ("app", "production", "live", None, False, None, "audit", "production-absent-mode"),
+            ]
+            trigger_outcomes = {
+                "health": {
+                    "DEPLOY_API_OUTCOME": "success",
+                    "HEALTH_GATE_OUTCOME": "failure",
+                },
+                "staging": {
+                    "DEPLOY_API_OUTCOME": "success",
+                    "STAGING_STRIPE_OUTCOME": "failure",
+                },
+                "audit": {
+                    "DEPLOY_API_OUTCOME": "success",
+                    "PRODUCTION_STRIPE_OUTCOME": "failure",
+                },
+            }
+
+            for (
+                mode,
+                environment,
+                target,
+                prior,
+                slot_setting,
+                prior_enabled,
+                trigger,
+                kind,
+            ) in post_reconcile_cases:
+                with self.subTest(mode=mode, environment=environment, prior=kind, trigger=trigger):
+                    seed_state(prior, slot_setting, prior_enabled=prior_enabled)
+                    deploy_env = base_environment(
+                        mode=mode, target_environment=environment, billing_mode=target
+                    )
+                    deploy_env["GITHUB_OUTPUT"] = str(github_output_path)
+                    deploy = run_shell(deploy_script, deploy_env)
+                    self.assertEqual(0, deploy.returncode, deploy.stdout + deploy.stderr)
+                    assert_no_secrets(deploy)
+                    self.assertEqual("false" if prior is None else "true", parse_outputs().get("billing_expected_mode_present"))
+                    self.assertEqual(
+                        "false" if prior_enabled is None else "true",
+                        parse_outputs().get("billing_stripe_enabled_present"),
+                    )
+                    if environment == "test":
+                        apply_reconcile_mutation(partial=trigger == "staging")
+                        self.assertEqual("true", stripe_enabled()["value"])
+
+                    rollback = run_shell(
+                        rollback_script,
+                        rollback_environment(deploy_env, **trigger_outcomes[trigger]),
+                    )
+                    self.assertEqual(0, rollback.returncode, rollback.stdout + rollback.stderr)
+                    assert_no_secrets(rollback)
+                    self.assertEqual(
+                        "DOCKER|old-image",
+                        json.loads(state_path.read_text())["runtime"],
+                    )
+                    observed = events_path.read_text().splitlines()
+                    self.assertIn("old-runtime-restored", observed)
+                    self.assertIn("restart", observed)
+                    self.assertIn("health-host-read", observed)
+                    rollback_events = observed[observed.index("old-runtime-restored"):]
+                    self.assertLess(
+                        rollback_events.index("old-runtime-restored"),
+                        rollback_events.index("restart"),
+                    )
+                    self.assertLess(
+                        rollback_events.index("restart"),
+                        rollback_events.index("health-host-read"),
+                    )
+                    if environment == "test":
+                        self.assertIn("staging-reconcile-mutated", observed)
+                        self.assertLess(
+                            observed.index("staging-reconcile-mutated"),
+                            observed.index("old-runtime-restored"),
+                        )
+                    if kind.startswith("absent-mode-already-enabled"):
+                        restored_mode = expected_mode()
+                        self.assertIsNotNone(restored_mode)
+                        self.assertEqual(target, restored_mode["value"])
+                        self.assertEqual(prior_enabled, stripe_enabled()["value"])
+                        self.assertNotIn("billing-expected-mode-deleted", observed)
+                        self.assertIn("billing-expected-mode-set", observed)
+                    elif prior is None:
+                        self.assertIsNone(expected_mode())
+                        self.assertIsNone(stripe_enabled())
+                        self.assertIsNone(lifecycle_enabled())
+                        self.assertIn("billing-expected-mode-deleted", observed)
+                        if environment == "test":
+                            self.assertIn("billing-stripe-enabled-deleted", rollback_events)
+                            self.assertLess(
+                                rollback_events.index("billing-stripe-enabled-deleted"),
+                                rollback_events.index("billing-expected-mode-deleted"),
+                            )
+                    else:
+                        restored_mode = expected_mode()
+                        self.assertIsNotNone(restored_mode)
+                        self.assertEqual(prior, restored_mode["value"])
+                        self.assertEqual(slot_setting, restored_mode["slotSetting"])
+                        if prior_enabled is None:
+                            self.assertIsNone(stripe_enabled())
+                            if environment == "test":
+                                self.assertIn("billing-stripe-enabled-deleted", observed)
+                        else:
+                            self.assertEqual(prior_enabled, stripe_enabled()["value"])
+                    if environment == "production":
+                        self.assertIn("reapply", observed)
+                        self.assertLess(observed.index("reapply"), observed.index("old-runtime-restored"))
+                    else:
+                        self.assertNotIn("reapply", observed)
+                    self.assertIn("restored the previous deployment image and build metadata", rollback.stdout + rollback.stderr)
+
+            seed_state(None, False)
+            deploy_env = base_environment(mode="app", target_environment="test", billing_mode="test")
+            deploy_env["GITHUB_OUTPUT"] = str(github_output_path)
+            deploy = run_shell(deploy_script, deploy_env)
+            self.assertEqual(0, deploy.returncode, deploy.stdout + deploy.stderr)
+            apply_reconcile_mutation()
+            deploy_env["FAIL_ENABLED_RESTORE"] = "1"
+            failed_restore = run_shell(
+                rollback_script,
+                rollback_environment(deploy_env, DEPLOY_API_OUTCOME="success", HEALTH_GATE_OUTCOME="failure"),
+            )
+            self.assertNotEqual(0, failed_restore.returncode, failed_restore.stdout + failed_restore.stderr)
+            failed_combined = failed_restore.stdout + failed_restore.stderr
+            self.assertIn("could not remove the newly introduced Billing__Stripe__Enabled.", failed_combined)
+            self.assertNotIn("restored the previous deployment image and build metadata", failed_combined)
+            self.assertEqual("true", stripe_enabled()["value"])
+            self.assertEqual("test", expected_mode()["value"])
+            self.assertIn("billing-enablement-restore-failed", events_path.read_text().splitlines())
+            assert_no_secrets(failed_restore)
 
     def test_managed_telemetry_deploy_passes_the_environment_recipient(self) -> None:
         script = ROOT / "scripts" / "deploy-managed-telemetry.sh"
@@ -2271,7 +2827,7 @@ case "$*" in
   *"webapp config appsettings delete"*) exit 0 ;;
   *"webapp config appsettings list"*)
     case "$*" in
-      *"Billing__Stripe__ExpectedMode"*) printf 'null\\n' ;;
+      *"Billing__Stripe__ExpectedMode"*) printf '[]\\n' ;;
       *"].name"*|*" ].name"*) ;;
       *"].value"*|*" ].value"*) ;;
       *) printf '%s\\n' "0" ;;

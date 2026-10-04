@@ -196,17 +196,42 @@ App and promote deploys write `Billing__Stripe__ExpectedMode` (`test` on the
 when Azure does not already have that exact value. The first billing-enabled
 start of the new image cannot miss that setting.
 `StripeBillingConfigurationValidator` throws at host start when billing is
-enabled without ExpectedMode. Before that write, the workflow captures
-whether the setting exists, its prior value, and slot-setting metadata. An
-unreadable settings list aborts before any mutation. If the current value
-already equals the target, the pre-switch write is skipped. After an
-image-switch failure, rollback restores the prior value or deletes a newly
-introduced setting. Production capture/reapply does not include ExpectedMode
-in the preserved set and does not delete newly introduced names, so this
-dedicated restore is required there as well. The later combined app-settings
-write still includes ExpectedMode after a successful switch. Infra still
-writes ExpectedMode after the Bicep replacement, because that path may
-recreate the Web App.
+enabled without ExpectedMode. Before that write, the workflow captures the
+non-secret restore set: ExpectedMode plus `Billing__Stripe__Enabled` and
+`Billing__Lifecycle__Enabled`, including existence, value, and slot-setting
+metadata. An unreadable, empty, or non-array settings list aborts before
+any mutation. Secret values are never captured into workflow outputs.
+Enablement flags are accepted with the same case-insensitive Boolean
+semantics as `scripts/production_stripe_reconcile.py` (`.strip().lower()`),
+so `TRUE`/`True`/`true` and `FALSE`/`False`/`false` are valid, including
+ASCII and POSIX whitespace, CR/LF included; other Unicode whitespace is
+rejected (fails closed). Capture and restore keep the exact original
+string. Captured values are written as GitHub Actions
+delimited output records so a leading or trailing CR/LF cannot split a
+single-line `NAME=VALUE` assignment. The full restore set is validated
+before any capture output is published, so one invalid flag cannot leave a
+partial prior-state record. If the current ExpectedMode already equals the
+target, the pre-switch write is skipped.
+
+Rollback restores that captured billing pair for every API rollback trigger
+(image-switch / `deploy-api`, staging Stripe configuration, production Stripe
+audit, and the health gate), not only an image-switch failure. A previously
+absent setting is deleted. Enablement is restored first, then ExpectedMode,
+so a partial settings failure cannot claim success after leaving billing
+enabled without a valid mode. Staging reconciliation can enable billing
+after a successful image switch; rollback therefore reverts those
+enablement flags together with ExpectedMode. Prior-absent ExpectedMode plus
+newly enabled billing cannot finish as billing-enabled without a valid mode.
+If the captured prior pair is already billing-enabled without ExpectedMode,
+rollback keeps the target ExpectedMode written this run instead of
+recreating that invalid combination. That keep-path treats enablement as
+true after the same case-insensitive Boolean check. Production capture/reapply still does
+not include ExpectedMode in the preserved set and does not delete newly
+introduced names, so this dedicated restore remains required there as well.
+The later combined app-settings write still includes ExpectedMode after a
+successful switch. Infra still writes ExpectedMode after the Bicep
+replacement, because that path may recreate the Web App. Telemetry outcomes
+remain excluded from API rollback.
 
 The `development` target is not a billing environment. The workflow does not
 set ExpectedMode there and does not require Stripe secrets. Development
