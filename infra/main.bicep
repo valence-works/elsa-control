@@ -15,7 +15,7 @@ param principalId string = ''
 @description('Azure SQL Catalog service objective (SKU name). Empty selects Standard S0 for every environment. Pass GP_S_Gen5 to request serverless.')
 param sqlDatabaseSkuName string = ''
 
-@description('Azure SQL Catalog edition (SKU tier). Empty selects Standard.')
+@description('Azure SQL Catalog edition (SKU tier). Empty selects GeneralPurpose for GP_S_* names and Standard otherwise.')
 param sqlDatabaseSkuTier string = ''
 
 @description('Azure SQL Catalog SKU family. Empty selects Gen5 for GP_S_* objectives and omits the family for DTU objectives.')
@@ -28,7 +28,7 @@ param sqlDatabaseSkuCapacity int = 0
 param sqlDatabaseMaxSizeBytes string = ''
 
 var resolvedSqlDatabaseSkuName = !empty(sqlDatabaseSkuName) ? sqlDatabaseSkuName : 'S0'
-var resolvedSqlDatabaseSkuTier = !empty(sqlDatabaseSkuTier) ? sqlDatabaseSkuTier : 'Standard'
+var resolvedSqlDatabaseSkuTier = !empty(sqlDatabaseSkuTier) ? sqlDatabaseSkuTier : (startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 'GeneralPurpose' : 'Standard')
 var resolvedSqlDatabaseSkuFamily = !empty(sqlDatabaseSkuFamily) ? sqlDatabaseSkuFamily : (startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 'Gen5' : '')
 var resolvedSqlDatabaseSkuCapacity = sqlDatabaseSkuCapacity > 0 ? sqlDatabaseSkuCapacity : (startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 1 : 10)
 var resolvedSqlDatabaseMaxSizeBytes = !empty(sqlDatabaseMaxSizeBytes) ? sqlDatabaseMaxSizeBytes : (resolvedSqlDatabaseSkuName == 'S0' ? '268435456000' : '0')

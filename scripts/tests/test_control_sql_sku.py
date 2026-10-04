@@ -107,7 +107,10 @@ class ControlSqlSkuTests(unittest.TestCase):
         self.assertIn("param sqlDatabaseSkuTier string = ''", main)
         self.assertIn("param sqlDatabaseMaxSizeBytes string = ''", main)
         self.assertIn("? sqlDatabaseSkuName : 'S0'", main)
-        self.assertIn("? sqlDatabaseSkuTier : 'Standard'", main)
+        self.assertIn(
+            "? sqlDatabaseSkuTier : (startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 'GeneralPurpose' : 'Standard')",
+            main,
+        )
         self.assertIn("sqlDatabaseSkuName: resolvedSqlDatabaseSkuName", main)
         self.assertNotIn("name: 'GP_S_Gen5'", main)
         self.assertNotIn("useStagingControlSqlSku", main)
@@ -213,6 +216,10 @@ module control_sql 'control-sql/control-sql.module.bicep' = {
             self.assertNotIn("name: 'GP_S_Gen5'", patched_module)
             self.assertIn("resolvedSqlDatabaseSkuName", patched_main)
             self.assertIn("? sqlDatabaseSkuName : 'S0'", patched_main)
+            self.assertIn(
+                "? sqlDatabaseSkuTier : (startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 'GeneralPurpose' : 'Standard')",
+                patched_main,
+            )
             self.assertEqual("", patched_parameters["sqlDatabaseSkuName"]["value"])
             self.assertEqual(
                 staging_parameters_document(),
@@ -247,6 +254,75 @@ module control_sql 'control-sql/control-sql.module.bicep' = {
                 check=False,
             )
             self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_name_only_gp_s_override_resolves_coherent_serverless_sku(self) -> None:
+        az = shutil.which("az")
+        if az is None:
+            self.skipTest("Azure CLI is not installed")
+        main = MAIN_BICEP.read_text()
+        start = main.index("var resolvedSqlDatabaseSkuName")
+        end = main.index("\nvar tags")
+        resolution = main[start:end].strip()
+        self.assertIn(
+            "startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 'GeneralPurpose' : 'Standard'",
+            resolution,
+        )
+        compiled_main = subprocess.run(
+            [az, "bicep", "build", "--file", str(MAIN_BICEP), "--stdout"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(0, compiled_main.returncode, compiled_main.stderr)
+        main_template = json.loads(compiled_main.stdout)
+        self.assertIn(
+            "startsWith(variables('resolvedSqlDatabaseSkuName'), 'GP_S_')",
+            main_template["variables"]["resolvedSqlDatabaseSkuTier"],
+        )
+        self.assertIn("'GeneralPurpose'", main_template["variables"]["resolvedSqlDatabaseSkuTier"])
+        with tempfile.TemporaryDirectory() as temporary:
+            wrapper = Path(temporary) / "name-only-gp.bicep"
+            compiled = Path(temporary) / "name-only-gp.json"
+            wrapper.write_text(
+                "targetScope = 'resourceGroup'\n"
+                "param sqlDatabaseSkuName string = 'GP_S_Gen5'\n"
+                "param sqlDatabaseSkuTier string = ''\n"
+                "param sqlDatabaseSkuFamily string = ''\n"
+                "param sqlDatabaseSkuCapacity int = 0\n"
+                "param sqlDatabaseMaxSizeBytes string = ''\n"
+                f"{resolution}\n"
+                f"module control_sql '{os.path.relpath(MODULE, wrapper.parent)}' = {{\n"
+                "  name: 'control-sql'\n"
+                "  params: {\n"
+                "    location: 'westeurope'\n"
+                "    sqlDatabaseSkuName: resolvedSqlDatabaseSkuName\n"
+                "    sqlDatabaseSkuTier: resolvedSqlDatabaseSkuTier\n"
+                "    sqlDatabaseSkuFamily: resolvedSqlDatabaseSkuFamily\n"
+                "    sqlDatabaseSkuCapacity: resolvedSqlDatabaseSkuCapacity\n"
+                "    sqlDatabaseMaxSizeBytes: resolvedSqlDatabaseMaxSizeBytes\n"
+                "  }\n"
+                "}\n"
+            )
+            result = subprocess.run(
+                [az, "bicep", "build", "--file", str(wrapper), "--outfile", str(compiled)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            template = json.loads(compiled.read_text())
+            self.assertIn(
+                "startsWith(variables('resolvedSqlDatabaseSkuName'), 'GP_S_')",
+                template["variables"]["resolvedSqlDatabaseSkuTier"],
+            )
+            self.assertIn("'GeneralPurpose'", template["variables"]["resolvedSqlDatabaseSkuTier"])
+            params = nested_module_parameters(template)
+            self.assertEqual("[variables('resolvedSqlDatabaseSkuName')]", params["sqlDatabaseSkuName"]["value"])
+            self.assertEqual("[variables('resolvedSqlDatabaseSkuTier')]", params["sqlDatabaseSkuTier"]["value"])
+            self.assertEqual("[variables('resolvedSqlDatabaseSkuFamily')]", params["sqlDatabaseSkuFamily"]["value"])
+            self.assertEqual("[variables('resolvedSqlDatabaseSkuCapacity')]", params["sqlDatabaseSkuCapacity"]["value"])
 
     def test_staging_wrapper_build_emits_s0_and_250_gib_without_serverless(self) -> None:
         az = shutil.which("az")
