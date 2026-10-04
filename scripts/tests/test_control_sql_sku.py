@@ -58,13 +58,14 @@ class ControlSqlSkuTests(unittest.TestCase):
         self.assertEqual("S0", STAGING_SKU["sqlDatabaseSkuName"])
         self.assertEqual("Standard", STAGING_SKU["sqlDatabaseSkuTier"])
         self.assertEqual(10, STAGING_SKU["sqlDatabaseSkuCapacity"])
-        self.assertEqual("GP_S_Gen5", PRODUCTION_SKU["sqlDatabaseSkuName"])
-        self.assertEqual("GeneralPurpose", PRODUCTION_SKU["sqlDatabaseSkuTier"])
-        self.assertEqual("Gen5", PRODUCTION_SKU["sqlDatabaseSkuFamily"])
-        self.assertEqual(1, PRODUCTION_SKU["sqlDatabaseSkuCapacity"])
-        self.assertEqual("0", PRODUCTION_SKU["sqlDatabaseMaxSizeBytes"])
+        self.assertEqual("S0", PRODUCTION_SKU["sqlDatabaseSkuName"])
+        self.assertEqual("Standard", PRODUCTION_SKU["sqlDatabaseSkuTier"])
+        self.assertEqual("", PRODUCTION_SKU["sqlDatabaseSkuFamily"])
+        self.assertEqual(10, PRODUCTION_SKU["sqlDatabaseSkuCapacity"])
+        self.assertEqual(STAGING_MAX_SIZE_BYTES, PRODUCTION_SKU["sqlDatabaseMaxSizeBytes"])
+        self.assertEqual(STAGING_SKU, PRODUCTION_SKU)
 
-    def test_parameter_files_pin_staging_s0_and_production_gp(self) -> None:
+    def test_parameter_files_pin_staging_and_production_s0(self) -> None:
         staging = json.loads(STAGING_PARAMETERS.read_text())["parameters"]
         production = json.loads(PRODUCTION_PARAMETERS.read_text())["parameters"]
         azd = json.loads(AZD_PARAMETERS.read_text())["parameters"]
@@ -76,11 +77,11 @@ class ControlSqlSkuTests(unittest.TestCase):
         self.assertEqual(10, staging["sqlDatabaseSkuCapacity"]["value"])
         self.assertEqual(STAGING_MAX_SIZE_BYTES, staging["sqlDatabaseMaxSizeBytes"]["value"])
 
-        self.assertEqual("GP_S_Gen5", production["sqlDatabaseSkuName"]["value"])
-        self.assertEqual("GeneralPurpose", production["sqlDatabaseSkuTier"]["value"])
-        self.assertEqual("Gen5", production["sqlDatabaseSkuFamily"]["value"])
-        self.assertEqual(1, production["sqlDatabaseSkuCapacity"]["value"])
-        self.assertEqual("0", production["sqlDatabaseMaxSizeBytes"]["value"])
+        self.assertEqual("S0", production["sqlDatabaseSkuName"]["value"])
+        self.assertEqual("Standard", production["sqlDatabaseSkuTier"]["value"])
+        self.assertEqual("", production["sqlDatabaseSkuFamily"]["value"])
+        self.assertEqual(10, production["sqlDatabaseSkuCapacity"]["value"])
+        self.assertEqual(STAGING_MAX_SIZE_BYTES, production["sqlDatabaseMaxSizeBytes"]["value"])
         self.assertNotIn("environmentName", production)
 
         for name in (
@@ -105,16 +106,20 @@ class ControlSqlSkuTests(unittest.TestCase):
         self.assertIn("param sqlDatabaseSkuName string = ''", main)
         self.assertIn("param sqlDatabaseSkuTier string = ''", main)
         self.assertIn("param sqlDatabaseMaxSizeBytes string = ''", main)
-        self.assertIn("'valence-control-staging'", main)
-        self.assertIn("'test'", main)
-        self.assertIn("useStagingControlSqlSku", main)
+        self.assertIn("? sqlDatabaseSkuName : 'S0'", main)
+        self.assertIn(
+            "? sqlDatabaseSkuTier : (startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 'GeneralPurpose' : 'Standard')",
+            main,
+        )
         self.assertIn("sqlDatabaseSkuName: resolvedSqlDatabaseSkuName", main)
         self.assertNotIn("name: 'GP_S_Gen5'", main)
+        self.assertNotIn("useStagingControlSqlSku", main)
 
-        self.assertIn("param sqlDatabaseSkuName string = 'GP_S_Gen5'", module)
-        self.assertIn("param sqlDatabaseSkuTier string = 'GeneralPurpose'", module)
-        self.assertIn("param sqlDatabaseSkuFamily string = 'Gen5'", module)
-        self.assertIn("param sqlDatabaseSkuCapacity int = 1", module)
+        self.assertIn("param sqlDatabaseSkuName string = 'S0'", module)
+        self.assertIn("param sqlDatabaseSkuTier string = 'Standard'", module)
+        self.assertIn("param sqlDatabaseSkuFamily string = ''", module)
+        self.assertIn("param sqlDatabaseSkuCapacity int = 10", module)
+        self.assertIn("param sqlDatabaseMaxSizeBytes string = '268435456000'", module)
         self.assertIn("sku: catalogSku", module)
         self.assertIn("properties: catalogProperties", module)
         self.assertIn("startsWith(sqlDatabaseSkuName, 'GP_S_')", module)
@@ -205,11 +210,16 @@ module control_sql 'control-sql/control-sql.module.bicep' = {
             patched_module = module.read_text()
             patched_main = main.read_text()
             patched_parameters = json.loads(parameters.read_text())["parameters"]
-            self.assertIn("param sqlDatabaseSkuName string = 'GP_S_Gen5'", patched_module)
+            self.assertIn("param sqlDatabaseSkuName string = 'S0'", patched_module)
+            self.assertIn("param sqlDatabaseSkuTier string = 'Standard'", patched_module)
             self.assertIn("sku: catalogSku", patched_module)
             self.assertNotIn("name: 'GP_S_Gen5'", patched_module)
             self.assertIn("resolvedSqlDatabaseSkuName", patched_main)
-            self.assertIn("valence-control-staging", patched_main)
+            self.assertIn("? sqlDatabaseSkuName : 'S0'", patched_main)
+            self.assertIn(
+                "? sqlDatabaseSkuTier : (startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 'GeneralPurpose' : 'Standard')",
+                patched_main,
+            )
             self.assertEqual("", patched_parameters["sqlDatabaseSkuName"]["value"])
             self.assertEqual(
                 staging_parameters_document(),
@@ -244,6 +254,75 @@ module control_sql 'control-sql/control-sql.module.bicep' = {
                 check=False,
             )
             self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_name_only_gp_s_override_resolves_coherent_serverless_sku(self) -> None:
+        az = shutil.which("az")
+        if az is None:
+            self.skipTest("Azure CLI is not installed")
+        main = MAIN_BICEP.read_text()
+        start = main.index("var resolvedSqlDatabaseSkuName")
+        end = main.index("\nvar tags")
+        resolution = main[start:end].strip()
+        self.assertIn(
+            "startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 'GeneralPurpose' : 'Standard'",
+            resolution,
+        )
+        compiled_main = subprocess.run(
+            [az, "bicep", "build", "--file", str(MAIN_BICEP), "--stdout"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(0, compiled_main.returncode, compiled_main.stderr)
+        main_template = json.loads(compiled_main.stdout)
+        self.assertIn(
+            "startsWith(variables('resolvedSqlDatabaseSkuName'), 'GP_S_')",
+            main_template["variables"]["resolvedSqlDatabaseSkuTier"],
+        )
+        self.assertIn("'GeneralPurpose'", main_template["variables"]["resolvedSqlDatabaseSkuTier"])
+        with tempfile.TemporaryDirectory() as temporary:
+            wrapper = Path(temporary) / "name-only-gp.bicep"
+            compiled = Path(temporary) / "name-only-gp.json"
+            wrapper.write_text(
+                "targetScope = 'resourceGroup'\n"
+                "param sqlDatabaseSkuName string = 'GP_S_Gen5'\n"
+                "param sqlDatabaseSkuTier string = ''\n"
+                "param sqlDatabaseSkuFamily string = ''\n"
+                "param sqlDatabaseSkuCapacity int = 0\n"
+                "param sqlDatabaseMaxSizeBytes string = ''\n"
+                f"{resolution}\n"
+                f"module control_sql '{os.path.relpath(MODULE, wrapper.parent)}' = {{\n"
+                "  name: 'control-sql'\n"
+                "  params: {\n"
+                "    location: 'westeurope'\n"
+                "    sqlDatabaseSkuName: resolvedSqlDatabaseSkuName\n"
+                "    sqlDatabaseSkuTier: resolvedSqlDatabaseSkuTier\n"
+                "    sqlDatabaseSkuFamily: resolvedSqlDatabaseSkuFamily\n"
+                "    sqlDatabaseSkuCapacity: resolvedSqlDatabaseSkuCapacity\n"
+                "    sqlDatabaseMaxSizeBytes: resolvedSqlDatabaseMaxSizeBytes\n"
+                "  }\n"
+                "}\n"
+            )
+            result = subprocess.run(
+                [az, "bicep", "build", "--file", str(wrapper), "--outfile", str(compiled)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            template = json.loads(compiled.read_text())
+            self.assertIn(
+                "startsWith(variables('resolvedSqlDatabaseSkuName'), 'GP_S_')",
+                template["variables"]["resolvedSqlDatabaseSkuTier"],
+            )
+            self.assertIn("'GeneralPurpose'", template["variables"]["resolvedSqlDatabaseSkuTier"])
+            params = nested_module_parameters(template)
+            self.assertEqual("[variables('resolvedSqlDatabaseSkuName')]", params["sqlDatabaseSkuName"]["value"])
+            self.assertEqual("[variables('resolvedSqlDatabaseSkuTier')]", params["sqlDatabaseSkuTier"]["value"])
+            self.assertEqual("[variables('resolvedSqlDatabaseSkuFamily')]", params["sqlDatabaseSkuFamily"]["value"])
+            self.assertEqual("[variables('resolvedSqlDatabaseSkuCapacity')]", params["sqlDatabaseSkuCapacity"]["value"])
 
     def test_staging_wrapper_build_emits_s0_and_250_gib_without_serverless(self) -> None:
         az = shutil.which("az")
@@ -281,13 +360,49 @@ module control_sql 'control-sql/control-sql.module.bicep' = {
             self.assertEqual(10, params["sqlDatabaseSkuCapacity"]["value"])
             self.assertEqual(STAGING_MAX_SIZE_BYTES, params["sqlDatabaseMaxSizeBytes"]["value"])
 
-    def test_production_wrapper_build_keeps_gp_s_gen5_without_max_size(self) -> None:
+    def test_production_wrapper_build_emits_s0_and_250_gib_without_serverless(self) -> None:
         az = shutil.which("az")
         if az is None:
             self.skipTest("Azure CLI is not installed")
         with tempfile.TemporaryDirectory() as temporary:
             wrapper = Path(temporary) / "production-sql.bicep"
             compiled = Path(temporary) / "production-sql.json"
+            wrapper.write_text(
+                "targetScope = 'resourceGroup'\n"
+                f"module control_sql '{os.path.relpath(MODULE, wrapper.parent)}' = {{\n"
+                "  name: 'control-sql'\n"
+                "  params: {\n"
+                "    location: 'westeurope'\n"
+                "    sqlDatabaseSkuName: 'S0'\n"
+                "    sqlDatabaseSkuTier: 'Standard'\n"
+                "    sqlDatabaseSkuFamily: ''\n"
+                "    sqlDatabaseSkuCapacity: 10\n"
+                f"    sqlDatabaseMaxSizeBytes: '{STAGING_MAX_SIZE_BYTES}'\n"
+                "  }\n"
+                "}\n"
+            )
+            result = subprocess.run(
+                [az, "bicep", "build", "--file", str(wrapper), "--outfile", str(compiled)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            params = nested_module_parameters(json.loads(compiled.read_text()))
+            self.assertEqual("S0", params["sqlDatabaseSkuName"]["value"])
+            self.assertEqual("Standard", params["sqlDatabaseSkuTier"]["value"])
+            self.assertEqual("", params["sqlDatabaseSkuFamily"]["value"])
+            self.assertEqual(10, params["sqlDatabaseSkuCapacity"]["value"])
+            self.assertEqual(STAGING_MAX_SIZE_BYTES, params["sqlDatabaseMaxSizeBytes"]["value"])
+
+    def test_explicit_gp_s_gen5_wrapper_still_compiles_without_max_size(self) -> None:
+        az = shutil.which("az")
+        if az is None:
+            self.skipTest("Azure CLI is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            wrapper = Path(temporary) / "serverless-sql.bicep"
+            compiled = Path(temporary) / "serverless-sql.json"
             wrapper.write_text(
                 "targetScope = 'resourceGroup'\n"
                 f"module control_sql '{os.path.relpath(MODULE, wrapper.parent)}' = {{\n"
@@ -316,6 +431,39 @@ module control_sql 'control-sql/control-sql.module.bicep' = {
             self.assertEqual("Gen5", params["sqlDatabaseSkuFamily"]["value"])
             self.assertEqual(1, params["sqlDatabaseSkuCapacity"]["value"])
             self.assertEqual("0", params["sqlDatabaseMaxSizeBytes"]["value"])
+
+    def test_module_default_build_emits_s0_without_serverless_properties(self) -> None:
+        az = shutil.which("az")
+        if az is None:
+            self.skipTest("Azure CLI is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            compiled = Path(temporary) / "control-sql.json"
+            result = subprocess.run(
+                [az, "bicep", "build", "--file", str(MODULE), "--outfile", str(compiled)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            template = json.loads(compiled.read_text())
+            parameters = template["parameters"]
+            self.assertEqual("S0", parameters["sqlDatabaseSkuName"]["defaultValue"])
+            self.assertEqual("Standard", parameters["sqlDatabaseSkuTier"]["defaultValue"])
+            self.assertEqual("", parameters["sqlDatabaseSkuFamily"]["defaultValue"])
+            self.assertEqual(10, parameters["sqlDatabaseSkuCapacity"]["defaultValue"])
+            self.assertEqual(STAGING_MAX_SIZE_BYTES, parameters["sqlDatabaseMaxSizeBytes"]["defaultValue"])
+            variables = template["variables"]
+            self.assertIn("startsWith(parameters('sqlDatabaseSkuName'), 'GP_S_')", variables["serverlessSku"])
+            self.assertIn("autoPauseDelay", variables["catalogProperties"])
+            self.assertIn("if(variables('serverlessSku')", variables["catalogProperties"])
+            catalog = next(
+                resource
+                for resource in template["resources"]
+                if resource.get("type") == "Microsoft.Sql/servers/databases"
+            )
+            self.assertEqual("[variables('catalogSku')]", catalog["sku"])
+            self.assertEqual("[variables('catalogProperties')]", catalog["properties"])
 
 
 if __name__ == "__main__":

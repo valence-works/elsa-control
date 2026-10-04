@@ -722,9 +722,9 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertEqual("Standard", staging["sqlDatabaseSkuTier"]["value"])
         self.assertEqual(10, staging["sqlDatabaseSkuCapacity"]["value"])
         self.assertEqual("268435456000", staging["sqlDatabaseMaxSizeBytes"]["value"])
-        self.assertEqual("GP_S_Gen5", production["sqlDatabaseSkuName"]["value"])
-        self.assertEqual("GeneralPurpose", production["sqlDatabaseSkuTier"]["value"])
-        self.assertEqual("0", production["sqlDatabaseMaxSizeBytes"]["value"])
+        self.assertEqual("S0", production["sqlDatabaseSkuName"]["value"])
+        self.assertEqual("Standard", production["sqlDatabaseSkuTier"]["value"])
+        self.assertEqual("268435456000", production["sqlDatabaseMaxSizeBytes"]["value"])
 
     def test_regeneration_recreates_control_sql_sku_parameter_files_after_infra_wipe(self) -> None:
         """Aspire generate deletes infra/; the SKU patch must recreate the overlays."""
@@ -744,10 +744,10 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertEqual(10, staging["sqlDatabaseSkuCapacity"]["value"])
         self.assertEqual("268435456000", staging["sqlDatabaseMaxSizeBytes"]["value"])
         self.assertEqual("valence-control-staging", staging["environmentName"]["value"])
-        self.assertEqual("GP_S_Gen5", production["sqlDatabaseSkuName"]["value"])
-        self.assertEqual("Gen5", production["sqlDatabaseSkuFamily"]["value"])
-        self.assertEqual(1, production["sqlDatabaseSkuCapacity"]["value"])
-        self.assertEqual("0", production["sqlDatabaseMaxSizeBytes"]["value"])
+        self.assertEqual("S0", production["sqlDatabaseSkuName"]["value"])
+        self.assertEqual("", production["sqlDatabaseSkuFamily"]["value"])
+        self.assertEqual(10, production["sqlDatabaseSkuCapacity"]["value"])
+        self.assertEqual("268435456000", production["sqlDatabaseMaxSizeBytes"]["value"])
         self.assertNotIn("environmentName", production)
 
     def test_regeneration_failure_restores_all_manual_authority_directories(self) -> None:
