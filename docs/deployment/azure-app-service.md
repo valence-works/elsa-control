@@ -54,9 +54,17 @@ admin API endpoints under `/api/admin`.
 
 This is the fast path for application-only updates because the Azure resources
 are expected to already exist. It also avoids reapplying the App Service Bicep
-module on every code change. If the AppHost infrastructure shape changes, run
-the same workflow manually and choose `deploy_mode: infra`; that path runs the
-checked-in deployment helper:
+module on every code change. To preview or deploy only the RecoveryRequired alert rule and action group,
+choose `deploy_mode: telemetry`. The default `telemetry_action` is `what-if`
+and never creates. `create` is a separate dispatch and requires
+`confirm_environment` equal to the target environment name (`test` or
+`production`). Telemetry targeting production also requires that confirmation
+because the workflow's target default is production. That path runs the
+existing resource-group `scripts/deploy-managed-telemetry.sh` and does not
+deploy subscription-scoped `infra/main.bicep`. Infra mode does not run the
+telemetry preview or preflight. If the AppHost infrastructure shape changes,
+run the same workflow manually and choose `deploy_mode: infra`; that path
+runs the checked-in deployment helper:
 
 ```bash
 scripts/deploy-azure-elsa-control.sh \

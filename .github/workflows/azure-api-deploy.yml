@@ -13,13 +13,14 @@ on:
           - test
           - production
       deploy_mode:
-        description: "Use app for code-only deployment, infra for Bicep, build to stage, or promote an immutable candidate."
+        description: "Use app for code-only deployment, telemetry for the RecoveryRequired sink (RG-scoped), infra for subscription-scoped base Bicep (#705), build to stage, or promote an immutable candidate."
         required: true
         default: app
         type: choice
         options:
           - app
           - infra
+          - telemetry
           - build
           - promote
       candidate_run_id:
@@ -28,6 +29,18 @@ on:
         type: string
       candidate_digest:
         description: "Expected candidate image digest, including the sha256: prefix (promote only)."
+        required: false
+        type: string
+      telemetry_action:
+        description: "telemetry mode only. what-if previews only and never creates. create is a separate dispatch."
+        required: true
+        default: what-if
+        type: choice
+        options:
+          - what-if
+          - create
+      confirm_environment:
+        description: "Required for telemetry create, and for any telemetry dispatch targeting production. Must equal the target environment name."
         required: false
         type: string
 
@@ -67,8 +80,8 @@ jobs:
       # as STAGING_SMOKE_OWNER_ORGANIZATION_ID rather than as a source constant.
       EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ vars.EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS }}
       # RecoveryRequired Azure Monitor email. Staging never uses the production
-      # mailbox. infra mode passes the matching variable into
-      # scripts/deploy-managed-telemetry.sh.
+      # mailbox. telemetry mode passes the matching variable into
+      # scripts/deploy-managed-telemetry.sh. Infra mode does not run telemetry.
       STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT: ${{ vars.STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT }}
       PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT: ${{ vars.PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT }}
       MANAGED_TELEMETRY_WORKSPACE_NAME: ${{ vars.MANAGED_TELEMETRY_WORKSPACE_NAME }}
@@ -84,6 +97,8 @@ jobs:
       STAGING_SMOKE_OWNER_INSTANCE_ID: ${{ vars.STAGING_SMOKE_OWNER_INSTANCE_ID }}
       CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
       EXPECTED_CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
+      TELEMETRY_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.telemetry_action || 'what-if' }}
+      CONFIRM_ENVIRONMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.confirm_environment || '' }}
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: true
     steps:
@@ -91,11 +106,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup .NET SDK
+        if: ${{ env.DEPLOY_MODE != 'telemetry' }}
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
 
       - name: Setup Node.js
+        if: ${{ env.DEPLOY_MODE != 'telemetry' }}
         uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -108,22 +125,22 @@ jobs:
           ADMIN_API_KEY: ${{ env.DEPLOY_MODE == 'infra' && secrets.ADMIN_API_KEY || '' }}
           BUILDER_CLIENT_API_KEY: ${{ env.DEPLOY_MODE == 'infra' && secrets.BUILDER_CLIENT_API_KEY || '' }}
           CONTROL_ENTRA_CLIENT_SECRET: ${{ env.DEPLOY_MODE == 'infra' && secrets.CONTROL_ENTRA_CLIENT_SECRET || '' }}
-          STRIPE_TEST_SECRET_KEY: ${{ env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' && secrets.STRIPE_TEST_SECRET_KEY || '' }}
-          STRIPE_TEST_WEBHOOK_SIGNING_SECRET: ${{ env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' && secrets.STRIPE_TEST_WEBHOOK_SIGNING_SECRET || '' }}
-          ELSA_CLOUD_STAGING_ORIGIN: ${{ env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' && vars.ELSA_CLOUD_STAGING_ORIGIN || '' }}
-          STRIPE_HOSTED_PRICE_ID: ${{ env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' && vars.STRIPE_HOSTED_PRICE_ID || '' }}
-          STRIPE_PRODUCTION_PRICE_ID: ${{ env.TARGET_ENVIRONMENT == 'production' && env.DEPLOY_MODE != 'build' && vars.STRIPE_PRODUCTION_PRICE_ID || '' }}
-          CONTROL_PRODUCTION_WEBHOOK_URL: ${{ env.TARGET_ENVIRONMENT == 'production' && env.DEPLOY_MODE != 'build' && vars.CONTROL_PRODUCTION_WEBHOOK_URL || '' }}
-          AZURE_EXPECTED_PRODUCTION_PORTAL_RETURN_URL: ${{ env.TARGET_ENVIRONMENT == 'production' && env.DEPLOY_MODE != 'build' && vars.AZURE_EXPECTED_PRODUCTION_PORTAL_RETURN_URL || '' }}
-          AZURE_EXPECTED_PRODUCTION_CHECKOUT_SUCCESS_URL: ${{ env.TARGET_ENVIRONMENT == 'production' && env.DEPLOY_MODE != 'build' && vars.AZURE_EXPECTED_PRODUCTION_CHECKOUT_SUCCESS_URL || '' }}
-          AZURE_EXPECTED_PRODUCTION_CHECKOUT_CANCEL_URL: ${{ env.TARGET_ENVIRONMENT == 'production' && env.DEPLOY_MODE != 'build' && vars.AZURE_EXPECTED_PRODUCTION_CHECKOUT_CANCEL_URL || '' }}
-          AZURE_EXPECTED_PRODUCTION_CLOUD_PORTAL_RETURN_URL: ${{ env.TARGET_ENVIRONMENT == 'production' && env.DEPLOY_MODE != 'build' && vars.AZURE_EXPECTED_PRODUCTION_CLOUD_PORTAL_RETURN_URL || '' }}
+          STRIPE_TEST_SECRET_KEY: ${{ env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' && secrets.STRIPE_TEST_SECRET_KEY || '' }}
+          STRIPE_TEST_WEBHOOK_SIGNING_SECRET: ${{ env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' && secrets.STRIPE_TEST_WEBHOOK_SIGNING_SECRET || '' }}
+          ELSA_CLOUD_STAGING_ORIGIN: ${{ env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' && vars.ELSA_CLOUD_STAGING_ORIGIN || '' }}
+          STRIPE_HOSTED_PRICE_ID: ${{ env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' && vars.STRIPE_HOSTED_PRICE_ID || '' }}
+          STRIPE_PRODUCTION_PRICE_ID: ${{ env.TARGET_ENVIRONMENT == 'production' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' && vars.STRIPE_PRODUCTION_PRICE_ID || '' }}
+          CONTROL_PRODUCTION_WEBHOOK_URL: ${{ env.TARGET_ENVIRONMENT == 'production' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' && vars.CONTROL_PRODUCTION_WEBHOOK_URL || '' }}
+          AZURE_EXPECTED_PRODUCTION_PORTAL_RETURN_URL: ${{ env.TARGET_ENVIRONMENT == 'production' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' && vars.AZURE_EXPECTED_PRODUCTION_PORTAL_RETURN_URL || '' }}
+          AZURE_EXPECTED_PRODUCTION_CHECKOUT_SUCCESS_URL: ${{ env.TARGET_ENVIRONMENT == 'production' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' && vars.AZURE_EXPECTED_PRODUCTION_CHECKOUT_SUCCESS_URL || '' }}
+          AZURE_EXPECTED_PRODUCTION_CHECKOUT_CANCEL_URL: ${{ env.TARGET_ENVIRONMENT == 'production' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' && vars.AZURE_EXPECTED_PRODUCTION_CHECKOUT_CANCEL_URL || '' }}
+          AZURE_EXPECTED_PRODUCTION_CLOUD_PORTAL_RETURN_URL: ${{ env.TARGET_ENVIRONMENT == 'production' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' && vars.AZURE_EXPECTED_PRODUCTION_CLOUD_PORTAL_RETURN_URL || '' }}
         shell: bash
         run: |
           set -euo pipefail
 
           case "$DEPLOY_MODE" in
-            app|infra|build|promote) ;;
+            app|infra|telemetry|build|promote) ;;
             *)
               echo "::error::Unsupported deployment mode; refusing to continue."
               exit 1
@@ -340,16 +357,65 @@ jobs:
             AZURE_CLIENT_ID
             AZURE_TENANT_ID
             AZURE_SUBSCRIPTION_ID
-            AZURE_CONTAINER_REGISTRY_ENDPOINT
           )
 
-          if [ "$DEPLOY_MODE" != "build" ]; then
+          if [ "$DEPLOY_MODE" != "telemetry" ]; then
+            required+=(AZURE_CONTAINER_REGISTRY_ENDPOINT)
+          fi
+
+          if [ "$DEPLOY_MODE" != "build" ] && [ "$DEPLOY_MODE" != "telemetry" ]; then
             required+=(
               AZURE_ENV_NAME
               AZURE_LOCATION
               AZURE_RESOURCE_GROUP
               AZURE_WEBAPP_NAME
             )
+          fi
+
+          if [ "$DEPLOY_MODE" = "telemetry" ]; then
+            if [ "$TARGET_ENVIRONMENT" != "test" ] && [ "$TARGET_ENVIRONMENT" != "production" ]; then
+              echo "::error::Telemetry-only deploy is limited to test or production; refusing to continue."
+              exit 1
+            fi
+            telemetry_action="${TELEMETRY_ACTION:-what-if}"
+            case "$telemetry_action" in
+              what-if|create) ;;
+              *)
+                echo "::error::Unsupported telemetry action; refusing to continue."
+                exit 1
+                ;;
+            esac
+            if [ "$TARGET_ENVIRONMENT" = "production" ] && [ "${CONFIRM_ENVIRONMENT:-}" != "production" ]; then
+              echo "::error::Telemetry mode refuses the default production target unless confirm_environment is production."
+              exit 1
+            fi
+            if [ "$telemetry_action" = "create" ] && [ "${CONFIRM_ENVIRONMENT:-}" != "$TARGET_ENVIRONMENT" ]; then
+              echo "::error::Telemetry create requires confirm_environment to equal the target environment name."
+              exit 1
+            fi
+            required+=(
+              AZURE_LOCATION
+              AZURE_RESOURCE_GROUP
+              MANAGED_TELEMETRY_WORKSPACE_NAME
+              MANAGED_TELEMETRY_APPLICATION_INSIGHTS_NAME
+              MANAGED_TELEMETRY_API_IDENTITY_NAME
+              MANAGED_TELEMETRY_API_IDENTITY_RESOURCE_GROUP
+            )
+            if [ "$TARGET_ENVIRONMENT" = "test" ]; then
+              required+=(
+                STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT
+                PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT
+              )
+            else
+              required+=(PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT)
+            fi
+            if [ "$TARGET_ENVIRONMENT" = "test" ] &&
+               [ -n "${STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT:-}" ] &&
+               [ -n "${PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT:-}" ] &&
+               [ "$STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT" = "$PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT" ]; then
+              echo "::error::Staging RecoveryRequired alerts must not use the production mailbox."
+              exit 1
+            fi
           fi
 
           if [ "$DEPLOY_MODE" = "infra" ]; then
@@ -363,32 +429,9 @@ jobs:
             if [ "$TARGET_ENVIRONMENT" = "test" ]; then
               required+=(AZURE_PROVISIONER_IDENTITY_ID)
             fi
-            if [ "$TARGET_ENVIRONMENT" = "test" ] || [ "$TARGET_ENVIRONMENT" = "production" ]; then
-              required+=(
-                MANAGED_TELEMETRY_WORKSPACE_NAME
-                MANAGED_TELEMETRY_APPLICATION_INSIGHTS_NAME
-                MANAGED_TELEMETRY_API_IDENTITY_NAME
-                MANAGED_TELEMETRY_API_IDENTITY_RESOURCE_GROUP
-              )
-              if [ "$TARGET_ENVIRONMENT" = "test" ]; then
-                required+=(
-                  STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT
-                  PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT
-                )
-              else
-                required+=(PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT)
-              fi
-              if [ "$TARGET_ENVIRONMENT" = "test" ] &&
-                 [ -n "${STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT:-}" ] &&
-                 [ -n "${PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT:-}" ] &&
-                 [ "$STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT" = "$PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT" ]; then
-                echo "::error::Staging RecoveryRequired alerts must not use the production mailbox."
-                exit 1
-              fi
-            fi
           fi
 
-          if [ "$TARGET_ENVIRONMENT" = "test" ] && [ "$DEPLOY_MODE" != "build" ]; then
+          if [ "$TARGET_ENVIRONMENT" = "test" ] && [ "$DEPLOY_MODE" != "build" ] && [ "$DEPLOY_MODE" != "telemetry" ]; then
             required+=(
               ELSA_CLOUD_STAGING_ORIGIN
               STRIPE_HOSTED_PRICE_ID
@@ -403,9 +446,9 @@ jobs:
           fi
 
           billing_expected_mode=""
-          if [ "$TARGET_ENVIRONMENT" = "test" ] && [ "$DEPLOY_MODE" != "build" ]; then
+          if [ "$TARGET_ENVIRONMENT" = "test" ] && [ "$DEPLOY_MODE" != "build" ] && [ "$DEPLOY_MODE" != "telemetry" ]; then
             billing_expected_mode="test"
-          elif [ "$TARGET_ENVIRONMENT" = "production" ] && [ "$DEPLOY_MODE" != "build" ]; then
+          elif [ "$TARGET_ENVIRONMENT" = "production" ] && [ "$DEPLOY_MODE" != "build" ] && [ "$DEPLOY_MODE" != "telemetry" ]; then
             billing_expected_mode="live"
             required+=(
               STRIPE_PRODUCTION_PRICE_ID
@@ -429,7 +472,7 @@ jobs:
           done
 
           if [ "${#missing[@]}" -eq 0 ]; then
-            if [ "$TARGET_ENVIRONMENT" = "production" ] && [ "$DEPLOY_MODE" != "build" ]; then
+            if [ "$TARGET_ENVIRONMENT" = "production" ] && [ "$DEPLOY_MODE" != "build" ] && [ "$DEPLOY_MODE" != "telemetry" ]; then
               if ! python3 - <<'PY'
           from scripts.production_stripe_reconcile import ProductionAuditConfig, ReconciliationError
 
@@ -470,7 +513,7 @@ jobs:
           fi
 
       - name: Audit staging Stripe resources before deployment
-        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' }}
+        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' }}
         env:
           STRIPE_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
           STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_TEST_WEBHOOK_SIGNING_SECRET }}
@@ -483,15 +526,19 @@ jobs:
           python3 scripts/staging_stripe_reconcile.py --audit-stripe-only
 
       - name: Restore
+        if: ${{ env.DEPLOY_MODE != 'telemetry' }}
         run: dotnet restore ElsaControl.sln
 
       - name: Build AppHost
+        if: ${{ env.DEPLOY_MODE != 'telemetry' }}
         run: dotnet build src/Hosting/ElsaControl.AppHost/ElsaControl.AppHost.csproj --configuration Release --no-restore
 
       - name: Test API
+        if: ${{ env.DEPLOY_MODE != 'telemetry' }}
         run: dotnet test tests/Hosting/ElsaControl.Api.Tests/ElsaControl.Api.Tests.csproj --configuration Release --no-restore --verbosity normal
 
       - name: Build and test console
+        if: ${{ env.DEPLOY_MODE != 'telemetry' }}
         working-directory: src/Hosting/ElsaControl.Console
         run: |
           npm ci
@@ -648,7 +695,7 @@ jobs:
 
       - name: Capture current API deployment
         id: current-deployment
-        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.DEPLOY_MODE != 'build' }}
+        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -877,7 +924,7 @@ jobs:
 
       - name: Capture production Stripe billing settings before replacement
         id: production-billing-capture
-        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.TARGET_ENVIRONMENT == 'production' && env.DEPLOY_MODE != 'build' }}
+        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.TARGET_ENVIRONMENT == 'production' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' }}
         env:
           AZURE_RESOURCE_GROUP: ${{ env.AZURE_RESOURCE_GROUP }}
           AZURE_WEBAPP_NAME: ${{ env.AZURE_WEBAPP_NAME }}
@@ -889,7 +936,7 @@ jobs:
 
       - name: Deploy API app
         id: deploy-api
-        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.DEPLOY_MODE != 'build' }}
+        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' }}
         env:
           VALIDATED_CANDIDATE_IMAGE: ${{ steps.candidate-authority.outputs.candidate_image }}
           VALIDATED_CANDIDATE_BUILD_NUMBER: ${{ steps.candidate-authority.outputs.candidate_build_number }}
@@ -1104,9 +1151,17 @@ jobs:
             --name "$AZURE_WEBAPP_NAME" \
             --output none
 
+      - name: Preview managed telemetry sink
+        id: managed-telemetry-what-if
+        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.DEPLOY_MODE == 'telemetry' && env.TELEMETRY_ACTION == 'what-if' && (env.TARGET_ENVIRONMENT == 'test' || env.TARGET_ENVIRONMENT == 'production') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/deploy-managed-telemetry.sh --what-if
+
       - name: Deploy managed telemetry sink
         id: managed-telemetry
-        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.DEPLOY_MODE == 'infra' && (env.TARGET_ENVIRONMENT == 'test' || env.TARGET_ENVIRONMENT == 'production') }}
+        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.DEPLOY_MODE == 'telemetry' && env.TELEMETRY_ACTION == 'create' && (env.TARGET_ENVIRONMENT == 'test' || env.TARGET_ENVIRONMENT == 'production') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1114,7 +1169,7 @@ jobs:
 
       - name: Reconcile staging Stripe billing
         id: staging-stripe
-        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' }}
+        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' }}
         env:
           STRIPE_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
           STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_TEST_WEBHOOK_SIGNING_SECRET }}
@@ -1130,7 +1185,7 @@ jobs:
 
       - name: Verify deployed API health
         id: health-gate
-        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.DEPLOY_MODE != 'build' }}
+        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' }}
         env:
           VALIDATED_CANDIDATE_SOURCE_SHA: ${{ steps.candidate-authority.outputs.candidate_source_sha }}
           VALIDATED_CANDIDATE_BUILD_NUMBER: ${{ steps.candidate-authority.outputs.candidate_build_number }}
@@ -1208,7 +1263,7 @@ jobs:
 
       - name: Audit production Stripe billing
         id: production-stripe
-        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.TARGET_ENVIRONMENT == 'production' && env.DEPLOY_MODE != 'build' }}
+        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.TARGET_ENVIRONMENT == 'production' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' }}
         env:
           STRIPE_PRODUCTION_PRICE_ID: ${{ vars.STRIPE_PRODUCTION_PRICE_ID }}
           CONTROL_PRODUCTION_WEBHOOK_URL: ${{ vars.CONTROL_PRODUCTION_WEBHOOK_URL }}
@@ -1225,7 +1280,7 @@ jobs:
           python3 scripts/production_stripe_reconcile.py --audit --audit-capture "$PRODUCTION_BILLING_CAPTURE_PATH"
 
       - name: Restore previous API deployment after deployment, configuration, or health failure
-        if: ${{ failure() && steps.current-deployment.outcome == 'success' && steps.current-deployment.outputs.capture_succeeded == 'true' && (env.TARGET_ENVIRONMENT != 'production' || env.DEPLOY_MODE == 'build' || steps.production-billing-capture.outcome == 'success') && (steps.deploy-api.outcome == 'failure' || steps.staging-stripe.outcome == 'failure' || steps.managed-telemetry.outcome == 'failure' || steps.production-stripe.outcome == 'failure' || steps.health-gate.outcome == 'failure') }}
+        if: ${{ failure() && steps.current-deployment.outcome == 'success' && steps.current-deployment.outputs.capture_succeeded == 'true' && (env.TARGET_ENVIRONMENT != 'production' || env.DEPLOY_MODE == 'build' || steps.production-billing-capture.outcome == 'success') && (steps.deploy-api.outcome == 'failure' || steps.staging-stripe.outcome == 'failure' || steps.production-stripe.outcome == 'failure' || steps.health-gate.outcome == 'failure') }}
         env:
           PREVIOUS_LINUX_FX_VERSION: ${{ steps.current-deployment.outputs.linux_fx_version }}
           PREVIOUS_DEPLOYMENT_MODE: ${{ steps.current-deployment.outputs.deployment_mode }}

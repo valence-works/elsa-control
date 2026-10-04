@@ -35,6 +35,9 @@ param recoveryRequiredAlertEmail string
 ])
 param environment string
 
+@description('Create the Monitoring Metrics Publisher assignment on the Insights component. Contributor cannot write role assignments. The deploy script never sets this true; a read-only preflight either skips the assignment or fails closed naming the exact human grant.')
+param assignMonitoringMetricsPublisher bool = false
+
 var recoveryRequiredEventName = 'managed_lifecycle.recovery_required.entered'
 var recoveryRequiredActionGroupName = 'ag-recovery-required-${environment}'
 var recoveryRequiredAlertRuleName = 'qr-recovery-required-entered-${environment}'
@@ -89,8 +92,12 @@ resource applicationInsights 'Microsoft.Insights/components@2020-02-02' = {
 }
 
 // The built-in role authorizes telemetry publication, not query or administration.
+// Contributor excludes Microsoft.Authorization/*/write, so this resource is
+// created only when a privileged human already granted the assignment and the
+// deploy script's read-only preflight confirmed it. The script never requests
+// roleAssignments/write or subscription-scope rights.
 var MonitoringMetricsPublisherRoleId = '3913510d-42f4-4e42-8a64-420c390055eb'
-resource publisher 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource publisher 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (assignMonitoringMetricsPublisher) {
   name: guid(applicationInsights.id, apiIdentity.id, MonitoringMetricsPublisherRoleId)
   scope: applicationInsights
   properties: {

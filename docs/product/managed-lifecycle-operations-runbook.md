@@ -521,8 +521,8 @@ Who reads the mailbox: the operator named in
 named in `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT` for production.
 Never put an address in committed config, and never point staging at the
 production ops mailbox. `scripts/deploy-managed-telemetry.sh` (invoked by
-`azure-api-deploy.yml` in infra mode) refuses an unset recipient. Staging
-infra fails closed unless `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT`
+`azure-api-deploy.yml` in telemetry mode) refuses an unset recipient. Staging
+telemetry fails closed unless `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT`
 is also visible and differs from the staging mailbox.
 
 Until #508 GO row 26 (AC5) is proven on staging, keep the business-day
@@ -540,9 +540,34 @@ Required operator steps before the first live email (Sipke):
    `MANAGED_TELEMETRY_API_IDENTITY_NAME`, and
    `MANAGED_TELEMETRY_API_IDENTITY_RESOURCE_GROUP` on each environment
    that deploys the sink.
-3. Enable the exporter on the target API: set
-   `MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED=true` (applied as
-   `ManagedLifecycleTelemetry:AzureMonitor:Enabled`), plus
+3. Dispatch `deploy_mode: telemetry` with the default
+   `telemetry_action: what-if` against `test`. The role preflight never
+   blocks this preview: it reports `present`, `missing`,
+   `component-absent`, or `error` and then always runs the resource-group
+   what-if. Review that output before any create. It must show creates or
+   modifies only for the workspace, the Insights component,
+   `ag-recovery-required-staging`, and `qr-recovery-required-entered-staging`;
+   no deletes; no role assignment; the action group's only email receiver
+   is the staging mailbox. Telemetry targeting production is refused
+   unless `confirm_environment` is `production`. Infra mode does not run
+   this preview or preflight.
+4. After Code Review of that what-if, dispatch a separate run with
+   `telemetry_action: create` and `confirm_environment: test`. Create
+   deploys the workspace, Insights component, action group, and alert
+   without writing Authorization. If the component was absent or the
+   assignment is missing, the run prints the exact grant to make:
+   principal (API identity object id), role `Monitoring Metrics Publisher`
+   (`3913510d-42f4-4e42-8a64-420c390055eb`), and the Insights component
+   scope. An RG-level or subscription-level grant does not satisfy the
+   preflight. Do not use infra mode for this sink; subscription-scoped
+   `infra/main.bicep` is #705.
+5. A human creates that one role assignment. Rerun
+   `telemetry_action: what-if` until the preflight reports `present`. Keep
+   `MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED` off until then. Ingestion
+   stays off; a telemetry preflight failure never rolls the API back.
+6. Only after a preflight reports `present`, enable the exporter on the
+   target API: set `MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED=true` (applied
+   as `ManagedLifecycleTelemetry:AzureMonitor:Enabled`), plus
    `ManagedLifecycleTelemetry:AzureMonitor:ConnectionString` and
    `ManagedLifecycleTelemetry:AzureMonitor:ManagedIdentityClientId` from
    the reviewed sink component. Set
@@ -550,11 +575,9 @@ Required operator steps before the first live email (Sipke):
    deploy workflow sets `ManagedLifecycleTelemetry:AzureMonitor:Environment`
    to `staging` or `production` automatically. The Enabled flag is not
    turned on by default; an API without a connection string fails closed
-   if Enabled is true.
-4. Run infra deploy so `scripts/deploy-managed-telemetry.sh` creates the
-   environment-scoped rule and action group. Prove one `AppDependencies`
-   row for a known RecoveryRequired entry in the staging workspace before
-   treating the mailbox as live.
+   if Enabled is true. Prove one `AppDependencies` row for a known
+   RecoveryRequired entry in the staging workspace before treating the
+   mailbox as live.
 
 ## Enabling the production workers (#264, #315)
 

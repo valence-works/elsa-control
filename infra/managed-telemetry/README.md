@@ -37,14 +37,27 @@ Microsoft documents [Entra-authenticated ingestion and the required scoped role]
    the template and inspects the actual generated resource/role boundary, including
    the RecoveryRequired scheduled query rule and email action group.
 2. Resolve and verify the intended Control subscription, resource group, existing
-   API identity, supported sink region, and resource names. Infra deploy of
-   `azure-api-deploy.yml` runs `scripts/deploy-managed-telemetry.sh`, which
+   API identity, supported sink region, and resource names. The separately
+   guarded `telemetry` deploy mode of `azure-api-deploy.yml` runs
+   `scripts/deploy-managed-telemetry.sh` at resource-group scope. The default
+   `telemetry_action` is `what-if` and never creates. `create` is a separate
+   dispatch and requires `confirm_environment` equal to the target environment
+   name. It does not run subscription-scoped `infra/main.bicep`. Infra mode
+   does not run this preview or preflight. Full infra remains #705. The script
    passes `environment=staging` plus `STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT`
    on `test`, and `environment=production` plus
    `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT` on `production`. An unset
    recipient fails the deploy. Staging also requires
    `PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT` to be visible and different
-   so the mailbox cannot silently reuse production.
+   so the mailbox cannot silently reuse production. A read-only preflight
+   reports present, missing, component-absent, or error and never blocks the
+   what-if. It matches the exact API-identity principal, Monitoring Metrics
+   Publisher role id, and Insights component scope; an RG-level grant does
+   not satisfy it. An `az` error is reported as an error, never as a missing
+   assignment. When the component is absent, `create` deploys the workspace,
+   component, action group and alert without the role assignment, then prints
+   the exact grant. Ingestion stays off until a later preflight reports
+   present. The deploy identity never writes Authorization.
    Do not rely on the CLI's default subscription. Review every proposed change
    before deployment. A local `az deployment group what-if` must pass the same
    `environment` and `recoveryRequiredAlertEmail` parameters.
