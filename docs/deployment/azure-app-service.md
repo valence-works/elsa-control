@@ -46,16 +46,37 @@ the reverse).
 
 **When to run.** After this change is merged and the first staging
 deploy of that commit is live. Recapture the restore baseline from that
-deploy: `/health` build number and commit (`imageId`), the latest Web
-App deployment id, and the set of app-setting **names**. The expected
+deploy: the sitecontainers image reference **and digest**, `/health`
+`buildNumber` and `imageId` (they must agree with that digest), the
+set of app-setting **names**, `/health` `compatibilityFixture` `null`
+plus the authenticated compatibility response byte-matching the
+baseline, and the latest GitHub `test` deployment created by
+**Deploy staging** (filtered by that workflow/run — not the latest
+`test` deployment, because this job also creates one). The expected
 authenticated compatibility response stays `contractVersion` 1 with the
 same 11 capabilities unless this change itself adds one; if it does,
 the baseline is the list at that commit.
 
 **Inputs.** `mode`: `missing-capability` or `older-contract`. Test
-environment only. Requires `CLOUD_COMPATIBILITY_TOKEN` (Cloud BFF bearer
-for `GET /api/cloud/compatibility`) and `CLOUD_BFF_SMOKE_URL` (must
-report `compatible` after restore).
+environment only. The job mints a per-run Supabase user access token
+with the password grant and refuses to run if any of these `test`
+inputs are missing, or if the BFF host / token issuer is not the
+pinned staging project ref (the production ref
+`jhrcnclyydzngnyvhdht` is hard-refused):
+
+- secret `STAGING_E2E_COMPAT_EMAIL`
+- secret `STAGING_E2E_COMPAT_PASSWORD`
+- secret `VITE_SUPABASE_PUBLISHABLE_KEY` (password-grant and BFF `apikey`)
+- variable `STAGING_SUPABASE_PROJECT_REF`
+- variable `EXPECTED_STAGING_SUPABASE_ORIGIN` (`https://<ref>.supabase.co`)
+- variable `CLOUD_BFF_SMOKE_URL` (`https://<ref>.supabase.co/functions/v1/control-bff`)
+
+The minted token is masked with `::add-mask::` immediately, never
+written to outputs, and minted again before restore. Issuer must be
+`https://<ref>.supabase.co/auth/v1`; audience and role must be
+`authenticated`. After restore, BFF proof is `POST` `{ "action":
+"compatibility" }` and passes only on HTTP 200 with
+`.data.state=="compatible"` and `contractVersion==1`.
 
 **What it does.** Staging Control is an Azure **Web App**. Arm **sets**
 `CloudCompatibility__StagingFixture` and **restarts** the same deployed

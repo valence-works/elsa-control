@@ -41,7 +41,11 @@ jobs:
       AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
       AZURE_WEBAPP_NAME: ${{ vars.AZURE_WEBAPP_NAME }}
       AZURE_CONTAINER_REGISTRY_ENDPOINT: ${{ vars.AZURE_CONTAINER_REGISTRY_ENDPOINT }}
-      CLOUD_COMPATIBILITY_TOKEN: ${{ secrets.CLOUD_COMPATIBILITY_TOKEN }}
+      STAGING_E2E_COMPAT_EMAIL: ${{ secrets.STAGING_E2E_COMPAT_EMAIL }}
+      STAGING_E2E_COMPAT_PASSWORD: ${{ secrets.STAGING_E2E_COMPAT_PASSWORD }}
+      VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+      STAGING_SUPABASE_PROJECT_REF: ${{ vars.STAGING_SUPABASE_PROJECT_REF }}
+      EXPECTED_STAGING_SUPABASE_ORIGIN: ${{ vars.EXPECTED_STAGING_SUPABASE_ORIGIN }}
       CLOUD_BFF_SMOKE_URL: ${{ vars.CLOUD_BFF_SMOKE_URL }}
     steps:
       - name: Checkout
@@ -67,6 +71,12 @@ jobs:
           tenant-id: ${{ env.AZURE_TENANT_ID }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Mint the staging Cloud user token
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/staging-compat-fixture.sh mint
+
       - name: Preflight exclusive staging and capture the baseline
         id: preflight
         env:
@@ -84,6 +94,8 @@ jobs:
           EXPECTED_BUILD_NUMBER: ${{ steps.preflight.outputs.build_number }}
           EXPECTED_COMMIT: ${{ steps.preflight.outputs.commit }}
           EXPECTED_DEPLOYMENT_ID: ${{ steps.preflight.outputs.deployment_id }}
+          EXPECTED_IMAGE_REFERENCE: ${{ steps.preflight.outputs.image_reference }}
+          EXPECTED_PREFLIGHT_STARTED_AT: ${{ steps.preflight.outputs.preflight_started_at }}
           HEALTH_BUDGET_SECONDS: "300"
         shell: bash
         run: |
@@ -112,6 +124,13 @@ jobs:
             sleep 30
           done
 
+      - name: Mint the staging Cloud user token before restore
+        if: ${{ always() && steps.preflight.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/staging-compat-fixture.sh mint
+
       - name: Restore the baseline
         # Skip when exclusive preflight failed closed: the fixture was never
         # written, and a restore restart would bounce staging during an open
@@ -123,6 +142,8 @@ jobs:
           EXPECTED_BUILD_NUMBER: ${{ steps.preflight.outputs.build_number }}
           EXPECTED_COMMIT: ${{ steps.preflight.outputs.commit }}
           EXPECTED_DEPLOYMENT_ID: ${{ steps.preflight.outputs.deployment_id }}
+          EXPECTED_IMAGE_REFERENCE: ${{ steps.preflight.outputs.image_reference }}
+          EXPECTED_PREFLIGHT_STARTED_AT: ${{ steps.preflight.outputs.preflight_started_at }}
           EXPECTED_SETTING_NAMES_PATH: ${{ steps.preflight.outputs.setting_names_path }}
           HEALTH_ATTEMPTS: "18"
           HEALTH_RETRY_SECONDS: "5"
