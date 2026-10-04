@@ -71,11 +71,33 @@ async function signIn(page, origin, email, password) {
 function maskLocators(page, email) {
   return [
     page.getByText(email, { exact: false }),
+    page.locator(".acct-name"),
+    page.locator(".acct-mail"),
     page.getByText(UUID_PATTERN)
   ];
 }
 
-async function assertArmed(page, email) {
+async function openWorkspaceNavigation(page, viewport) {
+  // AppShell (elsa-cloud main b8718da7) has no account menu. The sidebar is
+  // a drawer on mobile, behind the "Open navigation" button.
+  if (!viewport?.isMobile) {
+    return;
+  }
+  const toggle = page.getByRole("button", { name: "Open navigation" });
+  await toggle.waitFor({ timeout: 45_000 });
+  if ((await toggle.getAttribute("aria-expanded")) !== "true") {
+    await toggle.click();
+  }
+  await page.locator("#app-sidebar").waitFor({ state: "visible", timeout: 45_000 });
+}
+
+async function assertSideSurfaces(page) {
+  const sidebar = page.locator("#app-sidebar");
+  await sidebar.getByRole("link", { name: "Billing and plans", exact: true }).waitFor();
+  await sidebar.getByRole("button", { name: "Sign out", exact: true }).waitFor();
+}
+
+async function assertArmed(page, email, viewport) {
   await page.getByText(UPDATE_BANNER, { exact: false }).waitFor({ timeout: 45_000 });
   await page.getByText(HOSTED_PAUSED, { exact: false }).waitFor();
   await page.getByText(SIDE_SURFACES, { exact: false }).waitFor();
@@ -90,13 +112,12 @@ async function assertArmed(page, email) {
       }
     }
   }
-  await openAccountMenu(page, email);
-  await page.getByRole("menuitem", { name: "Billing and plans" }).waitFor();
-  await page.getByRole("menuitem", { name: "Sign out" }).waitFor();
+  await openWorkspaceNavigation(page, viewport);
+  await assertSideSurfaces(page);
   await page.getByRole("link", { name: /hello@valence.works/i }).first().waitFor();
 }
 
-async function assertRestored(page, email) {
+async function assertRestored(page, email, viewport) {
   // Wait until the armed copy has cleared so the absence checks do not race
   // the compatibility poll. RESTORED_HOSTED must not match the paused text.
   await page.getByText(UPDATE_BANNER, { exact: true }).waitFor({ state: "hidden", timeout: 45_000 });
@@ -119,27 +140,8 @@ async function assertRestored(page, email) {
       }
     }
   }
-  await openAccountMenu(page, email);
-  await page.getByRole("menuitem", { name: "Billing and plans" }).waitFor();
-  await page.getByRole("menuitem", { name: "Sign out" }).waitFor();
-}
-
-async function openAccountMenu(page, email) {
-  if (await page.getByRole("menu").count()) {
-    return;
-  }
-  const candidates = [
-    page.getByRole("button", { name: email, exact: false }),
-    page.getByRole("button", { name: /signed in|account|menu/i })
-  ];
-  for (const candidate of candidates) {
-    if (await candidate.count()) {
-      await candidate.first().click();
-      if (await page.getByRole("menu").count()) {
-        return;
-      }
-    }
-  }
+  await openWorkspaceNavigation(page, viewport);
+  await assertSideSurfaces(page);
 }
 
 async function visitBillingAndSupport(page, origin) {
@@ -193,17 +195,17 @@ async function runPhase({ phase, origin, email, password, directory, statePath }
         if (statePath) {
           await context.storageState({ path: statePath });
         }
-        await assertArmed(page, email);
+        await assertArmed(page, email, viewport);
         files.push(await capture(page, directory, `${viewport.name}-armed`, email));
         await visitBillingAndSupport(page, origin);
         await page.goto(`${origin}/dashboard`, { waitUntil: "domcontentloaded" });
         await page.reload({ waitUntil: "domcontentloaded" });
-        await assertArmed(page, email);
+        await assertArmed(page, email, viewport);
         files.push(await capture(page, directory, `${viewport.name}-armed-reload`, email));
       } else if (phase === "restored") {
         await page.goto(`${origin}/dashboard`, { waitUntil: "domcontentloaded" });
         await page.reload({ waitUntil: "domcontentloaded" });
-        await assertRestored(page, email);
+        await assertRestored(page, email, viewport);
         files.push(await capture(page, directory, `${viewport.name}-restored-reload`, email));
       } else {
         throw new Error("SCREENSHOT_PHASE must be armed or restored.");
@@ -234,7 +236,7 @@ async function main() {
     files.map((file) => path.basename(file)).join("\n") + "\n",
     "utf8"
   );
-  console.log(`Captured ${files.length} ${phase} screens. Email and org ids were masked.`);
+  console.log(`Captured ${files.length} ${phase} screens. Email, display name, and org ids were masked.`);
 }
 
 await main();

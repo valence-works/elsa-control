@@ -50,6 +50,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "staging-compat-fixture.yml"
 SCRIPT = ROOT / "scripts" / "staging-compat-fixture.sh"
 SCREENS = ROOT / "scripts" / "staging-compat-fixture-screens.mjs"
 HANDLER_FIXTURE = ROOT / "scripts" / "tests" / "fixtures" / "elsa-cloud-control-bff-handler.ts"
+APP_SHELL_FIXTURE = ROOT / "scripts" / "tests" / "fixtures" / "elsa-cloud-app-shell.tsx"
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 TELEMETRY_LINE = (
     "telemetry: not used (Architect ruling); no-forward evidence = "
@@ -525,6 +526,25 @@ class StagingCompatWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(0, result.returncode, result.stderr + result.stdout)
             self.assertIn("playwright-ok", result.stdout)
+
+    def test_playwright_selectors_match_elsa_cloud_app_shell(self) -> None:
+        fixture = APP_SHELL_FIXTURE.read_text()
+        self.assertIn("b8718da7", fixture)
+        self.assertIn('aria-label="Open navigation"', fixture)
+        self.assertIn('id="app-sidebar"', fixture)
+        self.assertIn("Billing and plans", fixture)
+        self.assertIn("Sign out", fixture)
+        self.assertIn('className="acct-name"', fixture)
+        self.assertNotIn('role="menuitem"', fixture)
+        self.assertNotIn("openAccountMenu", self.screens)
+        self.assertNotIn('getByRole("menuitem"', self.screens)
+        self.assertIn('getByRole("link", { name: "Billing and plans", exact: true })', self.screens)
+        self.assertIn('getByRole("button", { name: "Sign out", exact: true })', self.screens)
+        self.assertIn('getByRole("button", { name: "Open navigation" })', self.screens)
+        self.assertIn('locator("#app-sidebar")', self.screens)
+        self.assertIn('locator(".acct-name")', self.screens)
+        self.assertIn("openWorkspaceNavigation", self.screens)
+        self.assertIn("viewport?.isMobile", self.screens)
 
     def test_telemetry_is_not_used_and_never_queries_azure(self) -> None:
         self.assertNotIn("Report armed-window telemetry", self.source)
