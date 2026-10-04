@@ -14,6 +14,15 @@ FREEZE_MARKER = re.compile(r"^staging-freeze:\s+(?P<state>on|off)\b", re.IGNOREC
 QA_WINDOW_MARKER = re.compile(r"^qa-window:\s+(?P<state>open|closed)\b", re.IGNORECASE)
 PROVE_NAME = re.compile(r"prove", re.IGNORECASE)
 FIXTURE_WORKFLOW = "staging-compat-fixture.yml"
+TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER"})
+TRUSTED_LOGINS = frozenset({"sfmskywalker"})
+
+# Fixture-on cap stays 20 minutes from the app-setting write. Restore always
+# keeps its own reserved budget. The job timeout is only a backstop above that.
+FIXTURE_CAP_SECONDS = 20 * 60
+RESTORE_BUDGET_SECONDS = 4 * 60
+MAX_HOLD_SECONDS = 15 * 60
+JOB_BACKSTOP_SECONDS = 30 * 60
 
 
 def first_nonempty_line(body: str) -> str:
@@ -24,9 +33,24 @@ def first_nonempty_line(body: str) -> str:
     return ""
 
 
+def commenter_is_trusted(comment: Mapping[str, Any]) -> bool:
+    association = str(comment.get("author_association") or "").strip().upper()
+    if association in TRUSTED_ASSOCIATIONS:
+        return True
+    user = comment.get("user")
+    login = ""
+    if isinstance(user, Mapping):
+        login = str(user.get("login") or "").strip().lower()
+    elif isinstance(comment.get("login"), str):
+        login = comment["login"].strip().lower()
+    return login in TRUSTED_LOGINS
+
+
 def latest_marker_state(comments: Iterable[Mapping[str, Any]], pattern: re.Pattern[str]) -> str | None:
     state: str | None = None
     for comment in comments:
+        if not commenter_is_trusted(comment):
+            continue
         body = comment.get("body")
         if not isinstance(body, str):
             continue
@@ -44,6 +68,16 @@ def qa_window_is_open(issue_state: str, comments: Iterable[Mapping[str, Any]]) -
     if issue_state == "open":
         return True
     return latest_marker_state(comments, QA_WINDOW_MARKER) == "open"
+
+
+def compute_hold_seconds(
+    elapsed_since_arm: int,
+    fixture_cap: int = FIXTURE_CAP_SECONDS,
+    restore_budget: int = RESTORE_BUDGET_SECONDS,
+    max_hold: int = MAX_HOLD_SECONDS,
+) -> int:
+    remaining = int(fixture_cap) - int(elapsed_since_arm) - int(restore_budget)
+    return max(0, min(int(max_hold), remaining))
 
 
 def conflicting_runs(
@@ -98,6 +132,9 @@ def main(argv: list[str] | None = None) -> int:
     runs.add_argument("--runs", required=True)
     runs.add_argument("--this-run-id", default="")
 
+    hold = sub.add_parser("hold")
+    hold.add_argument("--elapsed-since-arm", required=True, type=int)
+
     args = parser.parse_args(argv)
     if args.command == "freeze":
         comments = load_json(args.comments)
@@ -132,6 +169,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         print("No conflicting Deploy staging or Prove runs.")
+        return 0
+    if args.command == "hold":
+        print(compute_hold_seconds(args.elapsed_since_arm))
         return 0
     return 2
 

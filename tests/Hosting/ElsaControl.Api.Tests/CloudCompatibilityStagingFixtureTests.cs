@@ -208,7 +208,7 @@ public sealed class CloudCompatibilityStagingFixtureTests
     }
 
     [Fact]
-    public async Task Health_omits_the_fixture_when_unset()
+    public async Task Health_reports_null_compatibility_fixture_when_unset()
     {
         await using var app = CreateBffApplication();
         using var response = await app.CreateClient().GetAsync("/health");
@@ -216,7 +216,8 @@ public sealed class CloudCompatibilityStagingFixtureTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         Assert.Equal("ok", payload.RootElement.GetProperty("status").GetString());
-        Assert.Equal(JsonValueKind.Null, payload.RootElement.GetProperty("compatibilityFixture").ValueKind);
+        Assert.True(payload.RootElement.TryGetProperty("compatibilityFixture", out var fixture));
+        Assert.Equal(JsonValueKind.Null, fixture.ValueKind);
     }
 
     [Theory]

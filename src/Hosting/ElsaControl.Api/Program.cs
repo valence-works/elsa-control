@@ -744,8 +744,7 @@ app.MapGet("/health", (IConfiguration configuration, IOptions<CloudCompatibility
 {
     var buildNumber = SafeHealthIdentifier(configuration["Application:BuildNumber"]);
     var imageId = SafeHealthIdentifier(configuration["ELSA_CONTROL_IMAGE_ID"]);
-    // Known fixture modes only. Unset/unknown stay null so callers can tell
-    // whether the recycled process is actually serving the armed revision.
+    // Witness only: always present, null or a known mode. No code path gates on it.
     var compatibilityFixture = compatibility.Value.NormalizedStagingFixture;
     return Results.Ok(new { status = "ok", buildNumber, imageId, compatibilityFixture });
 });

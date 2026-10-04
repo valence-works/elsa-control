@@ -34,6 +34,41 @@ review the generated diff before committing it. For deployment commands and
 the first-run sequence, see
 [Azure Elsa Control Deployment Plan](azure-elsa-control-deployment-plan.md).
 
+## Staging Control compatibility fixture
+
+Manual workflow: `.github/workflows/staging-compat-fixture.yml`.
+Dispatch it only in an exclusive staging window after the CEO posts
+`staging-freeze: on` on #508, and never while #637 or #661 is an open QA
+window. It shares the Deploy staging concurrency group
+`azure-api-deploy-test` (GitHub keeps one pending run per group, so a
+pending Deploy staging is cancelled if this is dispatched first, and
+the reverse).
+
+**When to run.** After this change is merged and the first staging
+deploy of that commit is live. Recapture the restore baseline from that
+deploy: `/health` build number and commit (`imageId`), the latest Web
+App deployment id, and the set of app-setting **names**. The expected
+authenticated compatibility response stays `contractVersion` 1 with the
+same 11 capabilities unless this change itself adds one; if it does,
+the baseline is the list at that commit.
+
+**Inputs.** `mode`: `missing-capability` or `older-contract`. Test
+environment only. Requires `CLOUD_COMPATIBILITY_TOKEN` (Cloud BFF bearer
+for `GET /api/cloud/compatibility`) and `CLOUD_BFF_SMOKE_URL` (must
+report `compatible` after restore).
+
+**What it does.** Staging Control is an Azure **Web App**. Arm **sets**
+`CloudCompatibility__StagingFixture` and **restarts** the same deployed
+build. Restore **deletes** the setting (it does not blank it) and
+restarts again. `/health.compatibilityFixture` is a recycle witness
+only. Arm and restore count as successful only when the authenticated
+compatibility response matches the armed contract or the baseline, and
+restore also requires BFF smoke `compatible`.
+
+**Time cap.** The fixture may stay applied at most 20 minutes from the
+setting write. Restore always keeps a reserved 4-minute budget, including
+after cancel. The job timeout (30 minutes) is only a backstop.
+
 ## GitHub Actions Deployment
 
 The `Azure Control API Deploy` workflow is manually dispatched from GitHub Actions.

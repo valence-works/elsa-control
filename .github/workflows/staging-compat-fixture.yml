@@ -12,6 +12,8 @@ on:
           - older-contract
 
 # Share Deploy staging's lock so a deploy cannot land mid-proof.
+# GitHub keeps only one pending run per group, so dispatching this while a
+# Deploy staging is already pending cancels that pending deploy (and vice versa).
 concurrency:
   group: azure-api-deploy-test
   cancel-in-progress: false
@@ -20,7 +22,8 @@ jobs:
   fixture:
     name: Arm and restore the staging compatibility fixture
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Backstop above fixture-on (20m) + reserved restore (4m). Not the restore budget.
+    timeout-minutes: 30
     environment: test
     permissions:
       actions: read
@@ -31,12 +34,15 @@ jobs:
     env:
       TARGET_ENVIRONMENT: test
       FIXTURE_MODE: ${{ inputs.mode }}
+      DISPATCH_MODE: ${{ inputs.mode }}
       AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
       AZURE_WEBAPP_NAME: ${{ vars.AZURE_WEBAPP_NAME }}
       AZURE_CONTAINER_REGISTRY_ENDPOINT: ${{ vars.AZURE_CONTAINER_REGISTRY_ENDPOINT }}
+      CLOUD_COMPATIBILITY_TOKEN: ${{ secrets.CLOUD_COMPATIBILITY_TOKEN }}
+      CLOUD_BFF_SMOKE_URL: ${{ vars.CLOUD_BFF_SMOKE_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,7 +51,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ github.event.inputs.mode }}" != "missing-capability" ] && [ "${{ github.event.inputs.mode }}" != "older-contract" ]; then
+          if [ "$DISPATCH_MODE" != "missing-capability" ] && [ "$DISPATCH_MODE" != "older-contract" ]; then
             echo "::error::The compatibility fixture mode is not recognized."
             exit 1
           fi
@@ -70,10 +76,13 @@ jobs:
           set -euo pipefail
           scripts/staging-compat-fixture.sh preflight
 
-      - name: Arm the compatibility fixture on the same image digest
+      - name: Arm the compatibility fixture on the same deployed build
         id: arm
         env:
           EXPECTED_DIGEST: ${{ steps.preflight.outputs.digest }}
+          EXPECTED_BUILD_NUMBER: ${{ steps.preflight.outputs.build_number }}
+          EXPECTED_COMMIT: ${{ steps.preflight.outputs.commit }}
+          EXPECTED_DEPLOYMENT_ID: ${{ steps.preflight.outputs.deployment_id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -85,18 +94,33 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "Compatibility fixture is armed on the same image digest."
-          echo "Cancel this workflow to restore immediately. The job cap is 20 minutes."
-          end=$((SECONDS + 900))
+          armed_at="${{ steps.arm.outputs.armed_at }}"
+          if [[ ! "$armed_at" =~ ^[0-9]+$ ]]; then
+            echo "::error::Arm did not record when the Web App setting was applied."
+            exit 1
+          fi
+          now="$(date +%s)"
+          elapsed=$((now - armed_at))
+          hold="$(python3 scripts/lib/staging_compat_exclusive.py hold --elapsed-since-arm "$elapsed")"
+          echo "Compatibility fixture is armed on the same deployed Web App build."
+          echo "Hold ${hold}s (fixture-on cap 20m minus elapsed minus reserved restore)."
+          echo "Cancel this workflow to restore immediately."
+          end=$((SECONDS + hold))
           while [ "$SECONDS" -lt "$end" ]; do
             sleep 30
           done
 
       - name: Restore the baseline
         if: ${{ always() }}
+        timeout-minutes: 4
         env:
           EXPECTED_DIGEST: ${{ steps.preflight.outputs.digest }}
+          EXPECTED_BUILD_NUMBER: ${{ steps.preflight.outputs.build_number }}
+          EXPECTED_COMMIT: ${{ steps.preflight.outputs.commit }}
+          EXPECTED_DEPLOYMENT_ID: ${{ steps.preflight.outputs.deployment_id }}
           EXPECTED_SETTING_NAMES_PATH: ${{ steps.preflight.outputs.setting_names_path }}
+          HEALTH_ATTEMPTS: "8"
+          HEALTH_RETRY_SECONDS: "15"
         shell: bash
         run: |
           set -euo pipefail
