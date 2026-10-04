@@ -371,18 +371,23 @@ module control_sql 'control-sql/control-sql.module.bicep' = {
             )
             self.assertEqual(0, result.returncode, result.stderr)
             template = json.loads(compiled.read_text())
+            parameters = template["parameters"]
+            self.assertEqual("S0", parameters["sqlDatabaseSkuName"]["defaultValue"])
+            self.assertEqual("Standard", parameters["sqlDatabaseSkuTier"]["defaultValue"])
+            self.assertEqual("", parameters["sqlDatabaseSkuFamily"]["defaultValue"])
+            self.assertEqual(10, parameters["sqlDatabaseSkuCapacity"]["defaultValue"])
+            self.assertEqual(STAGING_MAX_SIZE_BYTES, parameters["sqlDatabaseMaxSizeBytes"]["defaultValue"])
+            variables = template["variables"]
+            self.assertIn("startsWith(parameters('sqlDatabaseSkuName'), 'GP_S_')", variables["serverlessSku"])
+            self.assertIn("autoPauseDelay", variables["catalogProperties"])
+            self.assertIn("if(variables('serverlessSku')", variables["catalogProperties"])
             catalog = next(
                 resource
                 for resource in template["resources"]
                 if resource.get("type") == "Microsoft.Sql/servers/databases"
             )
-            self.assertEqual("S0", catalog["sku"]["name"])
-            self.assertEqual("Standard", catalog["sku"]["tier"])
-            self.assertEqual(10, catalog["sku"]["capacity"])
-            self.assertNotIn("family", catalog["sku"])
-            self.assertEqual(268435456000, catalog["properties"]["maxSizeBytes"])
-            self.assertNotIn("autoPauseDelay", catalog["properties"])
-            self.assertNotIn("minCapacity", catalog["properties"])
+            self.assertEqual("[variables('catalogSku')]", catalog["sku"])
+            self.assertEqual("[variables('catalogProperties')]", catalog["properties"])
 
 
 if __name__ == "__main__":
