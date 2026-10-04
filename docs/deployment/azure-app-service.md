@@ -73,6 +73,16 @@ after cancel. Restore health waits are deadline-bounded so delete,
 restart, witness, and authenticated proofs fit that budget. The job
 timeout (30 minutes) is only a backstop.
 
+**Manual removal.** If a run leaves `CloudCompatibility__StagingFixture`
+armed, remove it by hand on the staging Control Web App:
+
+1. Delete the `CloudCompatibility__StagingFixture` app setting. Do not
+   blank it.
+2. Restart the Web App on the same deployed build.
+3. Verify `/health.compatibilityFixture` is `null`, authenticated
+   `GET /api/cloud/compatibility` matches the baseline contract, and BFF
+   smoke reports `compatible`.
+
 ## GitHub Actions Deployment
 
 The `Azure Control API Deploy` workflow is manually dispatched from GitHub Actions.

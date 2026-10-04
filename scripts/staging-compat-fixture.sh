@@ -17,7 +17,12 @@ BASELINE_CAPABILITIES_JSON='["cloud.bootstrap.v1","hosted.instances.list.v1","ho
 
 fail() {
   echo "::error::$1" >&2
-  return 1
+  # exit 1 only ends a command-substitution subshell. Terminate the
+  # top-level script so if/! /$(...) callers cannot continue after a failure.
+  if [ "${BASHPID:-$$}" -ne "$$" ]; then
+    kill -s TERM "$$" 2>/dev/null || true
+  fi
+  exit 1
 }
 
 require_test_environment() {
@@ -66,17 +71,13 @@ require_json_object() {
 
 gh_get() {
   local out
-  if ! out="$(gh api "$@")"; then
-    fail "A required GitHub API call failed."
-  fi
+  out="$(gh api "$@")" || fail "A required GitHub API call failed."
   printf '%s' "$out"
 }
 
 az_tsv() {
   local out
-  if ! out="$(az "$@" --output tsv --only-show-errors)"; then
-    fail "A required Azure CLI call failed."
-  fi
+  out="$(az "$@" --output tsv --only-show-errors)" || fail "A required Azure CLI call failed."
   printf '%s' "$out"
 }
 
@@ -87,13 +88,33 @@ list_setting_names() {
     --query '[].name' | LC_ALL=C sort
 }
 
-setting_present() {
-  local count
-  count="$(az_tsv webapp config appsettings list \
-    --resource-group "$AZURE_RESOURCE_GROUP" \
-    --name "$AZURE_WEBAPP_NAME" \
-    --query "[?name=='${SETTING_NAME}'] | length(@)")"
-  [ "${count:-0}" != "0" ]
+# Three outcomes: prints present|absent, or fail() exits on a read error.
+# A failed Azure read is never treated as absent.
+read_setting_presence() {
+  local attempt count
+  local attempts="${SETTING_READ_ATTEMPTS:-3}"
+  local retry="${SETTING_READ_RETRY_SECONDS:-2}"
+  for attempt in $(seq 1 "$attempts"); do
+    if count="$(az webapp config appsettings list \
+      --resource-group "$AZURE_RESOURCE_GROUP" \
+      --name "$AZURE_WEBAPP_NAME" \
+      --query "[?name=='${SETTING_NAME}'] | length(@)" \
+      --output tsv \
+      --only-show-errors)"; then
+      if [[ "$count" =~ ^[0-9]+$ ]]; then
+        if [ "$count" = "0" ]; then
+          printf '%s\n' "absent"
+        else
+          printf '%s\n' "present"
+        fi
+        return 0
+      fi
+    fi
+    if [ "$attempt" -lt "$attempts" ]; then
+      sleep "$retry"
+    fi
+  done
+  fail "Could not read whether the compatibility fixture setting is present."
 }
 
 latest_deployment_id() {
@@ -498,18 +519,14 @@ collect_test_environment_run_ids() {
   local repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required.}"
   local deployment_ids deployment_id state url run_id count statuses
   local ids='[]'
-  if ! deployment_ids="$(gh_get --paginate \
+  deployment_ids="$(gh_get --paginate \
     "repos/${repo}/deployments?environment=test&per_page=50" \
-    --jq '.[] | .id')"; then
-    return 1
-  fi
+    --jq '.[] | .id')"
   count=0
   while IFS= read -r deployment_id && [ "$count" -lt 20 ]; do
     [[ "$deployment_id" =~ ^[0-9]+$ ]] || continue
     count=$((count + 1))
-    if ! statuses="$(gh_get "repos/${repo}/deployments/${deployment_id}/statuses?per_page=1")"; then
-      return 1
-    fi
+    statuses="$(gh_get "repos/${repo}/deployments/${deployment_id}/statuses?per_page=1")"
     require_json_array "$statuses" "Test-environment deployment status"
     state="$(printf '%s\n' "$statuses" | jq -r '.[0].state // empty' | tr '[:upper:]' '[:lower:]')"
     case "$state" in
@@ -534,11 +551,9 @@ collect_runs() {
   local status raw page_query
   local combined='[]'
   for status in in_progress queued waiting pending requested; do
-    if ! raw="$(gh_get --paginate \
+    raw="$(gh_get --paginate \
       "repos/${repo}/actions/runs?status=${status}&per_page=50" \
-      --jq '.workflow_runs[] | {id, name, path, status}')"; then
-      return 1
-    fi
+      --jq '.workflow_runs[] | {id, name, path, status}')"
     if [ -n "$raw" ]; then
       if ! printf '%s\n' "$raw" | jq -se 'length == 0 or all(type == "object")' >/dev/null; then
         fail "Workflow run list was not valid JSON."
@@ -549,7 +564,7 @@ collect_runs() {
     combined="$(jq -cn --argjson existing "$combined" --argjson page "$page_query" '$existing + $page')"
   done
   local test_ids
-  test_ids="$(collect_test_environment_run_ids)"
+  test_ids="$(collect_test_environment_run_ids)" || exit 1
   require_json_array "$test_ids" "Test-environment run ids"
   combined="$(jq -cn --argjson runs "$combined" --argjson test_ids "$test_ids" '
     ($test_ids | map(tostring) | unique) as $ids
@@ -577,7 +592,7 @@ collect_runs() {
 
 check_exclusive() {
   local runs_json comments issue state
-  runs_json="$(collect_runs)"
+  runs_json="$(collect_runs)" || exit 1
   require_json_array "$runs_json" "Collected workflow runs"
   if ! printf '%s\n' "$runs_json" | python3 "$EXCLUSIVE_HELPER" runs --runs - --this-run-id "${GITHUB_RUN_ID:-}"; then
     return 1
@@ -624,7 +639,9 @@ arm() {
   local expected_digest="${EXPECTED_DIGEST:?EXPECTED_DIGEST is required.}"
   local expected_build="${EXPECTED_BUILD_NUMBER:-}"
   local expected_commit="${EXPECTED_COMMIT:-}"
-  if setting_present; then
+  local presence
+  presence="$(read_setting_presence)" || exit 1
+  if [ "$presence" = "present" ]; then
     fail "The compatibility fixture is already present; refusing to change staging."
   fi
   local before_digest
@@ -640,13 +657,14 @@ arm() {
     --only-show-errors; then
     fail "Writing the compatibility fixture app setting failed."
   fi
-  if ! setting_present; then
-    fail "The compatibility fixture setting was not created."
-  fi
-  restart_webapp
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     printf 'armed_at=%s\n' "$(date +%s)" >> "$GITHUB_OUTPUT"
   fi
+  presence="$(read_setting_presence)" || exit 1
+  if [ "$presence" != "present" ]; then
+    fail "The compatibility fixture setting was not created."
+  fi
+  restart_webapp
   wait_until_recycle_witness "$expected_digest" "$FIXTURE_MODE" "$expected_build" "$expected_commit"
   prove_authenticated_compatibility "$FIXTURE_MODE"
   echo "Armed the compatibility fixture on the same deployed Web App build."
@@ -660,7 +678,13 @@ restore() {
   local expected_build="${EXPECTED_BUILD_NUMBER:-}"
   local expected_commit="${EXPECTED_COMMIT:-}"
   local expected_deployment="${EXPECTED_DEPLOYMENT_ID:-}"
-  if ! setting_present; then
+  local presence
+  presence="$(read_setting_presence)" || exit 1
+  if [ "$presence" = "absent" ]; then
+    sleep "${RESTORE_ABSENT_RECHECK_SECONDS:-2}"
+    presence="$(read_setting_presence)" || exit 1
+  fi
+  if [ "$presence" = "absent" ]; then
     echo "The compatibility fixture was never written; restore is a no-op and will not restart the Web App."
     return 0
   fi
@@ -676,7 +700,8 @@ restore() {
     --only-show-errors; then
     fail "Deleting the compatibility fixture app setting failed."
   fi
-  if setting_present; then
+  presence="$(read_setting_presence)" || exit 1
+  if [ "$presence" = "present" ]; then
     fail "The compatibility fixture setting is still present after restore."
   fi
   restart_webapp

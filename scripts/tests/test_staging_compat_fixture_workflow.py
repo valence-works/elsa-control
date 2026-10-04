@@ -220,12 +220,19 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("DISPATCH_MODE: ${{ inputs.mode }}\n", self.source)
         self.assertNotIn("${{ github.event.inputs.mode }}", self.source)
         self.assertIn("timeout-minutes: 30\n", self.source)
+        self.assertIn("timeout-minutes: 12\n", self.source)
         self.assertIn("timeout-minutes: 4\n", self.source)
         self.assertNotIn("timeout-minutes: 20\n", self.source)
         self.assertIn("if: ${{ always() && steps.preflight.outcome == 'success' }}\n", self.source)
         self.assertNotIn("if: ${{ always() }}\n", self.source)
-        self.assertIn("HEALTH_BUDGET_SECONDS", self.source)
+        self.assertIn('HEALTH_BUDGET_SECONDS: "300"', self.source)
+        self.assertIn('HEALTH_BUDGET_SECONDS: "150"', self.source)
         self.assertIn("HEALTH_CURL_MAX_TIME", self.source)
+        self.assertIn("fail() {\n  echo \"::error::$1\" >&2\n", self.script)
+        self.assertIn("exit 1\n}", self.script)
+        self.assertIn("kill -s TERM \"$$\"", self.script)
+        self.assertIn("read_setting_presence", self.script)
+        self.assertNotIn('if [ "$(read_setting_presence)"', self.script)
         self.assertIn("scripts/staging-compat-fixture.sh restore", self.source)
         self.assertIn("scripts/staging-compat-fixture.sh preflight", self.source)
         self.assertIn("scripts/staging-compat-fixture.sh arm", self.source)
@@ -261,6 +268,7 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertNotIn("container app", self.script.lower())
         self.assertNotIn("container-app", self.script.lower())
         self.assertNotIn("new revision", self.script.lower())
+        self.assertIn("Manual removal", (ROOT / "docs" / "deployment" / "azure-app-service.md").read_text())
 
     def test_ci_runs_the_offline_workflow_contract(self) -> None:
         self.assertIn(
@@ -286,6 +294,9 @@ class StagingCompatScriptTests(unittest.TestCase):
                 "GH_TOKEN": "unused",
                 "CLOUD_COMPATIBILITY_TOKEN": "compat-token",
                 "CLOUD_BFF_SMOKE_URL": "https://bff.example.test/smoke",
+                "SETTING_READ_ATTEMPTS": "3",
+                "SETTING_READ_RETRY_SECONDS": "0",
+                "RESTORE_ABSENT_RECHECK_SECONDS": "0",
             }
         )
         env.update(updates)
@@ -304,6 +315,7 @@ class StagingCompatScriptTests(unittest.TestCase):
             "  exit 0\n"
             "fi\n"
             "if [[ \"$*\" == *\"webapp config appsettings list\"* && \"$*\" == *\"CloudCompatibility__StagingFixture\"* ]]; then\n"
+            "  if [ \"${AZ_FAIL_SETTING_LIST:-}\" = 1 ]; then echo failed-settings >&2; exit 2; fi\n"
             "  if [ -f \"${AZ_SETTING_PRESENT:-}\" ]; then echo 1; else echo 0; fi\n"
             "  exit 0\n"
             "fi\n"
@@ -392,6 +404,7 @@ class StagingCompatScriptTests(unittest.TestCase):
         fake.write_text(
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
+            "printf '%s\\n' \"$*\" >> \"${CURL_CALL_LOG:-/dev/null}\"\n"
             "output=\"\"\n"
             "url=\"\"\n"
             "while [ \"$#\" -gt 0 ]; do\n"
@@ -448,14 +461,23 @@ class StagingCompatScriptTests(unittest.TestCase):
             check=False,
         )
 
-    def assert_preflight_fails_before_set(self, env: dict[str, str], needle: str) -> None:
+    def assert_preflight_stops_at(self, env: dict[str, str], needle: str) -> None:
         result = self.run_script(env, "preflight")
         self.assertNotEqual(0, result.returncode)
         combined = result.stderr + result.stdout
         self.assertIn(needle, combined)
+        self.assertNotIn("No conflicting Deploy staging or Prove runs.", combined)
+        self.assertNotIn("Preflight captured", combined)
+        self.assertNotIn("The fixture is absent", combined)
         az_log = Path(env["AZ_CALL_LOG"])
         if az_log.exists():
-            self.assertNotIn("appsettings set", az_log.read_text())
+            az_text = az_log.read_text()
+            self.assertNotIn("appsettings set", az_text)
+            self.assertNotIn("webapp config show", az_text)
+            self.assertNotIn("webapp show", az_text)
+        curl_log = Path(env.get("CURL_CALL_LOG", ""))
+        if curl_log and curl_log.exists():
+            self.assertNotIn("/health", curl_log.read_text())
 
     def test_refuses_non_test_environment_before_touching_azure(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -567,67 +589,60 @@ class StagingCompatScriptTests(unittest.TestCase):
             gh_log = (temporary / "gh.log").read_text()
             self.assertNotIn("actions/runs?environment=", gh_log)
 
+    def exclusive_failure_env(self, temporary: Path, image: str, **updates: str) -> dict[str, str]:
+        self.write_fake_az(temporary, ["Application__BuildNumber"], image)
+        self.write_fake_gh(temporary)
+        self.write_fake_curl(temporary)
+        env = self.environment(temporary)
+        env["AZ_CALL_LOG"] = str(temporary / "az.log")
+        env["GH_CALL_LOG"] = str(temporary / "gh.log")
+        env["CURL_CALL_LOG"] = str(temporary / "curl.log")
+        env.update(updates)
+        return env
+
     def test_preflight_fails_when_deployments_list_fails(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("2" * 64)
             image = f"example.azurecr.io/elsa-control/api@{digest}"
-            self.write_fake_az(temporary, ["Application__BuildNumber"], image)
-            self.write_fake_gh(temporary)
-            env = self.environment(temporary)
-            env["AZ_CALL_LOG"] = str(temporary / "az.log")
-            env["GH_CALL_LOG"] = str(temporary / "gh.log")
-            env["GH_FAIL_DEPLOYMENTS"] = "1"
-            self.assert_preflight_fails_before_set(env, "GitHub API call failed")
+            env = self.exclusive_failure_env(temporary, image, GH_FAIL_DEPLOYMENTS="1")
+            self.assert_preflight_stops_at(env, "GitHub API call failed")
 
     def test_preflight_fails_when_deployment_status_fails(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("3" * 64)
             image = f"example.azurecr.io/elsa-control/api@{digest}"
-            self.write_fake_az(temporary, ["Application__BuildNumber"], image)
-            self.write_fake_gh(temporary)
             (temporary / "deployment-ids.txt").write_text("501\n")
-            env = self.environment(temporary)
-            env["AZ_CALL_LOG"] = str(temporary / "az.log")
-            env["GH_CALL_LOG"] = str(temporary / "gh.log")
-            env["GH_DEPLOYMENT_IDS"] = str(temporary / "deployment-ids.txt")
-            env["GH_FAIL_STATUSES"] = "1"
-            self.assert_preflight_fails_before_set(env, "GitHub API call failed")
+            env = self.exclusive_failure_env(
+                temporary,
+                image,
+                GH_DEPLOYMENT_IDS=str(temporary / "deployment-ids.txt"),
+                GH_FAIL_STATUSES="1",
+            )
+            self.assert_preflight_stops_at(env, "GitHub API call failed")
 
     def test_preflight_fails_when_runs_list_fails(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("4" * 64)
             image = f"example.azurecr.io/elsa-control/api@{digest}"
-            self.write_fake_az(temporary, ["Application__BuildNumber"], image)
-            self.write_fake_gh(temporary)
-            env = self.environment(temporary)
-            env["AZ_CALL_LOG"] = str(temporary / "az.log")
-            env["GH_CALL_LOG"] = str(temporary / "gh.log")
-            env["GH_FAIL_RUNS"] = "1"
-            self.assert_preflight_fails_before_set(env, "GitHub API call failed")
+            env = self.exclusive_failure_env(temporary, image, GH_FAIL_RUNS="1")
+            self.assert_preflight_stops_at(env, "GitHub API call failed")
 
     def test_preflight_fails_when_run_payload_is_malformed(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("5" * 64)
             image = f"example.azurecr.io/elsa-control/api@{digest}"
-            self.write_fake_az(temporary, ["Application__BuildNumber"], image)
-            self.write_fake_gh(temporary)
-            env = self.environment(temporary)
-            env["AZ_CALL_LOG"] = str(temporary / "az.log")
-            env["GH_CALL_LOG"] = str(temporary / "gh.log")
-            env["GH_MALFORMED_RUNS"] = "1"
-            self.assert_preflight_fails_before_set(env, "not valid JSON")
+            env = self.exclusive_failure_env(temporary, image, GH_MALFORMED_RUNS="1")
+            self.assert_preflight_stops_at(env, "not valid JSON")
 
     def test_preflight_fails_when_a_test_deployment_is_unmapped(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("6" * 64)
             image = f"example.azurecr.io/elsa-control/api@{digest}"
-            self.write_fake_az(temporary, ["Application__BuildNumber"], image)
-            self.write_fake_gh(temporary)
             (temporary / "deployment-ids.txt").write_text("501\n")
             (temporary / "deployment-statuses.json").write_text(
                 json.dumps(
@@ -639,12 +654,13 @@ class StagingCompatScriptTests(unittest.TestCase):
                     ]
                 )
             )
-            env = self.environment(temporary)
-            env["AZ_CALL_LOG"] = str(temporary / "az.log")
-            env["GH_CALL_LOG"] = str(temporary / "gh.log")
-            env["GH_DEPLOYMENT_IDS"] = str(temporary / "deployment-ids.txt")
-            env["GH_DEPLOYMENT_STATUSES"] = str(temporary / "deployment-statuses.json")
-            self.assert_preflight_fails_before_set(env, "could not be mapped to a workflow run")
+            env = self.exclusive_failure_env(
+                temporary,
+                image,
+                GH_DEPLOYMENT_IDS=str(temporary / "deployment-ids.txt"),
+                GH_DEPLOYMENT_STATUSES=str(temporary / "deployment-statuses.json"),
+            )
+            self.assert_preflight_stops_at(env, "could not be mapped to a workflow run")
 
     def test_preflight_fails_when_a_test_deployment_maps_to_another_run(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -745,6 +761,34 @@ class StagingCompatScriptTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             combined = result.stderr + result.stdout
             self.assertIn("did not recycle", combined)
+
+    def test_restore_fails_when_the_settings_read_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            digest = "sha256:" + ("8" * 64)
+            image = f"example.azurecr.io/elsa-control/api@{digest}"
+            present = temporary / "present"
+            present.write_text("present\n")
+            self.write_fake_az(temporary, ["Application__BuildNumber"], image)
+            self.write_fake_curl(temporary)
+            env = self.environment(temporary)
+            env["AZ_CALL_LOG"] = str(temporary / "az.log")
+            env["CURL_CALL_LOG"] = str(temporary / "curl.log")
+            env["AZ_SETTING_PRESENT"] = str(present)
+            env["AZ_FAIL_SETTING_LIST"] = "1"
+            env["EXPECTED_DIGEST"] = digest
+            result = self.run_script(env, "restore")
+            self.assertNotEqual(0, result.returncode)
+            combined = result.stderr + result.stdout
+            self.assertIn("Could not read whether the compatibility fixture setting is present.", combined)
+            self.assertNotIn("never written", combined)
+            self.assertNotIn("Restored the baseline", combined)
+            az_log = (temporary / "az.log").read_text()
+            self.assertNotIn("appsettings delete", az_log)
+            self.assertNotIn("webapp restart", az_log)
+            curl_log = temporary / "curl.log"
+            if curl_log.exists():
+                self.assertNotIn("/health", curl_log.read_text())
 
     def test_restore_is_a_noop_when_the_fixture_was_never_written(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

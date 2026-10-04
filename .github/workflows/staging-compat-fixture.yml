@@ -78,11 +78,13 @@ jobs:
 
       - name: Arm the compatibility fixture on the same deployed build
         id: arm
+        timeout-minutes: 12
         env:
           EXPECTED_DIGEST: ${{ steps.preflight.outputs.digest }}
           EXPECTED_BUILD_NUMBER: ${{ steps.preflight.outputs.build_number }}
           EXPECTED_COMMIT: ${{ steps.preflight.outputs.commit }}
           EXPECTED_DEPLOYMENT_ID: ${{ steps.preflight.outputs.deployment_id }}
+          HEALTH_BUDGET_SECONDS: "300"
         shell: bash
         run: |
           set -euo pipefail
@@ -125,7 +127,7 @@ jobs:
           HEALTH_ATTEMPTS: "18"
           HEALTH_RETRY_SECONDS: "5"
           HEALTH_CURL_MAX_TIME: "5"
-          HEALTH_BUDGET_SECONDS: "180"
+          HEALTH_BUDGET_SECONDS: "150"
         shell: bash
         run: |
           set -euo pipefail
