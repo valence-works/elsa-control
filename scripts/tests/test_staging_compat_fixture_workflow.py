@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import importlib.util
 import json
 import os
@@ -48,7 +49,12 @@ validate_bff_action_payload = exclusive.validate_bff_action_payload
 WORKFLOW = ROOT / ".github" / "workflows" / "staging-compat-fixture.yml"
 SCRIPT = ROOT / "scripts" / "staging-compat-fixture.sh"
 SCREENS = ROOT / "scripts" / "staging-compat-fixture-screens.mjs"
+HANDLER_FIXTURE = ROOT / "scripts" / "tests" / "fixtures" / "elsa-cloud-control-bff-handler.ts"
 CI = ROOT / ".github" / "workflows" / "ci.yml"
+TELEMETRY_LINE = (
+    "telemetry: not used (Architect ruling); no-forward evidence = "
+    "elsa-cloud#144 + (a)/(b) (test merged in elsa-cloud#146, 30ffdc1f)"
+)
 DEPLOY = ROOT / ".github" / "workflows" / "azure-api-deploy.yml"
 
 STAGING_SUPABASE_REF = "abcdefghij0123456789"
@@ -468,6 +474,14 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("createRequire", self.screens)
         self.assertIn("--prove-load", self.screens)
         self.assertIn("assertRestored", self.screens)
+        self.assertIn('waitFor({ state: "hidden", timeout: 45_000 })', self.screens)
+        self.assertNotRegex(self.screens, r"RESTORED_HOSTED = /.*\|Managed engine\|")
+        self.assertIn("Delete Playwright session file", self.source)
+        self.assertEqual(self.step_order()[-1], "Delete Playwright session file")
+        cleanup = self.source.split("name: Delete Playwright session file", 1)[1]
+        self.assertIn("if: always()", cleanup)
+        self.assertIn("rm -f", cleanup)
+        self.assertIn("compat-playwright-session.json", cleanup)
         self.assertIn("storageState", self.screens)
         self.assertIn("PLAYWRIGHT_STATE_PATH", self.source)
         self.assertIn("runner.temp", self.source)
@@ -519,8 +533,12 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertNotIn("role assignment", self.script)
         self.assertNotIn("az role", self.script)
         self.assertNotIn("Inconclusive", self.script)
-        self.assertIn("telemetry: not used (Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b)", self.script)
-        self.assertIn("telemetry: not used (Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b)", self.source)
+        self.assertIn(TELEMETRY_LINE, self.script)
+        self.assertIn(TELEMETRY_LINE, self.source)
+        self.assertIn(
+            "(test merged in elsa-cloud#146, 30ffdc1f)",
+            (ROOT / "docs" / "deployment" / "azure-app-service.md").read_text(),
+        )
 
 
 class StagingCompatScriptTests(unittest.TestCase):
@@ -1652,10 +1670,7 @@ class StagingCompatScriptTests(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stderr + result.stdout)
             summary = (temporary / "summary.md").read_text()
             self.assertIn("K=3", summary)
-            self.assertIn(
-                "telemetry: not used (Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b)",
-                summary,
-            )
+            self.assertIn(TELEMETRY_LINE, summary)
             self.assertIn("listOrganizations: HTTP 503", summary)
             self.assertIn("updateInstance: HTTP 503", summary)
             self.assertIn("createInstanceDeleteConfirmation: HTTP 503", summary)
@@ -1684,62 +1699,35 @@ class StagingCompatScriptTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertIn("no-store", result.stderr + result.stdout)
 
-    def test_update_instance_schema_rejects_string_version_and_intent(self) -> None:
-        valid = {
+    def valid_update_instance_payload(self) -> dict:
+        return {
             "action": "updateInstance",
             "organizationId": "11111111-1111-4111-8111-111111111111",
             "workspaceId": "22222222-2222-4222-8222-222222222222",
             "instanceId": "33333333-3333-4333-8333-333333333333",
             "version": 1,
-            "intent": {
-                "release": {
-                    "distributionId": "valence-runtime",
-                    "releaseLine": "3.8",
-                    "requestedVersion": "3.8.0",
-                    "channel": "stable",
-                    "patchUpdates": "automatic-within-minor",
-                    "minorUpdates": "explicit-approval",
-                    "majorMigrations": "explicit-migration",
-                },
-                "application": {"topologyId": "combined"},
-                "placement": {
-                    "targetMode": "managed",
-                    "regionCode": "westeurope",
-                    "isolationProfile": "dedicated",
-                    "capacityProfile": "standard-small",
-                },
-                "desiredLifecycle": "Running",
-            },
+            "intent": self.live_update_instance_intent(),
             "idempotencyKey": "44444444-4444-4444-8444-444444444444",
         }
-        self.assertIsNone(validate_bff_action_payload(valid))
-        bad = dict(valid)
-        bad["version"] = "1"
-        bad["intent"] = "stop"
-        self.assertIsNotNone(validate_bff_action_payload(bad))
+
+    def live_update_instance_intent(self) -> dict:
+        match = re.search(r"--argjson intent '(\{.*\})'", SCRIPT.read_text())
+        self.assertIsNotNone(match, "k_probe_payload updateInstance intent is missing")
+        return json.loads(match.group(1))
+
+    def post_fake_bff(self, payload: dict) -> str:
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             fake = self.write_fake_curl(temporary)
             env = self.environment(temporary)
             env["CLOUD_BFF_SMOKE_URL"] = STAGING_BFF_URL
-            payload = json.dumps(
-                {
-                    "action": "updateInstance",
-                    "organizationId": "11111111-1111-4111-8111-111111111111",
-                    "workspaceId": "22222222-2222-4222-8222-222222222222",
-                    "instanceId": "33333333-3333-4333-8333-333333333333",
-                    "version": "1",
-                    "intent": "stop",
-                    "idempotencyKey": "44444444-4444-4444-8444-444444444444",
-                }
-            )
             result = subprocess.run(
                 [
                     str(fake),
                     "--request",
                     "POST",
                     "--data",
-                    payload,
+                    json.dumps(payload),
                     "--output",
                     str(temporary / "body.json"),
                     "--dump-header",
@@ -1754,7 +1742,105 @@ class StagingCompatScriptTests(unittest.TestCase):
                 text=True,
                 check=False,
             )
-            self.assertEqual("400", result.stdout.strip(), result.stderr + result.stdout)
+            return result.stdout.strip()
+
+    def test_live_k_probe_bodies_match_pinned_handler_schema(self) -> None:
+        fixture = HANDLER_FIXTURE.read_text()
+        self.assertIn("30ffdc1f", fixture)
+        self.assertIn("elsa-cloud#146", fixture)
+        self.assertIn("Pinned source SHA: 30ffdc1f", fixture)
+        self.assertIn("ManagedElsaIntentSchema", fixture)
+        for token in (
+            "requestedVersion",
+            "networkOutcome",
+            "domainOutcome",
+            'z.literal("automatic-within-minor")',
+            'z.literal("explicit-approval")',
+            'z.literal("explicit-migration")',
+            'z.literal("Running")',
+            "featurePresetId: z.null()",
+            "packagePolicy: z.null()",
+            "configurationShapeRevisionId: z.null()",
+            "featureOverrides: z.record(z.never())",
+            ".min(1).max(120)",
+            ".min(8).max(200)",
+        ):
+            self.assertIn(token, fixture)
+        intent = self.live_update_instance_intent()
+        exported = re.search(
+            r"export const UPDATE_INSTANCE_INTENT_FIXTURE_JSON =\n  ('.*');",
+            fixture,
+        )
+        self.assertIsNotNone(exported, "handler fixture must export the live intent JSON")
+        self.assertEqual(intent, json.loads(exported.group(1)[1:-1]))
+        self.assertIsNone(validate_bff_action_payload(self.valid_update_instance_payload()))
+        self.assertIsNone(validate_bff_action_payload({"action": "listOrganizations"}))
+        self.assertIsNone(
+            validate_bff_action_payload(
+                {
+                    "action": "createInstanceDeleteConfirmation",
+                    "organizationId": "11111111-1111-4111-8111-111111111111",
+                    "workspaceId": "22222222-2222-4222-8222-222222222222",
+                    "instanceId": "33333333-3333-4333-8333-333333333333",
+                }
+            )
+        )
+
+    def test_update_instance_schema_matches_real_bff_and_rejects_each_break(self) -> None:
+        valid = self.valid_update_instance_payload()
+        self.assertIsNone(validate_bff_action_payload(valid))
+        self.assertEqual("200", self.post_fake_bff({"action": "compatibility"}))
+
+        missing_outcomes = copy.deepcopy(valid)
+        del missing_outcomes["intent"]["placement"]["networkOutcome"]
+        del missing_outcomes["intent"]["placement"]["domainOutcome"]
+
+        missing_requested = copy.deepcopy(valid)
+        del missing_requested["intent"]["release"]["requestedVersion"]
+
+        bad_patch = copy.deepcopy(valid)
+        bad_patch["intent"]["release"]["patchUpdates"] = "automatic"
+
+        stopped = copy.deepcopy(valid)
+        stopped["intent"]["desiredLifecycle"] = "Stopped"
+
+        missing_nulls = copy.deepcopy(valid)
+        del missing_nulls["intent"]["application"]["featurePresetId"]
+        del missing_nulls["intent"]["application"]["packagePolicy"]
+        del missing_nulls["intent"]["application"]["configurationShapeRevisionId"]
+
+        nonempty_overrides = copy.deepcopy(valid)
+        nonempty_overrides["intent"]["application"]["featureOverrides"] = {"x": 1}
+
+        string_version = copy.deepcopy(valid)
+        string_version["version"] = "1"
+
+        string_intent = copy.deepcopy(valid)
+        string_intent["intent"] = "stop"
+
+        long_catalog = copy.deepcopy(valid)
+        long_catalog["intent"]["release"]["requestedVersion"] = "v" * 121
+
+        short_key = copy.deepcopy(valid)
+        short_key["idempotencyKey"] = "short"
+
+        cases = {
+            "string version": string_version,
+            "string intent": string_intent,
+            "missing networkOutcome and domainOutcome": missing_outcomes,
+            "missing requestedVersion": missing_requested,
+            "patchUpdates literal": bad_patch,
+            "desiredLifecycle literal": stopped,
+            "required-null application fields": missing_nulls,
+            "empty featureOverrides": nonempty_overrides,
+            "unknown action": {"action": "notARealAction"},
+            "catalog length": long_catalog,
+            "idempotencyKey length": short_key,
+        }
+        for name, payload in cases.items():
+            with self.subTest(name):
+                self.assertIsNotNone(validate_bff_action_payload(payload), name)
+                self.assertEqual("400", self.post_fake_bff(payload), name)
 
 
 if __name__ == "__main__":

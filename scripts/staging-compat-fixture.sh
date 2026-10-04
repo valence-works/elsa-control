@@ -806,7 +806,7 @@ prove_k_action_probes() {
   read_linked_org_context
   append_step_summary "## In-hold K action probes"
   append_step_summary ""
-  append_step_summary "telemetry: not used (Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b)"
+  append_step_summary "telemetry: not used (Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b) (test merged in elsa-cloud#146, 30ffdc1f)"
   append_step_summary ""
   for action in "${K_PROBE_ACTION_LIST[@]}"; do
     k=$((k + 1))

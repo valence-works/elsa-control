@@ -14,7 +14,9 @@ const ALLOWED_ORIGIN = "https://calm-sand-03964eb03.2.azurestaticapps.net";
 const UPDATE_BANNER = "Service update in progress.";
 const HOSTED_PAUSED = "Managed engine actions are temporarily paused";
 const SIDE_SURFACES = "Billing, sign-out, and support remain available";
-const RESTORED_HOSTED = /No managed engines|Confirm managed engine|Managed engine|Create your first engine|Confirm and create engine|Existing engines|Start Hosted/i;
+// Restored-only hosted copy. Do not match /Managed engine/ — that also
+// matches the armed paused text and would settle the wait too early.
+const RESTORED_HOSTED = /No managed engines|Confirm managed engine|Create your first engine|Confirm and create engine|Existing engines|Start Hosted/i;
 const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i;
 
 if (process.argv.includes("--prove-load")) {
@@ -95,6 +97,10 @@ async function assertArmed(page, email) {
 }
 
 async function assertRestored(page, email) {
+  // Wait until the armed copy has cleared so the absence checks do not race
+  // the compatibility poll. RESTORED_HOSTED must not match the paused text.
+  await page.getByText(UPDATE_BANNER, { exact: true }).waitFor({ state: "hidden", timeout: 45_000 });
+  await page.getByText(HOSTED_PAUSED, { exact: false }).waitFor({ state: "hidden", timeout: 45_000 });
   await page.getByText(RESTORED_HOSTED).first().waitFor({ timeout: 45_000 });
   if (await page.getByText(UPDATE_BANNER, { exact: true }).count()) {
     throw new Error("The update-in-progress banner was still visible after restore.");

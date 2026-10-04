@@ -139,7 +139,7 @@ jobs:
           if [ "$(python3 scripts/lib/staging_compat_exclusive.py skip-in-hold --elapsed-since-arm "$elapsed" --needed 120)" = skip ]; then
             echo "Skipping K probes; remaining fixture-on budget before the 20-minute cap is short."
             {
-              printf "%s\n" "## In-hold K action probes" "" "telemetry: not used (Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b)" "" "Skipped; remaining fixture-on budget before the 20-minute cap is short."
+              printf "%s\n" "## In-hold K action probes" "" "telemetry: not used (Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b) (test merged in elsa-cloud#146, 30ffdc1f)" "" "Skipped; remaining fixture-on budget before the 20-minute cap is short."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -290,3 +290,10 @@ jobs:
             printf '## Post-restore evidence\n\n'
             printf 'Restored customer screens were skipped because restore did not succeed.\n'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete Playwright session file
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f "${{ runner.temp }}/compat-playwright-session.json"

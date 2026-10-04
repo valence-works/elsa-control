@@ -109,7 +109,7 @@ only a backstop.
 (`listOrganizations`, `updateInstance`, `createInstanceDeleteConfirmation`)
 and asserts the full 503 `control_update_in_progress` envelope with
 `Cache-Control: no-store`. The summary writes `telemetry: not used
-(Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b)` and
+(Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b) (test merged in elsa-cloud#146, 30ffdc1f)` and
 one line per probe. Playwright captures desktop and mobile PNGs on
 calm-sand while armed, after reload, and after restore by reloading the
 same session. Artifacts are PNGs only (7-day retention); traces, HARs,

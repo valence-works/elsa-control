@@ -43,20 +43,49 @@ UUID_PATTERN = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
-K_PROBE_INTENT_REQUIRED = (
-    "release.distributionId",
-    "release.releaseLine",
-    "release.channel",
-    "release.patchUpdates",
-    "release.minorUpdates",
-    "release.majorMigrations",
-    "application.topologyId",
-    "placement.targetMode",
-    "placement.regionCode",
-    "placement.isolationProfile",
-    "placement.capacityProfile",
-    "desiredLifecycle",
+# Mirror of elsa-cloud supabase/functions/control-bff/handler.ts BodySchema
+# at 30ffdc1f (elsa-cloud#146). Copied field-for-field into
+# scripts/tests/fixtures/elsa-cloud-control-bff-handler.ts. Being stricter
+# than that schema (for example UUID-shaped ids) is fail-closed and allowed.
+BFF_HANDLER_SOURCE_SHA = "30ffdc1f"
+CATALOG_MIN_LENGTH = 1
+CATALOG_MAX_LENGTH = 120
+IDEMPOTENCY_KEY_MIN_LENGTH = 8
+IDEMPOTENCY_KEY_MAX_LENGTH = 200
+KNOWN_BFF_ACTIONS = frozenset(
+    {
+        "compatibility",
+        "bootstrap",
+        "listOrganizations",
+        "updateInstance",
+        "createInstanceDeleteConfirmation",
+    }
 )
+RELEASE_CATALOG_FIELDS = (
+    "distributionId",
+    "releaseLine",
+    "requestedVersion",
+    "channel",
+)
+RELEASE_LITERALS = {
+    "patchUpdates": "automatic-within-minor",
+    "minorUpdates": "explicit-approval",
+    "majorMigrations": "explicit-migration",
+}
+APPLICATION_NULL_FIELDS = (
+    "featurePresetId",
+    "packagePolicy",
+    "configurationShapeRevisionId",
+)
+PLACEMENT_CATALOG_FIELDS = (
+    "targetMode",
+    "regionCode",
+    "isolationProfile",
+    "capacityProfile",
+    "networkOutcome",
+    "domainOutcome",
+)
+DESIRED_LIFECYCLE = "Running"
 
 
 def first_nonempty_line(body: str) -> str:
@@ -131,13 +160,73 @@ def skip_in_hold(
     return remaining_before_restore(elapsed_since_arm, fixture_cap, restore_budget) < int(needed_seconds)
 
 
-def _nested_get(payload: Mapping[str, Any], dotted: str) -> Any:
-    current: Any = payload
-    for part in dotted.split("."):
-        if not isinstance(current, Mapping) or part not in current:
-            return None
-        current = current[part]
-    return current
+def _catalog_error(value: Any, path: str) -> str | None:
+    if not isinstance(value, str):
+        return f"{path} must be a catalog string."
+    if not CATALOG_MIN_LENGTH <= len(value) <= CATALOG_MAX_LENGTH:
+        return (
+            f"{path} must be a catalog string of "
+            f"{CATALOG_MIN_LENGTH}-{CATALOG_MAX_LENGTH} characters."
+        )
+    return None
+
+
+def _require_object(value: Any, path: str) -> str | None:
+    if not isinstance(value, Mapping):
+        return f"{path} must be an object."
+    return None
+
+
+def _require_uuid(payload: Mapping[str, Any], field: str) -> str | None:
+    value = payload.get(field)
+    if not isinstance(value, str) or not UUID_PATTERN.fullmatch(value):
+        return f"{field} must be a UUID."
+    return None
+
+
+def _validate_managed_elsa_intent(intent: Any) -> str | None:
+    error = _require_object(intent, "intent")
+    if error:
+        return error
+    assert isinstance(intent, Mapping)
+    release = intent.get("release")
+    error = _require_object(release, "intent.release")
+    if error:
+        return error
+    assert isinstance(release, Mapping)
+    for field in RELEASE_CATALOG_FIELDS:
+        error = _catalog_error(release.get(field), f"intent.release.{field}")
+        if error:
+            return error
+    for field, expected in RELEASE_LITERALS.items():
+        if release.get(field) != expected:
+            return f"intent.release.{field} must be {expected!r}."
+    application = intent.get("application")
+    error = _require_object(application, "intent.application")
+    if error:
+        return error
+    assert isinstance(application, Mapping)
+    error = _catalog_error(application.get("topologyId"), "intent.application.topologyId")
+    if error:
+        return error
+    for field in APPLICATION_NULL_FIELDS:
+        if field not in application or application[field] is not None:
+            return f"intent.application.{field} must be null."
+    overrides = application.get("featureOverrides")
+    if not isinstance(overrides, Mapping) or len(overrides) != 0:
+        return "intent.application.featureOverrides must be an empty object."
+    placement = intent.get("placement")
+    error = _require_object(placement, "intent.placement")
+    if error:
+        return error
+    assert isinstance(placement, Mapping)
+    for field in PLACEMENT_CATALOG_FIELDS:
+        error = _catalog_error(placement.get(field), f"intent.placement.{field}")
+        if error:
+            return error
+    if intent.get("desiredLifecycle") != DESIRED_LIFECYCLE:
+        return f"intent.desiredLifecycle must be {DESIRED_LIFECYCLE!r}."
+    return None
 
 
 def validate_bff_action_payload(payload: Any) -> str | None:
@@ -145,9 +234,11 @@ def validate_bff_action_payload(payload: Any) -> str | None:
     if not isinstance(payload, Mapping):
         return "BFF payload must be a JSON object."
     action = payload.get("action")
-    if action == "compatibility":
-        return None
-    if action == "bootstrap":
+    if action in {None, ""}:
+        return "action is required."
+    if action not in KNOWN_BFF_ACTIONS:
+        return "action is not a recognized control-bff action."
+    if action in {"compatibility", "bootstrap"}:
         return None
     if action == "listOrganizations":
         extra = set(payload) - {"action"}
@@ -156,29 +247,28 @@ def validate_bff_action_payload(payload: Any) -> str | None:
         return None
     if action == "createInstanceDeleteConfirmation":
         for field in ("organizationId", "workspaceId", "instanceId"):
-            value = payload.get(field)
-            if not isinstance(value, str) or not UUID_PATTERN.fullmatch(value):
-                return f"{field} must be a UUID."
+            error = _require_uuid(payload, field)
+            if error:
+                return error
         return None
     if action == "updateInstance":
-        for field in ("organizationId", "workspaceId", "instanceId", "idempotencyKey"):
-            value = payload.get(field)
-            if not isinstance(value, str) or not UUID_PATTERN.fullmatch(value):
-                return f"{field} must be a UUID."
+        for field in ("organizationId", "workspaceId", "instanceId"):
+            error = _require_uuid(payload, field)
+            if error:
+                return error
+        key = payload.get("idempotencyKey")
+        if not isinstance(key, str) or not IDEMPOTENCY_KEY_MIN_LENGTH <= len(key) <= IDEMPOTENCY_KEY_MAX_LENGTH:
+            return (
+                "idempotencyKey must be a string of "
+                f"{IDEMPOTENCY_KEY_MIN_LENGTH}-{IDEMPOTENCY_KEY_MAX_LENGTH} characters."
+            )
+        if not UUID_PATTERN.fullmatch(key):
+            return "idempotencyKey must be a UUID."
         version = payload.get("version")
         if isinstance(version, bool) or not isinstance(version, int) or version < 1:
             return "version must be a positive integer."
-        intent = payload.get("intent")
-        if not isinstance(intent, Mapping):
-            return "intent must be an object."
-        for path in K_PROBE_INTENT_REQUIRED:
-            value = _nested_get(intent, path)
-            if not isinstance(value, str) or not value.strip():
-                return f"intent.{path} is required."
-        return None
-    if action in {None, ""}:
-        return "action is required."
-    return None
+        return _validate_managed_elsa_intent(payload.get("intent"))
+    return "action is not a recognized control-bff action."
 
 
 def conflicting_runs(
