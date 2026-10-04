@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -34,6 +36,24 @@ SCRIPT = ROOT / "scripts" / "staging-compat-fixture.sh"
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 DEPLOY = ROOT / ".github" / "workflows" / "azure-api-deploy.yml"
 
+STAGING_SUPABASE_REF = "abcdefghij0123456789"
+PRODUCTION_SUPABASE_REF = "jhrcnclyydzngnyvhdht"
+STAGING_SUPABASE_ORIGIN = f"https://{STAGING_SUPABASE_REF}.supabase.co"
+STAGING_BFF_URL = f"{STAGING_SUPABASE_ORIGIN}/functions/v1/control-bff"
+STAGING_ISSUER = f"{STAGING_SUPABASE_ORIGIN}/auth/v1"
+DEPLOY_STAGING_DEPLOYMENT_ID = "6839060690"
+DEPLOY_STAGING_RUN_ID = "37191070750"
+HEALTH_COMMIT = "e5e9b84fd9a2f0b90931cf503f786eb89e2b0f02"
+ALLOWED_AZ_COMMANDS = {
+    ("webapp", "config", "appsettings", "list"),
+    ("webapp", "config", "appsettings", "set"),
+    ("webapp", "config", "appsettings", "delete"),
+    ("webapp", "config", "show"),
+    ("webapp", "sitecontainers", "show"),
+    ("webapp", "restart"),
+    ("webapp", "show"),
+    ("acr", "manifest", "show-metadata"),
+}
 BASELINE_CAPABILITIES = [
     "cloud.bootstrap.v1",
     "hosted.instances.list.v1",
@@ -47,6 +67,19 @@ BASELINE_CAPABILITIES = [
     "hosted.subscription.manage.v1",
     "hosted.deployments.audit.v1",
 ]
+
+
+def mint_jwt(
+    *,
+    iss: str = STAGING_ISSUER,
+    aud: str = "authenticated",
+    role: str = "authenticated",
+) -> str:
+    def encode(payload: dict[str, object]) -> str:
+        raw = json.dumps(payload, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    return f"{encode({'alg': 'none', 'typ': 'JWT'})}.{encode({'iss': iss, 'aud': aud, 'role': role, 'sub': 'user'})}.sig"
 
 
 def trusted(body: str) -> dict[str, object]:
@@ -240,8 +273,21 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("appsettings delete", self.script)
         self.assertNotIn("production", self.source)
         self.assertIn("deployments: read\n", self.source)
-        self.assertIn("secrets.CLOUD_COMPATIBILITY_TOKEN", self.source)
-        self.assertEqual(1, self.source.count("secrets."))
+        self.assertNotIn("CLOUD_COMPATIBILITY_TOKEN", self.source)
+        self.assertNotIn("CLOUD_COMPATIBILITY_TOKEN", self.script)
+        self.assertIn("secrets.STAGING_E2E_COMPAT_EMAIL", self.source)
+        self.assertIn("secrets.STAGING_E2E_COMPAT_PASSWORD", self.source)
+        self.assertIn("secrets.VITE_SUPABASE_PUBLISHABLE_KEY", self.source)
+        self.assertIn("vars.STAGING_SUPABASE_PROJECT_REF", self.source)
+        self.assertIn("vars.EXPECTED_STAGING_SUPABASE_ORIGIN", self.source)
+        self.assertIn("vars.CLOUD_BFF_SMOKE_URL", self.source)
+        self.assertNotIn("scripts/staging-compat-fixture.sh mint", self.source)
+        self.assertGreaterEqual(self.source.count("GH_TOKEN: ${{ github.token }}"), 2)
+        self.assertEqual(9, self.source.count("secrets."))
+        job_env = self.source.split("steps:", 1)[0]
+        self.assertNotIn("secrets.STAGING_E2E_COMPAT_EMAIL", job_env)
+        self.assertNotIn("secrets.STAGING_E2E_COMPAT_PASSWORD", job_env)
+        self.assertNotIn("secrets.VITE_SUPABASE_PUBLISHABLE_KEY", job_env)
 
     def test_shares_the_deploy_staging_concurrency_group(self) -> None:
         self.assertIn(
@@ -256,7 +302,7 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("--output none", self.script)
         self.assertIn("Never prints setting values", self.script)
         self.assertNotIn("query '[].value'", self.script)
-        self.assertNotIn(".value", self.script)
+        self.assertNotIn("query '[].value'", self.script)
         self.assertIn("CloudCompatibility__StagingFixture", self.script)
         self.assertIn('SETTING_NAME}=${FIXTURE_MODE}', self.script)
         self.assertNotIn("actions/runs?environment=", self.script)
@@ -265,6 +311,12 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("inherit_errexit", self.script)
         self.assertIn("prove_authenticated_compatibility", self.script)
         self.assertIn("prove_bff_smoke_compatible", self.script)
+        self.assertIn('{"action":"compatibility"}', self.script)
+        self.assertIn(".data.state == \"compatible\"", self.script)
+        self.assertIn("control_update_in_progress", self.script)
+        self.assertIn("latest_deploy_staging_deployment_id", self.script)
+        self.assertNotIn("webapp deployment list", self.script)
+        self.assertIn("webapp sitecontainers show", self.script)
         self.assertNotIn("container app", self.script.lower())
         self.assertNotIn("container-app", self.script.lower())
         self.assertNotIn("new revision", self.script.lower())
@@ -280,6 +332,7 @@ class StagingCompatWorkflowTests(unittest.TestCase):
 
 class StagingCompatScriptTests(unittest.TestCase):
     def environment(self, temporary: Path, **updates: str) -> dict[str, str]:
+        token = updates.pop("MINTED_ACCESS_TOKEN", mint_jwt())
         env = os.environ.copy()
         env.update(
             {
@@ -292,8 +345,13 @@ class StagingCompatScriptTests(unittest.TestCase):
                 "GITHUB_REPOSITORY": "valence-works/elsa-control",
                 "GITHUB_RUN_ID": "99",
                 "GH_TOKEN": "unused",
-                "CLOUD_COMPATIBILITY_TOKEN": "compat-token",
-                "CLOUD_BFF_SMOKE_URL": "https://bff.example.test/smoke",
+                "STAGING_E2E_COMPAT_EMAIL": "compat@example.test",
+                "STAGING_E2E_COMPAT_PASSWORD": "unused-password",
+                "VITE_SUPABASE_PUBLISHABLE_KEY": "sb_publishable_test",
+                "STAGING_SUPABASE_PROJECT_REF": STAGING_SUPABASE_REF,
+                "EXPECTED_STAGING_SUPABASE_ORIGIN": STAGING_SUPABASE_ORIGIN,
+                "CLOUD_BFF_SMOKE_URL": STAGING_BFF_URL,
+                "MINTED_ACCESS_TOKEN": token,
                 "SETTING_READ_ATTEMPTS": "3",
                 "SETTING_READ_RETRY_SECONDS": "0",
                 "RESTORE_ABSENT_RECHECK_SECONDS": "0",
@@ -302,14 +360,23 @@ class StagingCompatScriptTests(unittest.TestCase):
         env.update(updates)
         return env
 
-    def write_fake_az(self, temporary: Path, setting_names: list[str], image: str) -> Path:
+    def tagged_image(self, digest: str) -> str:
+        return f"example.azurecr.io/elsa-control/api:{HEALTH_COMMIT}"
+
+    def write_fake_az(self, temporary: Path, setting_names: list[str], image: str, digest: str | None = None) -> Path:
         names_file = temporary / "setting-names.txt"
         names_file.write_text("".join(f"{name}\n" for name in setting_names))
+        if digest is None:
+            digest = image.split("@", 1)[1] if "@sha256:" in image else "sha256:" + ("a" * 64)
         fake = temporary / "az"
         fake.write_text(
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
             "printf '%s\\n' \"$*\" >> \"${AZ_CALL_LOG:?}\"\n"
+            "if [[ \"$*\" == *\"webapp deployment\"* ]]; then\n"
+            "  echo 'az webapp deployment is not a real command used by this host' >&2\n"
+            "  exit 41\n"
+            "fi\n"
             "if [[ \"$*\" == *\"webapp config appsettings list\"* && \"$*\" == *\"[].name\"* ]]; then\n"
             f"  cat {json.dumps(str(names_file))}\n"
             "  exit 0\n"
@@ -320,15 +387,35 @@ class StagingCompatScriptTests(unittest.TestCase):
             "  exit 0\n"
             "fi\n"
             "if [[ \"$*\" == *\"webapp config show\"* ]]; then\n"
-            f"  printf 'DOCKER|%s\\n' {json.dumps(image)}\n"
+            "  payload='{\"linuxFxVersion\":\"SITECONTAINERS\",\"kind\":\"app\"}'\n"
+            "  python3 -c 'import json,sys; args=sys.argv[1:]; q=\"\";\n"
+            "for i,a in enumerate(args):\n"
+            "    if a==\"--query\" and i+1<len(args): q=args[i+1].strip().strip(chr(39))\n"
+            "data=json.loads(sys.argv[-1]); print(data[q] if q else json.dumps(data))' \"$@\" \"$payload\"\n"
+            "  exit 0\n"
+            "fi\n"
+            "if [[ \"$*\" == *\"webapp sitecontainers show\"* ]]; then\n"
+            f"  payload={json.dumps(json.dumps({'name': 'main', 'image': image}))}\n"
+            "  python3 -c 'import json,sys; args=sys.argv[1:]; q=\"\";\n"
+            "for i,a in enumerate(args):\n"
+            "    if a==\"--query\" and i+1<len(args): q=args[i+1].strip().strip(chr(39))\n"
+            "data=json.loads(sys.argv[-1]); print(data[q] if q else json.dumps(data))' \"$@\" \"$payload\"\n"
+            "  exit 0\n"
+            "fi\n"
+            "if [[ \"$*\" == *\"acr manifest show-metadata\"* ]]; then\n"
+            f"  payload={json.dumps(json.dumps({'digest': digest, 'name': f'elsa-control/api:{HEALTH_COMMIT}'}))}\n"
+            "  python3 -c 'import json,sys; args=sys.argv[1:]; q=\"\";\n"
+            "for i,a in enumerate(args):\n"
+            "    if a==\"--query\" and i+1<len(args): q=args[i+1].strip().strip(chr(39))\n"
+            "data=json.loads(sys.argv[-1]); print(data[q] if q else json.dumps(data))' \"$@\" \"$payload\"\n"
             "  exit 0\n"
             "fi\n"
             "if [[ \"$*\" == *\"webapp show\"* ]]; then\n"
-            "  echo staging.example.test\n"
-            "  exit 0\n"
-            "fi\n"
-            "if [[ \"$*\" == *\"webapp deployment list\"* ]]; then\n"
-            "  echo \"${AZ_DEPLOYMENT_ID:-dep-1}\"\n"
+            "  payload='{\"defaultHostName\":\"staging.example.test\",\"state\":\"Running\"}'\n"
+            "  python3 -c 'import json,sys; args=sys.argv[1:]; q=\"\";\n"
+            "for i,a in enumerate(args):\n"
+            "    if a==\"--query\" and i+1<len(args): q=args[i+1].strip().strip(chr(39))\n"
+            "data=json.loads(sys.argv[-1]); print(data[q] if q else json.dumps(data))' \"$@\" \"$payload\"\n"
             "  exit 0\n"
             "fi\n"
             "if [[ \"$*\" == *\"webapp restart\"* ]]; then\n"
@@ -366,6 +453,12 @@ class StagingCompatScriptTests(unittest.TestCase):
             "  echo closed\n"
             "  exit 0\n"
             "fi\n"
+            "if [[ \"$*\" == *'/actions/workflows/azure-api-deploy.yml/runs'* ]]; then\n"
+            "  if [ -n \"${GH_DEPLOY_STAGING_RUNS:-}\" ] && [ -f \"${GH_DEPLOY_STAGING_RUNS}\" ]; then\n"
+            "    cat \"${GH_DEPLOY_STAGING_RUNS}\"\n"
+            "  fi\n"
+            "  exit 0\n"
+            "fi\n"
             "if [[ \"$*\" == *'/actions/runs?'* ]]; then\n"
             "  if [ \"${GH_FAIL_RUNS:-}\" = 1 ]; then echo failed-runs >&2; exit 2; fi\n"
             "  if [ \"${GH_MALFORMED_RUNS:-}\" = 1 ]; then echo 'not-json'; exit 0; fi\n"
@@ -374,21 +467,83 @@ class StagingCompatScriptTests(unittest.TestCase):
             "  fi\n"
             "  exit 0\n"
             "fi\n"
+            "if [[ \"$*\" == *'/actions/runs/'* ]]; then\n"
+            f"  if [[ \"$*\" == *'/actions/runs/{DEPLOY_STAGING_RUN_ID}'* ]] || [[ \"$*\" == *'/actions/runs/777'* ]]; then\n"
+            "    payload='{\"path\":\".github/workflows/azure-api-deploy.yml\",\"created_at\":\"2026-10-03T00:00:00Z\"}'\n"
+            "  elif [[ \"$*\" == *'/actions/runs/99'* ]]; then\n"
+            "    payload='{\"path\":\".github/workflows/staging-compat-fixture.yml\",\"created_at\":\"2026-10-04T09:00:00Z\"}'\n"
+            "  elif [ -n \"${GH_RUN_PATH:-}\" ]; then\n"
+            "    payload=$(jq -cn --arg path \"$GH_RUN_PATH\" '{path:$path,created_at:\"2026-10-03T00:00:00Z\"}')\n"
+            "  else\n"
+            "    payload='{\"path\":\".github/workflows/ci.yml\",\"created_at\":\"2026-10-03T00:00:00Z\"}'\n"
+            "  fi\n"
+            "  jq_expr=\"\"\n"
+            "  for arg in \"$@\"; do\n"
+            "    if [ \"${prev:-}\" = --jq ]; then jq_expr=\"$arg\"; fi\n"
+            "    prev=\"$arg\"\n"
+            "  done\n"
+            "  if [ -n \"$jq_expr\" ]; then jq -r \"$jq_expr\" <<<\"$payload\"; else printf '%s\\n' \"$payload\"; fi\n"
+            "  exit 0\n"
+            "fi\n"
+            "if [[ \"$*\" == *'/deployments/'* && \"$*\" != *statuses* && \"$*\" != *'/deployments?'* ]]; then\n"
+            "  payload='{\"created_at\":\"${GH_DEPLOYMENT_CREATED_AT:-2026-10-03T00:00:00Z}\"}'\n"
+            "  if [[ \"$*\" == *'/deployments/888'* ]]; then payload='{\"created_at\":\"2026-10-04T01:00:00Z\"}'; fi\n"
+            "  jq_expr=\"\"\n"
+            "  for arg in \"$@\"; do\n"
+            "    if [ \"${prev:-}\" = --jq ]; then jq_expr=\"$arg\"; fi\n"
+            "    prev=\"$arg\"\n"
+            "  done\n"
+            "  if [ -n \"$jq_expr\" ]; then jq -r \"$jq_expr\" <<<\"$payload\"; else printf '%s\\n' \"$payload\"; fi\n"
+            "  exit 0\n"
+            "fi\n"
             "if [[ \"$*\" == *'/deployments/'*'/statuses'* ]]; then\n"
             "  if [ \"${GH_FAIL_STATUSES:-}\" = 1 ]; then echo failed-status >&2; exit 2; fi\n"
             "  if [ -n \"${GH_DEPLOYMENT_STATUSES:-}\" ] && [ -f \"${GH_DEPLOYMENT_STATUSES}\" ]; then\n"
             "    cat \"${GH_DEPLOYMENT_STATUSES}\"\n"
-            "  else\n"
-            "    echo '[]'\n"
+            "    exit 0\n"
             "  fi\n"
+            f"  if [[ \"$*\" == *'/deployments/{DEPLOY_STAGING_DEPLOYMENT_ID}/'* ]]; then\n"
+            f"    echo '[{{ \"state\":\"success\",\"log_url\":\"https://github.com/valence-works/elsa-control/actions/runs/{DEPLOY_STAGING_RUN_ID}\" }}]'\n"
+            "    exit 0\n"
+            "  fi\n"
+            "  if [[ \"$*\" == *'/deployments/99/'* ]]; then\n"
+            "    echo '[{\"state\":\"in_progress\",\"log_url\":\"https://github.com/valence-works/elsa-control/actions/runs/99\"}]'\n"
+            "    exit 0\n"
+            "  fi\n"
+            "  if [[ \"$*\" == *'/deployments/888/'* ]]; then\n"
+            "    echo '[{\"state\":\"in_progress\",\"log_url\":\"https://github.com/valence-works/elsa-control/actions/runs/777\"}]'\n"
+            "    exit 0\n"
+            "  fi\n"
+            "  echo '[]'\n"
             "  exit 0\n"
             "fi\n"
             "if [[ \"$*\" == *'/deployments?'* ]]; then\n"
             "  if [ \"${GH_FAIL_DEPLOYMENTS:-}\" = 1 ]; then echo failed-deployments >&2; exit 2; fi\n"
             "  if [ \"${GH_MALFORMED_DEPLOYMENTS:-}\" = 1 ]; then echo '{'; exit 0; fi\n"
-            "  if [ -n \"${GH_DEPLOYMENT_IDS:-}\" ] && [ -f \"${GH_DEPLOYMENT_IDS}\" ]; then\n"
-            "    cat \"${GH_DEPLOYMENT_IDS}\"\n"
+            "  if [ -n \"${GH_DEPLOYMENT_JSON:-}\" ] && [ -f \"${GH_DEPLOYMENT_JSON}\" ]; then\n"
+            "    payload=$(cat \"${GH_DEPLOYMENT_JSON}\")\n"
+            "  elif [ -n \"${GH_DEPLOYMENT_IDS:-}\" ] && [ -f \"${GH_DEPLOYMENT_IDS}\" ]; then\n"
+            "    payload=$(python3 -c 'import json,sys; rows=[]\n"
+            "for raw in open(sys.argv[1]):\n"
+            "    item=raw.strip()\n"
+            "    if not item: continue\n"
+            "    created=\"2026-10-04T01:00:00Z\" if item==\"888\" else \"2026-10-03T00:00:00Z\"\n"
+            "    rows.append({\"id\":int(item),\"created_at\":created,\"environment\":\"test\"})\n"
+            "rows.sort(key=lambda row: row[\"created_at\"], reverse=True)\n"
+            "print(json.dumps(rows))' \"${GH_DEPLOYMENT_IDS}\")\n"
+            "  else\n"
+            f"    payload='[{{\"id\":99,\"created_at\":\"2026-10-04T09:00:00Z\",\"environment\":\"test\"}},{{\"id\":{DEPLOY_STAGING_DEPLOYMENT_ID},\"created_at\":\"2026-10-03T00:00:00Z\",\"environment\":\"test\"}},{{\"id\":9001,\"created_at\":\"2026-10-04T08:00:00Z\",\"environment\":\"production\"}}]'\n"
             "  fi\n"
+            "  if [[ \"$*\" == *'environment=test'* ]]; then\n"
+            "    payload=$(printf '%s' \"$payload\" | jq '[.[] | select(.environment==\"test\")]')\n"
+            "  fi\n"
+            "  jq_expr=\"\"\n"
+            "  prev=\"\"\n"
+            "  for arg in \"$@\"; do\n"
+            "    if [ \"$prev\" = --jq ]; then jq_expr=\"$arg\"; fi\n"
+            "    prev=\"$arg\"\n"
+            "  done\n"
+            "  if [ -n \"$jq_expr\" ]; then jq -r \"$jq_expr\" <<<\"$payload\"; else printf '%s\\n' \"$payload\"; fi\n"
             "  exit 0\n"
             "fi\n"
             "exit 41\n"
@@ -400,6 +555,24 @@ class StagingCompatScriptTests(unittest.TestCase):
         missing = [item for item in BASELINE_CAPABILITIES if item != "hosted.instances.provisioning-progress.v1"]
         compat = json.dumps({"contractVersion": 1, "capabilities": missing})
         baseline = json.dumps({"contractVersion": 1, "capabilities": BASELINE_CAPABILITIES})
+        bff_ok = json.dumps(
+            {
+                "data": {
+                    "state": "compatible",
+                    "contractVersion": 1,
+                    "capabilities": BASELINE_CAPABILITIES[:8],
+                }
+            }
+        )
+        bff_armed = json.dumps({"code": "control_update_in_progress"})
+        health = json.dumps(
+            {
+                "status": "ok",
+                "buildNumber": "232",
+                "imageId": HEALTH_COMMIT,
+                "compatibilityFixture": None,
+            }
+        )
         fake = temporary / "curl"
         fake.write_text(
             "#!/usr/bin/env bash\n"
@@ -407,20 +580,30 @@ class StagingCompatScriptTests(unittest.TestCase):
             "printf '%s\\n' \"$*\" >> \"${CURL_CALL_LOG:-/dev/null}\"\n"
             "output=\"\"\n"
             "url=\"\"\n"
+            "method=GET\n"
             "while [ \"$#\" -gt 0 ]; do\n"
             "  case \"$1\" in\n"
             "    --output) output=\"$2\"; shift 2 ;;\n"
             "    --write-out) shift 2 ;;\n"
             "    --silent|--show-error) shift ;;\n"
+            "    --request|-X) method=\"$2\"; shift 2 ;;\n"
             "    --max-time) shift 2 ;;\n"
             "    --header) shift 2 ;;\n"
+            "    --data|--data-raw) shift 2 ;;\n"
             "    *) url=\"$1\"; shift ;;\n"
             "  esac\n"
             "done\n"
+            "if [[ \"$url\" == *'/auth/v1/token'* ]]; then\n"
+            "  if [ \"$method\" != POST ]; then printf '405'; exit 0; fi\n"
+            "  if [ \"${TOKEN_FAIL:-}\" = 1 ]; then printf '401'; exit 0; fi\n"
+            "  printf '%s\\n' \"{\\\"access_token\\\":\\\"${MINTED_ACCESS_TOKEN:?}\\\"}\" > \"$output\"\n"
+            "  printf '200'\n"
+            "  exit 0\n"
+            "fi\n"
             "if [[ \"$url\" == *'/api/cloud/compatibility'* ]]; then\n"
-            f"  body={json.dumps(compat)}\n"
-            "  if [ \"${COMPAT_MODE:-}\" = baseline ]; then\n"
-            f"    body={json.dumps(baseline)}\n"
+            f"  body={json.dumps(baseline)}\n"
+            "  if [ \"${COMPAT_MODE:-}\" = armed ]; then\n"
+            f"    body={json.dumps(compat)}\n"
             "  fi\n"
             "  if [ \"${COMPAT_FAIL:-}\" = 1 ]; then printf '401'; exit 0; fi\n"
             "  printf '%s\\n' \"$body\" > \"$output\"\n"
@@ -428,11 +611,17 @@ class StagingCompatScriptTests(unittest.TestCase):
             "  exit 0\n"
             "fi\n"
             "if [ -n \"${CLOUD_BFF_SMOKE_URL:-}\" ] && [ \"$url\" = \"${CLOUD_BFF_SMOKE_URL}\" ]; then\n"
-            "  printf '%s\\n' '{\"compatible\":true}' > \"$output\"\n"
+            "  if [ \"$method\" != POST ]; then printf '405'; exit 0; fi\n"
+            "  if [ \"${BFF_ARMED:-}\" = 1 ]; then\n"
+            f"    printf '%s\\n' {json.dumps(bff_armed)} > \"$output\"\n"
+            "    printf '503'\n"
+            "    exit 0\n"
+            "  fi\n"
+            f"  printf '%s\\n' {json.dumps(bff_ok)} > \"$output\"\n"
             "  printf '200'\n"
             "  exit 0\n"
             "fi\n"
-            "body='{\"status\":\"ok\",\"buildNumber\":\"232\",\"imageId\":\"e5e9b84fd9a2f0b90931cf503f786eb89e2b0f02\",\"compatibilityFixture\":null}'\n"
+            f"body={json.dumps(health)}\n"
             "if [ -n \"${HEALTH_RESPONSES:-}\" ] && [ -f \"${HEALTH_RESPONSES}\" ]; then\n"
             "  if IFS= read -r line < \"${HEALTH_RESPONSES}\"; then\n"
             "    body=\"$line\"\n"
@@ -505,13 +694,14 @@ class StagingCompatScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("a" * 64)
-            image = f"example.azurecr.io/elsa-control/api@{digest}"
-            self.write_fake_az(temporary, ["Application__BuildNumber", "WEBSITES_PORT"], image)
+            image = self.tagged_image(digest)
+            self.write_fake_az(temporary, ["Application__BuildNumber", "WEBSITES_PORT"], image, digest)
             self.write_fake_gh(temporary)
             self.write_fake_curl(temporary)
             env = self.environment(temporary)
             env["AZ_CALL_LOG"] = str(temporary / "az.log")
             env["GH_CALL_LOG"] = str(temporary / "gh.log")
+            env["CURL_CALL_LOG"] = str(temporary / "curl.log")
             env["GITHUB_OUTPUT"] = str(temporary / "github.output")
             env["GITHUB_STEP_SUMMARY"] = str(temporary / "summary.md")
             result = self.run_script(env, "preflight")
@@ -521,26 +711,37 @@ class StagingCompatScriptTests(unittest.TestCase):
             self.assertIn(f"digest={digest}", output)
             self.assertIn(f"image_reference={image}", output)
             self.assertIn("build_number=232", output)
-            self.assertIn("commit=e5e9b84fd9a2f0b90931cf503f786eb89e2b0f02", output)
-            self.assertIn("deployment_id=dep-1", output)
+            self.assertIn(f"commit={HEALTH_COMMIT}", output)
+            self.assertIn(f"deployment_id={DEPLOY_STAGING_DEPLOYMENT_ID}", output)
+            self.assertIn("preflight_started_at=", output)
+            self.assertNotIn("CLOUD_COMPATIBILITY_TOKEN", output)
+            self.assertNotIn(env["MINTED_ACCESS_TOKEN"], output)
             self.assertIn("Application__BuildNumber", summary)
             self.assertIn("WEBSITES_PORT", summary)
             az_log = (temporary / "az.log").read_text()
+            self.assertIn("webapp sitecontainers show", az_log)
+            self.assertIn("acr manifest show-metadata", az_log)
+            self.assertNotIn("webapp deployment", az_log)
             self.assertNotIn("query '[].value'", az_log)
             self.assertNotIn("appsettings set", az_log)
             gh_log = (temporary / "gh.log").read_text()
             self.assertNotIn("actions/runs?environment=", gh_log)
             self.assertIn("deployments?environment=test", gh_log)
+            self.assertIn(f"actions/runs/{DEPLOY_STAGING_RUN_ID}", gh_log)
+            curl_log = (temporary / "curl.log").read_text()
+            self.assertIn("/auth/v1/token?grant_type=password", curl_log)
+            self.assertIn("::add-mask::", result.stdout + result.stderr)
 
     def test_preflight_fails_if_the_fixture_is_already_present(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("b" * 64)
-            image = f"example.azurecr.io/elsa-control/api@{digest}"
+            image = self.tagged_image(digest)
             self.write_fake_az(
                 temporary,
                 ["Application__BuildNumber", "CloudCompatibility__StagingFixture"],
                 image,
+                digest,
             )
             self.write_fake_gh(temporary)
             self.write_fake_curl(temporary)
@@ -555,8 +756,8 @@ class StagingCompatScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("d" * 64)
-            image = f"example.azurecr.io/elsa-control/api@{digest}"
-            self.write_fake_az(temporary, ["Application__BuildNumber"], image)
+            image = self.tagged_image(digest)
+            self.write_fake_az(temporary, ["Application__BuildNumber"], image, digest)
             self.write_fake_gh(temporary)
             self.write_fake_curl(temporary)
             runs = temporary / "runs.json"
@@ -590,7 +791,8 @@ class StagingCompatScriptTests(unittest.TestCase):
             self.assertNotIn("actions/runs?environment=", gh_log)
 
     def exclusive_failure_env(self, temporary: Path, image: str, **updates: str) -> dict[str, str]:
-        self.write_fake_az(temporary, ["Application__BuildNumber"], image)
+        digest = image.split("@", 1)[1] if "@sha256:" in image else "sha256:" + ("e" * 64)
+        self.write_fake_az(temporary, ["Application__BuildNumber"], image, digest)
         self.write_fake_gh(temporary)
         self.write_fake_curl(temporary)
         env = self.environment(temporary)
@@ -604,7 +806,7 @@ class StagingCompatScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("2" * 64)
-            image = f"example.azurecr.io/elsa-control/api@{digest}"
+            image = self.tagged_image(digest)
             env = self.exclusive_failure_env(temporary, image, GH_FAIL_DEPLOYMENTS="1")
             self.assert_preflight_stops_at(env, "GitHub API call failed")
 
@@ -612,7 +814,7 @@ class StagingCompatScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("3" * 64)
-            image = f"example.azurecr.io/elsa-control/api@{digest}"
+            image = self.tagged_image(digest)
             (temporary / "deployment-ids.txt").write_text("501\n")
             env = self.exclusive_failure_env(
                 temporary,
@@ -626,7 +828,7 @@ class StagingCompatScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("4" * 64)
-            image = f"example.azurecr.io/elsa-control/api@{digest}"
+            image = self.tagged_image(digest)
             env = self.exclusive_failure_env(temporary, image, GH_FAIL_RUNS="1")
             self.assert_preflight_stops_at(env, "GitHub API call failed")
 
@@ -634,7 +836,7 @@ class StagingCompatScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("5" * 64)
-            image = f"example.azurecr.io/elsa-control/api@{digest}"
+            image = self.tagged_image(digest)
             env = self.exclusive_failure_env(temporary, image, GH_MALFORMED_RUNS="1")
             self.assert_preflight_stops_at(env, "not valid JSON")
 
@@ -642,7 +844,7 @@ class StagingCompatScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("6" * 64)
-            image = f"example.azurecr.io/elsa-control/api@{digest}"
+            image = self.tagged_image(digest)
             (temporary / "deployment-ids.txt").write_text("501\n")
             (temporary / "deployment-statuses.json").write_text(
                 json.dumps(
@@ -666,8 +868,8 @@ class StagingCompatScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("e" * 64)
-            image = f"example.azurecr.io/elsa-control/api@{digest}"
-            self.write_fake_az(temporary, ["Application__BuildNumber"], image)
+            image = self.tagged_image(digest)
+            self.write_fake_az(temporary, ["Application__BuildNumber"], image, digest)
             self.write_fake_gh(temporary)
             (temporary / "deployment-ids.txt").write_text("501\n")
             (temporary / "deployment-statuses.json").write_text(
@@ -700,9 +902,9 @@ class StagingCompatScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("f" * 64)
-            image = f"example.azurecr.io/elsa-control/api@{digest}"
+            image = self.tagged_image(digest)
             present = temporary / "present"
-            self.write_fake_az(temporary, ["Application__BuildNumber"], image)
+            self.write_fake_az(temporary, ["Application__BuildNumber"], image, digest)
             self.write_fake_curl(temporary)
             health = self.write_health_responses(temporary, *self.armed_health())
             env = self.environment(temporary)
@@ -710,7 +912,9 @@ class StagingCompatScriptTests(unittest.TestCase):
             env["AZ_SETTING_PRESENT"] = str(present)
             env["EXPECTED_DIGEST"] = digest
             env["EXPECTED_BUILD_NUMBER"] = "232"
-            env["EXPECTED_COMMIT"] = "e5e9b84fd9a2f0b90931cf503f786eb89e2b0f02"
+            env["EXPECTED_COMMIT"] = HEALTH_COMMIT
+            env["COMPAT_MODE"] = "armed"
+            env["BFF_ARMED"] = "1"
             env["HEALTH_RETRY_SECONDS"] = "0"
             env["HEALTH_RESPONSES"] = str(health)
             env["GITHUB_OUTPUT"] = str(temporary / "github.output")
@@ -722,15 +926,16 @@ class StagingCompatScriptTests(unittest.TestCase):
             self.assertIn("armed_at=", (temporary / "github.output").read_text())
             combined = result.stderr + result.stdout
             self.assertIn("Authenticated /api/cloud/compatibility matched", combined)
+            self.assertIn("control_update_in_progress", combined)
             self.assertNotIn("missing-capability", combined)
 
     def test_arm_rejects_health_witness_without_authenticated_proof(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("7" * 64)
-            image = f"example.azurecr.io/elsa-control/api@{digest}"
+            image = self.tagged_image(digest)
             present = temporary / "present"
-            self.write_fake_az(temporary, ["Application__BuildNumber"], image)
+            self.write_fake_az(temporary, ["Application__BuildNumber"], image, digest)
             self.write_fake_curl(temporary)
             health = self.write_health_responses(temporary, *self.armed_health())
             env = self.environment(temporary)
@@ -739,6 +944,7 @@ class StagingCompatScriptTests(unittest.TestCase):
             env["EXPECTED_DIGEST"] = digest
             env["HEALTH_RETRY_SECONDS"] = "0"
             env["HEALTH_RESPONSES"] = str(health)
+            env["COMPAT_MODE"] = "armed"
             env["COMPAT_FAIL"] = "1"
             result = self.run_script(env, "arm")
             self.assertNotEqual(0, result.returncode)
@@ -748,9 +954,9 @@ class StagingCompatScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("1" * 64)
-            image = f"example.azurecr.io/elsa-control/api@{digest}"
+            image = self.tagged_image(digest)
             present = temporary / "present"
-            self.write_fake_az(temporary, ["Application__BuildNumber"], image)
+            self.write_fake_az(temporary, ["Application__BuildNumber"], image, digest)
             self.write_fake_curl(temporary)
             env = self.environment(temporary)
             env["AZ_CALL_LOG"] = str(temporary / "az.log")
@@ -766,7 +972,7 @@ class StagingCompatScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("8" * 64)
-            image = f"example.azurecr.io/elsa-control/api@{digest}"
+            image = self.tagged_image(digest)
             present = temporary / "present"
             present.write_text("present\n")
             self.write_fake_az(temporary, ["Application__BuildNumber"], image)
@@ -794,7 +1000,7 @@ class StagingCompatScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("9" * 64)
-            image = f"example.azurecr.io/elsa-control/api@{digest}"
+            image = self.tagged_image(digest)
             self.write_fake_az(temporary, ["Application__BuildNumber", "WEBSITES_PORT"], image)
             self.write_fake_curl(temporary)
             env = self.environment(temporary)
@@ -817,23 +1023,28 @@ class StagingCompatScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
             digest = "sha256:" + ("c" * 64)
-            image = f"example.azurecr.io/elsa-control/api@{digest}"
+            image = self.tagged_image(digest)
             names = temporary / "names.txt"
             names.write_text("Application__BuildNumber\nWEBSITES_PORT\n")
             present = temporary / "present"
             present.write_text("present\n")
-            self.write_fake_az(temporary, ["Application__BuildNumber", "WEBSITES_PORT"], image)
+            self.write_fake_az(temporary, ["Application__BuildNumber", "WEBSITES_PORT"], image, digest)
+            self.write_fake_gh(temporary)
             self.write_fake_curl(temporary)
             armed = '{"status":"ok","buildNumber":"232","imageId":"e5e9b84fd9a2f0b90931cf503f786eb89e2b0f02","compatibilityFixture":"missing-capability"}'
             restored = '{"status":"ok","buildNumber":"232","imageId":"e5e9b84fd9a2f0b90931cf503f786eb89e2b0f02","compatibilityFixture":null}'
             health = self.write_health_responses(temporary, armed, armed, restored, restored, restored)
-            env = self.environment(temporary, COMPAT_MODE="baseline")
+            env = self.environment(temporary)
             env["AZ_CALL_LOG"] = str(temporary / "az.log")
+            env["GH_CALL_LOG"] = str(temporary / "gh.log")
+            env["CURL_CALL_LOG"] = str(temporary / "curl.log")
             env["AZ_SETTING_PRESENT"] = str(present)
             env["EXPECTED_DIGEST"] = digest
             env["EXPECTED_BUILD_NUMBER"] = "232"
-            env["EXPECTED_COMMIT"] = "e5e9b84fd9a2f0b90931cf503f786eb89e2b0f02"
-            env["EXPECTED_DEPLOYMENT_ID"] = "dep-1"
+            env["EXPECTED_COMMIT"] = HEALTH_COMMIT
+            env["EXPECTED_DEPLOYMENT_ID"] = DEPLOY_STAGING_DEPLOYMENT_ID
+            env["EXPECTED_IMAGE_REFERENCE"] = image
+            env["EXPECTED_PREFLIGHT_STARTED_AT"] = "2026-10-04T00:00:00Z"
             env["EXPECTED_SETTING_NAMES_PATH"] = str(names)
             env["HEALTH_RETRY_SECONDS"] = "0"
             env["HEALTH_RESPONSES"] = str(health)
@@ -849,6 +1060,332 @@ class StagingCompatScriptTests(unittest.TestCase):
             combined = result.stderr + result.stdout
             self.assertIn("BFF smoke reported compatible", combined)
             self.assertNotIn("missing-capability", combined)
+            curl_log = (temporary / "curl.log").read_text()
+            self.assertIn("--request POST", curl_log)
+            self.assertIn("action", curl_log)
+            self.assertIn("/auth/v1/token?grant_type=password", curl_log)
+            self.assertNotIn(env["MINTED_ACCESS_TOKEN"], (temporary / "summary.md").read_text())
+
+    def test_script_uses_only_allowlisted_az_commands(self) -> None:
+        found: set[tuple[str, ...]] = set()
+        for match in re.finditer(
+            r"\b(?:az_tsv|az)\s+([A-Za-z][\w-]+(?:\s+[A-Za-z][\w-]+){0,8})",
+            SCRIPT.read_text(),
+        ):
+            command: list[str] = []
+            for token in match.group(1).split():
+                if token.startswith("-") or token.startswith("$") or token.startswith("\""):
+                    break
+                command.append(token)
+            if command:
+                found.add(tuple(command))
+        self.assertTrue(found)
+        unknown = found - ALLOWED_AZ_COMMANDS
+        self.assertEqual(set(), unknown)
+        self.assertNotIn("webapp deployment list", SCRIPT.read_text())
+        self.assertNotIn("webapp log deployment", SCRIPT.read_text())
+
+    def test_preflight_names_each_missing_input_before_arming(self) -> None:
+        required = {
+            "STAGING_E2E_COMPAT_EMAIL": "secret STAGING_E2E_COMPAT_EMAIL",
+            "STAGING_E2E_COMPAT_PASSWORD": "secret STAGING_E2E_COMPAT_PASSWORD",
+            "VITE_SUPABASE_PUBLISHABLE_KEY": "secret VITE_SUPABASE_PUBLISHABLE_KEY",
+            "STAGING_SUPABASE_PROJECT_REF": "variable STAGING_SUPABASE_PROJECT_REF",
+            "EXPECTED_STAGING_SUPABASE_ORIGIN": "variable EXPECTED_STAGING_SUPABASE_ORIGIN",
+            "CLOUD_BFF_SMOKE_URL": "variable CLOUD_BFF_SMOKE_URL",
+        }
+        for key, needle in required.items():
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as raw:
+                temporary = Path(raw)
+                digest = "sha256:" + ("0" * 64)
+                image = self.tagged_image(digest)
+                env = self.exclusive_failure_env(temporary, image)
+                env[key] = ""
+                result = self.run_script(env, "preflight")
+                combined = result.stderr + result.stdout
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("Compatibility fixture inputs are missing", combined)
+                self.assertIn(needle, combined)
+                self.assertNotIn("Preflight captured", combined)
+                self.assertNotIn("appsettings set", Path(env["AZ_CALL_LOG"]).read_text() if Path(env["AZ_CALL_LOG"]).exists() else "")
+
+    def test_refuses_the_production_supabase_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            digest = "sha256:" + ("a" * 64)
+            image = self.tagged_image(digest)
+            env = self.exclusive_failure_env(temporary, image)
+            env["STAGING_SUPABASE_PROJECT_REF"] = PRODUCTION_SUPABASE_REF
+            env["EXPECTED_STAGING_SUPABASE_ORIGIN"] = f"https://{PRODUCTION_SUPABASE_REF}.supabase.co"
+            env["CLOUD_BFF_SMOKE_URL"] = f"https://{PRODUCTION_SUPABASE_REF}.supabase.co/functions/v1/control-bff"
+            self.assert_preflight_stops_at(env, "production Supabase project ref")
+
+    def test_preflight_uses_deploy_staging_deployment_not_the_fixture_job(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            digest = "sha256:" + ("b" * 64)
+            image = self.tagged_image(digest)
+            self.write_fake_az(temporary, ["Application__BuildNumber"], image, digest)
+            self.write_fake_gh(temporary)
+            self.write_fake_curl(temporary)
+            (temporary / "deployment-ids.txt").write_text(f"99\n{DEPLOY_STAGING_DEPLOYMENT_ID}\n")
+            env = self.environment(temporary)
+            env["AZ_CALL_LOG"] = str(temporary / "az.log")
+            env["GH_CALL_LOG"] = str(temporary / "gh.log")
+            env["GH_DEPLOYMENT_IDS"] = str(temporary / "deployment-ids.txt")
+            env["GITHUB_OUTPUT"] = str(temporary / "github.output")
+            result = self.run_script(env, "preflight")
+            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+            self.assertIn(f"deployment_id={DEPLOY_STAGING_DEPLOYMENT_ID}", (temporary / "github.output").read_text())
+            self.assertNotIn("deployment_id=99", (temporary / "github.output").read_text())
+
+    def test_restore_fails_if_a_deploy_staging_run_started(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            digest = "sha256:" + ("c" * 64)
+            image = self.tagged_image(digest)
+            names = temporary / "names.txt"
+            names.write_text("Application__BuildNumber\n")
+            present = temporary / "present"
+            present.write_text("present\n")
+            self.write_fake_az(temporary, ["Application__BuildNumber"], image, digest)
+            self.write_fake_gh(temporary)
+            self.write_fake_curl(temporary)
+            restored = '{"status":"ok","buildNumber":"232","imageId":"%s","compatibilityFixture":null}' % HEALTH_COMMIT
+            health = self.write_health_responses(temporary, restored, restored, restored, restored)
+            (temporary / "deployment-ids.txt").write_text(
+                f"{DEPLOY_STAGING_DEPLOYMENT_ID}\n888\n"
+            )
+            env = self.environment(temporary)
+            env["AZ_CALL_LOG"] = str(temporary / "az.log")
+            env["GH_CALL_LOG"] = str(temporary / "gh.log")
+            env["AZ_SETTING_PRESENT"] = str(present)
+            env["EXPECTED_DIGEST"] = digest
+            env["EXPECTED_BUILD_NUMBER"] = "232"
+            env["EXPECTED_COMMIT"] = HEALTH_COMMIT
+            env["EXPECTED_DEPLOYMENT_ID"] = "888"
+            env["EXPECTED_IMAGE_REFERENCE"] = image
+            env["EXPECTED_PREFLIGHT_STARTED_AT"] = "2026-10-04T00:00:00Z"
+            env["EXPECTED_SETTING_NAMES_PATH"] = str(names)
+            env["HEALTH_RETRY_SECONDS"] = "0"
+            env["HEALTH_RESPONSES"] = str(health)
+            env["GH_DEPLOYMENT_IDS"] = str(temporary / "deployment-ids.txt")
+            result = self.run_script(env, "restore")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("Deploy staging run started between preflight and postflight", result.stderr + result.stdout)
+
+    def test_restore_ignores_non_test_azure_api_deploy_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            digest = "sha256:" + ("c" * 64)
+            image = self.tagged_image(digest)
+            names = temporary / "names.txt"
+            names.write_text("Application__BuildNumber\nWEBSITES_PORT\n")
+            present = temporary / "present"
+            present.write_text("present\n")
+            self.write_fake_az(temporary, ["Application__BuildNumber", "WEBSITES_PORT"], image, digest)
+            self.write_fake_gh(temporary)
+            self.write_fake_curl(temporary)
+            restored = '{"status":"ok","buildNumber":"232","imageId":"%s","compatibilityFixture":null}' % HEALTH_COMMIT
+            health = self.write_health_responses(temporary, restored, restored, restored, restored)
+            (temporary / "deployments.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": 9001,
+                            "created_at": "2026-10-04T08:00:00Z",
+                            "environment": "production",
+                        },
+                        {
+                            "id": int(DEPLOY_STAGING_DEPLOYMENT_ID),
+                            "created_at": "2026-10-03T00:00:00Z",
+                            "environment": "test",
+                        },
+                    ]
+                )
+            )
+            env = self.environment(temporary)
+            env["AZ_CALL_LOG"] = str(temporary / "az.log")
+            env["GH_CALL_LOG"] = str(temporary / "gh.log")
+            env["AZ_SETTING_PRESENT"] = str(present)
+            env["EXPECTED_DIGEST"] = digest
+            env["EXPECTED_BUILD_NUMBER"] = "232"
+            env["EXPECTED_COMMIT"] = HEALTH_COMMIT
+            env["EXPECTED_DEPLOYMENT_ID"] = DEPLOY_STAGING_DEPLOYMENT_ID
+            env["EXPECTED_IMAGE_REFERENCE"] = image
+            env["EXPECTED_PREFLIGHT_STARTED_AT"] = "2026-10-04T00:00:00Z"
+            env["EXPECTED_SETTING_NAMES_PATH"] = str(names)
+            env["HEALTH_RETRY_SECONDS"] = "0"
+            env["HEALTH_RESPONSES"] = str(health)
+            env["GH_DEPLOYMENT_JSON"] = str(temporary / "deployments.json")
+            env["GITHUB_STEP_SUMMARY"] = str(temporary / "summary.md")
+            result = self.run_script(env, "restore")
+            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+            self.assertIn("BFF smoke reported compatible", result.stderr + result.stdout)
+            self.assertNotIn("/deployments/9001", (temporary / "gh.log").read_text())
+
+    def test_mint_masks_the_token_and_never_writes_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            token = mint_jwt()
+            self.write_fake_curl(temporary)
+            env = self.environment(temporary, MINTED_ACCESS_TOKEN=token)
+            env["GITHUB_OUTPUT"] = str(temporary / "github.output")
+            env["CURL_CALL_LOG"] = str(temporary / "curl.log")
+            result = self.run_script(env, "mint")
+            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+            combined = result.stderr + result.stdout
+            self.assertIn("::add-mask::", combined)
+            self.assertIn(token, combined)
+            self.assertFalse((temporary / "github.output").exists() and token in (temporary / "github.output").read_text())
+            self.assertIn(f"{STAGING_SUPABASE_ORIGIN}/auth/v1/token?grant_type=password", (temporary / "curl.log").read_text())
+            self.assertNotIn("CLOUD_COMPATIBILITY_TOKEN", SCRIPT.read_text())
+
+    def test_mint_rejects_a_token_without_authenticated_role(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            self.write_fake_curl(temporary)
+            env = self.environment(temporary, MINTED_ACCESS_TOKEN=mint_jwt(role="anon"))
+            result = self.run_script(env, "mint")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("role must be authenticated", result.stderr + result.stdout)
+
+    def test_restore_deletes_before_a_mint_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            digest = "sha256:" + ("c" * 64)
+            image = self.tagged_image(digest)
+            names = temporary / "names.txt"
+            names.write_text("Application__BuildNumber\n")
+            present = temporary / "present"
+            present.write_text("present\n")
+            self.write_fake_az(temporary, ["Application__BuildNumber"], image, digest)
+            self.write_fake_gh(temporary)
+            self.write_fake_curl(temporary)
+            restored = '{"status":"ok","buildNumber":"232","imageId":"%s","compatibilityFixture":null}' % HEALTH_COMMIT
+            health = self.write_health_responses(temporary, restored, restored, restored, restored)
+            env = self.environment(temporary)
+            env["AZ_CALL_LOG"] = str(temporary / "az.log")
+            env["GH_CALL_LOG"] = str(temporary / "gh.log")
+            env["AZ_SETTING_PRESENT"] = str(present)
+            env["EXPECTED_DIGEST"] = digest
+            env["EXPECTED_BUILD_NUMBER"] = "232"
+            env["EXPECTED_COMMIT"] = HEALTH_COMMIT
+            env["EXPECTED_DEPLOYMENT_ID"] = DEPLOY_STAGING_DEPLOYMENT_ID
+            env["EXPECTED_IMAGE_REFERENCE"] = image
+            env["EXPECTED_PREFLIGHT_STARTED_AT"] = "2026-10-04T00:00:00Z"
+            env["EXPECTED_SETTING_NAMES_PATH"] = str(names)
+            env["HEALTH_RETRY_SECONDS"] = "0"
+            env["HEALTH_RESPONSES"] = str(health)
+            env["TOKEN_FAIL"] = "1"
+            result = self.run_script(env, "restore")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("password grant did not return HTTP 200", result.stderr + result.stdout)
+            self.assertFalse(present.exists())
+            az_log = (temporary / "az.log").read_text()
+            self.assertIn("appsettings delete", az_log)
+            self.assertIn("webapp restart", az_log)
+
+    def test_preflight_fails_when_health_omits_compatibility_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            digest = "sha256:" + ("a" * 64)
+            image = self.tagged_image(digest)
+            self.write_fake_az(temporary, ["Application__BuildNumber"], image, digest)
+            self.write_fake_gh(temporary)
+            self.write_fake_curl(temporary)
+            missing = '{"status":"ok","buildNumber":"232","imageId":"%s"}' % HEALTH_COMMIT
+            health = self.write_health_responses(temporary, missing)
+            env = self.environment(temporary)
+            env["AZ_CALL_LOG"] = str(temporary / "az.log")
+            env["GH_CALL_LOG"] = str(temporary / "gh.log")
+            env["HEALTH_RESPONSES"] = str(health)
+            result = self.run_script(env, "preflight")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("compatibilityFixture must be JSON null", result.stderr + result.stdout)
+
+    def test_restore_fails_closed_when_a_preflight_output_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            digest = "sha256:" + ("c" * 64)
+            image = self.tagged_image(digest)
+            names = temporary / "names.txt"
+            names.write_text("Application__BuildNumber\n")
+            present = temporary / "present"
+            present.write_text("present\n")
+            self.write_fake_az(temporary, ["Application__BuildNumber"], image, digest)
+            self.write_fake_gh(temporary)
+            self.write_fake_curl(temporary)
+            restored = '{"status":"ok","buildNumber":"232","imageId":"%s","compatibilityFixture":null}' % HEALTH_COMMIT
+            health = self.write_health_responses(temporary, restored, restored, restored, restored)
+            env = self.environment(temporary)
+            env["AZ_CALL_LOG"] = str(temporary / "az.log")
+            env["AZ_SETTING_PRESENT"] = str(present)
+            env["EXPECTED_DIGEST"] = digest
+            env["EXPECTED_COMMIT"] = HEALTH_COMMIT
+            env["EXPECTED_DEPLOYMENT_ID"] = DEPLOY_STAGING_DEPLOYMENT_ID
+            env["EXPECTED_IMAGE_REFERENCE"] = image
+            env["EXPECTED_PREFLIGHT_STARTED_AT"] = "2026-10-04T00:00:00Z"
+            env["EXPECTED_SETTING_NAMES_PATH"] = str(names)
+            env["HEALTH_RETRY_SECONDS"] = "0"
+            env["HEALTH_RESPONSES"] = str(health)
+            result = self.run_script(env, "restore")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("missing the preflight /health build number", result.stderr + result.stdout)
+            self.assertFalse(present.exists())
+            self.assertIn("appsettings delete", (temporary / "az.log").read_text())
+
+    def test_restore_stops_deploy_walk_at_the_first_older_deployment(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            digest = "sha256:" + ("c" * 64)
+            image = self.tagged_image(digest)
+            names = temporary / "names.txt"
+            names.write_text("Application__BuildNumber\n")
+            present = temporary / "present"
+            present.write_text("present\n")
+            self.write_fake_az(temporary, ["Application__BuildNumber"], image, digest)
+            self.write_fake_gh(temporary)
+            self.write_fake_curl(temporary)
+            restored = '{"status":"ok","buildNumber":"232","imageId":"%s","compatibilityFixture":null}' % HEALTH_COMMIT
+            health = self.write_health_responses(temporary, restored, restored, restored, restored)
+            rows = [
+                {
+                    "id": int(DEPLOY_STAGING_DEPLOYMENT_ID),
+                    "created_at": "2026-10-03T12:00:00Z",
+                    "environment": "test",
+                }
+            ]
+            rows.extend(
+                {
+                    "id": 2000 + index,
+                    "created_at": f"2026-10-02T{index:02d}:00:00Z",
+                    "environment": "test",
+                }
+                for index in range(47)
+            )
+            (temporary / "deployments.json").write_text(json.dumps(rows))
+            env = self.environment(temporary)
+            env["AZ_CALL_LOG"] = str(temporary / "az.log")
+            env["GH_CALL_LOG"] = str(temporary / "gh.log")
+            env["AZ_SETTING_PRESENT"] = str(present)
+            env["EXPECTED_DIGEST"] = digest
+            env["EXPECTED_BUILD_NUMBER"] = "232"
+            env["EXPECTED_COMMIT"] = HEALTH_COMMIT
+            env["EXPECTED_DEPLOYMENT_ID"] = DEPLOY_STAGING_DEPLOYMENT_ID
+            env["EXPECTED_IMAGE_REFERENCE"] = image
+            env["EXPECTED_PREFLIGHT_STARTED_AT"] = "2026-10-04T00:00:00Z"
+            env["EXPECTED_SETTING_NAMES_PATH"] = str(names)
+            env["HEALTH_RETRY_SECONDS"] = "0"
+            env["HEALTH_RESPONSES"] = str(health)
+            env["GH_DEPLOYMENT_JSON"] = str(temporary / "deployments.json")
+            env["GITHUB_STEP_SUMMARY"] = str(temporary / "summary.md")
+            result = self.run_script(env, "restore")
+            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+            created_at_reads = (temporary / "gh.log").read_text().count("/deployments/") - (
+                temporary / "gh.log"
+            ).read_text().count("/deployments?")
+            self.assertLess(created_at_reads, 8)
 
 
 if __name__ == "__main__":
