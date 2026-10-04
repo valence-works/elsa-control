@@ -446,6 +446,10 @@ jobs:
           fi
 
           billing_expected_mode=""
+          # Development is not a billing target. Do not set ExpectedMode there:
+          # the workflow does not require Stripe secrets for development, and
+          # StripeBillingConfigurationValidator only demands ExpectedMode when
+          # billing is enabled. Enabling development billing is unsupported.
           if [ "$TARGET_ENVIRONMENT" = "test" ] && [ "$DEPLOY_MODE" != "build" ] && [ "$DEPLOY_MODE" != "telemetry" ]; then
             billing_expected_mode="test"
           elif [ "$TARGET_ENVIRONMENT" = "production" ] && [ "$DEPLOY_MODE" != "build" ] && [ "$DEPLOY_MODE" != "telemetry" ]; then
@@ -963,6 +967,54 @@ jobs:
           pairing_allowlist_prefix='ElsaControl__ExternalEngines__PairingAllowedOrganizationIds__'
           pairing_before_count=""
 
+          write_billing_expected_mode() {
+            if [ -z "${BILLING_EXPECTED_MODE:-}" ]; then
+              return 0
+            fi
+            # Capture prior existence/value/slot metadata before any write so
+            # rollback can restore or delete. Fail closed if the setting
+            # cannot be read. Skip the write when Azure already has the
+            # target mode. First-enabled (absent or different) still writes
+            # before the new image can start.
+            if ! billing_expected_mode_record="$(az webapp config appsettings list \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$AZURE_WEBAPP_NAME" \
+              --query "[?name=='Billing__Stripe__ExpectedMode'] | [0]" \
+              --output json \
+              --only-show-errors)"; then
+              echo "::error::Could not read Billing__Stripe__ExpectedMode; refusing to mutate the Web App."
+              exit 1
+            fi
+            current_expected_mode=""
+            current_expected_mode_slot_setting="false"
+            billing_expected_mode_present="false"
+            if [ -n "$billing_expected_mode_record" ] && [ "$billing_expected_mode_record" != "null" ]; then
+              current_expected_mode="$(printf '%s' "$billing_expected_mode_record" | jq -r '.value // empty')"
+              current_expected_mode_slot_setting="$(printf '%s' "$billing_expected_mode_record" | jq -r 'if .slotSetting == true then "true" else "false" end')"
+              billing_mode_pattern='^(test|live|staging|production)$'
+              if [[ ! "$current_expected_mode" =~ $billing_mode_pattern ]]; then
+                echo "::error::The captured Billing__Stripe__ExpectedMode has an unexpected or unsafe format."
+                exit 1
+              fi
+              billing_expected_mode_present="true"
+            fi
+            if [ -n "${GITHUB_OUTPUT:-}" ]; then
+              echo "billing_expected_mode_present=$billing_expected_mode_present" >> "$GITHUB_OUTPUT"
+              if [ "$billing_expected_mode_present" = "true" ]; then
+                echo "billing_expected_mode=$current_expected_mode" >> "$GITHUB_OUTPUT"
+                echo "billing_expected_mode_slot_setting=$current_expected_mode_slot_setting" >> "$GITHUB_OUTPUT"
+              fi
+            fi
+            if [ "$current_expected_mode" = "$BILLING_EXPECTED_MODE" ]; then
+              return 0
+            fi
+            az webapp config appsettings set \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$AZURE_WEBAPP_NAME" \
+              --settings "Billing__Stripe__ExpectedMode=$BILLING_EXPECTED_MODE" \
+              --output none
+          }
+
           if [ "$DEPLOY_MODE" = "infra" ]; then
             if pairing_before_count="$(az webapp config appsettings list \
               --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -993,6 +1045,16 @@ jobs:
               --tag "$image" \
               .
             docker push "$image"
+
+            # App mode: write ExpectedMode before the image switch so the first
+            # billing-enabled start of the new image cannot miss it.
+            # StripeBillingConfigurationValidator throws at host start when
+            # billing is enabled without ExpectedMode. The helper captures
+            # prior existence/value/slot metadata first; rollback restores or
+            # deletes that prior state after an image-switch failure. The
+            # later combined settings write still includes ExpectedMode after
+            # a successful switch.
+            write_billing_expected_mode
 
             if [ "$current_deployment_mode" = "sitecontainers" ]; then
               az webapp sitecontainers update \
@@ -1033,6 +1095,12 @@ jobs:
               echo "::error::The validated candidate build number is unavailable; refusing promotion."
               exit 1
             fi
+
+            # Promote switches the image; write ExpectedMode first for the
+            # same first-start reason as app mode. Prior state is captured
+            # for rollback restore or delete. The later combined settings
+            # write stays after a successful readback.
+            write_billing_expected_mode
 
             if [ "$current_deployment_mode" = "sitecontainers" ]; then
               az webapp sitecontainers update \
@@ -1280,6 +1348,11 @@ jobs:
           python3 scripts/production_stripe_reconcile.py --audit --audit-capture "$PRODUCTION_BILLING_CAPTURE_PATH"
 
       - name: Restore previous API deployment after deployment, configuration, or health failure
+        # API rollback triggers: deploy-api, staging Stripe configuration,
+        # production Stripe audit, or the health gate. A telemetry
+        # what-if/create/preflight failure never rolls back the API in
+        # production, test, or development. Do not add managed-telemetry
+        # or managed-telemetry-what-if outcomes here.
         if: ${{ failure() && steps.current-deployment.outcome == 'success' && steps.current-deployment.outputs.capture_succeeded == 'true' && (env.TARGET_ENVIRONMENT != 'production' || env.DEPLOY_MODE == 'build' || steps.production-billing-capture.outcome == 'success') && (steps.deploy-api.outcome == 'failure' || steps.staging-stripe.outcome == 'failure' || steps.production-stripe.outcome == 'failure' || steps.health-gate.outcome == 'failure') }}
         env:
           PREVIOUS_LINUX_FX_VERSION: ${{ steps.current-deployment.outputs.linux_fx_version }}
@@ -1289,6 +1362,13 @@ jobs:
           PREVIOUS_BUILD_NUMBER_PRESENT: ${{ steps.current-deployment.outputs.application_build_number_present }}
           PREVIOUS_HEALTH_BUILD_NUMBER: ${{ steps.current-deployment.outputs.previous_health_build_number }}
           PREVIOUS_HEALTH_IMAGE_ID: ${{ steps.current-deployment.outputs.previous_health_image_id }}
+          DEPLOY_API_OUTCOME: ${{ steps.deploy-api.outcome }}
+          STAGING_STRIPE_OUTCOME: ${{ steps.staging-stripe.outcome }}
+          PRODUCTION_STRIPE_OUTCOME: ${{ steps.production-stripe.outcome }}
+          HEALTH_GATE_OUTCOME: ${{ steps.health-gate.outcome }}
+          PREVIOUS_BILLING_EXPECTED_MODE: ${{ steps.deploy-api.outputs.billing_expected_mode }}
+          PREVIOUS_BILLING_EXPECTED_MODE_PRESENT: ${{ steps.deploy-api.outputs.billing_expected_mode_present }}
+          PREVIOUS_BILLING_EXPECTED_MODE_SLOT_SETTING: ${{ steps.deploy-api.outputs.billing_expected_mode_slot_setting }}
           PRODUCTION_BILLING_CAPTURE_PATH: ${{ runner.temp }}/elsa-control-production-billing.json
         shell: bash
         run: |
@@ -1352,6 +1432,40 @@ jobs:
                 --output none; then
               echo "::error::Rollback failed: could not remove the previous Application__BuildNumber."
               exit 1
+            fi
+          fi
+
+          # Restore or delete ExpectedMode only when deploy-api captured an
+          # explicit prior state. An unset PRESENT means the read never
+          # completed, so this setting was not mutated.
+          if [ "$DEPLOY_MODE" = "app" ] || [ "$DEPLOY_MODE" = "promote" ]; then
+            if [ "${PREVIOUS_BILLING_EXPECTED_MODE_PRESENT:-}" = true ]; then
+              billing_mode_pattern='^(test|live|staging|production)$'
+              if [[ ! "${PREVIOUS_BILLING_EXPECTED_MODE:-}" =~ $billing_mode_pattern ]]; then
+                echo "::error::Rollback failed: the captured Billing__Stripe__ExpectedMode has an unexpected or unsafe format."
+                exit 1
+              fi
+              expected_mode_flag=--settings
+              if [ "${PREVIOUS_BILLING_EXPECTED_MODE_SLOT_SETTING:-}" = true ]; then
+                expected_mode_flag=--slot-settings
+              fi
+              if ! az webapp config appsettings set \
+                  --resource-group "$AZURE_RESOURCE_GROUP" \
+                  --name "$AZURE_WEBAPP_NAME" \
+                  "$expected_mode_flag" "Billing__Stripe__ExpectedMode=$PREVIOUS_BILLING_EXPECTED_MODE" \
+                  --output none; then
+                echo "::error::Rollback failed: could not restore the previous Billing__Stripe__ExpectedMode."
+                exit 1
+              fi
+            elif [ "${PREVIOUS_BILLING_EXPECTED_MODE_PRESENT:-}" = false ]; then
+              if ! az webapp config appsettings delete \
+                  --resource-group "$AZURE_RESOURCE_GROUP" \
+                  --name "$AZURE_WEBAPP_NAME" \
+                  --setting-names Billing__Stripe__ExpectedMode \
+                  --output none; then
+                echo "::error::Rollback failed: could not remove the newly introduced Billing__Stripe__ExpectedMode."
+                exit 1
+              fi
             fi
           fi
 
@@ -1452,7 +1566,25 @@ jobs:
             exit 1
           fi
 
-          echo "::error::API health gate failed; restored the previous deployment image and build metadata."
+          rollback_triggers=()
+          if [ "${DEPLOY_API_OUTCOME:-}" = "failure" ]; then
+            rollback_triggers+=("API deployment")
+          fi
+          if [ "${STAGING_STRIPE_OUTCOME:-}" = "failure" ]; then
+            rollback_triggers+=("staging Stripe configuration")
+          fi
+          if [ "${PRODUCTION_STRIPE_OUTCOME:-}" = "failure" ]; then
+            rollback_triggers+=("production Stripe audit")
+          fi
+          if [ "${HEALTH_GATE_OUTCOME:-}" = "failure" ]; then
+            rollback_triggers+=("API health gate")
+          fi
+          if [ "${#rollback_triggers[@]}" -eq 0 ]; then
+            rollback_trigger="deployment, configuration, or health"
+          else
+            rollback_trigger="$(IFS=', '; echo "${rollback_triggers[*]}")"
+          fi
+          echo "::error::${rollback_trigger} failed; restored the previous deployment image and build metadata."
 
       - name: Report recovery path for a new test environment
         if: ${{ failure() && env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE == 'infra' && steps.current-deployment.outcome == 'success' && steps.current-deployment.outputs.capture_succeeded != 'true' && (steps.deploy-api.outcome == 'failure' || steps.staging-stripe.outcome == 'failure' || steps.health-gate.outcome == 'failure') }}

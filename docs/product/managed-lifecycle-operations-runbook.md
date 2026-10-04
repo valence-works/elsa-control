@@ -564,7 +564,10 @@ Required operator steps before the first live email (Sipke):
 5. A human creates that one role assignment. Rerun
    `telemetry_action: what-if` until the preflight reports `present`. Keep
    `MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED` off until then. Ingestion
-   stays off; a telemetry preflight failure never rolls the API back.
+   stays off. A telemetry what-if, create, or preflight failure never
+   rolls back the API in production, test (staging), or development.
+   The API rollback condition in `azure-api-deploy.yml` does not include
+   telemetry step outcomes.
 6. Only after a preflight reports `present`, enable the exporter on the
    target API: set `MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED=true` (applied
    as `ManagedLifecycleTelemetry:AzureMonitor:Enabled`), plus
