@@ -8,6 +8,7 @@ import stat
 import tempfile
 import unittest
 import urllib.error
+import warnings
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -356,19 +357,40 @@ def stripe_http_error(
     code: str | None = None,
     message: str = STRIPE_ERROR_MESSAGE,
     url: str = f"https://api.stripe.com/v1/prices/{EXPECTED_SETTINGS['Billing__Stripe__DefaultPriceId']}?customer={CUSTOMER_ID}",
+    body: bytes | None = None,
+    fp: object | None = None,
 ) -> urllib.error.HTTPError:
     payload: dict[str, object] = {"message": message}
     if error_type is not None:
         payload["type"] = error_type
     if code is not None:
         payload["code"] = code
+    if fp is None:
+        fp = io.BytesIO(json.dumps({"error": payload}).encode() if body is None else body)
     return urllib.error.HTTPError(
         url,
         status,
         "error",
         hdrs=None,
-        fp=io.BytesIO(json.dumps({"error": payload}).encode()),
+        fp=fp,
     )
+
+
+class ExplodingStream:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def read(self, *args: object, **kwargs: object) -> bytes:
+        raise OSError("unavailable")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def assert_http_error_closed(test: unittest.TestCase, error: urllib.error.HTTPError) -> None:
+    fp = getattr(error, "fp", None)
+    if fp is not None:
+        test.assertTrue(getattr(fp, "closed", True))
 
 
 def audit_environment() -> dict[str, str]:
@@ -427,26 +449,63 @@ class ProductionStripeAuditReasonTests(unittest.TestCase):
         ):
             assert_secret_free(self, stripe_request_label(path))
 
-    def test_stripe_api_reason_names_prices_retrieve_authentication_error(self) -> None:
+    def _format_http_reason(self, path: str, http_error: urllib.error.HTTPError) -> str:
         error = ReconciliationError("Stripe API request failed")
-        error.__cause__ = stripe_http_error(401, "authentication_error")
-        reason = format_stripe_api_failure(f"/prices/price_live?customer={CUSTOMER_ID}", error)
-        self.assertEqual("stripe-api prices.retrieve: authentication_error (401)", reason)
+        error.__cause__ = http_error
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            reason = format_stripe_api_failure(path, error)
+        self.assertEqual([], [item for item in caught if issubclass(item.category, ResourceWarning)])
+        assert_http_error_closed(self, http_error)
         assert_secret_free(self, reason)
+        return reason
+
+    def test_stripe_api_reason_names_prices_retrieve_authentication_error(self) -> None:
+        http_error = stripe_http_error(401, "authentication_error")
+        reason = self._format_http_reason(f"/prices/price_live?customer={CUSTOMER_ID}", http_error)
+        self.assertEqual("stripe-api prices.retrieve: authentication_error (401)", reason)
 
     def test_stripe_api_reason_names_checkout_sessions_permission_error(self) -> None:
-        error = ReconciliationError("Stripe API request failed")
-        error.__cause__ = stripe_http_error(403, "permission_error", code="more_permissions_required")
-        reason = format_stripe_api_failure("/checkout/sessions", error)
+        http_error = stripe_http_error(403, "permission_error", code="more_permissions_required")
+        reason = self._format_http_reason("/checkout/sessions", http_error)
         self.assertEqual("stripe-api checkout.sessions.list: permission_error (403)", reason)
-        assert_secret_free(self, reason)
 
     def test_stripe_api_reason_falls_back_to_status_when_body_is_unsafe(self) -> None:
-        error = ReconciliationError("Stripe API request failed")
-        error.__cause__ = stripe_http_error(401, "Invalid API Key provided: rk_live_private")
-        reason = format_stripe_api_failure("/webhook_endpoints?limit=100", error)
+        http_error = stripe_http_error(401, "Invalid API Key provided: rk_live_private")
+        reason = self._format_http_reason("/webhook_endpoints?limit=100", http_error)
         self.assertEqual("stripe-api webhook_endpoints.list: request_failed (401)", reason)
-        assert_secret_free(self, reason)
+
+    def test_stripe_api_reason_closes_empty_malformed_and_unreadable_bodies(self) -> None:
+        empty = stripe_http_error(401, body=b"")
+        self.assertEqual(
+            "stripe-api webhook_endpoints.list: request_failed (401)",
+            self._format_http_reason("/webhook_endpoints?limit=100", empty),
+        )
+
+        malformed = stripe_http_error(403, body=b"not-json {")
+        self.assertEqual(
+            "stripe-api checkout.sessions.list: request_failed (403)",
+            self._format_http_reason("/checkout/sessions", malformed),
+        )
+
+        exploding = stripe_http_error(401, fp=ExplodingStream())
+        self.assertEqual(
+            "stripe-api prices.retrieve: request_failed (401)",
+            self._format_http_reason("/prices/price_live", exploding),
+        )
+
+    def test_local_pagination_failures_have_stable_value_free_reasons(self) -> None:
+        cases = (
+            ("Stripe returned invalid paginated data", "invalid_paginated_data"),
+            ("Stripe pagination state is invalid", "invalid_pagination_state"),
+            ("Stripe pagination cursor is invalid", "invalid_pagination_cursor"),
+            ("Stripe pagination exceeded its safety limit", "pagination_limit_exceeded"),
+        )
+        for message, token in cases:
+            with self.subTest(token=token):
+                reason = format_stripe_api_failure("/webhook_endpoints?limit=100", ReconciliationError(message))
+                self.assertEqual(f"stripe-api webhook_endpoints.list: {token}", reason)
+                assert_secret_free(self, reason)
 
     def test_missing_env_variable_names_the_github_variable(self) -> None:
         values = audit_environment()
@@ -560,12 +619,41 @@ class ProductionStripeAuditReasonTests(unittest.TestCase):
         self.assertNotIn(WEBHOOK_URL, reason)
 
     def test_audit_stripe_api_failure_uses_named_reason(self) -> None:
+        http_error = stripe_http_error(401, "authentication_error")
         error = ReconciliationError("Stripe API request failed")
-        error.__cause__ = stripe_http_error(401, "authentication_error")
+        error.__cause__ = http_error
         reason = self._reason(
             lambda: ProductionStripeReconciler(FailingStripe(error), FakeAzure(), config()).audit()
         )
         self.assertEqual("stripe-api webhook_endpoints.list: authentication_error (401)", reason)
+        assert_http_error_closed(self, http_error)
+
+    def test_audit_names_local_pagination_and_validation_failures(self) -> None:
+        class Page:
+            def __init__(self, payload: dict[str, object]) -> None:
+                self.payload = payload
+
+            def get(self, path: str) -> dict[str, object]:
+                return self.payload
+
+        cases = (
+            ({"data": "malformed", "has_more": False}, "invalid_paginated_data"),
+            ({"data": [{"id": "we_live"}], "has_more": "yes"}, "invalid_pagination_state"),
+            ({"data": [{"id": 1}], "has_more": True}, "invalid_pagination_cursor"),
+        )
+        for payload, token in cases:
+            with self.subTest(token=token):
+                reason = self._reason(
+                    lambda payload=payload: ProductionStripeReconciler(Page(payload), FakeAzure(), config()).audit()
+                )
+                self.assertEqual(f"stripe-api webhook_endpoints.list: {token}", reason)
+
+        class EndlessPages:
+            def get(self, path: str) -> dict[str, object]:
+                return {"data": [{"id": "we_page"}], "has_more": True}
+
+        reason = self._reason(lambda: ProductionStripeReconciler(EndlessPages(), FakeAzure(), config()).audit())
+        self.assertEqual("stripe-api webhook_endpoints.list: pagination_limit_exceeded", reason)
 
     def test_success_still_returns_the_same_checks(self) -> None:
         checks = ProductionStripeReconciler(FakeStripe(), FakeAzure(), config()).audit()
@@ -590,10 +678,14 @@ class ProductionStripeAuditReasonTests(unittest.TestCase):
             mock.patch.dict(os.environ, merged, clear=True),
             redirect_stdout(stdout),
             redirect_stderr(stderr),
+            warnings.catch_warnings(record=True) as caught,
         ):
+            warnings.simplefilter("always", ResourceWarning)
             code = main(argv)
         combined = stdout.getvalue() + stderr.getvalue()
         assert_secret_free(self, combined)
+        self.assertEqual([], [item for item in caught if issubclass(item.category, ResourceWarning)])
+        self.assertNotIn("ResourceWarning", combined)
         return code, stdout.getvalue(), stderr.getvalue()
 
     def test_main_audit_success_is_unchanged(self) -> None:
@@ -614,6 +706,38 @@ class ProductionStripeAuditReasonTests(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertEqual("", stdout)
         self.assertEqual("FAIL stripe-api webhook_endpoints.list: authentication_error (401)\n", stderr)
+
+    def test_main_audit_prints_local_pagination_reason(self) -> None:
+        cases = (
+            ({"data": "malformed", "has_more": False}, "invalid_paginated_data"),
+            ({"data": [{"id": "we_live"}], "has_more": "yes"}, "invalid_pagination_state"),
+            ({"data": [{"id": 1}], "has_more": True}, "invalid_pagination_cursor"),
+        )
+        for payload, token in cases:
+            with self.subTest(token=token):
+                class PayloadStripe:
+                    def __init__(self, *args: object, **kwargs: object) -> None:
+                        pass
+
+                    def get(self, path: str) -> dict[str, object]:
+                        return payload
+
+                code, stdout, stderr = self._run_main(["--audit"], stripe=PayloadStripe)
+                self.assertEqual(1, code)
+                self.assertEqual("", stdout)
+                self.assertEqual(f"FAIL stripe-api webhook_endpoints.list: {token}\n", stderr)
+
+    def test_main_audit_prints_pagination_limit_reason(self) -> None:
+        class EndlessStripe:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def get(self, path: str) -> dict[str, object]:
+                return {"data": [{"id": "we_page"}], "has_more": True}
+
+        code, stdout, stderr = self._run_main(["--audit"], stripe=EndlessStripe)
+        self.assertEqual(1, code)
+        self.assertEqual("FAIL stripe-api webhook_endpoints.list: pagination_limit_exceeded\n", stderr)
 
     def test_main_audit_prints_missing_env_variable(self) -> None:
         env = audit_environment()

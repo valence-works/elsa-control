@@ -21,6 +21,7 @@ import re
 import sys
 import urllib.error
 import urllib.parse
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -89,6 +90,13 @@ _RESOURCE_SEGMENTS = frozenset(
         "webhook_endpoints",
     }
 )
+_LOCAL_STRIPE_REASONS = {
+    "Stripe returned invalid paginated data": "invalid_paginated_data",
+    "Stripe pagination state is invalid": "invalid_pagination_state",
+    "Stripe pagination cursor is invalid": "invalid_pagination_cursor",
+    "Stripe pagination exceeded its safety limit": "pagination_limit_exceeded",
+    "Stripe returned an invalid response": "invalid_response",
+}
 
 
 def redact_secrets(text: str) -> str:
@@ -120,34 +128,79 @@ def format_stripe_api_failure(path: str, error: BaseException) -> str:
 
 
 def _stripe_error_label(error: BaseException) -> str:
+    http_label = _http_error_label(error)
+    if http_label is not None:
+        return http_label
+    local = _local_stripe_reason(error)
+    if local is not None:
+        return local
+    return "request_failed"
+
+
+def _http_error_label(error: BaseException) -> str | None:
     status: int | None = None
     error_type: str | None = None
     error_code: str | None = None
+    found = False
     current: BaseException | None = error
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         if isinstance(current, urllib.error.HTTPError):
-            try:
-                status = int(current.code)
-            except (TypeError, ValueError):
-                status = None
-            payload = _stripe_error_payload(current)
-            error_type = _safe_token(payload.get("type"))
-            error_code = _safe_token(payload.get("code"))
-            break
+            if not found:
+                found = True
+                try:
+                    status = int(current.code)
+                except (TypeError, ValueError):
+                    status = None
+                payload = _stripe_error_payload(current)
+                error_type = _safe_token(payload.get("type"))
+                error_code = _safe_token(payload.get("code"))
+            else:
+                _close_http_response(current)
         current = current.__cause__ or current.__context__
+    if not found:
+        return None
     label = error_type or error_code or "request_failed"
     if status is not None and 100 <= status <= 599:
         return f"{label} ({status})"
     return label
 
 
+def _local_stripe_reason(error: BaseException) -> str | None:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ReconciliationError):
+            mapped = _LOCAL_STRIPE_REASONS.get(str(current))
+            if mapped:
+                return mapped
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _close_http_response(error: urllib.error.HTTPError) -> None:
+    with suppress(Exception):
+        error.close()
+    fp = getattr(error, "fp", None)
+    if fp is not None:
+        with suppress(Exception):
+            fp.close()
+
+
 def _stripe_error_payload(error: urllib.error.HTTPError) -> Mapping[str, Any]:
+    raw = b""
     try:
-        raw = error.read()
+        with error:
+            try:
+                raw = error.read()
+            except Exception:
+                raw = b""
     except Exception:
-        return {}
+        raw = b""
+    finally:
+        _close_http_response(error)
     if not raw:
         return {}
     try:
