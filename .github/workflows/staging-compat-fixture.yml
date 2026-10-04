@@ -111,7 +111,10 @@ jobs:
           done
 
       - name: Restore the baseline
-        if: ${{ always() }}
+        # Skip when exclusive preflight failed closed: the fixture was never
+        # written, and a restore restart would bounce staging during an open
+        # QA window, missing freeze, or conflicting test deployment.
+        if: ${{ always() && steps.preflight.outcome == 'success' }}
         timeout-minutes: 4
         env:
           EXPECTED_DIGEST: ${{ steps.preflight.outputs.digest }}
@@ -119,8 +122,10 @@ jobs:
           EXPECTED_COMMIT: ${{ steps.preflight.outputs.commit }}
           EXPECTED_DEPLOYMENT_ID: ${{ steps.preflight.outputs.deployment_id }}
           EXPECTED_SETTING_NAMES_PATH: ${{ steps.preflight.outputs.setting_names_path }}
-          HEALTH_ATTEMPTS: "8"
-          HEALTH_RETRY_SECONDS: "15"
+          HEALTH_ATTEMPTS: "18"
+          HEALTH_RETRY_SECONDS: "5"
+          HEALTH_CURL_MAX_TIME: "5"
+          HEALTH_BUDGET_SECONDS: "180"
         shell: bash
         run: |
           set -euo pipefail

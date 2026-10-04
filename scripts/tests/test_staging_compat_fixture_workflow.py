@@ -222,7 +222,10 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("timeout-minutes: 30\n", self.source)
         self.assertIn("timeout-minutes: 4\n", self.source)
         self.assertNotIn("timeout-minutes: 20\n", self.source)
-        self.assertIn("if: ${{ always() }}\n", self.source)
+        self.assertIn("if: ${{ always() && steps.preflight.outcome == 'success' }}\n", self.source)
+        self.assertNotIn("if: ${{ always() }}\n", self.source)
+        self.assertIn("HEALTH_BUDGET_SECONDS", self.source)
+        self.assertIn("HEALTH_CURL_MAX_TIME", self.source)
         self.assertIn("scripts/staging-compat-fixture.sh restore", self.source)
         self.assertIn("scripts/staging-compat-fixture.sh preflight", self.source)
         self.assertIn("scripts/staging-compat-fixture.sh arm", self.source)
@@ -742,6 +745,29 @@ class StagingCompatScriptTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             combined = result.stderr + result.stdout
             self.assertIn("did not recycle", combined)
+
+    def test_restore_is_a_noop_when_the_fixture_was_never_written(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            digest = "sha256:" + ("9" * 64)
+            image = f"example.azurecr.io/elsa-control/api@{digest}"
+            self.write_fake_az(temporary, ["Application__BuildNumber", "WEBSITES_PORT"], image)
+            self.write_fake_curl(temporary)
+            env = self.environment(temporary)
+            env["AZ_CALL_LOG"] = str(temporary / "az.log")
+            env["EXPECTED_DIGEST"] = digest
+            env["EXPECTED_BUILD_NUMBER"] = "232"
+            env["EXPECTED_COMMIT"] = "e5e9b84fd9a2f0b90931cf503f786eb89e2b0f02"
+            env["HEALTH_RETRY_SECONDS"] = "0"
+            result = self.run_script(env, "restore")
+            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+            combined = result.stderr + result.stdout
+            self.assertIn("never written", combined)
+            self.assertIn("will not restart", combined)
+            az_log = (temporary / "az.log").read_text()
+            self.assertNotIn("webapp restart", az_log)
+            self.assertNotIn("appsettings delete", az_log)
+            self.assertNotIn("appsettings set", az_log)
 
     def test_restore_deletes_the_setting_and_requires_baseline_and_bff_smoke(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

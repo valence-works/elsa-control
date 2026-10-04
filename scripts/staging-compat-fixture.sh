@@ -221,7 +221,7 @@ wait_until_recycle_witness() {
   local expected_fixture="${2-}"
   local expected_build="${3-}"
   local expected_commit="${4-}"
-  local host health_url response_file http_status stable attempts retry
+  local host health_url response_file http_status stable attempts retry curl_max budget started remaining
   if ! known_health_fixture "$expected_fixture"; then
     fail "The expected compatibility fixture witness is not recognized."
   fi
@@ -231,16 +231,21 @@ wait_until_recycle_witness() {
   stable=0
   attempts="${HEALTH_ATTEMPTS:-30}"
   retry="${HEALTH_RETRY_SECONDS:-10}"
+  curl_max="${HEALTH_CURL_MAX_TIME:-10}"
+  budget="${HEALTH_BUDGET_SECONDS:-}"
+  started="$SECONDS"
   local attempt
   for attempt in $(seq 1 "$attempts"); do
-    if http_status="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' --max-time 10 "$health_url")"; then
+    if [ -n "$budget" ]; then
+      remaining=$((budget - (SECONDS - started)))
+      if [ "$remaining" -le 0 ]; then
+        rm -f "$response_file"
+        fail "Control did not recycle onto the expected Web App process."
+      fi
+    fi
+    if http_status="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' --max-time "$curl_max" "$health_url")"; then
       if [ "$http_status" = "200" ] && jq -e '.status == "ok"' "$response_file" >/dev/null 2>&1; then
-        local live_digest live_fixture live_build live_commit
-        live_digest="$(serving_image_digest)"
-        if [ "$live_digest" != "$expected_digest" ]; then
-          rm -f "$response_file"
-          fail "The serving image digest changed; the fixture must keep the same deployed build."
-        fi
+        local live_fixture live_build live_commit live_digest
         live_build="$(health_field "$response_file" buildNumber)"
         live_commit="$(health_field "$response_file" imageId)"
         if [ -n "$expected_build" ] && [ "$live_build" != "$expected_build" ]; then
@@ -252,7 +257,11 @@ wait_until_recycle_witness() {
           if [ "$live_fixture" = "$expected_fixture" ]; then
             stable=$((stable + 1))
             if [ "$stable" -ge 2 ]; then
+              live_digest="$(serving_image_digest)"
               rm -f "$response_file"
+              if [ "$live_digest" != "$expected_digest" ]; then
+                fail "The serving image digest changed; the fixture must keep the same deployed build."
+              fi
               echo "Recycle witness: /health is ok on the captured build and commit. This is not the proof."
               return 0
             fi
@@ -268,7 +277,20 @@ wait_until_recycle_witness() {
       stable=0
     fi
     echo "Health witness returned HTTP ${http_status} (attempt ${attempt}/${attempts}, stable ${stable}/2); retrying."
-    sleep "$retry"
+    if [ -n "$budget" ]; then
+      remaining=$((budget - (SECONDS - started)))
+      if [ "$remaining" -le 0 ]; then
+        rm -f "$response_file"
+        fail "Control did not recycle onto the expected Web App process."
+      fi
+      if [ "$retry" -gt "$remaining" ]; then
+        sleep "$remaining"
+      else
+        sleep "$retry"
+      fi
+    else
+      sleep "$retry"
+    fi
   done
   rm -f "$response_file"
   fail "Control did not recycle onto the expected Web App process."
@@ -638,19 +660,21 @@ restore() {
   local expected_build="${EXPECTED_BUILD_NUMBER:-}"
   local expected_commit="${EXPECTED_COMMIT:-}"
   local expected_deployment="${EXPECTED_DEPLOYMENT_ID:-}"
+  if ! setting_present; then
+    echo "The compatibility fixture was never written; restore is a no-op and will not restart the Web App."
+    return 0
+  fi
   if [ -z "$expected_digest" ]; then
     echo "No preflight digest was captured; restoring from the current serving digest."
     expected_digest="$(serving_image_digest)"
   fi
-  if setting_present; then
-    if ! az webapp config appsettings delete \
-      --resource-group "$AZURE_RESOURCE_GROUP" \
-      --name "$AZURE_WEBAPP_NAME" \
-      --setting-names "$SETTING_NAME" \
-      --output none \
-      --only-show-errors; then
-      fail "Deleting the compatibility fixture app setting failed."
-    fi
+  if ! az webapp config appsettings delete \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --name "$AZURE_WEBAPP_NAME" \
+    --setting-names "$SETTING_NAME" \
+    --output none \
+    --only-show-errors; then
+    fail "Deleting the compatibility fixture app setting failed."
   fi
   if setting_present; then
     fail "The compatibility fixture setting is still present after restore."

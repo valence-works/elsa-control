@@ -60,14 +60,18 @@ report `compatible` after restore).
 **What it does.** Staging Control is an Azure **Web App**. Arm **sets**
 `CloudCompatibility__StagingFixture` and **restarts** the same deployed
 build. Restore **deletes** the setting (it does not blank it) and
-restarts again. `/health.compatibilityFixture` is a recycle witness
-only. Arm and restore count as successful only when the authenticated
-compatibility response matches the armed contract or the baseline, and
-restore also requires BFF smoke `compatible`.
+restarts again **only when that setting is present**. If exclusive
+preflight failed closed or arm never wrote the fixture, restore does not
+restart or otherwise mutate the Web App. `/health.compatibilityFixture`
+is a recycle witness only. Arm and restore count as successful only when
+the authenticated compatibility response matches the armed contract or
+the baseline, and restore also requires BFF smoke `compatible`.
 
 **Time cap.** The fixture may stay applied at most 20 minutes from the
 setting write. Restore always keeps a reserved 4-minute budget, including
-after cancel. The job timeout (30 minutes) is only a backstop.
+after cancel. Restore health waits are deadline-bounded so delete,
+restart, witness, and authenticated proofs fit that budget. The job
+timeout (30 minutes) is only a backstop.
 
 ## GitHub Actions Deployment
 
