@@ -229,6 +229,8 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             modelBuilder.Entity<BillingProviderEventInboxEntry>().Property(x => x.ProviderEventId).UseCollation(binaryCollation);
             modelBuilder.Entity<BillingProviderEventInboxEntry>().Property(x => x.ProviderCustomerReference).UseCollation(binaryCollation);
             modelBuilder.Entity<BillingProviderEventInboxEntry>().Property(x => x.ProviderSubscriptionReference).UseCollation(binaryCollation);
+            modelBuilder.Entity<BillingProviderEventInboxEntry>().Property(x => x.ProviderObjectReference).UseCollation(binaryCollation);
+            modelBuilder.Entity<BillingProviderEventInboxEntry>().Property(x => x.PriceReference).UseCollation(binaryCollation);
             modelBuilder.Entity<OrganizationBillingCleanup>().Property(x => x.Provider).UseCollation(binaryCollation);
             modelBuilder.Entity<OrganizationBillingCleanup>().Property(x => x.ProviderCustomerReference).UseCollation(binaryCollation);
             modelBuilder.Entity<OrganizationBillingCleanup>().Property(x => x.ProviderSubscriptionReference).UseCollation(binaryCollation);
@@ -500,6 +502,10 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             billingEvent.EventHash = RequireSha256Digest(billingEvent.EventHash, nameof(billingEvent.EventHash));
             billingEvent.ProviderCustomerReference = OptionalSafeReference(billingEvent.ProviderCustomerReference, nameof(billingEvent.ProviderCustomerReference), OrganizationBillingLimits.ProviderReferenceMaxLength);
             billingEvent.ProviderSubscriptionReference = OptionalSafeReference(billingEvent.ProviderSubscriptionReference, nameof(billingEvent.ProviderSubscriptionReference), OrganizationBillingLimits.ProviderReferenceMaxLength);
+            billingEvent.ProviderObjectReference = OptionalSafeReference(billingEvent.ProviderObjectReference, nameof(billingEvent.ProviderObjectReference), OrganizationBillingLimits.ProviderReferenceMaxLength);
+            billingEvent.PriceReference = OptionalSafeReference(billingEvent.PriceReference, nameof(billingEvent.PriceReference), OrganizationBillingLimits.ProviderReferenceMaxLength);
+            if (billingEvent.AmountMinorUnits is < 0)
+                throw new InvalidOperationException("A billing event amount must be a non-negative minor-unit total.");
             billingEvent.RejectionCode = OptionalSafeCode(billingEvent.RejectionCode, nameof(billingEvent.RejectionCode));
             EnsureDefined(billingEvent.ProcessingStatus, nameof(billingEvent.ProcessingStatus));
             if (billingEvent.State.HasValue)

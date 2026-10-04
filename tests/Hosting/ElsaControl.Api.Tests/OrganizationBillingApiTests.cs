@@ -376,6 +376,44 @@ public sealed class OrganizationBillingApiTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Byte_different_webhook_redelivery_with_the_same_business_facts_is_replayed()
+    {
+        await _app.SeedAsync(_ => Task.CompletedTask);
+        var owner = _app.CreateControlIdentityClient(subject: "billing-redelivery-owner");
+        var organizationId = (await owner.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces"))!.Organizations.Single().Id;
+        await owner.PostControlJsonAsync($"/api/organizations/{organizationId}/billing/checkout", new { });
+        var first = new BillingProviderEvent(
+            organizationId,
+            BillingProviderNames.Stripe,
+            "evt-pending-webhooks",
+            "checkout.session.completed",
+            null,
+            DateTimeOffset.UtcNow,
+            Sha256("first-delivery"),
+            "cus_acme",
+            null,
+            "cs_acme",
+            "price_acme",
+            4900);
+        _provider.WebhookResult = BillingWebhookNormalizationResult.UnknownEvent(first);
+
+        var applied = await PostWebhookAsync("""{"id":"evt-pending-webhooks","pending_webhooks":1}""");
+        var exactReplay = await PostWebhookAsync("""{"id":"evt-pending-webhooks","pending_webhooks":1}""");
+        _provider.WebhookResult = BillingWebhookNormalizationResult.UnknownEvent(first with { EventHash = Sha256("redelivery") });
+        var replayed = await PostWebhookAsync("""{"id":"evt-pending-webhooks","pending_webhooks":2}""");
+
+        Assert.Equal(HttpStatusCode.OK, applied.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, exactReplay.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, replayed.StatusCode);
+        Assert.Equal("recorded-unknown", (await applied.Content.ReadFromJsonAsync<Dictionary<string, string>>())!["status"]);
+        Assert.Equal("replayed", (await exactReplay.Content.ReadFromJsonAsync<Dictionary<string, string>>())!["status"]);
+        Assert.Equal("replayed", (await replayed.Content.ReadFromJsonAsync<Dictionary<string, string>>())!["status"]);
+        await using var scope = _app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Equal(1, await db.BillingProviderEvents.CountAsync());
+    }
+
+    [Fact]
     public async Task Stripe_webhook_fails_closed_when_the_injected_provider_is_not_stripe()
     {
         _provider.Provider = "fake";

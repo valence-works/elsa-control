@@ -68,25 +68,48 @@ public sealed class StripeHostedInstanceLimitMigrationTests : IAsyncDisposable
         _sqlite.Organizations.Add(organization);
         await _sqlite.SaveChangesAsync();
 
-        var store = new OrganizationBillingStore(_sqlite);
         if (provider == BillingProviderNames.Stripe)
         {
-            await store.StartTrialAsync(organization.Id, provider, Now);
-            if (state == OrganizationSubscriptionState.Active)
+            // Seed the pre-cap schema without the current billing inbox model so
+            // this fixture stays valid after later inbox columns are added.
+            var subscription = new OrganizationSubscription
             {
-                await store.ConsumeAsync(new BillingProviderEvent(
-                    organization.Id,
-                    provider,
-                    $"evt-{organization.Id:N}",
-                    "customer.subscription.updated",
-                    state,
-                    Now.AddMinutes(1),
-                    "sha256:" + new string('a', 64)), Now.AddMinutes(2));
-            }
+                OrganizationId = organization.Id,
+                Provider = provider,
+                ProviderCustomerReference = $"cus-{organization.Id:N}"[..20],
+                ProviderSubscriptionReference = $"sub-{organization.Id:N}"[..20],
+                State = state,
+                TrialStartedAt = Now,
+                TrialEndsAt = Now.AddDays(14),
+                ActivatedAt = state == OrganizationSubscriptionState.Active ? Now.AddMinutes(1) : null,
+                LastProviderEventOccurredAt = Now.AddMinutes(1),
+                LastProviderEventId = $"evt-{organization.Id:N}",
+                CreatedAt = Now,
+                UpdatedAt = Now.AddMinutes(1),
+                LifecycleVersion = 1
+            };
+            _sqlite.OrganizationSubscriptions.Add(subscription);
+            _sqlite.OrganizationEntitlementSnapshots.Add(new OrganizationEntitlementSnapshot
+            {
+                OrganizationId = organization.Id,
+                SubscriptionId = subscription.Id,
+                SubscriptionState = state,
+                CanCreateCustomSources = true,
+                MaxSources = 1,
+                MaxWorkspaces = 1,
+                MaxInstances = maxInstances,
+                ManagedHostingEnabled = true,
+                ManagedHostingExpiresAt = Now.AddDays(30),
+                DeploymentTargetsEnabled = true,
+                SyncedAt = Now.AddMinutes(1),
+                CreatedAt = Now,
+                UpdatedAt = Now.AddMinutes(1)
+            });
+            await _sqlite.SaveChangesAsync();
         }
         else
         {
-            await store.GrantInternalEntitlementAsync(
+            await new OrganizationBillingStore(_sqlite).GrantInternalEntitlementAsync(
                 new(organization.Id, new("Migration fixture", maxInstances, Now.AddDays(30)), "test-operator"),
                 Now);
         }

@@ -48,6 +48,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
+                    b.Property<long?>("AmountMinorUnits")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("EventHash")
                         .IsRequired()
                         .HasMaxLength(71)
@@ -62,6 +65,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .HasColumnType("INTEGER");
 
                     b.Property<Guid>("OrganizationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PriceReference")
+                        .HasMaxLength(256)
                         .HasColumnType("TEXT");
 
                     b.Property<long?>("ProcessedAt")
@@ -83,6 +90,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                     b.Property<string>("ProviderEventId")
                         .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ProviderObjectReference")
                         .HasMaxLength(256)
                         .HasColumnType("TEXT");
 

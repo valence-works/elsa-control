@@ -214,11 +214,11 @@ public sealed class StripeBillingProvider(
                 return BillingWebhookNormalizationResult.Invalid("webhook.payload-invalid");
             var hash = Convert.ToHexString(SHA256.HashData(rawBody.Span)).ToLowerInvariant();
             var dataObject = stripeEvent.Data?.Object;
-            var (organizationId, customerReference, subscriptionReference, status) = ExtractCorrelation(dataObject);
-            if (organizationId == Guid.Empty)
+            var correlation = ExtractCorrelation(dataObject);
+            if (correlation.OrganizationId == Guid.Empty)
                 return BillingWebhookNormalizationResult.Invalid("webhook.organization-correlation-missing");
 
-            var state = MapState(stripeEvent.Type, status);
+            var state = MapState(stripeEvent.Type, correlation.Status);
             if (state.HasValue)
             {
                 if (dataObject is not Subscription subscription ||
@@ -227,15 +227,18 @@ public sealed class StripeBillingProvider(
                     return BillingWebhookNormalizationResult.Invalid("webhook.payload-invalid");
             }
             var providerEvent = new BillingProviderEvent(
-                organizationId,
+                correlation.OrganizationId,
                 Provider,
                 stripeEvent.Id,
                 stripeEvent.Type,
                 state,
                 new DateTimeOffset(DateTime.SpecifyKind(stripeEvent.Created, DateTimeKind.Utc)),
                 $"sha256:{hash}",
-                customerReference,
-                subscriptionReference);
+                correlation.CustomerReference,
+                correlation.SubscriptionReference,
+                correlation.ObjectReference,
+                correlation.PriceReference,
+                correlation.AmountMinorUnits);
             return state.HasValue
                 ? BillingWebhookNormalizationResult.KnownEvent(providerEvent)
                 : BillingWebhookNormalizationResult.UnknownEvent(providerEvent);
@@ -282,25 +285,65 @@ public sealed class StripeBillingProvider(
         return new BillingSessionLink(uri.AbsoluteUri);
     }
 
-    private static (Guid OrganizationId, string? CustomerReference, string? SubscriptionReference, string? Status) ExtractCorrelation(IHasObject? dataObject)
+    private readonly record struct StripeEventCorrelation(
+        Guid OrganizationId,
+        string? CustomerReference,
+        string? SubscriptionReference,
+        string? ObjectReference,
+        string? PriceReference,
+        long? AmountMinorUnits,
+        string? Status);
+
+    private static StripeEventCorrelation ExtractCorrelation(IHasObject? dataObject)
     {
         if (dataObject is Subscription subscription)
         {
-            return (ReadOrganizationId(subscription.Metadata), subscription.CustomerId, subscription.Id, subscription.Status);
+            var (price, amount) = ReadSubscriptionPrice(subscription);
+            return new(
+                ReadOrganizationId(subscription.Metadata),
+                subscription.CustomerId,
+                subscription.Id,
+                subscription.Id,
+                price,
+                amount,
+                subscription.Status);
         }
 
         if (dataObject is Customer customer)
-            return (ReadOrganizationId(customer.Metadata), customer.Id, null, null);
+            return new(ReadOrganizationId(customer.Metadata), customer.Id, null, customer.Id, null, null, null);
 
         if (dataObject is global::Stripe.Checkout.Session checkoutSession)
         {
             var organizationId = ReadOrganizationId(checkoutSession.Metadata);
             if (organizationId == Guid.Empty)
                 Guid.TryParse(checkoutSession.ClientReferenceId, out organizationId);
-            return (organizationId, checkoutSession.CustomerId, null, null);
+            // Keep ProviderSubscriptionReference unset for checkout sessions so
+            // historical inbox rows that stored null continue to replay.
+            return new(
+                organizationId,
+                checkoutSession.CustomerId,
+                null,
+                checkoutSession.Id,
+                ReadCheckoutPrice(checkoutSession),
+                checkoutSession.AmountTotal,
+                null);
         }
 
-        return (Guid.Empty, null, null, null);
+        return new(Guid.Empty, null, null, null, null, null, null);
+    }
+
+    private static (string? PriceReference, long? AmountMinorUnits) ReadSubscriptionPrice(Subscription subscription)
+    {
+        var price = subscription.Items?.Data?.FirstOrDefault()?.Price;
+        if (price is null)
+            return (null, null);
+        return (string.IsNullOrWhiteSpace(price.Id) ? null : price.Id, price.UnitAmount);
+    }
+
+    private static string? ReadCheckoutPrice(global::Stripe.Checkout.Session checkoutSession)
+    {
+        var priceId = checkoutSession.LineItems?.Data?.FirstOrDefault()?.Price?.Id;
+        return string.IsNullOrWhiteSpace(priceId) ? null : priceId;
     }
 
     private static Guid ReadOrganizationId(IReadOnlyDictionary<string, string>? metadata) =>

@@ -231,6 +231,53 @@ public sealed class StripeBillingProviderTests
     }
 
     [Fact]
+    public void Checkout_redelivery_that_only_changes_pending_webhooks_keeps_the_same_replay_facts()
+    {
+        var provider = CreateProvider();
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var firstJson = CheckoutEventJson(timestamp, pendingWebhooks: 1, amountTotal: 4900);
+        var redeliveryJson = CheckoutEventJson(timestamp, pendingWebhooks: 2, amountTotal: 4900);
+        Assert.NotEqual(firstJson, redeliveryJson);
+
+        var first = provider.VerifyAndNormalizeWebhook(
+            System.Text.Encoding.UTF8.GetBytes(firstJson),
+            EventUtility.GenerateSignatureHeader(firstJson, WebhookSecret, timestamp),
+            DateTimeOffset.FromUnixTimeSeconds(timestamp));
+        var redelivery = provider.VerifyAndNormalizeWebhook(
+            System.Text.Encoding.UTF8.GetBytes(redeliveryJson),
+            EventUtility.GenerateSignatureHeader(redeliveryJson, WebhookSecret, timestamp),
+            DateTimeOffset.FromUnixTimeSeconds(timestamp));
+
+        Assert.Equal(BillingWebhookNormalizationStatus.Unknown, first.Status);
+        Assert.Equal(BillingWebhookNormalizationStatus.Unknown, redelivery.Status);
+        Assert.NotEqual(first.Event!.EventHash, redelivery.Event!.EventHash);
+        Assert.False(BillingProviderEventReplayFacts.From(first.Event).ConflictsWith(BillingProviderEventReplayFacts.From(redelivery.Event)));
+        Assert.Equal("cs_123", first.Event.ProviderObjectReference);
+        Assert.Equal(4900, first.Event.AmountMinorUnits);
+        Assert.Equal("cus_123", first.Event.ProviderCustomerReference);
+    }
+
+    [Fact]
+    public void Same_event_id_with_a_different_customer_is_a_replay_conflict()
+    {
+        var provider = CreateProvider();
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var firstJson = CheckoutEventJson(timestamp, pendingWebhooks: 1, amountTotal: 4900, customer: "cus_123");
+        var conflictingJson = CheckoutEventJson(timestamp, pendingWebhooks: 1, amountTotal: 4900, customer: "cus_other");
+
+        var first = provider.VerifyAndNormalizeWebhook(
+            System.Text.Encoding.UTF8.GetBytes(firstJson),
+            EventUtility.GenerateSignatureHeader(firstJson, WebhookSecret, timestamp),
+            DateTimeOffset.FromUnixTimeSeconds(timestamp));
+        var conflicting = provider.VerifyAndNormalizeWebhook(
+            System.Text.Encoding.UTF8.GetBytes(conflictingJson),
+            EventUtility.GenerateSignatureHeader(conflictingJson, WebhookSecret, timestamp),
+            DateTimeOffset.FromUnixTimeSeconds(timestamp));
+
+        Assert.True(BillingProviderEventReplayFacts.From(first.Event!).ConflictsWith(BillingProviderEventReplayFacts.From(conflicting.Event!)));
+    }
+
+    [Fact]
     public void Invalid_signature_fails_closed_without_normalization()
     {
         var provider = CreateProvider();
@@ -304,6 +351,9 @@ public sealed class StripeBillingProviderTests
 
         Assert.Equal("The Stripe billing provider could not create a portal session.", exception.Message);
     }
+
+    private static string CheckoutEventJson(long timestamp, int pendingWebhooks, long amountTotal, string customer = "cus_123") =>
+        $"{{\"id\":\"evt_checkout_replay\",\"object\":\"event\",\"api_version\":\"2026-08-26.dahlia\",\"created\":{timestamp},\"pending_webhooks\":{pendingWebhooks},\"type\":\"checkout.session.completed\",\"data\":{{\"object\":{{\"id\":\"cs_123\",\"object\":\"checkout.session\",\"amount_total\":{amountTotal},\"client_reference_id\":\"{OrganizationId:D}\",\"customer\":\"{customer}\",\"metadata\":{{\"elsa_control_organization_id\":\"{OrganizationId:D}\"}}}}}}}}";
 
     private static StripeBillingProvider CreateProvider(
         IStripeCheckoutSessionGateway? checkout = null,
