@@ -58,6 +58,8 @@ Microsoft documents [Entra-authenticated ingestion and the required scoped role]
    component, action group and alert without the role assignment, then prints
    the exact grant. Ingestion stays off until a later preflight reports
    present. The deploy identity never writes Authorization.
+   A telemetry what-if, create, or preflight failure never rolls back the
+   API in production, test, or development.
    Do not rely on the CLI's default subscription. Review every proposed change
    before deployment. A local `az deployment group what-if` must pass the same
    `environment` and `recoveryRequiredAlertEmail` parameters.

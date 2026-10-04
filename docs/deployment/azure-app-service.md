@@ -62,7 +62,8 @@ and never creates. `create` is a separate dispatch and requires
 because the workflow's target default is production. That path runs the
 existing resource-group `scripts/deploy-managed-telemetry.sh` and does not
 deploy subscription-scoped `infra/main.bicep`. Infra mode does not run the
-telemetry preview or preflight. If the AppHost infrastructure shape changes,
+telemetry preview or preflight. A telemetry failure never rolls back the API
+in production, test, or development. If the AppHost infrastructure shape changes,
 run the same workflow manually and choose `deploy_mode: infra`; that path
 runs the checked-in deployment helper:
 
@@ -189,6 +190,36 @@ non-secret variables `STRIPE_HOSTED_PRICE_ID` and
 `ELSA_CLOUD_STAGING_ORIGIN`. The Stripe key must be test mode. The normal
 deployment workflow passes these values only to the configuration preflight and
 the staging reconciliation step; they are not job-wide environment variables.
+
+App and promote deploys write `Billing__Stripe__ExpectedMode` (`test` on the
+`test` target, `live` on `production`) before they switch the container image
+when Azure does not already have that exact value. The first billing-enabled
+start of the new image cannot miss that setting.
+`StripeBillingConfigurationValidator` throws at host start when billing is
+enabled without ExpectedMode. Before that write, the workflow captures
+whether the setting exists, its prior value, and slot-setting metadata. An
+unreadable settings list aborts before any mutation. If the current value
+already equals the target, the pre-switch write is skipped. After an
+image-switch failure, rollback restores the prior value or deletes a newly
+introduced setting. Production capture/reapply does not include ExpectedMode
+in the preserved set and does not delete newly introduced names, so this
+dedicated restore is required there as well. The later combined app-settings
+write still includes ExpectedMode after a successful switch. Infra still
+writes ExpectedMode after the Bicep replacement, because that path may
+recreate the Web App.
+
+The `development` target is not a billing environment. The workflow does not
+set ExpectedMode there and does not require Stripe secrets. Development
+billing is unsupported; use `test` for sandbox Stripe.
+
+A telemetry what-if, create, or preflight failure never rolls back the API
+image. That is the same for `production`, `test`, and `development`. The
+workflow records that policy on the API rollback step; telemetry outcomes
+are not rollback triggers. Telemetry is a separate `deploy_mode`; the API
+rollback condition includes only `deploy-api`, staging/production Stripe,
+and the health gate. The rollback completion message names the trigger that
+fired: API deployment, staging Stripe configuration, production Stripe
+audit, or the API health gate.
 
 Each non-build deployment to `test` runs
 `scripts/staging_stripe_reconcile.py --apply-azure-settings`. It fails closed
