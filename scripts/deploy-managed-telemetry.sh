@@ -2,7 +2,8 @@
 # Deploys infra/managed-telemetry with the environment-specific RecoveryRequired
 # mailbox at resource-group scope. Staging never uses the production recipient.
 # The address is never printed. The Monitoring Metrics Publisher assignment is
-# never created here; a read-only preflight fails closed when it is missing.
+# never created here. A read-only preflight never blocks the what-if; it reports
+# present, missing, component-absent, or error. Create never writes Authorization.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -84,36 +85,70 @@ fi
 az account set --subscription "$AZURE_SUBSCRIPTION_ID"
 insights_scope="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.Insights/components/${MANAGED_TELEMETRY_APPLICATION_INSIGHTS_NAME}"
 
-fail_missing_publisher_assignment() {
+preflight_state=""
+principal_id=""
+
+print_grant() {
   local principal="${1:-}"
   if [ -z "$principal" ]; then
-    echo "::error::Monitoring Metrics Publisher is not assigned on the Insights component. A human must create this one role assignment (the deploy identity cannot): principal=<API identity ${MANAGED_TELEMETRY_API_IDENTITY_NAME} principal id> role=${MONITORING_METRICS_PUBLISHER_ROLE_NAME} (${MONITORING_METRICS_PUBLISHER_ROLE_ID}) scope=${insights_scope}. Do not grant subscription-scope rights or Authorization write to the deploy identity." >&2
+    echo "A human must create this one role assignment (the deploy identity cannot): principal=<API identity ${MANAGED_TELEMETRY_API_IDENTITY_NAME} principal id> role=${MONITORING_METRICS_PUBLISHER_ROLE_NAME} (${MONITORING_METRICS_PUBLISHER_ROLE_ID}) scope=${insights_scope}. An RG-level or subscription-level grant does not satisfy this preflight. Do not grant subscription-scope rights or Authorization write to the deploy identity."
   else
-    echo "::error::Monitoring Metrics Publisher is not assigned on the Insights component. A human must create this one role assignment (the deploy identity cannot): principal=${principal} role=${MONITORING_METRICS_PUBLISHER_ROLE_NAME} (${MONITORING_METRICS_PUBLISHER_ROLE_ID}) scope=${insights_scope}. Do not grant subscription-scope rights or Authorization write to the deploy identity." >&2
+    echo "A human must create this one role assignment (the deploy identity cannot): principal=${principal} role=${MONITORING_METRICS_PUBLISHER_ROLE_NAME} (${MONITORING_METRICS_PUBLISHER_ROLE_ID}) scope=${insights_scope}. An RG-level or subscription-level grant does not satisfy this preflight. Do not grant subscription-scope rights or Authorization write to the deploy identity."
   fi
-  exit 1
 }
 
-if ! principal_id="$(az identity show \
+echo "Checking Monitoring Metrics Publisher assignment on the Insights component (read-only; inherited RG or subscription grants are ignored)."
+
+identity_err="$(mktemp)"
+set +e
+principal_id="$(az identity show \
   --name "$MANAGED_TELEMETRY_API_IDENTITY_NAME" \
   --resource-group "$MANAGED_TELEMETRY_API_IDENTITY_RESOURCE_GROUP" \
   --query principalId \
   --output tsv \
-  --only-show-errors 2>/dev/null)" || [ -z "${principal_id:-}" ]; then
-  fail_missing_publisher_assignment
-fi
-
-if ! assignments="$(az role assignment list \
-  --scope "$insights_scope" \
-  --output json \
-  --only-show-errors 2>/dev/null)"; then
-  fail_missing_publisher_assignment "$principal_id"
-fi
-
-assignment_match="$(
-  ASSIGNMENTS="$assignments" PRINCIPAL_ID="$principal_id" ROLE_ID="$MONITORING_METRICS_PUBLISHER_ROLE_ID" SCOPE="$insights_scope" python3 - <<'PY'
+  --only-show-errors 2>"$identity_err")"
+identity_code=$?
+set -e
+rm -f "$identity_err"
+if [ "$identity_code" -ne 0 ] || [ -z "${principal_id:-}" ]; then
+  echo "::error::Could not read the Control API identity principal (az exit ${identity_code}). Not treating this as a missing role assignment."
+  preflight_state="error"
+  principal_id=""
+else
+  component_err="$(mktemp)"
+  set +e
+  az resource show --ids "$insights_scope" --output none --only-show-errors >/dev/null 2>"$component_err"
+  component_code=$?
+  component_not_found=0
+  if grep -Eq 'ResourceNotFound|ResourceGroupNotFound|was not found' "$component_err"; then
+    component_not_found=1
+  fi
+  rm -f "$component_err"
+  set -e
+  if [ "$component_not_found" -eq 1 ]; then
+    preflight_state="component-absent"
+  elif [ "$component_code" -ne 0 ]; then
+    echo "::error::Could not read the Insights component (az exit ${component_code}). Not treating this as a missing role assignment."
+    preflight_state="error"
+  else
+    assignment_err="$(mktemp)"
+    set +e
+    assignments="$(az role assignment list \
+      --scope "$insights_scope" \
+      --output json \
+      --only-show-errors 2>"$assignment_err")"
+    assignment_code=$?
+    rm -f "$assignment_err"
+    set -e
+    if [ "$assignment_code" -ne 0 ]; then
+      echo "::error::Could not list role assignments on the Insights component (az exit ${assignment_code}). Not treating this as a missing role assignment."
+      preflight_state="error"
+    else
+      assignment_match="$(
+        ASSIGNMENTS="${assignments:-}" PRINCIPAL_ID="$principal_id" ROLE_ID="$MONITORING_METRICS_PUBLISHER_ROLE_ID" SCOPE="$insights_scope" python3 - <<'PY'
 import json
 import os
+import sys
 
 try:
     rows = json.loads(os.environ.get("ASSIGNMENTS") or "")
@@ -140,13 +175,44 @@ for row in rows:
         raise SystemExit(0)
 print("no")
 PY
-)" || fail_missing_publisher_assignment "$principal_id"
-
-if [ "$assignment_match" != "yes" ]; then
-  fail_missing_publisher_assignment "$principal_id"
+      )" || {
+        echo "::error::Could not parse role assignments on the Insights component. Not treating this as a missing role assignment."
+        preflight_state="error"
+        assignment_match=""
+      }
+      if [ "$preflight_state" != "error" ]; then
+        if [ "$assignment_match" = "yes" ]; then
+          preflight_state="present"
+        else
+          preflight_state="missing"
+        fi
+      fi
+    fi
+  fi
 fi
 
-echo "Monitoring Metrics Publisher assignment is present on the Insights component; skipping role assignment create."
+if [ -z "$preflight_state" ]; then
+  echo "::error::Could not complete the role-assignment preflight. Not treating this as a missing role assignment."
+  preflight_state="error"
+fi
+
+echo "Managed telemetry preflight: ${preflight_state}."
+case "$preflight_state" in
+  present)
+    echo "Monitoring Metrics Publisher assignment is present on the Insights component; skipping role assignment create."
+    ;;
+  missing)
+    echo "Monitoring Metrics Publisher assignment is missing on the Insights component."
+    print_grant "$principal_id"
+    ;;
+  component-absent)
+    echo "Insights component is absent. Create will deploy the workspace, component, action group and alert without the role assignment."
+    print_grant "$principal_id"
+    ;;
+  error)
+    echo "Managed telemetry preflight could not verify the role assignment."
+    ;;
+esac
 
 deployment_name="managed-telemetry-${environment}"
 template_file="$ROOT/infra/managed-telemetry/main.bicep"
@@ -161,7 +227,7 @@ parameters=(
   assignMonitoringMetricsPublisher=false
 )
 
-echo "Managed telemetry resource-group what-if for ${environment} (no deletes expected; alert rule, action group, and declared telemetry dependencies only)."
+echo "Managed telemetry resource-group what-if for ${environment} (no deletes expected; workspace, Insights component, alert rule, and action group only; no role assignment)."
 az deployment group what-if \
   --name "$deployment_name" \
   --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -169,6 +235,9 @@ az deployment group what-if \
   --parameters "${parameters[@]}"
 
 if [ "$WHAT_IF" = true ]; then
+  if [ "$preflight_state" = "error" ]; then
+    exit 1
+  fi
   exit 0
 fi
 
@@ -178,3 +247,17 @@ az deployment group create \
   --resource-group "$AZURE_RESOURCE_GROUP" \
   --template-file "$template_file" \
   --parameters "${parameters[@]}"
+
+case "$preflight_state" in
+  present)
+    echo "Managed telemetry create finished. Monitoring Metrics Publisher assignment was already present; no Authorization write was requested."
+    ;;
+  missing|component-absent)
+    echo "::warning::Managed telemetry create finished without a Monitoring Metrics Publisher assignment. Ingestion stays off until a human creates that one grant and a later preflight reports present."
+    print_grant "$principal_id"
+    ;;
+  error)
+    echo "::error::Managed telemetry create finished, but the role-assignment preflight could not be verified. Not treating this as a missing role assignment."
+    exit 1
+    ;;
+esac

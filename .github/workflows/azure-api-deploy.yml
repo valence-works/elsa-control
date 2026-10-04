@@ -31,6 +31,18 @@ on:
         description: "Expected candidate image digest, including the sha256: prefix (promote only)."
         required: false
         type: string
+      telemetry_action:
+        description: "telemetry mode only. what-if previews only and never creates. create is a separate dispatch."
+        required: true
+        default: what-if
+        type: choice
+        options:
+          - what-if
+          - create
+      confirm_environment:
+        description: "Required for telemetry create, and for any telemetry dispatch targeting production. Must equal the target environment name."
+        required: false
+        type: string
 
 concurrency:
   group: azure-api-deploy-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || 'production' }}
@@ -68,8 +80,8 @@ jobs:
       # as STAGING_SMOKE_OWNER_ORGANIZATION_ID rather than as a source constant.
       EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ vars.EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS }}
       # RecoveryRequired Azure Monitor email. Staging never uses the production
-      # mailbox. telemetry mode (and infra mode after a successful base deploy)
-      # passes the matching variable into scripts/deploy-managed-telemetry.sh.
+      # mailbox. telemetry mode passes the matching variable into
+      # scripts/deploy-managed-telemetry.sh. Infra mode does not run telemetry.
       STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT: ${{ vars.STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT }}
       PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT: ${{ vars.PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT }}
       MANAGED_TELEMETRY_WORKSPACE_NAME: ${{ vars.MANAGED_TELEMETRY_WORKSPACE_NAME }}
@@ -85,6 +97,8 @@ jobs:
       STAGING_SMOKE_OWNER_INSTANCE_ID: ${{ vars.STAGING_SMOKE_OWNER_INSTANCE_ID }}
       CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
       EXPECTED_CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
+      TELEMETRY_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.telemetry_action || 'what-if' }}
+      CONFIRM_ENVIRONMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.confirm_environment || '' }}
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: true
     steps:
@@ -363,6 +377,22 @@ jobs:
               echo "::error::Telemetry-only deploy is limited to test or production; refusing to continue."
               exit 1
             fi
+            telemetry_action="${TELEMETRY_ACTION:-what-if}"
+            case "$telemetry_action" in
+              what-if|create) ;;
+              *)
+                echo "::error::Unsupported telemetry action; refusing to continue."
+                exit 1
+                ;;
+            esac
+            if [ "$TARGET_ENVIRONMENT" = "production" ] && [ "${CONFIRM_ENVIRONMENT:-}" != "production" ]; then
+              echo "::error::Telemetry mode refuses the default production target unless confirm_environment is production."
+              exit 1
+            fi
+            if [ "$telemetry_action" = "create" ] && [ "${CONFIRM_ENVIRONMENT:-}" != "$TARGET_ENVIRONMENT" ]; then
+              echo "::error::Telemetry create requires confirm_environment to equal the target environment name."
+              exit 1
+            fi
             required+=(
               AZURE_LOCATION
               AZURE_RESOURCE_GROUP
@@ -398,29 +428,6 @@ jobs:
             )
             if [ "$TARGET_ENVIRONMENT" = "test" ]; then
               required+=(AZURE_PROVISIONER_IDENTITY_ID)
-            fi
-            if [ "$TARGET_ENVIRONMENT" = "test" ] || [ "$TARGET_ENVIRONMENT" = "production" ]; then
-              required+=(
-                MANAGED_TELEMETRY_WORKSPACE_NAME
-                MANAGED_TELEMETRY_APPLICATION_INSIGHTS_NAME
-                MANAGED_TELEMETRY_API_IDENTITY_NAME
-                MANAGED_TELEMETRY_API_IDENTITY_RESOURCE_GROUP
-              )
-              if [ "$TARGET_ENVIRONMENT" = "test" ]; then
-                required+=(
-                  STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT
-                  PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT
-                )
-              else
-                required+=(PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT)
-              fi
-              if [ "$TARGET_ENVIRONMENT" = "test" ] &&
-                 [ -n "${STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT:-}" ] &&
-                 [ -n "${PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT:-}" ] &&
-                 [ "$STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT" = "$PRODUCTION_RECOVERY_REQUIRED_ALERT_RECIPIENT" ]; then
-                echo "::error::Staging RecoveryRequired alerts must not use the production mailbox."
-                exit 1
-              fi
             fi
           fi
 
@@ -1146,7 +1153,7 @@ jobs:
 
       - name: Preview managed telemetry sink
         id: managed-telemetry-what-if
-        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && (env.DEPLOY_MODE == 'telemetry' || env.DEPLOY_MODE == 'infra') && (env.TARGET_ENVIRONMENT == 'test' || env.TARGET_ENVIRONMENT == 'production') }}
+        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.DEPLOY_MODE == 'telemetry' && env.TELEMETRY_ACTION == 'what-if' && (env.TARGET_ENVIRONMENT == 'test' || env.TARGET_ENVIRONMENT == 'production') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1154,7 +1161,7 @@ jobs:
 
       - name: Deploy managed telemetry sink
         id: managed-telemetry
-        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && (env.DEPLOY_MODE == 'telemetry' || env.DEPLOY_MODE == 'infra') && (env.TARGET_ENVIRONMENT == 'test' || env.TARGET_ENVIRONMENT == 'production') }}
+        if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.DEPLOY_MODE == 'telemetry' && env.TELEMETRY_ACTION == 'create' && (env.TARGET_ENVIRONMENT == 'test' || env.TARGET_ENVIRONMENT == 'production') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1273,7 +1280,7 @@ jobs:
           python3 scripts/production_stripe_reconcile.py --audit --audit-capture "$PRODUCTION_BILLING_CAPTURE_PATH"
 
       - name: Restore previous API deployment after deployment, configuration, or health failure
-        if: ${{ failure() && steps.current-deployment.outcome == 'success' && steps.current-deployment.outputs.capture_succeeded == 'true' && (env.TARGET_ENVIRONMENT != 'production' || env.DEPLOY_MODE == 'build' || steps.production-billing-capture.outcome == 'success') && (steps.deploy-api.outcome == 'failure' || steps.staging-stripe.outcome == 'failure' || steps.managed-telemetry-what-if.outcome == 'failure' || steps.managed-telemetry.outcome == 'failure' || steps.production-stripe.outcome == 'failure' || steps.health-gate.outcome == 'failure') }}
+        if: ${{ failure() && steps.current-deployment.outcome == 'success' && steps.current-deployment.outputs.capture_succeeded == 'true' && (env.TARGET_ENVIRONMENT != 'production' || env.DEPLOY_MODE == 'build' || steps.production-billing-capture.outcome == 'success') && (steps.deploy-api.outcome == 'failure' || steps.staging-stripe.outcome == 'failure' || steps.production-stripe.outcome == 'failure' || steps.health-gate.outcome == 'failure') }}
         env:
           PREVIOUS_LINUX_FX_VERSION: ${{ steps.current-deployment.outputs.linux_fx_version }}
           PREVIOUS_DEPLOYMENT_MODE: ${{ steps.current-deployment.outputs.deployment_mode }}
