@@ -17,8 +17,10 @@ const SIDE_SURFACES = "Billing, sign-out, and support remain available";
 // Restored-only hosted copy inside #main. Do not match /Managed engine/ —
 // that also matches the armed paused text. Do not match "Existing engines"
 // — that is a sidebar NavLink and would settle (or hang on mobile) before
-// the dashboard content.
-const RESTORED_HOSTED = /No managed engines|Confirm managed engine|Create your first engine|Confirm and create engine|Start Hosted/i;
+// the dashboard content. "Hosted subscription" and "Engine details" cover
+// an entitled Owner and a user who already has an engine; neither renders
+// while armed.
+const RESTORED_HOSTED = /No managed engines|Confirm managed engine|Create your first engine|Confirm and create engine|Start Hosted|Hosted subscription|Engine details/i;
 const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i;
 
 if (process.argv.includes("--prove-load")) {
