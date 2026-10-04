@@ -47,7 +47,6 @@ jobs:
       CLOUD_BFF_SMOKE_URL: ${{ vars.CLOUD_BFF_SMOKE_URL }}
       STAGING_CLOUD_ORIGIN: https://calm-sand-03964eb03.2.azurestaticapps.net
       SCREENSHOT_ROOT: ${{ github.workspace }}/staging-compat-screens
-      PLAYWRIGHT_STATE_PATH: ${{ runner.temp }}/compat-playwright-session.json
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -127,22 +126,20 @@ jobs:
           STAGING_E2E_COMPAT_PASSWORD: ${{ secrets.STAGING_E2E_COMPAT_PASSWORD }}
           VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
           EXPECTED_COMPAT_CONTEXT_PATH: ${{ steps.arm.outputs.compat_context_path }}
+          ARMED_AT: ${{ steps.arm.outputs.armed_at }}
         shell: bash
         run: |
           set -euo pipefail
-          armed_at="${{ steps.arm.outputs.armed_at }}"
-          if [[ ! "$armed_at" =~ ^[0-9]+$ ]]; then
+          if [[ ! "${ARMED_AT:-}" =~ ^[0-9]+$ ]]; then
             echo "::error::Arm did not record when the Web App setting was applied."
             exit 1
           fi
           now="$(date +%s)"
-          elapsed=$((now - armed_at))
+          elapsed=$((now - ARMED_AT))
           if [ "$(python3 scripts/lib/staging_compat_exclusive.py skip-in-hold --elapsed-since-arm "$elapsed" --needed 120)" = skip ]; then
             echo "Skipping K probes; remaining fixture-on budget before the 20-minute cap is short."
             {
-              printf '## In-hold K action probes\n\n'
-              printf 'telemetry: not used (Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b)\n\n'
-              printf 'Skipped; remaining fixture-on budget before the 20-minute cap is short.\n'
+              printf "%s\n" "## In-hold K action probes" "" "telemetry: not used (Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b)" "" "Skipped; remaining fixture-on budget before the 20-minute cap is short."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -157,45 +154,45 @@ jobs:
           STAGING_E2E_COMPAT_PASSWORD: ${{ secrets.STAGING_E2E_COMPAT_PASSWORD }}
           SCREENSHOT_PHASE: armed
           SCREENSHOT_DIR: ${{ env.SCREENSHOT_ROOT }}/armed
+          PLAYWRIGHT_STATE_PATH: ${{ runner.temp }}/compat-playwright-session.json
+          ARMED_AT: ${{ steps.arm.outputs.armed_at }}
         shell: bash
         run: |
           set -euo pipefail
-          armed_at="${{ steps.arm.outputs.armed_at }}"
-          if [[ ! "$armed_at" =~ ^[0-9]+$ ]]; then
+          if [[ ! "${ARMED_AT:-}" =~ ^[0-9]+$ ]]; then
             echo "::error::Arm did not record when the Web App setting was applied."
             exit 1
           fi
           now="$(date +%s)"
-          elapsed=$((now - armed_at))
+          elapsed=$((now - ARMED_AT))
           if [ "$(python3 scripts/lib/staging_compat_exclusive.py skip-in-hold --elapsed-since-arm "$elapsed" --needed 300)" = skip ]; then
             echo "captured=false" >> "$GITHUB_OUTPUT"
             echo "Skipping armed screens; remaining fixture-on budget before the 20-minute cap is short."
             {
-              printf '## Armed customer screens\n\n'
-              printf 'Skipped; remaining fixture-on budget before the 20-minute cap is short.\n'
+              printf "%s\n" "## Armed customer screens" "" "Skipped; remaining fixture-on budget before the 20-minute cap is short."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           node scripts/staging-compat-fixture-screens.mjs
           echo "captured=true" >> "$GITHUB_OUTPUT"
           {
-            printf '## Armed customer screens\n\n'
-            printf 'Uploaded as artifact `staging-compat-screens-armed` after restore.\n'
+            printf "%s\n" "## Armed customer screens" "" "Uploaded as artifact staging-compat-screens-armed after restore."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Hold the remaining exclusive proof window
         if: ${{ success() }}
         timeout-minutes: 16
+        env:
+          ARMED_AT: ${{ steps.arm.outputs.armed_at }}
         shell: bash
         run: |
           set -euo pipefail
-          armed_at="${{ steps.arm.outputs.armed_at }}"
-          if [[ ! "$armed_at" =~ ^[0-9]+$ ]]; then
+          if [[ ! "${ARMED_AT:-}" =~ ^[0-9]+$ ]]; then
             echo "::error::Arm did not record when the Web App setting was applied."
             exit 1
           fi
           now="$(date +%s)"
-          elapsed=$((now - armed_at))
+          elapsed=$((now - ARMED_AT))
           hold="$(python3 scripts/lib/staging_compat_exclusive.py hold --elapsed-since-arm "$elapsed")"
           echo "Compatibility fixture is armed on the same deployed Web App build."
           echo "Hold ${hold}s (fixture-on cap 20m minus elapsed minus reserved restore)."
@@ -256,6 +253,7 @@ jobs:
           STAGING_E2E_COMPAT_PASSWORD: ${{ secrets.STAGING_E2E_COMPAT_PASSWORD }}
           SCREENSHOT_PHASE: restored
           SCREENSHOT_DIR: ${{ env.SCREENSHOT_ROOT }}/restored
+          PLAYWRIGHT_STATE_PATH: ${{ runner.temp }}/compat-playwright-session.json
         shell: bash
         run: |
           set -euo pipefail
@@ -263,16 +261,14 @@ jobs:
             echo "captured=false" >> "$GITHUB_OUTPUT"
             echo "Skipping restored screens; the armed session was not captured."
             {
-              printf '## Restored customer screens\n\n'
-              printf 'Skipped; the armed session was not captured.\n'
+              printf "%s\n" "## Restored customer screens" "" "Skipped; the armed session was not captured."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           node scripts/staging-compat-fixture-screens.mjs
           echo "captured=true" >> "$GITHUB_OUTPUT"
           {
-            printf '## Restored customer screens\n\n'
-            printf 'Uploaded as artifact `staging-compat-screens-restored`.\n'
+            printf "%s\n" "## Restored customer screens" "" "Uploaded as artifact staging-compat-screens-restored."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload restored customer screens

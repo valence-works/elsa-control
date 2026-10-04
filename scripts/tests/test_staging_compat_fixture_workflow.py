@@ -471,6 +471,9 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("storageState", self.screens)
         self.assertIn("PLAYWRIGHT_STATE_PATH", self.source)
         self.assertIn("runner.temp", self.source)
+        job_env = self.source.split("steps:", 1)[0]
+        self.assertNotIn("runner.temp", job_env)
+        self.assertNotIn("PLAYWRIGHT_STATE_PATH", job_env)
         self.assertNotRegex(self.source, r"(?m)^\s+NODE_PATH:")
         self.assertIn(
             'npm install --no-save --ignore-scripts --prefix "$GITHUB_WORKSPACE/scripts" playwright@1.49.0',
