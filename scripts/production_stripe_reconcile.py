@@ -3,8 +3,13 @@
 
 The deployment workflow captures the complete existing ``Billing__Stripe__*``
 payload before a production app or infrastructure replacement and reapplies the
-same payload before restarting the API. The audit is read-only and prints only
-named checks. Provider responses and setting values never reach stdout/stderr.
+same payload before restarting the API. The audit is read-only. Success prints
+the same named ``PASS`` checks as before. Each ``--audit`` failure prints a
+secret-free ``FAIL <check>`` reason that names the missing env/GitHub variable,
+the mismatched Azure app setting name, the Stripe API error type or code with
+HTTP status and resource group, the live webhook endpoint count, or the missing
+and extra event names. Provider response bodies, setting values, secrets, URL
+query strings, and customer ids never reach stdout/stderr.
 """
 
 from __future__ import annotations
@@ -14,9 +19,12 @@ import json
 import os
 import re
 import sys
+import urllib.error
+import urllib.parse
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 if __package__:
     from .staging_stripe_reconcile import (
@@ -63,6 +71,163 @@ PRODUCTION_AUDIT_SETTINGS = frozenset(
 )
 PRICE_ID_PATTERN = re.compile(r"^price_[A-Za-z0-9]+$")
 WEBHOOK_SECRET_PATTERN = re.compile(r"^whsec_[A-Za-z0-9]+$")
+AUDIT_FAIL_CHECK = "production-stripe-reconciliation"
+WEBHOOK_LIST_PATH = "/webhook_endpoints?limit=100"
+_SAFE_TOKEN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_SAFE_EVENT = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
+_RESOURCE_SEGMENTS = frozenset(
+    {
+        "billing_portal",
+        "checkout",
+        "configurations",
+        "customers",
+        "invoices",
+        "payment_intents",
+        "prices",
+        "products",
+        "sessions",
+        "subscriptions",
+        "webhook_endpoints",
+    }
+)
+_LOCAL_STRIPE_REASONS = {
+    "Stripe returned invalid paginated data": "invalid_paginated_data",
+    "Stripe pagination state is invalid": "invalid_pagination_state",
+    "Stripe pagination cursor is invalid": "invalid_pagination_cursor",
+    "Stripe pagination exceeded its safety limit": "pagination_limit_exceeded",
+    "Stripe returned an invalid response": "invalid_response",
+}
+
+
+def redact_secrets(text: str) -> str:
+    """Keep ``sk_live``/``rk_live`` type prefixes; drop values, queries, and customer ids."""
+
+    redacted = re.sub(r"\?[^\s]+", "", text)
+    redacted = re.sub(r"\b((?:sk|rk)_(?:live|test))_[A-Za-z0-9]+", r"\1", redacted)
+    redacted = re.sub(r"\bwhsec_[A-Za-z0-9]+", "whsec", redacted)
+    redacted = re.sub(r"\bcus_[A-Za-z0-9]+", "cus", redacted)
+    return redacted
+
+
+def stripe_request_label(path: str) -> str:
+    parsed = urllib.parse.urlsplit(path)
+    parts = [urllib.parse.unquote(part) for part in parsed.path.split("/") if part]
+    resource_parts: list[str] = []
+    has_object = False
+    for part in parts:
+        if part in _RESOURCE_SEGMENTS:
+            resource_parts.append(part)
+        else:
+            has_object = True
+    resource = ".".join(resource_parts) or "request"
+    return f"{resource}.{'retrieve' if has_object else 'list'}"
+
+
+def format_stripe_api_failure(path: str, error: BaseException) -> str:
+    return f"stripe-api {stripe_request_label(path)}: {_stripe_error_label(error)}"
+
+
+def _stripe_error_label(error: BaseException) -> str:
+    http_label = _http_error_label(error)
+    if http_label is not None:
+        return http_label
+    local = _local_stripe_reason(error)
+    if local is not None:
+        return local
+    return "request_failed"
+
+
+def _http_error_label(error: BaseException) -> str | None:
+    status: int | None = None
+    error_type: str | None = None
+    error_code: str | None = None
+    found = False
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, urllib.error.HTTPError):
+            if not found:
+                found = True
+                try:
+                    status = int(current.code)
+                except (TypeError, ValueError):
+                    status = None
+                payload = _stripe_error_payload(current)
+                error_type = _safe_token(payload.get("type"))
+                error_code = _safe_token(payload.get("code"))
+            else:
+                _close_http_response(current)
+        current = current.__cause__ or current.__context__
+    if not found:
+        return None
+    label = error_type or error_code or "request_failed"
+    if status is not None and 100 <= status <= 599:
+        return f"{label} ({status})"
+    return label
+
+
+def _local_stripe_reason(error: BaseException) -> str | None:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ReconciliationError):
+            mapped = _LOCAL_STRIPE_REASONS.get(str(current))
+            if mapped:
+                return mapped
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _close_http_response(error: urllib.error.HTTPError) -> None:
+    with suppress(Exception):
+        error.close()
+    fp = getattr(error, "fp", None)
+    if fp is not None:
+        with suppress(Exception):
+            fp.close()
+
+
+def _stripe_error_payload(error: urllib.error.HTTPError) -> Mapping[str, Any]:
+    raw = b""
+    try:
+        with error:
+            try:
+                raw = error.read()
+            except Exception:
+                raw = b""
+    except Exception:
+        raw = b""
+    finally:
+        _close_http_response(error)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+        return {}
+    if not isinstance(parsed, Mapping):
+        return {}
+    payload = parsed.get("error", parsed)
+    return payload if isinstance(payload, Mapping) else {}
+
+
+def _safe_token(value: Any) -> str | None:
+    return value if isinstance(value, str) and _SAFE_TOKEN.fullmatch(value) else None
+
+
+def _safe_event_names(names: Iterable[str]) -> list[str]:
+    return [name if _SAFE_EVENT.fullmatch(name) else "invalid_event" for name in names]
+
+
+def _env_reason(message: str) -> str:
+    return message if message.startswith("env: ") else f"env: {message}"
+
+
+def _print_failure(reason: str | None = None) -> None:
+    text = redact_secrets(reason).strip() if reason else ""
+    print(f"FAIL {text or AUDIT_FAIL_CHECK}", file=sys.stderr)
 
 
 @dataclass(frozen=True)
@@ -84,38 +249,31 @@ class ProductionAuditConfig:
         def required(name: str) -> str:
             value = env.get(name, "").strip()
             if not value:
-                raise ReconciliationError(f"{name} is required")
+                raise ReconciliationError(f"env: {name} is missing")
             return value
+
+        def required_https(name: str, *, allow_query: bool = False) -> str:
+            try:
+                return parse_https_url(required(name), name=name, allow_query=allow_query)
+            except ReconciliationError as error:
+                raise ReconciliationError(_env_reason(str(error))) from error
 
         price_id = required("STRIPE_PRODUCTION_PRICE_ID")
         if not PRICE_ID_PATTERN.fullmatch(price_id):
-            raise ReconciliationError("STRIPE_PRODUCTION_PRICE_ID has an invalid format")
+            raise ReconciliationError("env: STRIPE_PRODUCTION_PRICE_ID has an invalid format")
 
-        webhook_url = parse_https_url(
-            required("CONTROL_PRODUCTION_WEBHOOK_URL"),
-            name="CONTROL_PRODUCTION_WEBHOOK_URL",
-        )
-        portal_return_url = parse_https_url(
-            required("AZURE_EXPECTED_PRODUCTION_PORTAL_RETURN_URL"),
-            name="AZURE_EXPECTED_PRODUCTION_PORTAL_RETURN_URL",
-        )
-        checkout_success_url = parse_https_url(
-            required("AZURE_EXPECTED_PRODUCTION_CHECKOUT_SUCCESS_URL"),
-            name="AZURE_EXPECTED_PRODUCTION_CHECKOUT_SUCCESS_URL",
+        webhook_url = required_https("CONTROL_PRODUCTION_WEBHOOK_URL")
+        portal_return_url = required_https("AZURE_EXPECTED_PRODUCTION_PORTAL_RETURN_URL")
+        checkout_success_url = required_https(
+            "AZURE_EXPECTED_PRODUCTION_CHECKOUT_SUCCESS_URL",
             allow_query=True,
         )
-        checkout_cancel_url = parse_https_url(
-            required("AZURE_EXPECTED_PRODUCTION_CHECKOUT_CANCEL_URL"),
-            name="AZURE_EXPECTED_PRODUCTION_CHECKOUT_CANCEL_URL",
-        )
-        cloud_portal_return_url = parse_https_url(
-            required("AZURE_EXPECTED_PRODUCTION_CLOUD_PORTAL_RETURN_URL"),
-            name="AZURE_EXPECTED_PRODUCTION_CLOUD_PORTAL_RETURN_URL",
-        )
+        checkout_cancel_url = required_https("AZURE_EXPECTED_PRODUCTION_CHECKOUT_CANCEL_URL")
+        cloud_portal_return_url = required_https("AZURE_EXPECTED_PRODUCTION_CLOUD_PORTAL_RETURN_URL")
         event_text = env.get("STRIPE_PRODUCTION_WEBHOOK_EVENTS", "").strip()
         events = frozenset(item.strip() for item in event_text.split(",") if item.strip()) if event_text else DEFAULT_WEBHOOK_EVENTS
         if events != DEFAULT_WEBHOOK_EVENTS:
-            raise ReconciliationError("STRIPE_PRODUCTION_WEBHOOK_EVENTS must use the approved production event set")
+            raise ReconciliationError("env: STRIPE_PRODUCTION_WEBHOOK_EVENTS must use the approved production event set")
         return cls(
             price_id=price_id,
             webhook_url=webhook_url,
@@ -246,45 +404,58 @@ class ProductionStripeReconciler:
     def audit(self) -> tuple[str, ...]:
         settings = self._azure.app_settings()
         self._check_settings(settings)
-        endpoints = stripe_list_all(self._stripe, "/webhook_endpoints?limit=100")
+        try:
+            endpoints = stripe_list_all(self._stripe, WEBHOOK_LIST_PATH)
+        except (ReconciliationError, urllib.error.HTTPError, urllib.error.URLError) as error:
+            raise ReconciliationError(format_stripe_api_failure(WEBHOOK_LIST_PATH, error)) from error
         matches = [
             endpoint
             for endpoint in endpoints
             if endpoint.get("url") == self._config.webhook_url and endpoint.get("livemode") is True
         ]
         if len(matches) != 1:
-            raise ReconciliationError("Production Stripe live webhook endpoint is missing or ambiguous")
+            raise ReconciliationError(f"webhook-endpoint: expected 1 live endpoint, found {len(matches)}")
         endpoint = matches[0]
         if endpoint.get("status") != "enabled":
-            raise ReconciliationError("Production Stripe webhook endpoint is not enabled in live mode")
+            raise ReconciliationError("webhook-endpoint: live endpoint is not enabled")
         events = endpoint.get("enabled_events")
-        if (
-            not isinstance(events, list)
-            or any(not isinstance(event, str) for event in events)
-            or len(events) != len(self._config.webhook_events)
-            or frozenset(events) != self._config.webhook_events
-        ):
-            raise ReconciliationError("Production Stripe webhook events do not match")
+        if not isinstance(events, list) or any(not isinstance(event, str) for event in events):
+            raise ReconciliationError("webhook-events: enabled_events is invalid")
+        actual = frozenset(events)
+        if len(events) != len(actual) or actual != self._config.webhook_events:
+            missing = _safe_event_names(sorted(self._config.webhook_events - actual))
+            extra = _safe_event_names(sorted(actual - self._config.webhook_events))
+            parts: list[str] = []
+            if missing:
+                parts.append("missing " + ", ".join(missing))
+            if extra:
+                parts.append("extra " + ", ".join(extra))
+            if len(events) != len(actual) and not parts:
+                parts.append("duplicate event names")
+            raise ReconciliationError("webhook-events: " + "; ".join(parts))
         return ("production-billing-settings", "production-stripe-webhook")
 
     def _check_settings(self, settings: Mapping[str, str]) -> None:
-        missing = PRODUCTION_AUDIT_SETTINGS.difference(settings)
+        missing = sorted(PRODUCTION_AUDIT_SETTINGS.difference(settings))
         if missing:
-            raise ReconciliationError("Production Stripe settings are incomplete")
+            raise ReconciliationError(f"azure-setting: missing {', '.join(missing)}")
         if settings["Billing__Stripe__Enabled"].lower() != "true":
-            raise ReconciliationError("Production Stripe billing is not enabled")
+            raise ReconciliationError("azure-setting: Billing__Stripe__Enabled is not true")
         if settings["Billing__Stripe__ExpectedMode"].strip().lower() not in {"live", "production"}:
-            raise ReconciliationError("Production Stripe expected mode is not live")
-        require_live_secret(settings["Billing__Stripe__SecretKey"], name="Production Stripe secret setting")
+            raise ReconciliationError("azure-setting: Billing__Stripe__ExpectedMode is not live")
+        try:
+            require_live_secret(settings["Billing__Stripe__SecretKey"], name="Production Stripe secret setting")
+        except ReconciliationError:
+            raise ReconciliationError("azure-setting: Billing__Stripe__SecretKey is not a live-mode credential") from None
         if (
             self._expected_secret_key is not None
             and settings["Billing__Stripe__SecretKey"] != self._expected_secret_key
         ):
-            raise ReconciliationError("Production Stripe audit key does not match the deployed billing setting")
+            raise ReconciliationError("azure-setting: Billing__Stripe__SecretKey does not match the audit key")
         if not WEBHOOK_SECRET_PATTERN.fullmatch(settings["Billing__Stripe__WebhookSigningSecret"]):
-            raise ReconciliationError("Production Stripe webhook signing secret has an unexpected shape")
+            raise ReconciliationError("azure-setting: Billing__Stripe__WebhookSigningSecret has an unexpected shape")
         if settings["Billing__Stripe__DefaultPriceId"] != self._config.price_id:
-            raise ReconciliationError("Production Stripe price does not match")
+            raise ReconciliationError("azure-setting: Billing__Stripe__DefaultPriceId does not match")
         expected = {
             "Billing__Stripe__CheckoutSuccessUrl": self._config.checkout_success_url,
             "Billing__Stripe__CheckoutCancelUrl": self._config.checkout_cancel_url,
@@ -293,15 +464,19 @@ class ProductionStripeReconciler:
         }
         for name, value in expected.items():
             if settings[name] != value:
-                raise ReconciliationError(f"Production Stripe setting {name} does not match")
+                raise ReconciliationError(f"azure-setting: {name} does not match")
 
 
 def _required_azure() -> AzureWebApp:
-    resource_group = os.environ.get("AZURE_RESOURCE_GROUP", "").strip()
-    webapp_name = os.environ.get("AZURE_WEBAPP_NAME", "").strip()
-    if not resource_group or not webapp_name:
-        raise ReconciliationError("AZURE_RESOURCE_GROUP and AZURE_WEBAPP_NAME are required")
-    return AzureWebApp(resource_group, webapp_name)
+    missing = [
+        name
+        for name in ("AZURE_RESOURCE_GROUP", "AZURE_WEBAPP_NAME")
+        if not os.environ.get(name, "").strip()
+    ]
+    if missing:
+        verb = "is" if len(missing) == 1 else "are"
+        raise ReconciliationError(f"env: {', '.join(missing)} {verb} missing")
+    return AzureWebApp(os.environ["AZURE_RESOURCE_GROUP"].strip(), os.environ["AZURE_WEBAPP_NAME"].strip())
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -342,10 +517,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             captured = read_capture(args.audit_capture)
             captured_secret_key = captured["Billing__Stripe__SecretKey"].value
         stripe_key = captured_secret_key or os.environ.get("STRIPE_PRODUCTION_SECRET_KEY", "")
-        require_live_secret(
-            stripe_key,
-            name="Production Stripe captured setting" if captured_secret_key else "STRIPE_PRODUCTION_SECRET_KEY",
-        )
+        if not captured_secret_key and not os.environ.get("STRIPE_PRODUCTION_SECRET_KEY", "").strip():
+            raise ReconciliationError("env: STRIPE_PRODUCTION_SECRET_KEY is missing")
+        try:
+            require_live_secret(
+                stripe_key,
+                name="Production Stripe captured setting" if captured_secret_key else "STRIPE_PRODUCTION_SECRET_KEY",
+            )
+        except ReconciliationError:
+            if captured_secret_key:
+                raise ReconciliationError("azure-setting: Billing__Stripe__SecretKey is not a live-mode credential") from None
+            raise ReconciliationError("env: STRIPE_PRODUCTION_SECRET_KEY is not a live-mode credential") from None
         checks = ProductionStripeReconciler(
             StripeApi(stripe_key, validator=lambda value: require_live_secret(value, name="STRIPE_PRODUCTION_SECRET_KEY")),
             azure,
@@ -355,11 +537,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         for check in checks:
             print(f"PASS {check}")
         return 0
-    except (KeyError, ReconciliationError, OSError, ValueError):
-        print("FAIL production-stripe-reconciliation", file=sys.stderr)
+    except ReconciliationError as error:
+        _print_failure(str(error) if args.audit else None)
+        return 1
+    except (KeyError, OSError, ValueError):
+        _print_failure()
         return 1
     except Exception:
-        print("FAIL production-stripe-reconciliation", file=sys.stderr)
+        _print_failure()
         return 1
 
 
