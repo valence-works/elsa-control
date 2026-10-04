@@ -18,6 +18,8 @@ DEPLOY_STAGING_WORKFLOW_PATH='.github/workflows/azure-api-deploy.yml'
 SUPABASE_PROJECT_REF_PATTERN='^[a-z0-9]{20}$'
 PRODUCTION_SUPABASE_PROJECT_REF='jhrcnclyydzngnyvhdht'
 BASELINE_CAPABILITIES_JSON='["cloud.bootstrap.v1","hosted.instances.list.v1","hosted.instances.create.v1","hosted.instances.status.v1","hosted.instances.provisioning-progress.v1","hosted.instances.overview.v1","hosted.studio.handoff.issue.v1","hosted.instances.quota-problem.v1","hosted.instances.confirmed-delete.v1","hosted.subscription.manage.v1","hosted.deployments.audit.v1"]'
+ARMED_BFF_ENVELOPE_JSON='{"code":"control_update_in_progress","error":"Elsa Cloud is being updated. Managed engine actions are temporarily paused."}'
+K_PROBE_ACTION_LIST=(listOrganizations updateInstance createInstanceDeleteConfirmation)
 
 fail() {
   echo "::error::$1" >&2
@@ -598,38 +600,84 @@ prove_authenticated_compatibility() {
   echo "Authenticated /api/cloud/compatibility matched the expected contract."
 }
 
-post_bff_compatibility() {
+read_cache_control() {
+  local header_file="$1"
+  python3 -c '
+import sys
+cache = ""
+with open(sys.argv[1], "r", encoding="utf-8", errors="replace", newline="") as handle:
+    for line in handle:
+        if line.lower().startswith("cache-control:"):
+            cache = line.split(":", 1)[1].replace("\r", "").strip()
+print(cache)
+' "$header_file" || fail "The BFF response headers could not be read."
+}
+
+post_bff_action() {
   local response_file="$1"
+  local header_file="$2"
+  local payload="$3"
   local http_status
   if [ -z "${CLOUD_BFF_SMOKE_URL:-}" ]; then
-    fail "BFF smoke proof is required; CLOUD_BFF_SMOKE_URL is not set."
+    fail "BFF proof is required; CLOUD_BFF_SMOKE_URL is not set."
   fi
   if [ -z "${STAGING_CLOUD_ACCESS_TOKEN:-}" ]; then
-    fail "BFF smoke proof is required; the Cloud access token was not minted."
+    fail "BFF proof is required; the Cloud access token was not minted."
   fi
   if [ -z "${VITE_SUPABASE_PUBLISHABLE_KEY:-}" ]; then
-    fail "BFF smoke proof is required; secret VITE_SUPABASE_PUBLISHABLE_KEY is not set."
+    fail "BFF proof is required; secret VITE_SUPABASE_PUBLISHABLE_KEY is not set."
   fi
-  if ! http_status="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' --max-time 10 \
+  if ! http_status="$(curl --silent --show-error --output "$response_file" --dump-header "$header_file" \
+    --write-out '%{http_code}' --max-time 10 \
     --request POST \
     --header "Authorization: Bearer ${STAGING_CLOUD_ACCESS_TOKEN}" \
     --header "apikey: ${VITE_SUPABASE_PUBLISHABLE_KEY}" \
     --header "Content-Type: application/json" \
-    --data '{"action":"compatibility"}' \
+    --data "$payload" \
     "$CLOUD_BFF_SMOKE_URL")"; then
-    rm -f "$response_file"
-    fail "The BFF compatibility request failed."
+    rm -f "$response_file" "$header_file"
+    fail "The BFF request failed."
   fi
   printf '%s\n' "$http_status"
 }
 
+post_bff_compatibility() {
+  post_bff_action "$1" "${2:-/dev/null}" '{"action":"compatibility"}'
+}
+
+assert_armed_bff_envelope() {
+  local http_status="$1"
+  local response_file="$2"
+  local header_file="$3"
+  local what="$4"
+  local cache_control expected actual
+  if [ "$http_status" != "503" ]; then
+    rm -f "$response_file" "$header_file"
+    fail "The ${what} did not return HTTP 503."
+  fi
+  cache_control="$(read_cache_control "$header_file")"
+  if [[ ! "$cache_control" =~ [Nn]o-[Ss]tore ]]; then
+    rm -f "$response_file" "$header_file"
+    fail "The ${what} Cache-Control header must contain no-store."
+  fi
+  require_json_object "$(cat "$response_file")" "$what"
+  expected="$(printf '%s' "$ARMED_BFF_ENVELOPE_JSON" | jq -S -c '.')"
+  actual="$(jq -S -c '.' "$response_file")"
+  if [ "$actual" != "$expected" ]; then
+    rm -f "$response_file" "$header_file"
+    fail "The ${what} body did not match the control_update_in_progress envelope."
+  fi
+}
+
 prove_bff_smoke_compatible() {
-  local response_file http_status
+  local response_file header_file http_status
   response_file="$(mktemp)"
-  if ! http_status="$(post_bff_compatibility "$response_file")"; then
-    rm -f "$response_file"
+  header_file="$(mktemp)"
+  if ! http_status="$(post_bff_compatibility "$response_file" "$header_file")"; then
+    rm -f "$response_file" "$header_file"
     exit 1
   fi
+  rm -f "$header_file"
   if [ "$http_status" != "200" ]; then
     rm -f "$response_file"
     fail "The BFF smoke proof did not return HTTP 200."
@@ -644,23 +692,151 @@ prove_bff_smoke_compatible() {
 }
 
 prove_bff_update_in_progress() {
-  local response_file http_status
+  local response_file header_file http_status
   response_file="$(mktemp)"
-  if ! http_status="$(post_bff_compatibility "$response_file")"; then
-    rm -f "$response_file"
+  header_file="$(mktemp)"
+  if ! http_status="$(post_bff_compatibility "$response_file" "$header_file")"; then
+    rm -f "$response_file" "$header_file"
     exit 1
   fi
-  if [ "$http_status" != "503" ]; then
-    rm -f "$response_file"
-    fail "The armed BFF compatibility proof did not return HTTP 503."
+  assert_armed_bff_envelope "$http_status" "$response_file" "$header_file" "armed BFF compatibility proof"
+  rm -f "$response_file" "$header_file"
+  echo "BFF reported the full control_update_in_progress envelope with no-store while the fixture was armed."
+}
+
+append_step_summary() {
+  local text="$1"
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    printf '%s\n' "$text" >> "$GITHUB_STEP_SUMMARY"
+  else
+    printf '%s\n' "$text"
   fi
-  require_json_object "$(cat "$response_file")" "Armed BFF compatibility response"
-  if ! jq -e '.code == "control_update_in_progress"' "$response_file" >/dev/null; then
-    rm -f "$response_file"
-    fail "The armed BFF compatibility proof did not report control_update_in_progress."
+}
+
+iso_now() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+write_output() {
+  local name="$1"
+  local value="$2"
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    printf '%s=%s\n' "$name" "$value" >> "$GITHUB_OUTPUT"
   fi
-  rm -f "$response_file"
-  echo "BFF reported control_update_in_progress while the fixture was armed."
+}
+
+random_uuid() {
+  python3 -c 'import uuid; print(uuid.uuid4())'
+}
+
+k_probe_payload() {
+  local action="$1"
+  local organization_id="$2"
+  local workspace_id="$3"
+  local instance_id="$4"
+  case "$action" in
+    listOrganizations)
+      jq -cn '{action:"listOrganizations"}'
+      ;;
+    updateInstance)
+      jq -cn \
+        --arg organizationId "$organization_id" \
+        --arg workspaceId "$workspace_id" \
+        --arg instanceId "$instance_id" \
+        --arg idempotencyKey "$(random_uuid)" \
+        --argjson version 1 \
+        --argjson intent '{"release":{"distributionId":"valence-runtime","releaseLine":"3.8","requestedVersion":"3.8.0","channel":"stable","patchUpdates":"automatic-within-minor","minorUpdates":"explicit-approval","majorMigrations":"explicit-migration"},"application":{"topologyId":"combined","featurePresetId":null,"featureOverrides":{},"packagePolicy":null,"configurationShapeRevisionId":null},"placement":{"targetMode":"managed","regionCode":"westeurope","isolationProfile":"dedicated","capacityProfile":"standard-small","networkOutcome":"public","domainOutcome":"managed"},"desiredLifecycle":"Running"}' \
+        '{action:"updateInstance",organizationId:$organizationId,workspaceId:$workspaceId,instanceId:$instanceId,version:$version,intent:$intent,idempotencyKey:$idempotencyKey}'
+      ;;
+    createInstanceDeleteConfirmation)
+      jq -cn \
+        --arg organizationId "$organization_id" \
+        --arg workspaceId "$workspace_id" \
+        --arg instanceId "$instance_id" \
+        '{action:"createInstanceDeleteConfirmation",organizationId:$organizationId,workspaceId:$workspaceId,instanceId:$instanceId}'
+      ;;
+    *)
+      fail "The in-hold action probe is not recognized."
+      ;;
+  esac
+}
+
+capture_linked_org_context() {
+  local response_file header_file http_status context_file organization_id workspace_id
+  response_file="$(mktemp)"
+  header_file="$(mktemp)"
+  if ! http_status="$(post_bff_action "$response_file" "$header_file" '{"action":"bootstrap"}')"; then
+    rm -f "$response_file" "$header_file"
+    exit 1
+  fi
+  if [ "$http_status" != "200" ]; then
+    rm -f "$response_file" "$header_file"
+    fail "The staging Cloud bootstrap did not return HTTP 200 before arming."
+  fi
+  require_json_object "$(cat "$response_file")" "Staging Cloud bootstrap response"
+  organization_id="$(jq -r '.data.organizationId // empty' "$response_file")"
+  workspace_id="$(jq -r '.data.workspaceId // empty' "$response_file")"
+  rm -f "$response_file" "$header_file"
+  if [ -z "$organization_id" ] || [ -z "$workspace_id" ]; then
+    fail "The staging Cloud bootstrap did not return a linked organization and workspace."
+  fi
+  context_file="$(mktemp)"
+  jq -cn --arg organizationId "$organization_id" --arg workspaceId "$workspace_id" \
+    '{organizationId:$organizationId,workspaceId:$workspaceId}' > "$context_file"
+  write_output "compat_context_path" "$context_file"
+  COMPAT_CONTEXT_PATH="$context_file"
+  echo "Captured the synthetic user's linked organization context before arming."
+}
+
+read_linked_org_context() {
+  local context_file="${EXPECTED_COMPAT_CONTEXT_PATH:-${COMPAT_CONTEXT_PATH:-}}"
+  if [ -z "$context_file" ] || [ ! -f "$context_file" ]; then
+    fail "The linked organization context from pre-arm bootstrap is missing."
+  fi
+  require_json_object "$(cat "$context_file")" "Linked organization context"
+  CONTEXT_ORGANIZATION_ID="$(jq -r '.organizationId // empty' "$context_file")"
+  CONTEXT_WORKSPACE_ID="$(jq -r '.workspaceId // empty' "$context_file")"
+  if [ -z "$CONTEXT_ORGANIZATION_ID" ] || [ -z "$CONTEXT_WORKSPACE_ID" ]; then
+    fail "The linked organization context is incomplete."
+  fi
+}
+
+prove_k_action_probes() {
+  local action response_file header_file http_status payload instance_id timestamp k=0 forward_note
+  read_linked_org_context
+  append_step_summary "## In-hold K action probes"
+  append_step_summary ""
+  append_step_summary "telemetry: not used (Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b) (test merged in elsa-cloud#146, 30ffdc1f)"
+  append_step_summary ""
+  for action in "${K_PROBE_ACTION_LIST[@]}"; do
+    k=$((k + 1))
+    instance_id="$(random_uuid)"
+    payload="$(k_probe_payload "$action" "$CONTEXT_ORGANIZATION_ID" "$CONTEXT_WORKSPACE_ID" "$instance_id")"
+    if ! python3 "$EXCLUSIVE_HELPER" validate-bff --payload "$payload"; then
+      fail "The in-hold ${action} probe payload failed BFF schema validation."
+    fi
+    response_file="$(mktemp)"
+    header_file="$(mktemp)"
+    timestamp="$(iso_now)"
+    if ! http_status="$(post_bff_action "$response_file" "$header_file" "$payload")"; then
+      rm -f "$response_file" "$header_file"
+      exit 1
+    fi
+    assert_armed_bff_envelope "$http_status" "$response_file" "$header_file" "in-hold ${action} probe"
+    rm -f "$response_file" "$header_file"
+    if [ "$action" = "listOrganizations" ]; then
+      forward_note="gate answered; a forward would have been 200 with data"
+    else
+      forward_note="gate answered; a forward would have been Control not-found"
+    fi
+    append_step_summary "- ${action}: HTTP ${http_status} at ${timestamp} (${forward_note})"
+    echo "In-hold ${action} probe returned the armed envelope."
+  done
+  append_step_summary ""
+  append_step_summary "K=${k}"
+  append_step_summary ""
+  write_output "k_probe_count" "$k"
+  echo "Recorded K=${k} in-hold action probes. No token or user body was written."
 }
 
 read_health_identity() {
@@ -988,6 +1164,10 @@ arm() {
   if [ "$before_digest" != "$expected_digest" ]; then
     fail "The serving digest no longer matches the preflight baseline."
   fi
+  capture_linked_org_context
+  local armed_at armed_at_iso
+  armed_at="$(date +%s)"
+  armed_at_iso="$(iso_now)"
   if ! az webapp config appsettings set \
     --resource-group "$AZURE_RESOURCE_GROUP" \
     --name "$AZURE_WEBAPP_NAME" \
@@ -996,9 +1176,12 @@ arm() {
     --only-show-errors; then
     fail "Writing the compatibility fixture app setting failed."
   fi
-  if [ -n "${GITHUB_OUTPUT:-}" ]; then
-    printf 'armed_at=%s\n' "$(date +%s)" >> "$GITHUB_OUTPUT"
-  fi
+  write_output "armed_at" "$armed_at"
+  write_output "armed_at_iso" "$armed_at_iso"
+  append_step_summary "## Fixture-on timestamps"
+  append_step_summary ""
+  append_step_summary "- Setting write: ${armed_at_iso} (unix ${armed_at})"
+  append_step_summary ""
   presence="$(read_setting_presence)" || exit 1
   if [ "$presence" != "present" ]; then
     fail "The compatibility fixture setting was not created."
@@ -1048,6 +1231,18 @@ restore() {
   if [ "$presence" = "present" ]; then
     fail "The compatibility fixture setting is still present after restore."
   fi
+  local deleted_at deleted_at_iso
+  deleted_at="$(date +%s)"
+  deleted_at_iso="$(iso_now)"
+  write_output "deleted_at" "$deleted_at"
+  write_output "deleted_at_iso" "$deleted_at_iso"
+  append_step_summary "## Fixture-on timestamps"
+  append_step_summary ""
+  append_step_summary "- Confirmed deletion: ${deleted_at_iso} (unix ${deleted_at})"
+  if [ -n "${ARMED_AT_ISO:-}" ]; then
+    append_step_summary "- Setting write: ${ARMED_AT_ISO}"
+  fi
+  append_step_summary ""
   restart_webapp
   wait_until_recycle_witness "$witness_digest" "" "$expected_build" "$expected_commit"
   require_restore_baseline "$expected_digest" "$expected_names" "$expected_build" \
@@ -1089,8 +1284,16 @@ restore() {
   echo "Restored the baseline: setting deleted, same deployed build, env var names match."
 }
 
+in_hold_probes() {
+  require_test_environment
+  require_smoke_inputs
+  mint_cloud_token
+  prove_bff_update_in_progress
+  prove_k_action_probes
+}
+
 usage() {
-  echo "Usage: $0 preflight|arm|restore|mint" >&2
+  echo "Usage: $0 preflight|arm|restore|mint|probes" >&2
 }
 
 main() {
@@ -1099,6 +1302,7 @@ main() {
     arm) arm ;;
     restore) restore ;;
     mint) mint_cloud_token ;;
+    probes) in_hold_probes ;;
     *)
       usage
       return 2

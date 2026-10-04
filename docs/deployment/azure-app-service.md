@@ -94,10 +94,33 @@ compatibility response matches the armed contract or the baseline, and
 restore also requires BFF smoke `compatible`.
 
 **Time cap.** The fixture may stay applied at most 20 minutes from the
-setting write. Restore always keeps a reserved 4-minute budget, including
-after cancel. Restore health waits are deadline-bounded so delete,
-restart, witness, and authenticated proofs fit that budget. The job
-timeout (30 minutes) is only a backstop.
+setting write to confirmed deletion. Restore always keeps a reserved
+4-minute delete budget inside that cap, including after cancel. In-hold
+K probes (2 minutes) and armed Playwright screens (5 minutes) skip
+themselves when the remaining write-to-delete budget is short so they
+cannot push deletion past 20 minutes. Armed PNG upload runs after
+restore and does not count against the fixture-on cap. After deletion,
+restore's health witness is 36 attempts or a 10-minute (600 s) budget
+on the same deployed build; that wait must not delay deletion. The
+restore step timeout is 16 minutes and the job timeout (60 minutes) is
+only a backstop.
+
+**In-hold evidence.** While armed, the job records K BFF action probes
+(`listOrganizations`, `updateInstance`, `createInstanceDeleteConfirmation`)
+and asserts the full 503 `control_update_in_progress` envelope with
+`Cache-Control: no-store`. The summary writes `telemetry: not used
+(Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b) (test merged in elsa-cloud#146, 30ffdc1f)` and
+one line per probe. Playwright captures desktop and mobile PNGs on
+calm-sand while armed, after reload, and after restore by reloading the
+same session. Artifacts are PNGs only (7-day retention); traces, HARs,
+videos, and storage-state files are not uploaded. Email and org ids are
+masked in the images.
+
+**Cancel.** Cancelling the workflow stops in-hold checks and the remaining
+hold. Restore still runs (`always()` and exclusive preflight success):
+verify by hand that the setting is deleted, `/health.compatibilityFixture`
+is JSON `null`, authenticated compatibility matches the baseline, and
+the BFF reports `compatible` if a run is cut off before restore finishes.
 
 **Manual removal.** If a run leaves `CloudCompatibility__StagingFixture`
 armed, remove it by hand on the staging Control Web App:
