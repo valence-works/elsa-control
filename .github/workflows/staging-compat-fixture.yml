@@ -79,8 +79,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$SCREENSHOT_ROOT"
-          npm install --no-save --prefix "$RUNNER_TEMP/compat-playwright" playwright@1.49.0
-          npx --prefix "$RUNNER_TEMP/compat-playwright" playwright install --with-deps chromium
+          # Install at the workspace root so the ESM capture script can resolve
+          # `playwright` by walking up from scripts/. NODE_PATH is ignored by ESM.
+          npm install --no-save --prefix "$GITHUB_WORKSPACE" playwright@1.49.0
+          npx --prefix "$GITHUB_WORKSPACE" playwright install --with-deps chromium
 
       - name: Preflight exclusive staging and capture the baseline
         id: preflight
@@ -135,7 +137,6 @@ jobs:
           STAGING_E2E_COMPAT_PASSWORD: ${{ secrets.STAGING_E2E_COMPAT_PASSWORD }}
           SCREENSHOT_PHASE: armed
           SCREENSHOT_DIR: ${{ env.SCREENSHOT_ROOT }}/armed
-          NODE_PATH: ${{ runner.temp }}/compat-playwright/node_modules
         shell: bash
         run: |
           set -euo pipefail
@@ -177,6 +178,7 @@ jobs:
           done
 
       - name: Restore the baseline
+        id: restore
         # Skip when exclusive preflight failed closed: the fixture was never
         # written, and a restore restart would bounce staging during an open
         # QA window, missing freeze, or conflicting test deployment.
@@ -209,14 +211,13 @@ jobs:
 
       - name: Capture restored customer screens
         id: restored_screens
-        if: ${{ !cancelled() && steps.restore.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.restore.outcome == 'success' && steps.playwright_setup.outcome == 'success' }}
         timeout-minutes: 5
         env:
           STAGING_E2E_COMPAT_EMAIL: ${{ secrets.STAGING_E2E_COMPAT_EMAIL }}
           STAGING_E2E_COMPAT_PASSWORD: ${{ secrets.STAGING_E2E_COMPAT_PASSWORD }}
           SCREENSHOT_PHASE: restored
           SCREENSHOT_DIR: ${{ env.SCREENSHOT_ROOT }}/restored
-          NODE_PATH: ${{ runner.temp }}/compat-playwright/node_modules
         shell: bash
         run: |
           set -euo pipefail

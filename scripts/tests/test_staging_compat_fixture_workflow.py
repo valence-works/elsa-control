@@ -366,6 +366,7 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertLess(names.index("Capture armed customer screens"), names.index("Restore the baseline"))
         self.assertLess(names.index("Hold the remaining exclusive proof window"), names.index("Restore the baseline"))
         restore_block = self.source.split("name: Restore the baseline", 1)[1].split("- name:", 1)[0]
+        self.assertIn("id: restore\n", restore_block)
         self.assertIn("if: ${{ always() && steps.preflight.outcome == 'success' }}", restore_block)
         self.assertNotIn("steps.k_probes", restore_block)
         self.assertNotIn("steps.armed_screens", restore_block)
@@ -400,7 +401,9 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         restored = self.source.split("name: Capture restored customer screens", 1)[1].split("- name:", 1)[0]
         telemetry = self.source.split("name: Report armed-window telemetry", 1)[1].split("- name:", 1)[0]
         skipped = self.source.split("name: Report skipped post-restore evidence", 1)[1]
+        self.assertIn("id: restore\n", self.source.split("name: Restore the baseline", 1)[1].split("- name:", 1)[0])
         self.assertIn("steps.restore.outcome == 'success'", restored)
+        self.assertIn("steps.playwright_setup.outcome == 'success'", restored)
         self.assertIn("steps.restore.outcome == 'success'", telemetry)
         self.assertIn("steps.restore.outcome != 'success'", skipped)
         self.assertIn("timeout-minutes: 5", restored)
@@ -439,6 +442,9 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("*.png", self.source)
         self.assertNotIn("*.zip", self.source)
         self.assertIn("Never writes Playwright traces, HAR captures, videos, or browser storage files.", self.screens)
+        self.assertNotRegex(self.source, r"(?m)^\s+NODE_PATH:")
+        self.assertIn('npm install --no-save --prefix "$GITHUB_WORKSPACE" playwright@1.49.0', self.source)
+        self.assertIn("NODE_PATH is ignored by ESM", self.source)
 
     def test_telemetry_step_does_not_query_or_grant_roles(self) -> None:
         telemetry = self.source.split("name: Report armed-window telemetry", 1)[1]
