@@ -281,10 +281,13 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("vars.STAGING_SUPABASE_PROJECT_REF", self.source)
         self.assertIn("vars.EXPECTED_STAGING_SUPABASE_ORIGIN", self.source)
         self.assertIn("vars.CLOUD_BFF_SMOKE_URL", self.source)
-        self.assertIn("scripts/staging-compat-fixture.sh mint", self.source)
-        self.assertGreaterEqual(self.source.count("scripts/staging-compat-fixture.sh mint"), 2)
+        self.assertNotIn("scripts/staging-compat-fixture.sh mint", self.source)
         self.assertGreaterEqual(self.source.count("GH_TOKEN: ${{ github.token }}"), 2)
-        self.assertEqual(3, self.source.count("secrets."))
+        self.assertEqual(9, self.source.count("secrets."))
+        job_env = self.source.split("steps:", 1)[0]
+        self.assertNotIn("secrets.STAGING_E2E_COMPAT_EMAIL", job_env)
+        self.assertNotIn("secrets.STAGING_E2E_COMPAT_PASSWORD", job_env)
+        self.assertNotIn("secrets.VITE_SUPABASE_PUBLISHABLE_KEY", job_env)
 
     def test_shares_the_deploy_staging_concurrency_group(self) -> None:
         self.assertIn(
@@ -384,19 +387,35 @@ class StagingCompatScriptTests(unittest.TestCase):
             "  exit 0\n"
             "fi\n"
             "if [[ \"$*\" == *\"webapp config show\"* ]]; then\n"
-            "  printf 'SITECONTAINERS\\n'\n"
+            "  payload='{\"linuxFxVersion\":\"SITECONTAINERS\",\"kind\":\"app\"}'\n"
+            "  python3 -c 'import json,sys; args=sys.argv[1:]; q=\"\";\n"
+            "for i,a in enumerate(args):\n"
+            "    if a==\"--query\" and i+1<len(args): q=args[i+1].strip().strip(chr(39))\n"
+            "data=json.loads(sys.argv[-1]); print(data[q] if q else json.dumps(data))' \"$@\" \"$payload\"\n"
             "  exit 0\n"
             "fi\n"
             "if [[ \"$*\" == *\"webapp sitecontainers show\"* ]]; then\n"
-            f"  printf '%s\\n' {json.dumps(image)}\n"
+            f"  payload={json.dumps(json.dumps({'name': 'main', 'image': image}))}\n"
+            "  python3 -c 'import json,sys; args=sys.argv[1:]; q=\"\";\n"
+            "for i,a in enumerate(args):\n"
+            "    if a==\"--query\" and i+1<len(args): q=args[i+1].strip().strip(chr(39))\n"
+            "data=json.loads(sys.argv[-1]); print(data[q] if q else json.dumps(data))' \"$@\" \"$payload\"\n"
             "  exit 0\n"
             "fi\n"
             "if [[ \"$*\" == *\"acr manifest show-metadata\"* ]]; then\n"
-            f"  printf '%s\\n' {json.dumps(digest)}\n"
+            f"  payload={json.dumps(json.dumps({'digest': digest, 'name': f'elsa-control/api:{HEALTH_COMMIT}'}))}\n"
+            "  python3 -c 'import json,sys; args=sys.argv[1:]; q=\"\";\n"
+            "for i,a in enumerate(args):\n"
+            "    if a==\"--query\" and i+1<len(args): q=args[i+1].strip().strip(chr(39))\n"
+            "data=json.loads(sys.argv[-1]); print(data[q] if q else json.dumps(data))' \"$@\" \"$payload\"\n"
             "  exit 0\n"
             "fi\n"
             "if [[ \"$*\" == *\"webapp show\"* ]]; then\n"
-            "  echo staging.example.test\n"
+            "  payload='{\"defaultHostName\":\"staging.example.test\",\"state\":\"Running\"}'\n"
+            "  python3 -c 'import json,sys; args=sys.argv[1:]; q=\"\";\n"
+            "for i,a in enumerate(args):\n"
+            "    if a==\"--query\" and i+1<len(args): q=args[i+1].strip().strip(chr(39))\n"
+            "data=json.loads(sys.argv[-1]); print(data[q] if q else json.dumps(data))' \"$@\" \"$payload\"\n"
             "  exit 0\n"
             "fi\n"
             "if [[ \"$*\" == *\"webapp restart\"* ]]; then\n"
@@ -450,23 +469,31 @@ class StagingCompatScriptTests(unittest.TestCase):
             "fi\n"
             "if [[ \"$*\" == *'/actions/runs/'* ]]; then\n"
             f"  if [[ \"$*\" == *'/actions/runs/{DEPLOY_STAGING_RUN_ID}'* ]] || [[ \"$*\" == *'/actions/runs/777'* ]]; then\n"
-            "    echo '.github/workflows/azure-api-deploy.yml'\n"
-            "    exit 0\n"
+            "    payload='{\"path\":\".github/workflows/azure-api-deploy.yml\",\"created_at\":\"2026-10-03T00:00:00Z\"}'\n"
+            "  elif [[ \"$*\" == *'/actions/runs/99'* ]]; then\n"
+            "    payload='{\"path\":\".github/workflows/staging-compat-fixture.yml\",\"created_at\":\"2026-10-04T09:00:00Z\"}'\n"
+            "  elif [ -n \"${GH_RUN_PATH:-}\" ]; then\n"
+            "    payload=$(jq -cn --arg path \"$GH_RUN_PATH\" '{path:$path,created_at:\"2026-10-03T00:00:00Z\"}')\n"
+            "  else\n"
+            "    payload='{\"path\":\".github/workflows/ci.yml\",\"created_at\":\"2026-10-03T00:00:00Z\"}'\n"
             "  fi\n"
-            "  if [[ \"$*\" == *'/actions/runs/99'* ]]; then\n"
-            "    echo '.github/workflows/staging-compat-fixture.yml'\n"
-            "    exit 0\n"
-            "  fi\n"
-            "  if [ -n \"${GH_RUN_PATH:-}\" ]; then printf '%s\\n' \"$GH_RUN_PATH\"; exit 0; fi\n"
-            "  echo '.github/workflows/ci.yml'\n"
+            "  jq_expr=\"\"\n"
+            "  for arg in \"$@\"; do\n"
+            "    if [ \"${prev:-}\" = --jq ]; then jq_expr=\"$arg\"; fi\n"
+            "    prev=\"$arg\"\n"
+            "  done\n"
+            "  if [ -n \"$jq_expr\" ]; then jq -r \"$jq_expr\" <<<\"$payload\"; else printf '%s\\n' \"$payload\"; fi\n"
             "  exit 0\n"
             "fi\n"
             "if [[ \"$*\" == *'/deployments/'* && \"$*\" != *statuses* && \"$*\" != *'/deployments?'* ]]; then\n"
-            "  if [[ \"$*\" == *'/deployments/888'* ]]; then\n"
-            "    echo '2026-10-04T01:00:00Z'\n"
-            "    exit 0\n"
-            "  fi\n"
-            "  echo \"${GH_DEPLOYMENT_CREATED_AT:-2026-10-03T00:00:00Z}\"\n"
+            "  payload='{\"created_at\":\"${GH_DEPLOYMENT_CREATED_AT:-2026-10-03T00:00:00Z}\"}'\n"
+            "  if [[ \"$*\" == *'/deployments/888'* ]]; then payload='{\"created_at\":\"2026-10-04T01:00:00Z\"}'; fi\n"
+            "  jq_expr=\"\"\n"
+            "  for arg in \"$@\"; do\n"
+            "    if [ \"${prev:-}\" = --jq ]; then jq_expr=\"$arg\"; fi\n"
+            "    prev=\"$arg\"\n"
+            "  done\n"
+            "  if [ -n \"$jq_expr\" ]; then jq -r \"$jq_expr\" <<<\"$payload\"; else printf '%s\\n' \"$payload\"; fi\n"
             "  exit 0\n"
             "fi\n"
             "if [[ \"$*\" == *'/deployments/'*'/statuses'* ]]; then\n"
@@ -493,11 +520,30 @@ class StagingCompatScriptTests(unittest.TestCase):
             "if [[ \"$*\" == *'/deployments?'* ]]; then\n"
             "  if [ \"${GH_FAIL_DEPLOYMENTS:-}\" = 1 ]; then echo failed-deployments >&2; exit 2; fi\n"
             "  if [ \"${GH_MALFORMED_DEPLOYMENTS:-}\" = 1 ]; then echo '{'; exit 0; fi\n"
-            "  if [ -n \"${GH_DEPLOYMENT_IDS:-}\" ] && [ -f \"${GH_DEPLOYMENT_IDS}\" ]; then\n"
-            "    cat \"${GH_DEPLOYMENT_IDS}\"\n"
-            "    exit 0\n"
+            "  if [ -n \"${GH_DEPLOYMENT_JSON:-}\" ] && [ -f \"${GH_DEPLOYMENT_JSON}\" ]; then\n"
+            "    payload=$(cat \"${GH_DEPLOYMENT_JSON}\")\n"
+            "  elif [ -n \"${GH_DEPLOYMENT_IDS:-}\" ] && [ -f \"${GH_DEPLOYMENT_IDS}\" ]; then\n"
+            "    payload=$(python3 -c 'import json,sys; rows=[]\n"
+            "for raw in open(sys.argv[1]):\n"
+            "    item=raw.strip()\n"
+            "    if not item: continue\n"
+            "    created=\"2026-10-04T01:00:00Z\" if item==\"888\" else \"2026-10-03T00:00:00Z\"\n"
+            "    rows.append({\"id\":int(item),\"created_at\":created,\"environment\":\"test\"})\n"
+            "rows.sort(key=lambda row: row[\"created_at\"], reverse=True)\n"
+            "print(json.dumps(rows))' \"${GH_DEPLOYMENT_IDS}\")\n"
+            "  else\n"
+            f"    payload='[{{\"id\":99,\"created_at\":\"2026-10-04T09:00:00Z\",\"environment\":\"test\"}},{{\"id\":{DEPLOY_STAGING_DEPLOYMENT_ID},\"created_at\":\"2026-10-03T00:00:00Z\",\"environment\":\"test\"}},{{\"id\":9001,\"created_at\":\"2026-10-04T08:00:00Z\",\"environment\":\"production\"}}]'\n"
             "  fi\n"
-            f"  printf '%s\\n' {json.dumps(DEPLOY_STAGING_DEPLOYMENT_ID)}\n"
+            "  if [[ \"$*\" == *'environment=test'* ]]; then\n"
+            "    payload=$(printf '%s' \"$payload\" | jq '[.[] | select(.environment==\"test\")]')\n"
+            "  fi\n"
+            "  jq_expr=\"\"\n"
+            "  prev=\"\"\n"
+            "  for arg in \"$@\"; do\n"
+            "    if [ \"$prev\" = --jq ]; then jq_expr=\"$arg\"; fi\n"
+            "    prev=\"$arg\"\n"
+            "  done\n"
+            "  if [ -n \"$jq_expr\" ]; then jq -r \"$jq_expr\" <<<\"$payload\"; else printf '%s\\n' \"$payload\"; fi\n"
             "  exit 0\n"
             "fi\n"
             "exit 41\n"
@@ -1023,7 +1069,7 @@ class StagingCompatScriptTests(unittest.TestCase):
     def test_script_uses_only_allowlisted_az_commands(self) -> None:
         found: set[tuple[str, ...]] = set()
         for match in re.finditer(
-            r"\b(?:az_tsv|az)\s+((?:webapp|acr)\s+[^\n\\]+)",
+            r"\b(?:az_tsv|az)\s+([A-Za-z][\w-]+(?:\s+[A-Za-z][\w-]+){0,8})",
             SCRIPT.read_text(),
         ):
             command: list[str] = []
@@ -1117,7 +1163,7 @@ class StagingCompatScriptTests(unittest.TestCase):
             env["EXPECTED_DIGEST"] = digest
             env["EXPECTED_BUILD_NUMBER"] = "232"
             env["EXPECTED_COMMIT"] = HEALTH_COMMIT
-            env["EXPECTED_DEPLOYMENT_ID"] = DEPLOY_STAGING_DEPLOYMENT_ID
+            env["EXPECTED_DEPLOYMENT_ID"] = "888"
             env["EXPECTED_IMAGE_REFERENCE"] = image
             env["EXPECTED_PREFLIGHT_STARTED_AT"] = "2026-10-04T00:00:00Z"
             env["EXPECTED_SETTING_NAMES_PATH"] = str(names)
@@ -1142,16 +1188,21 @@ class StagingCompatScriptTests(unittest.TestCase):
             self.write_fake_curl(temporary)
             restored = '{"status":"ok","buildNumber":"232","imageId":"%s","compatibilityFixture":null}' % HEALTH_COMMIT
             health = self.write_health_responses(temporary, restored, restored, restored, restored)
-            (temporary / "deploy-runs.json").write_text(
+            (temporary / "deployments.json").write_text(
                 json.dumps(
-                    {
-                        "id": 901,
-                        "created_at": "2026-10-04T01:00:00Z",
-                        "path": ".github/workflows/azure-api-deploy.yml",
-                        "name": "Azure Control API Deploy",
-                    }
+                    [
+                        {
+                            "id": 9001,
+                            "created_at": "2026-10-04T08:00:00Z",
+                            "environment": "production",
+                        },
+                        {
+                            "id": int(DEPLOY_STAGING_DEPLOYMENT_ID),
+                            "created_at": "2026-10-03T00:00:00Z",
+                            "environment": "test",
+                        },
+                    ]
                 )
-                + "\n"
             )
             env = self.environment(temporary)
             env["AZ_CALL_LOG"] = str(temporary / "az.log")
@@ -1166,11 +1217,12 @@ class StagingCompatScriptTests(unittest.TestCase):
             env["EXPECTED_SETTING_NAMES_PATH"] = str(names)
             env["HEALTH_RETRY_SECONDS"] = "0"
             env["HEALTH_RESPONSES"] = str(health)
-            env["GH_DEPLOY_STAGING_RUNS"] = str(temporary / "deploy-runs.json")
+            env["GH_DEPLOYMENT_JSON"] = str(temporary / "deployments.json")
             env["GITHUB_STEP_SUMMARY"] = str(temporary / "summary.md")
             result = self.run_script(env, "restore")
             self.assertEqual(0, result.returncode, result.stderr + result.stdout)
             self.assertIn("BFF smoke reported compatible", result.stderr + result.stdout)
+            self.assertNotIn("/deployments/9001", (temporary / "gh.log").read_text())
 
     def test_mint_masks_the_token_and_never_writes_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1197,6 +1249,143 @@ class StagingCompatScriptTests(unittest.TestCase):
             result = self.run_script(env, "mint")
             self.assertNotEqual(0, result.returncode)
             self.assertIn("role must be authenticated", result.stderr + result.stdout)
+
+    def test_restore_deletes_before_a_mint_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            digest = "sha256:" + ("c" * 64)
+            image = self.tagged_image(digest)
+            names = temporary / "names.txt"
+            names.write_text("Application__BuildNumber\n")
+            present = temporary / "present"
+            present.write_text("present\n")
+            self.write_fake_az(temporary, ["Application__BuildNumber"], image, digest)
+            self.write_fake_gh(temporary)
+            self.write_fake_curl(temporary)
+            restored = '{"status":"ok","buildNumber":"232","imageId":"%s","compatibilityFixture":null}' % HEALTH_COMMIT
+            health = self.write_health_responses(temporary, restored, restored, restored, restored)
+            env = self.environment(temporary)
+            env["AZ_CALL_LOG"] = str(temporary / "az.log")
+            env["GH_CALL_LOG"] = str(temporary / "gh.log")
+            env["AZ_SETTING_PRESENT"] = str(present)
+            env["EXPECTED_DIGEST"] = digest
+            env["EXPECTED_BUILD_NUMBER"] = "232"
+            env["EXPECTED_COMMIT"] = HEALTH_COMMIT
+            env["EXPECTED_DEPLOYMENT_ID"] = DEPLOY_STAGING_DEPLOYMENT_ID
+            env["EXPECTED_IMAGE_REFERENCE"] = image
+            env["EXPECTED_PREFLIGHT_STARTED_AT"] = "2026-10-04T00:00:00Z"
+            env["EXPECTED_SETTING_NAMES_PATH"] = str(names)
+            env["HEALTH_RETRY_SECONDS"] = "0"
+            env["HEALTH_RESPONSES"] = str(health)
+            env["TOKEN_FAIL"] = "1"
+            result = self.run_script(env, "restore")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("password grant did not return HTTP 200", result.stderr + result.stdout)
+            self.assertFalse(present.exists())
+            az_log = (temporary / "az.log").read_text()
+            self.assertIn("appsettings delete", az_log)
+            self.assertIn("webapp restart", az_log)
+
+    def test_preflight_fails_when_health_omits_compatibility_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            digest = "sha256:" + ("a" * 64)
+            image = self.tagged_image(digest)
+            self.write_fake_az(temporary, ["Application__BuildNumber"], image, digest)
+            self.write_fake_gh(temporary)
+            self.write_fake_curl(temporary)
+            missing = '{"status":"ok","buildNumber":"232","imageId":"%s"}' % HEALTH_COMMIT
+            health = self.write_health_responses(temporary, missing)
+            env = self.environment(temporary)
+            env["AZ_CALL_LOG"] = str(temporary / "az.log")
+            env["GH_CALL_LOG"] = str(temporary / "gh.log")
+            env["HEALTH_RESPONSES"] = str(health)
+            result = self.run_script(env, "preflight")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("compatibilityFixture must be JSON null", result.stderr + result.stdout)
+
+    def test_restore_fails_closed_when_a_preflight_output_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            digest = "sha256:" + ("c" * 64)
+            image = self.tagged_image(digest)
+            names = temporary / "names.txt"
+            names.write_text("Application__BuildNumber\n")
+            present = temporary / "present"
+            present.write_text("present\n")
+            self.write_fake_az(temporary, ["Application__BuildNumber"], image, digest)
+            self.write_fake_gh(temporary)
+            self.write_fake_curl(temporary)
+            restored = '{"status":"ok","buildNumber":"232","imageId":"%s","compatibilityFixture":null}' % HEALTH_COMMIT
+            health = self.write_health_responses(temporary, restored, restored, restored, restored)
+            env = self.environment(temporary)
+            env["AZ_CALL_LOG"] = str(temporary / "az.log")
+            env["AZ_SETTING_PRESENT"] = str(present)
+            env["EXPECTED_DIGEST"] = digest
+            env["EXPECTED_COMMIT"] = HEALTH_COMMIT
+            env["EXPECTED_DEPLOYMENT_ID"] = DEPLOY_STAGING_DEPLOYMENT_ID
+            env["EXPECTED_IMAGE_REFERENCE"] = image
+            env["EXPECTED_PREFLIGHT_STARTED_AT"] = "2026-10-04T00:00:00Z"
+            env["EXPECTED_SETTING_NAMES_PATH"] = str(names)
+            env["HEALTH_RETRY_SECONDS"] = "0"
+            env["HEALTH_RESPONSES"] = str(health)
+            result = self.run_script(env, "restore")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("missing the preflight /health build number", result.stderr + result.stdout)
+            self.assertFalse(present.exists())
+            self.assertIn("appsettings delete", (temporary / "az.log").read_text())
+
+    def test_restore_stops_deploy_walk_at_the_first_older_deployment(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            digest = "sha256:" + ("c" * 64)
+            image = self.tagged_image(digest)
+            names = temporary / "names.txt"
+            names.write_text("Application__BuildNumber\n")
+            present = temporary / "present"
+            present.write_text("present\n")
+            self.write_fake_az(temporary, ["Application__BuildNumber"], image, digest)
+            self.write_fake_gh(temporary)
+            self.write_fake_curl(temporary)
+            restored = '{"status":"ok","buildNumber":"232","imageId":"%s","compatibilityFixture":null}' % HEALTH_COMMIT
+            health = self.write_health_responses(temporary, restored, restored, restored, restored)
+            rows = [
+                {
+                    "id": int(DEPLOY_STAGING_DEPLOYMENT_ID),
+                    "created_at": "2026-10-03T12:00:00Z",
+                    "environment": "test",
+                }
+            ]
+            rows.extend(
+                {
+                    "id": 2000 + index,
+                    "created_at": f"2026-10-02T{index:02d}:00:00Z",
+                    "environment": "test",
+                }
+                for index in range(47)
+            )
+            (temporary / "deployments.json").write_text(json.dumps(rows))
+            env = self.environment(temporary)
+            env["AZ_CALL_LOG"] = str(temporary / "az.log")
+            env["GH_CALL_LOG"] = str(temporary / "gh.log")
+            env["AZ_SETTING_PRESENT"] = str(present)
+            env["EXPECTED_DIGEST"] = digest
+            env["EXPECTED_BUILD_NUMBER"] = "232"
+            env["EXPECTED_COMMIT"] = HEALTH_COMMIT
+            env["EXPECTED_DEPLOYMENT_ID"] = DEPLOY_STAGING_DEPLOYMENT_ID
+            env["EXPECTED_IMAGE_REFERENCE"] = image
+            env["EXPECTED_PREFLIGHT_STARTED_AT"] = "2026-10-04T00:00:00Z"
+            env["EXPECTED_SETTING_NAMES_PATH"] = str(names)
+            env["HEALTH_RETRY_SECONDS"] = "0"
+            env["HEALTH_RESPONSES"] = str(health)
+            env["GH_DEPLOYMENT_JSON"] = str(temporary / "deployments.json")
+            env["GITHUB_STEP_SUMMARY"] = str(temporary / "summary.md")
+            result = self.run_script(env, "restore")
+            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+            created_at_reads = (temporary / "gh.log").read_text().count("/deployments/") - (
+                temporary / "gh.log"
+            ).read_text().count("/deployments?")
+            self.assertLess(created_at_reads, 8)
 
 
 if __name__ == "__main__":

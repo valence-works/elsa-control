@@ -71,12 +71,16 @@ pinned staging project ref (the production ref
 - variable `EXPECTED_STAGING_SUPABASE_ORIGIN` (`https://<ref>.supabase.co`)
 - variable `CLOUD_BFF_SMOKE_URL` (`https://<ref>.supabase.co/functions/v1/control-bff`)
 
-The minted token is masked with `::add-mask::` immediately, never
-written to outputs, and minted again before restore. Issuer must be
+The job mints a token inside preflight, arm, and restore (each step
+mints in-process; the token is never written to `GITHUB_ENV` or
+outputs). It is masked with `::add-mask::` immediately. Issuer must be
 `https://<ref>.supabase.co/auth/v1`; audience and role must be
 `authenticated`. After restore, BFF proof is `POST` `{ "action":
 "compatibility" }` and passes only on HTTP 200 with
-`.data.state=="compatible"` and `contractVersion==1`.
+`.data.state=="compatible"` and `contractVersion==1`. While armed, the
+same POST must return HTTP 503 with `code: control_update_in_progress`.
+A Supabase password-grant failure must **not** block removing the
+fixture: restore deletes the setting and restarts before it mints.
 
 **What it does.** Staging Control is an Azure **Web App**. Arm **sets**
 `CloudCompatibility__StagingFixture` and **restarts** the same deployed
@@ -84,9 +88,10 @@ build. Restore **deletes** the setting (it does not blank it) and
 restarts again **only when that setting is present**. If exclusive
 preflight failed closed or arm never wrote the fixture, restore does not
 restart or otherwise mutate the Web App. `/health.compatibilityFixture`
-is a recycle witness only. Arm and restore count as successful only when
-the authenticated compatibility response matches the armed contract or
-the baseline, and restore also requires BFF smoke `compatible`.
+is a recycle witness only and must be JSON `null` (the key present).
+Arm and restore count as successful only when the authenticated
+compatibility response matches the armed contract or the baseline, and
+restore also requires BFF smoke `compatible`.
 
 **Time cap.** The fixture may stay applied at most 20 minutes from the
 setting write. Restore always keeps a reserved 4-minute budget, including
@@ -100,9 +105,24 @@ armed, remove it by hand on the staging Control Web App:
 1. Delete the `CloudCompatibility__StagingFixture` app setting. Do not
    blank it.
 2. Restart the Web App on the same deployed build.
-3. Verify `/health.compatibilityFixture` is `null`, authenticated
-   `GET /api/cloud/compatibility` matches the baseline contract, and BFF
-   smoke reports `compatible`.
+3. Verify `/health.compatibilityFixture` is JSON `null`, authenticated
+   `GET /api/cloud/compatibility` matches the baseline contract, and the
+   Cloud BFF reports compatible:
+
+   ```bash
+   curl --request POST \
+     --header "Authorization: Bearer <minted-access-token>" \
+     --header "apikey: ${VITE_SUPABASE_PUBLISHABLE_KEY}" \
+     --header "Content-Type: application/json" \
+     --data '{"action":"compatibility"}' \
+     "${CLOUD_BFF_SMOKE_URL}"
+   ```
+
+   Pass only on HTTP 200 with `.data.state=="compatible"` and
+   `contractVersion==1`. Mint the bearer with
+   `POST ${EXPECTED_STAGING_SUPABASE_ORIGIN}/auth/v1/token?grant_type=password`
+   using the dedicated `STAGING_E2E_COMPAT_*` user and the publishable
+   key as `apikey`.
 
 ## GitHub Actions Deployment
 

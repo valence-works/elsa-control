@@ -315,23 +315,23 @@ latest_deploy_staging_deployment_id() {
 assert_no_deploy_staging_since() {
   local since="${1:-}"
   local repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required.}"
-  local deployment_ids deployment_id created statuses url run_id path
+  local rows deployment_id created statuses url run_id path
   if [ -z "$since" ]; then
     fail "The preflight start time is required to prove Deploy staging did not start."
   fi
   # Only GitHub environment `test` deployments. azure-api-deploy.yml also
   # deploys production and development; those must not fail restore.
-  deployment_ids="$(gh_get --paginate \
-    "repos/${repo}/deployments?environment=test&per_page=50" \
-    --jq '.[] | .id')"
-  while IFS= read -r deployment_id; do
+  # Newest-first: stop at the first row older than preflight.
+  rows="$(gh_get --paginate \
+    "repos/${repo}/deployments?environment=test&per_page=100" \
+    --jq '.[] | [.id, .created_at] | @tsv')"
+  while IFS=$'\t' read -r deployment_id created; do
     [[ "$deployment_id" =~ ^[0-9]+$ ]] || continue
-    created="$(gh_get "repos/${repo}/deployments/${deployment_id}" --jq '.created_at')"
     if [ -z "$created" ]; then
       fail "A test-environment deployment created_at could not be read."
     fi
     if ! [[ "$created" > "$since" ]]; then
-      continue
+      break
     fi
     statuses="$(gh_get "repos/${repo}/deployments/${deployment_id}/statuses?per_page=1")"
     require_json_array "$statuses" "Test-environment deployment status"
@@ -346,7 +346,7 @@ assert_no_deploy_staging_since() {
     if [ "$path" = "$DEPLOY_STAGING_WORKFLOW_PATH" ]; then
       fail "A Deploy staging run started between preflight and postflight."
     fi
-  done <<< "$deployment_ids"
+  done <<< "$rows"
 }
 
 restart_webapp() {
@@ -440,13 +440,20 @@ known_health_fixture() {
 }
 
 # Witness only. /health.compatibilityFixture is never the arm/restore proof.
+# A missing field is not null; that fails closed as unrecognized.
 health_fixture_signal() {
   local response_file="$1"
-  local raw
-  raw="$(jq -r 'if has("compatibilityFixture") and (.compatibilityFixture | type == "string") then .compatibilityFixture else empty end' "$response_file")"
-  if known_health_fixture "$raw"; then
-    printf '%s\n' "$raw"
+  if jq -e 'has("compatibilityFixture") and .compatibilityFixture == null' "$response_file" >/dev/null 2>&1; then
+    printf '\n'
     return 0
+  fi
+  if jq -e 'has("compatibilityFixture") and (.compatibilityFixture | type == "string")' "$response_file" >/dev/null 2>&1; then
+    local raw
+    raw="$(jq -r '.compatibilityFixture' "$response_file")"
+    if known_health_fixture "$raw"; then
+      printf '%s\n' "$raw"
+      return 0
+    fi
   fi
   printf '%s\n' "__unrecognized__"
 }
@@ -680,7 +687,38 @@ read_health_identity() {
 
 require_null_health_fixture() {
   if [ "${HEALTH_FIXTURE:-}" != "" ]; then
-    fail "The /health compatibilityFixture must be null before arming and after restore."
+    fail "The /health compatibilityFixture must be JSON null before arming and after restore."
+  fi
+}
+
+require_restore_baseline() {
+  local expected_digest="$1"
+  local expected_names="$2"
+  local expected_build="$3"
+  local expected_commit="$4"
+  local expected_image="$5"
+  local expected_deployment="$6"
+  local expected_started="$7"
+  if [ -z "$expected_digest" ]; then
+    fail "Restore is missing the preflight digest."
+  fi
+  if [ -z "$expected_names" ] || [ ! -f "$expected_names" ]; then
+    fail "Restore is missing the preflight env-var names file."
+  fi
+  if [ -z "$expected_build" ]; then
+    fail "Restore is missing the preflight /health build number."
+  fi
+  if [ -z "$expected_commit" ]; then
+    fail "Restore is missing the preflight /health imageId."
+  fi
+  if [ -z "$expected_image" ]; then
+    fail "Restore is missing the preflight sitecontainers image reference."
+  fi
+  if [ -z "$expected_deployment" ]; then
+    fail "Restore is missing the preflight Deploy staging deployment id."
+  fi
+  if [ -z "$expected_started" ]; then
+    fail "Restore is missing the preflight start time."
   fi
 }
 
@@ -992,11 +1030,11 @@ restore() {
     echo "The compatibility fixture was never written; restore is a no-op and will not restart the Web App."
     return 0
   fi
-  require_smoke_inputs
-  mint_cloud_token
-  if [ -z "$expected_digest" ]; then
-    echo "No preflight digest was captured; restoring from the current serving digest."
-    expected_digest="$(serving_image_digest)"
+  # Remove the fixture before minting. A password-grant failure must not
+  # leave CloudCompatibility__StagingFixture set on staging.
+  local witness_digest="$expected_digest"
+  if [ -z "$witness_digest" ]; then
+    witness_digest="$(serving_image_digest)"
   fi
   if ! az webapp config appsettings delete \
     --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -1011,7 +1049,9 @@ restore() {
     fail "The compatibility fixture setting is still present after restore."
   fi
   restart_webapp
-  wait_until_recycle_witness "$expected_digest" "" "$expected_build" "$expected_commit"
+  wait_until_recycle_witness "$witness_digest" "" "$expected_build" "$expected_commit"
+  require_restore_baseline "$expected_digest" "$expected_names" "$expected_build" \
+    "$expected_commit" "$expected_image" "$expected_deployment" "$expected_started"
   local digest image_reference names_file deployment_id
   image_reference="$(serving_image_reference)"
   digest="$(image_digest "$image_reference")"
@@ -1021,27 +1061,27 @@ restore() {
   assert_health_agrees_with_image "$image_reference" "$digest" "$HEALTH_COMMIT"
   names_file="$(mktemp)"
   list_setting_names > "$names_file"
-  if [ -n "$expected_names" ] && [ -f "$expected_names" ]; then
-    if ! names_match "$expected_names" "$names_file"; then
-      fail "Env var names after restore do not match the preflight baseline."
-    fi
+  if ! names_match "$expected_names" "$names_file"; then
+    fail "Env var names after restore do not match the preflight baseline."
   fi
   if [ "$digest" != "$expected_digest" ]; then
     fail "The serving digest after restore does not match the preflight baseline."
   fi
-  if [ -n "$expected_build" ] && [ "$HEALTH_BUILD_NUMBER" != "$expected_build" ]; then
+  if [ "$HEALTH_BUILD_NUMBER" != "$expected_build" ]; then
     fail "The /health build number after restore does not match the preflight baseline."
   fi
-  if [ -n "$expected_commit" ] && [ "$HEALTH_COMMIT" != "$expected_commit" ]; then
+  if [ "$HEALTH_COMMIT" != "$expected_commit" ]; then
     fail "The /health commit after restore does not match the preflight baseline."
   fi
-  if [ -n "$expected_image" ] && [ "$image_reference" != "$expected_image" ]; then
+  if [ "$image_reference" != "$expected_image" ]; then
     fail "The sitecontainers image reference after restore does not match the preflight baseline."
   fi
-  if [ -n "$expected_deployment" ] && [ "$deployment_id" != "$expected_deployment" ]; then
+  if [ "$deployment_id" != "$expected_deployment" ]; then
     fail "The Deploy staging GitHub deployment id after restore does not match the preflight baseline."
   fi
   assert_no_deploy_staging_since "$expected_started"
+  require_smoke_inputs
+  mint_cloud_token
   prove_authenticated_compatibility ""
   prove_bff_smoke_compatible
   write_summary "Staging compatibility fixture restore" "$digest" "$image_reference" \

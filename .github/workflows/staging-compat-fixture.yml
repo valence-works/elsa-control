@@ -42,9 +42,6 @@ jobs:
       AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
       AZURE_WEBAPP_NAME: ${{ vars.AZURE_WEBAPP_NAME }}
       AZURE_CONTAINER_REGISTRY_ENDPOINT: ${{ vars.AZURE_CONTAINER_REGISTRY_ENDPOINT }}
-      STAGING_E2E_COMPAT_EMAIL: ${{ secrets.STAGING_E2E_COMPAT_EMAIL }}
-      STAGING_E2E_COMPAT_PASSWORD: ${{ secrets.STAGING_E2E_COMPAT_PASSWORD }}
-      VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
       STAGING_SUPABASE_PROJECT_REF: ${{ vars.STAGING_SUPABASE_PROJECT_REF }}
       EXPECTED_STAGING_SUPABASE_ORIGIN: ${{ vars.EXPECTED_STAGING_SUPABASE_ORIGIN }}
       CLOUD_BFF_SMOKE_URL: ${{ vars.CLOUD_BFF_SMOKE_URL }}
@@ -72,16 +69,13 @@ jobs:
           tenant-id: ${{ env.AZURE_TENANT_ID }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Mint the staging Cloud user token
-        shell: bash
-        run: |
-          set -euo pipefail
-          scripts/staging-compat-fixture.sh mint
-
       - name: Preflight exclusive staging and capture the baseline
         id: preflight
         env:
           GH_TOKEN: ${{ github.token }}
+          STAGING_E2E_COMPAT_EMAIL: ${{ secrets.STAGING_E2E_COMPAT_EMAIL }}
+          STAGING_E2E_COMPAT_PASSWORD: ${{ secrets.STAGING_E2E_COMPAT_PASSWORD }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
         shell: bash
         run: |
           set -euo pipefail
@@ -91,6 +85,9 @@ jobs:
         id: arm
         timeout-minutes: 12
         env:
+          STAGING_E2E_COMPAT_EMAIL: ${{ secrets.STAGING_E2E_COMPAT_EMAIL }}
+          STAGING_E2E_COMPAT_PASSWORD: ${{ secrets.STAGING_E2E_COMPAT_PASSWORD }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
           EXPECTED_DIGEST: ${{ steps.preflight.outputs.digest }}
           EXPECTED_BUILD_NUMBER: ${{ steps.preflight.outputs.build_number }}
           EXPECTED_COMMIT: ${{ steps.preflight.outputs.commit }}
@@ -125,21 +122,19 @@ jobs:
             sleep 30
           done
 
-      - name: Mint the staging Cloud user token before restore
-        if: ${{ always() && steps.preflight.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          scripts/staging-compat-fixture.sh mint
-
       - name: Restore the baseline
         # Skip when exclusive preflight failed closed: the fixture was never
         # written, and a restore restart would bounce staging during an open
         # QA window, missing freeze, or conflicting test deployment.
+        # A failed password grant must not block deleting the fixture; restore
+        # removes the setting before it mints.
         if: ${{ always() && steps.preflight.outcome == 'success' }}
         timeout-minutes: 4
         env:
           GH_TOKEN: ${{ github.token }}
+          STAGING_E2E_COMPAT_EMAIL: ${{ secrets.STAGING_E2E_COMPAT_EMAIL }}
+          STAGING_E2E_COMPAT_PASSWORD: ${{ secrets.STAGING_E2E_COMPAT_PASSWORD }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
           EXPECTED_DIGEST: ${{ steps.preflight.outputs.digest }}
           EXPECTED_BUILD_NUMBER: ${{ steps.preflight.outputs.build_number }}
           EXPECTED_COMMIT: ${{ steps.preflight.outputs.commit }}
