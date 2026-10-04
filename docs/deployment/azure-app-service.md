@@ -199,13 +199,14 @@ start of the new image cannot miss that setting.
 enabled without ExpectedMode. Before that write, the workflow captures the
 non-secret restore set: ExpectedMode plus `Billing__Stripe__Enabled` and
 `Billing__Lifecycle__Enabled`, including existence, value, and slot-setting
-metadata. An unreadable settings list aborts before any mutation. Secret
-values are never captured into workflow outputs. Enablement flags are
-accepted with the same case-insensitive Boolean semantics as
-`scripts/production_stripe_reconcile.py` (`.strip().lower()`), so
-`TRUE`/`True`/`true` and `FALSE`/`False`/`false` are valid, including the
-same surrounding whitespace `.strip()` accepts. Capture and restore keep
-the exact original string. Captured values are written as GitHub Actions
+metadata. An unreadable, empty, or non-array settings list aborts before
+any mutation. Secret values are never captured into workflow outputs.
+Enablement flags are accepted with the same case-insensitive Boolean
+semantics as `scripts/production_stripe_reconcile.py` (`.strip().lower()`),
+so `TRUE`/`True`/`true` and `FALSE`/`False`/`false` are valid, including
+ASCII and POSIX whitespace, CR/LF included; other Unicode whitespace is
+rejected (fails closed). Capture and restore keep the exact original
+string. Captured values are written as GitHub Actions
 delimited output records so a leading or trailing CR/LF cannot split a
 single-line `NAME=VALUE` assignment. The full restore set is validated
 before any capture output is published, so one invalid flag cannot leave a

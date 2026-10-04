@@ -987,7 +987,13 @@ jobs:
               echo "::error::Could not read billing restore settings; refusing to mutate the Web App."
               exit 1
             fi
-            billing_restore_records="$(printf '%s' "$billing_restore_records" | jq -c 'if type == "array" then . elif . == null then [] else [.] end')"
+            # Require a JSON array. Empty stdout, whitespace, null, and
+            # non-arrays must fail closed so rollback cannot treat an
+            # unreadable prior state as "all three absent".
+            if ! billing_restore_records="$(printf '%s' "$billing_restore_records" | jq -ce 'if type == "array" then . else error("not an array") end')"; then
+              echo "::error::Could not read billing restore settings; refusing to mutate the Web App."
+              exit 1
+            fi
             billing_mode_pattern='^(test|live|staging|production)$'
 
             # Enablement flags use the same case-insensitive Boolean semantics

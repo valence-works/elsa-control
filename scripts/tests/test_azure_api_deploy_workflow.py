@@ -299,13 +299,13 @@ if args[:3] == ["webapp", "config", "appsettings"] and "list" in args:
     if "Billing__Stripe__ExpectedMode" in query:
         current = os.environ.get("CURRENT_EXPECTED_MODE", "")
         if current:
-            print(json.dumps({{
+            print(json.dumps([{{
                 "name": "Billing__Stripe__ExpectedMode",
                 "value": current,
                 "slotSetting": False,
-            }}))
+            }}]))
         else:
-            print("null")
+            print("[]")
     else:
         print("0" if "length(@" in query else "")
 elif args[:3] == ["webapp", "config", "appsettings"] and "set" in args:
@@ -1356,8 +1356,9 @@ fi
         # and billing enablement are captured first and restored as a coherent
         # pair on every API rollback trigger. Enablement flags accept the
         # same case-insensitive Boolean variants as production reconcile
-        # while restore keeps the exact original string. An unreadable or
-        # incomplete prior state aborts before mutation or capture publish.
+        # while restore keeps the exact original string. An unreadable,
+        # empty, or non-array prior state aborts before mutation or
+        # capture publish.
         # Telemetry still never appears in the rollback condition.
         self.assertNotIn("TELEMETRY_FAILURE_ROLLS_BACK_API", self.source)
         self.assertIn("never rolls back the API in", self.source)
@@ -1382,6 +1383,8 @@ fi
         self.assertIn("billing_flag_is_true", self.source)
         self.assertIn('printf \'%s\' "${trimmed,,}"', self.source)
         self.assertIn("Validate the full restore set before publishing any capture", self.source)
+        self.assertIn("jq -ce 'if type == \"array\" then . else error(\"not an array\") end'", self.source)
+        self.assertNotIn("elif . == null then [] else [.] end", self.source)
         self.assertIn("jq -j '.value // empty'", self.source)
         self.assertIn('printf \'%s<<%s\\n\' "$name" "$delimiter"', self.source)
         self.assertIn("ELSA_BILLING_CAPTURE_EOF", self.source)
@@ -1634,6 +1637,17 @@ if args[:3] == ["webapp", "config", "appsettings"] and "list" in args:
         if os.environ.get("FAIL_SETTINGS_LIST") == "1":
             record("appsettings-list-failed")
             raise SystemExit(17)
+        empty_mode = os.environ.get("EMPTY_SETTINGS_LIST", "")
+        if empty_mode:
+            record("appsettings-list-empty-" + empty_mode)
+            if empty_mode == "empty":
+                raise SystemExit(0)
+            if empty_mode == "whitespace":
+                print("   ")
+                raise SystemExit(0)
+            if empty_mode == "null":
+                print("null")
+                raise SystemExit(0)
         print(json.dumps([
             current
             for name in BILLING_RESTORE_NAMES
@@ -1971,6 +1985,63 @@ printf '200'
                     self.assertEqual(before, expected_mode())
                     self.assertNotIn(
                         "billing-expected-mode-deleted",
+                        events_path.read_text().splitlines(),
+                    )
+
+            empty_list_cases = []
+            for mode in ("app", "promote"):
+                for environment, target in (("test", "test"), ("production", "live")):
+                    for payload in ("empty", "whitespace", "null"):
+                        empty_list_cases.append((mode, environment, target, payload))
+
+            for mode, environment, target, payload in empty_list_cases:
+                with self.subTest(mode=mode, environment=environment, prior=f"empty-list-{payload}"):
+                    seed_state(target, False, prior_enabled="true")
+                    deploy_env = base_environment(
+                        mode=mode, target_environment=environment, billing_mode=target
+                    )
+                    deploy_env["GITHUB_OUTPUT"] = str(github_output_path)
+                    deploy_env["EMPTY_SETTINGS_LIST"] = payload
+                    deploy_env["FAIL_IMAGE_SWITCH"] = "1"
+                    before = {
+                        "mode": expected_mode(),
+                        "stripe": stripe_enabled(),
+                        "lifecycle": lifecycle_enabled(),
+                    }
+                    deploy = run_shell(deploy_script, deploy_env)
+                    self.assertNotEqual(0, deploy.returncode, deploy.stdout + deploy.stderr)
+                    combined = deploy.stdout + deploy.stderr
+                    self.assertIn(
+                        "Could not read billing restore settings; refusing to mutate the Web App.",
+                        combined,
+                    )
+                    observed = events_path.read_text().splitlines()
+                    self.assertIn(f"appsettings-list-empty-{payload}", observed)
+                    self.assertNotIn("appsettings-set", observed)
+                    self.assertNotIn("billing-expected-mode-set", observed)
+                    self.assertNotIn("runtime-replaced", observed)
+                    self.assertNotIn("image-switch-failed", observed)
+                    self.assertEqual(before["mode"], expected_mode())
+                    self.assertEqual(before["stripe"], stripe_enabled())
+                    self.assertEqual(before["lifecycle"], lifecycle_enabled())
+                    outputs = parse_outputs()
+                    self.assertNotIn("billing_expected_mode_present", outputs)
+                    self.assertNotIn("billing_stripe_enabled_present", outputs)
+                    self.assertNotIn("billing_lifecycle_enabled_present", outputs)
+                    self.assertNotIn("billing_expected_mode", outputs)
+                    self.assertNotIn("billing_stripe_enabled", outputs)
+                    self.assertNotIn("billing_lifecycle_enabled", outputs)
+
+                    rollback = run_shell(rollback_script, rollback_environment(deploy_env))
+                    self.assertEqual(0, rollback.returncode, rollback.stdout + rollback.stderr)
+                    self.assertEqual(before["mode"], expected_mode())
+                    self.assertEqual(before["stripe"], stripe_enabled())
+                    self.assertNotIn(
+                        "billing-expected-mode-deleted",
+                        events_path.read_text().splitlines(),
+                    )
+                    self.assertNotIn(
+                        "billing-stripe-enabled-deleted",
                         events_path.read_text().splitlines(),
                     )
 
@@ -2657,7 +2728,7 @@ case "$*" in
   *"webapp config appsettings delete"*) exit 0 ;;
   *"webapp config appsettings list"*)
     case "$*" in
-      *"Billing__Stripe__ExpectedMode"*) printf 'null\\n' ;;
+      *"Billing__Stripe__ExpectedMode"*) printf '[]\\n' ;;
       *"].name"*|*" ].name"*) ;;
       *"].value"*|*" ].value"*) ;;
       *) printf '%s\\n' "0" ;;
