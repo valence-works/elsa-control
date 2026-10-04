@@ -203,8 +203,11 @@ metadata. An unreadable settings list aborts before any mutation. Secret
 values are never captured into workflow outputs. Enablement flags are
 accepted with the same case-insensitive Boolean semantics as
 `scripts/production_stripe_reconcile.py` (`.strip().lower()`), so
-`TRUE`/`True`/`true` and `FALSE`/`False`/`false` are valid. Capture and
-restore keep the exact original string. The full restore set is validated
+`TRUE`/`True`/`true` and `FALSE`/`False`/`false` are valid, including the
+same surrounding whitespace `.strip()` accepts. Capture and restore keep
+the exact original string. Captured values are written as GitHub Actions
+delimited output records so a leading or trailing CR/LF cannot split a
+single-line `NAME=VALUE` assignment. The full restore set is validated
 before any capture output is published, so one invalid flag cannot leave a
 partial prior-state record. If the current ExpectedMode already equals the
 target, the pre-switch write is skipped.

@@ -15,6 +15,65 @@ from textwrap import dedent
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "azure-api-deploy.yml"
+
+
+def parse_github_output_file(text: str) -> dict[str, str]:
+    """Parse GITHUB_OUTPUT the way actions/runner EnvFileKeyValuePairs does.
+
+    Linux runners split lines on LF only. NAME=VALUE is a single line.
+    NAME<<DELIM records keep the exact bytes between the header newline and
+    the newline that terminates the last content line before DELIM, so
+    leading and trailing CR/LF in the value are preserved. A standalone
+    Boolean line with neither '=' nor '<<' is invalid.
+    """
+
+    parsed: dict[str, str] = {}
+    index = 0
+    length = len(text)
+
+    def read_line() -> tuple[str | None, str | None]:
+        nonlocal index
+        if index >= length:
+            return None, None
+        start = index
+        lf = text.find("\n", index)
+        if lf < 0:
+            index = length
+            return text[start:], None
+        index = lf + 1
+        return text[start:lf], "\n"
+
+    line, _ = read_line()
+    while line is not None:
+        if line != "":
+            equals_index = line.find("=")
+            heredoc_index = line.find("<<")
+            if equals_index >= 0 and (heredoc_index < 0 or equals_index < heredoc_index):
+                key, value = line.split("=", 1)
+                if key == "":
+                    raise ValueError(f"Invalid format '{line}'. Name must not be empty")
+                parsed[key] = value
+            elif heredoc_index >= 0 and (equals_index < 0 or heredoc_index < equals_index):
+                key, delimiter = line.split("<<", 1)
+                if not key or not delimiter:
+                    raise ValueError(
+                        f"Invalid format '{line}'. Name must not be empty and delimiter must not be empty"
+                    )
+                start_index = index
+                end_index = index
+                temp_line, newline = read_line()
+                while temp_line != delimiter:
+                    if temp_line is None:
+                        raise ValueError(f"Invalid value. Matching delimiter not found '{delimiter}'")
+                    if newline is None:
+                        raise ValueError("Invalid value. EOF marker missing new line.")
+                    end_index = index - len(newline)
+                    temp_line, newline = read_line()
+                parsed[key] = text[start_index:end_index] if end_index > start_index else ""
+            else:
+                raise ValueError(f"Invalid format '{line}'")
+        line, _ = read_line()
+    return parsed
 PRODUCTION_BILLING_FIXTURE = {
     "STRIPE_PRODUCTION_PRICE_ID": "price_livefixture",
     "CONTROL_PRODUCTION_WEBHOOK_URL": "https://control.example.test/api/billing/webhooks/stripe",
@@ -29,6 +88,44 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = WORKFLOW.read_text()
+
+    def test_github_output_parser_matches_actions_runner(self) -> None:
+        self.assertEqual(
+            {"billing_stripe_enabled": "TRUE"},
+            parse_github_output_file("billing_stripe_enabled=TRUE\n"),
+        )
+        self.assertEqual(
+            {"billing_stripe_enabled": "\nTRUE"},
+            parse_github_output_file(
+                "billing_stripe_enabled<<EOF\n\nTRUE\nEOF\n"
+            ),
+        )
+        self.assertEqual(
+            {"billing_stripe_enabled": "TRUE\n"},
+            parse_github_output_file(
+                "billing_stripe_enabled<<EOF\nTRUE\n\nEOF\n"
+            ),
+        )
+        self.assertEqual(
+            {"billing_stripe_enabled": "TRUE\r"},
+            parse_github_output_file(
+                "billing_stripe_enabled<<EOF\nTRUE\r\nEOF\n"
+            ),
+        )
+        with self.assertRaises(ValueError):
+            parse_github_output_file("billing_stripe_enabled=\nTRUE\n")
+        with tempfile.NamedTemporaryFile("wb", delete=False) as handle:
+            handle.write(
+                b"billing_stripe_enabled<<EOF\n\rTRUE\nEOF\n"
+                b"billing_lifecycle_enabled<<EOF\nTRUE\r\nEOF\n"
+            )
+            path = Path(handle.name)
+        try:
+            from_file = parse_github_output_file(path.read_bytes().decode("utf-8"))
+            self.assertEqual("\rTRUE", from_file["billing_stripe_enabled"])
+            self.assertEqual("TRUE\r", from_file["billing_lifecycle_enabled"])
+        finally:
+            path.unlink()
 
     def test_capture_supports_classic_and_sitecontainer_runtime_images(self) -> None:
         self.assertIn("image_reference_pattern=", self.source)
@@ -1285,6 +1382,10 @@ fi
         self.assertIn("billing_flag_is_true", self.source)
         self.assertIn('printf \'%s\' "${trimmed,,}"', self.source)
         self.assertIn("Validate the full restore set before publishing any capture", self.source)
+        self.assertIn("jq -j '.value // empty'", self.source)
+        self.assertIn('printf \'%s<<%s\\n\' "$name" "$delimiter"', self.source)
+        self.assertIn("ELSA_BILLING_CAPTURE_EOF", self.source)
+        self.assertNotIn('echo "${prefix}=$value" >> "$GITHUB_OUTPUT"', self.source)
         self.assertNotIn("billing_enabled_pattern='^(true|false)$'", self.source)
         self.assertNotIn('[ "${PREVIOUS_BILLING_STRIPE_ENABLED:-}" = true ]', self.source)
         self.assertIn("PRODUCTION_STRIPE_OUTCOME", self.source)
@@ -1668,13 +1769,12 @@ printf '200'
                 return settings().get("Billing__Lifecycle__Enabled")
 
             def parse_outputs() -> dict[str, str]:
-                parsed: dict[str, str] = {}
-                if github_output_path.exists():
-                    for line in github_output_path.read_text().splitlines():
-                        if "=" in line:
-                            key, value = line.split("=", 1)
-                            parsed[key] = value
-                return parsed
+                if not github_output_path.exists():
+                    return {}
+                # Decode bytes so universal newlines cannot turn a leading CR
+                # into LF or eat a trailing CR before CRLF. Matches the Linux
+                # runner File.ReadAllText + LF-only ReadLine path.
+                return parse_github_output_file(github_output_path.read_bytes().decode("utf-8"))
 
             def run_shell(script: str, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
                 return subprocess.run(
@@ -1889,6 +1989,16 @@ printf '200'
                 ("TRUE", "false"),
                 ("true", "FALSE"),
                 (" True ", "TRUE"),
+                ("\nTRUE", "true"),
+                ("TRUE\n", "true"),
+                ("true", "\nTRUE"),
+                ("true", "TRUE\n"),
+                ("\rTRUE", "true"),
+                ("TRUE\r", "true"),
+                ("true", "\rTRUE"),
+                ("true", "TRUE\r"),
+                ("\nTRUE\n", "False"),
+                ("\r\nTrue\r\n", "FALSE"),
             ):
                 boolean_variant_cases.append(
                     (
@@ -2030,6 +2140,7 @@ printf '200'
                 ("app", "test", "test", None, False, "true", "health", "absent-mode-already-enabled"),
                 ("app", "test", "test", None, False, "TRUE", "health", "absent-mode-already-enabled-TRUE"),
                 ("promote", "test", "test", None, False, "True", "health", "absent-mode-already-enabled-True"),
+                ("app", "test", "test", None, False, "\nTRUE", "health", "absent-mode-already-enabled-LF-TRUE"),
                 ("promote", "test", "test", "live", True, None, "health", "different-mode-new-billing"),
                 ("app", "production", "live", None, False, None, "audit", "production-absent-mode"),
             ]

@@ -1021,7 +1021,10 @@ jobs:
               billing_restore_value=""
               billing_restore_slot="false"
               if [ -n "$record" ] && [ "$record" != "null" ]; then
-                billing_restore_value="$(printf '%s' "$record" | jq -r '.value // empty')"
+                # jq -j plus a sentinel keeps trailing CR/LF that
+                # command substitution would otherwise strip.
+                billing_restore_value="$(printf '%s' "$record" | jq -j '.value // empty'; printf x)"
+                billing_restore_value="${billing_restore_value%x}"
                 billing_restore_slot="$(printf '%s' "$record" | jq -r 'if .slotSetting == true then "true" else "false" end')"
                 billing_restore_present="true"
               fi
@@ -1042,6 +1045,22 @@ jobs:
               fi
             }
 
+            write_github_output_value() {
+              local name="$1"
+              local value="$2"
+              local delimiter="ELSA_BILLING_CAPTURE_EOF"
+              local n=0
+              while [[ "$value" == *"$delimiter"* ]]; do
+                n=$((n + 1))
+                delimiter="ELSA_BILLING_CAPTURE_EOF_${n}"
+              done
+              {
+                printf '%s<<%s\n' "$name" "$delimiter"
+                printf '%s' "$value"
+                printf '\n%s\n' "$delimiter"
+              } >> "$GITHUB_OUTPUT"
+            }
+
             publish_billing_restore_output() {
               local prefix="$1"
               local present="$2"
@@ -1050,7 +1069,10 @@ jobs:
               if [ -n "${GITHUB_OUTPUT:-}" ]; then
                 echo "${prefix}_present=$present" >> "$GITHUB_OUTPUT"
                 if [ "$present" = "true" ]; then
-                  echo "${prefix}=$value" >> "$GITHUB_OUTPUT"
+                  # Delimited records keep leading/trailing CR/LF lossless
+                  # and stay valid for the Actions runner parser. A
+                  # single-line NAME=VALUE assignment would split.
+                  write_github_output_value "$prefix" "$value"
                   echo "${prefix}_slot_setting=$slot_setting" >> "$GITHUB_OUTPUT"
                 fi
               fi
