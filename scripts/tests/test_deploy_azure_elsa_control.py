@@ -371,11 +371,11 @@ class DeployAzureElsaControlTests(unittest.TestCase):
             calls = call_log.read_text()
             self.assertIn("deployment sub what-if", calls)
             self.assertNotIn("stagingrecoverylever", calls)
-            self.assertIn('"sqlDatabaseSkuName": {"value": "GP_S_Gen5"}', calls)
-            self.assertIn('"sqlDatabaseSkuTier": {"value": "GeneralPurpose"}', calls)
-            self.assertIn('"sqlDatabaseSkuFamily": {"value": "Gen5"}', calls)
-            self.assertIn('"sqlDatabaseMaxSizeBytes": {"value": "0"}', calls)
-            self.assertNotIn('"S0"', calls)
+            self.assertIn('"sqlDatabaseSkuName": {"value": "S0"}', calls)
+            self.assertIn('"sqlDatabaseSkuTier": {"value": "Standard"}', calls)
+            self.assertIn('"sqlDatabaseSkuFamily": {"value": ""}', calls)
+            self.assertIn('"sqlDatabaseMaxSizeBytes": {"value": "268435456000"}', calls)
+            self.assertNotIn("GP_S_Gen5", calls)
 
     def test_refuses_when_target_environment_is_test_and_environment_name_is_test(self) -> None:
         environment = self.environment()

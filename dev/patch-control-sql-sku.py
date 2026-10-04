@@ -24,20 +24,20 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 from control_sql_sku import production_parameters_document, staging_parameters_document
 
 SKU_PARAMS = """
-@description('Azure SQL Catalog service objective (SKU name). Production default is GP_S_Gen5.')
-param sqlDatabaseSkuName string = 'GP_S_Gen5'
+@description('Azure SQL Catalog service objective (SKU name). Production default is S0.')
+param sqlDatabaseSkuName string = 'S0'
 
-@description('Azure SQL Catalog edition (SKU tier). Production default is GeneralPurpose.')
-param sqlDatabaseSkuTier string = 'GeneralPurpose'
+@description('Azure SQL Catalog edition (SKU tier). Production default is Standard.')
+param sqlDatabaseSkuTier string = 'Standard'
 
 @description('Azure SQL Catalog SKU family. Leave empty for DTU objectives such as S0.')
-param sqlDatabaseSkuFamily string = 'Gen5'
+param sqlDatabaseSkuFamily string = ''
 
 @description('Azure SQL Catalog SKU capacity (vCores or DTUs).')
-param sqlDatabaseSkuCapacity int = 1
+param sqlDatabaseSkuCapacity int = 10
 
 @description('Azure SQL Catalog max size in bytes. Empty or 0 omits the property. Use a string so 250 GiB (268435456000) is not an ARM 32-bit int.')
-param sqlDatabaseMaxSizeBytes string = '0'
+param sqlDatabaseMaxSizeBytes string = '268435456000'
 """
 
 GENERATED_CATALOG_PROPERTIES = """  properties: {
@@ -74,7 +74,7 @@ PARAMETERIZED_MODULE_PARAMS = """  params: {
   }
 """
 
-MAIN_SKU_BLOCK_MARKER = "var useStagingControlSqlSku"
+MAIN_SKU_BLOCK_MARKER = "var resolvedSqlDatabaseSkuName"
 
 
 def replace_once(content: str, already: str, anchor: str, replacement: str, what: str) -> str:
@@ -138,30 +138,23 @@ def patch_main(content: str) -> str:
         replacement = """@description('Id of the user or app to assign application roles')
 param principalId string = ''
 
-@description('Azure SQL Catalog service objective (SKU name). Empty selects the environment default: S0 for test/valence-control-staging, GP_S_Gen5 otherwise.')
+@description('Azure SQL Catalog service objective (SKU name). Empty selects Standard S0 for every environment. Pass GP_S_Gen5 to request serverless.')
 param sqlDatabaseSkuName string = ''
 
-@description('Azure SQL Catalog edition (SKU tier). Empty selects the environment default: Standard for test/valence-control-staging, GeneralPurpose otherwise.')
+@description('Azure SQL Catalog edition (SKU tier). Empty selects GeneralPurpose for GP_S_* names and Standard otherwise.')
 param sqlDatabaseSkuTier string = ''
 
 @description('Azure SQL Catalog SKU family. Empty selects Gen5 for GP_S_* objectives and omits the family for DTU objectives.')
 param sqlDatabaseSkuFamily string = ''
 
-@description('Azure SQL Catalog SKU capacity (vCores or DTUs). 0 selects the environment default (10 for S0, 1 for GP_S_Gen5).')
+@description('Azure SQL Catalog SKU capacity (vCores or DTUs). 0 selects the SKU default (10 for S0, 1 for GP_S_Gen5).')
 param sqlDatabaseSkuCapacity int = 0
 
-@description('Azure SQL Catalog max size in bytes. Empty selects 250 GiB for S0 and omits the property for GP_S_Gen5. 0 omits the property. String avoids ARM 32-bit int overflow.')
+@description('Azure SQL Catalog max size in bytes. Empty selects 250 GiB for S0 and omits the property for other SKUs. 0 omits the property. String avoids ARM 32-bit int overflow.')
 param sqlDatabaseMaxSizeBytes string = ''
 
-// Workflow GitHub target `test` maps to Azure environmentName valence-control-staging.
-// Matching only the literal name `test` would miss the real staging Catalog.
-var controlSqlStagingEnvironmentNames = [
-  'test'
-  'valence-control-staging'
-]
-var useStagingControlSqlSku = contains(controlSqlStagingEnvironmentNames, environmentName)
-var resolvedSqlDatabaseSkuName = !empty(sqlDatabaseSkuName) ? sqlDatabaseSkuName : (useStagingControlSqlSku ? 'S0' : 'GP_S_Gen5')
-var resolvedSqlDatabaseSkuTier = !empty(sqlDatabaseSkuTier) ? sqlDatabaseSkuTier : (useStagingControlSqlSku ? 'Standard' : 'GeneralPurpose')
+var resolvedSqlDatabaseSkuName = !empty(sqlDatabaseSkuName) ? sqlDatabaseSkuName : 'S0'
+var resolvedSqlDatabaseSkuTier = !empty(sqlDatabaseSkuTier) ? sqlDatabaseSkuTier : (startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 'GeneralPurpose' : 'Standard')
 var resolvedSqlDatabaseSkuFamily = !empty(sqlDatabaseSkuFamily) ? sqlDatabaseSkuFamily : (startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 'Gen5' : '')
 var resolvedSqlDatabaseSkuCapacity = sqlDatabaseSkuCapacity > 0 ? sqlDatabaseSkuCapacity : (startsWith(resolvedSqlDatabaseSkuName, 'GP_S_') ? 1 : 10)
 var resolvedSqlDatabaseMaxSizeBytes = !empty(sqlDatabaseMaxSizeBytes) ? sqlDatabaseMaxSizeBytes : (resolvedSqlDatabaseSkuName == 'S0' ? '268435456000' : '0')
