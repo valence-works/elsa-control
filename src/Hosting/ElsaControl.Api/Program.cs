@@ -339,6 +339,9 @@ builder.Services.AddScoped<ManagedElsaHandoffService>();
 builder.Services.AddHostedService<ManagedElsaHandoffConfigurationValidator>();
 builder.Services.AddHostedService<CloudBffConfigurationValidator>();
 builder.Services.AddHostedService<CloudAccountIdentityConfigurationValidator>();
+builder.Services.Configure<CloudCompatibilityOptions>(
+    builder.Configuration.GetSection(CloudCompatibilityOptions.ConfigurationSection));
+builder.Services.AddHostedService<CloudCompatibilityStagingFixtureValidator>();
 builder.Services.AddSingleton<IWorkspacePermissionContribution, ManagedElsaInstancePermissionContribution>();
 var catalogSqlManagedIdentityInterceptor =
     CatalogSqlManagedIdentityConnectionInterceptor.TryCreate(builder.Configuration);

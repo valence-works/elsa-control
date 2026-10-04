@@ -68,6 +68,7 @@ class CiWorkflowTests(unittest.TestCase):
             "python3 scripts/tests/test_deploy_azure_elsa_control.py",
             "python3 scripts/tests/test_control_sql_sku.py",
             "python3 -m unittest scripts.tests.test_production_stripe_reconcile",
+            "python3 scripts/tests/test_staging_compat_fixture_workflow.py",
             "python3 scripts/tests/test_azure_production_templates.py",
             "python3 scripts/tests/test_api_infrastructure.py",
             "python3 scripts/tests/test_customer_subscription_bootstrap.py",
