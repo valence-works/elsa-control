@@ -97,28 +97,59 @@ live` and state exactly what Sipke must enable.
 
 ## Reviewers
 
-Checked 2026-10-03.
+Checked 2026-10-04.
 
 | Reviewer | Live | How to invoke | Good for | How to tell it ran |
 | --- | --- | --- | --- | --- |
-| Greptile | no — not verified / not live (2026-10-03) | After Sipke installs the Greptile GitHub App and enables this repo in the Greptile dashboard, post a top-level PR comment `@greptileai` ([official trigger docs](https://www.greptile.com/docs/code-review-bot/trigger-code-review)). Optional: `@greptileai review the auth changes`. Do not treat adding a human or the control-room as a Greptile review. | Whole-repo context, summaries, inline comments, and suggested fixes. | A PR review and/or comments from `greptile-apps[bot]` (or the current Greptile GitHub App account) appear on the PR. |
-| GitHub Copilot Code Review | no — not verified / not live (2026-10-03) | Request Copilot as a reviewer: GitHub UI Reviewers → Copilot → Request; `gh pr create --reviewer @copilot` / `gh pr edit <n> --add-reviewer @copilot`; or REST `requested_reviewers: ["copilot-pull-request-reviewer[bot]"]` ([official docs](https://docs.github.com/en/copilot/how-tos/agents/copilot-code-review/using-copilot-code-review)). | Fast first-pass comments with severity labels and suggested patches. Copilot reviews are advisory. No Copilot review satisfies the merge gate, whatever its type (Comment, Approve or Request changes). | A review from `copilot-pull-request-reviewer[bot]` appears, and the Reviewers sidebar shows Copilot completed. |
-| Cursor Bugbot | no — not live (2026-10-03). Sipke has not enabled it in the Cursor dashboard. | After Sipke enables Bugbot for this repo at [cursor.com/dashboard](https://cursor.com/dashboard) (Integrations, then Bugbot under Automations), post a **top-level** PR comment `cursor review` ([official docs](https://cursor.com/docs/bugbot)). `bugbot run` is the documented alias. Do not use `@cursor review`. | Defect, security, and edge-case findings with inline comments and suggested fixes. | Inline comments plus a GitHub check named `Cursor Bugbot`. A `cursor[bot]` Issue Bus or `ready-for-CR` comment is **not** a Bugbot review. |
+| Greptile | no — not verified / not live (2026-10-04) | After Sipke installs the Greptile GitHub App and enables this repo in the Greptile dashboard, post a top-level PR comment `@greptileai` ([official trigger docs](https://www.greptile.com/docs/code-review-bot/trigger-code-review)). Optional: `@greptileai review the auth changes`. Do not treat adding a human or the control-room as a Greptile review. | Whole-repo context, summaries, inline comments, and suggested fixes. | A PR review and/or comments from `greptile-apps[bot]` (or the current Greptile GitHub App account) appear on the PR. |
+| GitHub Copilot Code Review | no — not verified / not live (2026-10-04) | Request Copilot as a reviewer: GitHub UI Reviewers → Copilot → Request; `gh pr create --reviewer @copilot` / `gh pr edit <n> --add-reviewer @copilot`; or REST `requested_reviewers: ["copilot-pull-request-reviewer[bot]"]` ([official docs](https://docs.github.com/en/copilot/how-tos/agents/copilot-code-review/using-copilot-code-review)). | Fast first-pass comments with severity labels and suggested patches. Copilot reviews are advisory. No Copilot review satisfies the merge gate, whatever its type (Comment, Approve or Request changes). | A review from `copilot-pull-request-reviewer[bot]` appears, and the Reviewers sidebar shows Copilot completed. |
+| Cursor Bugbot | **yes — live in `valence-works/elsa-control` only (2026-10-04)**. Sipke enabled it at 03:14 Europe/Amsterdam, set to run only when mentioned. Not live in sibling repos (see below). | The PR author posts a **top-level** PR comment `cursor review` ([official docs](https://cursor.com/docs/bugbot)). `bugbot run` is the documented alias. Do not use `@cursor review`. Bugbot does not run on its own. **Every new head needs a fresh `cursor review`**, because a push does not re-run it. See [Cursor Bugbot rules](#cursor-bugbot-rules). | Defect, security, and edge-case findings with inline comments and suggested fixes. **Advisory only:** no Bugbot result, of any conclusion, satisfies the Elsa Control Code Review merge gate, which is unchanged. | A GitHub check named `Cursor Bugbot` (app `cursor`) on the head at trigger time, and/or a `cursor[bot]` review whose footer says "Reviewed by Cursor Bugbot for commit `<sha>`". The 👀 reaction is **not** proof. Neither is a `cursor[bot]` Issue Bus, `ready-for-CR`, or "Fixed in …" reply from a Cursor agent. |
 
-## Liveness evidence (2026-10-03)
+### Cursor Bugbot rules
+
+- **Who triggers.** The PR author posts the trigger: the worker that opened
+  the PR, or the CEO posting as `sfmskywalker`. This follows the
+  one-advisory-reviewer rule in [Selection](#selection). Post one trigger per
+  head; don't stack duplicate triggers.
+- **Pinned to a commit.** A Bugbot result applies only to the SHA it
+  reviewed: the `Cursor Bugbot` check's head SHA, or the commit in the
+  review's "Reviewed by Cursor Bugbot for commit …" footer. The head can move
+  mid-run, as it did on #710. After any push, post a fresh top-level
+  `cursor review` if you want an advisory pass on the new head. Hand Code
+  Review the findings together with the SHA they apply to.
+- **What counts as having run.** Only a `Cursor Bugbot` check run (app
+  `cursor`) or a Bugbot review or inline comments on that head. The
+  `cursor[bot]` 👀 reaction on the trigger is transient: it disappeared from
+  the #710 trigger after the run. It is not evidence. `cursor[bot]` is also
+  the account Cursor cloud agents post under (`ready-for-CR`, Issue Bus,
+  "Fixed in …" replies), so don't read the author alone as a Bugbot run.
+- **Never a gate.** The `Cursor Bugbot` check is not, and must not become, a
+  required status check, whatever its conclusion (neutral, failure, or
+  absent). A missing, slow, failed, or unresponsive Bugbot run never blocks a
+  merge. Note it on the PR and continue. The gate stays Elsa Control Code
+  Review's `**Verdict: APPROVE**` on the exact head plus required-green CI
+  (see [Merge gate](#merge-gate)).
+- **Scope.** This row covers `valence-works/elsa-control` only. Bugbot's
+  install, plan and cost, and enablement are unverified for `elsa-cloud`,
+  `elsa-production-image` and `elsa-control-connector`, so treat it as not
+  live there.
+
+## Liveness evidence (2026-10-04)
 
 Evidence used; nothing below is assumed live.
 
 | Check | Result |
 | --- | --- |
-| `greptile.json`, `.greptile/`, `.github/copilot-instructions.md` | Absent on `main` (`4b714c97`). Other `valence-works` repos have `copilot-instructions.md`; this repo does not. That file is optional Copilot customization, not proof of Copilot code review. |
-| GitHub issue/PR search for `commenter:greptile-apps`, `commenter:greptileai`, `commenter:copilot-pull-request-reviewer`, `reviewed-by:` those bots | Zero hits. |
-| Reviews on the last ~90 PRs | Only `sfmskywalker`. No `greptile-apps[bot]`, `copilot-pull-request-reviewer[bot]`, or Bugbot review author. |
-| Inline review comments on a 40-PR sample | No non-Sipke review-comment authors. |
+| `greptile.json`, `.greptile/`, `.github/copilot-instructions.md` | Absent on `main` (`22263253`, rechecked 2026-10-04). Other `valence-works` repos have `copilot-instructions.md`; this repo does not. That file is optional Copilot customization, not proof of Copilot code review. |
+| GitHub issue/PR search for `commenter:greptile-apps`, `commenter:greptileai`, `commenter:copilot-pull-request-reviewer`, `reviewed-by:` those bots | Zero hits (rechecked 2026-10-04). |
+| Reviews on the last 90 PRs (2026-10-04) | `sfmskywalker` plus `cursor[bot]` on #710 only: one Bugbot review on `d8dbbb73`, and two empty-body agent "Fixed in …" reply reviews on `2694cb43`. No `greptile-apps[bot]` or `copilot-pull-request-reviewer[bot]` review author. |
+| Inline review comments | Apart from `sfmskywalker`, only `cursor[bot]` on #710: 2 Bugbot findings plus 2 agent replies. |
 | Top-level PR comments | `cursor[bot]` posts Issue Bus / `ready-for-CR` notes from Cursor cloud agents. Those are not Bugbot runs. |
 | Org/repo GitHub App installations | Not verifiable with available tokens. |
-| Request Copilot on this PR (#688) | Not verifiable with available tokens. |
-| Cursor Bugbot dashboard | Sipke has not enabled Bugbot for this repo. Official enablement is dashboard-only; this environment cannot flip it. |
+| Request Copilot (#688) | Not verifiable with available tokens. |
+| Cursor Bugbot dashboard | 2026-10-04: Sipke enabled Bugbot for this repo (run only when mentioned). Evidence is the `Cursor Bugbot` run below. |
+| Cursor Bugbot run (2026-10-04) | Top-level `cursor review` on #710 ([comment](https://github.com/valence-works/elsa-control/pull/710#issuecomment-5975374652)) → a `Cursor Bugbot` check ([check](https://github.com/valence-works/elsa-control/runs/111334807973), neutral) plus a `cursor[bot]` review ([review](https://github.com/valence-works/elsa-control/pull/710#pullrequestreview-5403768479)) with 2 inline findings on head `d8dbbb73` (the head at trigger time; `2694cb43` was pushed mid-run). There was no `Cursor Bugbot` check on `2694cb43`, which is consistent with mention-only mode. The 👀 reaction seen at trigger time had gone by 03:51 CEST (`reactions.total_count = 0`). |
+| Sibling repos (2026-10-04) | `elsa-cloud`, `elsa-production-image` and `elsa-control-connector` are private and readable with the current token. Their latest PR heads (#142, #73, #3) have no `Cursor Bugbot` check. |
 
 ## What Sipke must enable
 
@@ -132,11 +163,8 @@ Until the matching evidence exists, keep each row not live.
    no-license review setting). Confirm that requesting `@copilot` /
    `copilot-pull-request-reviewer[bot]` is accepted and that bot posts a
    review. Then mark Copilot live in this file.
-3. **Cursor Bugbot.** In [cursor.com/dashboard](https://cursor.com/dashboard),
-   connect GitHub under Integrations and enable Bugbot for
-   `valence-works/elsa-control` under Automations. Confirm that a top-level
-   `cursor review` produces a `Cursor Bugbot` check and inline findings. Then
-   mark Bugbot live in this file.
+3. **Cursor Bugbot.** Done 2026-10-04 (live, run only when mentioned). See the
+   evidence above.
 
 ## Sibling repositories
 
@@ -144,5 +172,6 @@ Do not edit sibling repos from an `elsa-control` change. If Codex or a
 Cursor/Claude worker opens PRs in `valence-works/elsa-cloud` or
 `valence-works/elsa-production-image`, those repos need the same file and
 AGENTS.md pointer. The #508 merge-authority comment already applies to
-elsa-cloud. This environment received 404 for both sibling repos, so they
-were not modified here.
+elsa-cloud. As of 2026-10-04 these repos (and `elsa-control-connector`) are
+readable with the current token. They were not modified here, and no
+advisory reviewer, Bugbot included, is verified live in them.
