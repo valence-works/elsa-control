@@ -202,6 +202,8 @@ if args[:3] == ["webapp", "config", "appsettings"] and "list" in args:
     print("0" if "length(@)" in query else "")
 elif args[:3] == ["webapp", "config", "appsettings"] and "set" in args:
     record("appsettings-set")
+    if any("Billing__Stripe__ExpectedMode=" in argument for argument in args):
+        record("billing-expected-mode-set")
     if os.environ.get("FAIL_BEFORE_REAPPLY") == "1":
         raise SystemExit(41)
 elif args[:3] == ["webapp", "config", "appsettings"] and "delete" in args:
@@ -369,6 +371,21 @@ fi
                 self.assertLess(observed.index(replacement), observed.index("reapply"))
                 self.assertIn("restart", observed, observed)
                 self.assertLess(observed.index("reapply"), observed.index("restart"))
+                self.assertIn("billing-expected-mode-set", observed)
+                first_expected_mode = observed.index("billing-expected-mode-set")
+                if mode in ("app", "promote"):
+                    # First billing-enabled start must see ExpectedMode before
+                    # the image switch. The later combined settings write still
+                    # includes ExpectedMode after the switch; rollback restore
+                    # is unchanged.
+                    self.assertLess(first_expected_mode, observed.index(replacement))
+                    self.assertLess(
+                        observed.index(replacement),
+                        observed.index("billing-expected-mode-set", first_expected_mode + 1),
+                    )
+                else:
+                    self.assertLess(observed.index(replacement), first_expected_mode)
+                    self.assertEqual(1, observed.count("billing-expected-mode-set"))
                 if mode == "app":
                     self.assertIn("docker:build", observed)
                 else:
@@ -1212,6 +1229,76 @@ fi
         self.assertNotIn("managed-telemetry", rollback_if)
         self.assertIn("steps.deploy-api.outcome == 'failure'", rollback_if)
         self.assertIn("steps.health-gate.outcome == 'failure'", rollback_if)
+        # Deliberate pin update from run 37161715192: app-mode step names and
+        # if-conditions stay the same. The only app-path mutation-order change
+        # is inside Deploy API app — ExpectedMode is written before the image
+        # switch. Telemetry still never appears in the rollback condition.
+        self.assertIn('TELEMETRY_FAILURE_ROLLS_BACK_API: "false"', self.source)
+        self.assertIn("false for production, test, and development", self.source)
+        deploy_start = self.source.index("      - name: Deploy API app")
+        deploy_end = self.source.index("\n      - name:", deploy_start + 1)
+        deploy_step = self.source[deploy_start:deploy_end]
+        app_branch = deploy_step[
+            deploy_step.index('elif [ "$DEPLOY_MODE" = "app" ]; then') :
+            deploy_step.index('elif [ "$DEPLOY_MODE" = "promote" ]; then')
+        ]
+        self.assertLess(
+            app_branch.index("write_billing_expected_mode"),
+            app_branch.index("az webapp sitecontainers update"),
+        )
+        self.assertLess(
+            app_branch.index("write_billing_expected_mode"),
+            app_branch.index("az webapp config container set"),
+        )
+        promote_branch = deploy_step[
+            deploy_step.index('elif [ "$DEPLOY_MODE" = "promote" ]; then') :
+            deploy_step.index('echo "::error::The selected deployment mode cannot mutate the Web App."')
+        ]
+        self.assertLess(
+            promote_branch.index("write_billing_expected_mode"),
+            promote_branch.index("az webapp sitecontainers update"),
+        )
+        self.assertLess(
+            promote_branch.index("write_billing_expected_mode"),
+            promote_branch.index("az webapp config container set"),
+        )
+        infra_branch = deploy_step[
+            deploy_step.index('if [ "$DEPLOY_MODE" = "infra" ]; then') :
+            deploy_step.index('elif [ "$DEPLOY_MODE" = "app" ]; then')
+        ]
+        self.assertNotIn("write_billing_expected_mode", infra_branch)
+        self.assertIn("Development is not a billing target.", self.source)
+        self.assertIn("Enabling development billing is unsupported.", self.source)
+
+    def test_development_target_leaves_billing_expected_mode_unset(self) -> None:
+        check_start = self.source.index("        run: |\n", self.source.index("      - name: Check deployment configuration"))
+        check_end = self.source.index("\n      - name:", check_start)
+        check_script = dedent(self.source[check_start + len("        run: |\n") : check_end])
+        check_script = check_script.replace("${{ github.event_name }}", "workflow_dispatch")
+        environment = os.environ.copy() | {
+            "TARGET_ENVIRONMENT": "development",
+            "DEPLOY_MODE": "app",
+            "AZURE_CLIENT_ID": "00000000-0000-0000-0000-000000000001",
+            "AZURE_TENANT_ID": "00000000-0000-0000-0000-000000000002",
+            "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
+            "AZURE_CONTAINER_REGISTRY_ENDPOINT": "dev.azurecr.io",
+            "AZURE_ENV_NAME": "development",
+            "AZURE_LOCATION": "westeurope",
+            "AZURE_RESOURCE_GROUP": "rg-development",
+            "AZURE_WEBAPP_NAME": "dev-api",
+        }
+        with tempfile.NamedTemporaryFile() as output, tempfile.NamedTemporaryFile() as github_env:
+            environment["GITHUB_OUTPUT"] = output.name
+            environment["GITHUB_ENV"] = github_env.name
+            result = subprocess.run(
+                ["bash", "-c", check_script],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("billing_expected_mode=\n", Path(output.name).read_text())
 
     def test_managed_telemetry_deploy_passes_the_environment_recipient(self) -> None:
         script = ROOT / "scripts" / "deploy-managed-telemetry.sh"
@@ -1710,6 +1797,56 @@ esac
             self.assertIn("webapp config show", mismatch_calls)
             self.assertNotIn("webapp config appsettings set", mismatch_calls)
             self.assertNotIn("webapp restart", mismatch_calls)
+
+            # Recreate with ExpectedMode so the early billing write is pinned
+            # before the image switch; the later combined settings write stays
+            # after a successful readback.
+            call_log.unlink(missing_ok=True)
+            billed_environment = os.environ.copy()
+            billed_environment.pop("TARGET_ENVIRONMENT", None)
+            billed_environment.pop("MANAGED_LIFECYCLE_AZURE_MONITOR_ENABLED", None)
+            billed_environment.update(
+                {
+                    "PATH": f"{temp_path}:{billed_environment['PATH']}",
+                    "AZ_CALL_LOG": str(call_log),
+                    "AZURE_RESOURCE_GROUP": "test-rg",
+                    "AZURE_WEBAPP_NAME": "test-api",
+                    "AZURE_CONTAINER_REGISTRY_ENDPOINT": "acr.azurecr.io",
+                    "DEPLOY_MODE": "promote",
+                    "GITHUB_RUN_NUMBER": "1786839398",
+                    "VALIDATED_CANDIDATE_IMAGE": candidate_image,
+                    "VALIDATED_CANDIDATE_BUILD_NUMBER": "96",
+                    "CURRENT_DEPLOYMENT_MODE": "classic",
+                    "RUNTIME_READBACK": f"DOCKER|{candidate_image}",
+                    "CLOUD_ACCOUNT_ISSUER": "",
+                    "TARGET_ENVIRONMENT": "production",
+                    "BILLING_EXPECTED_MODE": "live",
+                }
+            )
+            billed = subprocess.run(
+                ["bash", "-c", deploy_script],
+                env=billed_environment,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            self.assertEqual(0, billed.returncode, billed.stderr)
+            billed_calls = call_log.read_text().splitlines()
+            expected_mode_indexes = [
+                index
+                for index, line in enumerate(billed_calls)
+                if "Billing__Stripe__ExpectedMode=live" in line
+            ]
+            container_indexes = [
+                index
+                for index, line in enumerate(billed_calls)
+                if "webapp config container set" in line
+            ]
+            self.assertEqual(2, len(expected_mode_indexes))
+            self.assertEqual(1, len(container_indexes))
+            self.assertLess(expected_mode_indexes[0], container_indexes[0])
+            self.assertLess(container_indexes[0], expected_mode_indexes[1])
 
     def test_health_identity_separates_candidate_source_from_promotion_run(self) -> None:
         self.assertIn('VALIDATED_CANDIDATE_SOURCE_SHA: ${{ steps.candidate-authority.outputs.candidate_source_sha }}', self.source)
