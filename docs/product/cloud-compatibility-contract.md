@@ -85,3 +85,18 @@ stage status unknown rather than guessing from historical activity.
   the serving BFF no longer depends on the newer contract. This keeps an older
   client compatible with the additive version 1 envelope and avoids a BFF
   calling routes absent from a rolled-back Control deployment.
+
+## Staging compatibility fixture
+
+The staging-only `CloudCompatibility:StagingFixture` switch can make
+staging Control advertise `missing-capability` or `older-contract` so
+Cloud can prove version-skew handling. It is armed only by the manual
+`Staging Control compatibility fixture` workflow on the GitHub `test`
+environment. See
+[the fixture runbook](../deployment/azure-app-service.md#staging-control-compatibility-fixture)
+for when to run it, its inputs, what it restores, and the time cap.
+
+`GET /health` may include `compatibilityFixture` (`null` or a known mode
+name) as a recycle witness. No code path gates on that field. Arm and
+restore proofs use the authenticated compatibility response (and BFF
+smoke `compatible` after restore), not `/health` alone.

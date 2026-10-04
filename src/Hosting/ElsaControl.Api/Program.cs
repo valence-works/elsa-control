@@ -339,6 +339,9 @@ builder.Services.AddScoped<ManagedElsaHandoffService>();
 builder.Services.AddHostedService<ManagedElsaHandoffConfigurationValidator>();
 builder.Services.AddHostedService<CloudBffConfigurationValidator>();
 builder.Services.AddHostedService<CloudAccountIdentityConfigurationValidator>();
+builder.Services.Configure<CloudCompatibilityOptions>(
+    builder.Configuration.GetSection(CloudCompatibilityOptions.ConfigurationSection));
+builder.Services.AddHostedService<CloudCompatibilityStagingFixtureValidator>();
 builder.Services.AddSingleton<IWorkspacePermissionContribution, ManagedElsaInstancePermissionContribution>();
 var catalogSqlManagedIdentityInterceptor =
     CatalogSqlManagedIdentityConnectionInterceptor.TryCreate(builder.Configuration);
@@ -737,11 +740,13 @@ app.UseRateLimiter();
 app.UseAuthorization();
 
 app.MapOpenApi();
-app.MapGet("/health", (IConfiguration configuration) =>
+app.MapGet("/health", (IConfiguration configuration, IOptions<CloudCompatibilityOptions> compatibility) =>
 {
     var buildNumber = SafeHealthIdentifier(configuration["Application:BuildNumber"]);
     var imageId = SafeHealthIdentifier(configuration["ELSA_CONTROL_IMAGE_ID"]);
-    return Results.Ok(new { status = "ok", buildNumber, imageId });
+    // Witness only: always present, null or a known mode. No code path gates on it.
+    var compatibilityFixture = compatibility.Value.NormalizedStagingFixture;
+    return Results.Ok(new { status = "ok", buildNumber, imageId, compatibilityFixture });
 });
 app.MapGet("/", () => "Elsa Control API");
 if (adminConsoleDevelopmentUrl is not null)

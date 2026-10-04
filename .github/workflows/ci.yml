@@ -36,6 +36,7 @@ jobs:
           python3 scripts/tests/test_deploy_azure_elsa_control.py
           python3 scripts/tests/test_control_sql_sku.py
           python3 -m unittest scripts.tests.test_production_stripe_reconcile
+          python3 scripts/tests/test_staging_compat_fixture_workflow.py
 
       - name: Validate production Azure image and template contracts
         run: |
@@ -66,14 +67,16 @@ jobs:
             scripts/lib/azure-workload-proof.sh \
             scripts/validate-azure-workload-proof.sh \
             scripts/validate-api-provider-image.sh \
-            scripts/validate-azure-api-candidate.sh
+            scripts/validate-azure-api-candidate.sh \
+            scripts/staging-compat-fixture.sh
           shellcheck \
             scripts/azure-workload-proof.sh \
             scripts/azure-workload-restore-proof.sh \
             scripts/lib/azure-workload-proof.sh \
             scripts/validate-azure-workload-proof.sh \
             scripts/validate-api-provider-image.sh \
-            scripts/validate-azure-api-candidate.sh
+            scripts/validate-azure-api-candidate.sh \
+            scripts/staging-compat-fixture.sh
 
       - name: Compile Azure workload proof Bicep templates
         run: |

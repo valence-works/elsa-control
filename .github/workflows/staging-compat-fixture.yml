@@ -1,0 +1,134 @@
+name: Staging Control compatibility fixture
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Incompatibility mode to advertise from staging Control."
+        required: true
+        type: choice
+        options:
+          - missing-capability
+          - older-contract
+
+# Share Deploy staging's lock so a deploy cannot land mid-proof.
+# GitHub keeps only one pending run per group, so dispatching this while a
+# Deploy staging is already pending cancels that pending deploy (and vice versa).
+concurrency:
+  group: azure-api-deploy-test
+  cancel-in-progress: false
+
+jobs:
+  fixture:
+    name: Arm and restore the staging compatibility fixture
+    runs-on: ubuntu-latest
+    # Backstop above fixture-on (20m) + reserved restore (4m). Not the restore budget.
+    timeout-minutes: 30
+    environment: test
+    permissions:
+      actions: read
+      contents: read
+      deployments: read
+      id-token: write
+      issues: read
+    env:
+      TARGET_ENVIRONMENT: test
+      FIXTURE_MODE: ${{ inputs.mode }}
+      DISPATCH_MODE: ${{ inputs.mode }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      AZURE_WEBAPP_NAME: ${{ vars.AZURE_WEBAPP_NAME }}
+      AZURE_CONTAINER_REGISTRY_ENDPOINT: ${{ vars.AZURE_CONTAINER_REGISTRY_ENDPOINT }}
+      CLOUD_COMPATIBILITY_TOKEN: ${{ secrets.CLOUD_COMPATIBILITY_TOKEN }}
+      CLOUD_BFF_SMOKE_URL: ${{ vars.CLOUD_BFF_SMOKE_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Refuse any environment other than test
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$DISPATCH_MODE" != "missing-capability" ] && [ "$DISPATCH_MODE" != "older-contract" ]; then
+            echo "::error::The compatibility fixture mode is not recognized."
+            exit 1
+          fi
+          if [ "$TARGET_ENVIRONMENT" != "test" ]; then
+            echo "::error::The compatibility fixture can run only in the test environment."
+            exit 1
+          fi
+
+      - name: Log in Azure CLI
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Preflight exclusive staging and capture the baseline
+        id: preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/staging-compat-fixture.sh preflight
+
+      - name: Arm the compatibility fixture on the same deployed build
+        id: arm
+        timeout-minutes: 12
+        env:
+          EXPECTED_DIGEST: ${{ steps.preflight.outputs.digest }}
+          EXPECTED_BUILD_NUMBER: ${{ steps.preflight.outputs.build_number }}
+          EXPECTED_COMMIT: ${{ steps.preflight.outputs.commit }}
+          EXPECTED_DEPLOYMENT_ID: ${{ steps.preflight.outputs.deployment_id }}
+          HEALTH_BUDGET_SECONDS: "300"
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/staging-compat-fixture.sh arm
+
+      - name: Hold the fixture for the exclusive proof window
+        if: ${{ success() }}
+        timeout-minutes: 16
+        shell: bash
+        run: |
+          set -euo pipefail
+          armed_at="${{ steps.arm.outputs.armed_at }}"
+          if [[ ! "$armed_at" =~ ^[0-9]+$ ]]; then
+            echo "::error::Arm did not record when the Web App setting was applied."
+            exit 1
+          fi
+          now="$(date +%s)"
+          elapsed=$((now - armed_at))
+          hold="$(python3 scripts/lib/staging_compat_exclusive.py hold --elapsed-since-arm "$elapsed")"
+          echo "Compatibility fixture is armed on the same deployed Web App build."
+          echo "Hold ${hold}s (fixture-on cap 20m minus elapsed minus reserved restore)."
+          echo "Cancel this workflow to restore immediately."
+          end=$((SECONDS + hold))
+          while [ "$SECONDS" -lt "$end" ]; do
+            sleep 30
+          done
+
+      - name: Restore the baseline
+        # Skip when exclusive preflight failed closed: the fixture was never
+        # written, and a restore restart would bounce staging during an open
+        # QA window, missing freeze, or conflicting test deployment.
+        if: ${{ always() && steps.preflight.outcome == 'success' }}
+        timeout-minutes: 4
+        env:
+          EXPECTED_DIGEST: ${{ steps.preflight.outputs.digest }}
+          EXPECTED_BUILD_NUMBER: ${{ steps.preflight.outputs.build_number }}
+          EXPECTED_COMMIT: ${{ steps.preflight.outputs.commit }}
+          EXPECTED_DEPLOYMENT_ID: ${{ steps.preflight.outputs.deployment_id }}
+          EXPECTED_SETTING_NAMES_PATH: ${{ steps.preflight.outputs.setting_names_path }}
+          HEALTH_ATTEMPTS: "18"
+          HEALTH_RETRY_SECONDS: "5"
+          HEALTH_CURL_MAX_TIME: "5"
+          HEALTH_BUDGET_SECONDS: "150"
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/staging-compat-fixture.sh restore
