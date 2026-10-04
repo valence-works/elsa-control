@@ -1,16 +1,29 @@
 #!/usr/bin/env node
 // Capture calm-sand customer screens for the staging compatibility fixture.
-// Never writes Playwright traces, HAR captures, videos, or browser storage files.
+// Never writes Playwright traces, HAR captures, videos, or browser storage files
+// into uploaded artifacts. Session state stays in PLAYWRIGHT_STATE_PATH only.
 
-import { chromium, devices } from "playwright";
-import { mkdir, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { access, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+
+const require = createRequire(import.meta.url);
+const { chromium, devices } = require("playwright");
 
 const ALLOWED_ORIGIN = "https://calm-sand-03964eb03.2.azurestaticapps.net";
 const UPDATE_BANNER = "Service update in progress.";
 const HOSTED_PAUSED = "Managed engine actions are temporarily paused";
 const SIDE_SURFACES = "Billing, sign-out, and support remain available";
+const RESTORED_HOSTED = /No managed engines|Confirm managed engine|Managed engine|Create your first engine|Confirm and create engine|Existing engines|Start Hosted/i;
 const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i;
+
+if (process.argv.includes("--prove-load")) {
+  if (!chromium || !devices) {
+    throw new Error("playwright did not load.");
+  }
+  console.log("playwright-ok");
+  process.exit(0);
+}
 
 function requiredEnv(name) {
   const value = process.env[name] ?? "";
@@ -81,14 +94,28 @@ async function assertArmed(page, email) {
   await page.getByRole("link", { name: /hello@valence.works/i }).first().waitFor();
 }
 
-async function assertRestored(page) {
-  await page.waitForTimeout(1_000);
+async function assertRestored(page, email) {
+  await page.getByText(RESTORED_HOSTED).first().waitFor({ timeout: 45_000 });
   if (await page.getByText(UPDATE_BANNER, { exact: true }).count()) {
     throw new Error("The update-in-progress banner was still visible after restore.");
   }
   if (await page.getByText(HOSTED_PAUSED, { exact: false }).count()) {
     throw new Error("Hosted engine actions were still paused after restore.");
   }
+  if (await page.getByText(SIDE_SURFACES, { exact: false }).count()) {
+    throw new Error("The update-in-progress side-surface copy was still visible after restore.");
+  }
+  const create = page.getByRole("button", { name: /Confirm and create engine|Start Hosted/i });
+  if (await create.count()) {
+    for (const button of await create.all()) {
+      if (await button.isVisible() && await button.isDisabled()) {
+        throw new Error("A Hosted engine action stayed disabled after restore.");
+      }
+    }
+  }
+  await openAccountMenu(page, email);
+  await page.getByRole("menuitem", { name: "Billing and plans" }).waitFor();
+  await page.getByRole("menuitem", { name: "Sign out" }).waitFor();
 }
 
 async function openAccountMenu(page, email) {
@@ -128,21 +155,38 @@ async function capture(page, directory, stem, email) {
   return file;
 }
 
-async function runPhase({ phase, origin, email, password, directory }) {
+async function fileExists(file) {
+  try {
+    await access(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runPhase({ phase, origin, email, password, directory, statePath }) {
   const browser = await chromium.launch();
   const files = [];
   try {
     for (const viewport of viewports()) {
+      const reuseSession = phase === "restored" && statePath && (await fileExists(statePath));
+      if (phase === "restored" && !reuseSession) {
+        throw new Error("Restored screens must reload the armed session; PLAYWRIGHT_STATE_PATH is missing.");
+      }
       const context = await browser.newContext({
         viewport: viewport.viewport,
         isMobile: Boolean(viewport.isMobile),
         hasTouch: Boolean(viewport.hasTouch),
-        ignoreHTTPSErrors: false
+        ignoreHTTPSErrors: false,
+        ...(reuseSession ? { storageState: statePath } : {})
       });
       context.setDefaultNavigationTimeout(45_000);
       const page = await context.newPage();
-      await signIn(page, origin, email, password);
       if (phase === "armed") {
+        await signIn(page, origin, email, password);
+        if (statePath) {
+          await context.storageState({ path: statePath });
+        }
         await assertArmed(page, email);
         files.push(await capture(page, directory, `${viewport.name}-armed`, email));
         await visitBillingAndSupport(page, origin);
@@ -151,8 +195,9 @@ async function runPhase({ phase, origin, email, password, directory }) {
         await assertArmed(page, email);
         files.push(await capture(page, directory, `${viewport.name}-armed-reload`, email));
       } else if (phase === "restored") {
+        await page.goto(`${origin}/dashboard`, { waitUntil: "domcontentloaded" });
         await page.reload({ waitUntil: "domcontentloaded" });
-        await assertRestored(page);
+        await assertRestored(page, email);
         files.push(await capture(page, directory, `${viewport.name}-restored-reload`, email));
       } else {
         throw new Error("SCREENSHOT_PHASE must be armed or restored.");
@@ -170,10 +215,14 @@ async function main() {
   const email = requiredEnv("STAGING_E2E_COMPAT_EMAIL");
   const password = requiredEnv("STAGING_E2E_COMPAT_PASSWORD");
   const directory = requiredEnv("SCREENSHOT_DIR");
+  const statePath = process.env.PLAYWRIGHT_STATE_PATH || "";
   const origin = originFromEnv();
   refuseProduction(email, "STAGING_E2E_COMPAT_EMAIL");
+  if (statePath && /storage-state|trace|video/i.test(statePath)) {
+    throw new Error("PLAYWRIGHT_STATE_PATH must not look like an uploaded browser artifact.");
+  }
   await mkdir(directory, { recursive: true });
-  const files = await runPhase({ phase, origin, email, password, directory });
+  const files = await runPhase({ phase, origin, email, password, directory, statePath });
   await writeFile(
     path.join(directory, "manifest.txt"),
     files.map((file) => path.basename(file)).join("\n") + "\n",

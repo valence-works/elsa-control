@@ -27,15 +27,36 @@ RESTORE_HEALTH_RETRY_SECONDS = 15
 RESTORE_HEALTH_CURL_MAX_TIME = 10
 RESTORE_HEALTH_BUDGET_SECONDS = 10 * 60
 RESTORE_STEP_TIMEOUT_SECONDS = 16 * 60
+ARM_STEP_TIMEOUT_SECONDS = 12 * 60
+ARM_HEALTH_BUDGET_SECONDS = 5 * 60
 IN_HOLD_K_PROBES_TIMEOUT_SECONDS = 2 * 60
 IN_HOLD_SCREENS_TIMEOUT_SECONDS = 5 * 60
 IN_HOLD_BUDGET_SECONDS = IN_HOLD_K_PROBES_TIMEOUT_SECONDS + IN_HOLD_SCREENS_TIMEOUT_SECONDS
 POST_RESTORE_SCREENS_TIMEOUT_SECONDS = 5 * 60
-TELEMETRY_STEP_TIMEOUT_SECONDS = 3 * 60
+UPLOAD_ARTIFACT_TIMEOUT_SECONDS = 2 * 60
+ARTIFACT_RETENTION_DAYS = 7
 PLAYWRIGHT_SETUP_TIMEOUT_SECONDS = 6 * 60
 MAX_HOLD_SECONDS = 15 * 60
 # Backstop above fixture-on + post-delete health + in-hold + post-restore.
 JOB_BACKSTOP_SECONDS = 60 * 60
+UUID_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+K_PROBE_INTENT_REQUIRED = (
+    "release.distributionId",
+    "release.releaseLine",
+    "release.channel",
+    "release.patchUpdates",
+    "release.minorUpdates",
+    "release.majorMigrations",
+    "application.topologyId",
+    "placement.targetMode",
+    "placement.regionCode",
+    "placement.isolationProfile",
+    "placement.capacityProfile",
+    "desiredLifecycle",
+)
 
 
 def first_nonempty_line(body: str) -> str:
@@ -93,6 +114,73 @@ def compute_hold_seconds(
     return max(0, min(int(max_hold), remaining))
 
 
+def remaining_before_restore(
+    elapsed_since_arm: int,
+    fixture_cap: int = FIXTURE_CAP_SECONDS,
+    restore_budget: int = RESTORE_BUDGET_SECONDS,
+) -> int:
+    return max(0, int(fixture_cap) - int(elapsed_since_arm) - int(restore_budget))
+
+
+def skip_in_hold(
+    elapsed_since_arm: int,
+    needed_seconds: int,
+    fixture_cap: int = FIXTURE_CAP_SECONDS,
+    restore_budget: int = RESTORE_BUDGET_SECONDS,
+) -> bool:
+    return remaining_before_restore(elapsed_since_arm, fixture_cap, restore_budget) < int(needed_seconds)
+
+
+def _nested_get(payload: Mapping[str, Any], dotted: str) -> Any:
+    current: Any = payload
+    for part in dotted.split("."):
+        if not isinstance(current, Mapping) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def validate_bff_action_payload(payload: Any) -> str | None:
+    """Return an error if the payload would fail the real Cloud BFF schema."""
+    if not isinstance(payload, Mapping):
+        return "BFF payload must be a JSON object."
+    action = payload.get("action")
+    if action == "compatibility":
+        return None
+    if action == "bootstrap":
+        return None
+    if action == "listOrganizations":
+        extra = set(payload) - {"action"}
+        if extra:
+            return "listOrganizations accepts only the action field."
+        return None
+    if action == "createInstanceDeleteConfirmation":
+        for field in ("organizationId", "workspaceId", "instanceId"):
+            value = payload.get(field)
+            if not isinstance(value, str) or not UUID_PATTERN.fullmatch(value):
+                return f"{field} must be a UUID."
+        return None
+    if action == "updateInstance":
+        for field in ("organizationId", "workspaceId", "instanceId", "idempotencyKey"):
+            value = payload.get(field)
+            if not isinstance(value, str) or not UUID_PATTERN.fullmatch(value):
+                return f"{field} must be a UUID."
+        version = payload.get("version")
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            return "version must be a positive integer."
+        intent = payload.get("intent")
+        if not isinstance(intent, Mapping):
+            return "intent must be an object."
+        for path in K_PROBE_INTENT_REQUIRED:
+            value = _nested_get(intent, path)
+            if not isinstance(value, str) or not value.strip():
+                return f"intent.{path} is required."
+        return None
+    if action in {None, ""}:
+        return "action is required."
+    return None
+
+
 def conflicting_runs(
     runs: Iterable[Mapping[str, Any]],
     this_run_id: str | None,
@@ -148,6 +236,13 @@ def main(argv: list[str] | None = None) -> int:
     hold = sub.add_parser("hold")
     hold.add_argument("--elapsed-since-arm", required=True, type=int)
 
+    skip = sub.add_parser("skip-in-hold")
+    skip.add_argument("--elapsed-since-arm", required=True, type=int)
+    skip.add_argument("--needed", required=True, type=int)
+
+    validate = sub.add_parser("validate-bff")
+    validate.add_argument("--payload", required=True)
+
     args = parser.parse_args(argv)
     if args.command == "freeze":
         comments = load_json(args.comments)
@@ -185,6 +280,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "hold":
         print(compute_hold_seconds(args.elapsed_since_arm))
+        return 0
+    if args.command == "skip-in-hold":
+        print("skip" if skip_in_hold(args.elapsed_since_arm, args.needed) else "run")
+        return 0
+    if args.command == "validate-bff":
+        try:
+            payload = json.loads(args.payload)
+        except json.JSONDecodeError:
+            print("BFF payload was not valid JSON.", file=sys.stderr)
+            return 1
+        error = validate_bff_action_payload(payload)
+        if error:
+            print(error, file=sys.stderr)
+            return 1
         return 0
     return 2
 

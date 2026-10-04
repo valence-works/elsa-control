@@ -36,9 +36,15 @@ IN_HOLD_BUDGET_SECONDS = exclusive.IN_HOLD_BUDGET_SECONDS
 IN_HOLD_K_PROBES_TIMEOUT_SECONDS = exclusive.IN_HOLD_K_PROBES_TIMEOUT_SECONDS
 IN_HOLD_SCREENS_TIMEOUT_SECONDS = exclusive.IN_HOLD_SCREENS_TIMEOUT_SECONDS
 POST_RESTORE_SCREENS_TIMEOUT_SECONDS = exclusive.POST_RESTORE_SCREENS_TIMEOUT_SECONDS
-TELEMETRY_STEP_TIMEOUT_SECONDS = exclusive.TELEMETRY_STEP_TIMEOUT_SECONDS
+ARM_STEP_TIMEOUT_SECONDS = exclusive.ARM_STEP_TIMEOUT_SECONDS
+ARM_HEALTH_BUDGET_SECONDS = exclusive.ARM_HEALTH_BUDGET_SECONDS
+UPLOAD_ARTIFACT_TIMEOUT_SECONDS = exclusive.UPLOAD_ARTIFACT_TIMEOUT_SECONDS
+ARTIFACT_RETENTION_DAYS = exclusive.ARTIFACT_RETENTION_DAYS
 MAX_HOLD_SECONDS = exclusive.MAX_HOLD_SECONDS
 JOB_BACKSTOP_SECONDS = exclusive.JOB_BACKSTOP_SECONDS
+skip_in_hold = exclusive.skip_in_hold
+remaining_before_restore = exclusive.remaining_before_restore
+validate_bff_action_payload = exclusive.validate_bff_action_payload
 WORKFLOW = ROOT / ".github" / "workflows" / "staging-compat-fixture.yml"
 SCRIPT = ROOT / "scripts" / "staging-compat-fixture.sh"
 SCREENS = ROOT / "scripts" / "staging-compat-fixture-screens.mjs"
@@ -155,6 +161,9 @@ class StagingCompatExclusiveTests(unittest.TestCase):
         )
         self.assertGreaterEqual(compute_hold_seconds(0), IN_HOLD_BUDGET_SECONDS)
         self.assertGreaterEqual(compute_hold_seconds(180), IN_HOLD_BUDGET_SECONDS)
+        self.assertFalse(skip_in_hold(0, IN_HOLD_K_PROBES_TIMEOUT_SECONDS))
+        self.assertTrue(skip_in_hold(ARM_STEP_TIMEOUT_SECONDS, IN_HOLD_SCREENS_TIMEOUT_SECONDS))
+        self.assertGreaterEqual(remaining_before_restore(0), IN_HOLD_BUDGET_SECONDS)
         self.assertGreaterEqual(RESTORE_HEALTH_ATTEMPTS, 36)
         self.assertGreaterEqual(RESTORE_HEALTH_BUDGET_SECONDS, 10 * 60)
         self.assertGreaterEqual(RESTORE_STEP_TIMEOUT_SECONDS, RESTORE_HEALTH_BUDGET_SECONDS)
@@ -292,7 +301,7 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("scripts/staging-compat-fixture.sh preflight", self.source)
         self.assertIn("scripts/staging-compat-fixture.sh arm", self.source)
         self.assertIn("scripts/staging-compat-fixture.sh probes", self.source)
-        self.assertIn("scripts/staging-compat-fixture.sh telemetry", self.source)
+        self.assertNotIn("scripts/staging-compat-fixture.sh telemetry", self.source)
         self.assertIn("scripts/staging-compat-fixture-screens.mjs", self.source)
         self.assertIn("az webapp restart", self.script)
         self.assertIn("appsettings delete", self.script)
@@ -385,7 +394,25 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("timeout-minutes: 5", screens_block)
         self.assertEqual(IN_HOLD_K_PROBES_TIMEOUT_SECONDS, 2 * 60)
         self.assertEqual(IN_HOLD_SCREENS_TIMEOUT_SECONDS, 5 * 60)
+        self.assertEqual(ARM_HEALTH_BUDGET_SECONDS, 5 * 60)
+        self.assertEqual(ARM_STEP_TIMEOUT_SECONDS, 12 * 60)
         self.assertLessEqual(IN_HOLD_BUDGET_SECONDS, compute_hold_seconds(0))
+        self.assertLessEqual(
+            ARM_HEALTH_BUDGET_SECONDS
+            + IN_HOLD_K_PROBES_TIMEOUT_SECONDS
+            + IN_HOLD_SCREENS_TIMEOUT_SECONDS
+            + RESTORE_BUDGET_SECONDS,
+            FIXTURE_CAP_SECONDS,
+        )
+        self.assertTrue(skip_in_hold(ARM_STEP_TIMEOUT_SECONDS, IN_HOLD_SCREENS_TIMEOUT_SECONDS))
+        self.assertLessEqual(
+            ARM_STEP_TIMEOUT_SECONDS + IN_HOLD_K_PROBES_TIMEOUT_SECONDS + RESTORE_BUDGET_SECONDS,
+            FIXTURE_CAP_SECONDS,
+        )
+        self.assertIn("skip-in-hold", k_block)
+        self.assertIn("skip-in-hold", screens_block)
+        names = self.step_order()
+        self.assertGreater(names.index("Upload armed customer screens"), names.index("Restore the baseline"))
         self.assertGreaterEqual(16 * 60, MAX_HOLD_SECONDS)
 
     def test_cancel_keeps_restore_on_always_preflight_success(self) -> None:
@@ -399,20 +426,17 @@ class StagingCompatWorkflowTests(unittest.TestCase):
 
     def test_post_restore_evidence_runs_only_after_successful_restore(self) -> None:
         restored = self.source.split("name: Capture restored customer screens", 1)[1].split("- name:", 1)[0]
-        telemetry = self.source.split("name: Report armed-window telemetry", 1)[1].split("- name:", 1)[0]
         skipped = self.source.split("name: Report skipped post-restore evidence", 1)[1]
         self.assertIn("id: restore\n", self.source.split("name: Restore the baseline", 1)[1].split("- name:", 1)[0])
         self.assertIn("steps.restore.outcome == 'success'", restored)
         self.assertIn("steps.playwright_setup.outcome == 'success'", restored)
-        self.assertIn("steps.restore.outcome == 'success'", telemetry)
         self.assertIn("steps.restore.outcome != 'success'", skipped)
         self.assertIn("timeout-minutes: 5", restored)
-        self.assertIn("timeout-minutes: 3", telemetry)
         self.assertEqual(POST_RESTORE_SCREENS_TIMEOUT_SECONDS, 5 * 60)
-        self.assertEqual(TELEMETRY_STEP_TIMEOUT_SECONDS, 3 * 60)
+        self.assertNotIn("Report armed-window telemetry", self.source)
         names = self.step_order()
         self.assertGreater(names.index("Capture restored customer screens"), names.index("Restore the baseline"))
-        self.assertGreater(names.index("Report armed-window telemetry"), names.index("Restore the baseline"))
+        self.assertGreater(names.index("Upload armed customer screens"), names.index("Restore the baseline"))
 
     def test_restore_timeouts_exceed_the_health_budget(self) -> None:
         restore_block = self.source.split("name: Restore the baseline", 1)[1].split("- name:", 1)[0]
@@ -429,7 +453,6 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("Service update in progress.", self.screens)
         self.assertIn("Managed engine actions are temporarily paused", self.screens)
         self.assertIn("calm-sand-03964eb03.2.azurestaticapps.net", self.screens)
-        self.assertNotIn("storageState", self.screens)
         self.assertNotIn("recordHar", self.screens)
         self.assertNotIn(".har", self.screens)
         self.assertNotIn("recordVideo", self.screens)
@@ -441,19 +464,60 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("staging-compat-screens-restored", self.source)
         self.assertIn("*.png", self.source)
         self.assertNotIn("*.zip", self.source)
-        self.assertIn("Never writes Playwright traces, HAR captures, videos, or browser storage files.", self.screens)
+        self.assertIn("Never writes Playwright traces, HAR captures, videos, or browser storage files", self.screens)
+        self.assertIn("createRequire", self.screens)
+        self.assertIn("--prove-load", self.screens)
+        self.assertIn("assertRestored", self.screens)
+        self.assertIn("storageState", self.screens)
+        self.assertIn("PLAYWRIGHT_STATE_PATH", self.source)
+        self.assertIn("runner.temp", self.source)
         self.assertNotRegex(self.source, r"(?m)^\s+NODE_PATH:")
-        self.assertIn('npm install --no-save --prefix "$GITHUB_WORKSPACE" playwright@1.49.0', self.source)
-        self.assertIn("NODE_PATH is ignored by ESM", self.source)
+        self.assertIn(
+            'npm install --no-save --ignore-scripts --prefix "$GITHUB_WORKSPACE/scripts" playwright@1.49.0',
+            self.source,
+        )
+        self.assertIn("staging-compat-fixture-screens.mjs --prove-load", self.source)
+        self.assertLess(
+            self.source.index("name: Install Playwright Chromium"),
+            self.source.index("name: Log in Azure CLI"),
+        )
+        self.assertIn("retention-days: 7", self.source)
+        self.assertNotIn("retention-days: 14", self.source)
+        self.assertEqual(ARTIFACT_RETENTION_DAYS, 7)
+        self.assertEqual(UPLOAD_ARTIFACT_TIMEOUT_SECONDS, 2 * 60)
+        self.assertIn("timeout-minutes: 2", self.source.split("name: Upload armed customer screens", 1)[1].split("- name:", 1)[0])
 
-    def test_telemetry_step_does_not_query_or_grant_roles(self) -> None:
-        telemetry = self.source.split("name: Report armed-window telemetry", 1)[1]
-        self.assertIn("scripts/staging-compat-fixture.sh telemetry", telemetry)
+    def test_playwright_script_loads_via_create_require_without_node_path(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            script_dir = Path(raw) / "scripts"
+            module_dir = script_dir / "node_modules" / "playwright"
+            module_dir.mkdir(parents=True)
+            (module_dir / "package.json").write_text('{"name":"playwright","main":"index.js"}\n')
+            (module_dir / "index.js").write_text("module.exports = { chromium: {}, devices: { 'iPhone 14': { viewport: { width: 390, height: 844 } } } };\n")
+            dest = script_dir / "staging-compat-fixture-screens.mjs"
+            dest.write_text(self.screens)
+            env = os.environ.copy()
+            env.pop("NODE_PATH", None)
+            result = subprocess.run(
+                ["node", str(dest), "--prove-load"],
+                cwd=raw,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+            self.assertIn("playwright-ok", result.stdout)
+
+    def test_telemetry_is_not_used_and_never_queries_azure(self) -> None:
+        self.assertNotIn("Report armed-window telemetry", self.source)
+        self.assertNotIn("scripts/staging-compat-fixture.sh telemetry", self.source)
         self.assertNotIn("az monitor", self.script)
         self.assertNotIn("role assignment", self.script)
         self.assertNotIn("az role", self.script)
-        self.assertIn("Inconclusive", self.script)
-        self.assertIn("do not reach a queryable App Insights", self.script)
+        self.assertNotIn("Inconclusive", self.script)
+        self.assertIn("telemetry: not used (Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b)", self.script)
+        self.assertIn("telemetry: not used (Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b)", self.source)
 
 
 class StagingCompatScriptTests(unittest.TestCase):
@@ -764,6 +828,11 @@ class StagingCompatScriptTests(unittest.TestCase):
             "fi\n"
             "if [ -n \"${CLOUD_BFF_SMOKE_URL:-}\" ] && [ \"$url\" = \"${CLOUD_BFF_SMOKE_URL}\" ]; then\n"
             "  if [ \"$method\" != POST ]; then write_headers 405; printf '405'; exit 0; fi\n"
+            f"  if ! python3 {json.dumps(str(ROOT / 'scripts' / 'lib' / 'staging_compat_exclusive.py'))} validate-bff --payload \"$payload\"; then\n"
+            "    write_headers 400\n"
+            "    printf '400'\n"
+            "    exit 0\n"
+            "  fi\n"
             "  if [[ \"$payload\" == *'\"bootstrap\"'* ]]; then\n"
             f"    printf '%s\\n' {json.dumps(bff_bootstrap)} > \"$output\"\n"
             "    write_headers 200\n"
@@ -1580,9 +1649,14 @@ class StagingCompatScriptTests(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stderr + result.stdout)
             summary = (temporary / "summary.md").read_text()
             self.assertIn("K=3", summary)
+            self.assertIn(
+                "telemetry: not used (Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b)",
+                summary,
+            )
             self.assertIn("listOrganizations: HTTP 503", summary)
             self.assertIn("updateInstance: HTTP 503", summary)
             self.assertIn("createInstanceDeleteConfirmation: HTTP 503", summary)
+            self.assertIn("gate answered", summary)
             self.assertIn("k_probe_count=3", (temporary / "github.output").read_text())
             self.assertNotIn(env["MINTED_ACCESS_TOKEN"], summary)
             self.assertNotIn("11111111-1111-4111-8111-111111111111", summary)
@@ -1590,6 +1664,10 @@ class StagingCompatScriptTests(unittest.TestCase):
             self.assertIn("listOrganizations", curl_log)
             self.assertIn("updateInstance", curl_log)
             self.assertIn("createInstanceDeleteConfirmation", curl_log)
+            self.assertRegex(curl_log, r'"version":1\b')
+            self.assertNotIn('"version":"1"', curl_log)
+            self.assertIn('"intent":{', curl_log)
+            self.assertNotIn('"intent":"stop"', curl_log)
 
     def test_in_hold_probes_fail_without_no_store(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1603,25 +1681,77 @@ class StagingCompatScriptTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertIn("no-store", result.stderr + result.stdout)
 
-    def test_telemetry_report_is_inconclusive_and_never_queries_azure(self) -> None:
+    def test_update_instance_schema_rejects_string_version_and_intent(self) -> None:
+        valid = {
+            "action": "updateInstance",
+            "organizationId": "11111111-1111-4111-8111-111111111111",
+            "workspaceId": "22222222-2222-4222-8222-222222222222",
+            "instanceId": "33333333-3333-4333-8333-333333333333",
+            "version": 1,
+            "intent": {
+                "release": {
+                    "distributionId": "valence-runtime",
+                    "releaseLine": "3.8",
+                    "requestedVersion": "3.8.0",
+                    "channel": "stable",
+                    "patchUpdates": "automatic-within-minor",
+                    "minorUpdates": "explicit-approval",
+                    "majorMigrations": "explicit-migration",
+                },
+                "application": {"topologyId": "combined"},
+                "placement": {
+                    "targetMode": "managed",
+                    "regionCode": "westeurope",
+                    "isolationProfile": "dedicated",
+                    "capacityProfile": "standard-small",
+                },
+                "desiredLifecycle": "Running",
+            },
+            "idempotencyKey": "44444444-4444-4444-8444-444444444444",
+        }
+        self.assertIsNone(validate_bff_action_payload(valid))
+        bad = dict(valid)
+        bad["version"] = "1"
+        bad["intent"] = "stop"
+        self.assertIsNotNone(validate_bff_action_payload(bad))
         with tempfile.TemporaryDirectory() as raw:
             temporary = Path(raw)
+            fake = self.write_fake_curl(temporary)
             env = self.environment(temporary)
-            env["AZ_CALL_LOG"] = str(temporary / "az.log")
-            env["ARMED_AT_ISO"] = "2026-10-04T11:23:00Z"
-            env["DELETED_AT_ISO"] = "2026-10-04T11:37:00Z"
-            env["EXPECTED_COMPATIBILITY_REQUESTS"] = "7"
-            env["GITHUB_STEP_SUMMARY"] = str(temporary / "summary.md")
-            result = self.run_script(env, "telemetry")
-            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
-            summary = (temporary / "summary.md").read_text()
-            self.assertIn("Inconclusive", summary)
-            self.assertIn("2026-10-04T11:23:00Z", summary)
-            self.assertIn("2026-10-04T11:37:00Z", summary)
-            self.assertIn("Expected GET /api/cloud/compatibility count from this run: 7", summary)
-            self.assertIn("requests", summary)
-            self.assertFalse((temporary / "az.log").exists())
-            self.assertNotIn(env["MINTED_ACCESS_TOKEN"], summary)
+            env["CLOUD_BFF_SMOKE_URL"] = STAGING_BFF_URL
+            payload = json.dumps(
+                {
+                    "action": "updateInstance",
+                    "organizationId": "11111111-1111-4111-8111-111111111111",
+                    "workspaceId": "22222222-2222-4222-8222-222222222222",
+                    "instanceId": "33333333-3333-4333-8333-333333333333",
+                    "version": "1",
+                    "intent": "stop",
+                    "idempotencyKey": "44444444-4444-4444-8444-444444444444",
+                }
+            )
+            result = subprocess.run(
+                [
+                    str(fake),
+                    "--request",
+                    "POST",
+                    "--data",
+                    payload,
+                    "--output",
+                    str(temporary / "body.json"),
+                    "--dump-header",
+                    str(temporary / "headers.txt"),
+                    "--write-out",
+                    "%{http_code}",
+                    STAGING_BFF_URL,
+                ],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual("400", result.stdout.strip(), result.stderr + result.stdout)
 
 
 if __name__ == "__main__":

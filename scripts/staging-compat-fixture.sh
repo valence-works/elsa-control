@@ -744,7 +744,9 @@ k_probe_payload() {
         --arg workspaceId "$workspace_id" \
         --arg instanceId "$instance_id" \
         --arg idempotencyKey "$(random_uuid)" \
-        '{action:"updateInstance",organizationId:$organizationId,workspaceId:$workspaceId,instanceId:$instanceId,version:"1",intent:"stop",idempotencyKey:$idempotencyKey}'
+        --argjson version 1 \
+        --argjson intent '{"release":{"distributionId":"valence-runtime","releaseLine":"3.8","requestedVersion":"3.8.0","channel":"stable","patchUpdates":"automatic-within-minor","minorUpdates":"explicit-approval","majorMigrations":"explicit-migration"},"application":{"topologyId":"combined","featurePresetId":null,"featureOverrides":{},"packagePolicy":null,"configurationShapeRevisionId":null},"placement":{"targetMode":"managed","regionCode":"westeurope","isolationProfile":"dedicated","capacityProfile":"standard-small","networkOutcome":"public","domainOutcome":"managed"},"desiredLifecycle":"Running"}' \
+        '{action:"updateInstance",organizationId:$organizationId,workspaceId:$workspaceId,instanceId:$instanceId,version:$version,intent:$intent,idempotencyKey:$idempotencyKey}'
       ;;
     createInstanceDeleteConfirmation)
       jq -cn \
@@ -800,14 +802,19 @@ read_linked_org_context() {
 }
 
 prove_k_action_probes() {
-  local action response_file header_file http_status payload instance_id timestamp k=0
+  local action response_file header_file http_status payload instance_id timestamp k=0 forward_note
   read_linked_org_context
   append_step_summary "## In-hold K action probes"
+  append_step_summary ""
+  append_step_summary "telemetry: not used (Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b)"
   append_step_summary ""
   for action in "${K_PROBE_ACTION_LIST[@]}"; do
     k=$((k + 1))
     instance_id="$(random_uuid)"
     payload="$(k_probe_payload "$action" "$CONTEXT_ORGANIZATION_ID" "$CONTEXT_WORKSPACE_ID" "$instance_id")"
+    if ! python3 "$EXCLUSIVE_HELPER" validate-bff --payload "$payload"; then
+      fail "The in-hold ${action} probe payload failed BFF schema validation."
+    fi
     response_file="$(mktemp)"
     header_file="$(mktemp)"
     timestamp="$(iso_now)"
@@ -817,7 +824,12 @@ prove_k_action_probes() {
     fi
     assert_armed_bff_envelope "$http_status" "$response_file" "$header_file" "in-hold ${action} probe"
     rm -f "$response_file" "$header_file"
-    append_step_summary "- ${action}: HTTP ${http_status} at ${timestamp}"
+    if [ "$action" = "listOrganizations" ]; then
+      forward_note="gate answered; a forward would have been 200 with data"
+    else
+      forward_note="gate answered; a forward would have been Control not-found"
+    fi
+    append_step_summary "- ${action}: HTTP ${http_status} at ${timestamp} (${forward_note})"
     echo "In-hold ${action} probe returned the armed envelope."
   done
   append_step_summary ""
@@ -825,38 +837,6 @@ prove_k_action_probes() {
   append_step_summary ""
   write_output "k_probe_count" "$k"
   echo "Recorded K=${k} in-hold action probes. No token or user body was written."
-}
-
-write_telemetry_report() {
-  local armed_at="${ARMED_AT_ISO:-}"
-  local deleted_at="${DELETED_AT_ISO:-}"
-  local expected="${EXPECTED_COMPATIBILITY_REQUESTS:-}"
-  if [ -z "$armed_at" ] || [ -z "$deleted_at" ]; then
-    fail "Telemetry report is missing the armed-window write and delete timestamps."
-  fi
-  append_step_summary "## Armed-window telemetry"
-  append_step_summary ""
-  append_step_summary "- Result: **Inconclusive** — staging Control HTTP requests do not reach a queryable App Insights or Log Analytics store."
-  append_step_summary "- Window start (setting write): ${armed_at}"
-  append_step_summary "- Window end (confirmed deletion): ${deleted_at}"
-  append_step_summary "- Expected GET /api/cloud/compatibility count from this run: ${expected:-unknown}"
-  append_step_summary "- Compatibility count: not queried"
-  append_step_summary "- /api/cloud/bootstrap, /api/me/*, /api/workspaces/*, /api/organizations/*, /api/managed-elsa/*: not queried"
-  append_step_summary "- Sink: managed-lifecycle Azure Monitor only (role elsa-control-api / instance managed-lifecycle). ASP.NET Core requests export OTLP-only when OTEL_EXPORTER_OTLP_ENDPOINT is set; deploy does not set it."
-  append_step_summary "- Options are on #723: App Service HTTP logs into the staging workspace, or a dedicated request exporter. The managed-lifecycle sink was not widened."
-  append_step_summary ""
-  append_step_summary "KQL that would be used if a request store existed:"
-  append_step_summary ""
-  append_step_summary '```kql'
-  append_step_summary "let start = datetime(${armed_at});"
-  append_step_summary "let end = datetime(${deleted_at});"
-  append_step_summary "requests"
-  append_step_summary "| where timestamp between (start .. end)"
-  append_step_summary '| where name has "/api/cloud" or name has "/api/me" or name has "/api/workspaces" or name has "/api/organizations" or name has "/api/managed-elsa"'
-  append_step_summary "| summarize Compatibility=countif(name has \"/api/cloud/compatibility\"), Bootstrap=countif(name has \"/api/cloud/bootstrap\"), Me=countif(name has \"/api/me\"), Workspaces=countif(name has \"/api/workspaces\"), Organizations=countif(name has \"/api/organizations\"), ManagedElsa=countif(name has \"/api/managed-elsa\")"
-  append_step_summary '```'
-  append_step_summary ""
-  echo "Telemetry report recorded as Inconclusive; no Azure Monitor query was sent."
 }
 
 read_health_identity() {
@@ -1312,13 +1292,8 @@ in_hold_probes() {
   prove_k_action_probes
 }
 
-telemetry_report() {
-  require_test_environment
-  write_telemetry_report
-}
-
 usage() {
-  echo "Usage: $0 preflight|arm|restore|mint|probes|telemetry" >&2
+  echo "Usage: $0 preflight|arm|restore|mint|probes" >&2
 }
 
 main() {
@@ -1328,7 +1303,6 @@ main() {
     restore) restore ;;
     mint) mint_cloud_token ;;
     probes) in_hold_probes ;;
-    telemetry) telemetry_report ;;
     *)
       usage
       return 2

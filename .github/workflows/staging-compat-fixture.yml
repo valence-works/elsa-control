@@ -47,6 +47,7 @@ jobs:
       CLOUD_BFF_SMOKE_URL: ${{ vars.CLOUD_BFF_SMOKE_URL }}
       STAGING_CLOUD_ORIGIN: https://calm-sand-03964eb03.2.azurestaticapps.net
       SCREENSHOT_ROOT: ${{ github.workspace }}/staging-compat-screens
+      PLAYWRIGHT_STATE_PATH: ${{ runner.temp }}/compat-playwright-session.json
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -64,13 +65,6 @@ jobs:
             exit 1
           fi
 
-      - name: Log in Azure CLI
-        uses: azure/login@v2
-        with:
-          client-id: ${{ env.AZURE_CLIENT_ID }}
-          tenant-id: ${{ env.AZURE_TENANT_ID }}
-          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
-
       - name: Install Playwright Chromium
         id: playwright_setup
         continue-on-error: true
@@ -79,10 +73,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$SCREENSHOT_ROOT"
-          # Install at the workspace root so the ESM capture script can resolve
-          # `playwright` by walking up from scripts/. NODE_PATH is ignored by ESM.
-          npm install --no-save --prefix "$GITHUB_WORKSPACE" playwright@1.49.0
-          npx --prefix "$GITHUB_WORKSPACE" playwright install --with-deps chromium
+          # Install next to the ESM capture script so createRequire(import.meta.url)
+          # resolves `playwright` from scripts/node_modules. Do this before Azure
+          # login. --ignore-scripts skips package postinstall; browsers are installed
+          # explicitly afterwards.
+          npm install --no-save --ignore-scripts --prefix "$GITHUB_WORKSPACE/scripts" playwright@1.49.0
+          npx --prefix "$GITHUB_WORKSPACE/scripts" playwright install --with-deps chromium
+          node scripts/staging-compat-fixture-screens.mjs --prove-load
+
+      - name: Log in Azure CLI
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
 
       - name: Preflight exclusive staging and capture the baseline
         id: preflight
@@ -126,6 +130,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          armed_at="${{ steps.arm.outputs.armed_at }}"
+          if [[ ! "$armed_at" =~ ^[0-9]+$ ]]; then
+            echo "::error::Arm did not record when the Web App setting was applied."
+            exit 1
+          fi
+          now="$(date +%s)"
+          elapsed=$((now - armed_at))
+          if [ "$(python3 scripts/lib/staging_compat_exclusive.py skip-in-hold --elapsed-since-arm "$elapsed" --needed 120)" = skip ]; then
+            echo "Skipping K probes; remaining fixture-on budget before the 20-minute cap is short."
+            {
+              printf '## In-hold K action probes\n\n'
+              printf 'telemetry: not used (Architect ruling); no-forward evidence = elsa-cloud#144 + (a)/(b)\n\n'
+              printf 'Skipped; remaining fixture-on budget before the 20-minute cap is short.\n'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           scripts/staging-compat-fixture.sh probes
 
       - name: Capture armed customer screens
@@ -140,20 +160,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          armed_at="${{ steps.arm.outputs.armed_at }}"
+          if [[ ! "$armed_at" =~ ^[0-9]+$ ]]; then
+            echo "::error::Arm did not record when the Web App setting was applied."
+            exit 1
+          fi
+          now="$(date +%s)"
+          elapsed=$((now - armed_at))
+          if [ "$(python3 scripts/lib/staging_compat_exclusive.py skip-in-hold --elapsed-since-arm "$elapsed" --needed 300)" = skip ]; then
+            echo "captured=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping armed screens; remaining fixture-on budget before the 20-minute cap is short."
+            {
+              printf '## Armed customer screens\n\n'
+              printf 'Skipped; remaining fixture-on budget before the 20-minute cap is short.\n'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           node scripts/staging-compat-fixture-screens.mjs
+          echo "captured=true" >> "$GITHUB_OUTPUT"
           {
             printf '## Armed customer screens\n\n'
-            printf 'Uploaded as artifact `staging-compat-screens-armed`.\n'
+            printf 'Uploaded as artifact `staging-compat-screens-armed` after restore.\n'
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload armed customer screens
-        if: ${{ !cancelled() && steps.armed_screens.outcome == 'success' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: staging-compat-screens-armed
-          path: ${{ env.SCREENSHOT_ROOT }}/armed/*.png
-          if-no-files-found: error
-          retention-days: 14
 
       - name: Hold the remaining exclusive proof window
         if: ${{ success() }}
@@ -209,6 +237,16 @@ jobs:
           set -euo pipefail
           scripts/staging-compat-fixture.sh restore
 
+      - name: Upload armed customer screens
+        if: ${{ !cancelled() && steps.armed_screens.outputs.captured == 'true' }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-compat-screens-armed
+          path: ${{ env.SCREENSHOT_ROOT }}/armed/*.png
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Capture restored customer screens
         id: restored_screens
         if: ${{ !cancelled() && steps.restore.outcome == 'success' && steps.playwright_setup.outcome == 'success' }}
@@ -221,33 +259,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [ ! -f "$PLAYWRIGHT_STATE_PATH" ]; then
+            echo "captured=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping restored screens; the armed session was not captured."
+            {
+              printf '## Restored customer screens\n\n'
+              printf 'Skipped; the armed session was not captured.\n'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           node scripts/staging-compat-fixture-screens.mjs
+          echo "captured=true" >> "$GITHUB_OUTPUT"
           {
             printf '## Restored customer screens\n\n'
             printf 'Uploaded as artifact `staging-compat-screens-restored`.\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload restored customer screens
-        if: ${{ !cancelled() && steps.restored_screens.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.restored_screens.outputs.captured == 'true' }}
+        timeout-minutes: 2
         uses: actions/upload-artifact@v4
         with:
           name: staging-compat-screens-restored
           path: ${{ env.SCREENSHOT_ROOT }}/restored/*.png
           if-no-files-found: error
-          retention-days: 14
-
-      - name: Report armed-window telemetry
-        id: telemetry
-        if: ${{ !cancelled() && steps.restore.outcome == 'success' }}
-        timeout-minutes: 3
-        env:
-          ARMED_AT_ISO: ${{ steps.arm.outputs.armed_at_iso }}
-          DELETED_AT_ISO: ${{ steps.restore.outputs.deleted_at_iso }}
-          EXPECTED_COMPATIBILITY_REQUESTS: "7"
-        shell: bash
-        run: |
-          set -euo pipefail
-          scripts/staging-compat-fixture.sh telemetry
+          retention-days: 7
 
       - name: Report skipped post-restore evidence
         if: ${{ always() && steps.preflight.outcome == 'success' && steps.restore.outcome != 'success' }}
@@ -256,5 +292,5 @@ jobs:
           set -euo pipefail
           {
             printf '## Post-restore evidence\n\n'
-            printf 'Restored customer screens and telemetry were skipped because restore did not succeed.\n'
+            printf 'Restored customer screens were skipped because restore did not succeed.\n'
           } >> "$GITHUB_STEP_SUMMARY"
