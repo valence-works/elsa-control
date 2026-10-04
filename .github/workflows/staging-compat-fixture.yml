@@ -35,6 +35,7 @@ jobs:
       TARGET_ENVIRONMENT: test
       FIXTURE_MODE: ${{ inputs.mode }}
       DISPATCH_MODE: ${{ inputs.mode }}
+      GH_TOKEN: ${{ github.token }}
       AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
@@ -138,6 +139,7 @@ jobs:
         if: ${{ always() && steps.preflight.outcome == 'success' }}
         timeout-minutes: 4
         env:
+          GH_TOKEN: ${{ github.token }}
           EXPECTED_DIGEST: ${{ steps.preflight.outputs.digest }}
           EXPECTED_BUILD_NUMBER: ${{ steps.preflight.outputs.build_number }}
           EXPECTED_COMMIT: ${{ steps.preflight.outputs.commit }}

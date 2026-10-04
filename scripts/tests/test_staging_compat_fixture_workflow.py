@@ -283,6 +283,7 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("vars.CLOUD_BFF_SMOKE_URL", self.source)
         self.assertIn("scripts/staging-compat-fixture.sh mint", self.source)
         self.assertGreaterEqual(self.source.count("scripts/staging-compat-fixture.sh mint"), 2)
+        self.assertGreaterEqual(self.source.count("GH_TOKEN: ${{ github.token }}"), 2)
         self.assertEqual(3, self.source.count("secrets."))
 
     def test_shares_the_deploy_staging_concurrency_group(self) -> None:
@@ -448,7 +449,7 @@ class StagingCompatScriptTests(unittest.TestCase):
             "  exit 0\n"
             "fi\n"
             "if [[ \"$*\" == *'/actions/runs/'* ]]; then\n"
-            f"  if [[ \"$*\" == *'/actions/runs/{DEPLOY_STAGING_RUN_ID}'* ]]; then\n"
+            f"  if [[ \"$*\" == *'/actions/runs/{DEPLOY_STAGING_RUN_ID}'* ]] || [[ \"$*\" == *'/actions/runs/777'* ]]; then\n"
             "    echo '.github/workflows/azure-api-deploy.yml'\n"
             "    exit 0\n"
             "  fi\n"
@@ -458,6 +459,14 @@ class StagingCompatScriptTests(unittest.TestCase):
             "  fi\n"
             "  if [ -n \"${GH_RUN_PATH:-}\" ]; then printf '%s\\n' \"$GH_RUN_PATH\"; exit 0; fi\n"
             "  echo '.github/workflows/ci.yml'\n"
+            "  exit 0\n"
+            "fi\n"
+            "if [[ \"$*\" == *'/deployments/'* && \"$*\" != *statuses* && \"$*\" != *'/deployments?'* ]]; then\n"
+            "  if [[ \"$*\" == *'/deployments/888'* ]]; then\n"
+            "    echo '2026-10-04T01:00:00Z'\n"
+            "    exit 0\n"
+            "  fi\n"
+            "  echo \"${GH_DEPLOYMENT_CREATED_AT:-2026-10-03T00:00:00Z}\"\n"
             "  exit 0\n"
             "fi\n"
             "if [[ \"$*\" == *'/deployments/'*'/statuses'* ]]; then\n"
@@ -472,6 +481,10 @@ class StagingCompatScriptTests(unittest.TestCase):
             "  fi\n"
             "  if [[ \"$*\" == *'/deployments/99/'* ]]; then\n"
             "    echo '[{\"state\":\"in_progress\",\"log_url\":\"https://github.com/valence-works/elsa-control/actions/runs/99\"}]'\n"
+            "    exit 0\n"
+            "  fi\n"
+            "  if [[ \"$*\" == *'/deployments/888/'* ]]; then\n"
+            "    echo '[{\"state\":\"in_progress\",\"log_url\":\"https://github.com/valence-works/elsa-control/actions/runs/777\"}]'\n"
             "    exit 0\n"
             "  fi\n"
             "  echo '[]'\n"
@@ -1094,10 +1107,45 @@ class StagingCompatScriptTests(unittest.TestCase):
             self.write_fake_curl(temporary)
             restored = '{"status":"ok","buildNumber":"232","imageId":"%s","compatibilityFixture":null}' % HEALTH_COMMIT
             health = self.write_health_responses(temporary, restored, restored, restored, restored)
+            (temporary / "deployment-ids.txt").write_text(
+                f"{DEPLOY_STAGING_DEPLOYMENT_ID}\n888\n"
+            )
+            env = self.environment(temporary)
+            env["AZ_CALL_LOG"] = str(temporary / "az.log")
+            env["GH_CALL_LOG"] = str(temporary / "gh.log")
+            env["AZ_SETTING_PRESENT"] = str(present)
+            env["EXPECTED_DIGEST"] = digest
+            env["EXPECTED_BUILD_NUMBER"] = "232"
+            env["EXPECTED_COMMIT"] = HEALTH_COMMIT
+            env["EXPECTED_DEPLOYMENT_ID"] = DEPLOY_STAGING_DEPLOYMENT_ID
+            env["EXPECTED_IMAGE_REFERENCE"] = image
+            env["EXPECTED_PREFLIGHT_STARTED_AT"] = "2026-10-04T00:00:00Z"
+            env["EXPECTED_SETTING_NAMES_PATH"] = str(names)
+            env["HEALTH_RETRY_SECONDS"] = "0"
+            env["HEALTH_RESPONSES"] = str(health)
+            env["GH_DEPLOYMENT_IDS"] = str(temporary / "deployment-ids.txt")
+            result = self.run_script(env, "restore")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("Deploy staging run started between preflight and postflight", result.stderr + result.stdout)
+
+    def test_restore_ignores_non_test_azure_api_deploy_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            digest = "sha256:" + ("c" * 64)
+            image = self.tagged_image(digest)
+            names = temporary / "names.txt"
+            names.write_text("Application__BuildNumber\nWEBSITES_PORT\n")
+            present = temporary / "present"
+            present.write_text("present\n")
+            self.write_fake_az(temporary, ["Application__BuildNumber", "WEBSITES_PORT"], image, digest)
+            self.write_fake_gh(temporary)
+            self.write_fake_curl(temporary)
+            restored = '{"status":"ok","buildNumber":"232","imageId":"%s","compatibilityFixture":null}' % HEALTH_COMMIT
+            health = self.write_health_responses(temporary, restored, restored, restored, restored)
             (temporary / "deploy-runs.json").write_text(
                 json.dumps(
                     {
-                        "id": 777,
+                        "id": 901,
                         "created_at": "2026-10-04T01:00:00Z",
                         "path": ".github/workflows/azure-api-deploy.yml",
                         "name": "Azure Control API Deploy",
@@ -1119,9 +1167,10 @@ class StagingCompatScriptTests(unittest.TestCase):
             env["HEALTH_RETRY_SECONDS"] = "0"
             env["HEALTH_RESPONSES"] = str(health)
             env["GH_DEPLOY_STAGING_RUNS"] = str(temporary / "deploy-runs.json")
+            env["GITHUB_STEP_SUMMARY"] = str(temporary / "summary.md")
             result = self.run_script(env, "restore")
-            self.assertNotEqual(0, result.returncode)
-            self.assertIn("Deploy staging run started between preflight and postflight", result.stderr + result.stdout)
+            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+            self.assertIn("BFF smoke reported compatible", result.stderr + result.stdout)
 
     def test_mint_masks_the_token_and_never_writes_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

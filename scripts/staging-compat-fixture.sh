@@ -315,25 +315,38 @@ latest_deploy_staging_deployment_id() {
 assert_no_deploy_staging_since() {
   local since="${1:-}"
   local repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required.}"
-  local raw
+  local deployment_ids deployment_id created statuses url run_id path
   if [ -z "$since" ]; then
     fail "The preflight start time is required to prove Deploy staging did not start."
   fi
-  raw="$(gh_get "repos/${repo}/actions/workflows/azure-api-deploy.yml/runs?per_page=20" \
-    --jq '.workflow_runs[] | {id, created_at, path, name}')"
-  if [ -n "$raw" ]; then
-    if ! printf '%s\n' "$raw" | jq -se 'length == 0 or all(type == "object")' >/dev/null; then
-      fail "Deploy staging run list was not valid JSON."
+  # Only GitHub environment `test` deployments. azure-api-deploy.yml also
+  # deploys production and development; those must not fail restore.
+  deployment_ids="$(gh_get --paginate \
+    "repos/${repo}/deployments?environment=test&per_page=50" \
+    --jq '.[] | .id')"
+  while IFS= read -r deployment_id; do
+    [[ "$deployment_id" =~ ^[0-9]+$ ]] || continue
+    created="$(gh_get "repos/${repo}/deployments/${deployment_id}" --jq '.created_at')"
+    if [ -z "$created" ]; then
+      fail "A test-environment deployment created_at could not be read."
     fi
-  fi
-  if printf '%s\n' "$raw" | jq -se --arg since "$since" --arg this "${GITHUB_RUN_ID:-}" '
-    map(select(
-      (.created_at | tostring) > $since
-      and (.id | tostring) != $this
-    )) | length > 0
-  ' >/dev/null; then
-    fail "A Deploy staging run started between preflight and postflight."
-  fi
+    if ! [[ "$created" > "$since" ]]; then
+      continue
+    fi
+    statuses="$(gh_get "repos/${repo}/deployments/${deployment_id}/statuses?per_page=1")"
+    require_json_array "$statuses" "Test-environment deployment status"
+    url="$(printf '%s\n' "$statuses" | jq -r '.[0].log_url // .[0].target_url // empty')"
+    if ! run_id="$(extract_run_id_from_url "$url")"; then
+      fail "A test-environment deployment could not be mapped to a workflow run."
+    fi
+    if [ "$run_id" = "${GITHUB_RUN_ID:-}" ]; then
+      continue
+    fi
+    path="$(workflow_run_path "$run_id")"
+    if [ "$path" = "$DEPLOY_STAGING_WORKFLOW_PATH" ]; then
+      fail "A Deploy staging run started between preflight and postflight."
+    fi
+  done <<< "$deployment_ids"
 }
 
 restart_webapp() {
