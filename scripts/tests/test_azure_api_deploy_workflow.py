@@ -200,7 +200,15 @@ if args[:3] == ["webapp", "config", "appsettings"] and "list" in args:
     query = args[args.index("--query") + 1] if "--query" in args else ""
     record("appsettings-list")
     if "Billing__Stripe__ExpectedMode" in query:
-        print(os.environ.get("CURRENT_EXPECTED_MODE", ""))
+        current = os.environ.get("CURRENT_EXPECTED_MODE", "")
+        if current:
+            print(json.dumps({{
+                "name": "Billing__Stripe__ExpectedMode",
+                "value": current,
+                "slotSetting": False,
+            }}))
+        else:
+            print("null")
     else:
         print("0" if "length(@" in query else "")
 elif args[:3] == ["webapp", "config", "appsettings"] and "set" in args:
@@ -379,8 +387,8 @@ fi
                 if mode in ("app", "promote"):
                     # First billing-enabled start must see ExpectedMode before
                     # the image switch. The later combined settings write still
-                    # includes ExpectedMode after the switch; rollback restore
-                    # is unchanged.
+                    # includes ExpectedMode after the switch. Rollback restores
+                    # or deletes the captured prior setting after a failed switch.
                     self.assertLess(first_expected_mode, observed.index(replacement))
                     self.assertLess(
                         observed.index(replacement),
@@ -1247,14 +1255,27 @@ fi
         # Deliberate pin update from run 37161715192: app-mode step names and
         # if-conditions stay the same. The only app-path mutation-order change
         # is inside Deploy API app — ExpectedMode is written before the image
-        # switch unless Azure already has the target value. Telemetry still
-        # never appears in the rollback condition.
+        # switch unless Azure already has the target value. Prior
+        # existence/value/slot metadata is captured first and restored or
+        # deleted on rollback. An unreadable prior state aborts before
+        # mutation. Telemetry still never appears in the rollback condition.
         self.assertNotIn("TELEMETRY_FAILURE_ROLLS_BACK_API", self.source)
         self.assertIn("never rolls back the API in", self.source)
         self.assertIn("production, test, or development", self.source)
         self.assertIn('if [ "$current_expected_mode" = "$BILLING_EXPECTED_MODE" ]; then', self.source)
+        self.assertNotIn("later, lower-priority change", self.source)
+        self.assertIn("Could not read Billing__Stripe__ExpectedMode; refusing to mutate the Web App.", self.source)
+        self.assertIn("billing_expected_mode_present=", self.source)
+        self.assertIn("PREVIOUS_BILLING_EXPECTED_MODE_PRESENT", self.source)
+        self.assertIn("could not restore the previous Billing__Stripe__ExpectedMode.", self.source)
+        self.assertIn("could not remove the newly introduced Billing__Stripe__ExpectedMode.", self.source)
         self.assertIn("PRODUCTION_STRIPE_OUTCOME", self.source)
         self.assertIn("production Stripe audit", self.source)
+        expected_mode_list = self.source[
+            self.source.index('if ! billing_expected_mode_record="$(az webapp config appsettings list') :
+            self.source.index("echo \"::error::Could not read Billing__Stripe__ExpectedMode")
+        ]
+        self.assertNotIn("|| true", expected_mode_list)
         deploy_start = self.source.index("      - name: Deploy API app")
         deploy_end = self.source.index("\n      - name:", deploy_start + 1)
         deploy_step = self.source[deploy_start:deploy_end]
@@ -1404,6 +1425,370 @@ printf '200'
                     self.assertIn(expected, combined)
                     self.assertIn("restored the previous deployment image and build metadata", combined)
                     self.assertNotIn("API health gate failed", combined.replace(expected, ""))
+
+    def test_expected_mode_rollback_restores_prior_state_after_image_switch_failure(self) -> None:
+        """Stateful fake Azure CLI: capture prior ExpectedMode and restore it."""
+
+        def step_script(step_name: str) -> str:
+            start = self.source.index(f"      - name: {step_name}")
+            run_start = self.source.index("        run: |\n", start) + len("        run: |\n")
+            end = self.source.find("\n      - name:", run_start)
+            if end == -1:
+                end = len(self.source)
+            return dedent(self.source[run_start:end])
+
+        deploy_script = step_script("Deploy API app").replace(
+            "${{ steps.current-deployment.outputs.deployment_mode }}", "classic"
+        )
+        rollback_script = step_script(
+            "Restore previous API deployment after deployment, configuration, or health failure"
+        )
+
+        mutation_cases = []
+        for mode in ("app", "promote"):
+            for environment, target in (("test", "test"), ("production", "live")):
+                different = "live" if target == "test" else "test"
+                mutation_cases.extend(
+                    (
+                        (mode, environment, target, None, False, "absent"),
+                        (mode, environment, target, different, True, "different"),
+                        (mode, environment, target, target, False, "already-target"),
+                    )
+                )
+        unreadable_cases = (
+            ("app", "test", "test", "live", True),
+            ("promote", "production", "live", "test", False),
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            bin_path = temporary_path / "bin"
+            bin_path.mkdir()
+            events_path = temporary_path / "events.log"
+            state_path = temporary_path / "state.json"
+            capture_path = temporary_path / "production-billing.json"
+            github_output_path = temporary_path / "github-output"
+
+            def write_executable(name: str, contents: str) -> None:
+                path = bin_path / name
+                path.write_text(contents)
+                path.chmod(0o700)
+
+            write_executable(
+                "az",
+                f'''#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+events = Path({str(events_path)!r})
+state_path = Path({str(state_path)!r})
+args = sys.argv[1:]
+state = json.loads(state_path.read_text())
+
+def record(value):
+    with events.open("a", encoding="utf-8") as handle:
+        handle.write(value + "\\n")
+
+def persist():
+    state_path.write_text(json.dumps(state))
+
+def setting_record():
+    return state.setdefault("settings", {{}}).get("Billing__Stripe__ExpectedMode")
+
+if args[:3] == ["webapp", "config", "appsettings"] and "list" in args:
+    query = args[args.index("--query") + 1] if "--query" in args else ""
+    record("appsettings-list")
+    if "Billing__Stripe__ExpectedMode" in query:
+        if os.environ.get("FAIL_SETTINGS_LIST") == "1":
+            record("appsettings-list-failed")
+            raise SystemExit(17)
+        current = setting_record()
+        print(json.dumps(current) if current else "null")
+    else:
+        print("0" if "length(@" in query else "")
+elif args[:3] == ["webapp", "config", "appsettings"] and "set" in args:
+    record("appsettings-set")
+    collecting = None
+    for argument in args:
+        if argument in ("--settings", "--slot-settings"):
+            collecting = argument
+            continue
+        if collecting and argument.startswith("-"):
+            collecting = None
+            continue
+        if collecting and "=" in argument:
+            name, value = argument.split("=", 1)
+            if name == "Billing__Stripe__ExpectedMode":
+                record("billing-expected-mode-set")
+                if collecting == "--slot-settings":
+                    record("billing-expected-mode-slot-set")
+                state.setdefault("settings", {{}})[name] = {{
+                    "name": name,
+                    "value": value,
+                    "slotSetting": collecting == "--slot-settings",
+                }}
+                persist()
+elif args[:3] == ["webapp", "config", "appsettings"] and "delete" in args:
+    record("appsettings-delete")
+    if "Billing__Stripe__ExpectedMode" in args:
+        record("billing-expected-mode-deleted")
+        state.setdefault("settings", {{}}).pop("Billing__Stripe__ExpectedMode", None)
+        persist()
+elif args[:3] == ["webapp", "config", "set"]:
+    runtime = args[args.index("--linux-fx-version") + 1]
+    state["runtime"] = runtime
+    persist()
+    record("old-runtime-restored")
+elif args[:3] == ["webapp", "config", "container"] and "set" in args:
+    image = args[args.index("--container-image-name") + 1]
+    state["runtime"] = "DOCKER|" + image
+    persist()
+    record("runtime-replaced")
+    if os.environ.get("FAIL_IMAGE_SWITCH") == "1":
+        record("image-switch-failed")
+        raise SystemExit(41)
+elif args[:3] == ["webapp", "sitecontainers", "update"]:
+    image = args[args.index("--image") + 1]
+    state["runtime"] = image
+    persist()
+    record("runtime-replaced")
+    if os.environ.get("FAIL_IMAGE_SWITCH") == "1":
+        record("image-switch-failed")
+        raise SystemExit(41)
+elif args[:3] == ["webapp", "config", "show"]:
+    record("runtime-read")
+    print(state["runtime"])
+elif args[:3] == ["webapp", "sitecontainers", "show"]:
+    record("runtime-read")
+    print(state["runtime"])
+elif args[:2] == ["webapp", "restart"]:
+    record("restart")
+elif args[:2] == ["webapp", "show"]:
+    record("health-host-read")
+    print("synthetic-api.azurewebsites.net")
+else:
+    record("az:" + (args[0] if args else "empty"))
+''',
+            )
+            write_executable(
+                "docker",
+                f'''#!/usr/bin/env bash
+set -euo pipefail
+printf 'docker:%s\\n' "$1" >> {str(events_path)!r}
+''',
+            )
+            real_python = sys.executable
+            write_executable(
+                "python3",
+                f'''#!{real_python}
+import os
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+if args and args[0].endswith("scripts/production_stripe_reconcile.py"):
+    operation = "audit" if "--audit" in args else "capture" if "--capture" in args else "reapply"
+    with Path({str(events_path)!r}).open("a", encoding="utf-8") as handle:
+        handle.write(operation + "\\n")
+    if operation == "capture":
+        destination = Path(args[args.index("--capture") + 1])
+        destination.write_text("fake-private-capture")
+    raise SystemExit(0)
+os.execv({real_python!r}, [{real_python!r}, *args])
+''',
+            )
+            write_executable(
+                "curl",
+                '''#!/usr/bin/env bash
+set -euo pipefail
+output=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then output="$2"; shift 2; continue; fi
+  shift
+done
+printf '{"status":"ok","buildNumber":"88"}' > "$output"
+printf '200'
+''',
+            )
+            write_executable("sleep", "#!/usr/bin/env bash\nexit 0\n")
+
+            def settings() -> dict:
+                return json.loads(state_path.read_text()).get("settings", {})
+
+            def expected_mode() -> dict | None:
+                return settings().get("Billing__Stripe__ExpectedMode")
+
+            def parse_outputs() -> dict[str, str]:
+                parsed: dict[str, str] = {}
+                if github_output_path.exists():
+                    for line in github_output_path.read_text().splitlines():
+                        if "=" in line:
+                            key, value = line.split("=", 1)
+                            parsed[key] = value
+                return parsed
+
+            def run_shell(script: str, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["bash", "-c", script],
+                    cwd=ROOT,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            def base_environment(*, mode: str, target_environment: str, billing_mode: str) -> dict[str, str]:
+                environment = os.environ.copy()
+                environment.update(
+                    {
+                        "PATH": f"{bin_path}:{environment['PATH']}",
+                        "TARGET_ENVIRONMENT": target_environment,
+                        "DEPLOY_MODE": mode,
+                        "AZURE_ENV_NAME": target_environment,
+                        "AZURE_RESOURCE_GROUP": "rg-synthetic",
+                        "AZURE_WEBAPP_NAME": "synthetic-api",
+                        "AZURE_LOCATION": "westeurope",
+                        "AZURE_SUBSCRIPTION_ID": "subscription",
+                        "AZURE_CONTAINER_REGISTRY_ENDPOINT": "registry.azurecr.io",
+                        "GITHUB_SHA": "a" * 40,
+                        "GITHUB_RUN_NUMBER": "101",
+                        "VALIDATED_CANDIDATE_IMAGE": "registry.azurecr.io/elsa-control/api@sha256:" + "b" * 64,
+                        "VALIDATED_CANDIDATE_BUILD_NUMBER": "99",
+                        "PRODUCTION_BILLING_CAPTURE_PATH": str(capture_path),
+                        "BILLING_EXPECTED_MODE": billing_mode,
+                        "EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS": "",
+                        "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED": "",
+                        "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS": "",
+                        "STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED": "",
+                        "STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS": "",
+                        "STAGING_SMOKE_OWNER_INSTANCE_ID": "",
+                    }
+                )
+                return environment
+
+            def seed_state(prior: str | None, slot_setting: bool) -> None:
+                seeded: dict = {"runtime": "DOCKER|old-image", "settings": {}}
+                if prior is not None:
+                    seeded["settings"]["Billing__Stripe__ExpectedMode"] = {
+                        "name": "Billing__Stripe__ExpectedMode",
+                        "value": prior,
+                        "slotSetting": slot_setting,
+                    }
+                state_path.write_text(json.dumps(seeded))
+                events_path.write_text("")
+                github_output_path.write_text("")
+                capture_path.write_text("fake-private-capture")
+
+            def rollback_environment(deploy_env: dict[str, str]) -> dict[str, str]:
+                outputs = parse_outputs()
+                return deploy_env | {
+                    "PREVIOUS_DEPLOYMENT_MODE": "classic",
+                    "PREVIOUS_LINUX_FX_VERSION": "DOCKER|old-image",
+                    "PREVIOUS_SITECONTAINER_IMAGE": "",
+                    "PREVIOUS_BUILD_NUMBER": "88",
+                    "PREVIOUS_BUILD_NUMBER_PRESENT": "true",
+                    "PREVIOUS_HEALTH_BUILD_NUMBER": "88",
+                    "PREVIOUS_HEALTH_IMAGE_ID": "",
+                    "ROLLBACK_HEALTH": "1",
+                    "DEPLOY_API_OUTCOME": "failure",
+                    "PREVIOUS_BILLING_EXPECTED_MODE": outputs.get("billing_expected_mode", ""),
+                    "PREVIOUS_BILLING_EXPECTED_MODE_PRESENT": outputs.get(
+                        "billing_expected_mode_present", ""
+                    ),
+                    "PREVIOUS_BILLING_EXPECTED_MODE_SLOT_SETTING": outputs.get(
+                        "billing_expected_mode_slot_setting", ""
+                    ),
+                    "GITHUB_OUTPUT": str(github_output_path),
+                }
+
+            for mode, environment, target, prior, slot_setting, kind in mutation_cases:
+                with self.subTest(mode=mode, environment=environment, prior=kind):
+                    seed_state(prior, slot_setting)
+                    deploy_env = base_environment(
+                        mode=mode, target_environment=environment, billing_mode=target
+                    )
+                    deploy_env["GITHUB_OUTPUT"] = str(github_output_path)
+                    deploy_env["FAIL_IMAGE_SWITCH"] = "1"
+                    deploy = run_shell(deploy_script, deploy_env)
+                    self.assertEqual(41, deploy.returncode, deploy.stdout + deploy.stderr)
+                    observed = events_path.read_text().splitlines()
+                    self.assertIn("image-switch-failed", observed)
+                    self.assertIn("runtime-replaced", observed)
+                    if kind == "already-target":
+                        self.assertNotIn("billing-expected-mode-set", observed)
+                        self.assertEqual(target, expected_mode()["value"])
+                    else:
+                        self.assertIn("billing-expected-mode-set", observed)
+                        self.assertEqual(target, expected_mode()["value"])
+                    outputs = parse_outputs()
+                    if prior is None:
+                        self.assertEqual("false", outputs.get("billing_expected_mode_present"))
+                    else:
+                        self.assertEqual("true", outputs.get("billing_expected_mode_present"))
+                        self.assertEqual(prior, outputs.get("billing_expected_mode"))
+                        self.assertEqual(
+                            "true" if slot_setting else "false",
+                            outputs.get("billing_expected_mode_slot_setting"),
+                        )
+
+                    rollback = run_shell(rollback_script, rollback_environment(deploy_env))
+                    self.assertEqual(0, rollback.returncode, rollback.stdout + rollback.stderr)
+                    self.assertEqual(
+                        "DOCKER|old-image",
+                        json.loads(state_path.read_text())["runtime"],
+                    )
+                    restored = expected_mode()
+                    if prior is None:
+                        self.assertIsNone(restored)
+                        self.assertIn("billing-expected-mode-deleted", events_path.read_text().splitlines())
+                    else:
+                        self.assertIsNotNone(restored)
+                        self.assertEqual(prior, restored["value"])
+                        self.assertEqual(slot_setting, restored["slotSetting"])
+                        if slot_setting:
+                            self.assertIn(
+                                "billing-expected-mode-slot-set",
+                                events_path.read_text().splitlines(),
+                            )
+                    if environment == "production":
+                        self.assertIn("reapply", events_path.read_text().splitlines())
+                    else:
+                        self.assertNotIn("reapply", events_path.read_text().splitlines())
+
+            for mode, environment, target, prior, slot_setting in unreadable_cases:
+                with self.subTest(mode=mode, environment=environment, prior="unreadable"):
+                    seed_state(prior, slot_setting)
+                    deploy_env = base_environment(
+                        mode=mode, target_environment=environment, billing_mode=target
+                    )
+                    deploy_env["GITHUB_OUTPUT"] = str(github_output_path)
+                    deploy_env["FAIL_SETTINGS_LIST"] = "1"
+                    deploy_env["FAIL_IMAGE_SWITCH"] = "1"
+                    before = expected_mode()
+                    deploy = run_shell(deploy_script, deploy_env)
+                    self.assertNotEqual(0, deploy.returncode, deploy.stdout + deploy.stderr)
+                    combined = deploy.stdout + deploy.stderr
+                    self.assertIn(
+                        "Could not read Billing__Stripe__ExpectedMode; refusing to mutate the Web App.",
+                        combined,
+                    )
+                    observed = events_path.read_text().splitlines()
+                    self.assertIn("appsettings-list-failed", observed)
+                    self.assertNotIn("billing-expected-mode-set", observed)
+                    self.assertNotIn("runtime-replaced", observed)
+                    self.assertNotIn("image-switch-failed", observed)
+                    self.assertEqual(before, expected_mode())
+                    self.assertNotIn("billing_expected_mode_present", parse_outputs())
+
+                    rollback = run_shell(rollback_script, rollback_environment(deploy_env))
+                    self.assertEqual(0, rollback.returncode, rollback.stdout + rollback.stderr)
+                    self.assertEqual(before, expected_mode())
+                    self.assertNotIn(
+                        "billing-expected-mode-deleted",
+                        events_path.read_text().splitlines(),
+                    )
 
     def test_managed_telemetry_deploy_passes_the_environment_recipient(self) -> None:
         script = ROOT / "scripts" / "deploy-managed-telemetry.sh"
@@ -1790,6 +2175,7 @@ case "$*" in
   *"webapp config appsettings delete"*) exit 0 ;;
   *"webapp config appsettings list"*)
     case "$*" in
+      *"Billing__Stripe__ExpectedMode"*) printf 'null\\n' ;;
       *"].name"*|*" ].name"*) ;;
       *"].value"*|*" ].value"*) ;;
       *) printf '%s\\n' "0" ;;

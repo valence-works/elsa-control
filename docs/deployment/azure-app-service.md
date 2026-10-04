@@ -196,13 +196,17 @@ App and promote deploys write `Billing__Stripe__ExpectedMode` (`test` on the
 when Azure does not already have that exact value. The first billing-enabled
 start of the new image cannot miss that setting.
 `StripeBillingConfigurationValidator` throws at host start when billing is
-enabled without ExpectedMode. If the current value already equals the target,
-the pre-switch write is skipped so an image-switch failure does not mutate
-ExpectedMode. Restoring a newly introduced ExpectedMode after a failed switch
-is a later, lower-priority change. The later combined app-settings write and
-the existing restore-on-rollback behaviour are unchanged. Infra still writes
-ExpectedMode after the Bicep replacement, because that path may recreate the
-Web App.
+enabled without ExpectedMode. Before that write, the workflow captures
+whether the setting exists, its prior value, and slot-setting metadata. An
+unreadable settings list aborts before any mutation. If the current value
+already equals the target, the pre-switch write is skipped. After an
+image-switch failure, rollback restores the prior value or deletes a newly
+introduced setting. Production capture/reapply does not include ExpectedMode
+in the preserved set and does not delete newly introduced names, so this
+dedicated restore is required there as well. The later combined app-settings
+write still includes ExpectedMode after a successful switch. Infra still
+writes ExpectedMode after the Bicep replacement, because that path may
+recreate the Web App.
 
 The `development` target is not a billing environment. The workflow does not
 set ExpectedMode there and does not require Stripe secrets. Development

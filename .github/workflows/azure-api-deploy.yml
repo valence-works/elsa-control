@@ -971,19 +971,39 @@ jobs:
             if [ -z "${BILLING_EXPECTED_MODE:-}" ]; then
               return 0
             fi
-            # Skip the pre-switch write when Azure already has the target mode.
-            # That is the smaller safe answer to an image-switch failure after
-            # the early write: routine deploys do not mutate ExpectedMode
-            # before the switch. First-enabled (absent or different) still
-            # writes before the new image can start.
-            current_expected_mode="$(az webapp config appsettings list \
+            # Capture prior existence/value/slot metadata before any write so
+            # rollback can restore or delete. Fail closed if the setting
+            # cannot be read. Skip the write when Azure already has the
+            # target mode. First-enabled (absent or different) still writes
+            # before the new image can start.
+            if ! billing_expected_mode_record="$(az webapp config appsettings list \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_WEBAPP_NAME" \
-              --query "[?name=='Billing__Stripe__ExpectedMode'] | [0].value" \
-              --output tsv \
-              --only-show-errors 2>/dev/null || true)"
-            if [ "$current_expected_mode" = "None" ]; then
-              current_expected_mode=""
+              --query "[?name=='Billing__Stripe__ExpectedMode'] | [0]" \
+              --output json \
+              --only-show-errors)"; then
+              echo "::error::Could not read Billing__Stripe__ExpectedMode; refusing to mutate the Web App."
+              exit 1
+            fi
+            current_expected_mode=""
+            current_expected_mode_slot_setting="false"
+            billing_expected_mode_present="false"
+            if [ -n "$billing_expected_mode_record" ] && [ "$billing_expected_mode_record" != "null" ]; then
+              current_expected_mode="$(printf '%s' "$billing_expected_mode_record" | jq -r '.value // empty')"
+              current_expected_mode_slot_setting="$(printf '%s' "$billing_expected_mode_record" | jq -r 'if .slotSetting == true then "true" else "false" end')"
+              billing_mode_pattern='^(test|live|staging|production)$'
+              if [[ ! "$current_expected_mode" =~ $billing_mode_pattern ]]; then
+                echo "::error::The captured Billing__Stripe__ExpectedMode has an unexpected or unsafe format."
+                exit 1
+              fi
+              billing_expected_mode_present="true"
+            fi
+            if [ -n "${GITHUB_OUTPUT:-}" ]; then
+              echo "billing_expected_mode_present=$billing_expected_mode_present" >> "$GITHUB_OUTPUT"
+              if [ "$billing_expected_mode_present" = "true" ]; then
+                echo "billing_expected_mode=$current_expected_mode" >> "$GITHUB_OUTPUT"
+                echo "billing_expected_mode_slot_setting=$current_expected_mode_slot_setting" >> "$GITHUB_OUTPUT"
+              fi
             fi
             if [ "$current_expected_mode" = "$BILLING_EXPECTED_MODE" ]; then
               return 0
@@ -1029,8 +1049,11 @@ jobs:
             # App mode: write ExpectedMode before the image switch so the first
             # billing-enabled start of the new image cannot miss it.
             # StripeBillingConfigurationValidator throws at host start when
-            # billing is enabled without ExpectedMode. The later combined
-            # settings write and rollback restore stay where they are.
+            # billing is enabled without ExpectedMode. The helper captures
+            # prior existence/value/slot metadata first; rollback restores or
+            # deletes that prior state after an image-switch failure. The
+            # later combined settings write still includes ExpectedMode after
+            # a successful switch.
             write_billing_expected_mode
 
             if [ "$current_deployment_mode" = "sitecontainers" ]; then
@@ -1074,8 +1097,9 @@ jobs:
             fi
 
             # Promote switches the image; write ExpectedMode first for the
-            # same first-start reason as app mode. Later settings and
-            # rollback restore stay after the readback.
+            # same first-start reason as app mode. Prior state is captured
+            # for rollback restore or delete. The later combined settings
+            # write stays after a successful readback.
             write_billing_expected_mode
 
             if [ "$current_deployment_mode" = "sitecontainers" ]; then
@@ -1342,6 +1366,9 @@ jobs:
           STAGING_STRIPE_OUTCOME: ${{ steps.staging-stripe.outcome }}
           PRODUCTION_STRIPE_OUTCOME: ${{ steps.production-stripe.outcome }}
           HEALTH_GATE_OUTCOME: ${{ steps.health-gate.outcome }}
+          PREVIOUS_BILLING_EXPECTED_MODE: ${{ steps.deploy-api.outputs.billing_expected_mode }}
+          PREVIOUS_BILLING_EXPECTED_MODE_PRESENT: ${{ steps.deploy-api.outputs.billing_expected_mode_present }}
+          PREVIOUS_BILLING_EXPECTED_MODE_SLOT_SETTING: ${{ steps.deploy-api.outputs.billing_expected_mode_slot_setting }}
           PRODUCTION_BILLING_CAPTURE_PATH: ${{ runner.temp }}/elsa-control-production-billing.json
         shell: bash
         run: |
@@ -1405,6 +1432,40 @@ jobs:
                 --output none; then
               echo "::error::Rollback failed: could not remove the previous Application__BuildNumber."
               exit 1
+            fi
+          fi
+
+          # Restore or delete ExpectedMode only when deploy-api captured an
+          # explicit prior state. An unset PRESENT means the read never
+          # completed, so this setting was not mutated.
+          if [ "$DEPLOY_MODE" = "app" ] || [ "$DEPLOY_MODE" = "promote" ]; then
+            if [ "${PREVIOUS_BILLING_EXPECTED_MODE_PRESENT:-}" = true ]; then
+              billing_mode_pattern='^(test|live|staging|production)$'
+              if [[ ! "${PREVIOUS_BILLING_EXPECTED_MODE:-}" =~ $billing_mode_pattern ]]; then
+                echo "::error::Rollback failed: the captured Billing__Stripe__ExpectedMode has an unexpected or unsafe format."
+                exit 1
+              fi
+              expected_mode_flag=--settings
+              if [ "${PREVIOUS_BILLING_EXPECTED_MODE_SLOT_SETTING:-}" = true ]; then
+                expected_mode_flag=--slot-settings
+              fi
+              if ! az webapp config appsettings set \
+                  --resource-group "$AZURE_RESOURCE_GROUP" \
+                  --name "$AZURE_WEBAPP_NAME" \
+                  "$expected_mode_flag" "Billing__Stripe__ExpectedMode=$PREVIOUS_BILLING_EXPECTED_MODE" \
+                  --output none; then
+                echo "::error::Rollback failed: could not restore the previous Billing__Stripe__ExpectedMode."
+                exit 1
+              fi
+            elif [ "${PREVIOUS_BILLING_EXPECTED_MODE_PRESENT:-}" = false ]; then
+              if ! az webapp config appsettings delete \
+                  --resource-group "$AZURE_RESOURCE_GROUP" \
+                  --name "$AZURE_WEBAPP_NAME" \
+                  --setting-names Billing__Stripe__ExpectedMode \
+                  --output none; then
+                echo "::error::Rollback failed: could not remove the newly introduced Billing__Stripe__ExpectedMode."
+                exit 1
+              fi
             fi
           fi
 
