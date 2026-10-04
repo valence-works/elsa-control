@@ -199,7 +199,10 @@ def record(value):
 if args[:3] == ["webapp", "config", "appsettings"] and "list" in args:
     query = args[args.index("--query") + 1] if "--query" in args else ""
     record("appsettings-list")
-    print("0" if "length(@)" in query else "")
+    if "Billing__Stripe__ExpectedMode" in query:
+        print(os.environ.get("CURRENT_EXPECTED_MODE", ""))
+    else:
+        print("0" if "length(@" in query else "")
 elif args[:3] == ["webapp", "config", "appsettings"] and "set" in args:
     record("appsettings-set")
     if any("Billing__Stripe__ExpectedMode=" in argument for argument in args):
@@ -390,6 +393,18 @@ fi
                     self.assertIn("docker:build", observed)
                 else:
                     self.assertNotIn("docker:build", observed)
+
+            events_path.write_text("")
+            state_path.write_text(json.dumps({"runtime": "DOCKER|old-image"}))
+            already_set = run_shell(deploy_script, mode="app", CURRENT_EXPECTED_MODE="live")
+            self.assertEqual(0, already_set.returncode, already_set.stdout + already_set.stderr)
+            already_set_events = events()
+            replacement = already_set_events.index("runtime-replaced")
+            self.assertLess(
+                replacement,
+                already_set_events.index("billing-expected-mode-set"),
+            )
+            self.assertEqual(1, already_set_events.count("billing-expected-mode-set"))
 
             events_path.write_text("")
             state_path.write_text(json.dumps({"runtime": "DOCKER|old-image"}))
@@ -1232,9 +1247,14 @@ fi
         # Deliberate pin update from run 37161715192: app-mode step names and
         # if-conditions stay the same. The only app-path mutation-order change
         # is inside Deploy API app — ExpectedMode is written before the image
-        # switch. Telemetry still never appears in the rollback condition.
-        self.assertIn('TELEMETRY_FAILURE_ROLLS_BACK_API: "false"', self.source)
-        self.assertIn("false for production, test, and development", self.source)
+        # switch unless Azure already has the target value. Telemetry still
+        # never appears in the rollback condition.
+        self.assertNotIn("TELEMETRY_FAILURE_ROLLS_BACK_API", self.source)
+        self.assertIn("never rolls back the API in", self.source)
+        self.assertIn("production, test, or development", self.source)
+        self.assertIn('if [ "$current_expected_mode" = "$BILLING_EXPECTED_MODE" ]; then', self.source)
+        self.assertIn("PRODUCTION_STRIPE_OUTCOME", self.source)
+        self.assertIn("production Stripe audit", self.source)
         deploy_start = self.source.index("      - name: Deploy API app")
         deploy_end = self.source.index("\n      - name:", deploy_start + 1)
         deploy_step = self.source[deploy_start:deploy_end]
@@ -1299,6 +1319,91 @@ fi
             )
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             self.assertIn("billing_expected_mode=\n", Path(output.name).read_text())
+
+    def test_rollback_message_names_the_failed_trigger(self) -> None:
+        start = self.source.index(
+            "      - name: Restore previous API deployment after deployment, configuration, or health failure"
+        )
+        run_start = self.source.index("        run: |\n", start) + len("        run: |\n")
+        end = self.source.find("\n      - name:", run_start)
+        rollback_script = dedent(self.source[run_start:end])
+
+        cases = (
+            ({"HEALTH_GATE_OUTCOME": "failure"}, "API health gate failed"),
+            ({"PRODUCTION_STRIPE_OUTCOME": "failure"}, "production Stripe audit failed"),
+            ({"STAGING_STRIPE_OUTCOME": "failure"}, "staging Stripe configuration failed"),
+            ({"DEPLOY_API_OUTCOME": "failure"}, "API deployment failed"),
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            bin_path = temporary_path / "bin"
+            bin_path.mkdir()
+            (bin_path / "az").write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"webapp config set"*) exit 0 ;;
+  *"webapp config appsettings"*) exit 0 ;;
+  *"webapp config show"*) printf '%s\\n' "DOCKER|old-image" ;;
+  *"webapp restart"*) exit 0 ;;
+  *"webapp show"*) printf '%s\\n' "api.azurewebsites.net" ;;
+  *) exit 1 ;;
+esac
+"""
+            )
+            (bin_path / "az").chmod(0o700)
+            (bin_path / "curl").write_text(
+                '''#!/usr/bin/env bash
+set -euo pipefail
+output=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then output="$2"; shift 2; continue; fi
+  shift
+done
+printf '{"status":"ok","buildNumber":"88"}' > "$output"
+printf '200'
+'''
+            )
+            (bin_path / "curl").chmod(0o700)
+            (bin_path / "sleep").write_text("#!/usr/bin/env bash\nexit 0\n")
+            (bin_path / "sleep").chmod(0o700)
+            (bin_path / "python3").write_text("#!/usr/bin/env bash\nexit 0\n")
+            (bin_path / "python3").chmod(0o700)
+
+            base = os.environ.copy()
+            base.update(
+                {
+                    "PATH": f"{bin_path}:{base['PATH']}",
+                    "TARGET_ENVIRONMENT": "test",
+                    "DEPLOY_MODE": "app",
+                    "AZURE_RESOURCE_GROUP": "rg-test",
+                    "AZURE_WEBAPP_NAME": "test-api",
+                    "PREVIOUS_DEPLOYMENT_MODE": "classic",
+                    "PREVIOUS_LINUX_FX_VERSION": "DOCKER|old-image",
+                    "PREVIOUS_SITECONTAINER_IMAGE": "",
+                    "PREVIOUS_BUILD_NUMBER": "88",
+                    "PREVIOUS_BUILD_NUMBER_PRESENT": "true",
+                    "PREVIOUS_HEALTH_BUILD_NUMBER": "88",
+                    "PREVIOUS_HEALTH_IMAGE_ID": "",
+                    "PRODUCTION_BILLING_CAPTURE_PATH": str(temporary_path / "missing-capture.json"),
+                }
+            )
+            for outcomes, expected in cases:
+                with self.subTest(expected=expected):
+                    result = subprocess.run(
+                        ["bash", "-c", rollback_script],
+                        cwd=ROOT,
+                        env=base | outcomes,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    combined = result.stdout + result.stderr
+                    self.assertIn(expected, combined)
+                    self.assertIn("restored the previous deployment image and build metadata", combined)
+                    self.assertNotIn("API health gate failed", combined.replace(expected, ""))
 
     def test_managed_telemetry_deploy_passes_the_environment_recipient(self) -> None:
         script = ROOT / "scripts" / "deploy-managed-telemetry.sh"

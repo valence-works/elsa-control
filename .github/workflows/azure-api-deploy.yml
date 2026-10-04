@@ -99,11 +99,6 @@ jobs:
       EXPECTED_CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
       TELEMETRY_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.telemetry_action || 'what-if' }}
       CONFIRM_ENVIRONMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.confirm_environment || '' }}
-      # Policy pin: a telemetry what-if/create/preflight failure never rolls
-      # back the API image. This is the same for production, test (staging),
-      # and development. #706 removed telemetry terms from the API rollback
-      # condition; do not add them back.
-      TELEMETRY_FAILURE_ROLLS_BACK_API: "false"
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: true
     steps:
@@ -973,13 +968,31 @@ jobs:
           pairing_before_count=""
 
           write_billing_expected_mode() {
-            if [ -n "${BILLING_EXPECTED_MODE:-}" ]; then
-              az webapp config appsettings set \
-                --resource-group "$AZURE_RESOURCE_GROUP" \
-                --name "$AZURE_WEBAPP_NAME" \
-                --settings "Billing__Stripe__ExpectedMode=$BILLING_EXPECTED_MODE" \
-                --output none
+            if [ -z "${BILLING_EXPECTED_MODE:-}" ]; then
+              return 0
             fi
+            # Skip the pre-switch write when Azure already has the target mode.
+            # That is the smaller safe answer to an image-switch failure after
+            # the early write: routine deploys do not mutate ExpectedMode
+            # before the switch. First-enabled (absent or different) still
+            # writes before the new image can start.
+            current_expected_mode="$(az webapp config appsettings list \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$AZURE_WEBAPP_NAME" \
+              --query "[?name=='Billing__Stripe__ExpectedMode'] | [0].value" \
+              --output tsv \
+              --only-show-errors 2>/dev/null || true)"
+            if [ "$current_expected_mode" = "None" ]; then
+              current_expected_mode=""
+            fi
+            if [ "$current_expected_mode" = "$BILLING_EXPECTED_MODE" ]; then
+              return 0
+            fi
+            az webapp config appsettings set \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$AZURE_WEBAPP_NAME" \
+              --settings "Billing__Stripe__ExpectedMode=$BILLING_EXPECTED_MODE" \
+              --output none
           }
 
           if [ "$DEPLOY_MODE" = "infra" ]; then
@@ -1311,10 +1324,11 @@ jobs:
           python3 scripts/production_stripe_reconcile.py --audit --audit-capture "$PRODUCTION_BILLING_CAPTURE_PATH"
 
       - name: Restore previous API deployment after deployment, configuration, or health failure
-        # API rollback triggers: deploy-api, staging/production Stripe, or the
-        # health gate. Telemetry is never a trigger. TELEMETRY_FAILURE_ROLLS_BACK_API
-        # is false for production, test, and development; do not add
-        # managed-telemetry or managed-telemetry-what-if outcomes here.
+        # API rollback triggers: deploy-api, staging Stripe configuration,
+        # production Stripe audit, or the health gate. A telemetry
+        # what-if/create/preflight failure never rolls back the API in
+        # production, test, or development. Do not add managed-telemetry
+        # or managed-telemetry-what-if outcomes here.
         if: ${{ failure() && steps.current-deployment.outcome == 'success' && steps.current-deployment.outputs.capture_succeeded == 'true' && (env.TARGET_ENVIRONMENT != 'production' || env.DEPLOY_MODE == 'build' || steps.production-billing-capture.outcome == 'success') && (steps.deploy-api.outcome == 'failure' || steps.staging-stripe.outcome == 'failure' || steps.production-stripe.outcome == 'failure' || steps.health-gate.outcome == 'failure') }}
         env:
           PREVIOUS_LINUX_FX_VERSION: ${{ steps.current-deployment.outputs.linux_fx_version }}
@@ -1324,6 +1338,10 @@ jobs:
           PREVIOUS_BUILD_NUMBER_PRESENT: ${{ steps.current-deployment.outputs.application_build_number_present }}
           PREVIOUS_HEALTH_BUILD_NUMBER: ${{ steps.current-deployment.outputs.previous_health_build_number }}
           PREVIOUS_HEALTH_IMAGE_ID: ${{ steps.current-deployment.outputs.previous_health_image_id }}
+          DEPLOY_API_OUTCOME: ${{ steps.deploy-api.outcome }}
+          STAGING_STRIPE_OUTCOME: ${{ steps.staging-stripe.outcome }}
+          PRODUCTION_STRIPE_OUTCOME: ${{ steps.production-stripe.outcome }}
+          HEALTH_GATE_OUTCOME: ${{ steps.health-gate.outcome }}
           PRODUCTION_BILLING_CAPTURE_PATH: ${{ runner.temp }}/elsa-control-production-billing.json
         shell: bash
         run: |
@@ -1487,7 +1505,25 @@ jobs:
             exit 1
           fi
 
-          echo "::error::API health gate failed; restored the previous deployment image and build metadata."
+          rollback_triggers=()
+          if [ "${DEPLOY_API_OUTCOME:-}" = "failure" ]; then
+            rollback_triggers+=("API deployment")
+          fi
+          if [ "${STAGING_STRIPE_OUTCOME:-}" = "failure" ]; then
+            rollback_triggers+=("staging Stripe configuration")
+          fi
+          if [ "${PRODUCTION_STRIPE_OUTCOME:-}" = "failure" ]; then
+            rollback_triggers+=("production Stripe audit")
+          fi
+          if [ "${HEALTH_GATE_OUTCOME:-}" = "failure" ]; then
+            rollback_triggers+=("API health gate")
+          fi
+          if [ "${#rollback_triggers[@]}" -eq 0 ]; then
+            rollback_trigger="deployment, configuration, or health"
+          else
+            rollback_trigger="$(IFS=', '; echo "${rollback_triggers[*]}")"
+          fi
+          echo "::error::${rollback_trigger} failed; restored the previous deployment image and build metadata."
 
       - name: Report recovery path for a new test environment
         if: ${{ failure() && env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE == 'infra' && steps.current-deployment.outcome == 'success' && steps.current-deployment.outputs.capture_succeeded != 'true' && (steps.deploy-api.outcome == 'failure' || steps.staging-stripe.outcome == 'failure' || steps.health-gate.outcome == 'failure') }}

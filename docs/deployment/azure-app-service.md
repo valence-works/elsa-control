@@ -192,11 +192,15 @@ deployment workflow passes these values only to the configuration preflight and
 the staging reconciliation step; they are not job-wide environment variables.
 
 App and promote deploys write `Billing__Stripe__ExpectedMode` (`test` on the
-`test` target, `live` on `production`) before they switch the container image,
-so the first billing-enabled start of the new image cannot miss that setting.
+`test` target, `live` on `production`) before they switch the container image
+when Azure does not already have that exact value. The first billing-enabled
+start of the new image cannot miss that setting.
 `StripeBillingConfigurationValidator` throws at host start when billing is
-enabled without ExpectedMode. The later combined app-settings write and the
-existing restore-on-rollback behaviour are unchanged. Infra still writes
+enabled without ExpectedMode. If the current value already equals the target,
+the pre-switch write is skipped so an image-switch failure does not mutate
+ExpectedMode. Restoring a newly introduced ExpectedMode after a failed switch
+is a later, lower-priority change. The later combined app-settings write and
+the existing restore-on-rollback behaviour are unchanged. Infra still writes
 ExpectedMode after the Bicep replacement, because that path may recreate the
 Web App.
 
@@ -205,10 +209,13 @@ set ExpectedMode there and does not require Stripe secrets. Development
 billing is unsupported; use `test` for sandbox Stripe.
 
 A telemetry what-if, create, or preflight failure never rolls back the API
-image. That is the same for `production`, `test`, and `development`.
-`TELEMETRY_FAILURE_ROLLS_BACK_API` is `false` in the workflow. Telemetry is a
-separate `deploy_mode`; the API rollback condition includes only `deploy-api`,
-staging/production Stripe, and the health gate.
+image. That is the same for `production`, `test`, and `development`. The
+workflow records that policy on the API rollback step; telemetry outcomes
+are not rollback triggers. Telemetry is a separate `deploy_mode`; the API
+rollback condition includes only `deploy-api`, staging/production Stripe,
+and the health gate. The rollback completion message names the trigger that
+fired: API deployment, staging Stripe configuration, production Stripe
+audit, or the API health gate.
 
 Each non-build deployment to `test` runs
 `scripts/staging_stripe_reconcile.py --apply-azure-settings`. It fails closed
