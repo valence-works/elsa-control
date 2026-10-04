@@ -642,6 +642,8 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("visibility: hidden", source)
         self.assertIn("transition: none", source)
         self.assertIn("animation: none", source)
+        self.assertIn("#cloud-workspace *", source)
+        self.assertRegex(source, r"#cloud-workspace \*\s*\{[^}]*transition:\s*none")
         self.assertIn("addStyleTag", source)
         capture_fn = self.capture_fn(source)
         self.assertIn("hidePiiInDom", capture_fn)
@@ -731,6 +733,100 @@ class StagingCompatWorkflowTests(unittest.TestCase):
             "",
         )
         result = self.run_screens_prove(vacuous_guard, "--prove-pii-guard")
+        self.assertNotEqual(0, result.returncode)
+        self.assertNotIn("compat-user@example.test", result.stdout + result.stderr)
+
+    def function_body(self, source: str, name: str) -> str:
+        return source.split(f"async function {name}", 1)[1].split("async function ", 1)[0]
+
+    def assert_identity_collector_is_pinned(self, source: str) -> None:
+        collector = self.function_body(source, "collectIdentitySecrets")
+        self.assertIn("return secrets;", collector)
+        self.assertNotRegex(collector, r"return\s+\[\s*\]")
+        self.assertIn("if (!trimmedEmail)", collector)
+        self.assertIn("if (!found)", collector)
+        self.assertIn('throw new Error("Identity values were not collected before capture.")', collector)
+        for name in ("collectIdentitySecrets", "assertNoVisibleIdentity", "capture"):
+            body = self.function_body(source, name)
+            self.assertNotRegex(body, r"\bconsole\.")
+            self.assertNotRegex(body, r"\bprocess\.std")
+            for throw in re.finditer(r"throw new Error\((.*?)\);", body, re.S):
+                self.assertRegex(
+                    throw.group(1).strip(),
+                    r'^"[^"\\]*"$',
+                    f"{name} interpolates a value in an error",
+                )
+
+    def assert_prove_rejects_identity_mutation(self, source: str) -> None:
+        with self.assertRaises(AssertionError):
+            self.assert_identity_collector_is_pinned(source)
+        result = self.run_screens_prove(source, "--prove-pii-guard")
+        self.assertNotEqual(0, result.returncode)
+        output = result.stdout + result.stderr
+        self.assertNotIn("compat-user@example.test", output)
+        self.assertNotIn("Compat Display Name", output)
+
+    def test_identity_collector_is_pinned_and_returns_secrets(self) -> None:
+        self.assert_identity_collector_is_pinned(self.screens)
+        result = self.run_screens_prove(self.screens, "--prove-pii-guard")
+        self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+        self.assertIn("pii-guard-ok", result.stdout)
+        self.assertNotIn("compat-user@example.test", result.stdout + result.stderr)
+        self.assertNotIn("Compat Display Name", result.stdout + result.stderr)
+
+    def test_identity_collector_fails_under_mutation(self) -> None:
+        empty_return = self.screens.replace("return secrets;", "return [];")
+        self.assert_prove_rejects_identity_mutation(empty_return)
+        no_blank_email = self.screens.replace(
+            '  if (!trimmedEmail) {\n    throw new Error("Identity values were not collected before capture.");\n  }\n',
+            "",
+            1,
+        )
+        self.assert_prove_rejects_identity_mutation(no_blank_email)
+        no_found = self.screens.replace(
+            '    if (!found) {\n      throw new Error("Identity values were not collected before capture.");\n    }\n',
+            "",
+            1,
+        )
+        self.assert_prove_rejects_identity_mutation(no_found)
+        console_log = self.screens.replace(
+            "        secrets.push(text);\n",
+            "        secrets.push(text);\n        console.log(text);\n",
+            1,
+        )
+        self.assert_prove_rejects_identity_mutation(console_log)
+        stdout_write = self.screens.replace(
+            "        secrets.push(text);\n",
+            "        secrets.push(text);\n        process.stdout.write(text);\n",
+            1,
+        )
+        self.assert_prove_rejects_identity_mutation(stdout_write)
+        leaky_error = self.screens.replace(
+            'throw new Error("Identity values were not collected before capture.");',
+            'throw new Error("missing " + trimmedEmail);',
+            1,
+        )
+        self.assert_prove_rejects_identity_mutation(leaky_error)
+        leaky_guard = self.screens.replace(
+            'throw new Error("A customer identity string was still visible at capture time.");',
+            'throw new Error("visible: " + secrets.join(","));',
+            1,
+        )
+        self.assert_prove_rejects_identity_mutation(leaky_guard)
+        leaky_capture = self.screens.replace(
+            "  await redactPiiText(page);\n",
+            "  await redactPiiText(page);\n  console.log(email);\n",
+            1,
+        )
+        self.assert_prove_rejects_identity_mutation(leaky_capture)
+        no_workspace_descendants = self.screens.replace(
+            " #cloud-workspace * { transition: none !important; }",
+            "",
+            1,
+        )
+        with self.assertRaises(AssertionError):
+            self.assert_pii_hide_style_covers_targets(no_workspace_descendants)
+        result = self.run_screens_prove(no_workspace_descendants, "--prove-pii-guard")
         self.assertNotEqual(0, result.returncode)
         self.assertNotIn("compat-user@example.test", result.stdout + result.stderr)
 

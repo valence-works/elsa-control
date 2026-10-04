@@ -4,7 +4,7 @@
 // into uploaded artifacts. Session state stays in PLAYWRIGHT_STATE_PATH only.
 
 import { createRequire } from "node:module";
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const require = createRequire(import.meta.url);
@@ -23,7 +23,7 @@ const SIDE_SURFACES = "Billing, sign-out, and support remain available";
 const RESTORED_HOSTED = /No managed engines|Confirm managed engine|Create your first engine|Confirm and create engine|Start Hosted|Hosted subscription|Engine details/i;
 const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i;
 const PII_HIDE_SELECTORS = [".acct-name", ".acct-mail", ".avatar", "#cloud-workspace", ".vh h1"];
-const PII_HIDE_STYLE = `${PII_HIDE_SELECTORS.join(", ")} { visibility: hidden !important; transition: none !important; animation: none !important; }`;
+const PII_HIDE_STYLE = `${PII_HIDE_SELECTORS.join(", ")} { visibility: hidden !important; transition: none !important; animation: none !important; } #cloud-workspace * { transition: none !important; }`;
 
 if (process.argv.includes("--prove-load")) {
   if (!chromium || !devices) {
@@ -327,7 +327,179 @@ async function main() {
   console.log(`Captured ${files.length} ${phase} screens. Identity hidden in DOM and masked.`);
 }
 
+const PROVE_EMAIL = "compat-user@example.test";
+const PROVE_DISPLAY_NAME = "Compat Display Name";
+const IDENTITY_LEAK = /compat-user@example\.test|Compat Display Name|@example\.test/i;
+
+function functionBody(source, name) {
+  const start = source.indexOf(`async function ${name}`);
+  if (start < 0) {
+    throw new Error(`Missing ${name}.`);
+  }
+  const rest = source.slice(start);
+  const next = rest.indexOf("\nasync function ", 1);
+  return next < 0 ? rest : rest.slice(0, next);
+}
+
+function assertNoIdentityLeak(text) {
+  if (IDENTITY_LEAK.test(String(text ?? ""))) {
+    throw new Error("An identity path leaked a secret.");
+  }
+}
+
+function identityLocatorPage(textsBySelector) {
+  return {
+    locator(selector) {
+      const texts = textsBySelector[selector] ?? [];
+      return {
+        async count() {
+          return texts.length;
+        },
+        nth(index) {
+          return {
+            async textContent() {
+              return texts[index] ?? "";
+            }
+          };
+        }
+      };
+    }
+  };
+}
+
+async function withIdentityIoGuard(work) {
+  const originals = {
+    log: console.log,
+    info: console.info,
+    warn: console.warn,
+    error: console.error,
+    debug: console.debug,
+    stdout: process.stdout.write.bind(process.stdout),
+    stderr: process.stderr.write.bind(process.stderr)
+  };
+  const writes = [];
+  const tapConsole = (...args) => {
+    writes.push(args.map((value) => String(value)).join(" "));
+  };
+  const tapStream = () => (chunk, encoding, callback) => {
+    writes.push(String(chunk));
+    if (typeof encoding === "function") {
+      encoding();
+    } else if (typeof callback === "function") {
+      callback();
+    }
+    return true;
+  };
+  console.log = tapConsole;
+  console.info = tapConsole;
+  console.warn = tapConsole;
+  console.error = tapConsole;
+  console.debug = tapConsole;
+  process.stdout.write = tapStream();
+  process.stderr.write = tapStream();
+  try {
+    const result = await work();
+    for (const write of writes) {
+      assertNoIdentityLeak(write);
+    }
+    return result;
+  } catch (error) {
+    for (const write of writes) {
+      assertNoIdentityLeak(write);
+    }
+    assertNoIdentityLeak(error?.message);
+    throw error;
+  } finally {
+    console.log = originals.log;
+    console.info = originals.info;
+    console.warn = originals.warn;
+    console.error = originals.error;
+    console.debug = originals.debug;
+    process.stdout.write = originals.stdout;
+    process.stderr.write = originals.stderr;
+  }
+}
+
+function assertIdentityPathsDoNotInterpolate(source) {
+  for (const name of ["collectIdentitySecrets", "assertNoVisibleIdentity", "capture"]) {
+    const body = functionBody(source, name);
+    if (/\bconsole\./.test(body) || /\bprocess\.std/.test(body)) {
+      throw new Error("An identity path writes to the console or a std stream.");
+    }
+    for (const match of body.matchAll(/throw new Error\((.*)\);/g)) {
+      if (!/^"[^"\\]*"$/.test(match[1].trim())) {
+        throw new Error("An identity path interpolates a value in an error.");
+      }
+    }
+  }
+  const collector = functionBody(source, "collectIdentitySecrets");
+  if (!/return secrets;/.test(collector)) {
+    throw new Error("collectIdentitySecrets does not return secrets.");
+  }
+  if (!/if\s*\(\s*!trimmedEmail\s*\)/.test(collector)) {
+    throw new Error("The blank-email collector check is missing.");
+  }
+  if (!/if\s*\(\s*!found\s*\)/.test(collector)) {
+    throw new Error("The missing-identity collector check is missing.");
+  }
+}
+
+async function proveIdentityCollector() {
+  const source = await readFile(new URL(import.meta.url), "utf8");
+  assertIdentityPathsDoNotInterpolate(source);
+  const page = identityLocatorPage({
+    ".acct-name": [PROVE_DISPLAY_NAME],
+    ".acct-mail": [PROVE_EMAIL]
+  });
+  const collected = await withIdentityIoGuard(() => collectIdentitySecrets(page, PROVE_EMAIL));
+  if (!Array.isArray(collected) || collected.length === 0) {
+    throw new Error("collectIdentitySecrets did not return secrets.");
+  }
+  if (!collected.includes(PROVE_EMAIL) || !collected.includes(PROVE_DISPLAY_NAME)) {
+    throw new Error("collectIdentitySecrets omitted a collected identity value.");
+  }
+  try {
+    await withIdentityIoGuard(() => collectIdentitySecrets(page, "   "));
+    throw new Error("blank-email-miss");
+  } catch (error) {
+    if (error.message === "blank-email-miss") {
+      throw error;
+    }
+    if (!/not collected/.test(error.message)) {
+      throw error;
+    }
+  }
+  const emptyPage = identityLocatorPage({ ".acct-name": [], ".acct-mail": [] });
+  try {
+    await withIdentityIoGuard(() => collectIdentitySecrets(emptyPage, PROVE_EMAIL));
+    throw new Error("not-found-miss");
+  } catch (error) {
+    if (error.message === "not-found-miss") {
+      throw error;
+    }
+    if (!/not collected/.test(error.message)) {
+      throw error;
+    }
+  }
+  const blankNamePage = identityLocatorPage({
+    ".acct-name": ["   "],
+    ".acct-mail": [PROVE_EMAIL]
+  });
+  try {
+    await withIdentityIoGuard(() => collectIdentitySecrets(blankNamePage, PROVE_EMAIL));
+    throw new Error("blank-name-miss");
+  } catch (error) {
+    if (error.message === "blank-name-miss") {
+      throw error;
+    }
+    if (!/not collected/.test(error.message)) {
+      throw error;
+    }
+  }
+}
+
 async function provePiiGuard() {
+  await proveIdentityCollector();
   const visiblePage = {
     getByText() {
       return {
@@ -348,10 +520,10 @@ async function provePiiGuard() {
   };
   let failed = false;
   try {
-    await assertNoVisibleIdentity(visiblePage, ["compat-user@example.test"]);
+    await withIdentityIoGuard(() => assertNoVisibleIdentity(visiblePage, [PROVE_EMAIL]));
   } catch (error) {
     failed = true;
-    if (/compat-user@example\.test/i.test(error.message) || /@example\.test/i.test(error.message)) {
+    if (IDENTITY_LEAK.test(error.message)) {
       throw new Error("The identity guard leaked a secret in its error.");
     }
     if (!/identity string was still visible/.test(error.message)) {
@@ -361,9 +533,9 @@ async function provePiiGuard() {
   if (!failed) {
     throw new Error("The identity guard accepted a visible secret.");
   }
-  await assertNoVisibleIdentity(hiddenPage, ["compat-user@example.test"]);
+  await withIdentityIoGuard(() => assertNoVisibleIdentity(hiddenPage, [PROVE_EMAIL]));
   try {
-    await assertNoVisibleIdentity(hiddenPage, []);
+    await withIdentityIoGuard(() => assertNoVisibleIdentity(hiddenPage, []));
     throw new Error("empty-secrets-miss");
   } catch (error) {
     if (error.message === "empty-secrets-miss") {
@@ -383,6 +555,9 @@ async function provePiiGuard() {
   }
   if (!/transition:\s*none/i.test(PII_HIDE_STYLE) || !/animation:\s*none/i.test(PII_HIDE_STYLE)) {
     throw new Error("The hide style still allows transitions or animations.");
+  }
+  if (!/#cloud-workspace \*\s*\{[^}]*transition:\s*none/.test(PII_HIDE_STYLE)) {
+    throw new Error("The hide style does not disable transitions on workspace descendants.");
   }
   console.log("pii-guard-ok");
 }
