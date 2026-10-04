@@ -624,6 +624,92 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(wait)
         self.assertIn('locator("#main")', wait.group(1))
 
+    def capture_fn(self, source: str) -> str:
+        return source.split("async function capture", 1)[1].split("async function ", 1)[0]
+
+    def pii_hide_selectors(self, source: str) -> list[str]:
+        match = re.search(r"const PII_HIDE_SELECTORS = \[([^\]]+)\]", source)
+        self.assertIsNotNone(match, "PII_HIDE_SELECTORS is missing")
+        return re.findall(r'"([^"]+)"', match.group(1))
+
+    def assert_pii_hide_style_covers_targets(self, source: str) -> None:
+        required = [".acct-name", ".acct-mail", ".avatar", "#cloud-workspace", ".vh h1"]
+        selectors = self.pii_hide_selectors(source)
+        for selector in required:
+            self.assertIn(selector, selectors)
+        style = re.search(r"const PII_HIDE_STYLE = (`[^`]+`|[^;]+);", source)
+        self.assertIsNotNone(style, "PII_HIDE_STYLE is missing")
+        self.assertIn("visibility: hidden", source)
+        self.assertIn("addStyleTag", source)
+        capture_fn = self.capture_fn(source)
+        self.assertIn("hidePiiInDom", capture_fn)
+        self.assertIn("assertNoVisibleIdentity", capture_fn)
+        self.assertLess(capture_fn.find("hidePiiInDom"), capture_fn.find("screenshot"))
+        self.assertLess(capture_fn.find("assertNoVisibleIdentity"), capture_fn.find("screenshot"))
+
+    def assert_desktop_screenshot_is_viewport_only(self, source: str) -> None:
+        capture_fn = self.capture_fn(source)
+        self.assertNotRegex(capture_fn, r"fullPage:\s*true")
+        self.assertIn("fullPage: Boolean(viewport?.isMobile)", capture_fn)
+
+    def run_screens_prove(self, source: str, *args: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as raw:
+            script_dir = Path(raw) / "scripts"
+            module_dir = script_dir / "node_modules" / "playwright"
+            module_dir.mkdir(parents=True)
+            (module_dir / "package.json").write_text('{"name":"playwright","main":"index.js"}\n')
+            (module_dir / "index.js").write_text(
+                "module.exports = { chromium: {}, devices: { 'iPhone 14': { viewport: { width: 390, height: 844 } } } };\n"
+            )
+            dest = script_dir / "staging-compat-fixture-screens.mjs"
+            dest.write_text(source)
+            env = os.environ.copy()
+            env.pop("NODE_PATH", None)
+            return subprocess.run(
+                ["node", str(dest), *args],
+                cwd=raw,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    def test_capture_hides_pii_in_dom_and_desktop_is_not_full_page(self) -> None:
+        self.assert_pii_hide_style_covers_targets(self.screens)
+        self.assert_desktop_screenshot_is_viewport_only(self.screens)
+        result = self.run_screens_prove(self.screens, "--prove-pii-guard")
+        self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+        self.assertIn("pii-guard-ok", result.stdout)
+        self.assertNotIn("compat-user@example.test", result.stdout + result.stderr)
+
+    def test_pii_capture_contracts_fail_under_mutation(self) -> None:
+        missing_selector = self.screens.replace('".avatar", ', "")
+        with self.assertRaises(AssertionError):
+            self.assert_pii_hide_style_covers_targets(missing_selector)
+        always_full_page = self.screens.replace(
+            "fullPage: Boolean(viewport?.isMobile)",
+            "fullPage: true",
+        )
+        with self.assertRaises(AssertionError):
+            self.assert_desktop_screenshot_is_viewport_only(always_full_page)
+        no_guard = self.screens.replace("await assertNoVisibleIdentity(page, secrets);", "")
+        with self.assertRaises(AssertionError):
+            self.assert_pii_hide_style_covers_targets(no_guard)
+        no_throw = self.screens.replace(
+            'throw new Error("A customer identity string was still visible at capture time.");',
+            "continue;",
+        )
+        result = self.run_screens_prove(no_throw, "--prove-pii-guard")
+        self.assertNotEqual(0, result.returncode)
+        self.assertNotIn("compat-user@example.test", result.stdout + result.stderr)
+        leaky = self.screens.replace(
+            'throw new Error("A customer identity string was still visible at capture time.");',
+            'throw new Error("visible: " + secrets.join(","));',
+        )
+        result = self.run_screens_prove(leaky, "--prove-pii-guard")
+        self.assertNotEqual(0, result.returncode)
+        self.assertNotIn("compat-user@example.test", result.stdout + result.stderr)
+
     def test_telemetry_is_not_used_and_never_queries_azure(self) -> None:
         self.assertNotIn("Report armed-window telemetry", self.source)
         self.assertNotIn("scripts/staging-compat-fixture.sh telemetry", self.source)
