@@ -17,12 +17,25 @@ FIXTURE_WORKFLOW = "staging-compat-fixture.yml"
 TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER"})
 TRUSTED_LOGINS = frozenset({"sfmskywalker"})
 
-# Fixture-on cap stays 20 minutes from the app-setting write. Restore always
-# keeps its own reserved budget. The job timeout is only a backstop above that.
+# Fixture-on cap stays 20 minutes from the app-setting write to confirmed
+# deletion. Restore reserves a short delete budget inside that cap. The longer
+# health witness runs after deletion and must not push deletion later.
 FIXTURE_CAP_SECONDS = 20 * 60
 RESTORE_BUDGET_SECONDS = 4 * 60
+RESTORE_HEALTH_ATTEMPTS = 36
+RESTORE_HEALTH_RETRY_SECONDS = 15
+RESTORE_HEALTH_CURL_MAX_TIME = 10
+RESTORE_HEALTH_BUDGET_SECONDS = 10 * 60
+RESTORE_STEP_TIMEOUT_SECONDS = 16 * 60
+IN_HOLD_K_PROBES_TIMEOUT_SECONDS = 2 * 60
+IN_HOLD_SCREENS_TIMEOUT_SECONDS = 5 * 60
+IN_HOLD_BUDGET_SECONDS = IN_HOLD_K_PROBES_TIMEOUT_SECONDS + IN_HOLD_SCREENS_TIMEOUT_SECONDS
+POST_RESTORE_SCREENS_TIMEOUT_SECONDS = 5 * 60
+TELEMETRY_STEP_TIMEOUT_SECONDS = 3 * 60
+PLAYWRIGHT_SETUP_TIMEOUT_SECONDS = 6 * 60
 MAX_HOLD_SECONDS = 15 * 60
-JOB_BACKSTOP_SECONDS = 30 * 60
+# Backstop above fixture-on + post-delete health + in-hold + post-restore.
+JOB_BACKSTOP_SECONDS = 60 * 60
 
 
 def first_nonempty_line(body: str) -> str:

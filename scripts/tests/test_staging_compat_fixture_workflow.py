@@ -29,10 +29,19 @@ qa_window_is_open = exclusive.qa_window_is_open
 compute_hold_seconds = exclusive.compute_hold_seconds
 FIXTURE_CAP_SECONDS = exclusive.FIXTURE_CAP_SECONDS
 RESTORE_BUDGET_SECONDS = exclusive.RESTORE_BUDGET_SECONDS
+RESTORE_HEALTH_ATTEMPTS = exclusive.RESTORE_HEALTH_ATTEMPTS
+RESTORE_HEALTH_BUDGET_SECONDS = exclusive.RESTORE_HEALTH_BUDGET_SECONDS
+RESTORE_STEP_TIMEOUT_SECONDS = exclusive.RESTORE_STEP_TIMEOUT_SECONDS
+IN_HOLD_BUDGET_SECONDS = exclusive.IN_HOLD_BUDGET_SECONDS
+IN_HOLD_K_PROBES_TIMEOUT_SECONDS = exclusive.IN_HOLD_K_PROBES_TIMEOUT_SECONDS
+IN_HOLD_SCREENS_TIMEOUT_SECONDS = exclusive.IN_HOLD_SCREENS_TIMEOUT_SECONDS
+POST_RESTORE_SCREENS_TIMEOUT_SECONDS = exclusive.POST_RESTORE_SCREENS_TIMEOUT_SECONDS
+TELEMETRY_STEP_TIMEOUT_SECONDS = exclusive.TELEMETRY_STEP_TIMEOUT_SECONDS
 MAX_HOLD_SECONDS = exclusive.MAX_HOLD_SECONDS
 JOB_BACKSTOP_SECONDS = exclusive.JOB_BACKSTOP_SECONDS
 WORKFLOW = ROOT / ".github" / "workflows" / "staging-compat-fixture.yml"
 SCRIPT = ROOT / "scripts" / "staging-compat-fixture.sh"
+SCREENS = ROOT / "scripts" / "staging-compat-fixture-screens.mjs"
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 DEPLOY = ROOT / ".github" / "workflows" / "azure-api-deploy.yml"
 
@@ -136,7 +145,7 @@ class StagingCompatExclusiveTests(unittest.TestCase):
         self.assertLessEqual(FIXTURE_CAP_SECONDS + RESTORE_BUDGET_SECONDS, JOB_BACKSTOP_SECONDS)
         self.assertEqual(20 * 60, FIXTURE_CAP_SECONDS)
         self.assertEqual(4 * 60, RESTORE_BUDGET_SECONDS)
-        self.assertEqual(30 * 60, JOB_BACKSTOP_SECONDS)
+        self.assertEqual(60 * 60, JOB_BACKSTOP_SECONDS)
         self.assertEqual(MAX_HOLD_SECONDS, compute_hold_seconds(0))
         self.assertEqual(660, compute_hold_seconds(300))
         self.assertEqual(0, compute_hold_seconds(1000))
@@ -144,6 +153,12 @@ class StagingCompatExclusiveTests(unittest.TestCase):
             0,
             compute_hold_seconds(FIXTURE_CAP_SECONDS - RESTORE_BUDGET_SECONDS + 1),
         )
+        self.assertGreaterEqual(compute_hold_seconds(0), IN_HOLD_BUDGET_SECONDS)
+        self.assertGreaterEqual(compute_hold_seconds(180), IN_HOLD_BUDGET_SECONDS)
+        self.assertGreaterEqual(RESTORE_HEALTH_ATTEMPTS, 36)
+        self.assertGreaterEqual(RESTORE_HEALTH_BUDGET_SECONDS, 10 * 60)
+        self.assertGreaterEqual(RESTORE_STEP_TIMEOUT_SECONDS, RESTORE_HEALTH_BUDGET_SECONDS)
+        self.assertGreaterEqual(JOB_BACKSTOP_SECONDS, FIXTURE_CAP_SECONDS + RESTORE_STEP_TIMEOUT_SECONDS)
 
     def test_conflicting_runs_ignore_this_run_and_non_staging_deploys(self) -> None:
         self.assertEqual(
@@ -235,8 +250,12 @@ class StagingCompatWorkflowTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.source = WORKFLOW.read_text()
         cls.script = SCRIPT.read_text()
+        cls.screens = SCREENS.read_text()
         cls.ci = CI.read_text()
         cls.deploy = DEPLOY.read_text()
+
+    def step_order(self) -> list[str]:
+        return re.findall(r"^\s+- name: (.+)$", self.source, re.M)
 
     def test_manual_dispatch_only_in_the_test_environment_with_mode_input(self) -> None:
         self.assertIn("name: Staging Control compatibility fixture\n", self.source)
@@ -252,14 +271,17 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("FIXTURE_MODE: ${{ inputs.mode }}\n", self.source)
         self.assertIn("DISPATCH_MODE: ${{ inputs.mode }}\n", self.source)
         self.assertNotIn("${{ github.event.inputs.mode }}", self.source)
-        self.assertIn("timeout-minutes: 30\n", self.source)
+        self.assertIn("timeout-minutes: 60\n", self.source)
         self.assertIn("timeout-minutes: 12\n", self.source)
-        self.assertIn("timeout-minutes: 4\n", self.source)
+        self.assertIn("timeout-minutes: 16\n", self.source)
+        self.assertNotIn("timeout-minutes: 30\n", self.source)
         self.assertNotIn("timeout-minutes: 20\n", self.source)
         self.assertIn("if: ${{ always() && steps.preflight.outcome == 'success' }}\n", self.source)
         self.assertNotIn("if: ${{ always() }}\n", self.source)
         self.assertIn('HEALTH_BUDGET_SECONDS: "300"', self.source)
-        self.assertIn('HEALTH_BUDGET_SECONDS: "150"', self.source)
+        self.assertIn('HEALTH_BUDGET_SECONDS: "600"', self.source)
+        self.assertIn('HEALTH_ATTEMPTS: "36"', self.source)
+        self.assertIn('HEALTH_RETRY_SECONDS: "15"', self.source)
         self.assertIn("HEALTH_CURL_MAX_TIME", self.source)
         self.assertIn("fail() {\n  echo \"::error::$1\" >&2\n", self.script)
         self.assertIn("exit 1\n}", self.script)
@@ -269,6 +291,9 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("scripts/staging-compat-fixture.sh restore", self.source)
         self.assertIn("scripts/staging-compat-fixture.sh preflight", self.source)
         self.assertIn("scripts/staging-compat-fixture.sh arm", self.source)
+        self.assertIn("scripts/staging-compat-fixture.sh probes", self.source)
+        self.assertIn("scripts/staging-compat-fixture.sh telemetry", self.source)
+        self.assertIn("scripts/staging-compat-fixture-screens.mjs", self.source)
         self.assertIn("az webapp restart", self.script)
         self.assertIn("appsettings delete", self.script)
         self.assertNotIn("production", self.source)
@@ -283,7 +308,7 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("vars.CLOUD_BFF_SMOKE_URL", self.source)
         self.assertNotIn("scripts/staging-compat-fixture.sh mint", self.source)
         self.assertGreaterEqual(self.source.count("GH_TOKEN: ${{ github.token }}"), 2)
-        self.assertEqual(9, self.source.count("secrets."))
+        self.assertEqual(16, self.source.count("secrets."))
         job_env = self.source.split("steps:", 1)[0]
         self.assertNotIn("secrets.STAGING_E2E_COMPAT_EMAIL", job_env)
         self.assertNotIn("secrets.STAGING_E2E_COMPAT_PASSWORD", job_env)
@@ -314,6 +339,12 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn('{"action":"compatibility"}', self.script)
         self.assertIn(".data.state == \"compatible\"", self.script)
         self.assertIn("control_update_in_progress", self.script)
+        self.assertIn("Elsa Cloud is being updated. Managed engine actions are temporarily paused.", self.script)
+        self.assertIn("no-store", self.script)
+        self.assertIn("listOrganizations", self.script)
+        self.assertIn("updateInstance", self.script)
+        self.assertIn("createInstanceDeleteConfirmation", self.script)
+        self.assertIn("jq -S -c '.'", self.script)
         self.assertIn("latest_deploy_staging_deployment_id", self.script)
         self.assertNotIn("webapp deployment list", self.script)
         self.assertIn("webapp sitecontainers show", self.script)
@@ -328,6 +359,95 @@ class StagingCompatWorkflowTests(unittest.TestCase):
             self.ci,
         )
         self.assertIn("scripts/staging-compat-fixture.sh", self.ci)
+
+    def test_in_hold_checks_run_before_restore_and_cannot_skip_it(self) -> None:
+        names = self.step_order()
+        self.assertLess(names.index("Record K action probes while armed"), names.index("Restore the baseline"))
+        self.assertLess(names.index("Capture armed customer screens"), names.index("Restore the baseline"))
+        self.assertLess(names.index("Hold the remaining exclusive proof window"), names.index("Restore the baseline"))
+        restore_block = self.source.split("name: Restore the baseline", 1)[1].split("- name:", 1)[0]
+        self.assertIn("if: ${{ always() && steps.preflight.outcome == 'success' }}", restore_block)
+        self.assertNotIn("steps.k_probes", restore_block)
+        self.assertNotIn("steps.armed_screens", restore_block)
+        self.assertIn("timeout-minutes: 16", restore_block)
+        self.assertIn('HEALTH_ATTEMPTS: "36"', restore_block)
+        self.assertIn('HEALTH_BUDGET_SECONDS: "600"', restore_block)
+
+    def test_in_hold_failures_do_not_use_always_and_fit_the_hold(self) -> None:
+        k_block = self.source.split("name: Record K action probes while armed", 1)[1].split("- name:", 1)[0]
+        screens_block = self.source.split("name: Capture armed customer screens", 1)[1].split("- name:", 1)[0]
+        hold_block = self.source.split("name: Hold the remaining exclusive proof window", 1)[1].split("- name:", 1)[0]
+        self.assertNotIn("always()", k_block)
+        self.assertNotIn("always()", screens_block)
+        self.assertIn("if: ${{ success() }}", hold_block)
+        self.assertIn("timeout-minutes: 2", k_block)
+        self.assertIn("timeout-minutes: 5", screens_block)
+        self.assertEqual(IN_HOLD_K_PROBES_TIMEOUT_SECONDS, 2 * 60)
+        self.assertEqual(IN_HOLD_SCREENS_TIMEOUT_SECONDS, 5 * 60)
+        self.assertLessEqual(IN_HOLD_BUDGET_SECONDS, compute_hold_seconds(0))
+        self.assertGreaterEqual(16 * 60, MAX_HOLD_SECONDS)
+
+    def test_cancel_keeps_restore_on_always_preflight_success(self) -> None:
+        restore_block = self.source.split("name: Restore the baseline", 1)[1].split("- name:", 1)[0]
+        hold_block = self.source.split("name: Hold the remaining exclusive proof window", 1)[1].split("- name:", 1)[0]
+        k_block = self.source.split("name: Record K action probes while armed", 1)[1].split("- name:", 1)[0]
+        self.assertIn("always() && steps.preflight.outcome == 'success'", restore_block)
+        self.assertIn("success()", hold_block)
+        self.assertNotIn("cancelled()", restore_block)
+        self.assertNotIn("always()", k_block)
+
+    def test_post_restore_evidence_runs_only_after_successful_restore(self) -> None:
+        restored = self.source.split("name: Capture restored customer screens", 1)[1].split("- name:", 1)[0]
+        telemetry = self.source.split("name: Report armed-window telemetry", 1)[1].split("- name:", 1)[0]
+        skipped = self.source.split("name: Report skipped post-restore evidence", 1)[1]
+        self.assertIn("steps.restore.outcome == 'success'", restored)
+        self.assertIn("steps.restore.outcome == 'success'", telemetry)
+        self.assertIn("steps.restore.outcome != 'success'", skipped)
+        self.assertIn("timeout-minutes: 5", restored)
+        self.assertIn("timeout-minutes: 3", telemetry)
+        self.assertEqual(POST_RESTORE_SCREENS_TIMEOUT_SECONDS, 5 * 60)
+        self.assertEqual(TELEMETRY_STEP_TIMEOUT_SECONDS, 3 * 60)
+        names = self.step_order()
+        self.assertGreater(names.index("Capture restored customer screens"), names.index("Restore the baseline"))
+        self.assertGreater(names.index("Report armed-window telemetry"), names.index("Restore the baseline"))
+
+    def test_restore_timeouts_exceed_the_health_budget(self) -> None:
+        restore_block = self.source.split("name: Restore the baseline", 1)[1].split("- name:", 1)[0]
+        self.assertIn("timeout-minutes: 60\n", self.source)
+        self.assertGreaterEqual(JOB_BACKSTOP_SECONDS, RESTORE_STEP_TIMEOUT_SECONDS + FIXTURE_CAP_SECONDS)
+        self.assertGreaterEqual(RESTORE_STEP_TIMEOUT_SECONDS, RESTORE_HEALTH_BUDGET_SECONDS)
+        self.assertGreaterEqual(int(re.search(r'HEALTH_ATTEMPTS: "(\d+)"', restore_block).group(1)), 36)
+        self.assertGreaterEqual(int(re.search(r'HEALTH_BUDGET_SECONDS: "(\d+)"', restore_block).group(1)), 600)
+        self.assertIn('HEALTH_ATTEMPTS: "36"', restore_block)
+
+    def test_playwright_capture_masks_identity_and_uploads_pngs_only(self) -> None:
+        self.assertIn("mask:", self.screens)
+        self.assertIn("STAGING_E2E_COMPAT_EMAIL", self.screens)
+        self.assertIn("Service update in progress.", self.screens)
+        self.assertIn("Managed engine actions are temporarily paused", self.screens)
+        self.assertIn("calm-sand-03964eb03.2.azurestaticapps.net", self.screens)
+        self.assertNotIn("storageState", self.screens)
+        self.assertNotIn("recordHar", self.screens)
+        self.assertNotIn(".har", self.screens)
+        self.assertNotIn("recordVideo", self.screens)
+        self.assertNotRegex(self.screens, r"trace:\s")
+        self.assertNotIn("video:", self.source)
+        self.assertNotIn("trace:", self.source)
+        self.assertNotIn(".har", self.source)
+        self.assertIn("staging-compat-screens-armed", self.source)
+        self.assertIn("staging-compat-screens-restored", self.source)
+        self.assertIn("*.png", self.source)
+        self.assertNotIn("*.zip", self.source)
+        self.assertIn("Never writes Playwright traces, HAR captures, videos, or browser storage files.", self.screens)
+
+    def test_telemetry_step_does_not_query_or_grant_roles(self) -> None:
+        telemetry = self.source.split("name: Report armed-window telemetry", 1)[1]
+        self.assertIn("scripts/staging-compat-fixture.sh telemetry", telemetry)
+        self.assertNotIn("az monitor", self.script)
+        self.assertNotIn("role assignment", self.script)
+        self.assertNotIn("az role", self.script)
+        self.assertIn("Inconclusive", self.script)
+        self.assertIn("do not reach a queryable App Insights", self.script)
 
 
 class StagingCompatScriptTests(unittest.TestCase):
@@ -564,7 +684,20 @@ class StagingCompatScriptTests(unittest.TestCase):
                 }
             }
         )
-        bff_armed = json.dumps({"code": "control_update_in_progress"})
+        bff_bootstrap = json.dumps(
+            {
+                "data": {
+                    "organizationId": "11111111-1111-4111-8111-111111111111",
+                    "workspaceId": "22222222-2222-4222-8222-222222222222",
+                }
+            }
+        )
+        bff_armed = json.dumps(
+            {
+                "code": "control_update_in_progress",
+                "error": "Elsa Cloud is being updated. Managed engine actions are temporarily paused.",
+            }
+        )
         health = json.dumps(
             {
                 "status": "ok",
@@ -579,20 +712,33 @@ class StagingCompatScriptTests(unittest.TestCase):
             "set -euo pipefail\n"
             "printf '%s\\n' \"$*\" >> \"${CURL_CALL_LOG:-/dev/null}\"\n"
             "output=\"\"\n"
+            "header_file=\"\"\n"
+            "payload=\"\"\n"
             "url=\"\"\n"
             "method=GET\n"
             "while [ \"$#\" -gt 0 ]; do\n"
             "  case \"$1\" in\n"
             "    --output) output=\"$2\"; shift 2 ;;\n"
+            "    --dump-header) header_file=\"$2\"; shift 2 ;;\n"
             "    --write-out) shift 2 ;;\n"
             "    --silent|--show-error) shift ;;\n"
             "    --request|-X) method=\"$2\"; shift 2 ;;\n"
             "    --max-time) shift 2 ;;\n"
             "    --header) shift 2 ;;\n"
-            "    --data|--data-raw) shift 2 ;;\n"
+            "    --data|--data-raw) payload=\"$2\"; shift 2 ;;\n"
             "    *) url=\"$1\"; shift ;;\n"
             "  esac\n"
             "done\n"
+            "write_headers() {\n"
+            "  local status=\"$1\"\n"
+            "  if [ -n \"$header_file\" ] && [ \"$header_file\" != /dev/null ]; then\n"
+            "    if [ \"${BFF_OMIT_NO_STORE:-}\" = 1 ]; then\n"
+            "      printf 'HTTP/1.1 %s\\r\\nCache-Control: max-age=0\\r\\n\\r\\n' \"$status\" > \"$header_file\"\n"
+            "    else\n"
+            "      printf 'HTTP/1.1 %s\\r\\nCache-Control: no-store\\r\\n\\r\\n' \"$status\" > \"$header_file\"\n"
+            "    fi\n"
+            "  fi\n"
+            "}\n"
             "if [[ \"$url\" == *'/auth/v1/token'* ]]; then\n"
             "  if [ \"$method\" != POST ]; then printf '405'; exit 0; fi\n"
             "  if [ \"${TOKEN_FAIL:-}\" = 1 ]; then printf '401'; exit 0; fi\n"
@@ -611,13 +757,21 @@ class StagingCompatScriptTests(unittest.TestCase):
             "  exit 0\n"
             "fi\n"
             "if [ -n \"${CLOUD_BFF_SMOKE_URL:-}\" ] && [ \"$url\" = \"${CLOUD_BFF_SMOKE_URL}\" ]; then\n"
-            "  if [ \"$method\" != POST ]; then printf '405'; exit 0; fi\n"
+            "  if [ \"$method\" != POST ]; then write_headers 405; printf '405'; exit 0; fi\n"
+            "  if [[ \"$payload\" == *'\"bootstrap\"'* ]]; then\n"
+            f"    printf '%s\\n' {json.dumps(bff_bootstrap)} > \"$output\"\n"
+            "    write_headers 200\n"
+            "    printf '200'\n"
+            "    exit 0\n"
+            "  fi\n"
             "  if [ \"${BFF_ARMED:-}\" = 1 ]; then\n"
             f"    printf '%s\\n' {json.dumps(bff_armed)} > \"$output\"\n"
+            "    write_headers 503\n"
             "    printf '503'\n"
             "    exit 0\n"
             "  fi\n"
             f"  printf '%s\\n' {json.dumps(bff_ok)} > \"$output\"\n"
+            "  write_headers 200\n"
             "  printf '200'\n"
             "  exit 0\n"
             "fi\n"
@@ -927,6 +1081,10 @@ class StagingCompatScriptTests(unittest.TestCase):
             combined = result.stderr + result.stdout
             self.assertIn("Authenticated /api/cloud/compatibility matched", combined)
             self.assertIn("control_update_in_progress", combined)
+            self.assertIn("no-store", combined)
+            self.assertIn("armed_at_iso=", (temporary / "github.output").read_text())
+            self.assertIn("compat_context_path=", (temporary / "github.output").read_text())
+            self.assertNotIn("11111111-1111-4111-8111-111111111111", (temporary / "github.output").read_text())
             self.assertNotIn("missing-capability", combined)
 
     def test_arm_rejects_health_witness_without_authenticated_proof(self) -> None:
@@ -1049,9 +1207,12 @@ class StagingCompatScriptTests(unittest.TestCase):
             env["HEALTH_RETRY_SECONDS"] = "0"
             env["HEALTH_RESPONSES"] = str(health)
             env["GITHUB_STEP_SUMMARY"] = str(temporary / "summary.md")
+            env["GITHUB_OUTPUT"] = str(temporary / "github.output")
             result = self.run_script(env, "restore")
             self.assertEqual(0, result.returncode, result.stderr + result.stdout)
             self.assertFalse(present.exists())
+            self.assertIn("deleted_at_iso=", (temporary / "github.output").read_text())
+            self.assertIn("Confirmed deletion:", (temporary / "summary.md").read_text())
             az_log = (temporary / "az.log").read_text()
             self.assertIn("appsettings delete", az_log)
             self.assertIn("webapp restart", az_log)
@@ -1386,6 +1547,75 @@ class StagingCompatScriptTests(unittest.TestCase):
                 temporary / "gh.log"
             ).read_text().count("/deployments?")
             self.assertLess(created_at_reads, 8)
+
+    def write_context(self, temporary: Path) -> Path:
+        path = temporary / "compat-context.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "organizationId": "11111111-1111-4111-8111-111111111111",
+                    "workspaceId": "22222222-2222-4222-8222-222222222222",
+                }
+            )
+        )
+        return path
+
+    def test_in_hold_probes_record_k_and_require_the_full_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            self.write_fake_curl(temporary)
+            env = self.environment(temporary)
+            env["CURL_CALL_LOG"] = str(temporary / "curl.log")
+            env["BFF_ARMED"] = "1"
+            env["EXPECTED_COMPAT_CONTEXT_PATH"] = str(self.write_context(temporary))
+            env["GITHUB_STEP_SUMMARY"] = str(temporary / "summary.md")
+            env["GITHUB_OUTPUT"] = str(temporary / "github.output")
+            result = self.run_script(env, "probes")
+            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+            summary = (temporary / "summary.md").read_text()
+            self.assertIn("K=3", summary)
+            self.assertIn("listOrganizations: HTTP 503", summary)
+            self.assertIn("updateInstance: HTTP 503", summary)
+            self.assertIn("createInstanceDeleteConfirmation: HTTP 503", summary)
+            self.assertIn("k_probe_count=3", (temporary / "github.output").read_text())
+            self.assertNotIn(env["MINTED_ACCESS_TOKEN"], summary)
+            self.assertNotIn("11111111-1111-4111-8111-111111111111", summary)
+            curl_log = (temporary / "curl.log").read_text()
+            self.assertIn("listOrganizations", curl_log)
+            self.assertIn("updateInstance", curl_log)
+            self.assertIn("createInstanceDeleteConfirmation", curl_log)
+
+    def test_in_hold_probes_fail_without_no_store(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            self.write_fake_curl(temporary)
+            env = self.environment(temporary)
+            env["BFF_ARMED"] = "1"
+            env["BFF_OMIT_NO_STORE"] = "1"
+            env["EXPECTED_COMPAT_CONTEXT_PATH"] = str(self.write_context(temporary))
+            result = self.run_script(env, "probes")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("no-store", result.stderr + result.stdout)
+
+    def test_telemetry_report_is_inconclusive_and_never_queries_azure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            env = self.environment(temporary)
+            env["AZ_CALL_LOG"] = str(temporary / "az.log")
+            env["ARMED_AT_ISO"] = "2026-10-04T11:23:00Z"
+            env["DELETED_AT_ISO"] = "2026-10-04T11:37:00Z"
+            env["EXPECTED_COMPATIBILITY_REQUESTS"] = "7"
+            env["GITHUB_STEP_SUMMARY"] = str(temporary / "summary.md")
+            result = self.run_script(env, "telemetry")
+            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+            summary = (temporary / "summary.md").read_text()
+            self.assertIn("Inconclusive", summary)
+            self.assertIn("2026-10-04T11:23:00Z", summary)
+            self.assertIn("2026-10-04T11:37:00Z", summary)
+            self.assertIn("Expected GET /api/cloud/compatibility count from this run: 7", summary)
+            self.assertIn("requests", summary)
+            self.assertFalse((temporary / "az.log").exists())
+            self.assertNotIn(env["MINTED_ACCESS_TOKEN"], summary)
 
 
 if __name__ == "__main__":

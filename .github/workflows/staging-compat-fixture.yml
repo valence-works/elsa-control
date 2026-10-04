@@ -22,8 +22,8 @@ jobs:
   fixture:
     name: Arm and restore the staging compatibility fixture
     runs-on: ubuntu-latest
-    # Backstop above fixture-on (20m) + reserved restore (4m). Not the restore budget.
-    timeout-minutes: 30
+    # Backstop above fixture-on (20m) + post-delete health (10m+) + in-hold + screens.
+    timeout-minutes: 60
     environment: test
     permissions:
       actions: read
@@ -45,6 +45,8 @@ jobs:
       STAGING_SUPABASE_PROJECT_REF: ${{ vars.STAGING_SUPABASE_PROJECT_REF }}
       EXPECTED_STAGING_SUPABASE_ORIGIN: ${{ vars.EXPECTED_STAGING_SUPABASE_ORIGIN }}
       CLOUD_BFF_SMOKE_URL: ${{ vars.CLOUD_BFF_SMOKE_URL }}
+      STAGING_CLOUD_ORIGIN: https://calm-sand-03964eb03.2.azurestaticapps.net
+      SCREENSHOT_ROOT: ${{ github.workspace }}/staging-compat-screens
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -68,6 +70,17 @@ jobs:
           client-id: ${{ env.AZURE_CLIENT_ID }}
           tenant-id: ${{ env.AZURE_TENANT_ID }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Playwright Chromium
+        id: playwright_setup
+        continue-on-error: true
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$SCREENSHOT_ROOT"
+          npm install --no-save --prefix "$RUNNER_TEMP/compat-playwright" playwright@1.49.0
+          npx --prefix "$RUNNER_TEMP/compat-playwright" playwright install --with-deps chromium
 
       - name: Preflight exclusive staging and capture the baseline
         id: preflight
@@ -100,7 +113,48 @@ jobs:
           set -euo pipefail
           scripts/staging-compat-fixture.sh arm
 
-      - name: Hold the fixture for the exclusive proof window
+      - name: Record K action probes while armed
+        id: k_probes
+        timeout-minutes: 2
+        env:
+          STAGING_E2E_COMPAT_EMAIL: ${{ secrets.STAGING_E2E_COMPAT_EMAIL }}
+          STAGING_E2E_COMPAT_PASSWORD: ${{ secrets.STAGING_E2E_COMPAT_PASSWORD }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+          EXPECTED_COMPAT_CONTEXT_PATH: ${{ steps.arm.outputs.compat_context_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/staging-compat-fixture.sh probes
+
+      - name: Capture armed customer screens
+        id: armed_screens
+        if: ${{ success() && steps.playwright_setup.outcome == 'success' }}
+        timeout-minutes: 5
+        env:
+          STAGING_E2E_COMPAT_EMAIL: ${{ secrets.STAGING_E2E_COMPAT_EMAIL }}
+          STAGING_E2E_COMPAT_PASSWORD: ${{ secrets.STAGING_E2E_COMPAT_PASSWORD }}
+          SCREENSHOT_PHASE: armed
+          SCREENSHOT_DIR: ${{ env.SCREENSHOT_ROOT }}/armed
+          NODE_PATH: ${{ runner.temp }}/compat-playwright/node_modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/staging-compat-fixture-screens.mjs
+          {
+            printf '## Armed customer screens\n\n'
+            printf 'Uploaded as artifact `staging-compat-screens-armed`.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload armed customer screens
+        if: ${{ !cancelled() && steps.armed_screens.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-compat-screens-armed
+          path: ${{ env.SCREENSHOT_ROOT }}/armed/*.png
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Hold the remaining exclusive proof window
         if: ${{ success() }}
         timeout-minutes: 16
         shell: bash
@@ -128,8 +182,9 @@ jobs:
         # QA window, missing freeze, or conflicting test deployment.
         # A failed password grant must not block deleting the fixture; restore
         # removes the setting before it mints.
+        # In-hold check failures and cancel must not skip this step.
         if: ${{ always() && steps.preflight.outcome == 'success' }}
-        timeout-minutes: 4
+        timeout-minutes: 16
         env:
           GH_TOKEN: ${{ github.token }}
           STAGING_E2E_COMPAT_EMAIL: ${{ secrets.STAGING_E2E_COMPAT_EMAIL }}
@@ -142,11 +197,63 @@ jobs:
           EXPECTED_IMAGE_REFERENCE: ${{ steps.preflight.outputs.image_reference }}
           EXPECTED_PREFLIGHT_STARTED_AT: ${{ steps.preflight.outputs.preflight_started_at }}
           EXPECTED_SETTING_NAMES_PATH: ${{ steps.preflight.outputs.setting_names_path }}
-          HEALTH_ATTEMPTS: "18"
-          HEALTH_RETRY_SECONDS: "5"
-          HEALTH_CURL_MAX_TIME: "5"
-          HEALTH_BUDGET_SECONDS: "150"
+          ARMED_AT_ISO: ${{ steps.arm.outputs.armed_at_iso }}
+          HEALTH_ATTEMPTS: "36"
+          HEALTH_RETRY_SECONDS: "15"
+          HEALTH_CURL_MAX_TIME: "10"
+          HEALTH_BUDGET_SECONDS: "600"
         shell: bash
         run: |
           set -euo pipefail
           scripts/staging-compat-fixture.sh restore
+
+      - name: Capture restored customer screens
+        id: restored_screens
+        if: ${{ !cancelled() && steps.restore.outcome == 'success' }}
+        timeout-minutes: 5
+        env:
+          STAGING_E2E_COMPAT_EMAIL: ${{ secrets.STAGING_E2E_COMPAT_EMAIL }}
+          STAGING_E2E_COMPAT_PASSWORD: ${{ secrets.STAGING_E2E_COMPAT_PASSWORD }}
+          SCREENSHOT_PHASE: restored
+          SCREENSHOT_DIR: ${{ env.SCREENSHOT_ROOT }}/restored
+          NODE_PATH: ${{ runner.temp }}/compat-playwright/node_modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/staging-compat-fixture-screens.mjs
+          {
+            printf '## Restored customer screens\n\n'
+            printf 'Uploaded as artifact `staging-compat-screens-restored`.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload restored customer screens
+        if: ${{ !cancelled() && steps.restored_screens.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-compat-screens-restored
+          path: ${{ env.SCREENSHOT_ROOT }}/restored/*.png
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Report armed-window telemetry
+        id: telemetry
+        if: ${{ !cancelled() && steps.restore.outcome == 'success' }}
+        timeout-minutes: 3
+        env:
+          ARMED_AT_ISO: ${{ steps.arm.outputs.armed_at_iso }}
+          DELETED_AT_ISO: ${{ steps.restore.outputs.deleted_at_iso }}
+          EXPECTED_COMPATIBILITY_REQUESTS: "7"
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/staging-compat-fixture.sh telemetry
+
+      - name: Report skipped post-restore evidence
+        if: ${{ always() && steps.preflight.outcome == 'success' && steps.restore.outcome != 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf '## Post-restore evidence\n\n'
+            printf 'Restored customer screens and telemetry were skipped because restore did not succeed.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
