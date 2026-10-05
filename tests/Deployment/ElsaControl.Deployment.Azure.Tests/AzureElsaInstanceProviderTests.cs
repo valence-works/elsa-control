@@ -642,6 +642,90 @@ public sealed class AzureElsaInstanceProviderTests
     }
 
     [Fact]
+    public async Task Transient_foundation_failure_records_retry_evidence_without_auto_resume_on_first_observe()
+    {
+        var fixture = await CreateObserveFixtureAsync(
+            FailedObservation(AzureProviderRunnerStep.Foundation, AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode),
+            attemptedStep: AzureProviderRunnerStep.Foundation,
+            phase: AzureProviderOperationPhase.Planned);
+
+        var observation = await fixture.Provider.ObserveAsync(fixture.Request);
+
+        Assert.NotNull(observation.RetryEvidence);
+        Assert.False(observation.RetryEvidence.AutoResume);
+        Assert.Equal(AzureLateSuccessCodes.Retrying, observation.ReasonCode);
+        Assert.Equal(1, fixture.ObservationStore.CreateCalls);
+        Assert.Equal(AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds,
+            fixture.OperationStore.Current!.ArmObservationBackoffSeconds);
+    }
+
+    [Fact]
+    public async Task Transient_foundation_failure_auto_resumes_after_the_failure_has_been_seen()
+    {
+        var now = DateTimeOffset.Parse("2026-10-05T00:04:00Z");
+        var fixture = await CreateObserveFixtureAsync(
+            FailedObservation(AzureProviderRunnerStep.Foundation, AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode),
+            attemptedStep: AzureProviderRunnerStep.Foundation,
+            phase: AzureProviderOperationPhase.Planned,
+            lastArmObservedAt: now.AddSeconds(-120),
+            backoffSeconds: AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds,
+            now: now);
+        fixture.OperationStore.Current = fixture.OperationStore.Current! with
+        {
+            LastObservationReasonCode = AzureLateSuccessCodes.Retrying
+        };
+
+        var observation = await fixture.Provider.ObserveAsync(fixture.Request);
+
+        Assert.NotNull(observation.RetryEvidence);
+        Assert.True(observation.RetryEvidence.AutoResume);
+        Assert.Equal(AzureLateSuccessCodes.Retrying, observation.ReasonCode);
+    }
+
+    [Fact]
+    public async Task Transient_foundation_failure_at_the_auto_resume_cap_is_exhausted_and_recoverable()
+    {
+        var now = DateTimeOffset.Parse("2026-10-05T00:04:00Z");
+        var fixture = await CreateObserveFixtureAsync(
+            FailedObservation(AzureProviderRunnerStep.Foundation, AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode),
+            attemptedStep: AzureProviderRunnerStep.Foundation,
+            phase: AzureProviderOperationPhase.Planned,
+            now: now);
+
+        var first = await fixture.Provider.ObserveAsync(fixture.Request);
+        Assert.NotNull(first.RetryEvidence);
+        fixture.OperationStore.Current = fixture.OperationStore.Current! with
+        {
+            AutoResumeCount = AzureNamedDeploymentFreshness.MaximumAutoResumes,
+            LastArmObservedAt = now.AddSeconds(-120),
+            ArmObservationBackoffSeconds = AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds,
+            LastObservationReasonCode = AzureLateSuccessCodes.Retrying
+        };
+
+        var observation = await fixture.Provider.ObserveAsync(fixture.Request);
+
+        Assert.NotNull(observation.RetryEvidence);
+        Assert.False(observation.RetryEvidence.AutoResume);
+        Assert.Equal(AzureLateSuccessCodes.AutoResumeExhausted, observation.ReasonCode);
+        Assert.Equal(AzureNamedDeploymentFreshness.MaximumAutoResumes, fixture.OperationStore.Current!.AutoResumeCount);
+    }
+
+    [Fact]
+    public async Task Non_transient_foundation_failure_records_needs_operator_and_retry_evidence()
+    {
+        var fixture = await CreateObserveFixtureAsync(
+            FailedObservation(AzureProviderRunnerStep.Foundation),
+            attemptedStep: AzureProviderRunnerStep.Foundation,
+            phase: AzureProviderOperationPhase.Planned);
+
+        var observation = await fixture.Provider.ObserveAsync(fixture.Request);
+
+        Assert.NotNull(observation.RetryEvidence);
+        Assert.False(observation.RetryEvidence.AutoResume);
+        Assert.Equal(AzureLateSuccessCodes.NeedsOperator, observation.ReasonCode);
+    }
+
+    [Fact]
     public async Task Recovery_required_retry_safe_mutation_replay_stays_manual()
     {
         var fixture = await CreateObserveFixtureAsync(
@@ -1360,6 +1444,19 @@ public sealed class AzureElsaInstanceProviderTests
             SubscriptionId = "11111111-1111-1111-1111-111111111111",
             ResourceGroupNamePrefix = "rg-elsa"
         };
+
+    private static AzureProviderRecoveryObservation FailedObservation(
+        AzureProviderRunnerStep failedStep,
+        string? innerErrorCode = null) =>
+        new(
+            AzureProviderRecoveryObservationKind.Failed,
+            failedStep,
+            new(),
+            AzureProviderHealth.Unknown,
+            null,
+            AzureLateSuccessCodes.DeploymentFailed,
+            "Azure reported the deployment as failed or canceled.",
+            innerErrorCode);
 
     private static AzureProviderRecoveryObservation ConfirmedObservation(AzureProviderRunnerStep completedStep) =>
         new(

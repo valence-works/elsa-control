@@ -730,6 +730,8 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     {
         var process = NewFoundationProcess();
         process.Success(IsDeploymentReplayObservation, $"[\"{staleState}\"]");
+        if (staleState == "Failed")
+            ScriptFailedFoundationCleanup(process, environmentFailed: false);
         process.Success(IsDeploymentSubmission);
         process.Success(IsDeploymentPoll, DeploymentPoll(staleState, "{}", StaleDeploymentTimestamp));
         process.Success(IsDeploymentPoll, DeploymentPoll("Running"));
@@ -800,11 +802,30 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     {
         var process = NewFoundationProcess();
         process.Success(IsDeploymentReplayObservation, existing);
+        if (existing == "[\"Failed\"]")
+            ScriptFailedFoundationCleanup(process, environmentFailed: false);
         process.Deployment(FoundationOutputs());
 
         var result = await _fixture.Runner(process).RunAsync(ReplayedFoundation());
 
         Assert.True(result.Outcome == AzureProviderRunnerOutcome.Completed, $"{result.Code}: {result.Message}");
+        Assert.Single(process.Calls, IsDeploymentSubmission);
+    }
+
+    [Fact]
+    public async Task Replayed_foundation_cleans_a_failed_environment_and_stale_deployment_before_resubmitting()
+    {
+        var process = NewFoundationProcess();
+        process.Success(IsDeploymentReplayObservation, "[\"Failed\"]");
+        ScriptFailedFoundationCleanup(process);
+        process.Deployment(FoundationOutputs());
+
+        var result = await _fixture.Runner(process).RunAsync(ReplayedFoundation());
+
+        Assert.True(result.Outcome == AzureProviderRunnerOutcome.Completed, $"{result.Code}: {result.Message}");
+        Assert.Single(process.Calls, IsFailedEnvironmentShow);
+        Assert.Single(process.Calls, IsFailedEnvironmentDelete);
+        Assert.Single(process.Calls, IsNamedDeploymentDelete);
         Assert.Single(process.Calls, IsDeploymentSubmission);
     }
 
@@ -830,6 +851,29 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
 
     private AzureProviderRunnerCommand ReplayedFoundation() =>
         _fixture.Command(AzureProviderRunnerStep.Foundation) with { IsResume = true, AttemptNumber = 2, IsStepReplay = true };
+
+    [Theory]
+    [InlineData("Failed", "ManagedEnvironmentProvisioningError", "azure.arm.managed-environment-provisioning-error")]
+    [InlineData("Canceled", null, null)]
+    public async Task Recovery_observer_reports_a_terminal_foundation_failure_as_confirmed_failed(
+        string state, string? armCode, string? expectedInner)
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("properties.provisioningState"), state);
+        ScriptDeploymentError(process, armCode);
+        var foundation = RecoverableFoundationResources();
+
+        var observation = await _fixture.Runner(process)
+            .ObserveAsync(CreateRecoveryRequest(foundation, AzureProviderRunnerStep.Foundation, AzureProviderOperationPhase.Planned));
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.Failed, observation.Kind);
+        Assert.Equal(AzureProviderRunnerStep.Foundation, observation.CompletedStep);
+        Assert.Equal(AzureLateSuccessCodes.DeploymentOutcome(state), observation.Code);
+        Assert.Equal(expectedInner, observation.InnerErrorCode);
+        AssertNoProviderMutation(process);
+    }
 
     [Fact]
     public async Task Recovery_observer_confirms_owned_foundation_without_mutation()
@@ -920,38 +964,41 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
-    public async Task Recovery_observer_reports_a_failed_workload_deployment_without_evidence()
+    public async Task Recovery_observer_reports_a_failed_workload_deployment_as_confirmed_failed()
     {
         var process = new FakeCommandProcess();
         ConfigureOwnedWorkloadObservation(
             process,
             DeploymentPoll("Failed", WorkloadObserveOutputs()),
             includeRevision: false);
+        ScriptDeploymentError(process, "AllocationFailed");
 
         var observation = await _fixture.Runner(process)
             .ObserveAsync(CreateWorkloadRecoveryRequest());
 
-        Assert.Equal(AzureProviderRecoveryObservationKind.Ambiguous, observation.Kind);
+        Assert.Equal(AzureProviderRecoveryObservationKind.Failed, observation.Kind);
+        Assert.Equal(AzureProviderRunnerStep.Workload, observation.CompletedStep);
         Assert.Equal(AzureLateSuccessCodes.DeploymentFailed, observation.Code);
-        Assert.Null(observation.CompletedStep);
+        Assert.Equal(AzureTransientArmFailure.AllocationFailedCode, observation.InnerErrorCode);
         AssertNoProviderMutation(process);
     }
 
     [Fact]
-    public async Task Recovery_observer_reports_a_canceled_workload_deployment_without_evidence()
+    public async Task Recovery_observer_reports_a_canceled_workload_deployment_as_confirmed_failed()
     {
         var process = new FakeCommandProcess();
         ConfigureOwnedWorkloadObservation(
             process,
             DeploymentPoll("Canceled", WorkloadObserveOutputs()),
             includeRevision: false);
+        ScriptDeploymentError(process);
 
         var observation = await _fixture.Runner(process)
             .ObserveAsync(CreateWorkloadRecoveryRequest());
 
-        Assert.Equal(AzureProviderRecoveryObservationKind.Ambiguous, observation.Kind);
+        Assert.Equal(AzureProviderRecoveryObservationKind.Failed, observation.Kind);
+        Assert.Equal(AzureProviderRunnerStep.Workload, observation.CompletedStep);
         Assert.Equal(AzureLateSuccessCodes.DeploymentCanceled, observation.Code);
-        Assert.Null(observation.CompletedStep);
         AssertNoProviderMutation(process);
     }
 
@@ -3657,6 +3704,39 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
         process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
         process.Success(args => args.Contains("properties.provisioningState"), "Succeeded");
+    }
+
+    private static bool IsDeploymentErrorQuery(string[] args) =>
+        args is ["deployment", "group", "show", ..] &&
+        args.Any(argument => argument.Contains("properties.error.code", StringComparison.Ordinal));
+
+    private static bool IsFailedEnvironmentShow(string[] args) =>
+        args is ["resource", "show", ..] && args.Contains("--ids") &&
+        args.Any(argument => argument.Contains("managedEnvironments", StringComparison.Ordinal));
+
+    private static bool IsFailedEnvironmentDelete(string[] args) =>
+        args is ["resource", "delete", ..] && args.Contains("--ids") &&
+        args.Any(argument => argument.Contains("managedEnvironments", StringComparison.Ordinal));
+
+    private static bool IsNamedDeploymentDelete(string[] args) =>
+        args is ["deployment", "group", "delete", ..];
+
+    private static void ScriptDeploymentError(FakeCommandProcess process, string? armCode = null)
+    {
+        var inner = armCode is null ? "null" : $"\"{armCode}\"";
+        process.Success(IsDeploymentErrorQuery, $$"""{"code":{{inner}},"inner":{{inner}}}""");
+    }
+
+    private static void ScriptFailedFoundationCleanup(FakeCommandProcess process, bool environmentFailed = true)
+    {
+        if (environmentFailed)
+        {
+            process.Success(IsFailedEnvironmentShow, "Failed");
+            process.Success(IsFailedEnvironmentDelete);
+        }
+        else
+            process.Failure(IsFailedEnvironmentShow);
+        process.Success(IsNamedDeploymentDelete);
     }
 
     private static void ConfigureOwnedWorkloadObservation(

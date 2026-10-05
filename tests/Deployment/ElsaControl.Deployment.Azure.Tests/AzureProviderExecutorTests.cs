@@ -381,6 +381,43 @@ public sealed class AzureProviderExecutorTests
         Assert.Contains(AzureProviderRunnerStep.Promotion, runner.Steps);
     }
 
+    [Fact]
+    public async Task Failed_foundation_observation_re_runs_foundation_then_continues_create()
+    {
+        var store = new FakeOperationStore();
+        var runner = new RecordingRunner
+        {
+            FirstFoundationOutcome = AzureProviderRunnerOutcome.Uncertain,
+            FoundationResourcesOverride = FoundationResources()
+        };
+        var executor = new AzureProviderExecutor(store, runner, new StaticTimeProvider(Now), TimeSpan.FromMinutes(5));
+        var plan = CreatePlan();
+
+        var interrupted = await executor.ApplyAsync(CreateRequest(), plan);
+        var observed = new AzureProviderRecoveryObservation(
+            AzureProviderRecoveryObservationKind.Failed,
+            AzureProviderRunnerStep.Foundation,
+            interrupted.Operation.Resources,
+            AzureProviderHealth.Unknown,
+            null,
+            AzureLateSuccessCodes.DeploymentFailed,
+            "Azure reported the deployment as failed or canceled.",
+            AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode);
+
+        var resumed = await executor.RecoverAsync(interrupted.Operation, plan, observed);
+
+        Assert.Equal(AzureProviderExecutionOutcome.RecoveryRequired, interrupted.Outcome);
+        Assert.Equal(AzureProviderOperationPhase.Planned, interrupted.Operation.Phase);
+        Assert.Equal(AzureProviderExecutionOutcome.Succeeded, resumed.Outcome);
+        Assert.Equal(AzureProviderOperationStatus.Succeeded, resumed.Operation.Status);
+        Assert.Equal(1, store.RecoveryClaimCount);
+        Assert.Equal(2, runner.Steps.Count(step => step == AzureProviderRunnerStep.Foundation));
+        Assert.True(runner.Commands[1].IsStepReplay);
+        Assert.Contains(AzureProviderRunnerStep.AcrPull, runner.Steps);
+        Assert.Contains(AzureProviderRunnerStep.Promotion, runner.Steps);
+        Assert.DoesNotContain(AzureProviderOperationPhase.FoundationObserved, store.CheckpointPhases());
+    }
+
     [Theory]
     [InlineData("The Azure provider assignment binding is invalid.")]
     [InlineData("Checkpoint phase cannot move backwards.")]
@@ -1629,6 +1666,7 @@ public sealed class AzureProviderExecutorTests
         public bool FailFoundationOnce { get; init; }
         public bool FailCleanupOnce { get; init; }
         public AzureProviderRunnerOutcome FoundationOutcome { get; init; } = AzureProviderRunnerOutcome.Completed;
+        public AzureProviderRunnerOutcome? FirstFoundationOutcome { get; init; }
         public AzureProviderRunnerOutcome PromotionOutcome { get; init; } = AzureProviderRunnerOutcome.Completed;
         public AzureProviderHealth Health { get; init; } = AzureProviderHealth.Healthy;
         public bool StableTrafficRestored { get; init; } = true;
@@ -1739,7 +1777,13 @@ public sealed class AzureProviderExecutorTests
             if (command.Step == AzureProviderRunnerStep.Health)
                 return Result(AzureProviderRunnerOutcome.Completed, AzureProviderOperationPhase.HealthVerified, health: Health);
             if (command.Step == AzureProviderRunnerStep.Foundation)
-                return Result(FoundationOutcome, AzureProviderOperationPhase.FoundationSubmitted, FoundationResourcesOverride);
+            {
+                var outcome = FirstFoundationOutcome is { } first &&
+                    Steps.Count(step => step == AzureProviderRunnerStep.Foundation) == 1
+                    ? first
+                    : FoundationOutcome;
+                return Result(outcome, AzureProviderOperationPhase.FoundationSubmitted, FoundationResourcesOverride);
+            }
             return Result(
                 AzureProviderRunnerOutcome.Completed,
                 RunnerPhase(command.Step));
@@ -1812,6 +1856,7 @@ public sealed class AzureProviderExecutorTests
     {
         private AzureProviderOperation? _operation;
         private readonly List<AzureProviderOperationTransition> _transitions = [];
+        private readonly List<AzureProviderOperationPhase> _checkpointPhases = [];
         private readonly object _heartbeatLock = new();
         private TaskCompletionSource _nextHeartbeat = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _heartbeatCount;
@@ -1826,6 +1871,7 @@ public sealed class AzureProviderExecutorTests
         }
 
         public int RecoveryClaimCount { get; private set; }
+        public IReadOnlyList<AzureProviderOperationPhase> CheckpointPhases() => _checkpointPhases;
         public int DeleteRecoveryClaimCount { get; private set; }
         public AzureProviderDeleteRecoveryAuthority? DeleteRecoveryAuthority { get; set; }
         public AzureProviderOperation? DeleteRecoveryClaimResult { get; set; }
@@ -2021,6 +2067,7 @@ public sealed class AzureProviderExecutorTests
             if (_operation is null || _operation.Status != AzureProviderOperationStatus.Running || expectedVersion.HasValue && _operation.Version != expectedVersion.Value)
                 return Task.FromResult<AzureProviderOperation?>(null);
             var resources = checkpoint.ReplaceResources ? checkpoint.Resources : MergeResources(_operation.Resources, checkpoint.Resources);
+            _checkpointPhases.Add(checkpoint.Phase);
             _operation = _operation with
             {
                 Phase = checkpoint.Phase,

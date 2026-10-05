@@ -37,6 +37,11 @@ public static class ManagedElsaInstanceCustomerProjection
         ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale,
         ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending,
         RecoveryRequiredUnavailableReasonCode,
+        ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+        ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled,
+        ManagedElsaReasonCodeCatalog.AzureRecoveryRetrying,
+        ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted,
+        ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator,
         ProvisioningUnavailableReasonCode,
         FailedUnavailableReasonCode,
         UnknownUnavailableReasonCode,
@@ -77,7 +82,7 @@ public static class ManagedElsaInstanceCustomerProjection
         if (HasStoredTerminalPriority(stored) || desiredLifecycle == ElsaDesiredLifecycle.Deleting)
             return stored;
 
-        if (IsParkedProvisioningRecovery(activeOperation))
+        if (IsParkedProvisioningRecovery(activeOperation) || IsConfirmedArmFailurePark(activeOperation))
             return ElsaObservedLifecycle.RecoveryRequired;
 
         if (stored != ElsaObservedLifecycle.Unknown)
@@ -288,6 +293,18 @@ public static class ManagedElsaInstanceCustomerProjection
     private static bool IsParkedProvisioningRecovery(ActiveLifecycleOperation? activeOperation) =>
         activeOperation is { State: ElsaInstanceOperationState.RecoveryRequired, RequiresHumanAt: not null } parked &&
         IsProvisioningAction(parked.Action);
+
+    private static bool IsConfirmedArmFailurePark(ActiveLifecycleOperation? activeOperation) =>
+        activeOperation is { State: ElsaInstanceOperationState.RecoveryRequired } parked &&
+        IsProvisioningAction(parked.Action) &&
+        (IsArmFailureCustomerCode(parked.ParkReason) || IsArmFailureCustomerCode(parked.FailureCode));
+
+    private static bool IsArmFailureCustomerCode(string? code) =>
+        code is ManagedElsaReasonCodeCatalog.AzureDeploymentFailed
+            or ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled
+            or ManagedElsaReasonCodeCatalog.AzureRecoveryRetrying
+            or ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted
+            or ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator;
 
     private static ActiveLifecycleOperation? ToActive(ElsaInstanceOperationSummary? operation) =>
         operation is null

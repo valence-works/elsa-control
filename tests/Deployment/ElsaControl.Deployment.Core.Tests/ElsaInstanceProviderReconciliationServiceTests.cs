@@ -450,6 +450,32 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
         Assert.False(result.RetrySafe);
     }
 
+    [Fact]
+    public async Task Confirmed_arm_failure_evidence_is_retry_safe_and_operator_recoverable()
+    {
+        var (store, accepted) = await RecoveryTargetAsync();
+        var observation = new ElsaInstanceProviderObservation(
+            ElsaInstanceProviderObservationKind.Confirmed,
+            ElsaObservedLifecycle.Provisioning,
+            ElsaInstanceProviderHealthGate.Unknown,
+            "observation-arm-failed-evidence",
+            OpaqueEvidence(autoResume: false))
+        {
+            ReasonCode = ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator
+        };
+
+        var result = await Service(store, new RecordingPort(observation)).ReconcileAsync(WorkspaceId, accepted.Operation.Id);
+
+        Assert.Equal(ElsaInstanceProviderReconciliationOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator, result.DiagnosticCode);
+        Assert.True(result.RetrySafe);
+
+        var current = await store.GetInstanceAsync(WorkspaceId, accepted.Instance.Id);
+        var recovered = await new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now.AddMinutes(1)))
+            .RecoverAsync(new(WorkspaceId, current!.Id, current.Version, "recover-arm-failed"));
+        Assert.Equal(ElsaInstanceOperationState.Queued, recovered.Operation.State);
+    }
+
     [Theory]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded)]

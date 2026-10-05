@@ -374,7 +374,7 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted)]
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationInProgress)]
     [InlineData(ManagedElsaReasonCodeCatalog.ProviderReconciliationConverged)]
-    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadInProgress)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadObserved)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzurePromotionUncertain)]
@@ -498,7 +498,7 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
             instance.Id,
             ElsaInstanceOperationAction.Create,
             ElsaInstanceOperationState.RecoveryRequired,
-            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+            ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded,
             parkedAt: Now);
 
         Assert.Equal(ElsaObservedLifecycle.Provisioning,
@@ -507,12 +507,37 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
             instance.Id,
             ElsaInstanceOperationAction.Create,
             ElsaInstanceOperationState.RecoveryRequired,
-            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+            ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded,
             parkedAt: Now,
             requiresHumanAt: Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter);
         Assert.Equal(ElsaObservedLifecycle.RecoveryRequired,
             ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(
                 instance, flagged, Now + ManagedElsaReasonCodeCatalog.HumanRequiredAfter));
+    }
+
+    [Theory]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryRetrying)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted)]
+    public void Confirmed_arm_failure_park_projects_recovery_required_immediately(string reason)
+    {
+        var instance = Instance(ElsaObservedLifecycle.Provisioning);
+        var operation = Operation(
+            instance.Id,
+            ElsaInstanceOperationAction.Create,
+            ElsaInstanceOperationState.RecoveryRequired,
+            reason,
+            parkedAt: Now);
+
+        var projected = ManagedElsaInstanceCustomerProjection.ProjectObservedLifecycle(instance, operation, Now);
+
+        Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, projected);
+        Assert.False(ManagedElsaInstanceCustomerProjection.IsKnownInProgress(projected));
+        Assert.Equal(ManagedElsaInstanceCustomerProjection.NeedsAttentionLabel,
+            ManagedElsaInstanceCustomerProjection.CustomerLabel(projected));
+        Assert.Equal(reason, ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(operation));
     }
 
     [Fact]
@@ -774,7 +799,6 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
     [Theory]
     [InlineData("/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-customer/providers/Microsoft.App/containerApps/app")]
     [InlineData("Worker heartbeat became stale.")]
-    [InlineData("azure.deployment.failed")]
     [InlineData("deletion.provider-correlation-invalid")]
     [InlineData("provider.reconciliation.unsupported-synthetic")]
     [InlineData("azure.recovery.step-unsupported")]
@@ -791,6 +815,11 @@ public sealed class ManagedElsaInstanceCustomerProjectionTests
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionBlockedByOperationInFlight)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderProgressStale)]
     [InlineData(ManagedElsaReasonCodeCatalog.DeletionProviderCleanupPending)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryRetrying)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted)]
+    [InlineData(ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator)]
     [InlineData(ManagedElsaInstanceCustomerProjection.RecoveryRequiredUnavailableReasonCode)]
     [InlineData(ElsaInstanceCommercialOperation.EntitlementRequired)]
     [InlineData(ElsaInstanceCommercialOperation.EntitlementSafeExitSuperseded)]

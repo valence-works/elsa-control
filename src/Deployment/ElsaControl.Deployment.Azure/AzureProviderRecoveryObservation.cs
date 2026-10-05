@@ -251,12 +251,40 @@ public static class AzureProviderRecoveryObservationSupport
     /// mismatch is a SQL cleanup retry after the bootstrap script has already been observed;
     /// it advances no phase and therefore cannot cause the script to run again.
     /// </summary>
+    public static bool IsFailedStepRetryBoundary(
+        AzureProviderRunnerStep? attemptedStep,
+        AzureProviderOperationPhase currentPhase,
+        AzureProviderRunnerStep completedStep,
+        AzureProviderOperationPhase observedPhase)
+    {
+        if (completedStep is not (AzureProviderRunnerStep.Foundation or AzureProviderRunnerStep.AcrPull or
+            AzureProviderRunnerStep.Workload))
+            return false;
+        if (observedPhase != currentPhase)
+            return false;
+        if (!(attemptedStep == completedStep ||
+              (attemptedStep is null && completedStep == AzureProviderRunnerStep.Foundation)))
+            return false;
+
+        try
+        {
+            return AzureProviderOperationPhaseOrdering.Compare(RecoveryPhase(completedStep), currentPhase) > 0;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return false;
+        }
+    }
+
     public static bool IsCompatibleBoundary(
         AzureProviderRunnerStep? attemptedStep,
         AzureProviderOperationPhase currentPhase,
         AzureProviderRunnerStep completedStep,
         AzureProviderOperationPhase observedPhase)
     {
+        if (IsFailedStepRetryBoundary(attemptedStep, currentPhase, completedStep, observedPhase))
+            return true;
+
         if (completedStep is not (AzureProviderRunnerStep.Foundation or AzureProviderRunnerStep.AcrPull or
             AzureProviderRunnerStep.SeedSecrets or
             AzureProviderRunnerStep.SqlFirewallCreate or AzureProviderRunnerStep.SqlBootstrapScript or

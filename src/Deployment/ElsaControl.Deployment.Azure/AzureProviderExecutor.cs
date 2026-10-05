@@ -277,6 +277,8 @@ public sealed class AzureProviderExecutor
             return Result(operation, AzureProviderExecutionOutcome.InProgress, "azure.operation.in-progress", "The Azure operation is already owned by another worker.");
         if (operation.Status != AzureProviderOperationStatus.RecoveryRequired)
             return ResultForObservedState(operation, "azure.operation.recovery-invalid", "The Azure operation is not awaiting explicit recovery.");
+        if (observation.Kind == AzureProviderRecoveryObservationKind.Failed)
+            return await RecoverFailedStepAsync(operation, plan, observation, cancellationToken);
         if (observation.Kind != AzureProviderRecoveryObservationKind.Confirmed)
             return Result(operation, AzureProviderExecutionOutcome.RecoveryRequired, observation.Code, observation.Message);
 
@@ -1197,6 +1199,43 @@ public sealed class AzureProviderExecutor
             AzureProviderOperationPhase.TrafficPromoted => [],
             _ => throw new InvalidOperationException("The reconcile operation has an invalid lifecycle phase.")
         };
+
+    private async Task<AzureProviderExecutionResult> RecoverFailedStepAsync(
+        AzureProviderOperation operation,
+        AzureWorkloadPlan plan,
+        AzureProviderRecoveryObservation observation,
+        CancellationToken cancellationToken)
+    {
+        var failedStep = observation.CompletedStep!.Value;
+        if (!AzureProviderRecoveryObservationSupport.IsFailedStepRetryBoundary(
+                operation.AttemptedStep, operation.Phase, failedStep, operation.Phase) ||
+            failedStep == AzureProviderRunnerStep.Foundation &&
+            !AzureProviderRecoveryObservationSupport.IsFoundationOnlyEligible(operation) ||
+            failedStep == AzureProviderRunnerStep.AcrPull &&
+            !AzureProviderRecoveryObservationSupport.IsAcrPullEligible(operation) ||
+            failedStep == AzureProviderRunnerStep.Workload &&
+            !AzureProviderRecoveryObservationSupport.IsWorkloadEligible(operation))
+            return RecoveryInsufficient(operation);
+
+        var now = _timeProvider.GetUtcNow();
+        var leaseToken = Guid.NewGuid().ToString("N");
+        var claimed = await _store.ClaimRecoveryAsync(
+            operation.WorkspaceId,
+            operation.Id,
+            _workerId,
+            leaseToken,
+            _leaseDuration,
+            now,
+            operation.Version,
+            cancellationToken);
+        if (claimed is null)
+        {
+            var latest = await _store.GetAsync(operation.WorkspaceId, operation.Id, cancellationToken) ?? operation;
+            return ResultForObservedState(latest, "azure.operation.claim-lost", "The Azure operation is owned by another worker or changed concurrently.");
+        }
+
+        return await ExecuteClaimedAsync(plan, claimed, leaseToken, cancellationToken);
+    }
 
     private static AzureProviderExecutionResult RecoveryInsufficient(AzureProviderOperation operation) =>
         Result(operation, AzureProviderExecutionOutcome.RecoveryRequired,

@@ -23,6 +23,19 @@ public sealed class ElsaInstanceProviderReconciliationService(
     public const string AutoResumeExhaustedCode = ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted;
     public const string AutoResumeClaimConflictCode = ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeClaimConflict;
 
+    public static bool IsRecoverableResumeCode(string? code) =>
+        string.Equals(code, RetrySafeCode, StringComparison.Ordinal) ||
+        string.Equals(code, AutoResumeExhaustedCode, StringComparison.Ordinal) ||
+        string.Equals(code, ManagedElsaReasonCodeCatalog.AzureDeploymentFailed, StringComparison.Ordinal) ||
+        string.Equals(code, ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled, StringComparison.Ordinal) ||
+        string.Equals(code, ManagedElsaReasonCodeCatalog.AzureRecoveryRetrying, StringComparison.Ordinal) ||
+        string.Equals(code, ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator, StringComparison.Ordinal);
+
+    public static string PersistedArmFailureCode(string? diagnosticCode) =>
+        string.Equals(diagnosticCode, ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled, StringComparison.Ordinal)
+            ? ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled
+            : ManagedElsaReasonCodeCatalog.AzureDeploymentFailed;
+
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
 
     public Task<int> AdvanceDueHumanRequiredClocksAsync(

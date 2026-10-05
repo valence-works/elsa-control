@@ -131,7 +131,8 @@ public enum AzureProviderRecoveryObservationKind
     Confirmed,
     InProgress,
     Unknown,
-    Ambiguous
+    Ambiguous,
+    Failed
 }
 
 public sealed record AzureProviderRecoveryObservation(
@@ -141,7 +142,8 @@ public sealed record AzureProviderRecoveryObservation(
     AzureProviderHealth Health,
     string? Endpoint,
     string Code,
-    string Message)
+    string Message,
+    string? InnerErrorCode = null)
 {
     public void Validate()
     {
@@ -151,12 +153,17 @@ public sealed record AzureProviderRecoveryObservation(
         AzureProviderOperationValidation.ValidateMessage(Message);
         AzureProviderOperationValidation.ValidateReferences(Resources);
         AzureProviderOperationValidation.ValidateEndpoint(Endpoint);
+        if (InnerErrorCode is not null && !AzureProviderOperationValidation.IsSafeCode(InnerErrorCode))
+            throw new ArgumentException("The Azure recovery observation inner error is unsafe.", nameof(InnerErrorCode));
         if (Kind == AzureProviderRecoveryObservationKind.Confirmed && CompletedStep is null)
             throw new ArgumentException("A confirmed recovery observation must identify a completed step.", nameof(CompletedStep));
+        if (Kind == AzureProviderRecoveryObservationKind.Failed && CompletedStep is null)
+            throw new ArgumentException("A failed recovery observation must identify the failed step.", nameof(CompletedStep));
         if (CompletedStep is { } completedStep &&
             !AzureProviderRecoveryObservationSupport.IsSupportedCompletedStep(completedStep))
             throw new ArgumentException("The observed recovery step cannot be resumed.", nameof(CompletedStep));
-        if (Kind != AzureProviderRecoveryObservationKind.Confirmed && CompletedStep is not null)
+        if (Kind is not (AzureProviderRecoveryObservationKind.Confirmed or AzureProviderRecoveryObservationKind.Failed) &&
+            CompletedStep is not null)
             throw new ArgumentException("An uncertain recovery observation cannot identify a completed step.", nameof(CompletedStep));
         if (Kind != AzureProviderRecoveryObservationKind.Confirmed &&
             (Health != AzureProviderHealth.Unknown || Endpoint is not null))

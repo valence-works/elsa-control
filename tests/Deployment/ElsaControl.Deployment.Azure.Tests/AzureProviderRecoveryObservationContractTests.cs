@@ -245,14 +245,36 @@ public sealed class AzureProviderRecoveryObservationContractTests
             "provider.recovery.unknown",
             "The retained provider state remains uncertain.");
 
+        var failed = new AzureProviderRecoveryObservation(
+            AzureProviderRecoveryObservationKind.Failed,
+            AzureProviderRunnerStep.Foundation,
+            new(),
+            AzureProviderHealth.Unknown,
+            null,
+            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+            "Azure reported the deployment as failed or canceled.",
+            AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode);
         confirmed.Validate();
         uncertain.Validate();
+        failed.Validate();
         var confirmedWithoutStep = confirmed with { CompletedStep = null };
+        var failedWithoutStep = failed with { CompletedStep = null };
         var uncertainWithStep = uncertain with { CompletedStep = AzureProviderRunnerStep.Foundation };
         var healthyUncertainty = uncertain with { Health = AzureProviderHealth.Healthy };
         Assert.Throws<ArgumentException>(() => confirmedWithoutStep.Validate());
+        Assert.Throws<ArgumentException>(() => failedWithoutStep.Validate());
         Assert.Throws<ArgumentException>(() => uncertainWithStep.Validate());
         Assert.Throws<ArgumentException>(() => healthyUncertainty.Validate());
+        Assert.True(AzureProviderRecoveryObservationSupport.IsFailedStepRetryBoundary(
+            AzureProviderRunnerStep.Foundation,
+            AzureProviderOperationPhase.Planned,
+            AzureProviderRunnerStep.Foundation,
+            AzureProviderOperationPhase.Planned));
+        Assert.True(AzureProviderRecoveryObservationSupport.IsCompatibleBoundary(
+            AzureProviderRunnerStep.Foundation,
+            AzureProviderOperationPhase.Planned,
+            AzureProviderRunnerStep.Foundation,
+            AzureProviderOperationPhase.Planned));
 
         var invalidKind = confirmed with { Kind = (AzureProviderRecoveryObservationKind)999 };
         var exception = Assert.Throws<ArgumentException>(invalidKind.Validate);
