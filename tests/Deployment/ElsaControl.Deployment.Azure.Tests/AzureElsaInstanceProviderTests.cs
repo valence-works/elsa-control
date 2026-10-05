@@ -680,6 +680,33 @@ public sealed class AzureElsaInstanceProviderTests
         Assert.NotNull(observation.RetryEvidence);
         Assert.True(observation.RetryEvidence.AutoResume);
         Assert.Equal(AzureLateSuccessCodes.Retrying, observation.ReasonCode);
+        Assert.Equal(
+            AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds,
+            fixture.OperationStore.Current!.ArmObservationBackoffSeconds);
+    }
+
+    [Fact]
+    public async Task Transient_foundation_failure_backoff_grows_from_the_persisted_auto_resume_count()
+    {
+        var now = DateTimeOffset.Parse("2026-10-05T00:04:00Z");
+        var fixture = await CreateObserveFixtureAsync(
+            FailedObservation(AzureProviderRunnerStep.Foundation, AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode),
+            attemptedStep: AzureProviderRunnerStep.Foundation,
+            phase: AzureProviderOperationPhase.Planned,
+            lastArmObservedAt: now.AddSeconds(-300),
+            backoffSeconds: AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds,
+            autoResumeCount: 2,
+            now: now);
+        fixture.OperationStore.Current = fixture.OperationStore.Current! with
+        {
+            LastObservationReasonCode = AzureLateSuccessCodes.Retrying
+        };
+
+        var observation = await fixture.Provider.ObserveAsync(fixture.Request);
+
+        Assert.NotNull(observation.RetryEvidence);
+        Assert.True(observation.RetryEvidence.AutoResume);
+        Assert.Equal(240, fixture.OperationStore.Current!.ArmObservationBackoffSeconds);
     }
 
     [Fact]

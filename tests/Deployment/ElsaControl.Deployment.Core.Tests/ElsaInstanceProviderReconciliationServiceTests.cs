@@ -476,6 +476,26 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
         Assert.Equal(ElsaInstanceOperationState.Queued, recovered.Operation.State);
     }
 
+    [Fact]
+    public void Recoverable_azure_failure_without_evidence_is_not_resume_safe()
+    {
+        Assert.False(ElsaInstanceProviderReconciliationService.HasRecoverableResumeEvidence(
+            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+            ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator,
+            null,
+            null));
+        Assert.True(ElsaInstanceProviderReconciliationService.HasRecoverableResumeEvidence(
+            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+            ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator,
+            "https://evidence.example/retry/arm-failed",
+            "sha256:" + new string('c', 64)));
+        Assert.True(ElsaInstanceProviderReconciliationService.HasRecoverableResumeEvidence(
+            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+            ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted,
+            null,
+            null));
+    }
+
     [Theory]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed)]
     [InlineData(ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded)]

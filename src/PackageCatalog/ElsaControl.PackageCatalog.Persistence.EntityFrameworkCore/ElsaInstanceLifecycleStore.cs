@@ -2706,8 +2706,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             requestedOperation.State == ElsaInstanceOperationState.Queued &&
             requestedOperation.AttemptNumber == existingOperation.AttemptNumber + 1;
         if (isRecoveryResume && existingOperation.Action != ElsaInstanceOperationAction.Delete &&
-            !ElsaInstanceProviderReconciliationService.IsRecoverableResumeCode(existingOperation.FailureCode) &&
-            !ElsaInstanceProviderReconciliationService.IsRecoverableResumeCode(existingOperation.ReconciliationDiagnosticCode))
+            !ElsaInstanceProviderReconciliationService.HasRecoverableResumeEvidence(
+                existingOperation.FailureCode,
+                existingOperation.ReconciliationDiagnosticCode,
+                existingOperation.ReconciliationRetryEvidenceReference,
+                existingOperation.ReconciliationRetryEvidenceDigest))
             throw Conflict("Provider reconciliation has not established that retry is safe.");
         if ((!canTransition && !isRecoveryResume) || requestedOperation.AttemptNumber < existingOperation.AttemptNumber)
             throw Conflict("Lifecycle operation state transition is not valid.");

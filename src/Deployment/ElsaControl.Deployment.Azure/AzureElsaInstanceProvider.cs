@@ -304,7 +304,8 @@ public sealed class AzureElsaInstanceProvider(
                   AzureNamedDeploymentFreshness.IsConfirmedCompletedResume(operation.AttemptedStep, completed)) ||
                  (transientFailed && seenFailedBefore));
             var reasonCode = ResolveObservationReason(observed, eligibleAutoResume, operation.AutoResumeCount);
-            await RecordArmObservationClockAsync(operation, eligibleAutoResume, reasonCode, cancellationToken);
+            await RecordArmObservationClockAsync(
+                operation, eligibleAutoResume, isFailedStepRetry, reasonCode, cancellationToken);
             if ((observed.Kind != AzureProviderRecoveryObservationKind.Confirmed && !isFailedStepRetry) ||
                 observed.CompletedStep is null)
                 return new RecoveryObservationResult(null, reasonCode);
@@ -544,11 +545,12 @@ public sealed class AzureElsaInstanceProvider(
     private Task RecordArmObservationClockAsync(
         AzureProviderOperation operation,
         bool eligibleAutoResume,
+        bool isFailedStepRetry,
         string? reasonCode,
         CancellationToken cancellationToken)
     {
-        var backoff = eligibleAutoResume
-            ? AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds
+        var backoff = eligibleAutoResume || isFailedStepRetry
+            ? AzureNamedDeploymentFreshness.BackoffSecondsForAutoResumeCount(operation.AutoResumeCount)
             : AzureNamedDeploymentFreshness.NextBackoffSeconds(operation.ArmObservationBackoffSeconds);
         return operationStore.RecordArmObservationClockAsync(
             operation.WorkspaceId,

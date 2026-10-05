@@ -634,13 +634,13 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         var error = await ExecuteAzAsync(command,
             ["deployment", "group", "show", "--subscription", subscription, "--resource-group", group,
                 "--name", deploymentName,
-                "--query", "{code:properties.error.code,inner:properties.error.details[0].code}",
+                "--query", "properties.error",
                 "--output", "json", "--only-show-errors"],
             ParseDeploymentErrorAsync,
             cancellationToken);
         if (!error.Succeeded || error.Value is null)
             return null;
-        return AzureTransientArmFailure.ToSafeDiagnostic(error.Value.Value.Inner ?? error.Value.Value.Code);
+        return AzureTransientArmFailure.Classify(error.Value.Value);
     }
 
     private static AzureProviderRunnerStep? GetSqlRecoveryStep(AzureProviderOperation operation) =>
@@ -2878,8 +2878,16 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                     ["resource", "delete", "--ids", environmentId, "--yes", "--output", "none", "--only-show-errors"],
                     static _ => AzureCommandNoOutput.Instance,
                     cancellationToken);
-                if (!deleted.Succeeded)
-                    return ProcessFailure(command, phase, deleted, resources, mutation: true);
+                if (!IsAbsentOrSuccessfulMutation(deleted))
+                {
+                    if (IsTimedOutMutation(deleted))
+                    {
+                        if (!await WaitUntilEnvironmentAbsentAsync(command, environmentId, cancellationToken))
+                            return ProcessFailure(command, phase, deleted, resources, mutation: true);
+                    }
+                    else
+                        return ProcessFailure(command, phase, deleted, resources, mutation: true);
+                }
             }
         }
 
@@ -2889,8 +2897,54 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 "--yes", "--output", "none", "--only-show-errors"],
             static _ => AzureCommandNoOutput.Instance,
             cancellationToken);
-        return removed.Succeeded ? null : ProcessFailure(command, phase, removed, resources, mutation: true);
+        return IsAbsentOrSuccessfulMutation(removed)
+            ? null
+            : ProcessFailure(command, phase, removed, resources, mutation: true);
     }
+
+    private async Task<bool> WaitUntilEnvironmentAbsentAsync(
+        AzureProviderRunnerCommand command,
+        string environmentId,
+        CancellationToken cancellationToken)
+    {
+        var observationAttempts = _options.CleanupObservationAttempts ?? _options.ObservationAttempts;
+        for (var attempt = 0; attempt < observationAttempts; attempt++)
+        {
+            if (await ObserveEnvironmentAbsentAsync(command, environmentId, cancellationToken))
+                return true;
+            if (attempt + 1 < observationAttempts)
+                await Task.Delay(_options.ObservationDelay, cancellationToken);
+        }
+
+        return false;
+    }
+
+    private async Task<bool> ObserveEnvironmentAbsentAsync(
+        AzureProviderRunnerCommand command,
+        string environmentId,
+        CancellationToken cancellationToken)
+    {
+        var show = await ExecuteAzAsync(command,
+            ["resource", "show", "--ids", environmentId, "--query", "properties.provisioningState",
+                "--output", "tsv", "--only-show-errors"],
+            ParseStringAsync,
+            cancellationToken);
+        return IsAbsentResourceObservation(show);
+    }
+
+    private static bool IsAbsentOrSuccessfulMutation<T>(AzureCommandProcessResult<T> result)
+        where T : AzureCommandSafeOutput =>
+        result.Succeeded || IsAbsentResourceObservation(result);
+
+    private static bool IsAbsentResourceObservation<T>(AzureCommandProcessResult<T> result)
+        where T : AzureCommandSafeOutput =>
+        result.FailureKind == AzureCommandProcessFailureKind.NonZeroExitCode &&
+        result.ExitCode == AzureCliResourceNotFoundExitCode;
+
+    private static bool IsTimedOutMutation<T>(AzureCommandProcessResult<T> result)
+        where T : AzureCommandSafeOutput =>
+        result.Status == AzureCommandProcessStatus.TimedOut &&
+        result.FailureKind == AzureCommandProcessFailureKind.TimedOut;
 
     private static bool IsTerminalDeploymentState(string? state) =>
         state is not null && TerminalDeploymentStates.Contains(state);
@@ -3259,7 +3313,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private static SafeValue<T> ParseJson<T>(ReadOnlyMemory<char> output) => new(JsonSerializer.Deserialize<T>(output.Span, JsonOptions) ?? throw new JsonException());
     private static SafeValue<DeploymentOutputs> ParseDeploymentOutputsAsync(ReadOnlyMemory<char> output) => ParseJson<DeploymentOutputs>(output);
     private static SafeValue<DeploymentPoll> ParseDeploymentPollAsync(ReadOnlyMemory<char> output) => ParseJson<DeploymentPoll>(output);
-    private static SafeValue<DeploymentError> ParseDeploymentErrorAsync(ReadOnlyMemory<char> output) => ParseJson<DeploymentError>(output);
+    private static SafeValue<JsonElement> ParseDeploymentErrorAsync(ReadOnlyMemory<char> output) =>
+        new(JsonSerializer.Deserialize<JsonElement>(output.Span, JsonOptions));
     private static SafeValue<IReadOnlyDictionary<string, string>> ParseTagsAsync(ReadOnlyMemory<char> output) => new(new ReadOnlyDictionary<string, string>(ParseJson<Dictionary<string, string>>(output).Value));
     private static SafeValue<IReadOnlyList<RoleAssignment>> ParseRoleAssignmentsAsync(ReadOnlyMemory<char> output) => new(ParseJson<List<RoleAssignment>>(output).Value);
     private static SafeValue<IReadOnlyList<AzureResource>> ParseResourcesAsync(ReadOnlyMemory<char> output) => new(ParseJson<List<AzureResource>>(output).Value);
@@ -3396,12 +3451,6 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         public string? State { get; set; }
         public DateTimeOffset? Timestamp { get; set; }
         public DeploymentOutputs? Outputs { get; set; }
-    }
-
-    private sealed class DeploymentError
-    {
-        public string? Code { get; set; }
-        public string? Inner { get; set; }
     }
 
     private sealed class OutputValue

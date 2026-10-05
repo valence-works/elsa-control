@@ -2698,6 +2698,40 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
+    public async Task Confirmed_arm_failure_without_retry_evidence_refuses_operator_recover()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "ARM failed no evidence");
+        var workspaceStore = new DeploymentWorkspaceStore(db);
+        Assert.NotNull(await workspaceStore.ClaimNextQueuedRunAsync("deployment-worker", Now));
+        Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
+            Now.AddMinutes(10), TimeSpan.FromMinutes(5)));
+        db.ChangeTracker.Clear();
+        var parked = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == accepted.Operation.Id);
+        parked.FailureCode = ManagedElsaReasonCodeCatalog.AzureDeploymentFailed;
+        parked.ReconciliationDiagnosticCode = ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator;
+        parked.ReconciliationRetryEvidenceReference = null;
+        parked.ReconciliationRetryEvidenceDigest = null;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var lifecycleStore = CreateStore(db);
+        var current = await lifecycleStore.GetInstanceAsync(workspace.Id, accepted.Instance.Id);
+        var error = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            new ElsaInstanceLifecycleService(lifecycleStore, new FixedTimeProvider(Now.AddMinutes(12)))
+                .RecoverAsync(new(workspace.Id, accepted.Instance.Id, current!.Version, "recover-arm-failed-no-evidence")));
+
+        Assert.Equal("Provider reconciliation has not established that retry is safe.", error.Message);
+        var stillParked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, stillParked.State);
+        Assert.Null(stillParked.ReconciliationRetryEvidenceReference);
+        Assert.Null(stillParked.ReconciliationRetryEvidenceDigest);
+    }
+
+    [Fact]
     public async Task Customer_delete_of_confirmed_arm_failed_create_supersedes_and_completes()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

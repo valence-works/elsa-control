@@ -44,6 +44,17 @@ public sealed class AzureNamedDeploymentFreshnessTests
     }
 
     [Fact]
+    public void Auto_resume_backoff_is_exponential_from_the_persisted_count()
+    {
+        Assert.Equal(60, AzureNamedDeploymentFreshness.BackoffSecondsForAutoResumeCount(0));
+        Assert.Equal(120, AzureNamedDeploymentFreshness.BackoffSecondsForAutoResumeCount(1));
+        Assert.Equal(240, AzureNamedDeploymentFreshness.BackoffSecondsForAutoResumeCount(2));
+        Assert.Equal(300, AzureNamedDeploymentFreshness.BackoffSecondsForAutoResumeCount(3));
+        Assert.Equal(300, AzureNamedDeploymentFreshness.BackoffSecondsForAutoResumeCount(8));
+        Assert.Equal(60, AzureNamedDeploymentFreshness.BackoffSecondsForAutoResumeCount(-1));
+    }
+
+    [Fact]
     public void Arm_read_is_due_when_no_prior_observation_or_backoff_elapsed()
     {
         var now = DateTimeOffset.Parse("2026-09-24T00:48:18Z");

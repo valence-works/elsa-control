@@ -31,6 +31,28 @@ public sealed class ElsaInstanceProviderReconciliationService(
         string.Equals(code, ManagedElsaReasonCodeCatalog.AzureRecoveryRetrying, StringComparison.Ordinal) ||
         string.Equals(code, ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator, StringComparison.Ordinal);
 
+    public static bool IsAutoResumeExhaustedCode(string? code) =>
+        string.Equals(code, AutoResumeExhaustedCode, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Recover of a confirmed ARM failure still requires retry evidence unless
+    /// the park is auto-resume-exhausted. A recoverable azure.* code alone is
+    /// not enough.
+    /// </summary>
+    public static bool HasRecoverableResumeEvidence(
+        string? failureCode,
+        string? diagnosticCode,
+        string? evidenceReference,
+        string? evidenceDigest)
+    {
+        if (!IsRecoverableResumeCode(failureCode) && !IsRecoverableResumeCode(diagnosticCode))
+            return false;
+        if (IsAutoResumeExhaustedCode(failureCode) || IsAutoResumeExhaustedCode(diagnosticCode))
+            return true;
+        return !string.IsNullOrWhiteSpace(evidenceReference) &&
+               !string.IsNullOrWhiteSpace(evidenceDigest);
+    }
+
     public static string PersistedArmFailureCode(string? diagnosticCode) =>
         string.Equals(diagnosticCode, ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled, StringComparison.Ordinal)
             ? ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled
