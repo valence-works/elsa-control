@@ -180,6 +180,61 @@ public sealed class AzureTransientArmFailureTests
         }
         """;
 
+    internal const string FiveFailedNestedModuleOperations = """
+        [
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.Resources/deployments",
+                "resourceName": "identity"
+              },
+              "statusMessage": { "error": { "code": "ResourceDeploymentFailure" } }
+            }
+          },
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.Resources/deployments",
+                "resourceName": "observability"
+              },
+              "statusMessage": { "error": { "code": "ResourceDeploymentFailure" } }
+            }
+          },
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.Resources/deployments",
+                "resourceName": "sql"
+              },
+              "statusMessage": { "error": { "code": "ResourceDeploymentFailure" } }
+            }
+          },
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.Resources/deployments",
+                "resourceName": "key-vault"
+              },
+              "statusMessage": { "error": { "code": "ResourceDeploymentFailure" } }
+            }
+          },
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.Resources/deployments",
+                "resourceName": "container-apps-environment"
+              },
+              "statusMessage": { "error": { "code": "ResourceDeploymentFailure" } }
+            }
+          }
+        ]
+        """;
+
     internal const string ProductionFoundationSiblingModuleOperations = """
         [
           {

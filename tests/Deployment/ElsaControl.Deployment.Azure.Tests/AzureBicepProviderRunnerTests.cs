@@ -1074,6 +1074,40 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Recovery_observer_treats_a_page_capped_operations_walk_as_needs_operator()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("properties.provisioningState"), "Failed");
+        process.Success(IsDeploymentErrorQuery, AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
+        process.Success(
+            args => IsDeploymentOperationsQuery(args, "elsa-proof-aaaaaaaaaaaa-foundation"),
+            AzureTransientArmFailureTests.FiveFailedNestedModuleOperations);
+        process.Success(
+            args => IsDeploymentOperationsQuery(args, "identity"),
+            AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations);
+        process.Success(
+            args => IsDeploymentOperationsQuery(args, "observability"),
+            AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations);
+        process.Success(
+            args => IsDeploymentOperationsQuery(args, "sql"),
+            AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations);
+        var foundation = RecoverableFoundationResources();
+
+        var observation = await _fixture.Runner(process)
+            .ObserveAsync(CreateRecoveryRequest(foundation, AzureProviderRunnerStep.Foundation, AzureProviderOperationPhase.Planned));
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.Failed, observation.Kind);
+        Assert.Null(observation.InnerErrorCode);
+        Assert.Contains(process.Calls, call => IsDeploymentOperationsQuery(call, "identity"));
+        Assert.Contains(process.Calls, call => IsDeploymentOperationsQuery(call, "sql"));
+        Assert.DoesNotContain(process.Calls, call => IsDeploymentOperationsQuery(call, "key-vault"));
+        Assert.DoesNotContain(process.Calls, call => IsDeploymentOperationsQuery(call, "container-apps-environment"));
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
     public async Task Recovery_observer_treats_an_unreadable_operations_list_as_needs_operator()
     {
         var process = new FakeCommandProcess();

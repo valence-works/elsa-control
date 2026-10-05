@@ -642,6 +642,42 @@ public sealed class AzureElsaInstanceProviderTests
     }
 
     [Fact]
+    public async Task Inner_error_change_from_needs_operator_to_transient_mints_a_new_receipt()
+    {
+        var now = DateTimeOffset.Parse("2026-10-05T00:04:00Z");
+        var fixture = await CreateObserveFixtureAsync(
+            FailedObservation(AzureProviderRunnerStep.Foundation),
+            attemptedStep: AzureProviderRunnerStep.Foundation,
+            phase: AzureProviderOperationPhase.Planned,
+            now: now);
+
+        var first = await fixture.Provider.ObserveAsync(fixture.Request);
+        Assert.NotNull(first.RetryEvidence);
+        Assert.Equal(AzureLateSuccessCodes.NeedsOperator, first.ReasonCode);
+        Assert.Equal(1, fixture.ObservationStore.CreateCalls);
+        var firstReference = first.RetryEvidence.Reference;
+        var firstDigest = first.RetryEvidence.Digest;
+
+        fixture.Observer.Observation = FailedObservation(
+            AzureProviderRunnerStep.Foundation,
+            AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode);
+        fixture.OperationStore.Current = fixture.OperationStore.Current! with
+        {
+            LastArmObservedAt = now.AddSeconds(-120),
+            ArmObservationBackoffSeconds = AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds,
+            LastObservationReasonCode = AzureLateSuccessCodes.NeedsOperator
+        };
+
+        var second = await fixture.Provider.ObserveAsync(fixture.Request);
+
+        Assert.NotNull(second.RetryEvidence);
+        Assert.Equal(AzureLateSuccessCodes.Retrying, second.ReasonCode);
+        Assert.Equal(2, fixture.ObservationStore.CreateCalls);
+        Assert.NotEqual(firstReference, second.RetryEvidence.Reference);
+        Assert.NotEqual(firstDigest, second.RetryEvidence.Digest);
+    }
+
+    [Fact]
     public async Task Transient_foundation_failure_records_retry_evidence_without_auto_resume_on_first_observe()
     {
         var fixture = await CreateObserveFixtureAsync(
@@ -1805,6 +1841,7 @@ public sealed class AzureElsaInstanceProviderTests
 
     private sealed class ScriptedRecoveryObserver(AzureProviderRecoveryObservation observation) : IAzureProviderRecoveryObserver
     {
+        public AzureProviderRecoveryObservation Observation { get; set; } = observation;
         public int Calls { get; private set; }
 
         public Task<AzureProviderRecoveryObservation> ObserveAsync(
@@ -1812,7 +1849,7 @@ public sealed class AzureElsaInstanceProviderTests
             CancellationToken cancellationToken = default)
         {
             Calls++;
-            return Task.FromResult(observation);
+            return Task.FromResult(Observation);
         }
     }
 

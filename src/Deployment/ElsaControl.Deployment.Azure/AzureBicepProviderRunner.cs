@@ -678,16 +678,25 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         pending.Enqueue((deploymentName, 0));
         var pages = 0;
         var nodes = 0;
+        var truncated = false;
 
         while (pending.Count > 0)
         {
             if (pages >= AzureTransientArmFailure.MaximumErrorWalkPages ||
                 nodes >= AzureTransientArmFailure.MaximumErrorWalkNodes)
+            {
+                truncated = true;
                 break;
+            }
 
             var (name, depth) = pending.Dequeue();
-            if (depth > AzureTransientArmFailure.MaximumErrorWalkDepth || !seen.Add(name))
+            if (!seen.Add(name))
                 continue;
+            if (depth > AzureTransientArmFailure.MaximumErrorWalkDepth)
+            {
+                truncated = true;
+                continue;
+            }
             if (!AzureTransientArmFailure.IsSafeNestedDeploymentName(name) &&
                 !string.Equals(name, deploymentName, StringComparison.Ordinal))
                 continue;
@@ -709,7 +718,10 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             foreach (var nested in AzureTransientArmFailure.FailedNestedDeploymentNames(operations.Value.Value))
             {
                 if (pending.Count + seen.Count >= AzureTransientArmFailure.MaximumErrorWalkFanout)
+                {
+                    truncated = true;
                     break;
+                }
                 pending.Enqueue((nested, depth + 1));
             }
 
@@ -720,6 +732,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 return null;
         }
 
+        if (truncated || pending.Count > 0)
+            return null;
         return AzureTransientArmFailure.Classify(codes);
     }
 

@@ -63,6 +63,33 @@ public sealed class AzureProviderRecoveryObservationContractTests
     }
 
     [Fact]
+    public void Postcondition_fingerprint_includes_allowlisted_inner_error_code()
+    {
+        var resources = new AzureProviderResourceReferences();
+        var resourceFingerprint = AzureProviderRecoveryObservationRecord.ComputeResourceFingerprint(resources);
+        var withoutInner = new AzureProviderRecoveryObservation(
+            AzureProviderRecoveryObservationKind.Failed,
+            AzureProviderRunnerStep.Foundation,
+            resources,
+            AzureProviderHealth.Unknown,
+            null,
+            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed,
+            "Azure reported the deployment as failed or canceled.");
+        var withInner = withoutInner with
+        {
+            InnerErrorCode = AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode
+        };
+
+        Assert.NotEqual(
+            AzureProviderRecoveryObservationRecord.ComputePostconditionFingerprint(withoutInner, resourceFingerprint),
+            AzureProviderRecoveryObservationRecord.ComputePostconditionFingerprint(withInner, resourceFingerprint));
+        Assert.Equal(
+            AzureProviderRecoveryObservationRecord.ComputePostconditionFingerprint(withoutInner, resourceFingerprint),
+            AzureProviderRecoveryObservationRecord.ComputePostconditionFingerprint(
+                withoutInner with { InnerErrorCode = null }, resourceFingerprint));
+    }
+
+    [Fact]
     public void Record_digest_is_bound_to_record_id()
     {
         var observation = CreateObservation();
