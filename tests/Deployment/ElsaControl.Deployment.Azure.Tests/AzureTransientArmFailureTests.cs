@@ -180,6 +180,64 @@ public sealed class AzureTransientArmFailureTests
         }
         """;
 
+    internal const string ProductionFoundationSiblingModuleOperations = """
+        [
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.Resources/deployments",
+                "resourceName": "container-apps-environment"
+              },
+              "statusMessage": {
+                "status": "Failed",
+                "error": {
+                  "code": "ResourceDeploymentFailure",
+                  "message": "The resource write operation failed to complete successfully, you can check deployment operations for details."
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.Resources/deployments",
+                "resourceName": "sql"
+              },
+              "statusMessage": {
+                "status": "Failed",
+                "error": {
+                  "code": "ResourceDeploymentFailure",
+                  "message": "The resource write operation failed to complete successfully, you can check deployment operations for details."
+                }
+              }
+            }
+          }
+        ]
+        """;
+
+    internal const string QuotaExceededDeploymentOperations = """
+        [
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.Sql/servers",
+                "resourceName": "proof-sql"
+              },
+              "statusMessage": {
+                "status": "Failed",
+                "error": {
+                  "code": "QuotaExceeded",
+                  "message": "The subscription has reached its SQL server quota."
+                }
+              }
+            }
+          }
+        ]
+        """;
+
     internal const string ProductionFoundationNestedModuleOperations = """
         [
           {

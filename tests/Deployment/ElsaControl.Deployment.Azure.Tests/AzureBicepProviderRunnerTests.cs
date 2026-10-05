@@ -1045,6 +1045,35 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Recovery_observer_does_not_treat_a_transient_sibling_as_transient_when_another_module_is_terminal()
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("properties.provisioningState"), "Failed");
+        process.Success(IsDeploymentErrorQuery, AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
+        process.Success(
+            args => IsDeploymentOperationsQuery(args, "elsa-proof-aaaaaaaaaaaa-foundation"),
+            AzureTransientArmFailureTests.ProductionFoundationSiblingModuleOperations);
+        process.Success(
+            args => IsDeploymentOperationsQuery(args, "container-apps-environment"),
+            AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations);
+        process.Success(
+            args => IsDeploymentOperationsQuery(args, "sql"),
+            AzureTransientArmFailureTests.QuotaExceededDeploymentOperations);
+        var foundation = RecoverableFoundationResources();
+
+        var observation = await _fixture.Runner(process)
+            .ObserveAsync(CreateRecoveryRequest(foundation, AzureProviderRunnerStep.Foundation, AzureProviderOperationPhase.Planned));
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.Failed, observation.Kind);
+        Assert.Null(observation.InnerErrorCode);
+        Assert.Contains(process.Calls, call => IsDeploymentOperationsQuery(call, "container-apps-environment"));
+        Assert.Contains(process.Calls, call => IsDeploymentOperationsQuery(call, "sql"));
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
     public async Task Recovery_observer_treats_an_unreadable_operations_list_as_needs_operator()
     {
         var process = new FakeCommandProcess();

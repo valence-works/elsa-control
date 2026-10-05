@@ -706,18 +706,18 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
 
             nodes = AzureTransientArmFailure.CollectOperationCodes(
                 operations.Value.Value, codes, depth, nodes);
-            var inspection = AzureTransientArmFailure.Inspect(codes);
-            if (inspection.HasTerminal)
-                return null;
-            if (inspection.TransientDiagnostic is not null)
-                return inspection.TransientDiagnostic;
-
             foreach (var nested in AzureTransientArmFailure.FailedNestedDeploymentNames(operations.Value.Value))
             {
                 if (pending.Count + seen.Count >= AzureTransientArmFailure.MaximumErrorWalkFanout)
                     break;
                 pending.Enqueue((nested, depth + 1));
             }
+
+            // A transient code on this page must not hide a later sibling
+            // module's terminal code. Terminal still fails closed immediately.
+            var inspection = AzureTransientArmFailure.Inspect(codes);
+            if (inspection.HasTerminal)
+                return null;
         }
 
         return AzureTransientArmFailure.Classify(codes);
