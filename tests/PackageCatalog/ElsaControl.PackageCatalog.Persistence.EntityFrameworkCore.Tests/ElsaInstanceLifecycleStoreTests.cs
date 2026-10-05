@@ -2649,6 +2649,134 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     }
 
     [Fact]
+    public async Task Confirmed_arm_failure_persists_failure_code_and_accepts_operator_recover()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "ARM failed recover");
+        var workspaceStore = new DeploymentWorkspaceStore(db);
+        Assert.NotNull(await workspaceStore.ClaimNextQueuedRunAsync("deployment-worker", Now));
+        Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
+            Now.AddMinutes(10), TimeSpan.FromMinutes(5)));
+        db.ChangeTracker.Clear();
+        var lifecycleStore = CreateStore(db);
+        var reconciled = await new ElsaInstanceProviderReconciliationService(
+                lifecycleStore,
+                new QueueProviderPort(new ElsaInstanceProviderObservation(
+                    ElsaInstanceProviderObservationKind.Confirmed,
+                    ElsaObservedLifecycle.Provisioning,
+                    ElsaInstanceProviderHealthGate.Unknown,
+                    "arm-failed-observation",
+                    new ElsaInstanceProviderRetryEvidence(
+                        "https://evidence.example/retry/arm-failed",
+                        "sha256:" + new string('c', 64)))
+                {
+                    ReasonCode = ManagedElsaReasonCodeCatalog.AzureRecoveryRetrying
+                }),
+                new FixedTimeProvider(Now.AddMinutes(11)))
+            .ReconcileAsync(workspace.Id, accepted.Operation.Id);
+
+        Assert.True(reconciled.RetrySafe);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureRecoveryRetrying, reconciled.DiagnosticCode);
+        var parked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, parked.State);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureDeploymentFailed, parked.FailureCode);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureRecoveryRetrying, parked.ReconciliationDiagnosticCode);
+        var api = new EfCoreManagedElsaInstanceApiStore(db);
+        var listed = Assert.Single((await api.ListInstancesAsync(workspace.Id, 1, 10)).Items);
+        Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, listed.ObservedLifecycle);
+        var active = Assert.Single(await api.GetActiveOperationsAsync(workspace.Id, [listed.Id]));
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureRecoveryRetrying,
+            ManagedElsaInstanceCustomerProjection.CustomerSafeOperationReason(active.Value));
+
+        var current = await lifecycleStore.GetInstanceAsync(workspace.Id, accepted.Instance.Id);
+        var recovered = await new ElsaInstanceLifecycleService(lifecycleStore, new FixedTimeProvider(Now.AddMinutes(12)))
+            .RecoverAsync(new(workspace.Id, accepted.Instance.Id, current!.Version, "recover-arm-failed"));
+        Assert.Equal(ElsaInstanceOperationState.Queued, recovered.Operation.State);
+    }
+
+    [Fact]
+    public async Task Confirmed_arm_failure_without_retry_evidence_refuses_operator_recover()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "ARM failed no evidence");
+        var workspaceStore = new DeploymentWorkspaceStore(db);
+        Assert.NotNull(await workspaceStore.ClaimNextQueuedRunAsync("deployment-worker", Now));
+        Assert.Equal(1, await workspaceStore.MarkStaleRunningRunsRecoveryRequiredAsync(
+            Now.AddMinutes(10), TimeSpan.FromMinutes(5)));
+        db.ChangeTracker.Clear();
+        var parked = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == accepted.Operation.Id);
+        parked.FailureCode = ManagedElsaReasonCodeCatalog.AzureDeploymentFailed;
+        parked.ReconciliationDiagnosticCode = ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator;
+        parked.ReconciliationRetryEvidenceReference = null;
+        parked.ReconciliationRetryEvidenceDigest = null;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var lifecycleStore = CreateStore(db);
+        var current = await lifecycleStore.GetInstanceAsync(workspace.Id, accepted.Instance.Id);
+        var error = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            new ElsaInstanceLifecycleService(lifecycleStore, new FixedTimeProvider(Now.AddMinutes(12)))
+                .RecoverAsync(new(workspace.Id, accepted.Instance.Id, current!.Version, "recover-arm-failed-no-evidence")));
+
+        Assert.Equal("Provider reconciliation has not established that retry is safe.", error.Message);
+        var stillParked = await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, stillParked.State);
+        Assert.Null(stillParked.ReconciliationRetryEvidenceReference);
+        Assert.Null(stillParked.ReconciliationRetryEvidenceDigest);
+    }
+
+    [Fact]
+    public async Task Customer_delete_of_confirmed_arm_failed_create_supersedes_and_completes()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted, claimedRun, deletion) = await QueueRecoveryBlockedDeleteAsync(
+            db, "ARM failed delete", "delete-arm-failed-create");
+        db.ChangeTracker.Clear();
+        var parked = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == accepted.Operation.Id);
+        parked.FailureCode = ManagedElsaReasonCodeCatalog.AzureDeploymentFailed;
+        parked.ReconciliationDiagnosticCode = ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator;
+        parked.ReconciliationRetryEvidenceReference = "https://evidence.example/retry/arm-failed-delete";
+        parked.ReconciliationRetryEvidenceDigest = "sha256:" + new string('d', 64);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+
+        var confirmedAbsent = new ElsaInstanceCleanupObservation(
+            ElsaInstanceCleanupObservationKind.ConfirmedAbsent,
+            deletion.Operation.Id,
+            deletion.Operation.AttemptNumber,
+            "deletion.provider-confirmed-absent");
+        var result = await new ElsaInstanceDeletionWorker(
+                new EfCoreElsaInstanceLifecycleStore(
+                    db, EmptyResolutionInputSource.Instance,
+                    new FixedTimeProvider(Now.AddMinutes(12))),
+                new QueueCleanupPort(confirmedAbsent),
+                new FixedTimeProvider(Now.AddMinutes(12)))
+            .ProcessAvailableAsync("deletion-worker");
+
+        Assert.Equal(1, result.ProviderInvocations);
+        Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Deleted, Assert.Single(result.Results).Outcome);
+        var predecessor = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Cancelled, predecessor.State);
+        Assert.Equal(ElsaInstanceDeletionDiagnosticCodes.PredecessorRecoverySuperseded, predecessor.FailureCode);
+        var tombstone = await db.ElsaInstances.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Instance.Id);
+        Assert.Equal(ElsaObservedLifecycle.Deleted, tombstone.ObservedLifecycle);
+        Assert.Equal(WorkspaceDeploymentRunStatus.Cancelled,
+            (await db.DeploymentRuns.AsNoTracking().SingleAsync(x => x.Id == claimedRun.Id)).Status);
+    }
+
+    [Fact]
     public async Task Auto_resume_through_the_ef_lifecycle_store_requeues_without_an_admin_recover()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -2749,9 +2877,22 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
 
         var listed = Assert.Single(
             (await new EfCoreManagedElsaInstanceApiStore(db).ListInstancesAsync(workspace.Id, 1, 10)).Items);
-        Assert.Equal(ElsaObservedLifecycle.Provisioning, listed.ObservedLifecycle);
-        Assert.NotEqual(ElsaObservedLifecycle.RecoveryRequired, listed.ObservedLifecycle);
-        Assert.Null(ManagedElsaInstanceCustomerProjection.CustomerLabel(listed.ObservedLifecycle));
+        var confirmedArmFailure = parkCode is
+            ManagedElsaReasonCodeCatalog.AzureDeploymentFailed or
+            ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled or
+            ManagedElsaReasonCodeCatalog.AzureRecoveryRetrying;
+        if (confirmedArmFailure)
+        {
+            Assert.Equal(ElsaObservedLifecycle.RecoveryRequired, listed.ObservedLifecycle);
+            Assert.Equal(ManagedElsaInstanceCustomerProjection.NeedsAttentionLabel,
+                ManagedElsaInstanceCustomerProjection.CustomerLabel(listed.ObservedLifecycle));
+        }
+        else
+        {
+            Assert.Equal(ElsaObservedLifecycle.Provisioning, listed.ObservedLifecycle);
+            Assert.NotEqual(ElsaObservedLifecycle.RecoveryRequired, listed.ObservedLifecycle);
+            Assert.Null(ManagedElsaInstanceCustomerProjection.CustomerLabel(listed.ObservedLifecycle));
+        }
     }
 
     [Fact]

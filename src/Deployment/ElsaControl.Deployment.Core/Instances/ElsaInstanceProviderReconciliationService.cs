@@ -23,6 +23,41 @@ public sealed class ElsaInstanceProviderReconciliationService(
     public const string AutoResumeExhaustedCode = ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeExhausted;
     public const string AutoResumeClaimConflictCode = ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeClaimConflict;
 
+    public static bool IsRecoverableResumeCode(string? code) =>
+        string.Equals(code, RetrySafeCode, StringComparison.Ordinal) ||
+        string.Equals(code, AutoResumeExhaustedCode, StringComparison.Ordinal) ||
+        string.Equals(code, ManagedElsaReasonCodeCatalog.AzureDeploymentFailed, StringComparison.Ordinal) ||
+        string.Equals(code, ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled, StringComparison.Ordinal) ||
+        string.Equals(code, ManagedElsaReasonCodeCatalog.AzureRecoveryRetrying, StringComparison.Ordinal) ||
+        string.Equals(code, ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator, StringComparison.Ordinal);
+
+    public static bool IsAutoResumeExhaustedCode(string? code) =>
+        string.Equals(code, AutoResumeExhaustedCode, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Recover of a confirmed ARM failure still requires retry evidence unless
+    /// the park is auto-resume-exhausted. A recoverable azure.* code alone is
+    /// not enough.
+    /// </summary>
+    public static bool HasRecoverableResumeEvidence(
+        string? failureCode,
+        string? diagnosticCode,
+        string? evidenceReference,
+        string? evidenceDigest)
+    {
+        if (!IsRecoverableResumeCode(failureCode) && !IsRecoverableResumeCode(diagnosticCode))
+            return false;
+        if (IsAutoResumeExhaustedCode(failureCode) || IsAutoResumeExhaustedCode(diagnosticCode))
+            return true;
+        return !string.IsNullOrWhiteSpace(evidenceReference) &&
+               !string.IsNullOrWhiteSpace(evidenceDigest);
+    }
+
+    public static string PersistedArmFailureCode(string? diagnosticCode) =>
+        string.Equals(diagnosticCode, ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled, StringComparison.Ordinal)
+            ? ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled
+            : ManagedElsaReasonCodeCatalog.AzureDeploymentFailed;
+
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
 
     public Task<int> AdvanceDueHumanRequiredClocksAsync(

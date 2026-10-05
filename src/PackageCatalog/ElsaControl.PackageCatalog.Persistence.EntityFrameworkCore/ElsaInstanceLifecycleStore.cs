@@ -121,7 +121,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                         x.State == ElsaInstanceOperationState.RecoveryRequired)
             .ExecuteUpdateAsync(
                 setters => setters
-                    .SetProperty(x => x.FailureCode, ElsaInstanceProviderReconciliationService.RetrySafeCode)
+                    .SetProperty(x => x.FailureCode, PersistedRetryFailureCode(diagnostic))
                     .SetProperty(x => x.FailureSummary, (string?)null)
                     .SetProperty(x => x.ReconciliationRetryEvidenceReference, reference)
                     .SetProperty(x => x.ReconciliationRetryEvidenceDigest, digest)
@@ -288,7 +288,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 operation.FailureCode = preserveUncertainSubmission
                     ? ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain
                     : commit.Operation.State == ElsaInstanceOperationState.RecoveryRequired && commit.RetrySafe
-                        ? ElsaInstanceProviderReconciliationService.RetrySafeCode
+                        ? PersistedRetryFailureCode(commit.DiagnosticCode)
                         : commit.Operation.State == ElsaInstanceOperationState.Failed ? commit.DiagnosticCode : null;
                 // Persistence derives the safe summary from FailureCode; do not assign
                 // human-readable text here that the validation boundary will discard.
@@ -2706,10 +2706,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             requestedOperation.State == ElsaInstanceOperationState.Queued &&
             requestedOperation.AttemptNumber == existingOperation.AttemptNumber + 1;
         if (isRecoveryResume && existingOperation.Action != ElsaInstanceOperationAction.Delete &&
-            !string.Equals(existingOperation.FailureCode,
-                ElsaInstanceProviderReconciliationService.RetrySafeCode, StringComparison.Ordinal) &&
-            !string.Equals(existingOperation.ReconciliationDiagnosticCode,
-                ElsaInstanceProviderReconciliationService.AutoResumeExhaustedCode, StringComparison.Ordinal))
+            !ElsaInstanceProviderReconciliationService.HasRecoverableResumeEvidence(
+                existingOperation.FailureCode,
+                existingOperation.ReconciliationDiagnosticCode,
+                existingOperation.ReconciliationRetryEvidenceReference,
+                existingOperation.ReconciliationRetryEvidenceDigest))
             throw Conflict("Provider reconciliation has not established that retry is safe.");
         if ((!canTransition && !isRecoveryResume) || requestedOperation.AttemptNumber < existingOperation.AttemptNumber)
             throw Conflict("Lifecycle operation state transition is not valid.");
@@ -3279,8 +3280,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             operation.ReconciledInstanceVersion.Value, operation.State);
         return new(outcome, projection, diagnosticCode,
             operation.State == ElsaInstanceOperationState.RecoveryRequired &&
-            string.Equals(operation.FailureCode, ElsaInstanceProviderReconciliationService.RetrySafeCode,
-                StringComparison.Ordinal) &&
+            ElsaInstanceProviderReconciliationService.IsRecoverableResumeCode(operation.FailureCode) &&
             operation.ReconciliationRetryEvidenceReference is not null &&
             operation.ReconciliationRetryEvidenceDigest is not null,
             replayed, operation.ReconciledAt.Value.ToUniversalTime());
@@ -3829,7 +3829,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         operation.FailureCode = preserveUncertainSubmission
             ? ManagedElsaReasonCodeCatalog.ProviderSubmissionUncertain
             : commit.RetrySafe
-                ? ElsaInstanceProviderReconciliationService.RetrySafeCode
+                ? PersistedRetryFailureCode(commit.DiagnosticCode)
                 : null;
         operation.FailureSummary = null;
         operation.CompletedAt = null;
@@ -3862,6 +3862,12 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         run.WorkerId = null;
         run.WorkerHeartbeatAt = null;
     }
+
+    private static string PersistedRetryFailureCode(string? diagnosticCode) =>
+        ElsaInstanceProviderReconciliationService.IsRecoverableResumeCode(diagnosticCode) &&
+        !string.Equals(diagnosticCode, ElsaInstanceProviderReconciliationService.RetrySafeCode, StringComparison.Ordinal)
+            ? ElsaInstanceProviderReconciliationService.PersistedArmFailureCode(diagnosticCode)
+            : ElsaInstanceProviderReconciliationService.RetrySafeCode;
 
     private static ElsaInstanceOperationEntity ToEntity(
         ElsaInstanceOperation operation,

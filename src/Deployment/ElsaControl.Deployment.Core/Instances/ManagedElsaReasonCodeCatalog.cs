@@ -60,6 +60,8 @@ public static class ManagedElsaReasonCodeCatalog
     public const string AzureRecoveryAutoResumeAccepted = "azure.recovery.auto-resume.accepted";
     public const string AzureRecoveryAutoResumeConflict = "azure.recovery.auto-resume.conflict";
     public const string AzureRecoveryAutoResumeRejected = "azure.recovery.auto-resume.rejected";
+    public const string AzureRecoveryRetrying = "azure.recovery.retrying";
+    public const string AzureRecoveryNeedsOperator = "azure.recovery.needs-operator";
     public const string AzureRecoveryFoundationObserved = "azure.recovery.foundation-observed";
     public const string AzureRecoveryFoundationOutputsUnavailable = "azure.recovery.foundation-outputs-unavailable";
     public const string AzureRecoveryFoundationOutputsInvalid = "azure.recovery.foundation-outputs-invalid";
@@ -150,6 +152,7 @@ public static class ManagedElsaReasonCodeCatalog
             new(AzureDeploymentFailed, ManagedElsaReasonClass.AutoResuming),
             new(AzureDeploymentWaitExceeded, ManagedElsaReasonClass.AutoResuming),
             new(AzureDeploymentCanceled, ManagedElsaReasonClass.AutoResuming),
+            new(AzureRecoveryRetrying, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoveryAutoResumeAccepted, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoveryFoundationObserved, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoveryFoundationOutputsUnavailable, ManagedElsaReasonClass.AutoResuming),
@@ -168,6 +171,7 @@ public static class ManagedElsaReasonCodeCatalog
             new(AzureRecoveryCheckpointUncertain, ManagedElsaReasonClass.AutoResuming),
             new(AzurePromotionUncertain, ManagedElsaReasonClass.AutoResuming),
             new(AzureRecoveryAutoResumeExhausted, ManagedElsaReasonClass.NeedsPerson),
+            new(AzureRecoveryNeedsOperator, ManagedElsaReasonClass.NeedsPerson),
             new(ProviderReconciliationAmbiguous, ManagedElsaReasonClass.NeedsPerson),
             new(ProviderReconciliationCorrelationMismatch, ManagedElsaReasonClass.NeedsPerson),
             new(ProviderReconciliationHealthFailed, ManagedElsaReasonClass.NeedsPerson),

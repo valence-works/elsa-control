@@ -15,6 +15,8 @@ public static class AzureLateSuccessCodes
     public const string AutoResumeAccepted = ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeAccepted;
     public const string AutoResumeConflict = ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeConflict;
     public const string AutoResumeRejected = ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeRejected;
+    public const string Retrying = ManagedElsaReasonCodeCatalog.AzureRecoveryRetrying;
+    public const string NeedsOperator = ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator;
 
     public static string DeploymentOutcome(string? armProvisioningState) =>
         string.Equals(armProvisioningState, "Canceled", StringComparison.OrdinalIgnoreCase) ||
@@ -25,5 +27,9 @@ public static class AzureLateSuccessCodes
     public static bool IsOperatorVisible(string? code) =>
         code is DeploymentFailed or DeploymentCanceled or AutoResumeExhausted
             or AutoResumeClaimConflict or AutoResumeAccepted or AutoResumeConflict
-            or AutoResumeRejected;
+            or AutoResumeRejected or Retrying or NeedsOperator;
+
+    public static bool IsTerminalDeploymentFailure(string? code) =>
+        code is DeploymentFailed or DeploymentCanceled or Retrying or NeedsOperator
+            or AutoResumeExhausted;
 }

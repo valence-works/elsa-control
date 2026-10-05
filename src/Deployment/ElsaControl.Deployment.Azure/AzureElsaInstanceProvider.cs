@@ -291,16 +291,28 @@ public sealed class AzureElsaInstanceProvider(
                     operation, retainedPlan, assignment, _providerScope, request.OperatorInitiated),
                 cancellationToken);
             observed.Validate();
-            var eligibleAutoResume = observed.Kind == AzureProviderRecoveryObservationKind.Confirmed &&
-                observed.CompletedStep is { } completed &&
-                AzureNamedDeploymentFreshness.IsConfirmedCompletedResume(operation.AttemptedStep, completed) &&
-                operation.AutoResumeCount < AzureNamedDeploymentFreshness.MaximumAutoResumes;
+            var isFailedStepRetry = observed.Kind == AzureProviderRecoveryObservationKind.Failed &&
+                observed.CompletedStep is not null;
+            var transientFailed = isFailedStepRetry && AzureTransientArmFailure.IsTransient(
+                AzureTransientArmFailure.Normalize(InnerArmCode(observed)));
+            var seenFailedBefore = AzureLateSuccessCodes.IsTerminalDeploymentFailure(operation.LastObservationReasonCode);
+            var eligibleAutoResume =
+                operation.AutoResumeCount < AzureNamedDeploymentFreshness.MaximumAutoResumes &&
+                !request.OperatorInitiated &&
+                ((observed.Kind == AzureProviderRecoveryObservationKind.Confirmed &&
+                  observed.CompletedStep is { } completed &&
+                  AzureNamedDeploymentFreshness.IsConfirmedCompletedResume(operation.AttemptedStep, completed)) ||
+                 (transientFailed && seenFailedBefore));
             var reasonCode = ResolveObservationReason(observed, eligibleAutoResume, operation.AutoResumeCount);
-            await RecordArmObservationClockAsync(operation, eligibleAutoResume, reasonCode, cancellationToken);
-            if (observed.Kind != AzureProviderRecoveryObservationKind.Confirmed || observed.CompletedStep is null)
+            await RecordArmObservationClockAsync(
+                operation, eligibleAutoResume, isFailedStepRetry, reasonCode, cancellationToken);
+            if ((observed.Kind != AzureProviderRecoveryObservationKind.Confirmed && !isFailedStepRetry) ||
+                observed.CompletedStep is null)
                 return new RecoveryObservationResult(null, reasonCode);
 
-            var observedPhase = AzureProviderRecoveryObservationSupport.RecoveryPhase(observed.CompletedStep.Value);
+            var observedPhase = isFailedStepRetry
+                ? operation.Phase
+                : AzureProviderRecoveryObservationSupport.RecoveryPhase(observed.CompletedStep.Value);
             if (!AzureProviderRecoveryObservationSupport.IsCompatibleBoundary(
                     operation.AttemptedStep, operation.Phase, observed.CompletedStep.Value, observedPhase))
                 return new RecoveryObservationResult(null, reasonCode);
@@ -489,6 +501,14 @@ public sealed class AzureElsaInstanceProvider(
         bool eligibleAutoResume,
         int autoResumeCount)
     {
+        if (observed.Kind == AzureProviderRecoveryObservationKind.Failed)
+        {
+            if (autoResumeCount >= AzureNamedDeploymentFreshness.MaximumAutoResumes)
+                return AzureLateSuccessCodes.AutoResumeExhausted;
+            if (AzureTransientArmFailure.IsTransient(AzureTransientArmFailure.Normalize(InnerArmCode(observed))))
+                return AzureLateSuccessCodes.Retrying;
+            return AzureLateSuccessCodes.NeedsOperator;
+        }
         if (observed.Kind == AzureProviderRecoveryObservationKind.Ambiguous &&
             (string.Equals(observed.Code, AzureLateSuccessCodes.DeploymentFailed, StringComparison.Ordinal) ||
              string.Equals(observed.Code, AzureLateSuccessCodes.DeploymentCanceled, StringComparison.Ordinal)))
@@ -501,14 +521,36 @@ public sealed class AzureElsaInstanceProvider(
         return AzureProviderOperationValidation.IsSafeCode(observed.Code) ? observed.Code : null;
     }
 
+    private static string? InnerArmCode(AzureProviderRecoveryObservation observed)
+    {
+        if (observed.InnerErrorCode is null)
+            return null;
+        foreach (var (safe, raw) in new (string Safe, string Raw)[]
+        {
+            (AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode, AzureTransientArmFailure.ManagedEnvironmentProvisioningError),
+            (AzureTransientArmFailure.TooManyRequestsCode, AzureTransientArmFailure.TooManyRequests),
+            (AzureTransientArmFailure.AllocationFailedCode, AzureTransientArmFailure.AllocationFailed),
+            (AzureTransientArmFailure.ServerTimeoutCode, AzureTransientArmFailure.ServerTimeout),
+            (AzureTransientArmFailure.InternalServerErrorCode, AzureTransientArmFailure.InternalServerError)
+        })
+        {
+            if (string.Equals(observed.InnerErrorCode, safe, StringComparison.Ordinal) ||
+                string.Equals(observed.InnerErrorCode, raw, StringComparison.OrdinalIgnoreCase))
+                return raw;
+        }
+
+        return AzureTransientArmFailure.Normalize(observed.InnerErrorCode);
+    }
+
     private Task RecordArmObservationClockAsync(
         AzureProviderOperation operation,
         bool eligibleAutoResume,
+        bool isFailedStepRetry,
         string? reasonCode,
         CancellationToken cancellationToken)
     {
-        var backoff = eligibleAutoResume
-            ? AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds
+        var backoff = eligibleAutoResume || isFailedStepRetry
+            ? AzureNamedDeploymentFreshness.BackoffSecondsForAutoResumeCount(operation.AutoResumeCount)
             : AzureNamedDeploymentFreshness.NextBackoffSeconds(operation.ArmObservationBackoffSeconds);
         return operationStore.RecordArmObservationClockAsync(
             operation.WorkspaceId,
@@ -730,7 +772,7 @@ public sealed class AzureElsaInstanceProvider(
         {
             return RecoveryRequired(ManagedElsaReasonCodeCatalog.AzureRecoveryObservationFailed);
         }
-        if (observed.Kind != AzureProviderRecoveryObservationKind.Confirmed)
+        if (observed.Kind is not (AzureProviderRecoveryObservationKind.Confirmed or AzureProviderRecoveryObservationKind.Failed))
             return RecoveryRequired(observed.Code);
 
         var result = await _executor.RecoverAsync(operation, retainedPlan, observed, cancellationToken);

@@ -32,6 +32,16 @@ public static class AzureNamedDeploymentFreshness
             ? MinimumArmIntervalSeconds
             : Math.Min(MaximumArmIntervalSeconds, currentBackoffSeconds * 2);
 
+    /// <summary>
+    /// Exponential ARM backoff from the persisted auto-resume count so retries
+    /// stay 60/120/240/300 across resumes instead of resetting to the 60 s floor.
+    /// </summary>
+    public static int BackoffSecondsForAutoResumeCount(int autoResumeCount)
+    {
+        var count = Math.Clamp(autoResumeCount, 0, 8);
+        return Math.Min(MaximumArmIntervalSeconds, MinimumArmIntervalSeconds * (1 << count));
+    }
+
     public static bool IsArmReadDue(
         DateTimeOffset now,
         DateTimeOffset? lastArmObservedAt,

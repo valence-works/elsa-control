@@ -245,7 +245,13 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 "--name", deploymentName, "--query", "properties.provisioningState", "--output", "tsv", "--only-show-errors"],
             ParseStringAsync,
             cancellationToken);
-        if (!deployment.Succeeded || !string.Equals(deployment.Value?.Value, "Succeeded", StringComparison.OrdinalIgnoreCase))
+        if (!deployment.Succeeded || string.IsNullOrWhiteSpace(deployment.Value?.Value))
+            return RecoveryObservationInProgress(request);
+        if (IsTerminalFailedDeploymentState(deployment.Value.Value))
+            return await RecoveryObservationFailedAsync(
+                request, command, AzureProviderRunnerStep.Foundation, deploymentName, cancellationToken,
+                AzureLateSuccessCodes.DeploymentOutcome(deployment.Value.Value));
+        if (!string.Equals(deployment.Value.Value, "Succeeded", StringComparison.OrdinalIgnoreCase))
             return RecoveryObservationInProgress(request);
 
         var resources = operation.Resources;
@@ -341,14 +347,9 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             return RecoveryObservationAmbiguous(request);
 
         if (!string.Equals(observed.State, "Succeeded", StringComparison.OrdinalIgnoreCase))
-            return new(
-                AzureProviderRecoveryObservationKind.Ambiguous,
-                null,
-                operation.Resources,
-                AzureProviderHealth.Unknown,
-                null,
-                AzureLateSuccessCodes.DeploymentOutcome(observed.State),
-                "Azure reported the workload deployment as failed or canceled.");
+            return await RecoveryObservationFailedAsync(
+                request, command, AzureProviderRunnerStep.Workload, deploymentName, cancellationToken,
+                AzureLateSuccessCodes.DeploymentOutcome(observed.State));
 
         if (observed.Outputs is null)
             return RecoveryObservationInProgress(
@@ -461,7 +462,14 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 "--query", "properties.provisioningState", "--output", "tsv", "--only-show-errors"],
             ParseStringAsync,
             cancellationToken);
-        if (!deployment.Succeeded || !string.Equals(deployment.Value?.Value, "Succeeded", StringComparison.OrdinalIgnoreCase))
+        if (!deployment.Succeeded || string.IsNullOrWhiteSpace(deployment.Value?.Value))
+            return RecoveryObservationInProgress(request);
+        if (IsTerminalFailedDeploymentState(deployment.Value.Value))
+            return await RecoveryObservationFailedAsync(
+                request, command, AzureProviderRunnerStep.AcrPull, deploymentName, cancellationToken,
+                AzureLateSuccessCodes.DeploymentOutcome(deployment.Value.Value),
+                _scope.RegistrySubscriptionId, _scope.RegistryResourceGroupName);
+        if (!string.Equals(deployment.Value.Value, "Succeeded", StringComparison.OrdinalIgnoreCase))
             return RecoveryObservationInProgress(request);
 
         return new(
@@ -585,6 +593,55 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private static AzureProviderRecoveryObservation RecoveryObservationUnsupported(AzureProviderRecoveryRequest request) =>
         new(AzureProviderRecoveryObservationKind.Ambiguous, null, request.Operation.Resources, AzureProviderHealth.Unknown,
             null, ManagedElsaReasonCodeCatalog.AzureRecoveryStepUnsupported, "The retained Azure recovery step is not supported by this provider observer.");
+
+    private static bool IsTerminalFailedDeploymentState(string? state) =>
+        IsTerminalDeploymentState(state) &&
+        !string.Equals(state, "Succeeded", StringComparison.OrdinalIgnoreCase);
+
+    private async Task<AzureProviderRecoveryObservation> RecoveryObservationFailedAsync(
+        AzureProviderRecoveryRequest request,
+        AzureProviderRunnerCommand command,
+        AzureProviderRunnerStep failedStep,
+        string deploymentName,
+        CancellationToken cancellationToken,
+        string? outcomeCode = null,
+        string? subscriptionId = null,
+        string? resourceGroupName = null)
+    {
+        var code = outcomeCode ?? AzureLateSuccessCodes.DeploymentFailed;
+        var inner = await TryReadDeploymentErrorCodeAsync(
+            command, deploymentName, cancellationToken, subscriptionId, resourceGroupName);
+        return new(
+            AzureProviderRecoveryObservationKind.Failed,
+            failedStep,
+            request.Operation.Resources,
+            AzureProviderHealth.Unknown,
+            null,
+            code,
+            "Azure reported the deployment as failed or canceled.",
+            inner);
+    }
+
+    private async Task<string?> TryReadDeploymentErrorCodeAsync(
+        AzureProviderRunnerCommand command,
+        string deploymentName,
+        CancellationToken cancellationToken,
+        string? subscriptionId = null,
+        string? resourceGroupName = null)
+    {
+        var subscription = subscriptionId ?? _scope.SubscriptionId;
+        var group = resourceGroupName ?? ResourceGroupName(command);
+        var error = await ExecuteAzAsync(command,
+            ["deployment", "group", "show", "--subscription", subscription, "--resource-group", group,
+                "--name", deploymentName,
+                "--query", "properties.error",
+                "--output", "json", "--only-show-errors"],
+            ParseDeploymentErrorAsync,
+            cancellationToken);
+        if (!error.Succeeded || error.Value is null)
+            return null;
+        return AzureTransientArmFailure.Classify(error.Value.Value);
+    }
 
     private static AzureProviderRunnerStep? GetSqlRecoveryStep(AzureProviderOperation operation) =>
         operation.AttemptedStep switch
@@ -2727,6 +2784,13 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             if (!existing.Succeeded || existing.Value is null)
                 return (null, ProcessFailure(command, phase, existing, resources, mutation: true));
             inFlight = IsInFlight(existing.Value.Value);
+            if (!inFlight && IsTerminalFailedDeploymentList(existing.Value.Value))
+            {
+                var cleaned = await CleanupStaleFailedNamedDeploymentAsync(
+                    command, phase, deploymentName, resources, cancellationToken);
+                if (cleaned is not null)
+                    return (null, cleaned);
+            }
         }
 
         // A terminal record older than this submission belongs to a previous same-name deployment.
@@ -2787,6 +2851,100 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             cancellationToken);
 
     private static bool IsInFlight(IReadOnlyList<string> states) => states is [var state] && !IsTerminalDeploymentState(state);
+
+    private static bool IsTerminalFailedDeploymentList(IReadOnlyList<string> states) =>
+        states is [var state] && IsTerminalFailedDeploymentState(state);
+
+    private async Task<AzureProviderRunnerResult?> CleanupStaleFailedNamedDeploymentAsync(
+        AzureProviderRunnerCommand command,
+        AzureProviderOperationPhase phase,
+        string deploymentName,
+        AzureProviderResourceReferences resources,
+        CancellationToken cancellationToken)
+    {
+        EnsureMutationAuthority(command);
+        if (command.Step == AzureProviderRunnerStep.Foundation)
+        {
+            var environmentId = resources.ContainerAppsEnvironmentResourceId
+                ?? ResourceId(command, "Microsoft.App", "managedEnvironments", $"{command.Plan.WorkloadName}-aca");
+            var environment = await ExecuteAzAsync(command,
+                ["resource", "show", "--ids", environmentId, "--query", "properties.provisioningState",
+                    "--output", "tsv", "--only-show-errors"],
+                ParseStringAsync,
+                cancellationToken);
+            if (environment.Succeeded && IsTerminalFailedDeploymentState(environment.Value?.Value))
+            {
+                var deleted = await ExecuteAzAsync<AzureCommandNoOutput>(command,
+                    ["resource", "delete", "--ids", environmentId, "--yes", "--output", "none", "--only-show-errors"],
+                    static _ => AzureCommandNoOutput.Instance,
+                    cancellationToken);
+                if (!IsAbsentOrSuccessfulMutation(deleted))
+                {
+                    if (IsTimedOutMutation(deleted))
+                    {
+                        if (!await WaitUntilEnvironmentAbsentAsync(command, environmentId, cancellationToken))
+                            return ProcessFailure(command, phase, deleted, resources, mutation: true);
+                    }
+                    else
+                        return ProcessFailure(command, phase, deleted, resources, mutation: true);
+                }
+            }
+        }
+
+        var removed = await ExecuteAzAsync<AzureCommandNoOutput>(command,
+            ["deployment", "group", "delete", "--subscription", _scope.SubscriptionId,
+                "--resource-group", ResourceGroupName(command), "--name", deploymentName,
+                "--yes", "--output", "none", "--only-show-errors"],
+            static _ => AzureCommandNoOutput.Instance,
+            cancellationToken);
+        return IsAbsentOrSuccessfulMutation(removed)
+            ? null
+            : ProcessFailure(command, phase, removed, resources, mutation: true);
+    }
+
+    private async Task<bool> WaitUntilEnvironmentAbsentAsync(
+        AzureProviderRunnerCommand command,
+        string environmentId,
+        CancellationToken cancellationToken)
+    {
+        var observationAttempts = _options.CleanupObservationAttempts ?? _options.ObservationAttempts;
+        for (var attempt = 0; attempt < observationAttempts; attempt++)
+        {
+            if (await ObserveEnvironmentAbsentAsync(command, environmentId, cancellationToken))
+                return true;
+            if (attempt + 1 < observationAttempts)
+                await Task.Delay(_options.ObservationDelay, cancellationToken);
+        }
+
+        return false;
+    }
+
+    private async Task<bool> ObserveEnvironmentAbsentAsync(
+        AzureProviderRunnerCommand command,
+        string environmentId,
+        CancellationToken cancellationToken)
+    {
+        var show = await ExecuteAzAsync(command,
+            ["resource", "show", "--ids", environmentId, "--query", "properties.provisioningState",
+                "--output", "tsv", "--only-show-errors"],
+            ParseStringAsync,
+            cancellationToken);
+        return IsAbsentResourceObservation(show);
+    }
+
+    private static bool IsAbsentOrSuccessfulMutation<T>(AzureCommandProcessResult<T> result)
+        where T : AzureCommandSafeOutput =>
+        result.Succeeded || IsAbsentResourceObservation(result);
+
+    private static bool IsAbsentResourceObservation<T>(AzureCommandProcessResult<T> result)
+        where T : AzureCommandSafeOutput =>
+        result.FailureKind == AzureCommandProcessFailureKind.NonZeroExitCode &&
+        result.ExitCode == AzureCliResourceNotFoundExitCode;
+
+    private static bool IsTimedOutMutation<T>(AzureCommandProcessResult<T> result)
+        where T : AzureCommandSafeOutput =>
+        result.Status == AzureCommandProcessStatus.TimedOut &&
+        result.FailureKind == AzureCommandProcessFailureKind.TimedOut;
 
     private static bool IsTerminalDeploymentState(string? state) =>
         state is not null && TerminalDeploymentStates.Contains(state);
@@ -3155,6 +3313,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private static SafeValue<T> ParseJson<T>(ReadOnlyMemory<char> output) => new(JsonSerializer.Deserialize<T>(output.Span, JsonOptions) ?? throw new JsonException());
     private static SafeValue<DeploymentOutputs> ParseDeploymentOutputsAsync(ReadOnlyMemory<char> output) => ParseJson<DeploymentOutputs>(output);
     private static SafeValue<DeploymentPoll> ParseDeploymentPollAsync(ReadOnlyMemory<char> output) => ParseJson<DeploymentPoll>(output);
+    private static SafeValue<JsonElement> ParseDeploymentErrorAsync(ReadOnlyMemory<char> output) =>
+        new(JsonSerializer.Deserialize<JsonElement>(output.Span, JsonOptions));
     private static SafeValue<IReadOnlyDictionary<string, string>> ParseTagsAsync(ReadOnlyMemory<char> output) => new(new ReadOnlyDictionary<string, string>(ParseJson<Dictionary<string, string>>(output).Value));
     private static SafeValue<IReadOnlyList<RoleAssignment>> ParseRoleAssignmentsAsync(ReadOnlyMemory<char> output) => new(ParseJson<List<RoleAssignment>>(output).Value);
     private static SafeValue<IReadOnlyList<AzureResource>> ParseResourcesAsync(ReadOnlyMemory<char> output) => new(ParseJson<List<AzureResource>>(output).Value);
