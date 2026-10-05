@@ -81,6 +81,9 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                     EventHash = providerEvent.EventHash,
                     ProviderCustomerReference = providerEvent.ProviderCustomerReference,
                     ProviderSubscriptionReference = providerEvent.ProviderSubscriptionReference,
+                    ProviderObjectReference = providerEvent.ProviderObjectReference,
+                    PriceReference = providerEvent.PriceReference,
+                    AmountMinorUnits = providerEvent.AmountMinorUnits,
                     OccurredAt = providerEvent.OccurredAt.ToUniversalTime(),
                     ReceivedAt = now,
                     ProcessedAt = now,
@@ -222,6 +225,9 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                 EventHash = providerEvent.EventHash,
                 ProviderCustomerReference = providerEvent.ProviderCustomerReference,
                 ProviderSubscriptionReference = providerEvent.ProviderSubscriptionReference,
+                ProviderObjectReference = providerEvent.ProviderObjectReference,
+                PriceReference = providerEvent.PriceReference,
+                AmountMinorUnits = providerEvent.AmountMinorUnits,
                 OccurredAt = occurrence,
                 ReceivedAt = now,
                 ProcessingStatus = BillingProviderEventProcessingStatus.Accepted
@@ -597,6 +603,10 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         RequireSha256(providerEvent.EventHash, nameof(providerEvent.EventHash));
         RequireSafeReference(providerEvent.ProviderCustomerReference, nameof(providerEvent.ProviderCustomerReference));
         RequireSafeReference(providerEvent.ProviderSubscriptionReference, nameof(providerEvent.ProviderSubscriptionReference));
+        RequireSafeReference(providerEvent.ProviderObjectReference, nameof(providerEvent.ProviderObjectReference));
+        RequireSafeReference(providerEvent.PriceReference, nameof(providerEvent.PriceReference));
+        if (providerEvent.AmountMinorUnits is < 0)
+            throw new ArgumentException("Amount must be a non-negative minor-unit total.", nameof(providerEvent));
         if (providerEvent.OccurredAt == default)
             throw new ArgumentException("Billing event occurrence timestamp is required.", nameof(providerEvent));
 
@@ -631,19 +641,15 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             EventHash = hash.ToLowerInvariant(),
             ProviderCustomerReference = string.IsNullOrWhiteSpace(providerEvent.ProviderCustomerReference) ? null : providerEvent.ProviderCustomerReference.Trim(),
             ProviderSubscriptionReference = string.IsNullOrWhiteSpace(providerEvent.ProviderSubscriptionReference) ? null : providerEvent.ProviderSubscriptionReference.Trim(),
+            ProviderObjectReference = string.IsNullOrWhiteSpace(providerEvent.ProviderObjectReference) ? null : providerEvent.ProviderObjectReference.Trim(),
+            PriceReference = string.IsNullOrWhiteSpace(providerEvent.PriceReference) ? null : providerEvent.PriceReference.Trim(),
             OccurredAt = providerEvent.OccurredAt.ToUniversalTime()
         };
     }
 
     private static void EnsureSameEvent(BillingProviderEventInboxEntry existing, BillingProviderEvent incoming)
     {
-        if (existing.OrganizationId != incoming.OrganizationId ||
-            !string.Equals(existing.EventHash, incoming.EventHash, StringComparison.OrdinalIgnoreCase) ||
-            existing.State != incoming.State ||
-            !string.Equals(existing.EventType, incoming.EventType, StringComparison.Ordinal) ||
-            existing.OccurredAt != incoming.OccurredAt.ToUniversalTime() ||
-            !string.Equals(existing.ProviderCustomerReference, incoming.ProviderCustomerReference, StringComparison.Ordinal) ||
-            !string.Equals(existing.ProviderSubscriptionReference, incoming.ProviderSubscriptionReference, StringComparison.Ordinal))
+        if (BillingProviderEventReplayFacts.From(existing).ConflictsWith(BillingProviderEventReplayFacts.From(incoming)))
             throw new BillingProviderEventConflictException("A provider event ID was previously received with different normalized facts.");
     }
 

@@ -262,6 +262,135 @@ public sealed class OrganizationBillingPersistenceTests
     }
 
     [Fact]
+    public async Task Same_event_with_a_different_raw_body_hash_is_replayed_without_a_second_effect()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        await db.SaveChangesAsync();
+        var store = new OrganizationBillingStore(db);
+        var first = Event("evt-redelivery", OrganizationSubscriptionState.Active, Now.AddMinutes(1));
+
+        var applied = await store.ConsumeAsync(first, Now.AddMinutes(2));
+        var replay = await store.ConsumeAsync(first with { EventHash = "sha256:" + new string('b', 64) }, Now.AddMinutes(3));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Applied, applied.Outcome);
+        Assert.Equal(BillingEventConsumptionOutcome.Replayed, replay.Outcome);
+        Assert.Equal(1, await db.BillingProviderEvents.CountAsync());
+        Assert.Equal(1, await db.OrganizationAuditRecords.CountAsync());
+        Assert.Equal(OrganizationSubscriptionState.Active, (await db.OrganizationSubscriptions.SingleAsync()).State);
+    }
+
+    [Fact]
+    public async Task Unknown_checkout_redelivery_with_a_different_hash_is_replayed()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        await db.SaveChangesAsync();
+        var first = new BillingProviderEvent(
+            OrganizationId,
+            BillingProviderNames.Stripe,
+            "evt-checkout",
+            "checkout.session.completed",
+            null,
+            Now,
+            "sha256:" + new string('a', 64),
+            "cus_acme",
+            null,
+            "cs_acme",
+            "price_acme",
+            4900);
+        var store = new OrganizationBillingStore(db);
+
+        var recorded = await store.RecordUnknownAsync(first, Now.AddMinutes(1));
+        var replay = await store.RecordUnknownAsync(
+            first with { EventHash = "sha256:" + new string('b', 64) },
+            Now.AddMinutes(2));
+
+        Assert.Equal(BillingEventConsumptionOutcome.RecordedUnknown, recorded.Outcome);
+        Assert.Equal(BillingEventConsumptionOutcome.Replayed, replay.Outcome);
+        Assert.Equal(1, await db.BillingProviderEvents.CountAsync());
+        Assert.Null(await db.OrganizationSubscriptions.SingleOrDefaultAsync(x => x.OrganizationId == OrganizationId));
+    }
+
+    [Fact]
+    public async Task Historical_inbox_row_without_extra_facts_replays_a_byte_different_redelivery()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        db.BillingProviderEvents.Add(new BillingProviderEventInboxEntry
+        {
+            OrganizationId = OrganizationId,
+            Provider = BillingProviderNames.Stripe,
+            ProviderEventId = "evt-historical",
+            EventType = "checkout.session.completed",
+            State = null,
+            EventHash = "sha256:" + new string('a', 64),
+            ProviderCustomerReference = "cus_acme",
+            OccurredAt = Now,
+            ReceivedAt = Now,
+            ProcessedAt = Now,
+            ProcessingStatus = BillingProviderEventProcessingStatus.RecordedUnknown,
+            RejectionCode = "provider.event.unknown"
+        });
+        await db.SaveChangesAsync();
+
+        var replay = await new OrganizationBillingStore(db).RecordUnknownAsync(
+            new BillingProviderEvent(
+                OrganizationId,
+                BillingProviderNames.Stripe,
+                "evt-historical",
+                "checkout.session.completed",
+                null,
+                Now,
+                "sha256:" + new string('b', 64),
+                "cus_acme",
+                null,
+                "cs_acme",
+                "price_acme",
+                4900),
+            Now.AddMinutes(1));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Replayed, replay.Outcome);
+        Assert.Equal(1, await db.BillingProviderEvents.CountAsync());
+    }
+
+    [Fact]
+    public async Task Same_event_id_with_different_recorded_business_facts_is_a_conflict()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        await db.SaveChangesAsync();
+        var store = new OrganizationBillingStore(db);
+        var first = Event("evt-conflict-facts", OrganizationSubscriptionState.Active, Now.AddMinutes(1)) with
+        {
+            ProviderObjectReference = "sub_acme",
+            PriceReference = "price_acme",
+            AmountMinorUnits = 4900
+        };
+        await store.ConsumeAsync(first, Now.AddMinutes(2));
+
+        await Assert.ThrowsAsync<BillingProviderEventConflictException>(() =>
+            store.ConsumeAsync(first with { AmountMinorUnits = 9900, EventHash = "sha256:" + new string('b', 64) }, Now.AddMinutes(3)));
+        await Assert.ThrowsAsync<BillingProviderEventConflictException>(() =>
+            store.ConsumeAsync(first with { ProviderCustomerReference = "cus_other", EventHash = "sha256:" + new string('c', 64) }, Now.AddMinutes(4)));
+
+        Assert.Equal(1, await db.BillingProviderEvents.CountAsync());
+        Assert.Equal(OrganizationSubscriptionState.Active, (await db.OrganizationSubscriptions.SingleAsync()).State);
+    }
+
+    [Fact]
     public async Task Maximum_length_event_id_uses_inbox_guid_for_audit_target()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -694,6 +823,8 @@ public sealed class OrganizationBillingPersistenceTests
         Assert.Equal(OrganizationBillingLimits.ProviderReferenceMaxLength, model.FindEntityType(typeof(OrganizationSubscription))!.FindProperty(nameof(OrganizationSubscription.ProviderSubscriptionReference))!.GetMaxLength());
         Assert.Equal(OrganizationBillingLimits.ProviderReferenceMaxLength, model.FindEntityType(typeof(BillingProviderEventInboxEntry))!.FindProperty(nameof(BillingProviderEventInboxEntry.ProviderCustomerReference))!.GetMaxLength());
         Assert.Equal(OrganizationBillingLimits.ProviderReferenceMaxLength, model.FindEntityType(typeof(BillingProviderEventInboxEntry))!.FindProperty(nameof(BillingProviderEventInboxEntry.ProviderSubscriptionReference))!.GetMaxLength());
+        Assert.Equal(OrganizationBillingLimits.ProviderReferenceMaxLength, model.FindEntityType(typeof(BillingProviderEventInboxEntry))!.FindProperty(nameof(BillingProviderEventInboxEntry.ProviderObjectReference))!.GetMaxLength());
+        Assert.Equal(OrganizationBillingLimits.ProviderReferenceMaxLength, model.FindEntityType(typeof(BillingProviderEventInboxEntry))!.FindProperty(nameof(BillingProviderEventInboxEntry.PriceReference))!.GetMaxLength());
     }
 
     [Fact]
@@ -867,8 +998,10 @@ public sealed class OrganizationBillingPersistenceTests
         await db.Database.MigrateAsync("20260904013824_AddOrganizationBillingLifecycle");
 
         db.ChangeTracker.Clear();
-        var restored = await db.BillingProviderEvents.SingleAsync();
-        Assert.Equal(OrganizationSubscriptionState.Suspended, restored.State);
+        var restoredState = await db.Database
+            .SqlQueryRaw<string>("""SELECT "State" AS "Value" FROM "BillingProviderEvents" """)
+            .SingleAsync();
+        Assert.Equal(nameof(OrganizationSubscriptionState.Suspended), restoredState);
     }
 
     [Fact]

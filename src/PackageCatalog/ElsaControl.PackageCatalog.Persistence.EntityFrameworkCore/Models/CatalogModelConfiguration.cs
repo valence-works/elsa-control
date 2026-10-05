@@ -385,6 +385,8 @@ internal sealed class BillingProviderEventInboxEntryConfiguration : IEntityTypeC
         builder.Property(x => x.EventHash).HasMaxLength(71).IsRequired();
         builder.Property(x => x.ProviderCustomerReference).HasMaxLength(OrganizationBillingLimits.ProviderReferenceMaxLength);
         builder.Property(x => x.ProviderSubscriptionReference).HasMaxLength(OrganizationBillingLimits.ProviderReferenceMaxLength);
+        builder.Property(x => x.ProviderObjectReference).HasMaxLength(OrganizationBillingLimits.ProviderReferenceMaxLength);
+        builder.Property(x => x.PriceReference).HasMaxLength(OrganizationBillingLimits.ProviderReferenceMaxLength);
         builder.Property(x => x.ProcessingStatus).HasConversion<string>().HasMaxLength(32);
         builder.Property(x => x.RejectionCode).HasMaxLength(128);
         builder.Property(x => x.OccurredAt).HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));

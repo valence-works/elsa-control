@@ -75,7 +75,10 @@ public sealed record BillingProviderEvent(
     DateTimeOffset OccurredAt,
     string EventHash,
     string? ProviderCustomerReference = null,
-    string? ProviderSubscriptionReference = null);
+    string? ProviderSubscriptionReference = null,
+    string? ProviderObjectReference = null,
+    string? PriceReference = null,
+    long? AmountMinorUnits = null);
 
 public enum BillingProviderEventProcessingStatus
 {
@@ -310,6 +313,9 @@ public sealed class BillingProviderEventInboxEntry
     public string EventHash { get; set; } = "";
     public string? ProviderCustomerReference { get; set; }
     public string? ProviderSubscriptionReference { get; set; }
+    public string? ProviderObjectReference { get; set; }
+    public string? PriceReference { get; set; }
+    public long? AmountMinorUnits { get; set; }
     public DateTimeOffset OccurredAt { get; set; }
     public DateTimeOffset ReceivedAt { get; set; }
     public DateTimeOffset? ProcessedAt { get; set; }
