@@ -37,6 +37,12 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     /// <summary>Allowance for clock skew between Control and ARM when rejecting a previous same-name deployment record.</summary>
     private static readonly TimeSpan DeploymentTimestampSkew = TimeSpan.FromMinutes(1);
     private static readonly HashSet<string> TerminalDeploymentStates = new(["Succeeded", "Failed", "Canceled"], StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// Failed operations only, capped at the error-walk fan-out so the observer
+    /// never materializes an unbounded ARM operations page.
+    /// </summary>
+    private static readonly string FailedDeploymentOperationsQuery =
+        $"[?properties.provisioningState=='Failed'] | [0:{AzureTransientArmFailure.MaximumErrorWalkFanout}]";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = true
@@ -610,7 +616,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     {
         var code = outcomeCode ?? AzureLateSuccessCodes.DeploymentFailed;
         var inner = await TryReadDeploymentErrorCodeAsync(
-            command, deploymentName, cancellationToken, subscriptionId, resourceGroupName);
+            command, deploymentName, cancellationToken, subscriptionId, resourceGroupName,
+            inspectOperations: string.Equals(code, AzureLateSuccessCodes.DeploymentFailed, StringComparison.Ordinal));
         return new(
             AzureProviderRecoveryObservationKind.Failed,
             failedStep,
@@ -627,7 +634,8 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         string deploymentName,
         CancellationToken cancellationToken,
         string? subscriptionId = null,
-        string? resourceGroupName = null)
+        string? resourceGroupName = null,
+        bool inspectOperations = false)
     {
         var subscription = subscriptionId ?? _scope.SubscriptionId;
         var group = resourceGroupName ?? ResourceGroupName(command);
@@ -640,7 +648,93 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             cancellationToken);
         if (!error.Succeeded || error.Value is null)
             return null;
-        return AzureTransientArmFailure.Classify(error.Value.Value);
+        var inspection = AzureTransientArmFailure.InspectError(error.Value.Value);
+        if (inspection.HasTerminal)
+            return null;
+        if (inspection.TransientDiagnostic is not null)
+            return inspection.TransientDiagnostic;
+        if (!inspectOperations)
+            return null;
+        return await TryClassifyFailedDeploymentOperationsAsync(
+            command, deploymentName, subscription, group, cancellationToken);
+    }
+
+    /// <summary>
+    /// Read-only walk of failed deployment operations for a named deployment and
+    /// same-RG nested module deployments. Bounded by the same depth, node, fan-out
+    /// and page limits as the error-tree walk. A failed or truncated list stays
+    /// operator-recoverable.
+    /// </summary>
+    private async Task<string?> TryClassifyFailedDeploymentOperationsAsync(
+        AzureProviderRunnerCommand command,
+        string deploymentName,
+        string subscriptionId,
+        string resourceGroupName,
+        CancellationToken cancellationToken)
+    {
+        var codes = new List<string>();
+        var pending = new Queue<(string Name, int Depth)>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        pending.Enqueue((deploymentName, 0));
+        var pages = 0;
+        var nodes = 0;
+        var truncated = false;
+
+        while (pending.Count > 0)
+        {
+            if (pages >= AzureTransientArmFailure.MaximumErrorWalkPages ||
+                nodes >= AzureTransientArmFailure.MaximumErrorWalkNodes)
+            {
+                truncated = true;
+                break;
+            }
+
+            var (name, depth) = pending.Dequeue();
+            if (!seen.Add(name))
+                continue;
+            if (depth > AzureTransientArmFailure.MaximumErrorWalkDepth)
+            {
+                truncated = true;
+                continue;
+            }
+            if (!AzureTransientArmFailure.IsSafeNestedDeploymentName(name) &&
+                !string.Equals(name, deploymentName, StringComparison.Ordinal))
+                continue;
+
+            pages++;
+            var operations = await ExecuteAzAsync(command,
+                ["deployment", "operation", "group", "list",
+                    "--subscription", subscriptionId, "--resource-group", resourceGroupName,
+                    "--name", name,
+                    "--query", FailedDeploymentOperationsQuery,
+                    "--output", "json", "--only-show-errors"],
+                ParseDeploymentErrorAsync,
+                cancellationToken);
+            if (!operations.Succeeded || operations.Value is null)
+                return null;
+
+            nodes = AzureTransientArmFailure.CollectOperationCodes(
+                operations.Value.Value, codes, depth, nodes);
+            foreach (var nested in AzureTransientArmFailure.FailedNestedDeploymentNames(operations.Value.Value))
+            {
+                if (pending.Count + seen.Count >= AzureTransientArmFailure.MaximumErrorWalkFanout)
+                {
+                    truncated = true;
+                    break;
+                }
+                pending.Enqueue((nested, depth + 1));
+            }
+
+            // A transient code on this page must not hide a later sibling
+            // module's terminal code. Terminal still fails closed immediately.
+            var inspection = AzureTransientArmFailure.Inspect(codes);
+            if (inspection.HasTerminal)
+                return null;
+        }
+
+        if (truncated || pending.Count > 0)
+            return null;
+        return AzureTransientArmFailure.Classify(codes);
     }
 
     private static AzureProviderRunnerStep? GetSqlRecoveryStep(AzureProviderOperation operation) =>

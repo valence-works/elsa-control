@@ -1,3 +1,4 @@
+using System.Text.Json;
 using ElsaControl.Deployment.Core.Instances;
 using Xunit;
 
@@ -86,8 +87,41 @@ public sealed class AzureTransientArmFailureTests
     [InlineData("""{"code":"DeploymentFailed"}""")]
     [InlineData("""{"code":"DeploymentFailed","details":[{"code":"ResourceDeploymentFailure"}]}""")]
     [InlineData("""{"code":"DeploymentFailed","details":[{"code":"QuotaExceeded"},{"code":"ManagedEnvironmentProvisioningError"}]}""")]
+    [InlineData(WrapperOnlyProductionFoundationError)]
     public void Wrapper_or_terminal_trees_are_not_transient(string json) =>
         Assert.Null(AzureTransientArmFailure.Classify(json));
+
+    [Fact]
+    public void Production_wrapper_error_with_operations_status_message_is_transient()
+    {
+        Assert.Null(AzureTransientArmFailure.Classify(WrapperOnlyProductionFoundationError));
+        Assert.Equal(
+            AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode,
+            AzureTransientArmFailure.ClassifyOperations(ProductionManagedEnvironmentOperations));
+    }
+
+    [Fact]
+    public void Operations_message_text_is_not_scraped_for_unknown_codes() =>
+        Assert.Null(AzureTransientArmFailure.ClassifyOperations(MessageOnlyDeploymentOperations));
+
+    [Theory]
+    [InlineData("""[{"properties":{"provisioningState":"Failed","statusMessage":{"error":{"code":"QuotaExceeded"}}}}]""")]
+    [InlineData("""[{"properties":{"provisioningState":"Failed","statusMessage":{"error":{"code":"RequestDisallowedByPolicy"}}}}]""")]
+    [InlineData("""[{"properties":{"statusMessage":{"error":{"code":"QuotaExceeded","details":[{"code":"ManagedEnvironmentProvisioningError"}]}}}}]""")]
+    public void Operations_terminal_or_wrapper_trees_are_not_transient(string json) =>
+        Assert.Null(AzureTransientArmFailure.ClassifyOperations(json));
+
+    [Fact]
+    public void Failed_nested_module_names_are_taken_from_structured_targets_only()
+    {
+        using var document = JsonDocument.Parse(ProductionFoundationNestedModuleOperations);
+        var names = AzureTransientArmFailure.FailedNestedDeploymentNames(document.RootElement);
+        Assert.Equal(["container-apps-environment"], names);
+
+        using var unsafeDocument = JsonDocument.Parse(
+            """[{"properties":{"targetResource":{"resourceType":"Microsoft.Resources/deployments","resourceName":"/subscriptions/1/resourceGroups/foreign-rg/providers/Microsoft.Resources/deployments/other"}}}]""");
+        Assert.Empty(AzureTransientArmFailure.FailedNestedDeploymentNames(unsafeDocument.RootElement));
+    }
 
     internal const string NestedProductionAcaFailure = """
         {
@@ -126,5 +160,201 @@ public sealed class AzureTransientArmFailureTests
             }
           ]
         }
+        """;
+
+    /// <summary>
+    /// Recorded production shape from #750: the top-level foundation error only
+    /// wraps DeploymentFailed / ResourceDeploymentFailure. The transient ACA
+    /// code is absent from details[].
+    /// </summary>
+    internal const string WrapperOnlyProductionFoundationError = """
+        {
+          "code": "DeploymentFailed",
+          "message": "At least one resource deployment operation failed. Please list deployment operations for details. Please see https://aka.ms/arm-deployment-operations for usage details.",
+          "details": [
+            {
+              "code": "ResourceDeploymentFailure",
+              "message": "The resource write operation failed to complete successfully, you can check deployment operations for details."
+            }
+          ]
+        }
+        """;
+
+    internal const string FiveFailedNestedModuleOperations = """
+        [
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.Resources/deployments",
+                "resourceName": "identity"
+              },
+              "statusMessage": { "error": { "code": "ResourceDeploymentFailure" } }
+            }
+          },
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.Resources/deployments",
+                "resourceName": "observability"
+              },
+              "statusMessage": { "error": { "code": "ResourceDeploymentFailure" } }
+            }
+          },
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.Resources/deployments",
+                "resourceName": "sql"
+              },
+              "statusMessage": { "error": { "code": "ResourceDeploymentFailure" } }
+            }
+          },
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.Resources/deployments",
+                "resourceName": "key-vault"
+              },
+              "statusMessage": { "error": { "code": "ResourceDeploymentFailure" } }
+            }
+          },
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.Resources/deployments",
+                "resourceName": "container-apps-environment"
+              },
+              "statusMessage": { "error": { "code": "ResourceDeploymentFailure" } }
+            }
+          }
+        ]
+        """;
+
+    internal const string ProductionFoundationSiblingModuleOperations = """
+        [
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.Resources/deployments",
+                "resourceName": "container-apps-environment"
+              },
+              "statusMessage": {
+                "status": "Failed",
+                "error": {
+                  "code": "ResourceDeploymentFailure",
+                  "message": "The resource write operation failed to complete successfully, you can check deployment operations for details."
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.Resources/deployments",
+                "resourceName": "sql"
+              },
+              "statusMessage": {
+                "status": "Failed",
+                "error": {
+                  "code": "ResourceDeploymentFailure",
+                  "message": "The resource write operation failed to complete successfully, you can check deployment operations for details."
+                }
+              }
+            }
+          }
+        ]
+        """;
+
+    internal const string QuotaExceededDeploymentOperations = """
+        [
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.Sql/servers",
+                "resourceName": "proof-sql"
+              },
+              "statusMessage": {
+                "status": "Failed",
+                "error": {
+                  "code": "QuotaExceeded",
+                  "message": "The subscription has reached its SQL server quota."
+                }
+              }
+            }
+          }
+        ]
+        """;
+
+    internal const string ProductionFoundationNestedModuleOperations = """
+        [
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.Resources/deployments",
+                "resourceName": "container-apps-environment"
+              },
+              "statusMessage": {
+                "status": "Failed",
+                "error": {
+                  "code": "ResourceDeploymentFailure",
+                  "message": "The resource write operation failed to complete successfully, you can check deployment operations for details."
+                }
+              }
+            }
+          }
+        ]
+        """;
+
+    internal const string ProductionManagedEnvironmentOperations = """
+        [
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/proof-rg/providers/Microsoft.App/managedEnvironments/ec0139c55cfd7449-aca",
+                "resourceType": "Microsoft.App/managedEnvironments",
+                "resourceName": "ec0139c55cfd7449-aca"
+              },
+              "statusCode": "Conflict",
+              "statusMessage": {
+                "status": "Failed",
+                "error": {
+                  "code": "ManagedEnvironmentProvisioningError",
+                  "message": "Error when initializing components on ManagedCluster"
+                }
+              }
+            }
+          }
+        ]
+        """;
+
+    internal const string MessageOnlyDeploymentOperations = """
+        [
+          {
+            "properties": {
+              "provisioningState": "Failed",
+              "targetResource": {
+                "resourceType": "Microsoft.App/managedEnvironments",
+                "resourceName": "proof-aca"
+              },
+              "statusMessage": {
+                "status": "Failed",
+                "error": {
+                  "code": "ResourceDeploymentFailure",
+                  "message": "ManagedEnvironmentProvisioningError: Error when initializing components on ManagedCluster"
+                }
+              }
+            }
+          }
+        ]
         """;
 }

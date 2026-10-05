@@ -139,7 +139,8 @@ public sealed record AzureProviderRecoveryObservationRecord(
         observation.Validate();
         RequireFingerprint(resourceFingerprint, nameof(resourceFingerprint));
         var canonical = string.Join('\n', observation.Kind, observation.CompletedStep,
-            observation.Health, resourceFingerprint, observation.Code);
+            observation.Health, resourceFingerprint, observation.Code,
+            observation.InnerErrorCode ?? string.Empty);
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 
