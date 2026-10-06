@@ -302,11 +302,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 operation.HeartbeatAt = null;
                 operation.UpdatedAt = commit.ReconciledAt.ToUniversalTime();
                 operation.ReconciliationEvidenceFingerprint = commit.EvidenceFingerprint;
+                ApplyReconciliationRetryEvidence(operation, commit);
                 operation.ReconciliationDiagnosticCode = commit.DiagnosticCode;
-                operation.ReconciliationRetryEvidenceReference = commit.RetryEvidenceReference ??
-                    operation.ReconciliationRetryEvidenceReference;
-                operation.ReconciliationRetryEvidenceDigest = commit.RetryEvidenceDigest ??
-                    operation.ReconciliationRetryEvidenceDigest;
                 operation.ReconciledObservedLifecycle = commit.Instance.ObservedLifecycle;
                 operation.ReconciledHealth = commit.Instance.Health;
                 operation.ReconciledInstanceVersion = checked(instance.Version + 1);
@@ -3816,6 +3813,25 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                current.CurrentDeploymentManagedHandoff == (projectedDeployment?.ManagedHandoff == true);
     }
 
+    /// <summary>
+    /// Retry evidence belongs to the incoming observation's diagnostic, not to
+    /// derived FailureCode bookkeeping. An identical diagnostic without new
+    /// evidence retains its pair; a changed diagnostic or partial replacement
+    /// clears both fields. Never combine halves from different observations.
+    /// Call before replacing ReconciliationDiagnosticCode.
+    /// </summary>
+    private static void ApplyReconciliationRetryEvidence(
+        ElsaInstanceOperationEntity operation, ElsaInstanceProviderReconciliationCommit commit)
+    {
+        var completeReplacement = commit.RetryEvidenceReference is not null && commit.RetryEvidenceDigest is not null;
+        if (commit.RetryEvidenceReference is null && commit.RetryEvidenceDigest is null &&
+            string.Equals(operation.ReconciliationDiagnosticCode, commit.DiagnosticCode, StringComparison.Ordinal))
+            return;
+
+        operation.ReconciliationRetryEvidenceReference = completeReplacement ? commit.RetryEvidenceReference : null;
+        operation.ReconciliationRetryEvidenceDigest = completeReplacement ? commit.RetryEvidenceDigest : null;
+    }
+
     private static void ApplyNoOpReconciliationMetadata(
         ElsaInstanceOperationEntity operation,
         DeploymentRunEntity run,
@@ -3839,11 +3855,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         operation.HeartbeatAt = null;
         operation.UpdatedAt = commit.ReconciledAt.ToUniversalTime();
         operation.ReconciliationEvidenceFingerprint = commit.EvidenceFingerprint;
+        ApplyReconciliationRetryEvidence(operation, commit);
         operation.ReconciliationDiagnosticCode = commit.DiagnosticCode;
-        operation.ReconciliationRetryEvidenceReference = commit.RetryEvidenceReference ??
-            operation.ReconciliationRetryEvidenceReference;
-        operation.ReconciliationRetryEvidenceDigest = commit.RetryEvidenceDigest ??
-            operation.ReconciliationRetryEvidenceDigest;
         operation.ReconciledObservedLifecycle = commit.Instance.ObservedLifecycle;
         operation.ReconciledHealth = commit.Instance.Health;
         operation.ReconciledInstanceVersion = instanceVersion;

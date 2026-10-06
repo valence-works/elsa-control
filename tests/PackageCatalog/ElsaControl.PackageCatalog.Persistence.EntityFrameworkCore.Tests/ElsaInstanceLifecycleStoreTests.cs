@@ -3409,9 +3409,10 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             identityBinding.CanonicalCallbackUri);
         Assert.Equal(2, await db.ElsaInstanceAuditEvents.CountAsync(x =>
             x.OperationId == accepted.Operation.Id && x.EventType == "lifecycle.reconciled"));
-        Assert.Equal("https://evidence.example/retry/provider-observation-1",
-            operation.ReconciliationRetryEvidenceReference);
-        Assert.Equal("sha256:" + new string('b', 64), operation.ReconciliationRetryEvidenceDigest);
+        // Convergence is a new diagnostic: current evidence no longer describes
+        // the earlier ambiguous observation; append-only history remains above.
+        Assert.Null(operation.ReconciliationRetryEvidenceReference);
+        Assert.Null(operation.ReconciliationRetryEvidenceDigest);
         Assert.False(replay.RetrySafe);
 
         var projectedEngine = await db.WorkflowEngines.SingleAsync(x => x.Id == run.EngineId);

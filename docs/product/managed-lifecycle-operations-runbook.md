@@ -452,6 +452,18 @@ metadata is not an ARM error code. The earlier synthetic nested fixture carrying
 an error `code` of `Conflict` is unknown and requires operator attention.
 Regression tests prove these classification rules, not live recovery completion.
 
+## Current retry evidence
+
+A reconciliation observation's diagnostic identifies the failure its retry
+evidence describes. An unchanged diagnostic without replacement evidence retains
+the current reference/digest pair. A changed diagnostic without a complete new
+pair clears both fields; a partial replacement also clears both, even for the
+same diagnostic. Complete replacements install the reference and digest together.
+This rule applies to both aggregate updates and no-op reconciliation ticks.
+Convergence clears the earlier failure's current evidence without removing audit
+history. Admin recover refuses missing evidence; the existing auto-resume-exhausted
+exception, provider re-observation, and commercial checks still apply.
+
 ## Controlled-fixture validation
 
 Validate this runbook against controlled persistence/API fixtures for:
