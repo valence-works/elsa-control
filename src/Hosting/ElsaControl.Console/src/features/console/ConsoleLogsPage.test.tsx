@@ -25,12 +25,12 @@ const mocks = vi.hoisted(() => {
 vi.mock("@microsoft/signalr", () => ({
   HubConnectionState: { Connected: "Connected" },
   LogLevel: { Warning: 2 },
-  HubConnectionBuilder: vi.fn(() => ({
+  HubConnectionBuilder: vi.fn(function () { return {
     withUrl: vi.fn().mockReturnThis(),
     withAutomaticReconnect: vi.fn().mockReturnThis(),
     configureLogging: vi.fn().mockReturnThis(),
     build: vi.fn(() => mocks.hubConnection)
-  }))
+  }; })
 }));
 
 vi.mock("@/features/console/consoleLogApi", () => ({

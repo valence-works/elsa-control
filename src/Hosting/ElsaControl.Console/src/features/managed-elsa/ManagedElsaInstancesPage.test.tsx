@@ -20,6 +20,7 @@ const azureProvisioningProvider = { id: "azure", displayName: "Azure" };
 
 describe("ManagedElsaInstancesPage", () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     window.sessionStorage.clear();
   });

@@ -53,6 +53,18 @@ if ! docker start "$container_id" >/dev/null 2>&1; then
   fail "container failed to start"
 fi
 
+# Check the actual application payload, not just the multi-stage Dockerfile.
+# Keep paths and all container output private; every failed read fails closed.
+if ! docker exec "$container_id" sh -ec '
+  test -f /app/wwwroot/admin/index.html
+  modules="$(find /app -name node_modules -print -quit)" || exit 1
+  test -z "$modules"
+  locks="$(find /app \( -name package-lock.json -o -name npm-shrinkwrap.json \) -print -quit)" || exit 1
+  test -z "$locks"
+' >/dev/null 2>&1; then
+  fail "application payload is missing the console or contains npm development artifacts"
+fi
+
 healthy=false
 deadline=$((SECONDS + 60))
 while ((SECONDS < deadline)); do
