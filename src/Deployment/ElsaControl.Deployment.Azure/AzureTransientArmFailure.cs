@@ -45,6 +45,26 @@ public static class AzureTransientArmFailure
         InternalServerError
     };
 
+    private static readonly HashSet<string> WrapperArmCodes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        DeploymentFailed,
+        ResourceDeploymentFailure
+    };
+
+    private static readonly string[][] OperationErrorPaths =
+    [
+        ["properties", "statusMessage", "error"],
+        ["statusMessage", "error"],
+        ["properties", "error"],
+        ["error"]
+    ];
+
+    private static readonly string[][] OperationStatusPaths =
+    [
+        ["properties", "statusMessage"],
+        ["statusMessage"]
+    ];
+
     private static readonly HashSet<string> TerminalArmCodes = new(StringComparer.OrdinalIgnoreCase)
     {
         QuotaExceeded,
@@ -86,16 +106,11 @@ public static class AzureTransientArmFailure
         };
 
     /// <summary>
-    /// Classifies a nested ARM error tree. Any terminal nested code blocks retry.
-    /// Otherwise the first allow-listed nested code becomes the safe diagnostic.
-    /// Wrapper codes such as DeploymentFailed and ResourceDeploymentFailure are neither.
+    /// Classifies a complete nested ARM error tree. Unknown or terminal codes,
+    /// malformed errors, and truncated walks block retry. Only known wrapper and
+    /// allow-listed transient codes may contribute to a transient result.
     /// </summary>
-    public static string? Classify(JsonElement error)
-    {
-        var codes = new List<string>();
-        CollectCodes(error, codes, depth: 0, nodes: 0);
-        return Classify(codes);
-    }
+    public static string? Classify(JsonElement error) => InspectError(error).TransientDiagnostic;
 
     public static string? Classify(string? json)
     {
@@ -141,15 +156,16 @@ public static class AzureTransientArmFailure
     public static string? ClassifyOperations(JsonElement operations)
     {
         var codes = new List<string>();
-        CollectOperationCodes(operations, codes, depth: 0, nodes: 0);
-        return Classify(codes);
+        CollectOperationCodes(operations, codes, depth: 0, nodes: 0, out var incomplete);
+        return incomplete ? null : Classify(codes);
     }
 
     internal static AzureArmErrorInspection InspectError(JsonElement error)
     {
         var codes = new List<string>();
-        CollectCodes(error, codes, depth: 0, nodes: 0);
-        return Inspect(codes);
+        var incomplete = false;
+        CollectCodes(error, codes, depth: 0, nodes: 0, ref incomplete);
+        return incomplete || codes.Count == 0 ? new AzureArmErrorInspection(null, NeedsOperator: true) : Inspect(codes);
     }
 
     internal static AzureArmErrorInspection Inspect(IEnumerable<string?> codes)
@@ -159,14 +175,12 @@ public static class AzureTransientArmFailure
         foreach (var code in codes)
         {
             var normalized = Normalize(code);
-            if (normalized is null)
-                continue;
-            if (TerminalArmCodes.Contains(normalized))
-                return new AzureArmErrorInspection(null, HasTerminal: true);
+            if (normalized is null || (!WrapperArmCodes.Contains(normalized) && !IsTransient(normalized)))
+                return new AzureArmErrorInspection(null, NeedsOperator: true);
             firstTransient ??= IsTransient(normalized) ? ToSafeDiagnostic(normalized) : null;
         }
 
-        return new AzureArmErrorInspection(firstTransient, HasTerminal: false);
+        return new AzureArmErrorInspection(firstTransient, NeedsOperator: false);
     }
 
     internal static bool IsSafeNestedDeploymentName(string? name) =>
@@ -175,9 +189,10 @@ public static class AzureTransientArmFailure
         name.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.') &&
         name.IndexOfAny(['/', '\\']) < 0;
 
-    internal static IReadOnlyList<string> FailedNestedDeploymentNames(JsonElement operations)
+    internal static IReadOnlyList<string> FailedNestedDeploymentNames(JsonElement operations, out bool incomplete)
     {
-        if (operations.ValueKind != JsonValueKind.Array)
+        incomplete = operations.ValueKind != JsonValueKind.Array;
+        if (incomplete)
             return [];
 
         var names = new List<string>();
@@ -185,35 +200,46 @@ public static class AzureTransientArmFailure
         foreach (var operation in operations.EnumerateArray())
         {
             if (fanout++ >= MaximumErrorWalkFanout)
+            {
+                incomplete = true;
                 break;
-            if (!TryGetTarget(operation, out var type, out var name) || name is null)
+            }
+            if (!TryGetTarget(operation, out var type, out var name))
                 continue;
             if (!string.Equals(type, NestedModuleDeploymentType, StringComparison.OrdinalIgnoreCase))
                 continue;
             if (!IsSafeNestedDeploymentName(name))
+            {
+                incomplete = true;
                 continue;
-            names.Add(name);
+            }
+            names.Add(name!);
         }
 
         return names;
     }
 
-    internal static int CollectOperationCodes(JsonElement operations, List<string> codes, int depth, int nodes)
+    internal static int CollectOperationCodes(
+        JsonElement operations, List<string> codes, int depth, int nodes, out bool incomplete)
     {
-        if (operations.ValueKind == JsonValueKind.Array)
-        {
-            var fanout = 0;
-            foreach (var operation in operations.EnumerateArray())
-            {
-                if (fanout++ >= MaximumErrorWalkFanout || nodes >= MaximumErrorWalkNodes || depth > MaximumErrorWalkDepth)
-                    break;
-                nodes = CollectOneOperation(operation, codes, depth + 1, nodes);
-            }
+        incomplete = false;
+        if (operations.ValueKind != JsonValueKind.Array)
+            return CollectOneOperation(operations, codes, depth, nodes, ref incomplete);
 
-            return nodes;
+        var fanout = 0;
+        foreach (var operation in operations.EnumerateArray())
+        {
+            if (fanout++ >= MaximumErrorWalkFanout)
+            {
+                incomplete = true;
+                break;
+            }
+            nodes = CollectOneOperation(operation, codes, depth + 1, nodes, ref incomplete);
+            if (incomplete)
+                break;
         }
 
-        return CollectOneOperation(operations, codes, depth, nodes);
+        return nodes;
     }
 
     public static bool IsRetryingOrNeedsOperator(string? code) =>
@@ -223,71 +249,81 @@ public static class AzureTransientArmFailure
             or ManagedElsaReasonCodeCatalog.AzureDeploymentFailed
             or ManagedElsaReasonCodeCatalog.AzureDeploymentCanceled;
 
-    private static int CollectCodes(JsonElement element, List<string> codes, int depth, int nodes)
+    private static int CollectCodes(JsonElement element, List<string> codes, int depth, int nodes, ref bool incomplete)
     {
         if (nodes >= MaximumErrorWalkNodes || depth > MaximumErrorWalkDepth)
+        {
+            incomplete = true;
             return nodes;
+        }
         nodes++;
 
         switch (element.ValueKind)
         {
             case JsonValueKind.Object:
-                if (element.TryGetProperty("code", out var codeElement) &&
-                    codeElement.ValueKind == JsonValueKind.String)
-                {
-                    var code = codeElement.GetString();
-                    if (!string.IsNullOrWhiteSpace(code))
-                        codes.Add(code);
-                }
+                if (element.TryGetProperty("code", out var codeElement) && codeElement.ValueKind == JsonValueKind.String)
+                    codes.Add(codeElement.GetString() ?? string.Empty);
+                else
+                    incomplete = true;
 
-                if (element.TryGetProperty("details", out var details) &&
-                    details.ValueKind == JsonValueKind.Array)
-                    nodes = CollectCodes(details, codes, depth + 1, nodes);
+                if (element.TryGetProperty("details", out var details) && details.ValueKind != JsonValueKind.Null)
+                {
+                    if (details.ValueKind == JsonValueKind.Array)
+                        nodes = CollectCodes(details, codes, depth + 1, nodes, ref incomplete);
+                    else
+                        incomplete = true;
+                }
                 break;
             case JsonValueKind.Array:
                 var fanout = 0;
                 foreach (var child in element.EnumerateArray())
                 {
-                    if (fanout++ >= MaximumErrorWalkFanout || nodes >= MaximumErrorWalkNodes)
+                    if (fanout++ >= MaximumErrorWalkFanout)
+                    {
+                        incomplete = true;
                         break;
-                    nodes = CollectCodes(child, codes, depth + 1, nodes);
+                    }
+                    nodes = CollectCodes(child, codes, depth + 1, nodes, ref incomplete);
+                    if (incomplete)
+                        break;
                 }
-
+                break;
+            default:
+                incomplete = true;
                 break;
         }
 
         return nodes;
     }
 
-    private static int CollectOneOperation(JsonElement operation, List<string> codes, int depth, int nodes)
+    private static int CollectOneOperation(JsonElement operation, List<string> codes, int depth, int nodes, ref bool incomplete)
     {
         if (nodes >= MaximumErrorWalkNodes || depth > MaximumErrorWalkDepth)
-            return nodes;
-        nodes++;
-        if (TryGetStructuredOperationError(operation, out var error))
-            nodes = CollectCodes(error, codes, depth + 1, nodes);
-        return nodes;
-    }
-
-    private static bool TryGetStructuredOperationError(JsonElement operation, out JsonElement error)
-    {
-        if (TryGetObjectPath(operation, out error, "properties", "statusMessage", "error") ||
-            TryGetObjectPath(operation, out error, "statusMessage", "error") ||
-            TryGetObjectPath(operation, out error, "properties", "error") ||
-            TryGetObjectPath(operation, out error, "error"))
-            return true;
-
-        if ((TryGetObjectPath(operation, out var statusMessage, "properties", "statusMessage") ||
-             TryGetObjectPath(operation, out statusMessage, "statusMessage")) &&
-            statusMessage.TryGetProperty("code", out var code) &&
-            code.ValueKind == JsonValueKind.String)
         {
-            error = statusMessage;
-            return true;
+            incomplete = true;
+            return nodes;
         }
-
-        error = default;
-        return false;
+        nodes++;
+        var found = false;
+        // Inspect every supported structured error path. A transient in the first
+        // path must not hide an unknown or terminal code in a sibling path.
+        foreach (var path in OperationErrorPaths)
+        {
+            if (!TryGetPath(operation, out var error, path))
+                continue;
+            found = true;
+            nodes = CollectCodes(error, codes, depth + 1, nodes, ref incomplete);
+        }
+        foreach (var path in OperationStatusPaths)
+        {
+            if (!TryGetObjectPath(operation, out var status, path) || !status.TryGetProperty("code", out _))
+                continue;
+            found = true;
+            nodes = CollectCodes(status, codes, depth + 1, nodes, ref incomplete);
+        }
+        if (!found)
+            incomplete = true;
+        return nodes;
     }
 
     private static bool TryGetTarget(JsonElement operation, out string? type, out string? name)
@@ -309,14 +345,16 @@ public static class AzureTransientArmFailure
         return false;
     }
 
-    private static bool TryGetObjectPath(JsonElement element, out JsonElement value, params string[] path)
+    private static bool TryGetObjectPath(JsonElement element, out JsonElement value, params string[] path) =>
+        TryGetPath(element, out value, path) && value.ValueKind == JsonValueKind.Object;
+
+    private static bool TryGetPath(JsonElement element, out JsonElement value, params string[] path)
     {
         value = element;
         foreach (var segment in path)
         {
             if (value.ValueKind != JsonValueKind.Object ||
-                !value.TryGetProperty(segment, out value) ||
-                value.ValueKind != JsonValueKind.Object)
+                !value.TryGetProperty(segment, out value))
             {
                 value = default;
                 return false;
@@ -341,4 +379,4 @@ public static class AzureTransientArmFailure
     }
 }
 
-internal readonly record struct AzureArmErrorInspection(string? TransientDiagnostic, bool HasTerminal);
+internal readonly record struct AzureArmErrorInspection(string? TransientDiagnostic, bool NeedsOperator);

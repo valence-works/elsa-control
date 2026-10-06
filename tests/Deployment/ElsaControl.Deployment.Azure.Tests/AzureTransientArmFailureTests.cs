@@ -69,12 +69,13 @@ public sealed class AzureTransientArmFailureTests
         Assert.True(AzureTransientArmFailure.IsRetryingOrNeedsOperator(code));
 
     [Fact]
-    public void Nested_production_aca_module_failure_is_transient()
-    {
-        Assert.Equal(
-            AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode,
-            AzureTransientArmFailure.Classify(NestedProductionAcaFailure));
-    }
+    public void Historical_conflict_wrapper_is_unknown_and_blocks_retry() =>
+        Assert.Null(AzureTransientArmFailure.Classify(HistoricalConflictAcaFailure));
+
+    [Fact]
+    public void Nested_known_wrappers_preserve_transient_classification() =>
+        Assert.Equal(AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode,
+            AzureTransientArmFailure.Classify("""{"code":"DeploymentFailed","details":[{"code":"ResourceDeploymentFailure","details":[{"code":"ManagedEnvironmentProvisioningError"}]}]}"""));
 
     [Fact]
     public void Message_only_inner_text_is_not_transient() =>
@@ -115,15 +116,183 @@ public sealed class AzureTransientArmFailureTests
     public void Failed_nested_module_names_are_taken_from_structured_targets_only()
     {
         using var document = JsonDocument.Parse(ProductionFoundationNestedModuleOperations);
-        var names = AzureTransientArmFailure.FailedNestedDeploymentNames(document.RootElement);
+        var names = AzureTransientArmFailure.FailedNestedDeploymentNames(document.RootElement, out var incomplete);
+        Assert.False(incomplete);
         Assert.Equal(["container-apps-environment"], names);
 
         using var unsafeDocument = JsonDocument.Parse(
             """[{"properties":{"targetResource":{"resourceType":"Microsoft.Resources/deployments","resourceName":"/subscriptions/1/resourceGroups/foreign-rg/providers/Microsoft.Resources/deployments/other"}}}]""");
-        Assert.Empty(AzureTransientArmFailure.FailedNestedDeploymentNames(unsafeDocument.RootElement));
+        Assert.Empty(AzureTransientArmFailure.FailedNestedDeploymentNames(unsafeDocument.RootElement, out var unsafeTarget));
+        Assert.True(unsafeTarget);
     }
 
-    internal const string NestedProductionAcaFailure = """
+    [Theory]
+    [InlineData("UnknownError")]
+    [InlineData("Conflict")]
+    [InlineData("not-a-code")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void Unknown_siblings_block_retry_in_either_order(string? unknown)
+    {
+        string?[] codes = [AzureTransientArmFailure.ManagedEnvironmentProvisioningError, unknown];
+        foreach (var ordered in new[] { codes, codes.Reverse().ToArray() })
+        {
+            Assert.Null(AzureTransientArmFailure.Classify(ordered));
+            Assert.Null(AzureTransientArmFailure.Classify(JsonSerializer.Serialize(new
+            {
+                code = AzureTransientArmFailure.DeploymentFailed,
+                details = ordered.Select(code => new { code }).ToArray()
+            })));
+        }
+    }
+
+    [Theory]
+    [InlineData("depth")]
+    [InlineData("nodes")]
+    [InlineData("fanout")]
+    public void Truncated_error_walk_blocks_retry(string bound) =>
+        Assert.Null(AzureTransientArmFailure.Classify(IncompleteErrorTree(bound)));
+
+    [Fact]
+    public void Truncated_operations_list_blocks_retry() =>
+        Assert.Null(AzureTransientArmFailure.ClassifyOperations(OversizedOperations));
+
+    [Theory]
+    [InlineData("depth")]
+    [InlineData("nodes")]
+    [InlineData("fanout")]
+    public void Truncated_operation_error_tree_blocks_retry(string bound) =>
+        Assert.Null(AzureTransientArmFailure.ClassifyOperations(
+            "[{\"properties\":{\"statusMessage\":{\"error\":" + IncompleteErrorTree(bound) + "}}}]"));
+
+    [Theory]
+    [InlineData("UnknownError")]
+    [InlineData("QuotaExceeded")]
+    public void Every_structured_operation_error_path_must_be_safe(string code)
+    {
+        var operation = new
+        {
+            properties = new
+            {
+                statusMessage = new { error = new { code = AzureTransientArmFailure.ManagedEnvironmentProvisioningError } },
+                error = new { code }
+            }
+        };
+        Assert.Null(AzureTransientArmFailure.ClassifyOperations(JsonSerializer.Serialize(new[] { operation })));
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"error\":null}")]
+    [InlineData("{\"error\":{\"code\":42}}")]
+    [InlineData("{\"error\":{\"code\":\"DeploymentFailed\",\"details\":{}}}")]
+    public void Incomplete_operation_error_cannot_hide_behind_a_transient_sibling(string operation) =>
+        Assert.Null(AzureTransientArmFailure.ClassifyOperations(
+            "[{\"error\":{\"code\":\"ManagedEnvironmentProvisioningError\"}}," + operation + "]"));
+
+    [Theory]
+    [InlineData("properties.statusMessage.error")]
+    [InlineData("statusMessage.error")]
+    [InlineData("properties.error")]
+    [InlineData("error")]
+    [InlineData("properties.statusMessage")]
+    [InlineData("statusMessage")]
+    public void Each_supported_structured_operation_error_path_remains_transient(string path)
+    {
+        object error = new { code = AzureTransientArmFailure.ManagedEnvironmentProvisioningError };
+        foreach (var segment in path.Split('.').Reverse())
+            error = new Dictionary<string, object> { [segment] = error };
+        Assert.Equal(AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode,
+            AzureTransientArmFailure.ClassifyOperations(JsonSerializer.Serialize(new[] { error })));
+    }
+
+    [Theory]
+    [InlineData("depth")]
+    [InlineData("nodes")]
+    [InlineData("fanout")]
+    public void Complete_error_walk_at_limit_remains_transient(string bound)
+    {
+        object wrapper = new { code = AzureTransientArmFailure.DeploymentFailed };
+        object[] details;
+        if (bound == "depth")
+        {
+            for (var index = 0; index < 3; index++)
+                wrapper = new { code = AzureTransientArmFailure.DeploymentFailed, details = new[] { wrapper } };
+            details = [wrapper];
+        }
+        else if (bound == "nodes")
+        {
+            // Root + details array + four wrapper/array pairs + 54 leaves = 64.
+            details = new[] { 14, 14, 14, 12 }.Select(count => (object)new
+            {
+                code = AzureTransientArmFailure.DeploymentFailed,
+                details = Enumerable.Repeat(wrapper, count).ToArray()
+            }).ToArray();
+        }
+        else
+            details = Enumerable.Repeat(wrapper, 16).ToArray();
+
+        Assert.Equal(AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode,
+            AzureTransientArmFailure.Classify(JsonSerializer.Serialize(new
+            {
+                code = AzureTransientArmFailure.ManagedEnvironmentProvisioningError,
+                details
+            })));
+    }
+
+    internal static string IncompleteErrorTree(string bound)
+    {
+        object terminal = new { code = AzureTransientArmFailure.QuotaExceeded };
+        object nested;
+        switch (bound)
+        {
+            case "depth":
+                nested = terminal;
+                for (var index = 0; index < 5; index++)
+                    nested = new { code = AzureTransientArmFailure.DeploymentFailed, details = new[] { nested } };
+                break;
+            case "nodes":
+                nested = new
+                {
+                    code = AzureTransientArmFailure.DeploymentFailed,
+                    details = Enumerable.Range(0, 4).Select(_ => (object)new
+                    {
+                        code = AzureTransientArmFailure.DeploymentFailed,
+                        details = Enumerable.Repeat(new { code = AzureTransientArmFailure.DeploymentFailed }, 16).ToArray()
+                    }).Append(terminal).ToArray()
+                };
+                break;
+            case "fanout":
+                nested = new
+                {
+                    code = AzureTransientArmFailure.DeploymentFailed,
+                    details = Enumerable.Repeat((object)new { code = AzureTransientArmFailure.DeploymentFailed }, 16)
+                        .Append(terminal).ToArray()
+                };
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(bound));
+        }
+
+        return JsonSerializer.Serialize(new
+        {
+            code = AzureTransientArmFailure.ManagedEnvironmentProvisioningError,
+            details = new[] { nested }
+        });
+    }
+
+    internal static string OversizedOperations => JsonSerializer.Serialize(Enumerable.Range(0, 17).Select(index => new
+    {
+        properties = new
+        {
+            provisioningState = "Failed",
+            statusMessage = new { error = new { code = index == 0
+                ? AzureTransientArmFailure.ManagedEnvironmentProvisioningError
+                : index == 16 ? AzureTransientArmFailure.QuotaExceeded : AzureTransientArmFailure.DeploymentFailed } }
+        }
+    }));
+
+    internal const string HistoricalConflictAcaFailure = """
         {
           "code": "DeploymentFailed",
           "message": "At least one resource deployment operation failed. Please list deployment operations for details. Please see https://aka.ms/arm-deployment-operations for usage details.",

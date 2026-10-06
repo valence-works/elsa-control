@@ -432,6 +432,26 @@ denial alone is not positive operator-access proof. Stored instance health alone
 remains unknown/incomplete, never healthy. Keep the metric and authorized trace
 contracts above unchanged throughout rollout.
 
+## Bounded Azure failure classification
+
+Automatic retry requires a complete structured error walk containing only known
+transient codes and the `DeploymentFailed` / `ResourceDeploymentFailure` wrappers.
+Any unknown code, malformed error, or exceeded depth (8), node (64), or fan-out
+(16) limit requires operator attention. Free-text messages are never parsed.
+An unsafe initial error cannot be rescued by a later operations-list lookup.
+
+The failed-operations query projects up to 17 results so the seventeenth detects
+fan-out truncation. Same-resource-group nested deployments share the node budget
+and at most four CLI list calls. These limits bound classification and projected
+output; they do not bound Azure CLI's internal HTTP pagination. Retry backoff,
+the three-attempt cap, and the commercial gate remain unchanged.
+
+The recorded #750 ACA failure is retryable through its structured
+`ManagedEnvironmentProvisioningError` operations entry. Its HTTP `statusCode`
+metadata is not an ARM error code. The earlier synthetic nested fixture carrying
+an error `code` of `Conflict` is unknown and requires operator attention.
+Regression tests prove these classification rules, not live recovery completion.
+
 ## Controlled-fixture validation
 
 Validate this runbook against controlled persistence/API fixtures for:

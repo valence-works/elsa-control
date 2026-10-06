@@ -38,11 +38,11 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private static readonly TimeSpan DeploymentTimestampSkew = TimeSpan.FromMinutes(1);
     private static readonly HashSet<string> TerminalDeploymentStates = new(["Succeeded", "Failed", "Canceled"], StringComparer.OrdinalIgnoreCase);
     /// <summary>
-    /// Failed operations only, capped at the error-walk fan-out so the observer
-    /// never materializes an unbounded ARM operations page.
+    /// Failed operations only, with one extra result to detect fan-out overflow.
+    /// This bounds projected output, not Azure CLI's internal HTTP pagination.
     /// </summary>
     private static readonly string FailedDeploymentOperationsQuery =
-        $"[?properties.provisioningState=='Failed'] | [0:{AzureTransientArmFailure.MaximumErrorWalkFanout}]";
+        $"[?properties.provisioningState=='Failed'] | [0:{AzureTransientArmFailure.MaximumErrorWalkFanout + 1}]";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = true
@@ -649,7 +649,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         if (!error.Succeeded || error.Value is null)
             return null;
         var inspection = AzureTransientArmFailure.InspectError(error.Value.Value);
-        if (inspection.HasTerminal)
+        if (inspection.NeedsOperator)
             return null;
         if (inspection.TransientDiagnostic is not null)
             return inspection.TransientDiagnostic;
@@ -662,7 +662,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     /// <summary>
     /// Read-only walk of failed deployment operations for a named deployment and
     /// same-RG nested module deployments. Bounded by the same depth, node, fan-out
-    /// and page limits as the error-tree walk. A failed or truncated list stays
+    /// and four CLI-list-call limits. A failed or truncated list stays
     /// operator-recoverable.
     /// </summary>
     private async Task<string?> TryClassifyFailedDeploymentOperationsAsync(
@@ -714,8 +714,13 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 return null;
 
             nodes = AzureTransientArmFailure.CollectOperationCodes(
-                operations.Value.Value, codes, depth, nodes);
-            foreach (var nested in AzureTransientArmFailure.FailedNestedDeploymentNames(operations.Value.Value))
+                operations.Value.Value, codes, depth, nodes, out var incomplete);
+            if (incomplete)
+                return null;
+            var nestedNames = AzureTransientArmFailure.FailedNestedDeploymentNames(operations.Value.Value, out var incompleteTargets);
+            if (incompleteTargets)
+                return null;
+            foreach (var nested in nestedNames)
             {
                 if (pending.Count + seen.Count >= AzureTransientArmFailure.MaximumErrorWalkFanout)
                 {
@@ -726,9 +731,9 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             }
 
             // A transient code on this page must not hide a later sibling
-            // module's terminal code. Terminal still fails closed immediately.
+            // module's unknown or terminal code. Either fails closed immediately.
             var inspection = AzureTransientArmFailure.Inspect(codes);
-            if (inspection.HasTerminal)
+            if (inspection.NeedsOperator)
                 return null;
         }
 
