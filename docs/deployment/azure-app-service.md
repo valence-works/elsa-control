@@ -206,14 +206,67 @@ interrupted candidate step plus successful restore and postflight identities.
 A stalled restore or runner loss must remain an incident, never a claimed PASS.
 See [GitHub's cancellation sequence](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation).
 
-This workflow has implementation and local stub-test coverage, but no live
-Azure rollback dispatch has been run yet. R1/R2, live data/read proofs, and
-the exact cancellation exercise therefore remain pending. The workflow does
-not prove Cloud BFF production behavior, managed Elsa runtime rollback, or a
-rollback across a schema boundary. If the schema gate refuses, keep the freeze
-on and roll forward with Deploy staging after the data owner resolves the
-boundary. Do not describe this runbook as a live staging result until a run
-records the exact pair, restore, postflight, and cancellation evidence.
+### Control rollback (staging-proven)
+
+On 6 October 2026, the exact staging build 234 → 233 → 234 pair passed
+normal image rollback and roll-forward. This evidence applies to that pair;
+every later pair must pass fresh provenance, schema, persisted-data, identity,
+and freeze gates before a write. Same-schema plus a passed persisted-data check
+permits this guarded image rollback. A schema boundary or uncertain evidence
+means **roll forward only**; restoring an image never down-migrates Catalog.
+
+The successful pair used these workflow inputs:
+
+```bash
+gh workflow run staging-control-rollback.yml \
+  --repo valence-works/elsa-control --ref main \
+  --field previous_digest=sha256:5cb01f39da5faafac8e214c88d4d50c30e16a40e6e6c440911d9d2da3defb046 \
+  --field expected_digest=sha256:ae142a98adfec4a6a080af56195634ace873cb07d3d49f58cb23bdafb2393c9f
+```
+
+N was build **234**, source `e19036c1cd6eeabea49e791ac4b47f8fe8ac7ff5`;
+N-1 was build **233**, source `903c5eb5a48d7e026908e5f59a4fba9d13a8b7e1`.
+Both came from successful Deploy-staging runs; the older source was the
+immediate successful predecessor. There were no changed persisted-contract
+paths and both source migration sets contained the same 63 IDs, with sorted-set
+hash `ecdedb125d9ca90a17349f6ab9645015bffa727ec708284b93ec74a955bece1d`.
+**Applied history was inferred from N's successful startup, not observed through
+SQL.** The preflight logs contain the non-secret migration IDs; no new SQL grant
+or firewall rule was used.
+
+| Result | Evidence on 6 October 2026 (CEST) |
+| --- | --- |
+| R1 — Control image rollback PASS | [Run 37520468942](https://github.com/valence-works/elsa-control/actions/runs/37520468942), harness `f5f6a5d9fc7557bfcd8f5ad12af97806d5d911a8`. Preflight 21:38:41–21:39:53; switch 21:39:53–21:43:19; N-1 checks 21:43:19–21:43:44. Predicted and actual BFF outcome compatible; authenticated source contract and non-admin existing-data hash matched. |
+| R2 — Control roll-forward PASS | Same run: restore 21:44:14–21:47:05; every postflight 21:47:05–21:47:43. Switch-step start to restore-start upper bound 261 seconds, below the 1,200-second cap. |
+| Failure recovery PASS; R1 FAIL in first rehearsal | [Run 37516632083](https://github.com/valence-works/elsa-control/actions/runs/37516632083) failed its N-1 BFF assertion. Restore 21:13:25–21:16:07 and every postflight 21:16:07–21:16:46 succeeded. [PR #760](https://github.com/valence-works/elsa-control/pull/760) fixed the invalid prediction and distinguished evaluation errors from genuine incompatibility before the successful retry. |
+| Deliberate interrupted hold — PASS | [Run 37524549830](https://github.com/valence-works/elsa-control/actions/runs/37524549830), same harness and pair. Runtime hold checkpoint 22:17:18.166 CEST; ordinary cancellation HTTP 202 at 22:17:21.474; hold **Cancelled** at 22:17:48. Restore 22:17:48–22:20:31 and every postflight 22:20:31–22:21:19 succeeded, within 237.53 seconds of the request (five-minute grace). Overall workflow **Cancelled** is expected; only the restoration proof is PASS. |
+| R3 — Cloud BFF rollback PASS, separate scope | [Cloud #152 evidence](https://github.com/valence-works/elsa-cloud/issues/152#issuecomment-6023098436): normal run 37497316894 and cancelled verified-hold run 37512773158. The actual cancellation hold was visible at 20:38:09; restoration finished at 20:40:28. Current Cloud source and provider version were restored exactly; this is not frontend or Control-image evidence. |
+
+Both the normal and deliberately cancelled runs restored the exact
+image/digest, health build/source,
+`Application__BuildNumber` presence/value/slot stickiness, setting-name hash
+`d811cd7e5e4954d6776f615ecddff26a3e4eb0a911e031df53a9a6e586720cc6`,
+fixture JSON `null`, byte-identical authenticated compatibility, existing-data
+hash, and compatible BFF. Deploy-staging deployment `6840074804` was unchanged,
+with no intervening Deploy-staging run. These were authenticated operational
+read proofs using a synthetic non-admin user. Ordinary customer sign-in and
+billing-browser proof remain separate #508 requirements.
+
+Earlier intended cancellation runs 37521845481 and 37523327392 completed
+normal restoration without a submitted cancellation; they are not interruption
+evidence. The successful exercise used fresh GitHub run/job/step metadata to
+request ordinary cancellation during the verified hold, then validated that the
+actual runtime checkpoint in completed logs preceded the request. No force
+cancellation was used.
+
+Only the existing staging App Service was used: no new resources, SKU change,
+SQL grants, firewall changes, or production mutation. Incremental restart cost
+was not measured; this is not a recurring-cost headroom claim.
+
+Production, managed-runtime rollback, rollback across a schema boundary, and
+#508 row 14 (rollback with a capable engine present) remain **unproven**.
+Frontend rollback remains separate under #547. Passing this pair does not
+establish first-public #508 GO or replace the remaining customer-flow evidence.
 
 ## GitHub Actions Deployment
 
