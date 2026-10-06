@@ -36,6 +36,13 @@ Skip an issue that does not have project Status `Ready` and Agent State `Agent R
 
 The GitHub org project [Elsa Commercial Platform](https://github.com/orgs/valence-works/projects/7) (#7) is the source of truth for execution state. All worker lanes (`worker:codex`, `worker:claude`, `worker:cursor`) keep it updated.
 
+The board spans repositories. The command resolves an item by repository identity,
+issue number, and Project content kind `Issue`, across all targeted search pages.
+Another repository's same-numbered issue, a pull request, or a draft cannot satisfy
+pickup. Unknown identity or duplicate exact matches fail closed. `drift --all`
+checks only the requested repository's issues and reports unreadable identities;
+field updates re-read and verify the specific item before writing.
+
 Status values: `Backlog`, `Ready`, `In Progress`, `In Review`, `Blocked`, `Done`.
 
 Views that dispatchers and workers must honor: Execution, Agent Queue, Blocked.
