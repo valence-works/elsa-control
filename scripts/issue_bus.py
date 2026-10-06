@@ -263,7 +263,7 @@ class GhClient:
         return [_normalize_project_item(item) for item in _rest_collection(value, "items")]
 
     def project_for_issue(self, number: int) -> ProjectSnapshot:
-        """Read one issue's matching Project item without scanning the board."""
+        """Resolve the exact repository Issue across every targeted search page."""
 
         fields = self.project_fields()
         status_field = fields.get("status")
@@ -278,6 +278,8 @@ class GhClient:
             GITHUB_API_VERSION,
             f"orgs/{self.project_owner}/projectsV2/{self.project_number}/items?per_page=100&q={number}"
             f"&fields={status_field.rest_id},{agent_field.rest_id}",
+            "--paginate",
+            "--slurp",
             json_output=True,
         )
         raw_items = _rest_collection(value, "items")
@@ -286,13 +288,13 @@ class GhClient:
             if not isinstance(raw, Mapping):
                 continue
             content = raw.get("content")
-            content_number = content.get("number") if isinstance(content, Mapping) else None
-            try:
-                item_matches = int(content_number) == number
-            except (TypeError, ValueError):
-                item_matches = False
-            if not item_matches:
+            content_number = _positive_int(content.get("number")) if isinstance(content, Mapping) else None
+            if content_number != number:
                 continue
+            if _project_issue_identity(raw) != (self.repository.casefold(), number):
+                continue
+            if item is not None:
+                raise GhError("Project has multiple items for the exact repository issue")
             values = raw.get("fields", raw)
             item = ProjectItem(
                 id=str(raw.get("node_id") or raw.get("id") or ""),
@@ -303,7 +305,6 @@ class GhClient:
                 raw=raw,
                 rest_id=_rest_int(raw.get("id")),
             )
-            break
         return ProjectSnapshot(item, fields)
 
     def linked_open_prs(self, number: int) -> Sequence[Mapping[str, Any]]:
@@ -504,6 +505,21 @@ class GhClient:
             values.append({"id": field.rest_id, "value": str(option_id)})
         if not values:
             return
+        expected_identity = (self.repository.casefold(), item.issue_number)
+        if item.project_id != str(self.project_number) or _project_issue_identity(item.raw) != expected_identity:
+            raise GhError("refusing Project mutation for a different repository issue")
+        item_path = f"orgs/{self.project_owner}/projectsV2/{self.project_number}/items/{item.rest_id}"
+        current = self.run("api", "-H", GITHUB_API_VERSION, item_path, json_output=True)
+        # The specific-item endpoint wraps its value; search results are bare rows.
+        if isinstance(current, Mapping) and "value" in current:
+            current = current["value"]
+        if (
+            not isinstance(current, Mapping)
+            or _project_issue_identity(current) != expected_identity
+            or _positive_int(current.get("id")) != item.rest_id
+            or str(current.get("node_id") or current.get("id") or "") != item.id
+        ):
+            raise GhError("Project item identity changed before mutation")
         try:
             payload = json.dumps({"fields": values})
         except (TypeError, ValueError) as exc:
@@ -514,7 +530,7 @@ class GhClient:
             "PATCH",
             "-H",
             GITHUB_API_VERSION,
-            f"orgs/{self.project_owner}/projectsV2/{self.project_number}/items/{item.rest_id}",
+            item_path,
             "--input",
             "-",
             input_data=payload,
@@ -922,19 +938,30 @@ class IssueBus:
             return [self._drift_issue(number)]
         item_rows = self.client.project_items()
         findings: list[dict[str, Any]] = []
+        seen: set[tuple[str, int]] = set()
         for row in item_rows:
-            content = row.get("content")
-            raw_number = content.get("number") if isinstance(content, Mapping) else None
             try:
-                issue_number = int(raw_number)
-            except (TypeError, ValueError):
+                identity = _project_issue_identity(row)
+            except IssueBusError as exc:
+                findings.append({"issue": None, "code": "unable-to-check", "message": str(exc)})
                 continue
-            findings.append(self._drift_project_row(issue_number, row))
+            if identity is None or identity[0] != self.client.repository.casefold():
+                continue
+            if identity in seen:
+                findings.append({"issue": identity[1], "code": "unable-to-check", "message": "Project has multiple items for the exact repository issue"})
+                continue
+            seen.add(identity)
+            findings.append(self._drift_project_row(identity[1], row))
         return findings
 
     def _drift_project_row(self, number: int, row: Mapping[str, Any]) -> dict[str, Any]:
         """Check normalized REST item fields locally; query links only for ready items."""
 
+        try:
+            if _project_issue_identity(row) != (self.client.repository.casefold(), number):
+                raise GhError("Project row does not belong to the requested repository issue")
+        except IssueBusError as exc:
+            return {"issue": number, "code": "unable-to-check", "message": str(exc)}
         labels = _labels({"labels": row.get("labels", [])})
         ready = READY_LABEL in labels
         status = _text_value(row, "status", "Status")
@@ -1011,6 +1038,30 @@ def _repository_from_api_url(value: Any) -> str | None:
         return None
     match = REPOSITORY_API_URL_PATTERN.fullmatch(value)
     return match.group("repo") if match is not None else None
+
+
+def _project_issue_identity(row: Mapping[str, Any]) -> tuple[str, int] | None:
+    """Require Project content kind and repository; issue business type is unrelated."""
+
+    content_type = row.get("content_type")
+    if content_type in ("PullRequest", "DraftIssue"):
+        return None
+    if content_type != "Issue":
+        raise GhError("Project item has an unreadable content type")
+    content = row.get("content")
+    if not isinstance(content, Mapping) or "pull_request" in content:
+        raise GhError("Project Issue item has unreadable or conflicting content")
+    number = content.get("number")
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        raise GhError("Project Issue item has no valid issue number")
+    repository = content.get("repository")
+    full_name = repository.get("full_name") if isinstance(repository, Mapping) else None
+    api_name = _repository_from_api_url(content.get("repository_url"))
+    if not isinstance(full_name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", full_name):
+        raise GhError("Project Issue item has no readable repository identity")
+    if "repository_url" in content and (api_name is None or api_name.casefold() != full_name.casefold()):
+        raise GhError("Project Issue item has conflicting repository identities")
+    return full_name.casefold(), number
 
 
 def _pr_label(pr: Mapping[str, Any]) -> str:
