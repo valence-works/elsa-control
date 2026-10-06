@@ -15,6 +15,7 @@ from textwrap import dedent
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "azure-api-deploy.yml"
+ROLLBACK_HELPERS = ROOT / "scripts" / "lib" / "azure-api-deploy-rollback.sh"
 
 
 def parse_github_output_file(text: str) -> dict[str, str]:
@@ -88,6 +89,7 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = WORKFLOW.read_text()
+        cls.rollback_helpers = ROLLBACK_HELPERS.read_text()
 
     def test_github_output_parser_matches_actions_runner(self) -> None:
         self.assertEqual(
@@ -136,7 +138,11 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         )
         self.assertIn('elif [ "$linux_fx_version" = "SITECONTAINERS" ]', self.source)
         self.assertIn("az webapp sitecontainers show", self.source)
-        self.assertEqual(3, self.source.count("--query image"))
+        self.assertGreaterEqual(self.source.count("--query image"), 2)
+        self.assertIn("azure_capture_health_identity", self.source)
+        self.assertIn("azure_wait_for_stable_api_health", self.source)
+        self.assertIn("azure_restore_api_runtime_configuration", self.source)
+        self.assertIn("--query image", self.rollback_helpers)
         self.assertNotIn("--query properties.image", self.source)
         self.assertIn(
             "Could not capture the current main sitecontainer image; refusing an unprotected deployment.",
@@ -209,7 +215,7 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertNotIn("DEPLOY_MODE != 'build'", main_guard)
         self.assertIn("The promoted runtime did not match the validated immutable image", self.source)
         self.assertIn("--query linuxFxVersion", self.source)
-        self.assertEqual(3, self.source.count("--query image"))
+        self.assertGreaterEqual(self.source.count("--query image"), 2)
         self.assertIn(
             'current_deployment_mode="${{ steps.current-deployment.outputs.deployment_mode }}"',
             self.source,
@@ -217,7 +223,8 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertIn('if [ "$current_deployment_mode" = "sitecontainers" ]', self.source)
         self.assertIn('elif [ "$current_deployment_mode" = "classic" ]', self.source)
         self.assertIn("PREVIOUS_SITECONTAINER_IMAGE", self.source)
-        self.assertIn('--image "$PREVIOUS_SITECONTAINER_IMAGE"', self.source)
+        self.assertIn("azure_restore_api_runtime_configuration", self.source)
+        self.assertIn('--image "$sitecontainer_image"', self.rollback_helpers)
         self.assertIn("steps.deploy-api.outcome == 'failure'", self.source)
         self.assertIn("steps.health-gate.outcome == 'failure'", self.source)
         self.assertNotIn("steps.managed-telemetry.outcome == 'failure'", self.source)
@@ -430,6 +437,8 @@ fi
                     "STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED": "",
                     "STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS": "",
                     "STAGING_SMOKE_OWNER_INSTANCE_ID": "",
+                    "AZURE_HEALTH_ATTEMPTS": "2",
+                    "AZURE_HEALTH_RETRY_SECONDS": "0",
                 }
             )
 
@@ -1828,6 +1837,11 @@ printf '200'
                         "STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED": "",
                         "STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS": "",
                         "STAGING_SMOKE_OWNER_INSTANCE_ID": "",
+                        # Shared rollback health is intentionally bounded in
+                        # production; make the fake provider deterministic and
+                        # fast while preserving the two-stable-probe contract.
+                        "AZURE_HEALTH_ATTEMPTS": "2",
+                        "AZURE_HEALTH_RETRY_SECONDS": "0",
                     }
                 )
                 return environment
@@ -2996,10 +3010,10 @@ esac
         self.assertIn('expected_image_id="$VALIDATED_CANDIDATE_SOURCE_SHA"', self.source)
         self.assertIn('VALIDATED_CANDIDATE_BUILD_NUMBER: ${{ steps.candidate-authority.outputs.candidate_build_number }}', self.source)
         self.assertIn('expected_build_number="$VALIDATED_CANDIDATE_BUILD_NUMBER"', self.source)
-        self.assertIn('--arg expected_build_number "$expected_build_number"', self.source)
-        self.assertNotIn('--arg expected_build_number "$GITHUB_RUN_NUMBER"', self.source)
+        self.assertIn('--arg expected_build_number "$expected_build_number"', self.rollback_helpers)
+        self.assertNotIn('--arg expected_build_number "$GITHUB_RUN_NUMBER"', self.rollback_helpers)
         self.assertNotIn('Application__BuildNumber="$GITHUB_RUN_NUMBER"', self.source)
-        self.assertIn('--arg expected_image_id "$expected_image_id"', self.source)
+        self.assertIn('--arg expected_image_id "$expected_image_id"', self.rollback_helpers)
         self.assertIn('The Web App has a runtime image identity override; refusing promotion', self.source)
 
     def test_test_environment_reconciles_stripe_without_exposing_secrets_job_wide(self) -> None:
@@ -3053,26 +3067,22 @@ esac
 
     def test_health_gates_require_exact_http_200(self) -> None:
         self.assertGreaterEqual(
-            self.source.count('if [ "$http_status" = "200" ]'), 2
+            self.rollback_helpers.count('if http_status="$(curl'), 1
         )
-        self.assertIn('.buildNumber == $expected_build_number', self.source)
-        self.assertIn('.imageId == $expected_image_id', self.source)
+        self.assertIn('.buildNumber == $expected_build_number', self.rollback_helpers)
+        self.assertIn('.imageId == $expected_image_id', self.rollback_helpers)
+        self.assertIn('$expected_build_number == "" or', self.rollback_helpers)
         self.assertIn('expected_previous_image_id="${PREVIOUS_HEALTH_IMAGE_ID:-}"', self.source)
         self.assertIn("PREVIOUS_HEALTH_IMAGE_ID", self.source)
         self.assertIn("PREVIOUS_HEALTH_BUILD_NUMBER", self.source)
-        self.assertIn("previous_health_image_id=\"$(jq -r '.imageId // empty'", self.source)
-        self.assertIn('restored_runtime_image=', self.source)
-        self.assertIn(
-            "expected_previous_health_query='.status == \"ok\" and .buildNumber == $expected_build_number and .imageId == $expected_image_id'",
-            self.source,
-        )
+        self.assertIn('restored_runtime_image=', self.rollback_helpers)
         self.assertIn('legacy-image compatibility path', self.source)
         self.assertIn(
             'Azure is not configured with the captured previous main sitecontainer image',
-            self.source,
+            self.rollback_helpers,
         )
-        self.assertIn('if [ "$stable_health_probes" -ge 2 ]; then', self.source)
-        self.assertIn('if [ "$stable_rollback_health_probes" -ge 2 ]; then', self.source)
+        self.assertIn('"$stable" -ge 2', self.rollback_helpers)
+        self.assertIn('azure_wait_for_stable_api_health', self.source)
 
     def test_infra_deploy_uses_the_checked_in_api_dockerfile(self) -> None:
         deploy_script = (ROOT / "scripts" / "deploy-azure-elsa-control.sh").read_text()
@@ -3110,6 +3120,13 @@ case "$*" in
   *"webapp config appsettings list"*)
     case "$*" in
       *"ELSA_CONTROL_IMAGE_ID"*) printf '%s\\n' "${IMAGE_ID_OVERRIDE_COUNT:-0}" ;;
+      *"Application__BuildNumber"*"slotSetting"*)
+        slot_value="${APPLICATION_BUILD_SLOT_SETTING:-false}"
+        if [[ "$*" == *"--output tsv"* ]]; then
+          case "$slot_value" in true) slot_value=True;; false) slot_value=False;; esac
+        fi
+        printf '%s\\n' "$slot_value"
+        ;;
       *) printf '%s\\n' "${APPLICATION_BUILD_NUMBER}" ;;
     esac
     ;;
@@ -3151,6 +3168,7 @@ printf '%s' "${HEALTH_STATUS:-200}"
                 health_response: str = '{"status":"ok","buildNumber":"1786839398","imageId":"abcdef0123456789"}',
                 health_status: str = "200",
                 image_id_override_count: str = "0",
+                build_slot_setting: str = "false",
             ) -> subprocess.CompletedProcess[str]:
                 output_file = temp_path / "github-output"
                 output_file.unlink(missing_ok=True)
@@ -3162,6 +3180,7 @@ printf '%s' "${HEALTH_STATUS:-200}"
                         "LINUX_FX_VERSION": linux_fx_version,
                         "SITECONTAINER_IMAGE": sitecontainer_image,
                         "APPLICATION_BUILD_NUMBER": "1786839398",
+                        "APPLICATION_BUILD_SLOT_SETTING": build_slot_setting,
                         "FAIL_SITECONTAINER_LOOKUP": str(fail_sitecontainer_lookup).lower(),
                         "WEBAPP_MISSING": str(webapp_missing).lower(),
                         "DEPLOY_MODE": deploy_mode,
@@ -3219,6 +3238,12 @@ printf '%s' "${HEALTH_STATUS:-200}"
             valid_output = (temp_path / "github-output").read_text()
             self.assertIn("previous_health_build_number=1786839398", valid_output)
             self.assertIn("previous_health_image_id=abcdef0123456789", valid_output)
+            self.assertIn("application_build_number_slot_setting=false", valid_output)
+            sticky_build_capture = run_capture("SITECONTAINERS", "acr.azurecr.io/elsa-control/api:latest", build_slot_setting="true")
+            self.assertEqual(0, sticky_build_capture.returncode, sticky_build_capture.stderr)
+            self.assertIn("application_build_number_slot_setting=true", (temp_path / "github-output").read_text())
+            unreadable_slot_capture = run_capture("SITECONTAINERS", "acr.azurecr.io/elsa-control/api:latest", build_slot_setting="null")
+            self.assertNotEqual(0, unreadable_slot_capture.returncode)
 
             unsafe_health_capture = run_capture(
                 "DOCKER|acr.azurecr.io/elsa-control/api:latest",
@@ -3227,7 +3252,7 @@ printf '%s' "${HEALTH_STATUS:-200}"
             )
             self.assertNotEqual(unsafe_health_capture.returncode, 0)
             self.assertIn(
-                "unexpected or unsafe previous_health_image_id",
+                "unexpected or unsafe identity",
                 unsafe_health_capture.stdout + unsafe_health_capture.stderr,
             )
 

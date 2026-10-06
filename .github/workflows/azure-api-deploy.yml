@@ -703,6 +703,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Shared with staging-control-rollback.yml. Keep deployment capture
+          # and restore behavior in one implementation.
+          source scripts/lib/azure-api-deploy-rollback.sh
 
           webapp_probe_file="$(mktemp)"
           trap 'rm -f "$webapp_probe_file"' EXIT
@@ -860,56 +863,20 @@ jobs:
             fi
 
             echo "application_build_number_present=true" >> "$GITHUB_OUTPUT"
+            application_build_slot_setting="$(az webapp config appsettings list \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$AZURE_WEBAPP_NAME" \
+              --query "[?name=='Application__BuildNumber'] | [0].slotSetting" \
+              --output json | jq -er 'if type == "boolean" then tostring else error("Application__BuildNumber slot stickiness was unreadable.") end')"
           else
             echo "application_build_number_present=false" >> "$GITHUB_OUTPUT"
+            application_build_slot_setting=false
           fi
+          echo "application_build_number_slot_setting=$application_build_slot_setting" >> "$GITHUB_OUTPUT"
 
-          if ! default_host_name="$(az webapp show \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --name "$AZURE_WEBAPP_NAME" \
-            --query defaultHostName \
-            --output tsv)"; then
-            echo "::error::Could not resolve the current API host for deployment identity capture; refusing an unprotected deployment."
-            exit 1
-          fi
-          if [ -z "$default_host_name" ]; then
-            echo "::error::Azure returned no current API host for deployment identity capture; refusing an unprotected deployment."
-            exit 1
-          fi
-          health_response_file="$(mktemp)"
-          trap 'rm -f "$webapp_probe_file" "$health_response_file"' EXIT
-          health_url="https://$default_host_name/health"
-          previous_health_build_number=""
-          previous_health_image_id=""
-          if ! http_status="$(curl --silent --show-error --output "$health_response_file" --write-out '%{http_code}' --max-time 10 "$health_url")"; then
-            http_status=000
-          fi
-          if [ "$http_status" = "200" ] && jq -e '.status == "ok"' "$health_response_file" >/dev/null 2>&1; then
-            if jq -e 'type == "object"' "$health_response_file" >/dev/null 2>&1; then
-              previous_health_build_number="$(jq -r '.buildNumber // empty' "$health_response_file")"
-              previous_health_image_id="$(jq -r '.imageId // empty' "$health_response_file")"
-              if [ "$previous_health_build_number" = "unknown" ]; then
-                previous_health_build_number=""
-              fi
-              if [ "$previous_health_image_id" = "unknown" ]; then
-                previous_health_image_id=""
-              fi
-              for identifier in previous_health_build_number previous_health_image_id; do
-                value="${!identifier}"
-                if [ -n "$value" ] && [[ ! "$value" =~ $safe_identifier_pattern ]]; then
-                  echo "::error::The current API health response contains an unexpected or unsafe $identifier; refusing an unprotected deployment."
-                  exit 1
-                fi
-              done
-              echo "Captured safe current API build/image identity for rollback verification."
-            else
-              echo "::notice::The current API health response had no object identity fields; retaining Azure image/build metadata and using rollback compatibility verification."
-            fi
-          else
-            previous_health_build_number=""
-            previous_health_image_id=""
-            echo "::notice::Current API health was unavailable or not healthy at $health_url (HTTP ${http_status:-000}); retaining Azure image/build metadata and using rollback compatibility verification."
-          fi
+          azure_capture_health_identity
+          previous_health_build_number="$AZURE_CAPTURED_HEALTH_BUILD_NUMBER"
+          previous_health_image_id="$AZURE_CAPTURED_HEALTH_IMAGE_ID"
           echo "deployment_mode=$deployment_mode" >> "$GITHUB_OUTPUT"
           echo "linux_fx_version=$rollback_linux_fx_version" >> "$GITHUB_OUTPUT"
           if [ -n "$rollback_sitecontainer_image" ]; then
@@ -1396,23 +1363,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          if ! default_host_name="$(az webapp show \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --name "$AZURE_WEBAPP_NAME" \
-            --query defaultHostName \
-            --output tsv)"; then
-            echo "::error::Could not resolve the API host for the post-deployment health check."
-            exit 1
-          fi
-          if [ -z "$default_host_name" ]; then
-            echo "::error::Azure returned no API host for the post-deployment health check."
-            exit 1
-          fi
-          health_url="https://$default_host_name/health"
-          health_response_file="$(mktemp)"
-          trap 'rm -f "$health_response_file"' EXIT
-          stable_health_probes=0
+          source scripts/lib/azure-api-deploy-rollback.sh
           expected_image_id="$GITHUB_SHA"
           expected_build_number="$GITHUB_RUN_NUMBER"
           if [ "$DEPLOY_MODE" = "promote" ]; then
@@ -1438,32 +1389,7 @@ jobs:
             fi
           fi
 
-          for attempt in $(seq 1 30); do
-            if http_status="$(curl --silent --show-error --output "$health_response_file" --write-out '%{http_code}' --max-time 10 "$health_url")"; then
-              if [ "$http_status" = "200" ] && jq -e \
-                --arg expected_build_number "$expected_build_number" \
-                --arg expected_image_id "$expected_image_id" \
-                '.status == "ok" and .buildNumber == $expected_build_number and .imageId == $expected_image_id' \
-                "$health_response_file" >/dev/null 2>&1; then
-                stable_health_probes=$((stable_health_probes + 1))
-                if [ "$stable_health_probes" -ge 2 ]; then
-                  echo "API health check passed with HTTP 200 and the expected build/image identity on attempt $attempt."
-                  exit 0
-                fi
-              else
-                stable_health_probes=0
-              fi
-            else
-              http_status=000
-              stable_health_probes=0
-            fi
-
-            echo "API health check returned HTTP $http_status or an unexpected build/image identity (attempt $attempt/30, stable probes $stable_health_probes/2); retrying."
-            sleep 10
-          done
-
-          echo "::error::API health check failed after deployment: $health_url"
-          exit 1
+          azure_wait_for_stable_api_health "$expected_build_number" "$expected_image_id" "API"
 
       - name: Audit production Stripe billing
         id: production-stripe
@@ -1496,6 +1422,7 @@ jobs:
           PREVIOUS_SITECONTAINER_IMAGE: ${{ steps.current-deployment.outputs.sitecontainer_image }}
           PREVIOUS_BUILD_NUMBER: ${{ steps.current-deployment.outputs.application_build_number }}
           PREVIOUS_BUILD_NUMBER_PRESENT: ${{ steps.current-deployment.outputs.application_build_number_present }}
+          PREVIOUS_BUILD_NUMBER_SLOT_SETTING: ${{ steps.current-deployment.outputs.application_build_number_slot_setting }}
           PREVIOUS_HEALTH_BUILD_NUMBER: ${{ steps.current-deployment.outputs.previous_health_build_number }}
           PREVIOUS_HEALTH_IMAGE_ID: ${{ steps.current-deployment.outputs.previous_health_image_id }}
           DEPLOY_API_OUTCOME: ${{ steps.deploy-api.outcome }}
@@ -1516,67 +1443,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          source scripts/lib/azure-api-deploy-rollback.sh
 
           if [ "$TARGET_ENVIRONMENT" = "production" ] && [ "$DEPLOY_MODE" != "build" ]; then
             python3 scripts/production_stripe_reconcile.py --reapply "$PRODUCTION_BILLING_CAPTURE_PATH"
           fi
 
-          if [ "$PREVIOUS_DEPLOYMENT_MODE" = "classic" ]; then
-            if ! az webapp config set \
-                --resource-group "$AZURE_RESOURCE_GROUP" \
-                --name "$AZURE_WEBAPP_NAME" \
-                --linux-fx-version "$PREVIOUS_LINUX_FX_VERSION" \
-                --output none; then
-              echo "::error::Rollback failed: could not restore the previous Docker runtime image."
-              exit 1
-            fi
-          elif [ "$PREVIOUS_DEPLOYMENT_MODE" = "sitecontainers" ]; then
-            if [ -z "$PREVIOUS_SITECONTAINER_IMAGE" ]; then
-              echo "::error::Rollback failed: the previous main sitecontainer image was not captured."
-              exit 1
-            fi
-            if ! az webapp config set \
-                --resource-group "$AZURE_RESOURCE_GROUP" \
-                --name "$AZURE_WEBAPP_NAME" \
-                --linux-fx-version "$PREVIOUS_LINUX_FX_VERSION" \
-                --output none; then
-              echo "::error::Rollback failed: could not restore the SITECONTAINERS runtime."
-              exit 1
-            fi
-            if ! az webapp sitecontainers update \
-                --resource-group "$AZURE_RESOURCE_GROUP" \
-                --name "$AZURE_WEBAPP_NAME" \
-                --container-name main \
-                --image "$PREVIOUS_SITECONTAINER_IMAGE" \
-                --is-main true \
-                --output none; then
-              echo "::error::Rollback failed: could not restore the previous main sitecontainer image."
-              exit 1
-            fi
-          else
-            echo "::error::Rollback failed: the captured deployment mode is unsupported."
-            exit 1
-          fi
-
-          if [ "$PREVIOUS_BUILD_NUMBER_PRESENT" = true ]; then
-            if ! az webapp config appsettings set \
-                --resource-group "$AZURE_RESOURCE_GROUP" \
-                --name "$AZURE_WEBAPP_NAME" \
-                --settings "Application__BuildNumber=$PREVIOUS_BUILD_NUMBER" \
-                --output none; then
-              echo "::error::Rollback failed: could not restore the previous Application__BuildNumber."
-              exit 1
-            fi
-          else
-            if ! az webapp config appsettings delete \
-                --resource-group "$AZURE_RESOURCE_GROUP" \
-                --name "$AZURE_WEBAPP_NAME" \
-                --setting-names Application__BuildNumber \
-                --output none; then
-              echo "::error::Rollback failed: could not remove the previous Application__BuildNumber."
-              exit 1
-            fi
-          fi
+          azure_restore_api_runtime_configuration \
+            "$PREVIOUS_DEPLOYMENT_MODE" \
+            "$PREVIOUS_LINUX_FX_VERSION" \
+            "$PREVIOUS_SITECONTAINER_IMAGE" \
+            "$PREVIOUS_BUILD_NUMBER_PRESENT" \
+            "$PREVIOUS_BUILD_NUMBER" \
+            "${PREVIOUS_BUILD_NUMBER_SLOT_SETTING:-false}"
 
           # Restore ExpectedMode and billing enablement as one coherent pair
           # for every API rollback trigger. Staging reconciliation can enable
@@ -1700,102 +1579,23 @@ jobs:
               "$keep_expected_mode"
           fi
 
-          if ! az webapp restart \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --name "$AZURE_WEBAPP_NAME" \
-              --output none; then
-            echo "::error::Rollback failed: could not restart the API after restoring the previous deployment."
-            exit 1
-          fi
-
-          if [ "$PREVIOUS_DEPLOYMENT_MODE" = "classic" ]; then
-            if ! restored_runtime_image="$(az webapp config show \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --name "$AZURE_WEBAPP_NAME" \
-              --query linuxFxVersion \
-              --output tsv)"; then
-              echo "::error::Rollback failed: could not verify the restored Docker runtime image."
-              exit 1
-            fi
-          else
-            if ! restored_runtime_image="$(az webapp sitecontainers show \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --name "$AZURE_WEBAPP_NAME" \
-              --container-name main \
-              --query image \
-              --output tsv)"; then
-              echo "::error::Rollback failed: could not verify the restored main sitecontainer image."
-              exit 1
-            fi
-          fi
-          if [ "$PREVIOUS_DEPLOYMENT_MODE" = "classic" ]; then
-            if [ "$restored_runtime_image" != "$PREVIOUS_LINUX_FX_VERSION" ]; then
-              echo "::error::Rollback failed: Azure is not configured with the captured previous Docker runtime image."
-              exit 1
-            fi
-          elif [ "$restored_runtime_image" != "$PREVIOUS_SITECONTAINER_IMAGE" ]; then
-            echo "::error::Rollback failed: Azure is not configured with the captured previous main sitecontainer image."
-            exit 1
-          fi
+          azure_restart_and_verify_api_runtime \
+            "$PREVIOUS_DEPLOYMENT_MODE" \
+            "$PREVIOUS_LINUX_FX_VERSION" \
+            "$PREVIOUS_SITECONTAINER_IMAGE"
 
           expected_previous_build_number="${PREVIOUS_HEALTH_BUILD_NUMBER:-${PREVIOUS_BUILD_NUMBER:-unknown}}"
           expected_previous_image_id="${PREVIOUS_HEALTH_IMAGE_ID:-}"
-          # shellcheck disable=SC2016 # The jq variables intentionally expand inside jq, not Bash.
           if [ -n "$expected_previous_image_id" ]; then
-            expected_previous_health_query='.status == "ok" and .buildNumber == $expected_build_number and .imageId == $expected_image_id'
             echo "Rollback health will require the captured previous build and image identity."
           else
-            expected_previous_health_query='.status == "ok" and ((.buildNumber // $expected_build_number) == $expected_build_number)'
             echo "::notice::Rollback health is using the explicit legacy-image compatibility path because the pre-deploy health response had no safe embedded image identity; Azure image configuration was matched to the captured reference."
           fi
 
-          if ! default_host_name="$(az webapp show \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --name "$AZURE_WEBAPP_NAME" \
-            --query defaultHostName \
-            --output tsv)"; then
-            echo "::error::Rollback failed: could not resolve the API host after restoring the previous deployment."
-            exit 1
-          fi
-          if [ -z "$default_host_name" ]; then
-            echo "::error::Rollback failed: Azure returned no API host after restoring the previous deployment."
-            exit 1
-          fi
-
-          rollback_health_url="https://$default_host_name/health"
-          rollback_health_response_file="$(mktemp)"
-          trap 'rm -f "$rollback_health_response_file"' EXIT
-          rollback_health_succeeded=false
-          stable_rollback_health_probes=0
-          for attempt in $(seq 1 30); do
-            if http_status="$(curl --silent --show-error --output "$rollback_health_response_file" --write-out '%{http_code}' --max-time 10 "$rollback_health_url")"; then
-              if [ "$http_status" = "200" ] && jq -e \
-                --arg expected_build_number "$expected_previous_build_number" \
-                --arg expected_image_id "$expected_previous_image_id" \
-                "$expected_previous_health_query" \
-                "$rollback_health_response_file" >/dev/null 2>&1; then
-                stable_rollback_health_probes=$((stable_rollback_health_probes + 1))
-                if [ "$stable_rollback_health_probes" -ge 2 ]; then
-                  rollback_health_succeeded=true
-                  echo "Rollback health check passed with HTTP 200 and the expected previous build identity on attempt $attempt."
-                  break
-                fi
-              else
-                stable_rollback_health_probes=0
-              fi
-            else
-              http_status=000
-              stable_rollback_health_probes=0
-            fi
-
-            echo "Rollback health check returned HTTP $http_status or an unexpected build identity (attempt $attempt/30, stable probes $stable_rollback_health_probes/2); retrying."
-            sleep 10
-          done
-
-          if [ "$rollback_health_succeeded" != true ]; then
-            echo "::error::Rollback failed: the previous API deployment did not return HTTP 200 at $rollback_health_url."
-            exit 1
-          fi
+          azure_wait_for_stable_api_health \
+            "$expected_previous_build_number" \
+            "$expected_previous_image_id" \
+            "Rollback"
 
           rollback_triggers=()
           if [ "${DEPLOY_API_OUTCOME:-}" = "failure" ]; then

@@ -37,6 +37,7 @@ jobs:
           python3 scripts/tests/test_control_sql_sku.py
           python3 -m unittest scripts.tests.test_production_stripe_reconcile
           python3 scripts/tests/test_staging_compat_fixture_workflow.py
+          python3 scripts/tests/test_staging_control_rollback.py
 
       - name: Validate production Azure image and template contracts
         run: |
@@ -68,7 +69,9 @@ jobs:
             scripts/validate-azure-workload-proof.sh \
             scripts/validate-api-provider-image.sh \
             scripts/validate-azure-api-candidate.sh \
-            scripts/staging-compat-fixture.sh
+            scripts/staging-compat-fixture.sh \
+            scripts/staging-control-rollback.sh \
+            scripts/lib/azure-api-deploy-rollback.sh
           shellcheck \
             scripts/azure-workload-proof.sh \
             scripts/azure-workload-restore-proof.sh \
@@ -76,7 +79,9 @@ jobs:
             scripts/validate-azure-workload-proof.sh \
             scripts/validate-api-provider-image.sh \
             scripts/validate-azure-api-candidate.sh \
-            scripts/staging-compat-fixture.sh
+            scripts/staging-compat-fixture.sh \
+            scripts/staging-control-rollback.sh \
+            scripts/lib/azure-api-deploy-rollback.sh
 
       - name: Compile Azure workload proof Bicep templates
         run: |
