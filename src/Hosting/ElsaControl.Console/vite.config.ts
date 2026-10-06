@@ -1,6 +1,6 @@
 import path from "node:path";
 import react from "@vitejs/plugin-react";
-import { build, defineConfig, loadEnv, normalizePath } from "vite";
+import { build, defineConfig, loadEnv, normalizePath, type Plugin } from "vite";
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, __dirname, "");
@@ -30,7 +30,7 @@ export default defineConfig(({ mode }) => {
 
   return {
     base: "/admin/",
-    plugins: [react(), {
+    plugins: [react(), consoleDependencyBoundary(), {
       name: "console-theme-bootstrap",
       transformIndexHtml: {
         order: "pre",
@@ -96,6 +96,7 @@ async function buildThemeBootstrap(): Promise<string> {
   const result = await build({
     configFile: false,
     logLevel: "silent",
+    plugins: [consoleDependencyBoundary()],
     build: {
       write: false,
       minify: true,
@@ -106,6 +107,29 @@ async function buildThemeBootstrap(): Promise<string> {
   const chunks = outputs.flatMap(output => "output" in output ? output.output : []).filter(output => output.type === "chunk");
   if (chunks.length !== 1) throw new Error("Expected one standalone theme bootstrap script.");
   return chunks[0].code;
+}
+
+// Inspect Rollup's actual emitted module graph, including the inline theme bundle.
+// A devDependency label or a source search alone does not prove runtime absence.
+export function consoleDependencyBoundary(): Plugin {
+  const buildOnly = /^(?:@vitest\/[^/]+|vitest|tinypool|braces|micromatch|fast-glob|postcss-selector-parser|source-map-js)(?:\/|$)/;
+  return {
+    name: "console-dependency-boundary",
+    apply: "build",
+    generateBundle(_options, bundle) {
+      for (const chunk of Object.values(bundle)) {
+        if (chunk.type !== "chunk") continue;
+        for (const id of [...chunk.moduleIds, ...chunk.imports, ...chunk.dynamicImports]) {
+          const normalized = id.replace(/\\/g, "/").replace(/^\0/, "").split(/[?#]/, 1)[0];
+          const packagePaths = [normalized, ...normalized.split("/node_modules/").slice(1)];
+          for (const packagePath of packagePaths) {
+            const match = packagePath.match(buildOnly);
+            if (match) this.error(`Production console bundle contains a build/test dependency: ${match[0].replace(/\/$/, "")}`);
+          }
+        }
+      }
+    }
+  };
 }
 
 function requestTargetsAdminConsoleLogs(url: string | undefined) {

@@ -36,7 +36,12 @@ case "$1" in
       *) printf '%s\\n' "${FAKE_STATE:-running}" ;;
     esac
     echo 'untrusted raw container detail' >&2 ;;
-  exec) printf '%s\\n' '{"status":"ok"}' ;;
+  exec)
+    if [[ "$3" == sh ]]; then
+      echo 'untrusted application payload detail' >&2
+      exit "${FAKE_PAYLOAD_EXIT:-0}"
+    fi
+    printf '%s\\n' '{"status":"ok"}' ;;
   stop) printf '%s\\n' "$4" ;;
   logs)
     echo 'untrusted raw container detail'
@@ -107,6 +112,15 @@ esac
         self.assertIn("container exited before /health became ready", result.stderr)
         self.assertNotIn("untrusted raw container detail", result.stdout + result.stderr)
         self.assertEqual(f"rm --force {CONTAINER_ID}", self.log.read_text().splitlines()[-1])
+
+    def test_failed_payload_probe_fails_closed_before_health_and_cleans(self) -> None:
+        result = self.run_smoke(FAKE_PAYLOAD_EXIT="1")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("application payload is missing the console or contains npm development artifacts", result.stderr)
+        self.assertNotIn("untrusted application payload detail", result.stdout + result.stderr)
+        calls = self.log.read_text()
+        self.assertNotIn("curl --fail", calls)
+        self.assertEqual(f"rm --force {CONTAINER_ID}", calls.splitlines()[-1])
 
     def test_untrusted_container_identifier_cannot_select_cleanup_targets(self) -> None:
         result = self.run_smoke(FAKE_ID="--all")
