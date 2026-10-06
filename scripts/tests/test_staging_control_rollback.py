@@ -365,6 +365,68 @@ class StagingControlRollbackTests(unittest.TestCase):
             )
             self.assertNotEqual(0, unreadable.returncode)
 
+    def test_preflight_rejects_invalid_scope_and_inputs_before_external_access(self) -> None:
+        scope = {
+            "AZURE_SUBSCRIPTION_ID": "8e23037a-420f-4ad0-9594-9d194de29e84",
+            "AZURE_RESOURCE_GROUP": "rg-valence-control-staging",
+            "AZURE_WEBAPP_NAME": "api-tud53zotij43k",
+            "AZURE_CONTAINER_REGISTRY_ENDPOINT": "elsacontrolacrtud53zotij43k.azurecr.io",
+        }
+        environment = {
+            **scope,
+            **{f"EXPECTED_STAGING_{key}": value for key, value in scope.items()},
+            "TARGET_ENVIRONMENT": "test",
+            "PREVIOUS_DIGEST": "sha256:" + "b" * 64,
+            "EXPECTED_DIGEST": "sha256:" + "a" * 64,
+            "INPUT_PREVIOUS_DIGEST": "",
+            "INPUT_EXPECTED_DIGEST": "",
+        }
+        cases = [
+            (f"environment-{value or 'missing'}", {"TARGET_ENVIRONMENT": value}, "only in the test environment")
+            for value in ("production", "staging", "")
+        ]
+        for key in scope:
+            expected_key = f"EXPECTED_STAGING_{key}"
+            cases.extend([
+                (f"{key}-mismatch", {key: "not-staging"}, "explicit staging allowlist value"),
+                (f"{key}-missing", {key: ""}, "is required"),
+                (f"{key}-no-allowlist", {expected_key: ""}, "no explicit staging allowlist value"),
+                (f"{key}-production", {key: "prod-target", expected_key: "prod-target"}, "production identifier"),
+            ])
+        for key in ("PREVIOUS_DIGEST", "EXPECTED_DIGEST"):
+            for index, value in enumerate(("", "233", "sha256:" + "g" * 64,
+                                           "sha256:" + "a" * 63, "registry/api@sha256:" + "a" * 64)):
+                cases.append((f"{key}-invalid-{index}", {key: value}, "must be a sha256 digest"))
+        cases.append(("identical-digests", {"PREVIOUS_DIGEST": environment["EXPECTED_DIGEST"]},
+                      "digests must be different"))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            call_log = Path(temporary) / "external-call"
+            environment["GUARD_CALL_LOG"] = str(call_log)
+            script = f'''
+                source "{ROLLBACK}"
+                unexpected_access() {{ printf '%s\\n' external > "$GUARD_CALL_LOG"; return 97; }}
+                az() {{ unexpected_access; }}
+                gh() {{ unexpected_access; }}
+                curl() {{ unexpected_access; }}
+                check_exclusive() {{ unexpected_access; }}
+                rollback_preflight
+            '''
+            # The valid control must reach the boundary, so an earlier unrelated
+            # failure cannot make every negative case pass.
+            accepted = self.run_bash(script, environment)
+            self.assertEqual(97, accepted.returncode, accepted.stdout + accepted.stderr)
+            self.assertTrue(call_log.exists())
+            call_log.unlink()
+
+            for label, overrides, message in cases:
+                with self.subTest(case=label):
+                    call_log.unlink(missing_ok=True)
+                    rejected = self.run_bash(script, {**environment, **overrides})
+                    self.assertNotEqual(0, rejected.returncode)
+                    self.assertIn(message, rejected.stdout + rejected.stderr)
+                    self.assertFalse(call_log.exists(), "invalid preflight reached external access")
+
     def test_scope_and_tag_baseline_refuse_before_any_provider_write(self) -> None:
         hostile_scope = self.run_bash(
             f'source "{ROLLBACK}"; rollback_require_scope',
