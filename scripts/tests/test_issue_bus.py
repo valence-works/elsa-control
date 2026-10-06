@@ -76,6 +76,33 @@ def expired_claim() -> dict[str, str]:
     }
 
 
+def project_issue_row(number: int = 401, repository: str = "valence-works/elsa-control", item_id: int = 2001) -> dict[str, Any]:
+    return {
+        "id": item_id,
+        "node_id": f"PVTI_{item_id}",
+        "content_type": "Issue",
+        "content": {"number": number, "repository": {"full_name": repository}},
+        "labels": ["ready-for-agent"],
+        "status": "Ready",
+        "agent State": "Agent Ready",
+    }
+
+
+def project_client(pages: Any, repository: str = "valence-works/elsa-control") -> tuple[issue_bus.GhClient, list[tuple[str, ...]]]:
+    calls: list[tuple[str, ...]] = []
+
+    def runner(*command: str, **kwargs: Any) -> issue_bus.CommandResult:
+        calls.append(command)
+        return issue_bus.CommandResult(json.dumps(pages), "", 0)
+
+    client = issue_bus.GhClient(repository, runner=runner)
+    client._fields = {
+        "status": issue_bus.ProjectField("1001", "Status", {"In Progress": "progress"}, 1001),
+        "agent state": issue_bus.ProjectField("1002", "Agent State", {}, 1002),
+    }
+    return client, calls
+
+
 class GhClientAdapterTests(unittest.TestCase):
     def test_targeted_rest_project_query_parses_numeric_ids_and_options(self) -> None:
         fields_response = [
@@ -141,6 +168,9 @@ class GhClientAdapterTests(unittest.TestCase):
                 "fields": [],
             },
         ]
+        for row in items_response:
+            row["content_type"] = "Issue"
+            row["content"]["repository"] = {"full_name": "valence-works/elsa-control"}
         commands: list[tuple[str, ...]] = []
 
         def runner(*command: str, **kwargs: Any) -> issue_bus.CommandResult:
@@ -163,8 +193,10 @@ class GhClientAdapterTests(unittest.TestCase):
         self.assertEqual(snapshot.fields["status"].options["In Progress"], "status-progress")
         self.assertEqual(snapshot.fields["agent state"].options["Assigned"], "agent-assigned")
         self.assertIn("/fields?per_page=100", commands[0][-1])
-        self.assertIn("q=401", commands[1][-1])
-        self.assertIn("fields=1001,1002", commands[1][-1])
+        self.assertIn("q=401", " ".join(commands[1]))
+        self.assertIn("fields=1001,1002", " ".join(commands[1]))
+        self.assertIn("--paginate", commands[1])
+        self.assertIn("--slurp", commands[1])
         self.assertNotIn("item-list", " ".join(commands[0] + commands[1]))
 
         rows = client.project_items()
@@ -179,13 +211,14 @@ class GhClientAdapterTests(unittest.TestCase):
 
     def test_project_patch_uses_numeric_item_and_field_ids(self) -> None:
         calls: list[tuple[tuple[str, ...], str | None]] = []
+        row = project_issue_row()
 
         def runner(*command: str, **kwargs: Any) -> issue_bus.CommandResult:
             calls.append((command, kwargs.get("input_data")))
-            return issue_bus.CommandResult("{}", "", 0)
+            return issue_bus.CommandResult(json.dumps({"value": row}), "", 0)
 
         client = issue_bus.GhClient("valence-works/elsa-control", runner=runner)
-        item = issue_bus.ProjectItem("PVTI_item", "7", 401, "Ready", "Agent Ready", {}, rest_id=2001)
+        item = issue_bus.ProjectItem(row["node_id"], "7", 401, "Ready", "Agent Ready", row, rest_id=2001)
         status = issue_bus.ProjectField(
             "1001", "Status", {"Ready": "status-ready", "In Progress": "status-progress"}, 1001
         )
@@ -195,7 +228,7 @@ class GhClientAdapterTests(unittest.TestCase):
 
         client.set_project_fields(item, ((status, "In Progress"), (agent, "Assigned")))
 
-        command, input_data = calls[0]
+        command, input_data = calls[1]
         self.assertIn("--method", command)
         self.assertIn("PATCH", command)
         self.assertTrue(any("/items/2001" in part for part in command))
@@ -206,11 +239,161 @@ class GhClientAdapterTests(unittest.TestCase):
         )
 
         client.set_project_fields(item, ((status, "Ready"), (agent, "Agent Ready")))
-        _, rollback_input = calls[1]
+        _, rollback_input = calls[3]
         self.assertEqual(
             json.loads(rollback_input or "{}"),
             {"fields": [{"id": 1001, "value": "status-ready"}, {"id": 1002, "value": "agent-ready"}]},
         )
+
+    def test_exact_repository_wins_independent_of_search_order(self) -> None:
+        target = project_issue_row(repository="valence-works/elsa-cloud")
+        other = project_issue_row(item_id=2002)
+        for rows in ([other, target], [target, other]):
+            with self.subTest(order=[row["id"] for row in rows]):
+                client, _ = project_client(rows, "valence-works/elsa-cloud")
+                snapshot = client.project_for_issue(401)
+                self.assertEqual(snapshot.item.id, target["node_id"])
+
+    def test_target_on_later_page_is_found_and_duplicates_are_rejected(self) -> None:
+        other = project_issue_row(repository="valence-works/elsa-cloud", item_id=2002)
+        target = project_issue_row()
+        client, calls = project_client([{"items": [other]}, {"items": [target]}])
+        self.assertEqual(client.project_for_issue(401).item.id, target["node_id"])
+        self.assertIn("--paginate", calls[0])
+        self.assertIn("--slurp", calls[0])
+
+        client, _ = project_client([[target], [project_issue_row(item_id=2003)]])
+        with self.assertRaisesRegex(issue_bus.GhError, "multiple items"):
+            client.project_for_issue(401)
+
+    def test_pull_requests_and_drafts_cannot_own_issue_number(self) -> None:
+        for kind in ("PullRequest", "DraftIssue"):
+            row = project_issue_row()
+            row["content_type"] = kind
+            with self.subTest(kind=kind):
+                client, _ = project_client([row])
+                self.assertIsNone(client.project_for_issue(401).item)
+
+    def test_missing_and_conflicting_project_identity_fail_closed(self) -> None:
+        for change in ("missing-repo", "missing-kind", "wrong-kind", "repo-conflict", "bad-url", "pr-conflict", "bad-repo"):
+            row = project_issue_row()
+            if change == "missing-repo":
+                del row["content"]["repository"]
+            elif change == "missing-kind":
+                del row["content_type"]
+            elif change == "wrong-kind":
+                row["content_type"] = "Task"
+            elif change == "repo-conflict":
+                row["content"]["repository_url"] = "https://api.github.com/repos/valence-works/elsa-cloud"
+            elif change == "bad-url":
+                row["content"]["repository_url"] = "not-an-api-repository"
+            elif change == "pr-conflict":
+                row["content"]["pull_request"] = {}
+            else:
+                row["content"]["repository"]["full_name"] = "not-a-repository"
+            with self.subTest(change=change):
+                client, _ = project_client([project_issue_row(), row])
+                with self.assertRaises(issue_bus.GhError):
+                    client.project_for_issue(401)
+
+    def test_non_integer_project_issue_numbers_fail_closed(self) -> None:
+        for number in (True, 401.9, "401", None, 0, -1):
+            with self.subTest(number=number):
+                with self.assertRaisesRegex(issue_bus.GhError, "valid issue number"):
+                    issue_bus._project_issue_identity(project_issue_row(number=number))
+
+    def test_other_repository_cannot_be_used_when_target_absent(self) -> None:
+        client, _ = project_client([project_issue_row(repository="valence-works/elsa-cloud")])
+        self.assertIsNone(client.project_for_issue(401).item)
+
+    def test_case_insensitive_repository_and_business_issue_type(self) -> None:
+        row = project_issue_row(repository="Valence-Works/Elsa-Control")
+        row["content"]["type"] = {"name": "Task"}
+        row["content"]["repository_url"] = "https://api.github.com/repos/valence-works/elsa-control"
+        client, _ = project_client([row])
+        self.assertEqual(client.project_for_issue(401).item.rest_id, 2001)
+
+    def test_mutation_refuses_foreign_stale_and_unknown_item_before_patch(self) -> None:
+        for change in ("foreign", "missing-repo", "wrong-number", "wrong-id", "wrong-node", "wrong-project"):
+            row = project_issue_row()
+            current = copy.deepcopy(row)
+            project_id = "7"
+            if change == "foreign":
+                current["content"]["repository"]["full_name"] = "valence-works/elsa-cloud"
+            elif change == "missing-repo":
+                del current["content"]["repository"]
+            elif change == "wrong-number":
+                current["content"]["number"] = 402
+            elif change == "wrong-id":
+                current["id"] = 2002
+            elif change == "wrong-node":
+                current["node_id"] = "PVTI_other"
+            else:
+                project_id = "8"
+            with self.subTest(change=change):
+                client, calls = project_client({"value": current})
+                item = issue_bus.ProjectItem(row["node_id"], project_id, 401, "Ready", "Agent Ready", row, rest_id=2001)
+                with self.assertRaises(issue_bus.GhError):
+                    client.set_project_field(item, client._fields["status"], "In Progress")
+                self.assertFalse(any("PATCH" in command for command in calls))
+
+    def test_foreign_raw_mutation_item_is_rejected_without_network(self) -> None:
+        row = project_issue_row(repository="valence-works/elsa-cloud")
+        client, calls = project_client({"value": row})
+        item = issue_bus.ProjectItem(row["node_id"], "7", 401, "Ready", "Agent Ready", row, rest_id=2001)
+        with self.assertRaisesRegex(issue_bus.GhError, "different repository issue"):
+            client.set_project_field(item, client._fields["status"], "In Progress")
+        self.assertEqual(calls, [])
+
+    def test_mutation_identity_read_failure_never_sends_patch(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def runner(*command: str, **kwargs: Any) -> issue_bus.CommandResult:
+            calls.append(command)
+            return issue_bus.CommandResult("", "HTTP 403: Resource not accessible", 1)
+
+        client = issue_bus.GhClient(runner=runner)
+        row = project_issue_row()
+        item = issue_bus.ProjectItem(row["node_id"], "7", 401, "Ready", "Agent Ready", row, rest_id=2001)
+        field = issue_bus.ProjectField("1001", "Status", {"In Progress": "progress"}, 1001)
+        with self.assertRaises(issue_bus.GhError):
+            client.set_project_field(item, field, "In Progress")
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("PATCH", calls[0])
+
+    def test_drift_all_only_inspects_exact_repository_issue_rows(self) -> None:
+        target = project_issue_row()
+        foreign = project_issue_row(repository="valence-works/elsa-cloud", item_id=2002)
+        foreign["status"] = "In Progress"
+        pr = project_issue_row(number=402, item_id=2003)
+        pr["content_type"] = "PullRequest"
+        client, calls = project_client([foreign, pr, target])
+        client.linked_open_prs = lambda number: calls.append(("linked", str(number))) or []
+        findings = issue_bus.IssueBus(client).drift(all_items=True)
+        self.assertEqual(findings, [{"issue": 401, "findings": []}])
+        self.assertEqual([call for call in calls if call[0] == "linked"], [("linked", "401")])
+
+    def test_drift_all_reports_unknown_identity_without_following_pr_links(self) -> None:
+        row = project_issue_row()
+        del row["content"]["repository"]
+        client, calls = project_client([row])
+        findings = issue_bus.IssueBus(client).drift(all_items=True)
+        self.assertEqual(findings[0]["code"], "unable-to-check")
+        self.assertEqual(len(calls), 1)
+
+    def test_drift_all_reports_duplicate_identity_as_unable_to_check(self) -> None:
+        client, _ = project_client([project_issue_row(), project_issue_row(item_id=2002)])
+        client.linked_open_prs = lambda number: []
+        findings = issue_bus.IssueBus(client).drift(all_items=True)
+        self.assertEqual(findings[-1]["code"], "unable-to-check")
+        self.assertEqual(findings[-1]["issue"], 401)
+
+    def test_direct_drift_row_rejects_foreign_repository(self) -> None:
+        client, calls = project_client([])
+        row = project_issue_row(repository="valence-works/elsa-cloud")
+        result = issue_bus.IssueBus(client)._drift_project_row(401, row)
+        self.assertEqual(result["code"], "unable-to-check")
+        self.assertEqual(calls, [])
 
     def test_claim_reads_and_writes_use_rest_endpoints(self) -> None:
         calls: list[tuple[tuple[str, ...], str | None]] = []
@@ -496,7 +679,7 @@ class GhClientAdapterTests(unittest.TestCase):
             "pr: https://github.com/valence-works/elsa-cloud/pull/75",
             pull_requests={"valence-works/elsa-cloud#75": pr_state("OPEN")},
         )
-        row = {"labels": [{"name": "ready-for-agent"}], "status": "Ready", "agent State": "Agent Ready"}
+        row = project_issue_row()
 
         result = issue_bus.IssueBus(client, output=lambda _: None)._drift_project_row(401, row)
 
@@ -505,6 +688,7 @@ class GhClientAdapterTests(unittest.TestCase):
 
 class FakeClient:
     def __init__(self, *, linked: list[dict[str, Any]] | None = None) -> None:
+        self.repository = "valence-works/elsa-control"
         self.issue_data: dict[str, Any] = {
             "number": 401,
             "state": "OPEN",
@@ -662,7 +846,8 @@ class FakeClient:
         return [
             {
                 "id": self.item.id,
-                "content": {"number": self.item.issue_number},
+                "content_type": "Issue",
+                "content": {"number": self.item.issue_number, "repository": {"full_name": self.repository}},
                 "labels": [label["name"] for label in self.issue_data["labels"]],
                 "status": self.item.status,
                 "agent State": self.item.agent_state,
