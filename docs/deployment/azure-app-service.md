@@ -147,6 +147,65 @@ armed, remove it by hand on the staging Control Web App:
    using the dedicated `STAGING_E2E_COMPAT_*` user and the publishable
    key as `apikey`.
 
+## Staging Control image rollback proof
+
+Manual workflow: `.github/workflows/staging-control-rollback.yml`. This is a
+staging-only proof workflow and shares the `azure-api-deploy-test`
+concurrency lock with Deploy staging and the compatibility fixture. It has two
+inputs: the verified immutable N-1 `elsa-control/api` digest and the expected
+immutable N digest. The workflow refuses tag-backed N baselines, non-test Azure
+identifiers, an unapproved #508 freeze, active competing windows, missing
+deployment provenance, or a missing exact pair marker in the #508 comments:
+
+```
+control-rollback-pair: approved N=sha256:<N-digest> N1=sha256:<N-1-digest> N1_COMMIT=<successful-Deploy-staging-source-sha>
+```
+
+Before the first write it captures the exact sitecontainer image reference,
+digest, `/health` build and image identity, app-setting names, and
+`Application__BuildNumber` presence, value, and slot stickiness. It resolves
+N-1 from the immediately preceding successful Deploy staging app/health run
+and the matching ACR source-SHA tag,
+requires unchanged migration sets and the pair-specific persisted-data
+approval, and records non-admin organization, workspace, and paginated
+instance reads as a hash. Compatibility is read through the authenticated
+Control endpoint. N-1's BFF outcome is predicted from its source capability
+list against the deployed Cloud required-capability list; the live proof then
+uses the compatible or `control_update_in_progress` read-compatible response
+accordingly.
+
+The schema evidence lists both exact migration sets and their sorted-set hash.
+An unavailable SQL read may use explicitly labeled inference from successful
+N startup; it is never reported as a direct database observation. Changed
+Persistence, Domain, or Cloud contract paths are listed and require an extra
+trusted, pair-specific data-owner marker matching their sorted-path hash:
+
+```
+control-rollback-data: approved N=sha256:<N-digest> N1=sha256:<N-1-digest> paths_sha256=<changed-path-set-hash>
+```
+
+The ordinary pair marker remains required even when no such paths changed.
+
+The only writes are the main sitecontainer image by immutable digest and the
+existing `Application__BuildNumber` setting, preserving its captured presence,
+value, and slot stickiness. The workflow checks N-1 health and image identity,
+compatibility, BFF behavior, and the same data hash, holds for a bounded
+window, and restores the exact N image and settings. Restore is reserved for
+`always()` after successful preflight and runs after failed checks or ordinary
+cancellation. The write-to-restore-start cap is fixed at 20 minutes, with
+restore time reserved inside that cap. A runner loss or force-cancel can stop
+the process before a restore step executes and is not claimed as guaranteed
+recovery; use the normal Deploy staging app run of main if recovery is needed.
+
+This workflow has implementation and local stub-test coverage, but no live
+Azure rollback dispatch has been run yet. R1/R2, live data/read proofs, and
+the exact cancellation exercise therefore remain pending. The workflow does
+not prove Cloud BFF production behavior, managed Elsa runtime rollback, or a
+rollback across a schema boundary. If the schema gate refuses, keep the freeze
+on and roll forward with Deploy staging after the data owner resolves the
+boundary. Do not describe this runbook as a live staging result until a run
+records the exact pair, restore, postflight, and cancellation evidence.
+
 ## GitHub Actions Deployment
 
 The `Azure Control API Deploy` workflow is manually dispatched from GitHub Actions.

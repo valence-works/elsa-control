@@ -1,0 +1,208 @@
+name: Staging Control image rollback proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      previous_digest:
+        description: "The exact N-1 elsa-control/api digest (sha256:...)."
+        required: true
+        type: string
+      expected_digest:
+        description: "The exact current N elsa-control/api digest to restore (sha256:...)."
+        required: true
+        type: string
+
+# This proof shares Deploy staging and the compatibility fixture's lock. A
+# normal cancellation stops the hold/check steps; the always() restore step is
+# reserved for the successful preflight path.
+concurrency:
+  group: azure-api-deploy-test
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Prove and restore the staging Control image
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    environment: test
+    permissions:
+      actions: read
+      contents: read
+      deployments: read
+      id-token: write
+      issues: read
+    env:
+      TARGET_ENVIRONMENT: test
+      AZURE_ENV_NAME: ${{ vars.AZURE_ENV_NAME }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      AZURE_WEBAPP_NAME: ${{ vars.AZURE_WEBAPP_NAME }}
+      AZURE_CONTAINER_REGISTRY_ENDPOINT: ${{ vars.AZURE_CONTAINER_REGISTRY_ENDPOINT }}
+      EXPECTED_STAGING_AZURE_SUBSCRIPTION_ID: 8e23037a-420f-4ad0-9594-9d194de29e84
+      EXPECTED_STAGING_AZURE_RESOURCE_GROUP: rg-valence-control-staging
+      EXPECTED_STAGING_AZURE_WEBAPP_NAME: api-tud53zotij43k
+      EXPECTED_STAGING_AZURE_CONTAINER_REGISTRY_ENDPOINT: elsacontrolacrtud53zotij43k.azurecr.io
+      STAGING_SUPABASE_PROJECT_REF: ${{ vars.STAGING_SUPABASE_PROJECT_REF }}
+      EXPECTED_STAGING_SUPABASE_ORIGIN: ${{ vars.EXPECTED_STAGING_SUPABASE_ORIGIN }}
+      CLOUD_BFF_SMOKE_URL: ${{ vars.CLOUD_BFF_SMOKE_URL }}
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      PREVIOUS_DIGEST: ${{ inputs.previous_digest }}
+      EXPECTED_DIGEST: ${{ inputs.expected_digest }}
+      STAGING_APPLIED_MIGRATIONS_JSON: ${{ vars.STAGING_APPLIED_MIGRATIONS_JSON }}
+      STAGING_ALLOW_INFERRED_HISTORY: true
+      STAGING_E2E_COMPAT_EMAIL: ${{ secrets.STAGING_E2E_COMPAT_EMAIL }}
+      STAGING_E2E_COMPAT_PASSWORD: ${{ secrets.STAGING_E2E_COMPAT_PASSWORD }}
+      VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+    steps:
+      - name: Checkout full history for provenance and migration comparison
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Refuse non-test and production targets before Azure login
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] &&
+            [ "$GITHUB_REF" = refs/heads/main ] &&
+            [ "$GITHUB_REPOSITORY" = valence-works/elsa-control ] || {
+              echo "::error::Rollback requires a main-branch manual dispatch in elsa-control."
+              exit 1
+            }
+          source scripts/staging-control-rollback.sh
+          rollback_require_scope
+          rollback_require_inputs
+
+      - name: Log in Azure CLI
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Preflight freeze, capture, schema and data gates
+        id: preflight
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/staging-control-rollback.sh preflight
+
+      - name: Switch staging to N-1 by immutable digest
+        id: switch
+        if: ${{ success() && steps.preflight.outcome == 'success' }}
+        timeout-minutes: 8
+        env:
+          PREFLIGHT_SUCCESS: ${{ steps.preflight.outputs.preflight_success }}
+          N_MINUS_1_COMMIT: ${{ steps.preflight.outputs.n1_commit }}
+          N_MINUS_1_BUILD_NUMBER: ${{ steps.preflight.outputs.n1_build_number }}
+          BUILD_PRESENT: ${{ steps.preflight.outputs.build_present }}
+          BUILD_SLOT_SETTING: ${{ steps.preflight.outputs.build_slot_setting }}
+          ORIGINAL_IMAGE_REFERENCE: ${{ steps.preflight.outputs.image_reference }}
+          EXPECTED_DIGEST: ${{ steps.preflight.outputs.digest }}
+          EXPECTED_BUILD_NUMBER: ${{ steps.preflight.outputs.build_number }}
+          EXPECTED_IMAGE_ID: ${{ steps.preflight.outputs.image_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/staging-control-rollback.sh switch
+
+      - name: Check N-1 health, compatibility and existing data
+        id: checks
+        if: ${{ success() && steps.switch.outcome == 'success' && !cancelled() }}
+        timeout-minutes: 8
+        env:
+          PREFLIGHT_SUCCESS: ${{ steps.preflight.outputs.preflight_success }}
+          N_MINUS_1_COMMIT: ${{ steps.preflight.outputs.n1_commit }}
+          N_MINUS_1_BUILD_NUMBER: ${{ steps.preflight.outputs.n1_build_number }}
+          EXPECTED_N_COMMIT: ${{ steps.preflight.outputs.expected_n_commit }}
+          N1_BFF_OUTCOME: ${{ steps.preflight.outputs.n1_bff_outcome }}
+          N1_COMPATIBILITY_PATH: ${{ steps.preflight.outputs.n1_compatibility_path }}
+          DATA_HASH_PATH: ${{ steps.preflight.outputs.data_hash_path }}
+          MIGRATION_HISTORY_HASH: ${{ steps.preflight.outputs.migration_history_hash }}
+          WRITE_EPOCH: ${{ steps.switch.outputs.write_epoch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/staging-control-rollback.sh check
+
+      - name: Hold the bounded N-1 proof window
+        id: hold
+        if: ${{ success() && steps.switch.outcome == 'success' && steps.checks.outcome == 'success' && !cancelled() }}
+        timeout-minutes: 16
+        env:
+          PREFLIGHT_SUCCESS: ${{ steps.preflight.outputs.preflight_success }}
+          WRITE_EPOCH: ${{ steps.switch.outputs.write_epoch }}
+          ROLLBACK_HOLD_SECONDS: "30"
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/staging-control-rollback.sh hold
+
+      - name: Restore N after success, failed checks, or ordinary cancellation
+        id: restore
+        if: ${{ always() && steps.preflight.outcome == 'success' }}
+        timeout-minutes: 12
+        env:
+          PREFLIGHT_SUCCESS: ${{ steps.preflight.outputs.preflight_success }}
+          EXPECTED_BUILD_NUMBER: ${{ steps.preflight.outputs.build_number }}
+          EXPECTED_IMAGE_ID: ${{ steps.preflight.outputs.image_id }}
+          ORIGINAL_IMAGE_REFERENCE: ${{ steps.preflight.outputs.image_reference }}
+          EXPECTED_DIGEST: ${{ steps.preflight.outputs.digest }}
+          BUILD_PRESENT: ${{ steps.preflight.outputs.build_present }}
+          BUILD_VALUE: ${{ steps.preflight.outputs.build_value }}
+          BUILD_SLOT_SETTING: ${{ steps.preflight.outputs.build_slot_setting }}
+          EXPECTED_N_COMMIT: ${{ steps.preflight.outputs.expected_n_commit }}
+          WRITE_EPOCH: ${{ steps.switch.outputs.write_epoch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/staging-control-rollback.sh restore
+
+      - name: Verify every post-restore identity and read proof
+        id: postflight
+        if: ${{ always() && steps.restore.outcome == 'success' }}
+        timeout-minutes: 8
+        env:
+          RESTORE_SUCCESS: ${{ steps.restore.outcome == 'success' && 'true' || 'false' }}
+          IMAGE_REFERENCE: ${{ steps.preflight.outputs.image_reference }}
+          DIGEST: ${{ steps.preflight.outputs.digest }}
+          BUILD_NUMBER: ${{ steps.preflight.outputs.build_number }}
+          IMAGE_ID: ${{ steps.preflight.outputs.image_id }}
+          BUILD_PRESENT: ${{ steps.preflight.outputs.build_present }}
+          BUILD_VALUE: ${{ steps.preflight.outputs.build_value }}
+          BUILD_SLOT_SETTING: ${{ steps.preflight.outputs.build_slot_setting }}
+          EXPECTED_N_COMMIT: ${{ steps.preflight.outputs.expected_n_commit }}
+          SETTING_NAMES_HASH: ${{ steps.preflight.outputs.setting_names_hash }}
+          COMPATIBILITY_PATH: ${{ steps.preflight.outputs.compatibility_path }}
+          DATA_HASH_PATH: ${{ steps.preflight.outputs.data_hash_path }}
+          MIGRATION_HISTORY_HASH: ${{ steps.preflight.outputs.migration_history_hash }}
+          DEPLOYMENT_ID: ${{ steps.preflight.outputs.deployment_id }}
+          PREFLIGHT_STARTED_AT: ${{ steps.preflight.outputs.preflight_started_at }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/staging-control-rollback.sh postflight
+
+      - name: Clean up the private rollback write marker
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/staging-control-rollback.sh
+          rollback_cleanup_write_epoch
+
+      - name: Record a failed restore as an operational incident
+        if: ${{ always() && steps.preflight.outcome == 'success' && steps.restore.outcome != 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::error::Control staging restore failed; leave staging-freeze on and recover with a normal Deploy staging app run of main."
+          exit 1
