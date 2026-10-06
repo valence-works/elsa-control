@@ -197,6 +197,15 @@ restore time reserved inside that cap. A runner loss or force-cancel can stop
 the process before a restore step executes and is not claimed as guaranteed
 recovery; use the normal Deploy staging app run of main if recovery is needed.
 
+The job itself uses `!cancelled()` so ordinary cancellation interrupts the
+active switch, check, or hold step. `always()` belongs on the armed restoration,
+postflight, and cleanup steps; putting it on the job keeps the running job alive.
+GitHub can forcibly terminate cancelled work after five minutes, so an accepted
+cancellation request is not recovery proof. The live exercise must show an
+interrupted candidate step plus successful restore and postflight identities.
+A stalled restore or runner loss must remain an incident, never a claimed PASS.
+See [GitHub's cancellation sequence](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation).
+
 This workflow has implementation and local stub-test coverage, but no live
 Azure rollback dispatch has been run yet. R1/R2, live data/read proofs, and
 the exact cancellation exercise therefore remain pending. The workflow does

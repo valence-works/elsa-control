@@ -39,6 +39,9 @@ class StagingControlRollbackTests(unittest.TestCase):
 
     def test_workflow_has_only_two_digest_inputs_and_reserves_restore(self) -> None:
         self.assertEqual(self.workflow_text.count("description: \"The exact"), 2)
+        job = self.workflow_text.split("  rollback:\n", 1)[1].split("    steps:\n", 1)[0]
+        self.assertIn("if: ${{ !cancelled() }}", job)
+        self.assertNotIn("always()", job, "the job must receive cancellation to interrupt its hold")
         self.assertIn("if: ${{ always() }}", self.workflow_text)
         self.assertIn("always() && steps.preflight.outcome == 'success'", self.workflow_text)
         self.assertIn("&& !cancelled()", self.workflow_text)

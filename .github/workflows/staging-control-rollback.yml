@@ -22,7 +22,9 @@ concurrency:
 jobs:
   rollback:
     name: Prove and restore the staging Control image
-    if: ${{ always() }}
+    # Let ordinary cancellation stop the active switch/check/hold step.
+    # Restoration and postflight remain cancellation-independent steps.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     environment: test
