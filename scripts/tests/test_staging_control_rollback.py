@@ -9,6 +9,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -76,7 +77,8 @@ class StagingControlRollbackTests(unittest.TestCase):
             self.assertTrue(any("--slot-settings Application__BuildNumber=233" in call for call in calls))
             self.assertFalse(any("--settings Application__BuildNumber" in call for call in calls))
 
-    def test_shared_health_keeps_legacy_empty_identity_fallback(self) -> None:
+    @contextmanager
+    def health_fixture(self):
         with tempfile.TemporaryDirectory() as temporary:
             fake_az = Path(temporary) / "az"
             fake_curl = Path(temporary) / "curl"
@@ -87,45 +89,50 @@ class StagingControlRollbackTests(unittest.TestCase):
                 "while [ \"$#\" -gt 0 ]; do\n"
                 "  if [ \"$1\" = --output ]; then output=$2; shift 2; else shift; fi\n"
                 "done\n"
-                "printf '{\"status\":\"ok\"}' > \"$output\"\n"
+                "printf '%s' \"$HEALTH_RESPONSE\" > \"$output\"\n"
                 "printf 200\n"
             )
             fake_sleep.write_text("#!/usr/bin/env bash\nexit 0\n")
             for path in (fake_az, fake_curl, fake_sleep):
                 path.chmod(0o700)
-            result = self.run_bash(
-                f'source "{HELPERS}"; azure_wait_for_stable_api_health "" "" legacy',
-                {
-                    "PATH": f"{temporary}:{os.environ['PATH']}",
-                    "AZURE_RESOURCE_GROUP": "rg-test",
-                    "AZURE_WEBAPP_NAME": "api-test",
-                    "AZURE_HEALTH_ATTEMPTS": "2",
-                    "AZURE_HEALTH_RETRY_SECONDS": "0",
-                },
-            )
-            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-            legacy_build_only = self.run_bash(
-                f'source "{HELPERS}"; azure_wait_for_stable_api_health 233 "" legacy',
-                {
-                    "PATH": f"{temporary}:{os.environ['PATH']}",
-                    "AZURE_RESOURCE_GROUP": "rg-test",
-                    "AZURE_WEBAPP_NAME": "api-test",
-                    "AZURE_HEALTH_ATTEMPTS": "2",
-                    "AZURE_HEALTH_RETRY_SECONDS": "0",
-                },
-            )
-            self.assertEqual(0, legacy_build_only.returncode, legacy_build_only.stdout + legacy_build_only.stderr)
-            strict_identity = self.run_bash(
-                f'source "{HELPERS}"; azure_wait_for_stable_api_health 233 source legacy',
-                {
-                    "PATH": f"{temporary}:{os.environ['PATH']}",
-                    "AZURE_RESOURCE_GROUP": "rg-test",
-                    "AZURE_WEBAPP_NAME": "api-test",
-                    "AZURE_HEALTH_ATTEMPTS": "1",
-                    "AZURE_HEALTH_RETRY_SECONDS": "0",
-                },
-            )
-            self.assertNotEqual(0, strict_identity.returncode)
+            yield {
+                "PATH": f"{temporary}:{os.environ['PATH']}",
+                "AZURE_RESOURCE_GROUP": "rg-test",
+                "AZURE_WEBAPP_NAME": "api-test",
+                "AZURE_HEALTH_ATTEMPTS": "2",
+                "AZURE_HEALTH_RETRY_SECONDS": "0",
+                "HEALTH_RESPONSE": '{"status":"ok"}',
+            }
+
+    def test_shared_health_keeps_legacy_empty_identity_fallback(self) -> None:
+        with self.health_fixture() as environment:
+            for build, image, should_pass in [("", "", True), ("233", "", True), ("233", "source", False)]:
+                with self.subTest(build=build, image=image):
+                    result = self.run_bash(
+                        f'source "{HELPERS}"; azure_wait_for_stable_api_health "{build}" "{image}" legacy',
+                        environment,
+                    )
+                    self.assertEqual(should_pass, result.returncode == 0, result.stdout + result.stderr)
+
+    def test_legacy_rollback_rejects_candidate_when_previous_build_is_unknown(self) -> None:
+        workflow = (ROOT / ".github/workflows/azure-api-deploy.yml").read_text()
+        start = workflow.index('          expected_previous_build_number=')
+        end = workflow.index('            "Rollback"', start) + len('            "Rollback"')
+        script = f'source "{HELPERS}";\n' + workflow[start:end]
+        with self.health_fixture() as environment:
+            for build, should_pass in [(None, True), ("unknown", True), ("234", False)]:
+                with self.subTest(observed_build=build):
+                    health = {"status": "ok"}
+                    if build is not None:
+                        health["buildNumber"] = build
+                    result = self.run_bash(script, {
+                        **environment,
+                        "PREVIOUS_HEALTH_BUILD_NUMBER": "",
+                        "PREVIOUS_BUILD_NUMBER": "unknown",
+                        "PREVIOUS_HEALTH_IMAGE_ID": "",
+                        "HEALTH_RESPONSE": json.dumps(health),
+                    })
+                    self.assertEqual(should_pass, result.returncode == 0, result.stdout + result.stderr)
 
     def test_health_failure_cleans_nested_temp_file_under_set_u(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -1592,9 +1592,6 @@ jobs:
             echo "::notice::Rollback health is using the explicit legacy-image compatibility path because the pre-deploy health response had no safe embedded image identity; Azure image configuration was matched to the captured reference."
           fi
 
-          if [ "$expected_previous_build_number" = unknown ]; then
-            expected_previous_build_number=""
-          fi
           azure_wait_for_stable_api_health \
             "$expected_previous_build_number" \
             "$expected_previous_image_id" \
