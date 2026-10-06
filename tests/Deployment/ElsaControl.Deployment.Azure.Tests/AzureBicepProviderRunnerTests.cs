@@ -955,13 +955,13 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
-    public async Task Recovery_observer_classifies_nested_aca_module_failure_as_transient()
+    public async Task Recovery_observer_rejects_historical_unknown_conflict_wrapper()
     {
         var process = new FakeCommandProcess();
         process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
         process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
         process.Success(args => args.Contains("properties.provisioningState"), "Failed");
-        process.Success(IsDeploymentErrorQuery, AzureTransientArmFailureTests.NestedProductionAcaFailure);
+        process.Success(IsDeploymentErrorQuery, AzureTransientArmFailureTests.HistoricalConflictAcaFailure);
         var foundation = RecoverableFoundationResources();
 
         var observation = await _fixture.Runner(process)
@@ -970,8 +970,85 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         Assert.Equal(AzureProviderRecoveryObservationKind.Failed, observation.Kind);
         Assert.Equal(AzureProviderRunnerStep.Foundation, observation.CompletedStep);
         Assert.Equal(AzureLateSuccessCodes.DeploymentFailed, observation.Code);
-        Assert.Equal(AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode, observation.InnerErrorCode);
+        Assert.Null(observation.InnerErrorCode);
+        Assert.DoesNotContain(process.Calls, IsDeploymentOperationsQuery);
         AssertNoProviderMutation(process);
+    }
+
+    [Theory]
+    [InlineData("unknown")]
+    [InlineData("depth")]
+    [InlineData("nodes")]
+    [InlineData("fanout")]
+    public async Task Recovery_observer_does_not_rescue_unsafe_initial_error_with_transient_operations(string kind)
+    {
+        var error = kind == "unknown"
+            ? """{"code":"UnknownError"}"""
+            : AzureTransientArmFailureTests.IncompleteErrorTree(kind);
+        var process = FailedFoundationObservation(error);
+        process.Success(IsDeploymentOperationsQuery, AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations);
+
+        var observation = await _fixture.Runner(process).ObserveAsync(CreateRecoveryRequest(
+            RecoverableFoundationResources(), AzureProviderRunnerStep.Foundation, AzureProviderOperationPhase.Planned));
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.Failed, observation.Kind);
+        Assert.Null(observation.InnerErrorCode);
+        Assert.DoesNotContain(process.Calls, IsDeploymentOperationsQuery);
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_detects_truncated_operations_using_an_extra_result()
+    {
+        var process = FailedFoundationObservation(AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
+        process.Success(IsDeploymentOperationsQuery, AzureTransientArmFailureTests.OversizedOperations);
+
+        var observation = await _fixture.Runner(process).ObserveAsync(CreateRecoveryRequest(
+            RecoverableFoundationResources(), AzureProviderRunnerStep.Foundation, AzureProviderOperationPhase.Planned));
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.Failed, observation.Kind);
+        Assert.Null(observation.InnerErrorCode);
+        var call = Assert.Single(process.Calls, IsDeploymentOperationsQuery);
+        Assert.Contains("[?properties.provisioningState=='Failed'] | [0:17]", call);
+        AssertNoProviderMutation(process);
+    }
+
+    [Theory]
+    [InlineData("/subscriptions/foreign/resourceGroups/foreign-rg/providers/Microsoft.Resources/deployments/other")]
+    [InlineData(null)]
+    public async Task Recovery_observer_refuses_uninspectable_nested_module_even_with_a_transient_sibling(string? name)
+    {
+        var process = FailedFoundationObservation(AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
+        process.Success(IsDeploymentOperationsQuery, JsonSerializer.Serialize(new[]
+        {
+            new
+            {
+                properties = new
+                {
+                    targetResource = new { resourceType = "Microsoft.Resources/deployments", resourceName = name },
+                    error = new { code = AzureTransientArmFailure.ManagedEnvironmentProvisioningError }
+                }
+            }
+        }));
+
+        var observation = await _fixture.Runner(process).ObserveAsync(CreateRecoveryRequest(
+            RecoverableFoundationResources(), AzureProviderRunnerStep.Foundation, AzureProviderOperationPhase.Planned));
+
+        Assert.Equal(AzureProviderRecoveryObservationKind.Failed, observation.Kind);
+        Assert.Null(observation.InnerErrorCode);
+        Assert.Single(process.Calls, IsDeploymentOperationsQuery);
+        Assert.DoesNotContain(process.Calls, call => call.Contains("foreign-rg"));
+        AssertNoProviderMutation(process);
+    }
+
+    private static FakeCommandProcess FailedFoundationObservation(string error)
+    {
+        var process = new FakeCommandProcess();
+        process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+        process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+        process.Success(args => args.Contains("properties.provisioningState"), "Failed");
+        process.Success(IsDeploymentErrorQuery, error);
+        return process;
     }
 
     [Fact]
