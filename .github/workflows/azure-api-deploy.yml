@@ -867,11 +867,7 @@ jobs:
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_WEBAPP_NAME" \
               --query "[?name=='Application__BuildNumber'] | [0].slotSetting" \
-              --output tsv)"
-            case "$application_build_slot_setting" in
-              true|false) ;;
-              *) echo "::error::Application__BuildNumber slot stickiness was unreadable."; exit 1 ;;
-            esac
+              --output json | jq -er 'if type == "boolean" then tostring else error("Application__BuildNumber slot stickiness was unreadable.") end')"
           else
             echo "application_build_number_present=false" >> "$GITHUB_OUTPUT"
             application_build_slot_setting=false

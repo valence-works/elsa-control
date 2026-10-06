@@ -3120,7 +3120,13 @@ case "$*" in
   *"webapp config appsettings list"*)
     case "$*" in
       *"ELSA_CONTROL_IMAGE_ID"*) printf '%s\\n' "${IMAGE_ID_OVERRIDE_COUNT:-0}" ;;
-      *"Application__BuildNumber"*"slotSetting"*) printf '%s\\n' "${APPLICATION_BUILD_SLOT_SETTING:-false}" ;;
+      *"Application__BuildNumber"*"slotSetting"*)
+        slot_value="${APPLICATION_BUILD_SLOT_SETTING:-false}"
+        if [[ "$*" == *"--output tsv"* ]]; then
+          case "$slot_value" in true) slot_value=True;; false) slot_value=False;; esac
+        fi
+        printf '%s\\n' "$slot_value"
+        ;;
       *) printf '%s\\n' "${APPLICATION_BUILD_NUMBER}" ;;
     esac
     ;;
@@ -3236,6 +3242,8 @@ printf '%s' "${HEALTH_STATUS:-200}"
             sticky_build_capture = run_capture("SITECONTAINERS", "acr.azurecr.io/elsa-control/api:latest", build_slot_setting="true")
             self.assertEqual(0, sticky_build_capture.returncode, sticky_build_capture.stderr)
             self.assertIn("application_build_number_slot_setting=true", (temp_path / "github-output").read_text())
+            unreadable_slot_capture = run_capture("SITECONTAINERS", "acr.azurecr.io/elsa-control/api:latest", build_slot_setting="null")
+            self.assertNotEqual(0, unreadable_slot_capture.returncode)
 
             unsafe_health_capture = run_capture(
                 "DOCKER|acr.azurecr.io/elsa-control/api:latest",
