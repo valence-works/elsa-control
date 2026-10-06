@@ -398,13 +398,19 @@ PY
 
 rollback_predict_bff_outcome() {
   local source="$1"
-  jq -e --argjson required "$CLOUD_REQUIRED_CAPABILITIES_JSON" \
-    --slurpfile candidate "$source" \
-    '($candidate[0].contractVersion == 1) and ($required | all(.[] as $cap; ($candidate[0].capabilities | index($cap) != null)))' >/dev/null || {
-      ROLLBACK_BFF_OUTCOME=gated
-      return 0
-    }
-  ROLLBACK_BFF_OUTCOME=compatible
+  if ! ROLLBACK_BFF_OUTCOME="$(jq -nr --argjson required "$CLOUD_REQUIRED_CAPABILITIES_JSON" \
+    --slurpfile candidate "$source" '
+      def valid_capabilities: type == "array" and length > 0 and all(.[]; type == "string" and length > 0);
+      if ($required | valid_capabilities) and ($candidate | length == 1) and
+         ($candidate[0].contractVersion | type == "number" and . >= 1 and floor == .) and
+         ($candidate[0].capabilities | valid_capabilities) then
+        if ($candidate[0].contractVersion == 1) and
+           all($required[]; . as $cap | $candidate[0].capabilities | index($cap) != null)
+        then "compatible" else "gated" end
+      else error("Invalid rollback capability evidence") end
+    ')"; then
+    fail "Rollback BFF capability prediction could not be evaluated; refusing before a write."
+  fi
 }
 
 rollback_capture_cloud_required_capabilities() {

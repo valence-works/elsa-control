@@ -502,6 +502,56 @@ class StagingControlRollbackTests(unittest.TestCase):
                     self.assertEqual(0, result.returncode, result.stdout + result.stderr)
                     self.assertEqual({"contractVersion": 1, "capabilities": ["cloud.bootstrap.v1"]}, json.loads(result.stdout))
 
+    def test_bff_prediction_distinguishes_compatible_and_incompatible_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "candidate.json"
+            for version, capabilities, expected in (
+                (1, ["bootstrap", "billing"], "compatible"),
+                (1, ["billing", "bootstrap", "extra"], "compatible"),
+                (1, ["bootstrap"], "gated"),
+                (2, ["bootstrap", "billing"], "gated"),
+            ):
+                with self.subTest(version=version, capabilities=capabilities):
+                    candidate.write_text(json.dumps({"contractVersion": version, "capabilities": capabilities}))
+                    result = self.run_bash(
+                        f'source "{ROLLBACK}"; rollback_predict_bff_outcome "{candidate}"; '
+                        'printf "%s" "$ROLLBACK_BFF_OUTCOME"',
+                        {"CLOUD_REQUIRED_CAPABILITIES_JSON": '["bootstrap","billing"]'},
+                    )
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual(expected, result.stdout)
+                    self.assertEqual("", result.stderr)
+
+    def test_bff_prediction_refuses_unreadable_or_invalid_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "candidate.json"
+            valid = '{"contractVersion":1,"capabilities":["bootstrap"]}'
+            for source, required in (
+                (None, '["bootstrap"]'),
+                ("not-json", '["bootstrap"]'),
+                (valid, "not-json"),
+                (valid, "{}"),
+                (valid, "[]"),
+                (valid, '[""]'),
+                ('{"contractVersion":1,"capabilities":null}', '["bootstrap"]'),
+                ('{"contractVersion":1,"capabilities":[7]}', '["bootstrap"]'),
+                ('{"contractVersion":"1","capabilities":["bootstrap"]}', '["bootstrap"]'),
+                ('{"contractVersion":1.5,"capabilities":["bootstrap"]}', '["bootstrap"]'),
+                (valid + "\n" + valid, '["bootstrap"]'),
+            ):
+                with self.subTest(source=source, required=required):
+                    if source is None:
+                        candidate.unlink(missing_ok=True)
+                    else:
+                        candidate.write_text(source)
+                    result = self.run_bash(
+                        f'source "{ROLLBACK}"; rollback_predict_bff_outcome "{candidate}"; '
+                        'printf "%s" "$ROLLBACK_BFF_OUTCOME"',
+                        {"CLOUD_REQUIRED_CAPABILITIES_JSON": required},
+                    )
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertNotIn("gated", result.stdout)
+
     def test_instance_proof_uses_real_instance_id_field_and_no_mutating_bootstrap(self) -> None:
         self.assertIn(".items[].instanceId", self.rollback_text)
         self.assertNotIn(".items[].id", self.rollback_text)
