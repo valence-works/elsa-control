@@ -986,7 +986,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
             ? """{"code":"UnknownError"}"""
             : AzureTransientArmFailureTests.IncompleteErrorTree(kind);
         var process = FailedFoundationObservation(error);
-        process.Success(IsDeploymentOperationsQuery, AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations);
+        ScriptOperations(process, IsDeploymentOperationsQuery, AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations);
 
         var observation = await _fixture.Runner(process).ObserveAsync(CreateRecoveryRequest(
             RecoverableFoundationResources(), AzureProviderRunnerStep.Foundation, AzureProviderOperationPhase.Planned));
@@ -998,10 +998,10 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     }
 
     [Fact]
-    public async Task Recovery_observer_detects_truncated_operations_using_an_extra_result()
+    public async Task Recovery_observer_rejects_excess_failed_operations_on_a_page()
     {
         var process = FailedFoundationObservation(AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
-        process.Success(IsDeploymentOperationsQuery, AzureTransientArmFailureTests.OversizedOperations);
+        ScriptOperations(process, IsDeploymentOperationsQuery, AzureTransientArmFailureTests.OversizedOperations);
 
         var observation = await _fixture.Runner(process).ObserveAsync(CreateRecoveryRequest(
             RecoverableFoundationResources(), AzureProviderRunnerStep.Foundation, AzureProviderOperationPhase.Planned));
@@ -1009,7 +1009,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         Assert.Equal(AzureProviderRecoveryObservationKind.Failed, observation.Kind);
         Assert.Null(observation.InnerErrorCode);
         var call = Assert.Single(process.Calls, IsDeploymentOperationsQuery);
-        Assert.Contains("[?properties.provisioningState=='Failed'] | [0:17]", call);
+        Assert.Contains(call, argument => argument.EndsWith("/operations?api-version=2025-04-01&$top=64", StringComparison.Ordinal));
         AssertNoProviderMutation(process);
     }
 
@@ -1019,12 +1019,13 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     public async Task Recovery_observer_refuses_uninspectable_nested_module_even_with_a_transient_sibling(string? name)
     {
         var process = FailedFoundationObservation(AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
-        process.Success(IsDeploymentOperationsQuery, JsonSerializer.Serialize(new[]
+        ScriptOperations(process, IsDeploymentOperationsQuery, JsonSerializer.Serialize(new[]
         {
             new
             {
                 properties = new
                 {
+                    provisioningState = "Failed",
                     targetResource = new { resourceType = "Microsoft.Resources/deployments", resourceName = name },
                     error = new { code = AzureTransientArmFailure.ManagedEnvironmentProvisioningError }
                 }
@@ -1059,7 +1060,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
         process.Success(args => args.Contains("properties.provisioningState"), "Failed");
         process.Success(IsDeploymentErrorQuery, AzureTransientArmFailureTests.MessageOnlyDeploymentFailure);
-        process.Success(IsDeploymentOperationsQuery, AzureTransientArmFailureTests.MessageOnlyDeploymentOperations);
+        ScriptOperations(process, IsDeploymentOperationsQuery, AzureTransientArmFailureTests.MessageOnlyDeploymentOperations);
         var foundation = RecoverableFoundationResources();
 
         var observation = await _fixture.Runner(process)
@@ -1078,7 +1079,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
         process.Success(args => args.Contains("properties.provisioningState"), "Failed");
         process.Success(IsDeploymentErrorQuery, AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
-        process.Success(
+        ScriptOperations(process,
             args => IsDeploymentOperationsQuery(args, "elsa-proof-aaaaaaaaaaaa-foundation"),
             AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations);
         var foundation = RecoverableFoundationResources();
@@ -1103,10 +1104,10 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
         process.Success(args => args.Contains("properties.provisioningState"), "Failed");
         process.Success(IsDeploymentErrorQuery, AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
-        process.Success(
+        ScriptOperations(process,
             args => IsDeploymentOperationsQuery(args, "elsa-proof-aaaaaaaaaaaa-foundation"),
             AzureTransientArmFailureTests.ProductionFoundationNestedModuleOperations);
-        process.Success(
+        ScriptOperations(process,
             args => IsDeploymentOperationsQuery(args, "container-apps-environment"),
             AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations);
         var foundation = RecoverableFoundationResources();
@@ -1129,13 +1130,13 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
         process.Success(args => args.Contains("properties.provisioningState"), "Failed");
         process.Success(IsDeploymentErrorQuery, AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
-        process.Success(
+        ScriptOperations(process,
             args => IsDeploymentOperationsQuery(args, "elsa-proof-aaaaaaaaaaaa-foundation"),
             AzureTransientArmFailureTests.ProductionFoundationSiblingModuleOperations);
-        process.Success(
+        ScriptOperations(process,
             args => IsDeploymentOperationsQuery(args, "container-apps-environment"),
             AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations);
-        process.Success(
+        ScriptOperations(process,
             args => IsDeploymentOperationsQuery(args, "sql"),
             AzureTransientArmFailureTests.QuotaExceededDeploymentOperations);
         var foundation = RecoverableFoundationResources();
@@ -1158,16 +1159,16 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
         process.Success(args => args.Contains("properties.provisioningState"), "Failed");
         process.Success(IsDeploymentErrorQuery, AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
-        process.Success(
+        ScriptOperations(process,
             args => IsDeploymentOperationsQuery(args, "elsa-proof-aaaaaaaaaaaa-foundation"),
             AzureTransientArmFailureTests.FiveFailedNestedModuleOperations);
-        process.Success(
+        ScriptOperations(process,
             args => IsDeploymentOperationsQuery(args, "identity"),
             AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations);
-        process.Success(
+        ScriptOperations(process,
             args => IsDeploymentOperationsQuery(args, "observability"),
             AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations);
-        process.Success(
+        ScriptOperations(process,
             args => IsDeploymentOperationsQuery(args, "sql"),
             AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations);
         var foundation = RecoverableFoundationResources();
@@ -1203,6 +1204,191 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         AssertNoProviderMutation(process);
     }
 
+    [Fact]
+    public async Task Recovery_observer_reads_a_later_page_after_only_successful_operations()
+    {
+        var process = FailedFoundationObservation(AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
+        var next = FoundationOperationsUrl + "&%24skiptoken=page%2B2%3D";
+        ScriptOperations(process, args => IsDeploymentOperationsQuery(args) && args[4] == FoundationOperationsUrl + "&$top=64",
+            """[{"properties":{"provisioningState":"Succeeded"}}]""", next);
+        ScriptOperations(process, args => IsDeploymentOperationsQuery(args) && args[4] == next,
+            AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations);
+
+        var observation = await ObserveFailedFoundationAsync(process);
+
+        Assert.Equal(AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode, observation.InnerErrorCode);
+        Assert.Equal(2, process.Calls.Count(IsDeploymentOperationsQuery));
+        AssertNoProviderMutation(process);
+    }
+
+    [Theory]
+    [InlineData("QuotaExceeded")]
+    [InlineData("UnknownError")]
+    public async Task Recovery_observer_does_not_hide_an_unsafe_later_page(string code)
+    {
+        var process = FailedFoundationObservation(AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
+        ScriptOperations(process, IsDeploymentOperationsQuery, AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations,
+            FoundationOperationsUrl + "&$skiptoken=2");
+        ScriptOperations(process, IsDeploymentOperationsQuery,
+            JsonSerializer.Serialize(new[] { new { properties = new { provisioningState = "Failed", error = new { code } } } }));
+
+        var observation = await ObserveFailedFoundationAsync(process);
+
+        Assert.Null(observation.InnerErrorCode);
+        Assert.Equal(2, process.Calls.Count(IsDeploymentOperationsQuery));
+        AssertNoProviderMutation(process);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Recovery_observer_requires_completion_within_four_explicit_pages(bool hasFifthPage)
+    {
+        var process = FailedFoundationObservation(AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
+        for (var page = 1; page <= 4; page++)
+            ScriptOperations(process, IsDeploymentOperationsQuery,
+                page == 1 ? AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations : "[]",
+                page < 4 || hasFifthPage ? FoundationOperationsUrl + $"&$skiptoken={page + 1}" : null);
+
+        var observation = await ObserveFailedFoundationAsync(process);
+
+        Assert.Equal(hasFifthPage ? null : AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode, observation.InnerErrorCode);
+        Assert.Equal(4, process.Calls.Count(IsDeploymentOperationsQuery));
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_shares_the_page_budget_with_nested_modules()
+    {
+        var process = FailedFoundationObservation(AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
+        ScriptOperations(process, IsDeploymentOperationsQuery, AzureTransientArmFailureTests.ProductionFoundationNestedModuleOperations,
+            FoundationOperationsUrl + "&$skiptoken=2");
+        ScriptOperations(process, IsDeploymentOperationsQuery, "[]");
+        var nested = FoundationOperationsUrl.Replace("elsa-proof-aaaaaaaaaaaa-foundation", "container-apps-environment", StringComparison.Ordinal);
+        ScriptOperations(process, args => IsDeploymentOperationsQuery(args, "container-apps-environment"),
+            AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations, nested + "&$skiptoken=2");
+        ScriptOperations(process, args => IsDeploymentOperationsQuery(args, "container-apps-environment"), "[]", nested + "&$skiptoken=3");
+
+        var observation = await ObserveFailedFoundationAsync(process);
+
+        Assert.Null(observation.InnerErrorCode);
+        Assert.Equal(4, process.Calls.Count(IsDeploymentOperationsQuery));
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_stops_a_repeated_continuation_without_repeating_the_request()
+    {
+        var process = FailedFoundationObservation(AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
+        var next = FoundationOperationsUrl + "&$skiptoken=2";
+        ScriptOperations(process, IsDeploymentOperationsQuery, AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations, next);
+        ScriptOperations(process, IsDeploymentOperationsQuery, "[]", next);
+
+        var observation = await ObserveFailedFoundationAsync(process);
+
+        Assert.Null(observation.InnerErrorCode);
+        Assert.Equal(2, process.Calls.Count(IsDeploymentOperationsQuery));
+        AssertNoProviderMutation(process);
+    }
+
+    [Theory]
+    [InlineData("host")]
+    [InlineData("http")]
+    [InlineData("subscription")]
+    [InlineData("group")]
+    [InlineData("deployment")]
+    [InlineData("path")]
+    [InlineData("userinfo")]
+    [InlineData("port")]
+    [InlineData("fragment")]
+    [InlineData("version")]
+    [InlineData("extra")]
+    [InlineData("duplicate")]
+    [InlineData("no-token")]
+    [InlineData("percent")]
+    [InlineData("long")]
+    public async Task Recovery_observer_does_not_follow_an_untrusted_continuation(string kind)
+    {
+        var next = FoundationOperationsUrl + "&$skiptoken=2";
+        next = kind switch
+        {
+            "host" => next.Replace("management.azure.com", "foreign.example", StringComparison.Ordinal),
+            "http" => next.Replace("https:", "http:", StringComparison.Ordinal),
+            "subscription" => next.Replace("11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222", StringComparison.Ordinal),
+            "group" => next.Replace("proof-rg", "foreign-rg", StringComparison.Ordinal),
+            "deployment" => next.Replace("elsa-proof-aaaaaaaaaaaa-foundation", "foreign-deployment", StringComparison.Ordinal),
+            "path" => next.Replace("/operations?", "/%2e%2e/operations?", StringComparison.Ordinal),
+            "userinfo" => next.Replace("https://", "https://user@", StringComparison.Ordinal),
+            "port" => next.Replace("management.azure.com/", "management.azure.com:444/", StringComparison.Ordinal),
+            "fragment" => next + "#fragment",
+            "version" => next.Replace("2025-04-01", "2000-01-01", StringComparison.Ordinal),
+            "extra" => next + "&other=value",
+            "duplicate" => next + "&%24skiptoken=3",
+            "no-token" => FoundationOperationsUrl,
+            "percent" => next + "%GG",
+            "long" => next + new string('x', 4096),
+            _ => throw new ArgumentOutOfRangeException(nameof(kind))
+        };
+        var process = FailedFoundationObservation(AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
+        ScriptOperations(process, IsDeploymentOperationsQuery, AzureTransientArmFailureTests.ProductionManagedEnvironmentOperations, next);
+
+        var observation = await ObserveFailedFoundationAsync(process);
+
+        Assert.Null(observation.InnerErrorCode);
+        Assert.Single(process.Calls, IsDeploymentOperationsQuery);
+        AssertNoProviderMutation(process);
+    }
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("{\"value\":null}")]
+    [InlineData("{\"value\":[],\"nextLink\":42}")]
+    [InlineData("{\"value\":[],\"nextLink\":\"\"}")]
+    [InlineData("{\"value\":[{}]}")]
+    [InlineData("{\"value\":[{\"properties\":{\"provisioningState\":\"Running\"}}]}")]
+    [InlineData("{\"value\":[{\"properties\":{\"provisioningState\":\"Canceled\"}}]}")]
+    public async Task Recovery_observer_rejects_an_incomplete_or_malformed_page(string page)
+    {
+        var process = FailedFoundationObservation(AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
+        process.Success(IsDeploymentOperationsQuery, page);
+
+        var observation = await ObserveFailedFoundationAsync(process);
+
+        Assert.Null(observation.InnerErrorCode);
+        Assert.Single(process.Calls, IsDeploymentOperationsQuery);
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_does_not_trust_the_top_hint_when_a_page_exceeds_its_size()
+    {
+        var process = FailedFoundationObservation(AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
+        ScriptOperations(process, IsDeploymentOperationsQuery, JsonSerializer.Serialize(Enumerable.Range(0, 65).Select(_ =>
+            new { properties = new { provisioningState = "Succeeded" } })));
+
+        Assert.Null((await ObserveFailedFoundationAsync(process)).InnerErrorCode);
+        Assert.Single(process.Calls, IsDeploymentOperationsQuery);
+        AssertNoProviderMutation(process);
+    }
+
+    [Fact]
+    public async Task Recovery_observer_applies_failed_operation_fanout_across_pages()
+    {
+        var process = FailedFoundationObservation(AzureTransientArmFailureTests.WrapperOnlyProductionFoundationError);
+        using var operations = JsonDocument.Parse(AzureTransientArmFailureTests.OversizedOperations);
+        ScriptOperations(process, IsDeploymentOperationsQuery, JsonSerializer.Serialize(operations.RootElement.EnumerateArray().Take(8)),
+            FoundationOperationsUrl + "&$skiptoken=2");
+        ScriptOperations(process, IsDeploymentOperationsQuery, JsonSerializer.Serialize(operations.RootElement.EnumerateArray().Skip(8)));
+
+        Assert.Null((await ObserveFailedFoundationAsync(process)).InnerErrorCode);
+        Assert.Equal(2, process.Calls.Count(IsDeploymentOperationsQuery));
+        AssertNoProviderMutation(process);
+    }
+
+    private Task<AzureProviderRecoveryObservation> ObserveFailedFoundationAsync(FakeCommandProcess process) =>
+        _fixture.Runner(process).ObserveAsync(CreateRecoveryRequest(
+            RecoverableFoundationResources(), AzureProviderRunnerStep.Foundation, AzureProviderOperationPhase.Planned));
+
     [Theory]
     [InlineData(AzureTransientArmFailure.QuotaExceeded, false)]
     [InlineData(AzureTransientArmFailure.RequestDisallowedByPolicy, false)]
@@ -1217,7 +1403,7 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         process.Success(args => args.Contains("properties.provisioningState"), "Failed");
         ScriptDeploymentError(process, armCode);
         if (listsOperations)
-            process.Success(IsDeploymentOperationsQuery, "[]");
+            ScriptOperations(process, IsDeploymentOperationsQuery, "[]");
         var foundation = RecoverableFoundationResources();
 
         var observation = await _fixture.Runner(process)
@@ -4068,14 +4254,17 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
         args.Contains("properties.error");
 
     private static bool IsDeploymentOperationsQuery(string[] args) =>
-        args is ["deployment", "operation", "group", "list", ..];
+        args is ["rest", "--method", "get", "--url", var url, ..] &&
+        url.Contains("/deployments/", StringComparison.Ordinal) && url.Contains("/operations?", StringComparison.Ordinal);
 
     private static bool IsDeploymentOperationsQuery(string[] args, string deploymentName) =>
         IsDeploymentOperationsQuery(args) &&
-        Array.IndexOf(args, "--name") is var nameIndex &&
-        nameIndex >= 0 &&
-        nameIndex + 1 < args.Length &&
-        string.Equals(args[nameIndex + 1], deploymentName, StringComparison.Ordinal);
+        args[4].Contains($"/deployments/{deploymentName}/operations?", StringComparison.Ordinal);
+
+    private static void ScriptOperations(FakeCommandProcess process, Func<string[], bool> matcher, string operations, string? nextLink = null) =>
+        process.Success(matcher, JsonSerializer.Serialize(new { value = JsonSerializer.Deserialize<JsonElement>(operations), nextLink }));
+
+    private const string FoundationOperationsUrl = "https://management.azure.com/subscriptions/11111111-1111-1111-1111-111111111111/resourcegroups/proof-rg/deployments/elsa-proof-aaaaaaaaaaaa-foundation/operations?api-version=2025-04-01";
 
     private static bool IsFailedEnvironmentShow(string[] args) =>
         args is ["resource", "show", ..] && args.Contains("--ids") &&
