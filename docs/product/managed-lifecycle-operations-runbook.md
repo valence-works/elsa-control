@@ -440,11 +440,23 @@ Any unknown code, malformed error, or exceeded depth (8), node (64), or fan-out
 (16) limit requires operator attention. Free-text messages are never parsed.
 An unsafe initial error cannot be rescued by a later operations-list lookup.
 
-The failed-operations query projects up to 17 results so the seventeenth detects
-fan-out truncation. Same-resource-group nested deployments share the node budget
-and at most four CLI list calls. These limits bound classification and projected
-output; they do not bound Azure CLI's internal HTTP pagination. Retry backoff,
-the three-attempt cap, and the commercial gate remain unchanged.
+The observer reads deployment operations with explicit `az rest` GET pages;
+no CLI list iterator follows pagination internally. Each page requests at most
+64 operations and rejects a larger or malformed response. Only completed
+`Succeeded` operations are skipped; an unfinished or unknown state requires
+operator attention. Failed operations share a 16-entry limit per deployment,
+including entries spread across pages. Same-resource-group nested deployments
+share the 64-node budget and a maximum of four page reads in total. A remaining
+continuation or nested deployment after that budget requires operator attention.
+
+Continuation URLs must retain the exact HTTPS ARM host, subscription, resource
+group, deployment, and operations path, with the expected API version and a
+pagination token. Cross-scope, malformed, repeated, or unsupported continuations
+fail closed without following them. The page budget limits application paging;
+Azure CLI authentication/transport behavior remains subject to the existing
+command timeout and bounded output capture. Raw provider output stays inside
+the command/parser boundary. Retry backoff, the three-attempt cap, and the
+commercial gate remain unchanged.
 
 The recorded #750 ACA failure is retryable through its structured
 `ManagedEnvironmentProvisioningError` operations entry. Its HTTP `statusCode`

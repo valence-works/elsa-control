@@ -37,12 +37,6 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     /// <summary>Allowance for clock skew between Control and ARM when rejecting a previous same-name deployment record.</summary>
     private static readonly TimeSpan DeploymentTimestampSkew = TimeSpan.FromMinutes(1);
     private static readonly HashSet<string> TerminalDeploymentStates = new(["Succeeded", "Failed", "Canceled"], StringComparer.OrdinalIgnoreCase);
-    /// <summary>
-    /// Failed operations only, with one extra result to detect fan-out overflow.
-    /// This bounds projected output, not Azure CLI's internal HTTP pagination.
-    /// </summary>
-    private static readonly string FailedDeploymentOperationsQuery =
-        $"[?properties.provisioningState=='Failed'] | [0:{AzureTransientArmFailure.MaximumErrorWalkFanout + 1}]";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = true
@@ -662,7 +656,7 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     /// <summary>
     /// Read-only walk of failed deployment operations for a named deployment and
     /// same-RG nested module deployments. Bounded by the same depth, node, fan-out
-    /// and four CLI-list-call limits. A failed or truncated list stays
+    /// and four explicit ARM-page limits across all nested modules. A failed or truncated page stays
     /// operator-recoverable.
     /// </summary>
     private async Task<string?> TryClassifyFailedDeploymentOperationsAsync(
@@ -701,40 +695,45 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
                 !string.Equals(name, deploymentName, StringComparison.Ordinal))
                 continue;
 
-            pages++;
-            var operations = await ExecuteAzAsync(command,
-                ["deployment", "operation", "group", "list",
-                    "--subscription", subscriptionId, "--resource-group", resourceGroupName,
-                    "--name", name,
-                    "--query", FailedDeploymentOperationsQuery,
-                    "--output", "json", "--only-show-errors"],
-                ParseDeploymentErrorAsync,
-                cancellationToken);
-            if (!operations.Succeeded || operations.Value is null)
-                return null;
-
-            nodes = AzureTransientArmFailure.CollectOperationCodes(
-                operations.Value.Value, codes, depth, nodes, out var incomplete);
-            if (incomplete)
-                return null;
-            var nestedNames = AzureTransientArmFailure.FailedNestedDeploymentNames(operations.Value.Value, out var incompleteTargets);
-            if (incompleteTargets)
-                return null;
-            foreach (var nested in nestedNames)
+            var firstUrl = AzureDeploymentOperationsPage.FirstUrl(subscriptionId, resourceGroupName, name);
+            string? url = firstUrl;
+            var visitedPages = new HashSet<string>(StringComparer.Ordinal);
+            var failedCount = 0;
+            while (url is not null)
             {
-                if (pending.Count + seen.Count >= AzureTransientArmFailure.MaximumErrorWalkFanout)
+                if (pages >= AzureTransientArmFailure.MaximumErrorWalkPages || !visitedPages.Add(url))
+                    return null;
+                pages++;
+                var result = await ExecuteAzAsync(command,
+                    ["rest", "--method", "get", "--url", url,
+                        "--subscription", subscriptionId, "--output", "json", "--only-show-errors"],
+                    AzureDeploymentOperationsPage.Parse, cancellationToken);
+                if (!result.Succeeded || result.Value is null)
+                    return null;
+                var page = result.Value;
+                failedCount += page.FailedOperations.GetArrayLength();
+                if (failedCount > AzureTransientArmFailure.MaximumErrorWalkFanout)
+                    return null;
+                nodes = AzureTransientArmFailure.CollectOperationCodes(
+                    page.FailedOperations, codes, depth, nodes, out var incomplete);
+                if (incomplete)
+                    return null;
+                var nestedNames = AzureTransientArmFailure.FailedNestedDeploymentNames(page.FailedOperations, out var incompleteTargets);
+                if (incompleteTargets)
+                    return null;
+                foreach (var nested in nestedNames)
                 {
-                    truncated = true;
-                    break;
+                    if (pending.Count + seen.Count >= AzureTransientArmFailure.MaximumErrorWalkFanout)
+                        return null;
+                    pending.Enqueue((nested, depth + 1));
                 }
-                pending.Enqueue((nested, depth + 1));
-            }
 
-            // A transient code on this page must not hide a later sibling
-            // module's unknown or terminal code. Either fails closed immediately.
-            var inspection = AzureTransientArmFailure.Inspect(codes);
-            if (inspection.NeedsOperator)
-                return null;
+                // An early transient must not hide an unsafe later page or sibling module.
+                if (AzureTransientArmFailure.Inspect(codes).NeedsOperator ||
+                    (page.NextLink is not null && !AzureDeploymentOperationsPage.IsSafeContinuation(page.NextLink, firstUrl)))
+                    return null;
+                url = page.NextLink;
+            }
         }
 
         if (truncated || pending.Count > 0)
