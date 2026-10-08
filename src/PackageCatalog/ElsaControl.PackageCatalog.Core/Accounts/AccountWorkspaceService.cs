@@ -189,7 +189,10 @@ public sealed class AccountWorkspaceService
         await _store.UpdateExternalIdentitySeenAsync(existing.ExternalIdentityId, normalized.DisplayName, normalized.Email, cancellationToken);
         if (workspace.Role == WorkspaceRole.Owner)
             await ProvisionOwnerAsync(workspace.Id, existing.Context.Account.Id, cancellationToken);
-        return new WorkspaceAccess(existing.Context.Account.Id, workspace.Id, workspace.Role, workspace.OrganizationId, workspace.OrganizationRole);
+        return new WorkspaceAccess(existing.Context.Account.Id, workspace.Id, workspace.Role, workspace.OrganizationId, workspace.OrganizationRole)
+        {
+            WorkspaceName = workspace.Name
+        };
     }
 
     public Task<OrganizationEntitlementSnapshot?> GetLatestOrganizationEntitlementAsync(Guid organizationId, CancellationToken cancellationToken = default) =>
@@ -452,6 +455,8 @@ public sealed record WorkspaceAccess(
     Guid OrganizationId = default,
     OrganizationRole OrganizationRole = ElsaControl.PackageCatalog.Core.Accounts.OrganizationRole.Member)
 {
+    public string? WorkspaceName { get; init; }
+
     public bool CanAdministerSources => Role is WorkspaceRole.Owner or WorkspaceRole.SourceAdmin;
 }
 

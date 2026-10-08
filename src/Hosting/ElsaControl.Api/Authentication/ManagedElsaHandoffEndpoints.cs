@@ -96,7 +96,10 @@ public static class ManagedElsaHandoffEndpoints
                     result.Claims.Scopes.Order(StringComparer.Ordinal).ToArray(),
                     result.Claims.ExpiresAt,
                     result.Claims.SessionExpiresAt,
-                    result.Claims.RuntimePermissions.Order(StringComparer.Ordinal).ToArray()))
+                    result.Claims.RuntimePermissions.Order(StringComparer.Ordinal).ToArray(),
+                    result.Claims.StudioAccess,
+                    result.Claims.WorkspaceName,
+                    context.TraceIdentifier))
             };
         });
 
@@ -179,4 +182,7 @@ public sealed record ManagedElsaHandoffRedeemResponse(
     IReadOnlyList<string> Scopes,
     DateTimeOffset ExpiresAt,
     DateTimeOffset SessionExpiresAt,
-    IReadOnlyList<string> RuntimePermissions);
+    IReadOnlyList<string> RuntimePermissions,
+    string? StudioAccess = null,
+    string? WorkspaceName = null,
+    string? SupportReference = null);

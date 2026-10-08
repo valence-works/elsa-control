@@ -16,6 +16,8 @@ public static class ManagedElsaHandoffDefaults
     public const string ConfigurationSection = "ManagedElsa:Handoff";
     public const string RuntimeSessionScope = "runtime:session";
     public const string RuntimePermissionClaim = "runtime_permission";
+    public const string StudioAccessClaim = "studioAccess";
+    public const string WorkspaceNameClaim = "workspaceName";
     public const string TokenType = "elsa-handoff+jwt";
     // This is deliberately distinct from the JWT `exp`, which expires the
     // one-time handoff code. It is the upper bound the runtime must apply to
@@ -119,6 +121,9 @@ public sealed record ManagedElsaHandoffAuthorization(
     int BindingVersion,
     IReadOnlySet<string> RuntimePermissions)
 {
+    public string? StudioAccess { get; init; }
+    public string? WorkspaceName { get; init; }
+
     public ManagedElsaHandoffAuthorization(
         Guid accountId,
         Guid organizationId,
@@ -302,6 +307,9 @@ public sealed record ManagedElsaHandoffClaims(
     DateTimeOffset SessionExpiresAt,
     IReadOnlySet<string> RuntimePermissions)
 {
+    public string? StudioAccess { get; init; }
+    public string? WorkspaceName { get; init; }
+
     public TrustedWorkspaceIdentity ToTrustedWorkspaceIdentity() =>
         new(ControlIssuer, ControlSubject, null, null);
 }
@@ -444,6 +452,10 @@ public sealed class ManagedElsaHandoffIssuer(
         claims.AddRange(authorization.RuntimePermissions
             .Order(StringComparer.Ordinal)
             .Select(permission => new Claim(ManagedElsaHandoffDefaults.RuntimePermissionClaim, permission)));
+        AddDisplayClaim(claims, ManagedElsaHandoffDefaults.StudioAccessClaim,
+            ManagedElsaHandoffDisplayMetadata.NormalizeStudioAccess(authorization.StudioAccess));
+        AddDisplayClaim(claims, ManagedElsaHandoffDefaults.WorkspaceNameClaim,
+            ManagedElsaHandoffDisplayMetadata.NormalizeWorkspaceName(authorization.WorkspaceName));
         var descriptor = new SecurityTokenDescriptor
         {
             Issuer = _options.Issuer,
@@ -480,6 +492,12 @@ public sealed class ManagedElsaHandoffIssuer(
             ? NormalizeUnixTime(sourceExpiresAt)
             : maximum;
         return sessionExpiresAt >= NormalizeUnixTime(now.Add(_options.TokenLifetime));
+    }
+
+    private static void AddDisplayClaim(List<Claim> claims, string claimType, string? value)
+    {
+        if (value is not null)
+            claims.Add(new Claim(claimType, value));
     }
 
     internal static ManagedElsaHandoffOptions ValidateOptions(ManagedElsaHandoffOptions options)
@@ -698,7 +716,17 @@ public sealed class ManagedElsaHandoffRedeemer(
             expiresAt,
             bindingVersion,
             sessionExpiresAt,
-            runtimePermissions);
+            runtimePermissions)
+        {
+            StudioAccess = OptionalDisplayClaim(
+                principal,
+                ManagedElsaHandoffDefaults.StudioAccessClaim,
+                ManagedElsaHandoffDisplayMetadata.NormalizeStudioAccess),
+            WorkspaceName = OptionalDisplayClaim(
+                principal,
+                ManagedElsaHandoffDefaults.WorkspaceNameClaim,
+                ManagedElsaHandoffDisplayMetadata.NormalizeWorkspaceName)
+        };
     }
 
     private async Task<ManagedElsaHandoffRedeemResult> InvalidAsync(
@@ -755,6 +783,41 @@ public sealed class ManagedElsaHandoffRedeemer(
         principal.FindFirst(claimType) is null
             ? legacyDefault
             : RequiredPositiveInt(principal, claimType);
+
+    private static string? OptionalDisplayClaim(
+        ClaimsPrincipal principal,
+        string claimType,
+        Func<string?, string?> normalize)
+    {
+        var claims = principal.FindAll(claimType).ToArray();
+        return claims.Length == 1 && claims[0].ValueType == ClaimValueTypes.String
+            ? normalize(claims[0].Value)
+            : null;
+    }
+}
+
+internal static class ManagedElsaHandoffDisplayMetadata
+{
+    public const int MaximumWorkspaceNameLength = 256;
+
+    public static string? NormalizeStudioAccess(string? value) => value switch
+    {
+        ManagedElsaRuntimePermissionMapping.StudioAccessFull => value,
+        ManagedElsaRuntimePermissionMapping.StudioAccessRoleLimited => value,
+        ManagedElsaRuntimePermissionMapping.StudioAccessDeploymentLimited => value,
+        _ => null
+    };
+
+    public static string? NormalizeWorkspaceName(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+
+        var normalized = value.Trim();
+        return normalized.Length <= MaximumWorkspaceNameLength && !normalized.Any(char.IsControl)
+            ? normalized
+            : null;
+    }
 }
 
 public sealed class ManagedElsaHandoffService(
