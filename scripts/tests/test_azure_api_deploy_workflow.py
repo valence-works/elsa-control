@@ -3825,6 +3825,8 @@ else:
     def test_recovery_lever_helper_applies_on_test_and_refuses_when_production_is_enabled(self) -> None:
         rehearsal = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         smoke = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        second = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        nil = "00000000-0000-0000-0000-000000000000"
         helper = ROOT / "scripts" / "apply-staging-recovery-lifecycle-lever-settings.sh"
         enabled_name = "Staging__RecoveryLifecycleLever__Enabled"
         prefix = "Staging__RecoveryLifecycleLever__AllowedInstanceIds__"
@@ -3866,14 +3868,20 @@ else:
                     timeout=10,
                 )
 
-            applied = run_helper("test", "true", rehearsal, {})
+            applied = run_helper("test", "true", f"\t{rehearsal} \t, \t{second}\t", {})
             self.assertEqual(0, applied.returncode, applied.stdout + applied.stderr)
             self.assertEqual(
-                {enabled_name: "true", smoke_name: smoke, f"{prefix}0": rehearsal},
+                {
+                    enabled_name: "true",
+                    smoke_name: smoke,
+                    f"{prefix}0": rehearsal,
+                    f"{prefix}1": second,
+                },
                 json.loads(store.read_text()),
             )
             self.assertIn("appsettings set", call_log.read_text())
             self.assertNotIn(rehearsal, applied.stdout + applied.stderr)
+            self.assertNotIn(second, applied.stdout + applied.stderr)
 
             stale_cleared = run_helper(
                 "test",
@@ -3886,6 +3894,39 @@ else:
             self.assertEqual({}, json.loads(store.read_text()))
             self.assertIn("appsettings delete", call_log.read_text())
             self.assertNotIn("appsettings set", call_log.read_text())
+
+            # Invalid proposed inputs must fail before any Azure read or write,
+            # leaving existing settings unchanged.
+            existing = {
+                enabled_name: "true",
+                smoke_name: smoke,
+                f"{prefix}0": rehearsal,
+            }
+            invalid_inputs = (
+                ("missing smoke owner", rehearsal, ""),
+                ("malformed allowlist ID", "not-a-guid", smoke),
+                ("nil allowlist ID", nil, smoke),
+                ("newline suffix owner", f"{rehearsal}\n{smoke}", smoke),
+                ("carriage return suffix", f"{rehearsal}\r{second}", smoke),
+                ("leading empty allowlist item", f",{rehearsal}", smoke),
+                ("empty allowlist item", f"{rehearsal},,{second}", smoke),
+                ("trailing empty allowlist item", f"{rehearsal},", smoke),
+                ("whitespace-only allowlist item", "   ", smoke),
+                ("embedded whitespace in allowlist ID", f"{rehearsal[:10]} {rehearsal[10:]}", smoke),
+                ("malformed smoke owner", rehearsal, "not-a-guid"),
+                ("nil smoke owner", rehearsal, nil),
+                ("whitespace in smoke owner", rehearsal, f" {smoke} "),
+                ("case-insensitive owner collision", smoke.upper(), smoke.lower()),
+            )
+            for label, allowlist, smoke_owner in invalid_inputs:
+                with self.subTest(label=label):
+                    rejected = run_helper("test", "true", allowlist, existing, smoke_owner=smoke_owner)
+                    self.assertNotEqual(0, rejected.returncode, rejected.stdout + rejected.stderr)
+                    self.assertEqual(existing, json.loads(store.read_text()))
+                    self.assertEqual("", call_log.read_text())
+                    self.assertNotIn(rehearsal, rejected.stdout + rejected.stderr)
+                    self.assertNotIn(second, rejected.stdout + rejected.stderr)
+                    self.assertNotIn(smoke, rejected.stdout + rejected.stderr)
 
             refused = run_helper("production", "true", rehearsal, {})
             self.assertNotEqual(0, refused.returncode)

@@ -46,17 +46,54 @@ fi
 
 expected_ids=()
 if [ -n "$ALLOWLIST" ]; then
+  if [[ "$ALLOWLIST" == *$'\n'* || "$ALLOWLIST" == *$'\r'* ]]; then
+    echo "::error::STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS must be a single-line comma-separated list."
+    exit 1
+  fi
+  if [[ "$ALLOWLIST" =~ (^|,)[[:space:]]*(,|$) ]]; then
+    echo "::error::STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS contains an empty instance id."
+    exit 1
+  fi
   IFS=',' read -r -a lever_entries <<< "$ALLOWLIST"
   for entry in "${lever_entries[@]}"; do
     trimmed="${entry#"${entry%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     if [ -z "$trimmed" ]; then
-      continue
+      echo "::error::STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS contains an empty instance id."
+      exit 1
+    fi
+    if [[ ! "$trimmed" =~ $lever_guid_pattern ]] || [ "$trimmed" = "00000000-0000-0000-0000-000000000000" ]; then
+      echo "::error::STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS contains an entry that is not a GUID instance id."
+      exit 1
     fi
     expected_ids+=("$trimmed")
   done
 fi
 expected_count=${#expected_ids[@]}
+
+# Validate the complete proposed setting set before even reading App Service:
+# a rejected input must never first delete stale settings or write a partial
+# configuration. Surrounding allowlist whitespace is normalized above, as in
+# the deployment workflow; empty entries and malformed or nil GUIDs are errors.
+if is_staging_lever_target; then
+  if [ "$expected_count" -gt 0 ] && [ -z "$SMOKE_OWNER_INSTANCE_ID" ]; then
+    echo "::error::STAGING_SMOKE_OWNER_INSTANCE_ID must be set so live staging recovery lifecycle lever settings can be checked against the Hosted smoke owner instance."
+    exit 1
+  fi
+  if [ -n "$SMOKE_OWNER_INSTANCE_ID" ]; then
+    if [[ ! "$SMOKE_OWNER_INSTANCE_ID" =~ $lever_guid_pattern ]] || [ "$SMOKE_OWNER_INSTANCE_ID" = "00000000-0000-0000-0000-000000000000" ]; then
+      echo "::error::STAGING_SMOKE_OWNER_INSTANCE_ID must be a GUID instance id."
+      exit 1
+    fi
+    smoke_normalized="${SMOKE_OWNER_INSTANCE_ID,,}"
+    for instance_id in "${expected_ids[@]}"; do
+      if [ "${instance_id,,}" = "$smoke_normalized" ]; then
+        echo "::error::STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS must not include the staging Hosted smoke owner instance."
+        exit 1
+      fi
+    done
+  fi
+fi
 
 list_lever_settings() {
   local query="$1"
@@ -148,14 +185,6 @@ if ! is_staging_lever_target && [ "$after_count" != "0" ]; then
 fi
 
 if is_staging_lever_target && [ "$expected_count" -gt 0 ]; then
-  if [ -z "$SMOKE_OWNER_INSTANCE_ID" ]; then
-    echo "::error::STAGING_SMOKE_OWNER_INSTANCE_ID must be set so live staging recovery lifecycle lever settings can be checked against the Hosted smoke owner instance."
-    exit 1
-  fi
-  if [[ ! "$SMOKE_OWNER_INSTANCE_ID" =~ $lever_guid_pattern ]] || [ "$SMOKE_OWNER_INSTANCE_ID" = "00000000-0000-0000-0000-000000000000" ]; then
-    echo "::error::STAGING_SMOKE_OWNER_INSTANCE_ID must be a GUID instance id."
-    exit 1
-  fi
   live_values="$(list_lever_settings "[?starts_with(name, '${PREFIX}')].value" || true)"
   smoke_normalized="${SMOKE_OWNER_INSTANCE_ID,,}"
   while IFS= read -r value; do
