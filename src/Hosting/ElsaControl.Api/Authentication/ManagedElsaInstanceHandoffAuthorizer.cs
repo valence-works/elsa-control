@@ -41,7 +41,11 @@ public sealed class ManagedElsaInstanceHandoffAuthorizer(
             request.CodeChallenge,
             new HashSet<string>([ManagedElsaHandoffDefaults.RuntimeSessionScope], StringComparer.Ordinal),
             target.BindingVersion,
-            ManagedElsaRuntimePermissionMapping.For(access, target.StudioGrantsSupported));
+            ManagedElsaRuntimePermissionMapping.For(access, target.StudioGrantsSupported))
+        {
+            StudioAccess = ManagedElsaRuntimePermissionMapping.StudioAccessFor(access.Role, target.StudioGrantsSupported),
+            WorkspaceName = access.WorkspaceName
+        };
     }
 
     public async ValueTask<bool> IsStillAuthorizedAsync(

@@ -18,6 +18,9 @@ namespace ElsaControl.Api.Authentication;
 public static class ManagedElsaRuntimePermissionMapping
 {
     public const string StructuredLogsRead = ManagedElsaRuntimePermissions.StructuredLogsRead;
+    public const string StudioAccessFull = "full";
+    public const string StudioAccessRoleLimited = "role-limited";
+    public const string StudioAccessDeploymentLimited = "deployment-limited";
 
     private static readonly IReadOnlySet<string> Empty = Array.Empty<string>().ToFrozenSet(StringComparer.Ordinal);
     private static readonly IReadOnlySet<string> StructuredLogs =
@@ -40,6 +43,13 @@ public static class ManagedElsaRuntimePermissionMapping
             ? StructuredLogs
             : Empty;
     }
+
+    public static string StudioAccessFor(WorkspaceRole role, bool studioGrantsSupported) =>
+        role is not WorkspaceRole.Owner
+            ? StudioAccessRoleLimited
+            : studioGrantsSupported
+                ? StudioAccessFull
+                : StudioAccessDeploymentLimited;
 
     public static bool IsSupported(string permission) => ManagedElsaRuntimePermissions.IsSupported(permission);
 

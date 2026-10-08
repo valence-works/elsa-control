@@ -4,7 +4,9 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Workspace;
 using ElsaControl.Deployment.Abstractions.Instances;
@@ -19,6 +21,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
 
 namespace ElsaControl.Api.Tests;
 
@@ -75,26 +78,64 @@ public sealed class ManagedElsaHandoffTests
         Assert.Equal(sessionExpiresAt, session.SessionExpiresAt);
     }
 
+    [Fact]
+    public async Task Unsigned_studio_access_payload_tampering_returns_401()
+    {
+        var authorizer = new FakeHandoffAuthorizer(Guid.NewGuid(), Guid.NewGuid());
+        await using var app = CreateApplication(authorizer);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        var client = app.CreateControlIdentityClient("unsigned-studio-access-tamper");
+        var issue = await client.PostControlJsonAsync(
+            "/api/managed-elsa/handoff/issue",
+            IssueRequest(authorizer));
+        Assert.Equal(HttpStatusCode.OK, issue.StatusCode);
+        var issued = (await issue.Content.ReadControlJsonAsync<ManagedElsaHandoffIssueResponse>())!;
+
+        var segments = issued.Token.Split('.');
+        var payload = JsonNode.Parse(Encoding.UTF8.GetString(Base64UrlEncoder.DecodeBytes(segments[1])))!;
+        payload[ManagedElsaHandoffDefaults.StudioAccessClaim] = ManagedElsaRuntimePermissionMapping.StudioAccessFull;
+        segments[1] = Base64UrlEncoder.Encode(Encoding.UTF8.GetBytes(payload.ToJsonString()));
+        var unsignedTamper = string.Join('.', segments);
+        var redeem = await app.CreateClient().PostControlJsonAsync(
+            "/api/managed-elsa/handoff/redeem",
+            new ManagedElsaHandoffRedeemRequest(
+                unsignedTamper,
+                authorizer.Audience,
+                authorizer.RedirectUri.OriginalString,
+                CodeVerifier));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, redeem.StatusCode);
+    }
+
     public enum Grants { None, StructuredLogs, Studio }
 
     [Theory]
-    [InlineData(WorkspaceRole.Owner, OrganizationRole.Member, Grants.Studio)]
-    [InlineData(WorkspaceRole.Owner, OrganizationRole.Owner, Grants.Studio)]
-    [InlineData(WorkspaceRole.Reader, OrganizationRole.Administrator, Grants.StructuredLogs)]
-    [InlineData(WorkspaceRole.Reader, OrganizationRole.Owner, Grants.StructuredLogs)]
-    [InlineData(WorkspaceRole.SourceAdmin, OrganizationRole.Administrator, Grants.StructuredLogs)]
-    [InlineData(WorkspaceRole.Reader, OrganizationRole.Member, Grants.None)]
-    [InlineData(WorkspaceRole.SourceAdmin, OrganizationRole.Member, Grants.None)]
+    [InlineData(WorkspaceRole.Owner, OrganizationRole.Member, Grants.Studio, ManagedElsaRuntimePermissionMapping.StudioAccessFull)]
+    [InlineData(WorkspaceRole.Owner, OrganizationRole.Owner, Grants.Studio, ManagedElsaRuntimePermissionMapping.StudioAccessFull)]
+    [InlineData(WorkspaceRole.Reader, OrganizationRole.Administrator, Grants.StructuredLogs, ManagedElsaRuntimePermissionMapping.StudioAccessRoleLimited)]
+    [InlineData(WorkspaceRole.Reader, OrganizationRole.Owner, Grants.StructuredLogs, ManagedElsaRuntimePermissionMapping.StudioAccessRoleLimited)]
+    [InlineData(WorkspaceRole.SourceAdmin, OrganizationRole.Administrator, Grants.StructuredLogs, ManagedElsaRuntimePermissionMapping.StudioAccessRoleLimited)]
+    [InlineData(WorkspaceRole.Reader, OrganizationRole.Member, Grants.None, ManagedElsaRuntimePermissionMapping.StudioAccessRoleLimited)]
+    [InlineData(WorkspaceRole.SourceAdmin, OrganizationRole.Member, Grants.None, ManagedElsaRuntimePermissionMapping.StudioAccessRoleLimited)]
     public void Workspace_role_sets_the_runtime_permission_ceiling(
         WorkspaceRole workspaceRole,
         OrganizationRole organizationRole,
-        Grants onStudioImage)
+        Grants onStudioImage,
+        string expectedStudioAccess)
     {
         var access = new WorkspaceAccess(Guid.NewGuid(), Guid.NewGuid(), workspaceRole, Guid.NewGuid(), organizationRole);
         var onLegacyImage = onStudioImage == Grants.Studio ? Grants.StructuredLogs : onStudioImage;
 
-        Assert.Equal(Permissions(onLegacyImage), ManagedElsaRuntimePermissionMapping.For(access, studioGrantsSupported: false).Order());
-        Assert.Equal(Permissions(onStudioImage), ManagedElsaRuntimePermissionMapping.For(access, studioGrantsSupported: true).Order());
+        foreach (var studioGrantsSupported in new[] { false, true })
+        {
+            var expectedGrants = studioGrantsSupported ? onStudioImage : onLegacyImage;
+            var expectedAccess = workspaceRole is WorkspaceRole.Owner && !studioGrantsSupported
+                ? ManagedElsaRuntimePermissionMapping.StudioAccessDeploymentLimited
+                : expectedStudioAccess;
+
+            Assert.Equal(Permissions(expectedGrants), ManagedElsaRuntimePermissionMapping.For(access, studioGrantsSupported).Order());
+            Assert.Equal(expectedAccess, ManagedElsaRuntimePermissionMapping.StudioAccessFor(workspaceRole, studioGrantsSupported));
+        }
     }
 
     private static IEnumerable<string> Permissions(Grants grants) => (grants switch
@@ -241,11 +282,13 @@ public sealed class ManagedElsaHandoffTests
         var workspaceId = await client.GetDefaultWorkspaceIdAsync();
         var instanceId = Guid.NewGuid();
         Guid organizationId;
+        string workspaceName;
         await using (var scope = app.Services.CreateAsyncScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
             var workspace = await db.Workspaces.SingleAsync(x => x.Id == workspaceId);
             organizationId = workspace.OrganizationId;
+            workspaceName = workspace.Name;
             db.OrganizationEntitlementSnapshots.Add(new OrganizationEntitlementSnapshot
             {
                 OrganizationId = organizationId,
@@ -314,6 +357,14 @@ public sealed class ManagedElsaHandoffTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var issued = (await response.Content.ReadControlJsonAsync<ManagedElsaHandoffIssueResponse>())!;
         var token = new JwtSecurityTokenHandler().ReadJwtToken(issued.Token);
+        Assert.Equal(
+            studioGrantsSupported
+                ? ManagedElsaRuntimePermissionMapping.StudioAccessFull
+                : ManagedElsaRuntimePermissionMapping.StudioAccessDeploymentLimited,
+            token.Claims.Single(claim => claim.Type == ManagedElsaHandoffDefaults.StudioAccessClaim).Value);
+        Assert.Equal(
+            workspaceName,
+            token.Claims.Single(claim => claim.Type == ManagedElsaHandoffDefaults.WorkspaceNameClaim).Value);
         var grants = token.Claims
             .Where(claim => claim.Type == ManagedElsaHandoffDefaults.RuntimePermissionClaim)
             .Select(claim => claim.Value)
@@ -325,11 +376,40 @@ public sealed class ManagedElsaHandoffTests
         }
         else
             Assert.Equal([ManagedElsaRuntimePermissionMapping.StructuredLogsRead], grants);
+
+        var redeemedResponse = await app.CreateClient().PostControlJsonAsync(
+            "/api/managed-elsa/handoff/redeem",
+            new ManagedElsaHandoffRedeemRequest(
+                issued.Token,
+                audience,
+                callback,
+                CodeVerifier));
+
+        Assert.Equal(HttpStatusCode.OK, redeemedResponse.StatusCode);
+        var redeemed = (await redeemedResponse.Content.ReadControlJsonAsync<ManagedElsaHandoffRedeemResponse>())!;
+        Assert.Equal(
+            studioGrantsSupported
+                ? ManagedElsaRuntimePermissionMapping.StudioAccessFull
+                : ManagedElsaRuntimePermissionMapping.StudioAccessDeploymentLimited,
+            redeemed.StudioAccess);
+        Assert.Equal(workspaceName, redeemed.WorkspaceName);
+        Assert.Equal(grants.Order(StringComparer.Ordinal), redeemed.RuntimePermissions.Order(StringComparer.Ordinal));
+        Assert.False(string.IsNullOrWhiteSpace(redeemed.SupportReference));
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            var audit = await db.ManagedElsaHandoffAuditEvents
+                .Where(entry => entry.Action == "redeem.succeeded")
+                .OrderByDescending(entry => entry.OccurredAt)
+                .FirstAsync();
+            Assert.Equal(audit.CorrelationId, redeemed.SupportReference);
+        }
     }
 
     [Theory]
     [InlineData(OrganizationRole.Member)]
     [InlineData(OrganizationRole.Administrator)]
+    [InlineData(OrganizationRole.Owner)]
     public async Task Workspace_reader_with_instance_open_never_receives_studio_permissions(OrganizationRole organizationRole)
     {
         var setup = await SeedManagedInstanceAsync(
@@ -405,6 +485,10 @@ public sealed class ManagedElsaHandoffTests
         var issue = await reader.PostControlJsonAsync("/api/managed-elsa/handoff/issue", request);
         Assert.Equal(HttpStatusCode.OK, issue.StatusCode);
         var issued = (await issue.Content.ReadControlJsonAsync<ManagedElsaHandoffIssueResponse>())!;
+        Assert.Equal(
+            ManagedElsaRuntimePermissionMapping.StudioAccessRoleLimited,
+            new JwtSecurityTokenHandler().ReadJwtToken(issued.Token).Claims
+                .Single(claim => claim.Type == ManagedElsaHandoffDefaults.StudioAccessClaim).Value);
         var redeem = await app.CreateClient().PostControlJsonAsync(
             "/api/managed-elsa/handoff/redeem",
             new ManagedElsaHandoffRedeemRequest(
@@ -418,14 +502,21 @@ public sealed class ManagedElsaHandoffTests
         Assert.Equal(readerAccountId, session.AccountId);
         Assert.Equal(setup.OrganizationId, session.OrganizationId);
         Assert.Equal(setup.InstanceId, session.InstanceId);
-        // An organization administrator keeps the Structured Logs read they have always had, and nothing more.
+        Assert.Equal(ManagedElsaRuntimePermissionMapping.StudioAccessRoleLimited, session.StudioAccess);
+        // Organization owners and administrators keep the Structured Logs read they have always had, and nothing more.
         Assert.Equal(
-            organizationRole == OrganizationRole.Administrator ? [ManagedElsaRuntimePermissionMapping.StructuredLogsRead] : [],
+            organizationRole is OrganizationRole.Administrator or OrganizationRole.Owner
+                ? [ManagedElsaRuntimePermissionMapping.StructuredLogsRead]
+                : [],
             session.RuntimePermissions);
 
         var pendingIssue = await reader.PostControlJsonAsync("/api/managed-elsa/handoff/issue", request);
         Assert.Equal(HttpStatusCode.OK, pendingIssue.StatusCode);
         var pendingToken = (await pendingIssue.Content.ReadControlJsonAsync<ManagedElsaHandoffIssueResponse>())!.Token;
+        pendingToken = RewriteSignedStudioAccess(
+            pendingToken,
+            app.Services.GetRequiredService<ManagedElsaHandoffKeyRing>(),
+            ManagedElsaRuntimePermissionMapping.StudioAccessFull);
 
         var revoke = await setup.Client.PostControlJsonAsync(
             $"/api/workspaces/{setup.WorkspaceId:D}/permissions/revocations",
@@ -493,6 +584,29 @@ public sealed class ManagedElsaHandoffTests
     {
         await using var scope = app.Services.CreateAsyncScope();
         await change(scope.ServiceProvider.GetRequiredService<CatalogDbContext>());
+    }
+
+    private static string RewriteSignedStudioAccess(
+        string token,
+        ManagedElsaHandoffKeyRing keyRing,
+        string studioAccess)
+    {
+        var handler = new JwtSecurityTokenHandler();
+        var source = handler.ReadJwtToken(token);
+        var claims = source.Claims
+            .Where(claim => claim.Type != ManagedElsaHandoffDefaults.StudioAccessClaim)
+            .Append(new Claim(ManagedElsaHandoffDefaults.StudioAccessClaim, studioAccess));
+        return handler.WriteToken(handler.CreateToken(new SecurityTokenDescriptor
+        {
+            Issuer = source.Issuer,
+            Audience = source.Audiences.Single(),
+            Subject = new ClaimsIdentity(claims),
+            IssuedAt = source.ValidFrom,
+            NotBefore = source.ValidFrom,
+            Expires = source.ValidTo,
+            TokenType = source.Header.Typ,
+            SigningCredentials = keyRing.ActiveSigningCredentials
+        }));
     }
 
     [Theory]
@@ -1035,6 +1149,54 @@ public sealed class ManagedElsaHandoffTests
             jwt.Claims.Single(x => x.Type == ManagedElsaHandoffDefaults.RuntimePermissionClaim).Value);
     }
 
+    [Fact]
+    public async Task Optional_display_claims_never_change_authorization_results()
+    {
+        using var fixture = CreateFixture();
+        var expectedPermissions = fixture.Authorizer.RuntimePermissions.Order(StringComparer.Ordinal).ToArray();
+        var scenarios = new[]
+        {
+            (fixture.IssueWithoutDisplayMetadata(), (string?)null, (string?)null),
+            (fixture.IssueWithDisplayClaims(
+                new Claim(ManagedElsaHandoffDefaults.StudioAccessClaim, "future-value"),
+                new Claim(ManagedElsaHandoffDefaults.WorkspaceNameClaim, " \t")), (string?)null, (string?)null),
+            (fixture.IssueWithDisplayClaims(
+                new Claim(ManagedElsaHandoffDefaults.StudioAccessClaim, ManagedElsaRuntimePermissionMapping.StudioAccessFull),
+                new Claim(ManagedElsaHandoffDefaults.StudioAccessClaim, ManagedElsaRuntimePermissionMapping.StudioAccessRoleLimited),
+                new Claim(ManagedElsaHandoffDefaults.WorkspaceNameClaim, "Workspace A"),
+                new Claim(ManagedElsaHandoffDefaults.WorkspaceNameClaim, "Workspace B")), (string?)null, (string?)null),
+            (fixture.IssueWithDisplayClaims(
+                new Claim(ManagedElsaHandoffDefaults.StudioAccessClaim, "true", ClaimValueTypes.Boolean),
+                new Claim(ManagedElsaHandoffDefaults.WorkspaceNameClaim, "Workspace\nA")), (string?)null, (string?)null),
+            (fixture.IssueWithDisplayClaims(
+                new Claim(ManagedElsaHandoffDefaults.StudioAccessClaim, ManagedElsaRuntimePermissionMapping.StudioAccessFull),
+                new Claim(ManagedElsaHandoffDefaults.WorkspaceNameClaim, "Workspace A")),
+                ManagedElsaRuntimePermissionMapping.StudioAccessFull,
+                "Workspace A")
+        };
+
+        foreach (var (token, expectedStudioAccess, expectedWorkspaceName) in scenarios)
+        {
+            var result = await fixture.RedeemAsync(token);
+
+            Assert.True(result.Succeeded);
+            var claims = result.Claims!;
+            Assert.Equal(expectedPermissions, claims.RuntimePermissions.Order(StringComparer.Ordinal));
+            Assert.Equal(expectedStudioAccess, claims.StudioAccess);
+            Assert.Equal(expectedWorkspaceName, claims.WorkspaceName);
+        }
+
+        fixture.Authorizer.StudioAccess = "unknown-value";
+        fixture.Authorizer.WorkspaceName = new string('w', 257);
+        var tokenWithInvalidIssueMetadata = fixture.Issue();
+        var jwt = new JwtSecurityTokenHandler().ReadJwtToken(tokenWithInvalidIssueMetadata);
+        Assert.DoesNotContain(jwt.Claims, claim => claim.Type == ManagedElsaHandoffDefaults.StudioAccessClaim);
+        Assert.DoesNotContain(jwt.Claims, claim => claim.Type == ManagedElsaHandoffDefaults.WorkspaceNameClaim);
+        var invalidIssueMetadataResult = await fixture.RedeemAsync(tokenWithInvalidIssueMetadata);
+        Assert.True(invalidIssueMetadataResult.Succeeded);
+        Assert.Equal(expectedPermissions, invalidIssueMetadataResult.Claims!.RuntimePermissions.Order(StringComparer.Ordinal));
+    }
+
     [Theory]
     [InlineData("*")]
     [InlineData("read:workflows")]
@@ -1559,6 +1721,15 @@ public sealed class ManagedElsaHandoffTests
                     ManagedElsaHandoffDefaults.RuntimePermissionClaim,
                     permission))));
 
+        public string IssueWithoutDisplayMetadata() =>
+            IssueWithDisplayClaims([]);
+
+        public string IssueWithDisplayClaims(params Claim[] displayClaims) =>
+            RewriteToken(Issue(), claims => claims
+                .Where(claim => claim.Type != ManagedElsaHandoffDefaults.StudioAccessClaim &&
+                                claim.Type != ManagedElsaHandoffDefaults.WorkspaceNameClaim)
+                .Concat(displayClaims));
+
         private string RewriteToken(
             string token,
             Func<IEnumerable<Claim>, IEnumerable<Claim>> rewriteClaims,
@@ -1603,6 +1774,8 @@ public sealed class ManagedElsaHandoffTests
         public string CodeChallenge { get; } = ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier);
         public int BindingVersion { get; set; } = 7;
         public bool IsAuthorized { get; set; } = true;
+        public string? StudioAccess { get; set; } = ManagedElsaRuntimePermissionMapping.StudioAccessRoleLimited;
+        public string? WorkspaceName { get; set; } = "Trusted workspace";
         public IReadOnlySet<string> RuntimePermissions { get; set; } = new HashSet<string>(
             [ManagedElsaRuntimePermissionMapping.StructuredLogsRead], StringComparer.Ordinal);
 
@@ -1615,7 +1788,11 @@ public sealed class ManagedElsaHandoffTests
             CodeChallenge,
             new HashSet<string>([ManagedElsaHandoffDefaults.RuntimeSessionScope], StringComparer.Ordinal),
             BindingVersion,
-            RuntimePermissions);
+            RuntimePermissions)
+        {
+            StudioAccess = StudioAccess,
+            WorkspaceName = WorkspaceName
+        };
 
         public ValueTask<ManagedElsaHandoffAuthorization?> AuthorizeAsync(
             TrustedWorkspaceIdentity identity,
