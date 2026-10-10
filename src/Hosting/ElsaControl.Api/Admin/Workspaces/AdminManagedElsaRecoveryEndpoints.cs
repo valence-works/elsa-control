@@ -235,6 +235,73 @@ public static class AdminManagedElsaRecoveryEndpoints
             });
         });
 
+        // Historical provider cleanup is distinct from a fresh ARM observation. This
+        // route is intentionally private and only attests what the trusted cleanup
+        // runner recorded when the Delete completed.
+        group.MapGet("/{operationId:guid}/cleanup-receipt/{organizationId:guid}", async (
+            Guid workspaceId,
+            Guid instanceId,
+            Guid operationId,
+            Guid organizationId,
+            IElsaInstanceLifecycleStore lifecycle,
+            IManagedElsaInstanceApiStore queries,
+            IAzureProviderOperationStore providerOperations,
+            IAzureProviderResourceAssignmentStore assignments,
+            CancellationToken cancellationToken) =>
+        {
+            if (workspaceId == Guid.Empty || instanceId == Guid.Empty ||
+                operationId == Guid.Empty || organizationId == Guid.Empty)
+                return Results.NotFound();
+
+            var instance = await lifecycle.GetInstanceAsync(workspaceId, instanceId, cancellationToken);
+            var lifecycleOperation = await queries.GetOperationForOrganizationAsync(
+                workspaceId, organizationId, instanceId, operationId, cancellationToken);
+            if (instance is null || lifecycleOperation is null ||
+                instance.OrganizationId != organizationId ||
+                instance.WorkspaceId != workspaceId || instance.Id != instanceId ||
+                !IsHistoricalDeleteTombstone(instance, lifecycleOperation, operationId))
+                return Results.NotFound();
+
+            // FinalizeDeletion clears the instance's assignment reference. Recover the
+            // historical placement only from the exact organization/workspace/instance
+            // owner tuple, and refuse ambiguity rather than selecting a likely row.
+            var ownerAssignments = await assignments.ListForInstanceAsync(
+                workspaceId, organizationId, instanceId, cancellationToken);
+            if (ownerAssignments.Count != 1)
+                return Results.NotFound();
+
+            var assignment = ownerAssignments[0];
+            if (assignment.LastOperationId is not { } providerOperationId)
+                return Results.NotFound();
+            var providerOperation = await providerOperations.GetAsync(
+                workspaceId, providerOperationId, cancellationToken);
+            if (!IsHistoricalCleanupReceiptEligible(
+                    instance, lifecycleOperation, operationId, assignment, providerOperation))
+                return Results.NotFound();
+
+            var lifecycleCompletedAt = lifecycleOperation.CompletedAt!.Value;
+            var providerCompletedAt = providerOperation!.CompletedAt!.Value;
+            var tombstoneDeletedAt = instance.DeletedAt!.Value;
+            var digest = ComputeHistoricalCleanupReceiptDigest(
+                workspaceId,
+                organizationId,
+                instanceId,
+                operationId,
+                lifecycleCompletedAt,
+                assignment,
+                providerOperation);
+
+            return Results.Ok(new AdminManagedElsaCleanupReceiptResponse(
+                InstanceTombstonePresent: true,
+                LifecycleDeleteSucceeded: true,
+                ProviderDeleteSucceeded: true,
+                ProviderAbsenceVerifiedAtCompletion: true,
+                ProviderCompletedAt: providerCompletedAt,
+                LifecycleCompletedAt: lifecycleCompletedAt,
+                TombstoneDeletedAt: tombstoneDeletedAt,
+                ReceiptDigest: digest));
+        });
+
         group.MapGet("/{operationId:guid}", async (
             Guid workspaceId,
             Guid instanceId,
@@ -317,6 +384,81 @@ public static class AdminManagedElsaRecoveryEndpoints
         return endpoints;
     }
 
+    private static bool IsHistoricalDeleteTombstone(
+        ElsaInstance instance,
+        ElsaInstanceOperationSummary operation,
+        Guid operationId)
+    {
+        return operation.Id == operationId &&
+               operation.InstanceId == instance.Id &&
+               operation.Action == ElsaInstanceOperationAction.Delete &&
+               operation.State == ElsaInstanceOperationState.Succeeded &&
+               operation.CompletedAt is not null &&
+               instance.Intent.DesiredLifecycle == ElsaDesiredLifecycle.Deleting &&
+               instance.ObservedLifecycle == ElsaObservedLifecycle.Deleted &&
+               instance.DeletedAt is not null &&
+               instance.DeletedAt.Value == operation.CompletedAt.Value &&
+               Guid.TryParseExact(instance.LastOperationId?.Value, "D", out var lastOperationId) &&
+               lastOperationId == operationId;
+    }
+
+    private static bool IsHistoricalCleanupReceiptEligible(
+        ElsaInstance instance,
+        ElsaInstanceOperationSummary lifecycleOperation,
+        Guid lifecycleOperationId,
+        AzureProviderResourceAssignment assignment,
+        AzureProviderOperation? providerOperation)
+    {
+        var expectedWorkloadName = AzureElsaInstanceProvider.WorkloadName(instance.Id);
+        return assignment.WorkspaceId == instance.WorkspaceId &&
+               assignment.OrganizationId == instance.OrganizationId &&
+               assignment.InstanceId == instance.Id &&
+               string.Equals(assignment.WorkloadName, expectedWorkloadName, StringComparison.OrdinalIgnoreCase) &&
+               assignment.LastOperationId is { } providerOperationId &&
+               providerOperation is not null &&
+               providerOperation.Id == providerOperationId &&
+               providerOperation.CompletedAt is not null &&
+               lifecycleOperation.CompletedAt is { } lifecycleCompletedAt &&
+               providerOperation.CompletedAt.Value <= lifecycleCompletedAt &&
+               assignment.DeletedAt is { } assignmentDeletedAt &&
+               assignmentDeletedAt <= providerOperation.CompletedAt.Value &&
+               AzureProviderOperationValidation.IsLifecycleDeleteIdempotencyKey(
+                   providerOperation.IdempotencyKey, lifecycleOperationId) &&
+               AzureProviderDeleteRecoverySupport.IsTerminalVerifiedCleanupEligible(
+                   providerOperation, assignment);
+    }
+
+    private static string ComputeHistoricalCleanupReceiptDigest(
+        Guid workspaceId,
+        Guid organizationId,
+        Guid instanceId,
+        Guid lifecycleOperationId,
+        DateTimeOffset lifecycleCompletedAt,
+        AzureProviderResourceAssignment assignment,
+        AzureProviderOperation providerOperation)
+    {
+        var canonical = string.Join('\n',
+        [
+            "elsa-managed-delete-cleanup-receipt-v1",
+            workspaceId.ToString("D"),
+            organizationId.ToString("D"),
+            instanceId.ToString("D"),
+            lifecycleOperationId.ToString("D"),
+            lifecycleCompletedAt.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            assignment.Id.ToString("D"),
+            assignment.SubscriptionId,
+            assignment.ResourceGroupName,
+            assignment.ProviderScopeFingerprint,
+            providerOperation.Id.ToString("D"),
+            providerOperation.CheckpointSequence.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            providerOperation.CompletedAt!.Value.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            providerOperation.Phase.ToString(),
+            providerOperation.Status.ToString()
+        ]);
+        return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(canonical)));
+    }
+
     private static IResult ProviderReadoutUnavailable(string code) =>
         ManagedElsaInstanceEndpoints.Problem(
             code,
@@ -353,3 +495,18 @@ public sealed record AdminManagedElsaProviderOperationResponse(
 {
     public string? ReasonCode { get; init; }
 }
+
+/// <summary>
+/// Safe historical receipt for a completed managed-instance Delete. The provider
+/// absence flag describes the runner's verified result at completion; it is not a
+/// current Azure Resource Manager observation.
+/// </summary>
+public sealed record AdminManagedElsaCleanupReceiptResponse(
+    bool InstanceTombstonePresent,
+    bool LifecycleDeleteSucceeded,
+    bool ProviderDeleteSucceeded,
+    bool ProviderAbsenceVerifiedAtCompletion,
+    DateTimeOffset ProviderCompletedAt,
+    DateTimeOffset LifecycleCompletedAt,
+    DateTimeOffset TombstoneDeletedAt,
+    string ReceiptDigest);
