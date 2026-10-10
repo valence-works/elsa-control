@@ -83,3 +83,32 @@ permanent guarantee, a signed authorization, a Stripe cleanup receipt or a
 coordinator completion action. The trusted rehearsal executor must check the
 retained run binding, freshness and every other cleanup receipt before releasing
 its pending run. This API does not complete or restart any run by itself.
+
+## Unknown Create and Delete responses
+
+The customer-facing lifecycle reconciliation read is separate from both Admin
+cleanup reads above. It uses the caller's existing workspace identity and never
+resubmits a lifecycle mutation:
+
+```text
+GET /api/workspaces/{workspaceId}/instances/operations/by-idempotency-key?action=Create&slug={submittedSlug}
+Idempotency-Key: {originalCreateKey}
+
+GET /api/workspaces/{workspaceId}/instances/operations/by-idempotency-key?action=Delete&instanceId={instanceId}
+Idempotency-Key: {stableDeleteKey}
+```
+
+The route resolves the organization from the authenticated workspace access,
+then matches the persisted action, idempotency scope, organization, workspace,
+and submitted slug or instance ID. It returns `200` only for that exact safe
+operation and instance projection. The response reuses the customer
+`instance` and `operation` projections; it never returns the idempotency key,
+request hash, or provider evidence. An invalid or ambiguous request returns
+`400`; an unmatched or mismatched lookup is concealed as `404`.
+
+A `404` only means no matching operation was readable at lookup time. It does
+not prove the mutation was never accepted and is not permission to retry Create
+or Delete. Guided engine provisioning is not covered by this contract. The
+lookup reads the catalog only and does not enqueue, resume, or mutate lifecycle,
+outbox, provider, or billing state. It also does not attest to provider cleanup
+or fresh Azure absence.
