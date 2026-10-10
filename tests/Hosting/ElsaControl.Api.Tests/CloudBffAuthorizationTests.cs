@@ -276,6 +276,7 @@ public sealed class CloudBffAuthorizationTests
             "GET /api/workspaces/{workspaceId:guid}/external-engine-connections/{connectionId:guid}/pairing",
             "GET /api/workspaces/{workspaceId:guid}/instances/",
             "GET /api/workspaces/{workspaceId:guid}/instances/onboarding-options",
+            "GET /api/workspaces/{workspaceId:guid}/instances/operations/by-idempotency-key",
             "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/activity",
             "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/available-releases",
             "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete-operations/{operationId:guid}",
