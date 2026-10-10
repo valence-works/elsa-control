@@ -1,6 +1,7 @@
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.OrganizationBilling;
 using ElsaControl.Deployment.Abstractions.Instances;
+using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Accounts;
@@ -715,6 +716,73 @@ public static class ManagedElsaInstanceEndpoints
             return Results.Ok(new ManagedElsaInstanceOperationReconciliationResponse(
                 instanceResponse,
                 ToOperationResponse(workspaceId, instance.Id, summary)));
+        }).RequireWorkspaceAccess().AllowCloudBff();
+
+        group.MapGet("/{instanceId:guid}/operations/{operationId:guid}/cleanup-receipt", async (
+            Guid workspaceId,
+            Guid instanceId,
+            Guid operationId,
+            HttpContext context,
+            IElsaInstanceLifecycleStore lifecycle,
+            IManagedElsaInstanceApiStore queries,
+            IAzureProviderOperationStore providerOperations,
+            IAzureProviderResourceAssignmentStore assignments,
+            CancellationToken cancellationToken) =>
+        {
+            var evidence = await ManagedElsaCleanupEvidenceReader.ReadHistoricalAsync(
+                workspaceId,
+                context.GetWorkspaceAccess().OrganizationId,
+                instanceId,
+                operationId,
+                lifecycle,
+                queries,
+                providerOperations,
+                assignments,
+                cancellationToken);
+            if (evidence is null)
+                return Results.NotFound();
+
+            return Results.Ok(ManagedElsaCleanupEvidenceReader.ToReceiptResponse(evidence));
+        }).RequireWorkspaceAccess().AllowCloudBff();
+
+        group.MapGet("/{instanceId:guid}/operations/{operationId:guid}/cleanup-observation", async (
+            Guid workspaceId,
+            Guid instanceId,
+            Guid operationId,
+            HttpContext context,
+            IServiceProvider services,
+            IElsaInstanceLifecycleStore lifecycle,
+            IManagedElsaInstanceApiStore queries,
+            IAzureProviderOperationStore providerOperations,
+            IAzureProviderResourceAssignmentStore assignments,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await ManagedElsaCleanupEvidenceReader.ReadFreshObservationAsync(
+                workspaceId,
+                context.GetWorkspaceAccess().OrganizationId,
+                instanceId,
+                operationId,
+                lifecycle,
+                queries,
+                providerOperations,
+                assignments,
+                services.GetService<IAzureProviderFreshResourceGroupObserver>(),
+                cancellationToken);
+            if (result.Failure == ManagedElsaCleanupEvidenceReader.FreshObservationFailure.NotFound)
+                return Results.NotFound();
+            if (result.Failure == ManagedElsaCleanupEvidenceReader.FreshObservationFailure.EvidenceChanged)
+                return ManagedElsaInstanceEndpoints.Problem(
+                    "instance.cleanup-observation.evidence-changed",
+                    "Fresh provider cleanup evidence is unavailable. No absence is confirmed.",
+                    StatusCodes.Status503ServiceUnavailable);
+            if (result.Failure != ManagedElsaCleanupEvidenceReader.FreshObservationFailure.None)
+                return ManagedElsaInstanceEndpoints.Problem(
+                    "instance.cleanup-observation.unavailable",
+                    "Fresh provider cleanup evidence is unavailable. No absence is confirmed.",
+                    StatusCodes.Status503ServiceUnavailable);
+
+            return Results.Ok(ManagedElsaCleanupEvidenceReader.ToFreshObservationResponse(
+                result.Evidence!, result.Observation!));
         }).RequireWorkspaceAccess().AllowCloudBff();
 
         group.MapGet("/{instanceId:guid}/revisions", async (
