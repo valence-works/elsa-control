@@ -87,6 +87,236 @@ public sealed class AzureBicepProviderRunnerTests : IDisposable
     private readonly RunnerFixture _fixture = new();
 
     [Theory]
+    [InlineData("false", AzureProviderFreshResourceGroupState.Absent)]
+    [InlineData("true", AzureProviderFreshResourceGroupState.Present)]
+    public async Task Fresh_resource_group_observation_uses_one_exact_read_and_returns_only_safe_evidence(
+        string output,
+        AzureProviderFreshResourceGroupState expectedState)
+    {
+        var (delete, lifecycleDeleteId, assignment) = TerminalFreshDelete();
+        var process = new FakeCommandProcess();
+        var clock = new SteppingTimeProvider(TimeSpan.FromSeconds(7));
+        process.Success(IsFreshResourceGroupExists, output, after: () => _ = clock.GetUtcNow());
+        var runner = new AzureBicepProviderRunner(_fixture.Options, _fixture.Scope, process, timeProvider: clock);
+        var result = await runner.ObserveAsync(delete, lifecycleDeleteId, assignment);
+
+        Assert.Equal(expectedState, result.State);
+        Assert.Equal(AzureProviderFreshResourceGroupObservationReasonCodes.Observed, result.ReasonCode);
+        Assert.Equal(new DateTimeOffset(2026, 9, 24, 0, 33, 7, TimeSpan.Zero), result.ObservedAt);
+        Assert.Matches("^[0-9a-f]{64}$", result.EvidenceDigest);
+        var call = Assert.Single(process.Calls);
+        Assert.Equal(
+        [
+            "group", "exists", "--subscription", _fixture.Scope.SubscriptionId,
+            "--name", assignment.ResourceGroupName, "--output", "tsv", "--only-show-errors"
+        ], call);
+        Assert.DoesNotContain("create", call);
+        Assert.DoesNotContain("delete", call);
+        Assert.DoesNotContain(assignment.ResourceGroupName, JsonSerializer.Serialize(result));
+    }
+
+    [Theory]
+    [InlineData(false, AzureProviderFreshResourceGroupObservationReasonCodes.ProviderUnavailable)]
+    [InlineData(true, AzureProviderFreshResourceGroupObservationReasonCodes.OutputInvalid)]
+    public async Task Fresh_resource_group_observation_fails_closed_for_provider_or_output_failure(
+        bool malformedOutput,
+        string expectedReason)
+    {
+        var (delete, lifecycleDeleteId, assignment) = TerminalFreshDelete();
+        var process = new FakeCommandProcess();
+        if (malformedOutput)
+            process.Success(IsFreshResourceGroupExists, "resource group maybe exists");
+        else
+            process.Failure(IsFreshResourceGroupExists);
+
+        var result = await _fixture.Runner(process).ObserveAsync(delete, lifecycleDeleteId, assignment);
+
+        Assert.Equal(AzureProviderFreshResourceGroupState.Unknown, result.State);
+        Assert.Equal(expectedReason, result.ReasonCode);
+        Assert.Null(result.EvidenceDigest);
+        Assert.NotNull(result.ObservedAt);
+        Assert.Single(process.Calls);
+        Assert.DoesNotContain(assignment.ResourceGroupName, JsonSerializer.Serialize(result));
+    }
+
+    [Theory]
+    [InlineData("lifecycle-id")]
+    [InlineData("wrong-subscription")]
+    [InlineData("wrong-owner")]
+    [InlineData("wrong-workload")]
+    [InlineData("wrong-group")]
+    [InlineData("wrong-assignment-fingerprint")]
+    [InlineData("assignment-not-deleted")]
+    public async Task Fresh_resource_group_observation_rejects_mismatched_bindings_before_cli(string mismatch)
+    {
+        var (delete, lifecycleDeleteId, assignment) = TerminalFreshDelete();
+        switch (mismatch)
+        {
+            case "wrong-subscription":
+                assignment = assignment with { SubscriptionId = _fixture.Scope.RegistrySubscriptionId };
+                break;
+            case "wrong-owner":
+                assignment = assignment with { OrganizationId = Guid.NewGuid() };
+                break;
+            case "wrong-workload":
+                assignment = assignment with { WorkloadName = "another-workload" };
+                break;
+            case "wrong-group":
+                assignment = assignment with { ResourceGroupName = "unrelated-group" };
+                break;
+            case "wrong-assignment-fingerprint":
+                assignment = assignment with { ProviderScopeFingerprint = new string('f', 64) };
+                break;
+            case "assignment-not-deleted":
+                assignment = assignment with { State = AzureProviderAssignmentState.Active };
+                break;
+        }
+        var wrongLifecycleDeleteId = mismatch == "lifecycle-id" ? Guid.NewGuid() : lifecycleDeleteId;
+        var process = new FakeCommandProcess();
+
+        var result = await _fixture.Runner(process).ObserveAsync(delete, wrongLifecycleDeleteId, assignment);
+
+        Assert.Equal(AzureProviderFreshResourceGroupState.Unknown, result.State);
+        Assert.Equal(AzureProviderFreshResourceGroupObservationReasonCodes.BindingMismatch, result.ReasonCode);
+        Assert.Null(result.ObservedAt);
+        Assert.Null(result.EvidenceDigest);
+        Assert.Empty(process.Calls);
+    }
+
+    [Fact]
+    public async Task Fresh_resource_group_observation_rejects_changed_runner_scope_before_cli()
+    {
+        var (delete, lifecycleDeleteId, assignment) = TerminalFreshDelete();
+        var process = new FakeCommandProcess();
+        var changedOptions = _fixture.Options with { AzureCliClientId = "55555555-5555-5555-5555-555555555555" };
+
+        var result = await new AzureBicepProviderRunner(changedOptions, _fixture.Scope, process)
+            .ObserveAsync(delete, lifecycleDeleteId, assignment);
+
+        Assert.Equal(AzureProviderFreshResourceGroupState.Unknown, result.State);
+        Assert.Equal(AzureProviderFreshResourceGroupObservationReasonCodes.AuthorityMismatch, result.ReasonCode);
+        Assert.Null(result.ObservedAt);
+        Assert.Empty(process.Calls);
+    }
+
+    [Fact]
+    public async Task Fresh_resource_group_observation_discards_result_if_template_authority_changes_during_query()
+    {
+        var (delete, lifecycleDeleteId, assignment) = TerminalFreshDelete();
+        var process = new FakeCommandProcess();
+        process.Success(IsFreshResourceGroupExists, "false", after: () =>
+            File.WriteAllText(Path.Combine(_fixture.TemplateRoot, "main.bicep"), "targetScope = 'subscription'"));
+
+        var result = await _fixture.Runner(process).ObserveAsync(delete, lifecycleDeleteId, assignment);
+
+        Assert.Equal(AzureProviderFreshResourceGroupState.Unknown, result.State);
+        Assert.Equal(AzureProviderFreshResourceGroupObservationReasonCodes.AuthorityMismatch, result.ReasonCode);
+        Assert.NotNull(result.ObservedAt);
+        Assert.Null(result.EvidenceDigest);
+        Assert.Single(process.Calls);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Fresh_resource_group_observation_propagates_cancellation(bool duringQuery)
+    {
+        var (delete, lifecycleDeleteId, assignment) = TerminalFreshDelete();
+        var process = new FakeCommandProcess();
+        using var cancellation = new CancellationTokenSource();
+        if (duringQuery)
+            process.Success(IsFreshResourceGroupExists, "false", after: cancellation.Cancel);
+        else
+            cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => _fixture.Runner(process)
+            .ObserveAsync(delete, lifecycleDeleteId, assignment, cancellation.Token));
+
+        if (duringQuery)
+            Assert.Single(process.Calls);
+        else
+            Assert.Empty(process.Calls);
+    }
+
+    private (AzureProviderOperation Delete, Guid LifecycleDeleteId, AzureProviderResourceAssignment Assignment)
+        TerminalFreshDelete()
+    {
+        var workspaceId = Guid.NewGuid();
+        var organizationId = Guid.NewGuid();
+        var instanceId = Guid.NewGuid();
+        var lifecycleDeleteId = Guid.NewGuid();
+        var providerOperationId = Guid.NewGuid();
+        var assignmentId = Guid.NewGuid();
+        var workloadName = AzureElsaInstanceProvider.WorkloadName(instanceId);
+        var now = new DateTimeOffset(2026, 10, 10, 12, 0, 0, TimeSpan.Zero);
+        var scopeFingerprint = _fixture.Options.ComputeProviderScopeFingerprint(_fixture.Scope);
+        var resourceGroupName = AzureProviderResourceAssignmentNaming.ResourceGroupName(
+            _fixture.Scope.ResourceGroupName, instanceId);
+        var assignment = new AzureProviderResourceAssignment(
+            assignmentId,
+            workspaceId,
+            organizationId,
+            instanceId,
+            scopeFingerprint,
+            AzureProviderResourceAssignmentNaming.CurrentVersion,
+            _fixture.Scope.SubscriptionId,
+            resourceGroupName,
+            workloadName,
+            AzureProviderResourceAssignmentNaming.OwnershipKey(assignmentId, instanceId, scopeFingerprint),
+            _fixture.Scope.Location,
+            AzureProviderAssignmentState.Deleted,
+            new AzureProviderResourceReferences(ResourceGroupName: resourceGroupName),
+            providerOperationId,
+            2,
+            now.AddMinutes(-3),
+            now,
+            now.AddMinutes(-1));
+        var delete = new AzureProviderOperation(
+            Id: providerOperationId,
+            WorkspaceId: workspaceId,
+            TargetKey: workloadName,
+            Action: AzureProviderOperationAction.Delete,
+            IdempotencyKey: AzureProviderOperationValidation.LifecycleIdempotencyKey(lifecycleDeleteId) + ":delete",
+            RequestHash: new string('a', 64),
+            OperationIdentity: "test-delete-identity",
+            PlanFingerprint: _fixture.Plan.Fingerprint,
+            TemplateFingerprint: _fixture.Options.ComputeTemplateAuthorityFingerprint(),
+            ElsaVersion: _fixture.Plan.ElsaVersion,
+            ReleaseLine: _fixture.Plan.ReleaseLine,
+            Topology: _fixture.Plan.Topology,
+            Isolation: _fixture.Plan.Isolation,
+            Location: _fixture.Plan.Location,
+            ImageRepository: _fixture.Plan.ImageRepository,
+            ImageDigest: _fixture.Plan.ImageDigest,
+            ReleaseManifestDigest: _fixture.Plan.ReleaseManifestDigest,
+            ReleaseManifestSignatureDigest: _fixture.Plan.ReleaseManifestSignatureDigest,
+            Status: AzureProviderOperationStatus.Succeeded,
+            Phase: AzureProviderOperationPhase.CleanupVerified,
+            CheckpointSequence: 1,
+            AttemptNumber: 1,
+            Version: 2,
+            Resources: new AzureProviderResourceReferences(ResourceGroupName: resourceGroupName),
+            Endpoint: null,
+            Health: AzureProviderHealth.Unknown,
+            Diagnostics: [],
+            WorkerId: null,
+            LeaseExpiresAt: null,
+            HeartbeatAt: null,
+            CreatedAt: now.AddMinutes(-2),
+            UpdatedAt: now,
+            CompletedAt: now,
+            ProviderScopeFingerprint: scopeFingerprint,
+            OrganizationId: organizationId,
+            InstanceId: instanceId,
+            LifecycleAction: ElsaInstanceOperationAction.Delete,
+            ProviderAssignmentId: assignmentId);
+        return (delete, lifecycleDeleteId, assignment);
+    }
+
+    private static bool IsFreshResourceGroupExists(string[] args) =>
+        args is ["group", "exists", "--subscription", _, "--name", _, "--output", "tsv", "--only-show-errors"];
+
+    [Theory]
     [InlineData(AzureProviderRunnerStep.Foundation, "standard-small", "1", "1", "0.5", "1Gi")]
     [InlineData(AzureProviderRunnerStep.Workload, "standard-small", "1", "1", "0.5", "1Gi")]
     [InlineData(AzureProviderRunnerStep.Foundation, "standard", "1", "3", "1", "2Gi")]
