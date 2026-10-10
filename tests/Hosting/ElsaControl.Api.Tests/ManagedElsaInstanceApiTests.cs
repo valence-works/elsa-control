@@ -1574,6 +1574,109 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Theory]
+    [InlineData(AzureProviderFreshResourceGroupState.Absent)]
+    [InlineData(AzureProviderFreshResourceGroupState.Present)]
+    [InlineData(AzureProviderFreshResourceGroupState.Unknown)]
+    public async Task Admin_fresh_cleanup_observation_is_private_bound_and_truthful(
+        AzureProviderFreshResourceGroupState state)
+    {
+        var app = await PrepareApplicationAsync([]);
+        var fixture = await SeedHistoricalCleanupReceiptAsync(app, $"fresh-{Guid.NewGuid():N}");
+        var observer = _fixture.FreshCleanupObserver;
+        observer.State = state;
+        var path = $"/api/admin/workspaces/{fixture.WorkspaceId:D}/instances/{fixture.InstanceId:D}" +
+                   $"/operations/{fixture.LifecycleOperationId:D}/cleanup-observation/{fixture.OrganizationId:D}";
+
+        using var anonymous = app.CreateClient();
+        using var denied = await anonymous.GetAsync(path);
+        Assert.Equal(HttpStatusCode.Unauthorized, denied.StatusCode);
+        using var customer = app.CreateControlIdentityClient();
+        using var deniedCustomer = await customer.GetAsync(path);
+        Assert.Equal(HttpStatusCode.Unauthorized, deniedCustomer.StatusCode);
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        using var wrongOwner = await admin.GetAsync(path.Replace(
+            fixture.OrganizationId.ToString("D"), Guid.NewGuid().ToString("D"), StringComparison.Ordinal));
+        Assert.Equal(HttpStatusCode.NotFound, wrongOwner.StatusCode);
+        Assert.Equal(0, observer.CallCount);
+
+        using var response = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        var body = (await response.Content.ReadControlJsonAsync<AdminManagedElsaFreshCleanupObservationResponse>())!;
+        Assert.Equal(state, body.State);
+        Assert.Equal(observer.ObservedAt, body.ObservedAt);
+        Assert.Equal(state == AzureProviderFreshResourceGroupState.Unknown ? null : new string('a', 64), body.EvidenceDigest);
+        Assert.Equal(1, observer.CallCount);
+        Assert.Equal(fixture.ProviderOperationId, observer.ProviderOperationId);
+        Assert.Equal(fixture.AssignmentId, observer.AssignmentId);
+        Assert.Equal(fixture.LifecycleOperationId, observer.LifecycleOperationId);
+
+        using var historical = await admin.GetAsync(path.Replace("cleanup-observation", "cleanup-receipt", StringComparison.Ordinal));
+        var receipt = (await historical.Content.ReadControlJsonAsync<AdminManagedElsaCleanupReceiptResponse>())!;
+        Assert.Equal(receipt.ReceiptDigest, body.HistoricalReceiptDigest);
+        var json = await response.Content.ReadAsStringAsync();
+        foreach (var privateValue in new[]
+                 {
+                     fixture.OrganizationId.ToString("D"), fixture.WorkspaceId.ToString("D"),
+                     fixture.InstanceId.ToString("D"), fixture.ProviderOperationId.ToString("D"),
+                     fixture.SubscriptionId, fixture.ResourceGroupName
+                 })
+            Assert.DoesNotContain(privateValue, json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Admin_fresh_cleanup_observation_never_returns_failed_or_changed_evidence(bool changeEvidence)
+    {
+        var app = await PrepareApplicationAsync([]);
+        var fixture = await SeedHistoricalCleanupReceiptAsync(app, $"fresh-fail-{Guid.NewGuid():N}");
+        var observer = _fixture.FreshCleanupObserver;
+        observer.State = AzureProviderFreshResourceGroupState.Absent;
+        observer.OnObserve = async () =>
+        {
+            if (!changeEvidence)
+                throw new InvalidOperationException("private-provider-output-must-not-leak");
+            await using var scope = app.Services.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE AzureProviderOperations SET CompletedAt = {fixture.LifecycleCompletedAt.AddSeconds(1).UtcTicks}
+                WHERE Id = {fixture.ProviderOperationId}
+                """);
+        };
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        using var response = await admin.GetAsync(
+            $"/api/admin/workspaces/{fixture.WorkspaceId:D}/instances/{fixture.InstanceId:D}" +
+            $"/operations/{fixture.LifecycleOperationId:D}/cleanup-observation/{fixture.OrganizationId:D}");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(1, observer.CallCount);
+        var json = await response.Content.ReadAsStringAsync();
+        Assert.Contains(changeEvidence ? "instance.cleanup-observation.evidence-changed" : "instance.cleanup-observation.unavailable", json);
+        Assert.DoesNotContain("private-provider-output-must-not-leak", json);
+        Assert.DoesNotContain("evidenceDigest", json);
+    }
+
+    [Fact]
+    public async Task Admin_fresh_cleanup_observation_fails_closed_without_a_concrete_runner()
+    {
+        await using var app = new ControlApiTestApplication(
+            configureServices: services => services.RemoveAll<IAzureProviderFreshResourceGroupObserver>());
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        using var response = await admin.GetAsync(
+            $"/api/admin/workspaces/{Guid.NewGuid():D}/instances/{Guid.NewGuid():D}" +
+            $"/operations/{Guid.NewGuid():D}/cleanup-observation/{Guid.NewGuid():D}");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Contains("instance.cleanup-observation.unavailable", await response.Content.ReadAsStringAsync());
+    }
+
+    [Theory]
     [InlineData("missing-tombstone")]
     [InlineData("observed-not-deleted")]
     [InlineData("desired-not-deleting")]
@@ -4092,6 +4195,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         internal ControlApiTestApplication Application { get; }
 
         internal CapturingReleaseCatalogStore ReleaseCatalog => _releaseCatalog;
+        internal CapturingFreshCleanupObserver FreshCleanupObserver { get; } = new();
 
         public Fixture()
         {
@@ -4118,6 +4222,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
                         ResourceGroupNamePrefix = "rg-correlation"
                     });
                     services.AddSingleton<IEngineProvisioningModule, TestProvisioningModule>();
+                    services.AddSingleton<IAzureProviderFreshResourceGroupObserver>(FreshCleanupObserver);
                     services.RemoveAll<IManagedElsaInstanceCatalog>();
                     services.AddSingleton<IManagedElsaInstanceCatalog>(_instanceCatalog);
                     services.RemoveAll<IGovernedReleaseCatalogStore>();
@@ -4131,6 +4236,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         {
             _instanceCatalog.SetInstances(instances);
             _releaseCatalog.SetEntries(releaseEntries);
+            FreshCleanupObserver.Reset();
         }
 
         public Task InitializeAsync() => Task.CompletedTask;
@@ -4142,6 +4248,42 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     {
         public string Id => "test";
         public string DisplayName => "Test provider";
+    }
+
+    internal sealed class CapturingFreshCleanupObserver : IAzureProviderFreshResourceGroupObserver
+    {
+        public AzureProviderFreshResourceGroupState State { get; set; }
+        public DateTimeOffset ObservedAt { get; private set; }
+        public int CallCount { get; private set; }
+        public Guid ProviderOperationId { get; private set; }
+        public Guid AssignmentId { get; private set; }
+        public Guid LifecycleOperationId { get; private set; }
+        public Func<Task>? OnObserve { get; set; }
+
+        public void Reset()
+        {
+            State = AzureProviderFreshResourceGroupState.Unknown;
+            ObservedAt = DateTimeOffset.UtcNow;
+            CallCount = 0;
+            ProviderOperationId = AssignmentId = LifecycleOperationId = Guid.Empty;
+            OnObserve = null;
+        }
+
+        public async Task<AzureProviderFreshResourceGroupObservation> ObserveAsync(
+            AzureProviderOperation delete,
+            Guid lifecycleDeleteOperationId,
+            AzureProviderResourceAssignment assignment,
+            CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            ProviderOperationId = delete.Id;
+            AssignmentId = assignment.Id;
+            LifecycleOperationId = lifecycleDeleteOperationId;
+            if (OnObserve is not null)
+                await OnObserve();
+            return new(State, ObservedAt, "azure.cleanup-observation.test",
+                State == AzureProviderFreshResourceGroupState.Unknown ? null : new string('a', 64));
+        }
     }
 
     private async Task<ControlApiTestApplication> PrepareApplicationAsync(

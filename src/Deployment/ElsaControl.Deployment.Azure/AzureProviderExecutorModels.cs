@@ -245,6 +245,46 @@ public interface IAzureProviderRecoveryObserver
         CancellationToken cancellationToken = default);
 }
 
+public enum AzureProviderFreshResourceGroupState
+{
+    Unknown,
+    Present,
+    Absent
+}
+
+/// <summary>
+/// Safe result of one fresh resource-group presence query. Provider and customer identifiers
+/// stay inside the trusted runner; only the bounded state, timestamp, reason code, and digest
+/// cross this observer boundary.
+/// </summary>
+public sealed record AzureProviderFreshResourceGroupObservation(
+    AzureProviderFreshResourceGroupState State,
+    DateTimeOffset? ObservedAt,
+    string ReasonCode,
+    string? EvidenceDigest);
+
+/// <summary>
+/// Performs a read-only ARM absence observation for an already terminal, verified Delete.
+/// Implementations must not retry cleanup or issue any provider mutation.
+/// </summary>
+public interface IAzureProviderFreshResourceGroupObserver
+{
+    Task<AzureProviderFreshResourceGroupObservation> ObserveAsync(
+        AzureProviderOperation delete,
+        Guid lifecycleDeleteOperationId,
+        AzureProviderResourceAssignment assignment,
+        CancellationToken cancellationToken = default);
+}
+
+public static class AzureProviderFreshResourceGroupObservationReasonCodes
+{
+    public const string Observed = "azure.fresh-resource-group.observed";
+    public const string BindingMismatch = "azure.fresh-resource-group.binding-mismatch";
+    public const string AuthorityMismatch = "azure.fresh-resource-group.authority-mismatch";
+    public const string ProviderUnavailable = "azure.fresh-resource-group.provider-unavailable";
+    public const string OutputInvalid = "azure.fresh-resource-group.output-invalid";
+}
+
 /// <summary>
 /// Adapter over the checked-in Azure Bicep/runbook lifecycle. Implementations may use Azure CLI,
 /// an SDK or a remote worker, but they must return only the safe result contract above.

@@ -249,57 +249,72 @@ public static class AdminManagedElsaRecoveryEndpoints
             IAzureProviderResourceAssignmentStore assignments,
             CancellationToken cancellationToken) =>
         {
-            if (workspaceId == Guid.Empty || instanceId == Guid.Empty ||
-                operationId == Guid.Empty || organizationId == Guid.Empty)
+            var evidence = await ReadHistoricalCleanupEvidenceAsync(
+                workspaceId, organizationId, instanceId, operationId,
+                lifecycle, queries, providerOperations, assignments, cancellationToken);
+            if (evidence is null)
                 return Results.NotFound();
-
-            var instance = await lifecycle.GetInstanceAsync(workspaceId, instanceId, cancellationToken);
-            var lifecycleOperation = await queries.GetOperationForOrganizationAsync(
-                workspaceId, organizationId, instanceId, operationId, cancellationToken);
-            if (instance is null || lifecycleOperation is null ||
-                instance.OrganizationId != organizationId ||
-                instance.WorkspaceId != workspaceId || instance.Id != instanceId ||
-                !IsHistoricalDeleteTombstone(instance, lifecycleOperation, operationId))
-                return Results.NotFound();
-
-            // FinalizeDeletion clears the instance's assignment reference. Recover the
-            // historical placement only from the exact organization/workspace/instance
-            // owner tuple, and refuse ambiguity rather than selecting a likely row.
-            var ownerAssignments = await assignments.ListForInstanceAsync(
-                workspaceId, organizationId, instanceId, cancellationToken);
-            if (ownerAssignments.Count != 1)
-                return Results.NotFound();
-
-            var assignment = ownerAssignments[0];
-            if (assignment.LastOperationId is not { } providerOperationId)
-                return Results.NotFound();
-            var providerOperation = await providerOperations.GetAsync(
-                workspaceId, providerOperationId, cancellationToken);
-            if (!IsHistoricalCleanupReceiptEligible(
-                    instance, lifecycleOperation, operationId, assignment, providerOperation))
-                return Results.NotFound();
-
-            var lifecycleCompletedAt = lifecycleOperation.CompletedAt!.Value;
-            var providerCompletedAt = providerOperation!.CompletedAt!.Value;
-            var tombstoneDeletedAt = instance.DeletedAt!.Value;
-            var digest = ComputeHistoricalCleanupReceiptDigest(
-                workspaceId,
-                organizationId,
-                instanceId,
-                operationId,
-                lifecycleCompletedAt,
-                assignment,
-                providerOperation);
 
             return Results.Ok(new AdminManagedElsaCleanupReceiptResponse(
                 InstanceTombstonePresent: true,
                 LifecycleDeleteSucceeded: true,
                 ProviderDeleteSucceeded: true,
                 ProviderAbsenceVerifiedAtCompletion: true,
-                ProviderCompletedAt: providerCompletedAt,
-                LifecycleCompletedAt: lifecycleCompletedAt,
-                TombstoneDeletedAt: tombstoneDeletedAt,
-                ReceiptDigest: digest));
+                ProviderCompletedAt: evidence.ProviderOperation.CompletedAt!.Value,
+                LifecycleCompletedAt: evidence.LifecycleOperation.CompletedAt!.Value,
+                TombstoneDeletedAt: evidence.Instance.DeletedAt!.Value,
+                ReceiptDigest: evidence.Digest));
+        });
+
+        group.MapGet("/{operationId:guid}/cleanup-observation/{organizationId:guid}", async (
+            Guid workspaceId,
+            Guid instanceId,
+            Guid operationId,
+            Guid organizationId,
+            HttpContext context,
+            IServiceProvider services,
+            IElsaInstanceLifecycleStore lifecycle,
+            IManagedElsaInstanceApiStore queries,
+            IAzureProviderOperationStore providerOperations,
+            IAzureProviderResourceAssignmentStore assignments,
+            CancellationToken cancellationToken) =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            var observer = services.GetService<IAzureProviderFreshResourceGroupObserver>();
+            if (observer is null)
+                return CleanupObservationUnavailable("instance.cleanup-observation.unavailable");
+
+            var evidence = await ReadHistoricalCleanupEvidenceAsync(
+                workspaceId, organizationId, instanceId, operationId,
+                lifecycle, queries, providerOperations, assignments, cancellationToken);
+            if (evidence is null)
+                return Results.NotFound();
+
+            AzureProviderFreshResourceGroupObservation observation;
+            try
+            {
+                observation = await observer.ObserveAsync(
+                    evidence.ProviderOperation, operationId, evidence.Assignment, cancellationToken);
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                return CleanupObservationUnavailable("instance.cleanup-observation.unavailable");
+            }
+
+            // The network read may outlive a concurrent retained-evidence change.
+            // Never pair an observation with a different historical ownership tuple.
+            var current = await ReadHistoricalCleanupEvidenceAsync(
+                workspaceId, organizationId, instanceId, operationId,
+                lifecycle, queries, providerOperations, assignments, cancellationToken);
+            if (current is null || !string.Equals(current.Digest, evidence.Digest, StringComparison.Ordinal))
+                return CleanupObservationUnavailable("instance.cleanup-observation.evidence-changed");
+
+            return Results.Ok(new AdminManagedElsaFreshCleanupObservationResponse(
+                observation.State,
+                observation.ObservedAt,
+                observation.ReasonCode,
+                observation.EvidenceDigest,
+                evidence.Digest));
         });
 
         group.MapGet("/{operationId:guid}", async (
@@ -384,6 +399,57 @@ public static class AdminManagedElsaRecoveryEndpoints
         return endpoints;
     }
 
+    private sealed record HistoricalCleanupEvidence(
+        ElsaInstance Instance,
+        ElsaInstanceOperationSummary LifecycleOperation,
+        AzureProviderResourceAssignment Assignment,
+        AzureProviderOperation ProviderOperation,
+        string Digest);
+
+    private static async Task<HistoricalCleanupEvidence?> ReadHistoricalCleanupEvidenceAsync(
+        Guid workspaceId,
+        Guid organizationId,
+        Guid instanceId,
+        Guid operationId,
+        IElsaInstanceLifecycleStore lifecycle,
+        IManagedElsaInstanceApiStore queries,
+        IAzureProviderOperationStore providerOperations,
+        IAzureProviderResourceAssignmentStore assignments,
+        CancellationToken cancellationToken)
+    {
+        if (workspaceId == Guid.Empty || instanceId == Guid.Empty ||
+            operationId == Guid.Empty || organizationId == Guid.Empty)
+            return null;
+
+        var instance = await lifecycle.GetInstanceAsync(workspaceId, instanceId, cancellationToken);
+        var operation = await queries.GetOperationForOrganizationAsync(
+            workspaceId, organizationId, instanceId, operationId, cancellationToken);
+        if (instance is null || operation is null ||
+            instance.OrganizationId != organizationId ||
+            instance.WorkspaceId != workspaceId || instance.Id != instanceId ||
+            !IsHistoricalDeleteTombstone(instance, operation, operationId))
+            return null;
+
+        // Deletion clears the placement reference: require one exact retained owner.
+        var ownerAssignments = await assignments.ListForInstanceAsync(
+            workspaceId, organizationId, instanceId, cancellationToken);
+        if (ownerAssignments.Count != 1)
+            return null;
+        var assignment = ownerAssignments[0];
+        if (assignment.LastOperationId is not { } providerOperationId)
+            return null;
+        var providerOperation = await providerOperations.GetAsync(
+            workspaceId, providerOperationId, cancellationToken);
+        if (!IsHistoricalCleanupReceiptEligible(
+                instance, operation, operationId, assignment, providerOperation))
+            return null;
+
+        return new(instance, operation, assignment, providerOperation!,
+            ComputeHistoricalCleanupReceiptDigest(
+                workspaceId, organizationId, instanceId, operationId,
+                operation.CompletedAt!.Value, assignment, providerOperation!));
+    }
+
     private static bool IsHistoricalDeleteTombstone(
         ElsaInstance instance,
         ElsaInstanceOperationSummary operation,
@@ -459,6 +525,12 @@ public static class AdminManagedElsaRecoveryEndpoints
             System.Text.Encoding.UTF8.GetBytes(canonical)));
     }
 
+    private static IResult CleanupObservationUnavailable(string code) =>
+        ManagedElsaInstanceEndpoints.Problem(
+            code,
+            "Fresh provider cleanup evidence is unavailable. No absence is confirmed.",
+            StatusCodes.Status503ServiceUnavailable);
+
     private static IResult ProviderReadoutUnavailable(string code) =>
         ManagedElsaInstanceEndpoints.Problem(
             code,
@@ -510,3 +582,11 @@ public sealed record AdminManagedElsaCleanupReceiptResponse(
     DateTimeOffset LifecycleCompletedAt,
     DateTimeOffset TombstoneDeletedAt,
     string ReceiptDigest);
+
+/// <summary>Private fresh ARM observation bound to the exact retained cleanup receipt.</summary>
+public sealed record AdminManagedElsaFreshCleanupObservationResponse(
+    AzureProviderFreshResourceGroupState State,
+    DateTimeOffset? ObservedAt,
+    string ReasonCode,
+    string? EvidenceDigest,
+    string HistoricalReceiptDigest);

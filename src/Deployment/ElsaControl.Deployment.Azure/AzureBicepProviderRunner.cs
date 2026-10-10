@@ -15,7 +15,8 @@ namespace ElsaControl.Deployment.Azure;
 /// successful response into bounded resource references. It never returns provider payloads,
 /// command output, or resolved secret values.
 /// </summary>
-public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProviderRecoveryObserver, IAzureRuntimeHealthProbe
+public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProviderRecoveryObserver,
+    IAzureProviderFreshResourceGroupObserver, IAzureRuntimeHealthProbe
 {
     private const string AcrPullRoleDefinitionId = "7f951dda-4ed3-4680-a7ca-43fe172d538d";
     private const string KeyVaultSecretsUserRoleDefinitionId = "4633458b-17de-408a-b874-0445c86b69e6";
@@ -123,6 +124,202 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             // committed a remote mutation, so the durable executor must recover it explicitly.
             return Uncertain(command, CurrentPhase(command.Step), "azure.runner.uncertain", "The Azure lifecycle step failed before its external result was confirmed.");
         }
+    }
+
+    public async Task<AzureProviderFreshResourceGroupObservation> ObserveAsync(
+        AzureProviderOperation delete,
+        Guid lifecycleDeleteOperationId,
+        AzureProviderResourceAssignment assignment,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!TryCreateFreshResourceGroupObservationContext(
+                delete, lifecycleDeleteOperationId, assignment, out var context))
+            return FreshResourceGroupObservationUnknown(
+                AzureProviderFreshResourceGroupObservationReasonCodes.BindingMismatch);
+
+        if (!HasCurrentFreshObservationAuthority(delete, assignment, context))
+            return FreshResourceGroupObservationUnknown(
+                AzureProviderFreshResourceGroupObservationReasonCodes.AuthorityMismatch);
+
+        var request = new AzureCommandProcessRequest(
+            _options.AzureCliPath,
+            [
+                AzureCommandArgument.Safe("group"),
+                AzureCommandArgument.Safe("exists"),
+                AzureCommandArgument.Safe("--subscription"),
+                AzureCommandArgument.Safe(_scope.SubscriptionId),
+                AzureCommandArgument.Safe("--name"),
+                AzureCommandArgument.Safe(assignment.ResourceGroupName),
+                AzureCommandArgument.Safe("--output"),
+                AzureCommandArgument.Safe("tsv"),
+                AzureCommandArgument.Safe("--only-show-errors")
+            ],
+            workingDirectory: _options.TemplateRoot);
+
+        AzureCommandProcessResult<SafeValue<bool>> query;
+        try
+        {
+            query = await _process.ExecuteAsync(request, ParseBooleanAsync, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return FreshResourceGroupObservationUnknown(
+                AzureProviderFreshResourceGroupObservationReasonCodes.ProviderUnavailable,
+                _timeProvider.GetUtcNow());
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var observedAt = _timeProvider.GetUtcNow();
+
+        // Scope and checked-in template authority are recomputed after the external read too.
+        // A query begun under old configuration cannot attest its result if authority changed
+        // while Azure CLI was running.
+        if (!HasCurrentFreshObservationAuthority(delete, assignment, context))
+            return FreshResourceGroupObservationUnknown(
+                AzureProviderFreshResourceGroupObservationReasonCodes.AuthorityMismatch,
+                observedAt);
+
+        if (!query.Succeeded || query.Value is null)
+            return FreshResourceGroupObservationUnknown(
+                query.FailureKind == AzureCommandProcessFailureKind.InvalidOutput
+                    ? AzureProviderFreshResourceGroupObservationReasonCodes.OutputInvalid
+                    : AzureProviderFreshResourceGroupObservationReasonCodes.ProviderUnavailable,
+                observedAt);
+
+        var state = query.Value.Value
+            ? AzureProviderFreshResourceGroupState.Present
+            : AzureProviderFreshResourceGroupState.Absent;
+        var digest = ComputeFreshResourceGroupObservationDigest(
+            delete,
+            lifecycleDeleteOperationId,
+            assignment,
+            state,
+            observedAt);
+        return new(
+            state,
+            observedAt,
+            AzureProviderFreshResourceGroupObservationReasonCodes.Observed,
+            digest);
+    }
+
+    private bool TryCreateFreshResourceGroupObservationContext(
+        AzureProviderOperation? delete,
+        Guid lifecycleDeleteOperationId,
+        AzureProviderResourceAssignment? assignment,
+        out AzureProviderExecutionContext context)
+    {
+        context = null!;
+        if (delete is null || assignment is null || lifecycleDeleteOperationId == Guid.Empty ||
+            !AzureProviderDeleteRecoverySupport.IsTerminalVerifiedCleanupEligible(delete, assignment) ||
+            !AzureProviderOperationValidation.IsLifecycleDeleteIdempotencyKey(
+                delete.IdempotencyKey, lifecycleDeleteOperationId) ||
+            delete.CompletedAt is not { } providerCompletedAt ||
+            assignment.DeletedAt is not { } assignmentDeletedAt ||
+            assignmentDeletedAt > providerCompletedAt ||
+            delete.OrganizationId is not { } organizationId ||
+            delete.InstanceId is not { } instanceId ||
+            delete.ProviderAssignmentId is not { } providerAssignmentId ||
+            !IsFingerprint(delete.PlanFingerprint) || !IsFingerprint(delete.TemplateFingerprint) ||
+            !string.Equals(assignment.WorkloadName, AzureElsaInstanceProvider.WorkloadName(instanceId), StringComparison.Ordinal) ||
+            !string.Equals(assignment.SubscriptionId, _scope.SubscriptionId, StringComparison.Ordinal) ||
+            !string.Equals(assignment.Location, _scope.Location, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        string expectedResourceGroup;
+        string expectedOwnershipKey;
+        try
+        {
+            expectedResourceGroup = AzureProviderResourceAssignmentNaming.ResourceGroupName(
+                _scope.ResourceGroupName, instanceId, assignment.NamingVersion);
+            expectedOwnershipKey = AzureProviderResourceAssignmentNaming.OwnershipKey(
+                assignment.Id, instanceId, assignment.ProviderScopeFingerprint);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        if (!string.Equals(assignment.ResourceGroupName, expectedResourceGroup, StringComparison.Ordinal) ||
+            !string.Equals(assignment.OwnershipKey, expectedOwnershipKey, StringComparison.Ordinal))
+            return false;
+
+        context = new AzureProviderExecutionContext(
+            delete.WorkspaceId,
+            organizationId,
+            instanceId,
+            delete.Id,
+            delete.OperationIdentity,
+            delete.IdempotencyKey,
+            delete.TargetKey,
+            providerAssignmentId.ToString("D"),
+            delete.PlanFingerprint,
+            delete.TemplateFingerprint,
+            delete.ProviderScopeFingerprint);
+        return true;
+    }
+
+    private bool HasCurrentFreshObservationAuthority(
+        AzureProviderOperation delete,
+        AzureProviderResourceAssignment assignment,
+        AzureProviderExecutionContext context)
+    {
+        try
+        {
+            _options.ValidateExecutionAuthority(context, _scope);
+            return string.Equals(
+                       delete.TemplateFingerprint,
+                       _options.ComputeTemplateAuthorityFingerprint(),
+                       StringComparison.Ordinal) &&
+                   string.Equals(
+                       assignment.ProviderScopeFingerprint,
+                       _options.ComputeProviderScopeFingerprint(_scope),
+                       StringComparison.Ordinal);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static AzureProviderFreshResourceGroupObservation FreshResourceGroupObservationUnknown(
+        string reasonCode,
+        DateTimeOffset? observedAt = null) =>
+        new(AzureProviderFreshResourceGroupState.Unknown, observedAt, reasonCode, null);
+
+    private static string ComputeFreshResourceGroupObservationDigest(
+        AzureProviderOperation delete,
+        Guid lifecycleDeleteOperationId,
+        AzureProviderResourceAssignment assignment,
+        AzureProviderFreshResourceGroupState state,
+        DateTimeOffset observedAt)
+    {
+        var canonical = string.Join('\n',
+        [
+            "elsa-fresh-resource-group-observation-v1",
+            delete.WorkspaceId.ToString("D"),
+            delete.OrganizationId!.Value.ToString("D"),
+            delete.InstanceId!.Value.ToString("D"),
+            delete.Id.ToString("D"),
+            lifecycleDeleteOperationId.ToString("D"),
+            assignment.Id.ToString("D"),
+            assignment.OwnershipKey,
+            assignment.ProviderScopeFingerprint,
+            assignment.SubscriptionId,
+            assignment.ResourceGroupName,
+            assignment.WorkloadName,
+            delete.IdempotencyKey,
+            delete.PlanFingerprint,
+            delete.TemplateFingerprint,
+            delete.CompletedAt!.Value.ToUniversalTime().UtcTicks.ToString(CultureInfo.InvariantCulture),
+            state.ToString(),
+            observedAt.ToUniversalTime().UtcTicks.ToString(CultureInfo.InvariantCulture)
+        ]);
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 
     /// <summary>

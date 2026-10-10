@@ -54,3 +54,32 @@ receipt and all other completion guards. Do not release a pending staging run,
 admit another Create, or mark a failed customer proof Passed from this historical
 lookup alone. Unknown Create/Delete responses and checkout-only interruptions
 remain separate reconciliation paths under #594.
+
+## Fresh provider observation
+
+`GET /api/admin/workspaces/{workspaceId}/instances/{instanceId}/operations/{operationId}/cleanup-observation/{organizationId}`
+
+This separate Admin read requires the same complete historical evidence before
+invoking the configured provider observer. It is unavailable when the concrete
+Azure worker runner is not composed. No credentials, provider scope or resource
+name is accepted from the caller.
+
+The observer independently validates the terminal provider Delete, lifecycle key,
+retained assignment and current execution authority. It issues one exact owned
+resource-group existence query using the existing configured runner identity;
+it does not log in, retry deletion, run cleanup or change provider state. A
+successful parsed `false` is `Absent`, `true` is `Present`; failed commands,
+malformed output and authority drift are `Unknown`. Cancellation remains
+cancellation. Only successful observations carry an evidence digest.
+
+The response contains the bounded observation state, time, fixed reason code,
+observation digest and historical receipt digest. The route rereads historical
+evidence after the network query and refuses a changed ownership/completion
+binding. Responses are not cacheable. Provider errors and private CLI output are
+never returned.
+
+`Absent` describes the exact resource group at the observation time. It is not a
+permanent guarantee, a signed authorization, a Stripe cleanup receipt or a
+coordinator completion action. The trusted rehearsal executor must check the
+retained run binding, freshness and every other cleanup receipt before releasing
+its pending run. This API does not complete or restart any run by itself.
