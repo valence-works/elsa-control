@@ -280,6 +280,8 @@ public sealed class CloudBffAuthorizationTests
             "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/activity",
             "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/available-releases",
             "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/delete-operations/{operationId:guid}",
+            "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/operations/{operationId:guid}/cleanup-observation",
+            "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/operations/{operationId:guid}/cleanup-receipt",
             "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/overview",
             "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/provisioning-progress",
             "PATCH /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}",
