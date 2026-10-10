@@ -8,9 +8,9 @@ it does not complete that rehearsal or the first-public gate.
 
 `GET /api/admin/workspaces/{workspaceId}/instances/{instanceId}/operations/{operationId}/cleanup-receipt/{organizationId}`
 
-The existing Admin authorization policy applies. Customer credentials cannot
-obtain this receipt. The route does not change lifecycle, provider, or billing
-state and does not call Azure. It requires no additional grants or schema.
+The existing Admin authorization policy applies. This operator route does not
+change lifecycle, provider, or billing state and does not call Azure. It requires
+no additional grants or schema.
 
 The caller supplies the exact retained organization, workspace, instance and
 accepted lifecycle Delete operation. It must not discover a candidate by picking
@@ -59,8 +59,19 @@ remain separate reconciliation paths under #594.
 
 `GET /api/admin/workspaces/{workspaceId}/instances/{instanceId}/operations/{operationId}/cleanup-observation/{organizationId}`
 
-This separate Admin read requires the same complete historical evidence before
-invoking the configured provider observer. It is unavailable when the concrete
+Workspace readers also have a customer-authenticated facade for the same bounded
+evidence:
+
+- `GET /api/workspaces/{workspaceId}/instances/{instanceId}/operations/{operationId}/cleanup-receipt`
+- `GET /api/workspaces/{workspaceId}/instances/{instanceId}/operations/{operationId}/cleanup-observation`
+
+These routes use the normal workspace access check and resolve organization from
+that authenticated workspace membership. They accept no organization, provider,
+receipt, or observation values from the caller. The Admin endpoints remain
+available to operators under their existing policy.
+
+The fresh-observation routes require the same complete historical evidence before
+invoking the configured provider observer. They are unavailable when the concrete
 Azure worker runner is not composed. No credentials, provider scope or resource
 name is accepted from the caller.
 
