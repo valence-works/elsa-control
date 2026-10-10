@@ -725,6 +725,26 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         return entity is null ? null : ToModel(entity);
     }
 
+    async Task<IReadOnlyList<AzureProviderResourceAssignment>> IAzureProviderResourceAssignmentStore.ListForInstanceAsync(
+        Guid workspaceId,
+        Guid organizationId,
+        Guid instanceId,
+        CancellationToken cancellationToken)
+    {
+        if (workspaceId == Guid.Empty || organizationId == Guid.Empty || instanceId == Guid.Empty)
+            throw new ArgumentException("The Azure assignment owner identity is invalid.");
+
+        var entities = await db.AzureProviderResourceAssignments.AsNoTracking()
+            .Where(x => x.WorkspaceId == workspaceId &&
+                        x.OrganizationId == organizationId &&
+                        x.InstanceId == instanceId)
+            .OrderByDescending(x => x.UpdatedAt)
+            .ThenByDescending(x => x.Id)
+            .Take(2)
+            .ToListAsync(cancellationToken);
+        return entities.Select(ToModel).ToArray();
+    }
+
     async Task<AzureProviderResourceAssignment?> IAzureProviderResourceAssignmentStore.RebindToCurrentScopeAsync(
         AzureProviderAssignmentScopeAuthority authority,
         DateTimeOffset now,

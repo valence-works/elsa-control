@@ -94,20 +94,41 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
             .AnyAsync(x => x.WorkspaceId == workspaceId && x.DeletedAt == null && x.Slug == slug, cancellationToken);
     }
 
-    public async Task<ElsaInstanceOperationSummary?> GetOperationAsync(
+    public Task<ElsaInstanceOperationSummary?> GetOperationAsync(
         Guid workspaceId,
         Guid instanceId,
         Guid operationId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetOperationCoreAsync(workspaceId, null, instanceId, operationId, cancellationToken);
+
+    public Task<ElsaInstanceOperationSummary?> GetOperationForOrganizationAsync(
+        Guid workspaceId,
+        Guid organizationId,
+        Guid instanceId,
+        Guid operationId,
+        CancellationToken cancellationToken = default) =>
+        GetOperationCoreAsync(workspaceId, organizationId, instanceId, operationId, cancellationToken);
+
+    private async Task<ElsaInstanceOperationSummary?> GetOperationCoreAsync(
+        Guid workspaceId,
+        Guid? organizationId,
+        Guid instanceId,
+        Guid operationId,
+        CancellationToken cancellationToken)
     {
-        if (workspaceId == Guid.Empty || instanceId == Guid.Empty || operationId == Guid.Empty)
+        if (workspaceId == Guid.Empty || organizationId == Guid.Empty ||
+            instanceId == Guid.Empty || operationId == Guid.Empty)
             return null;
 
-        var operation = await dbContext.ElsaInstanceOperations
+        var query = dbContext.ElsaInstanceOperations
             .AsNoTracking()
-            .SingleOrDefaultAsync(x => x.WorkspaceId == workspaceId &&
-                                       x.InstanceId == instanceId &&
-                                       x.Id == operationId, cancellationToken);
+            .Where(x => x.WorkspaceId == workspaceId &&
+                        x.InstanceId == instanceId &&
+                        x.Id == operationId);
+        if (organizationId is { } exactOrganizationId)
+            query = query.Where(x => x.OrganizationId == exactOrganizationId);
+
+        var operation = await query.SingleOrDefaultAsync(cancellationToken);
         if (operation is null || operation.InstanceId is null)
             return null;
 

@@ -29,6 +29,19 @@ public interface IManagedElsaInstanceApiStore
         Guid operationId,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Reads one operation only when all persisted ownership fields match. The default
+    /// deliberately returns no row for lightweight stores that cannot prove organization
+    /// ownership; private historical receipts must fail closed in that case.
+    /// </summary>
+    Task<ElsaInstanceOperationSummary?> GetOperationForOrganizationAsync(
+        Guid workspaceId,
+        Guid organizationId,
+        Guid instanceId,
+        Guid operationId,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<ElsaInstanceOperationSummary?>(null);
+
     Task<ElsaInstanceOperationPage> ListOperationsAsync(
         Guid workspaceId,
         Guid instanceId,

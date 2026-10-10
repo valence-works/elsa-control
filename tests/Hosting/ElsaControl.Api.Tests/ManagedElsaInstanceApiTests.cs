@@ -1432,6 +1432,178 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Admin_cleanup_receipt_is_exact_private_and_historical()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var receiptFixture = await SeedHistoricalCleanupReceiptAsync(app, "admin-cleanup-receipt");
+        var path = $"/api/admin/workspaces/{receiptFixture.WorkspaceId:D}/instances/{receiptFixture.InstanceId:D}" +
+                   $"/operations/{receiptFixture.LifecycleOperationId:D}/cleanup-receipt/{receiptFixture.OrganizationId:D}";
+
+        using var anonymous = app.CreateClient();
+        using var unauthenticated = await anonymous.GetAsync(path);
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticated.StatusCode);
+
+        using var customerIdentity = app.CreateControlIdentityClient();
+        using var customerResponse = await customerIdentity.GetAsync(path);
+        Assert.Equal(HttpStatusCode.Unauthorized, customerResponse.StatusCode);
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        using var response = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = (await response.Content.ReadControlJsonAsync<AdminManagedElsaCleanupReceiptResponse>())!;
+        Assert.True(body.InstanceTombstonePresent);
+        Assert.True(body.LifecycleDeleteSucceeded);
+        Assert.True(body.ProviderDeleteSucceeded);
+        Assert.True(body.ProviderAbsenceVerifiedAtCompletion);
+        Assert.Equal(receiptFixture.ProviderCompletedAt, body.ProviderCompletedAt);
+        Assert.Equal(receiptFixture.LifecycleCompletedAt, body.LifecycleCompletedAt);
+        Assert.Equal(receiptFixture.LifecycleCompletedAt, body.TombstoneDeletedAt);
+        Assert.True(body.ProviderCompletedAt <= body.LifecycleCompletedAt);
+        Assert.Equal(64, body.ReceiptDigest.Length);
+        Assert.All(body.ReceiptDigest, character => Assert.True(char.IsAsciiHexDigit(character)));
+
+        var json = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(receiptFixture.OrganizationId.ToString("D"), json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(receiptFixture.WorkspaceId.ToString("D"), json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(receiptFixture.InstanceId.ToString("D"), json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(receiptFixture.LifecycleOperationId.ToString("D"), json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(receiptFixture.ProviderOperationId.ToString("D"), json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(receiptFixture.AssignmentId.ToString("D"), json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(receiptFixture.SubscriptionId, json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(receiptFixture.ResourceGroupName, json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("\"providerAbsent\"", json, StringComparison.Ordinal);
+
+        using var repeated = await admin.GetAsync(path);
+        var repeatedBody = (await repeated.Content.ReadControlJsonAsync<AdminManagedElsaCleanupReceiptResponse>())!;
+        Assert.Equal(body.ReceiptDigest, repeatedBody.ReceiptDigest);
+
+        using var wrongOrganization = await admin.GetAsync(
+            $"/api/admin/workspaces/{receiptFixture.WorkspaceId:D}/instances/{receiptFixture.InstanceId:D}" +
+            $"/operations/{receiptFixture.LifecycleOperationId:D}/cleanup-receipt/{Guid.NewGuid():D}");
+        Assert.Equal(HttpStatusCode.NotFound, wrongOrganization.StatusCode);
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var operations = scope.ServiceProvider.GetRequiredService<IManagedElsaInstanceApiStore>();
+            var storedOperation = await operations.GetOperationAsync(
+                receiptFixture.WorkspaceId,
+                receiptFixture.InstanceId,
+                receiptFixture.LifecycleOperationId);
+            Assert.NotNull(storedOperation);
+            var wrongOwnerOperation = await operations.GetOperationForOrganizationAsync(
+                receiptFixture.WorkspaceId,
+                Guid.NewGuid(),
+                receiptFixture.InstanceId,
+                receiptFixture.LifecycleOperationId);
+            Assert.Null(wrongOwnerOperation);
+        }
+        using var wrongOperation = await admin.GetAsync(
+            $"/api/admin/workspaces/{receiptFixture.WorkspaceId:D}/instances/{receiptFixture.InstanceId:D}" +
+            $"/operations/{Guid.NewGuid():D}/cleanup-receipt/{receiptFixture.OrganizationId:D}");
+        Assert.Equal(HttpStatusCode.NotFound, wrongOperation.StatusCode);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE AzureProviderOperations
+                SET Status = {AzureProviderOperationStatus.RecoveryRequired.ToString()}, CompletedAt = NULL
+                WHERE Id = {receiptFixture.ProviderOperationId}
+                """);
+        }
+        using var unfinished = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.NotFound, unfinished.StatusCode);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE AzureProviderOperations
+                SET Status = {AzureProviderOperationStatus.Succeeded.ToString()},
+                    CompletedAt = {receiptFixture.ProviderCompletedAt.UtcTicks}
+                WHERE Id = {receiptFixture.ProviderOperationId}
+                """);
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE AzureProviderOperations
+                SET CompletedAt = {receiptFixture.LifecycleCompletedAt.AddSeconds(1).UtcTicks}
+                WHERE Id = {receiptFixture.ProviderOperationId}
+                """);
+        }
+        using var providerCompletedAfterLifecycle = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.NotFound, providerCompletedAfterLifecycle.StatusCode);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE AzureProviderOperations
+                SET CompletedAt = {receiptFixture.ProviderCompletedAt.UtcTicks}
+                WHERE Id = {receiptFixture.ProviderOperationId}
+                """);
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE AzureProviderResourceAssignments
+                SET LastOperationId = {Guid.NewGuid()}
+                WHERE Id = {receiptFixture.AssignmentId}
+                """);
+        }
+        using var mismatchedProviderBinding = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.NotFound, mismatchedProviderBinding.StatusCode);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE AzureProviderResourceAssignments
+                SET LastOperationId = {receiptFixture.ProviderOperationId}
+                WHERE Id = {receiptFixture.AssignmentId}
+                """);
+            var assignments = (IAzureProviderResourceAssignmentStore)new AzureProviderOperationStore(db);
+            await assignments.CreateOrGetAsync(new(
+                receiptFixture.WorkspaceId,
+                receiptFixture.OrganizationId,
+                receiptFixture.InstanceId,
+                new string('e', 64),
+                receiptFixture.SubscriptionId,
+                "rg-correlation",
+                AzureElsaInstanceProvider.WorkloadName(receiptFixture.InstanceId),
+                "westeurope"),
+                DateTimeOffset.UtcNow);
+        }
+        using var ambiguous = await admin.GetAsync(path);
+        Assert.Equal(HttpStatusCode.NotFound, ambiguous.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("missing-tombstone")]
+    [InlineData("observed-not-deleted")]
+    [InlineData("desired-not-deleting")]
+    [InlineData("last-operation-mismatch")]
+    [InlineData("lifecycle-wrong-action")]
+    [InlineData("lifecycle-nonterminal")]
+    [InlineData("lifecycle-missing-completion")]
+    [InlineData("assignment-wrong-organization")]
+    [InlineData("provider-wrong-organization")]
+    [InlineData("provider-scope-mismatch")]
+    [InlineData("assignment-residual-workload")]
+    [InlineData("provider-residual-workload")]
+    [InlineData("provider-endpoint-present")]
+    public async Task Admin_cleanup_receipt_hides_incomplete_or_mismatched_evidence(string boundary)
+    {
+        var app = await PrepareApplicationAsync([]);
+        var receiptFixture = await SeedHistoricalCleanupReceiptAsync(
+            app, $"receipt-{Guid.NewGuid():N}");
+        await MutateHistoricalCleanupReceiptBoundaryAsync(app, receiptFixture, boundary);
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        using var response = await admin.GetAsync(
+            $"/api/admin/workspaces/{receiptFixture.WorkspaceId:D}/instances/{receiptFixture.InstanceId:D}" +
+            $"/operations/{receiptFixture.LifecycleOperationId:D}/cleanup-receipt/{receiptFixture.OrganizationId:D}");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
     public async Task Admin_api_key_can_recover_exact_operation_and_replay_exact_request()
     {
         var app = await PrepareApplicationAsync([]);
@@ -4177,6 +4349,188 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
             $"UPDATE ElsaInstanceOperations SET State = {ElsaInstanceOperationState.Succeeded.ToString()}, CompletedAt = {completedAtTicks} WHERE Id = {operationId}");
     }
 
+    private static async Task<HistoricalCleanupReceiptFixture> SeedHistoricalCleanupReceiptAsync(
+        ControlApiTestApplication app,
+        string slug)
+    {
+        var topology = await SeedCorrelationInvalidDeleteTopologyAsync(
+            app, slug, retainWorkload: false, assignmentDeleted: false);
+        Guid organizationId;
+        Guid assignmentId;
+        Guid providerOperationId;
+        DateTimeOffset providerCompletedAt;
+        string subscriptionId;
+        string resourceGroupName;
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            organizationId = await db.Workspaces.Where(x => x.Id == topology.WorkspaceId)
+                .Select(x => x.OrganizationId)
+                .SingleAsync();
+            assignmentId = Guid.Parse(await db.Database.SqlQuery<string>($"""
+                SELECT PlacementAssignmentId AS Value FROM ElsaInstances
+                WHERE WorkspaceId = {topology.WorkspaceId} AND Id = {topology.InstanceId}
+                """).SingleAsync());
+
+            var store = new AzureProviderOperationStore(db);
+            var assignments = (IAzureProviderResourceAssignmentStore)store;
+            var assignment = (await assignments.GetAsync(topology.WorkspaceId, assignmentId))!;
+            subscriptionId = assignment.SubscriptionId;
+            resourceGroupName = assignment.ResourceGroupName;
+            var now = DateTimeOffset.UtcNow;
+            var providerOperation = await store.CreateOrGetAsync(new AzureProviderOperationRequest(
+                topology.WorkspaceId,
+                AzureElsaInstanceProvider.WorkloadName(topology.InstanceId),
+                AzureProviderOperationAction.Delete,
+                AzureProviderOperationValidation.LifecycleIdempotencyKey(topology.OperationId) + ":delete",
+                new string('a', 64), new string('b', 64), "3.8.0", "3.8", "combined", "Dedicated",
+                "westeurope", "valenceruntimeimages.azurecr.io/runtime-combined",
+                "sha256:" + new string('c', 64),
+                ProviderScopeFingerprint: assignment.ProviderScopeFingerprint,
+                OrganizationId: organizationId,
+                InstanceId: topology.InstanceId,
+                LifecycleAction: ElsaInstanceOperationAction.Delete,
+                ProviderAssignmentId: assignment.Id), now);
+            providerOperationId = providerOperation.Id;
+
+            const string leaseToken = "historical-cleanup-receipt-lease";
+            var claimed = (await store.ClaimAsync(
+                topology.WorkspaceId, providerOperationId, "historical-cleanup-receipt-test",
+                leaseToken, TimeSpan.FromMinutes(5), now))!;
+            var submitted = (await store.CheckpointAsync(
+                topology.WorkspaceId,
+                providerOperationId,
+                leaseToken,
+                new AzureProviderCheckpoint(
+                    AzureProviderOperationPhase.CleanupSubmitted,
+                    "cleanup.submitted",
+                    "Cleanup was submitted.",
+                    new AzureProviderResourceReferences(ResourceGroupName: resourceGroupName),
+                    null,
+                    AzureProviderHealth.Unknown,
+                    [],
+                    AttemptedStep: AzureProviderRunnerStep.Cleanup),
+                now.AddSeconds(1),
+                claimed.Version))!;
+            var verified = (await store.CheckpointAsync(
+                topology.WorkspaceId,
+                providerOperationId,
+                leaseToken,
+                new AzureProviderCheckpoint(
+                    AzureProviderOperationPhase.CleanupVerified,
+                    "cleanup.verified",
+                    "Provider cleanup absence was verified.",
+                    new AzureProviderResourceReferences(),
+                    null,
+                    AzureProviderHealth.Unknown,
+                    [],
+                    ReplaceResources: true),
+                now.AddSeconds(2),
+                submitted.Version))!;
+            var completed = (await store.FinalizeAsync(
+                topology.WorkspaceId,
+                providerOperationId,
+                leaseToken,
+                AzureProviderOperationStatus.Succeeded,
+                "azure.cleanup.completed",
+                now.AddSeconds(3),
+                verified.Version))!;
+            providerCompletedAt = completed.CompletedAt!.Value;
+        }
+
+        var lifecycleCompletedAt = providerCompletedAt.AddSeconds(1);
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE ElsaInstances
+                SET DesiredLifecycle = {ElsaDesiredLifecycle.Deleting.ToString()},
+                    ObservedLifecycle = {ElsaObservedLifecycle.Deleted.ToString()},
+                    DeletedAt = {lifecycleCompletedAt.UtcTicks},
+                    PlacementAssignmentId = NULL,
+                    LastOperationId = {topology.OperationId.ToString("D")}
+                WHERE WorkspaceId = {topology.WorkspaceId} AND Id = {topology.InstanceId}
+                """);
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE ElsaInstanceOperations
+                SET State = {ElsaInstanceOperationState.Succeeded.ToString()},
+                    CompletedAt = {lifecycleCompletedAt.UtcTicks},
+                    FailureCode = NULL
+                WHERE WorkspaceId = {topology.WorkspaceId} AND InstanceId = {topology.InstanceId}
+                  AND Id = {topology.OperationId}
+                """);
+        }
+
+        return new(
+            topology.WorkspaceId,
+            organizationId,
+            topology.InstanceId,
+            topology.OperationId,
+            providerOperationId,
+            assignmentId,
+            providerCompletedAt,
+            lifecycleCompletedAt,
+            subscriptionId,
+            resourceGroupName);
+    }
+
+    private static async Task MutateHistoricalCleanupReceiptBoundaryAsync(
+        ControlApiTestApplication app,
+        HistoricalCleanupReceiptFixture fixture,
+        string boundary)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var otherOrganizationId = Guid.NewGuid();
+
+        switch (boundary)
+        {
+            // These are valid aggregate states: tombstones can only be Deleted + Deleting + timestamp.
+            // Test the adjacent non-tombstone projections instead of persisting an invalid aggregate.
+            case "missing-tombstone":
+                await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE ElsaInstances SET ObservedLifecycle = {ElsaObservedLifecycle.Unknown.ToString()}, DeletedAt = NULL WHERE Id = {fixture.InstanceId}");
+                break;
+            case "observed-not-deleted":
+                await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE ElsaInstances SET ObservedLifecycle = {ElsaObservedLifecycle.Deleting.ToString()}, DeletedAt = NULL WHERE Id = {fixture.InstanceId}");
+                break;
+            case "desired-not-deleting":
+                await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE ElsaInstances SET DesiredLifecycle = {ElsaDesiredLifecycle.Running.ToString()}, ObservedLifecycle = {ElsaObservedLifecycle.Unknown.ToString()}, DeletedAt = NULL WHERE Id = {fixture.InstanceId}");
+                break;
+            case "last-operation-mismatch":
+                await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE ElsaInstances SET LastOperationId = {Guid.NewGuid().ToString("D")} WHERE Id = {fixture.InstanceId}");
+                break;
+            case "lifecycle-wrong-action":
+                await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE ElsaInstanceOperations SET Action = {ElsaInstanceOperationAction.Stop.ToString()} WHERE Id = {fixture.LifecycleOperationId}");
+                break;
+            case "lifecycle-nonterminal":
+                await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE ElsaInstanceOperations SET State = {ElsaInstanceOperationState.RecoveryRequired.ToString()}, CompletedAt = NULL WHERE Id = {fixture.LifecycleOperationId}");
+                break;
+            case "lifecycle-missing-completion":
+                await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE ElsaInstanceOperations SET CompletedAt = NULL WHERE Id = {fixture.LifecycleOperationId}");
+                break;
+            case "assignment-wrong-organization":
+                await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE AzureProviderResourceAssignments SET OrganizationId = {otherOrganizationId} WHERE Id = {fixture.AssignmentId}");
+                break;
+            case "provider-wrong-organization":
+                await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE AzureProviderOperations SET OrganizationId = {otherOrganizationId} WHERE Id = {fixture.ProviderOperationId}");
+                break;
+            case "provider-scope-mismatch":
+                await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE AzureProviderResourceAssignments SET ProviderScopeFingerprint = {new string('d', 64)} WHERE Id = {fixture.AssignmentId}");
+                break;
+            case "assignment-residual-workload":
+                await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE AzureProviderResourceAssignments SET WorkloadResourceId = {"/subscriptions/redacted/resourceGroups/redacted/providers/Microsoft.App/containerApps/redacted"} WHERE Id = {fixture.AssignmentId}");
+                break;
+            case "provider-residual-workload":
+                await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE AzureProviderOperations SET WorkloadResourceId = {"/subscriptions/redacted/resourceGroups/redacted/providers/Microsoft.App/containerApps/redacted"} WHERE Id = {fixture.ProviderOperationId}");
+                break;
+            case "provider-endpoint-present":
+                await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE AzureProviderOperations SET Endpoint = {"https://endpoint.invalid/"} WHERE Id = {fixture.ProviderOperationId}");
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(boundary), boundary, "Unknown cleanup receipt boundary.");
+        }
+    }
+
     private static async Task PersistRawAuditFieldsAsync(
         ControlApiTestApplication app,
         Guid instanceId,
@@ -4310,6 +4664,18 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Guid InstanceId,
         Guid OperationId,
         int InstanceVersion);
+
+    private sealed record HistoricalCleanupReceiptFixture(
+        Guid WorkspaceId,
+        Guid OrganizationId,
+        Guid InstanceId,
+        Guid LifecycleOperationId,
+        Guid ProviderOperationId,
+        Guid AssignmentId,
+        DateTimeOffset ProviderCompletedAt,
+        DateTimeOffset LifecycleCompletedAt,
+        string SubscriptionId,
+        string ResourceGroupName);
 
     private static async Task ParkApplyReleaseForRecoverAsync(
         ControlApiTestApplication app,

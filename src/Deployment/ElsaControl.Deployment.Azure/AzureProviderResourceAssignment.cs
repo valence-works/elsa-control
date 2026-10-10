@@ -135,6 +135,18 @@ public interface IAzureProviderResourceAssignmentStore
         Guid assignmentId,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Reads the bounded historical assignments for one exact managed-instance owner.
+    /// Callers must fail closed when more than one row is returned. The default keeps
+    /// lightweight stores from accidentally claiming historical assignment authority.
+    /// </summary>
+    Task<IReadOnlyList<AzureProviderResourceAssignment>> ListForInstanceAsync(
+        Guid workspaceId,
+        Guid organizationId,
+        Guid instanceId,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<AzureProviderResourceAssignment>>([]);
+
     Task<AzureProviderResourceAssignment?> RebindToCurrentScopeAsync(
         AzureProviderAssignmentScopeAuthority authority,
         DateTimeOffset now,
