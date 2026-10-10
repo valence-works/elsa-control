@@ -648,6 +648,75 @@ public static class ManagedElsaInstanceEndpoints
             return Results.Ok(ToOperationResponse(workspaceId, instanceId, operation));
         }).RequireWorkspaceAccess();
 
+        group.MapGet("/operations/by-idempotency-key", async (
+            Guid workspaceId,
+            HttpContext context,
+            WorkspacePermissionService permissions,
+            IElsaInstanceLifecycleStore lifecycle,
+            IManagedElsaInstanceApiStore queries,
+            [FromServices] IManagedElsaInstanceIdentityStore identities,
+            CancellationToken cancellationToken) =>
+        {
+            var keyResult = ReadIdempotencyKey(context);
+            if (keyResult.State == IdempotencyKeyState.Missing)
+                return Problem("instance.idempotency-key-required", "Idempotency-Key is required for operation reconciliation.", StatusCodes.Status400BadRequest);
+            if (keyResult.State == IdempotencyKeyState.Invalid)
+                return InvalidIdempotencyKey();
+            if (!TryReadOperationReconciliationQuery(
+                    context.Request.Query, out var action, out var slug, out var requestedInstanceId))
+                return Problem("instance.operation-reconciliation-request-invalid", "A valid action and its matching slug or instanceId are required.", StatusCodes.Status400BadRequest);
+
+            var access = context.GetWorkspaceAccess();
+            if (action == ElsaInstanceOperationAction.Create)
+            {
+                try
+                {
+                    slug = ElsaInstanceSlug.Normalize(slug!);
+                }
+                catch (ArgumentException)
+                {
+                    return Problem("instance.operation-reconciliation-request-invalid", "The submitted slug is invalid.", StatusCodes.Status400BadRequest);
+                }
+            }
+
+            // Delete operations use the same per-instance scope as lifecycle acceptance.
+            var idempotencyScope = action == ElsaInstanceOperationAction.Create
+                ? ElsaInstanceLifecycleService.CreateIdempotencyScope
+                : $"instance/{requestedInstanceId!.Value:D}/operations";
+            var operation = await lifecycle.FindOperationByKeyAsync(
+                workspaceId,
+                keyResult.Value!,
+                requestedInstanceId,
+                action,
+                idempotencyScope,
+                cancellationToken);
+            if (operation is null || operation.Action != action ||
+                requestedInstanceId is { } expectedInstanceId && operation.InstanceId != expectedInstanceId)
+                return Results.NotFound();
+
+            var instance = await lifecycle.GetInstanceAsync(workspaceId, operation.InstanceId, cancellationToken);
+            if (instance is null || instance.OrganizationId != access.OrganizationId ||
+                instance.WorkspaceId != workspaceId ||
+                action == ElsaInstanceOperationAction.Create && !string.Equals(instance.Slug, slug, StringComparison.Ordinal))
+                return Results.NotFound();
+
+            // This read side filters the persisted operation by the independently resolved
+            // organization as well as the workspace, instance and operation IDs.
+            var summary = await queries.GetOperationForOrganizationAsync(
+                workspaceId, access.OrganizationId, instance.Id, operation.Id, cancellationToken);
+            if (summary is null || summary.Id != operation.Id || summary.InstanceId != instance.Id || summary.Action != action)
+                return Results.NotFound();
+
+            var canOpen = (await permissions.GetEffectivePermissionsAsync(
+                workspaceId, access.AccountId, cancellationToken)).Has(ManagedElsaInstancePermissions.Open);
+            var instanceResponse = await ToResponseAsync(
+                instance, canOpen, workspaceId, identities, cancellationToken, summary);
+            context.Response.Headers.ETag = instanceResponse.ETag;
+            return Results.Ok(new ManagedElsaInstanceOperationReconciliationResponse(
+                instanceResponse,
+                ToOperationResponse(workspaceId, instance.Id, summary)));
+        }).RequireWorkspaceAccess().AllowCloudBff();
+
         group.MapGet("/{instanceId:guid}/revisions", async (
             Guid workspaceId, Guid instanceId,
             IElsaInstanceLifecycleStore lifecycle,
@@ -1009,6 +1078,48 @@ public static class ManagedElsaInstanceEndpoints
         }
     }
 
+    private static bool TryReadOperationReconciliationQuery(
+        IQueryCollection query,
+        out ElsaInstanceOperationAction action,
+        out string? slug,
+        out Guid? instanceId)
+    {
+        action = default;
+        slug = null;
+        instanceId = null;
+        if (query.Keys.Any(key => !string.Equals(key, "action", StringComparison.OrdinalIgnoreCase) &&
+                                  !string.Equals(key, "slug", StringComparison.OrdinalIgnoreCase) &&
+                                  !string.Equals(key, "instanceId", StringComparison.OrdinalIgnoreCase)))
+            return false;
+
+        var actions = query["action"];
+        if (actions.Count != 1)
+            return false;
+
+        if (string.Equals(actions[0], nameof(ElsaInstanceOperationAction.Create), StringComparison.OrdinalIgnoreCase))
+        {
+            var slugs = query["slug"];
+            if (query.Count != 2 || slugs.Count != 1 || string.IsNullOrWhiteSpace(slugs[0]) || query.ContainsKey("instanceId"))
+                return false;
+            action = ElsaInstanceOperationAction.Create;
+            slug = slugs[0];
+            return true;
+        }
+
+        if (string.Equals(actions[0], nameof(ElsaInstanceOperationAction.Delete), StringComparison.OrdinalIgnoreCase))
+        {
+            var instanceIds = query["instanceId"];
+            if (query.Count != 2 || instanceIds.Count != 1 || query.ContainsKey("slug") ||
+                !Guid.TryParseExact(instanceIds[0], "D", out var parsedInstanceId) || parsedInstanceId == Guid.Empty)
+                return false;
+            action = ElsaInstanceOperationAction.Delete;
+            instanceId = parsedInstanceId;
+            return true;
+        }
+
+        return false;
+    }
+
     private static IResult InvalidIdempotencyKey() =>
         Problem("instance.idempotency-key-invalid", "Idempotency-Key must be a safe token of at most 128 characters.", StatusCodes.Status400BadRequest);
 
@@ -1115,6 +1226,7 @@ public sealed record ManagedElsaInstanceLaunchProfile(
     string NetworkOutcome,
     string DomainOutcome);
 public sealed record ManagedElsaInstanceAcceptedResponse(ManagedElsaInstanceResponse Instance, ManagedElsaInstanceOperationResponse Operation, IReadOnlyDictionary<string, string> Links);
+public sealed record ManagedElsaInstanceOperationReconciliationResponse(ManagedElsaInstanceResponse Instance, ManagedElsaInstanceOperationResponse Operation);
 public sealed record ManagedElsaInstanceDeleteAcceptedResponse(Guid OperationId, ElsaInstanceOperationState State, DateTimeOffset AcceptedAt, string OperationUrl);
 public sealed record ManagedElsaInstanceDeleteOperationResponse(Guid OperationId, ElsaInstanceOperationState State, DateTimeOffset AcceptedAt, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt)
 {

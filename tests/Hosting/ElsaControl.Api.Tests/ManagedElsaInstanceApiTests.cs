@@ -769,6 +769,190 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Operation_reconciliation_finds_a_committed_create_after_the_acceptance_response_is_discarded()
+    {
+        var app = await PrepareApplicationAsync([]);
+        using var owner = app.CreateTrustedWorkspaceClient("operation-reconciliation-create-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var slug = "lost-create-response-runtime";
+        var idempotencyKey = Guid.NewGuid().ToString("D");
+
+        // Treat the accepted response as lost: the server commit is retained, but
+        // the caller does not parse or use the response body to discover IDs.
+        using var discardedAcceptance = await SendCreateRequestAsync(
+            owner, workspaceId, "Lost response runtime", slug, Intent(), idempotencyKey);
+        Assert.Equal(HttpStatusCode.Accepted, discardedAcceptance.StatusCode);
+        var countsBeforeRead = await ReadLifecycleRowCountsAsync(app);
+
+        using var response = await GetOperationReconciliationAsync(
+            owner, workspaceId, ElsaInstanceOperationAction.Create, idempotencyKey, slug: slug);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore == true);
+        var reconciled = await response.Content.ReadControlJsonAsync<ManagedElsaInstanceOperationReconciliationResponse>();
+        Assert.NotNull(reconciled);
+        Guid organizationId;
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            organizationId = await db.Workspaces.Where(x => x.Id == workspaceId)
+                .Select(x => x.OrganizationId).SingleAsync();
+        }
+        Assert.Equal(slug, reconciled.Instance.Slug);
+        Assert.Equal(organizationId, reconciled.Instance.OrganizationId);
+        Assert.NotEqual(Guid.Empty, reconciled.Instance.InstanceId);
+        Assert.Contains($"/api/workspaces/{workspaceId:D}/instances/{reconciled.Instance.InstanceId:D}",
+            reconciled.Instance.Links["self"], StringComparison.Ordinal);
+        Assert.Equal(reconciled.Instance.InstanceId, reconciled.Operation.InstanceId);
+        Assert.Equal(ElsaInstanceOperationAction.Create, reconciled.Operation.Action);
+        Assert.Equal(countsBeforeRead, await ReadLifecycleRowCountsAsync(app));
+        var json = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("idempotencyKey", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("requestHash", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Operation_reconciliation_hides_wrong_keys_slugs_actions_identities_and_workspaces()
+    {
+        var app = await PrepareApplicationAsync([]);
+        using var owner = app.CreateTrustedWorkspaceClient("operation-reconciliation-scope-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        const string slug = "reconciliation-scope-runtime";
+        const string idempotencyKey = "create-reconciliation-scope";
+        using var accepted = await SendCreateRequestAsync(owner, workspaceId, "Scope runtime", slug, Intent(), idempotencyKey);
+        Assert.Equal(HttpStatusCode.Accepted, accepted.StatusCode);
+        var acceptedBody = await accepted.Content.ReadControlJsonAsync<ManagedElsaInstanceAcceptedResponse>();
+        Assert.NotNull(acceptedBody);
+
+        using var wrongKey = await GetOperationReconciliationAsync(
+            owner, workspaceId, ElsaInstanceOperationAction.Create, "different-create-key", slug: slug);
+        using var wrongSlug = await GetOperationReconciliationAsync(
+            owner, workspaceId, ElsaInstanceOperationAction.Create, idempotencyKey, slug: "another-runtime");
+        using var wrongAction = await GetOperationReconciliationAsync(
+            owner, workspaceId, ElsaInstanceOperationAction.Delete, idempotencyKey,
+            instanceId: acceptedBody.Instance.InstanceId);
+
+        using var outsider = app.CreateTrustedWorkspaceClient("operation-reconciliation-outsider");
+        using var wrongIdentity = await GetOperationReconciliationAsync(
+            outsider, workspaceId, ElsaInstanceOperationAction.Create, idempotencyKey, slug: slug);
+        var outsiderWorkspaceId = await outsider.GetDefaultWorkspaceIdAsync();
+        using var wrongWorkspace = await GetOperationReconciliationAsync(
+            outsider, outsiderWorkspaceId, ElsaInstanceOperationAction.Create, idempotencyKey, slug: slug);
+
+        Assert.Equal(HttpStatusCode.NotFound, wrongKey.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, wrongSlug.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, wrongAction.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, wrongIdentity.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, wrongWorkspace.StatusCode);
+
+    }
+
+    [Fact]
+    public async Task Operation_reconciliation_finds_a_committed_delete_for_a_tombstoned_instance_without_writing()
+    {
+        var app = await PrepareApplicationAsync([]);
+        using var owner = app.CreateTrustedWorkspaceClient("operation-reconciliation-delete-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(owner, workspaceId, "lost-delete-response-runtime");
+        await MarkOperationSucceededAsync(app, created.Operation.Id);
+        using var confirmationResponse = await owner.PostAsync(
+            $"/api/workspaces/{workspaceId:D}/instances/{created.Instance.InstanceId:D}/delete-confirmations", null);
+        var confirmation = await confirmationResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceDeleteConfirmationResponse>();
+        Assert.Equal(HttpStatusCode.OK, confirmationResponse.StatusCode);
+        var idempotencyKey = $"staging-proof-delete-{Guid.NewGuid():N}";
+
+        // As with Create, deliberately discard the accepted response body.
+        using var discardedAcceptance = await SendDeleteAsync(
+            owner, workspaceId, created.Instance.InstanceId, created.Instance.ETag,
+            idempotencyKey, confirmation!.ConfirmationId);
+        Assert.Equal(HttpStatusCode.Accepted, discardedAcceptance.StatusCode);
+
+        Guid deleteOperationId;
+        var deletedAt = DateTimeOffset.UtcNow;
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            deleteOperationId = await db.ElsaInstanceOperations
+                .Where(x => x.IdempotencyKey == idempotencyKey && x.Action == ElsaInstanceOperationAction.Delete)
+                .Select(x => x.Id).SingleAsync();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE ElsaInstances
+                SET DesiredLifecycle = {ElsaDesiredLifecycle.Deleting.ToString()},
+                    ObservedLifecycle = {ElsaObservedLifecycle.Deleted.ToString()},
+                    Health = {ElsaInstanceHealth.Unknown.ToString()},
+                    DeletedAt = {deletedAt.UtcTicks},
+                    CurrentDeploymentId = NULL,
+                    CurrentDeploymentRevisionId = NULL,
+                    CurrentDeploymentEndpointUri = NULL,
+                    CurrentDeploymentManagedHandoff = 0,
+                    PlacementAssignmentId = NULL,
+                    ElsaTenantId = NULL,
+                    ElsaTenantAudience = NULL
+                WHERE Id = {created.Instance.InstanceId}
+                """);
+        }
+        await MarkOperationSucceededAsync(app, deleteOperationId);
+        var countsBeforeRead = await ReadLifecycleRowCountsAsync(app);
+
+        using var response = await GetOperationReconciliationAsync(
+            owner, workspaceId, ElsaInstanceOperationAction.Delete, idempotencyKey,
+            instanceId: created.Instance.InstanceId);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var reconciled = await response.Content.ReadControlJsonAsync<ManagedElsaInstanceOperationReconciliationResponse>();
+        Assert.NotNull(reconciled);
+        Assert.Equal(created.Instance.InstanceId, reconciled.Instance.InstanceId);
+        Assert.Equal(created.Instance.Slug, reconciled.Instance.Slug);
+        Assert.Equal(ElsaObservedLifecycle.Deleted, reconciled.Instance.ObservedLifecycle);
+        Assert.Equal(ElsaInstanceOperationAction.Delete, reconciled.Operation.Action);
+        Assert.Equal(ElsaInstanceOperationState.Succeeded, reconciled.Operation.State);
+        Assert.Equal(deleteOperationId, reconciled.Operation.Id);
+        using var listResponse = await owner.GetAsync($"/api/workspaces/{workspaceId:D}/instances");
+        var list = await listResponse.Content.ReadControlJsonAsync<ManagedElsaInstanceListResponse>();
+        Assert.DoesNotContain(list!.Items, item => item.InstanceId == created.Instance.InstanceId);
+        Assert.Equal(countsBeforeRead, await ReadLifecycleRowCountsAsync(app));
+    }
+
+    [Fact]
+    public async Task Operation_reconciliation_rejects_missing_or_ambiguous_query_and_key_input()
+    {
+        var app = await PrepareApplicationAsync([]);
+        using var owner = app.CreateTrustedWorkspaceClient("operation-reconciliation-invalid-owner");
+        var workspaceId = await owner.GetDefaultWorkspaceIdAsync();
+        var path = $"/api/workspaces/{workspaceId:D}/instances/operations/by-idempotency-key";
+
+        using var missingKey = await owner.GetAsync($"{path}?action=Create&slug=runtime");
+        using var malformedQuery = await GetOperationReconciliationAsync(
+            owner, workspaceId, ElsaInstanceOperationAction.Create, "safe-key", slug: "runtime", extraQuery: "&instanceId=00000000-0000-0000-0000-000000000001");
+        using var callerOrganization = await GetOperationReconciliationAsync(
+            owner, workspaceId, ElsaInstanceOperationAction.Create, "safe-key", slug: "runtime",
+            extraQuery: "&organizationId=00000000-0000-0000-0000-000000000001");
+        using var malformedGuidRequest = new HttpRequestMessage(HttpMethod.Get, $"{path}?action=Delete&instanceId=not-a-guid");
+        malformedGuidRequest.Headers.Add("Idempotency-Key", "safe-key");
+        using var malformedGuid = await owner.SendAsync(malformedGuidRequest);
+        using var duplicateKeyRequest = new HttpRequestMessage(HttpMethod.Get, $"{path}?action=Create&slug=runtime");
+        duplicateKeyRequest.Headers.TryAddWithoutValidation("Idempotency-Key", ["first-key", "second-key"]);
+        using var duplicateKey = await owner.SendAsync(duplicateKeyRequest);
+
+        Assert.Equal(HttpStatusCode.BadRequest, missingKey.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, malformedQuery.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, callerOrganization.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, malformedGuid.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, duplicateKey.StatusCode);
+        foreach (var query in new[] { "action=Create&action=Delete&slug=runtime",
+                     "action=Create&slug=runtime&slug=other", "action=Recover&slug=runtime" })
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"{path}?{query}");
+            request.Headers.Add("Idempotency-Key", "safe-key");
+            using var response = await owner.SendAsync(request);
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        }
+    }
+
+    [Fact]
     public async Task Operations_list_is_paged_newest_first_and_matches_the_advertised_link()
     {
         var app = await PrepareApplicationAsync([]);
@@ -5391,6 +5575,27 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         };
         request.Headers.Add("Idempotency-Key", idempotencyKey);
         request.Headers.TryAddWithoutValidation("If-Match", etag);
+        return client.SendAsync(request);
+    }
+
+    private static Task<HttpResponseMessage> GetOperationReconciliationAsync(
+        HttpClient client,
+        Guid workspaceId,
+        ElsaInstanceOperationAction action,
+        string idempotencyKey,
+        string? slug = null,
+        Guid? instanceId = null,
+        string? extraQuery = null)
+    {
+        var query = action switch
+        {
+            ElsaInstanceOperationAction.Create => $"?action=Create&slug={Uri.EscapeDataString(slug ?? string.Empty)}",
+            ElsaInstanceOperationAction.Delete => $"?action=Delete&instanceId={instanceId?.ToString("D") ?? string.Empty}",
+            _ => $"?action={Uri.EscapeDataString(action.ToString())}"
+        };
+        var request = new HttpRequestMessage(HttpMethod.Get,
+            $"/api/workspaces/{workspaceId:D}/instances/operations/by-idempotency-key{query}{extraQuery}");
+        request.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey);
         return client.SendAsync(request);
     }
 
