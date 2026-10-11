@@ -413,24 +413,201 @@ rollback_predict_bff_outcome() {
   fi
 }
 
+rollback_parse_cloud_capability_policy() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json
+import os
+import re
+import stat
+import sys
+
+MAX_RESPONSE_BYTES = 1024 * 1024
+MAX_HEADER_BYTES = 64 * 1024
+IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z", re.ASCII)
+STATUS_LINE = re.compile(r"HTTP/[0-9]+(?:\.[0-9]+)?[ \t]+([0-9]{3})(?:[ \t].*)?\Z", re.ASCII)
+HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z", re.ASCII)
+
+
+def read_bounded_regular_file(path, limit):
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError
+        content = bytearray()
+        while len(content) <= limit:
+            chunk = os.read(descriptor, min(65536, limit + 1 - len(content)))
+            if not chunk:
+                break
+            content.extend(chunk)
+        if len(content) > limit:
+            raise ValueError
+        return bytes(content)
+    finally:
+        os.close(descriptor)
+
+
+def reject_duplicate_object_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError
+        result[key] = value
+    return result
+
+
+def reject_non_json_constant(_value):
+    raise ValueError
+
+
+def parse_header_blocks(raw_headers):
+    text = raw_headers.decode("iso-8859-1").replace("\r\n", "\n")
+    if "\r" in text or "\x00" in text or not text.endswith("\n\n"):
+        raise ValueError
+
+    blocks = []
+    current = None
+    for line in text.split("\n"):
+        if line == "":
+            if current is not None:
+                blocks.append(current)
+                current = None
+            continue
+        if current is None:
+            status_match = STATUS_LINE.fullmatch(line)
+            if status_match is None:
+                raise ValueError
+            current = {"status": int(status_match.group(1)), "headers": []}
+            continue
+        if line.startswith((" ", "\t")) or ":" not in line:
+            raise ValueError
+        name, value = line.split(":", 1)
+        if HEADER_NAME.fullmatch(name) is None:
+            raise ValueError
+        if any((ord(character) < 0x20 and character != "\t") or ord(character) == 0x7f for character in value):
+            raise ValueError
+        current["headers"].append((name.lower(), value.strip(" \t")))
+
+    if current is not None or not blocks:
+        raise ValueError
+    return blocks[-1]
+
+
+def one_header(headers, name):
+    values = [value for header_name, value in headers if header_name == name.lower()]
+    if len(values) != 1:
+        raise ValueError
+    return values[0]
+
+
+def capability_ids(value, allow_empty):
+    if value == "" and allow_empty:
+        return []
+    identifiers = [identifier.strip(" \t") for identifier in value.split(",")]
+    if not identifiers or any(IDENTIFIER.fullmatch(identifier) is None for identifier in identifiers):
+        raise ValueError
+    if len(set(identifiers)) != len(identifiers):
+        raise ValueError
+    return identifiers
+
+
+def has_no_store_directive(values):
+    directives = []
+    for value in values:
+        token = []
+        in_quotes = False
+        escaped = False
+        for character in value:
+            if escaped:
+                token.append(character)
+                escaped = False
+            elif in_quotes and character == "\\":
+                token.append(character)
+                escaped = True
+            elif character == '"':
+                token.append(character)
+                in_quotes = not in_quotes
+            elif character == "," and not in_quotes:
+                directives.append("".join(token).strip(" \t").lower())
+                token = []
+            else:
+                token.append(character)
+        if in_quotes or escaped:
+            raise ValueError
+        directives.append("".join(token).strip(" \t").lower())
+    return "no-store" in directives
+
+
+def main():
+    response_path, header_path, http_status = sys.argv[1:]
+    if http_status != "200":
+        raise ValueError
+
+    final_block = parse_header_blocks(read_bounded_regular_file(header_path, MAX_HEADER_BYTES))
+    if final_block["status"] != 200:
+        raise ValueError
+    headers = final_block["headers"]
+    required = capability_ids(one_header(headers, "x-elsa-cloud-required-capabilities"), allow_empty=False)
+    optional = capability_ids(one_header(headers, "x-elsa-cloud-optional-capabilities"), allow_empty=True)
+    required_set = set(required)
+    optional_set = set(optional)
+    if required_set & optional_set:
+        raise ValueError
+
+    cache_control_values = [value for name, value in headers if name == "cache-control"]
+    if not cache_control_values or not has_no_store_directive(cache_control_values):
+        raise ValueError
+
+    response_text = read_bounded_regular_file(response_path, MAX_RESPONSE_BYTES).decode("utf-8")
+    payload = json.loads(
+        response_text,
+        object_pairs_hook=reject_duplicate_object_keys,
+        parse_constant=reject_non_json_constant,
+    )
+    if not isinstance(payload, dict) or set(payload) != {"data"}:
+        raise ValueError
+    data = payload["data"]
+    if not isinstance(data, dict) or set(data) != {"state", "contractVersion", "capabilities"}:
+        raise ValueError
+    if data["state"] != "compatible" or type(data["contractVersion"]) is not int or data["contractVersion"] != 1:
+        raise ValueError
+    body_capabilities = data["capabilities"]
+    if not isinstance(body_capabilities, list) or any(not isinstance(value, str) for value in body_capabilities):
+        raise ValueError
+    if any(IDENTIFIER.fullmatch(value) is None for value in body_capabilities):
+        raise ValueError
+    body_set = set(body_capabilities)
+    policy_set = required_set | optional_set
+    if len(body_set) != len(body_capabilities) or not required_set <= body_set or not body_set <= policy_set:
+        raise ValueError
+
+    print(json.dumps({"required": required, "optional": optional}, separators=(",", ":")))
+
+
+try:
+    main()
+except Exception:
+    sys.stderr.write("Cloud compatibility response evidence was invalid.\n")
+    sys.exit(1)
+PY
+}
+
 rollback_capture_cloud_required_capabilities() {
-  local response_file header_file http_status cache_control
+  local response_file header_file http_status capability_policy
   response_file="$(mktemp)"
   header_file="$(mktemp)"
   if ! http_status="$(post_bff_compatibility "$response_file" "$header_file")"; then
     rm -f "$response_file" "$header_file"
     fail "The deployed Cloud compatibility read failed; refusing rollback."
   fi
-  cache_control="$(read_cache_control "$header_file")"
-  if [ "$http_status" != 200 ] || [[ ! "$cache_control" =~ [Nn]o-[Ss]tore ]]; then
+  if ! capability_policy="$(rollback_parse_cloud_capability_policy "$response_file" "$header_file" "$http_status")"; then
     rm -f "$response_file" "$header_file"
-    fail "The deployed Cloud compatibility read was not an HTTP 200 no-store response."
+    fail "The deployed Cloud compatibility policy evidence could not be validated; refusing rollback."
   fi
-  jq -e '.data.state == "compatible" and .data.contractVersion == 1 and (.data.capabilities | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))' "$response_file" >/dev/null || {
+  if ! CLOUD_REQUIRED_CAPABILITIES_JSON="$(printf '%s' "$capability_policy" | jq -ce '.required | select(type == "array" and length > 0)')"; then
     rm -f "$response_file" "$header_file"
-    fail "The deployed Cloud did not return its exact compatible required-capability list."
-  }
-  CLOUD_REQUIRED_CAPABILITIES_JSON="$(jq -c '.data.capabilities' "$response_file")"
+    fail "The deployed Cloud compatibility required-capability list could not be read."
+  fi
   rm -f "$response_file" "$header_file"
   echo "Captured the deployed Cloud BFF required-capability list from its compatible no-store response."
 }

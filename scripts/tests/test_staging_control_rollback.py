@@ -635,6 +635,169 @@ class StagingControlRollbackTests(unittest.TestCase):
                     self.assertNotEqual(0, result.returncode)
                     self.assertNotIn("gated", result.stdout)
 
+    @contextmanager
+    def cloud_policy_fixture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            required = ["bootstrap", "billing"]
+            optional = ["overview", "cleanup"]
+            body = root / "body.json"
+            headers = root / "headers.txt"
+            body.write_text(json.dumps({"data": {
+                "state": "compatible", "contractVersion": 1,
+                "capabilities": required + optional,
+            }}))
+            headers.write_text(
+                "HTTP/2 200\r\nCache-Control: no-store\r\n"
+                "X-Elsa-Cloud-Required-Capabilities: bootstrap,billing\r\n"
+                "X-Elsa-Cloud-Optional-Capabilities: overview,cleanup\r\n\r\n"
+            )
+            yield root, body, headers
+
+    def parse_cloud_policy(self, body: Path, headers: Path, status: str = "200"):
+        return self.run_bash(
+            f'source "{ROLLBACK}"; rollback_parse_cloud_capability_policy '
+            f'"{body}" "{headers}" "{status}"', {},
+        )
+
+    def test_serving_policy_separates_required_from_advertised_optional_capabilities(self) -> None:
+        with self.cloud_policy_fixture() as (_, body, headers):
+            for optional in (["overview", "cleanup"], ["overview"], ["cleanup"], []):
+                with self.subTest(optional=optional):
+                    body.write_text(json.dumps({"data": {
+                        "state": "compatible", "contractVersion": 1,
+                        "capabilities": ["bootstrap", "billing", *optional],
+                    }}))
+                    result = self.parse_cloud_policy(body, headers)
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual({"required": ["bootstrap", "billing"],
+                                      "optional": ["overview", "cleanup"]}, json.loads(result.stdout))
+
+    def test_ten_advertised_capabilities_do_not_make_both_optional_surfaces_required(self) -> None:
+        # Current N advertises eight required and two optional; N-1 lacks cleanup only.
+        with self.cloud_policy_fixture() as (root, body, headers):
+            required = ["cloud.bootstrap.v1", "hosted.instances.list.v1", "hosted.instances.create.v1",
+                        "hosted.instances.status.v1", "hosted.instances.provisioning-progress.v1",
+                        "hosted.studio.handoff.issue.v1", "hosted.instances.quota-problem.v1",
+                        "hosted.instances.confirmed-delete.v1"]
+            optional = ["hosted.instances.overview.v1", "hosted.instances.reconciliation-cleanup.v1"]
+            body.write_text(json.dumps({"data": {"state": "compatible", "contractVersion": 1,
+                                                "capabilities": required + optional}}))
+            headers.write_text("HTTP/2 200\nCache-Control: no-store\n"
+                               + "X-Elsa-Cloud-Required-Capabilities: " + ",".join(required) + "\n"
+                               + "X-Elsa-Cloud-Optional-Capabilities: " + ",".join(optional) + "\n\n")
+            policy = self.parse_cloud_policy(body, headers)
+            self.assertEqual(0, policy.returncode, policy.stderr)
+            candidate = root / "candidate.json"
+            candidate.write_text(json.dumps({"contractVersion": 1, "capabilities": required + optional[:1]}))
+            result = self.run_bash(
+                f'source "{ROLLBACK}"; rollback_predict_bff_outcome "{candidate}"; '
+                'printf "%s" "$ROLLBACK_BFF_OUTCOME"',
+                {"CLOUD_REQUIRED_CAPABILITIES_JSON": json.dumps(json.loads(policy.stdout)["required"])},
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("compatible", result.stdout)
+
+    def test_serving_policy_uses_only_final_headers_and_accepts_empty_optional_policy(self) -> None:
+        with self.cloud_policy_fixture() as (_, body, headers):
+            body.write_text('{"data":{"state":"compatible","contractVersion":1,"capabilities":["bootstrap","billing"]}}')
+            headers.write_text(
+                "HTTP/1.1 200 Connection established\r\n"
+                "X-Elsa-Cloud-Required-Capabilities: unrelated\r\n\r\n"
+                "HTTP/1.1 103 Early Hints\r\nCache-Control: public\r\n\r\n"
+                "HTTP/2 200\r\ncache-control: private, NO-STORE\r\n"
+                "x-elsa-cloud-required-capabilities: bootstrap, \tbilling\r\n"
+                "x-elsa-cloud-optional-capabilities: \t\r\n\r\n"
+            )
+            result = self.parse_cloud_policy(body, headers)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual({"required": ["bootstrap", "billing"], "optional": []}, json.loads(result.stdout))
+
+    def test_serving_policy_rejects_ambiguous_headers_without_disclosing_evidence(self) -> None:
+        with self.cloud_policy_fixture() as (_, body, headers):
+            original = headers.read_text()
+            cases = {
+                "missing required": original.replace("X-Elsa-Cloud-Required-Capabilities: bootstrap,billing\n", ""),
+                "missing optional": original.replace("X-Elsa-Cloud-Optional-Capabilities: overview,cleanup\n", ""),
+                "duplicate required": original.replace("\n\n", "\nx-elsa-cloud-required-capabilities: private-sentinel\n\n"),
+                "duplicate optional": original.replace("\n\n", "\nX-ELSA-CLOUD-OPTIONAL-CAPABILITIES: private-sentinel\n\n"),
+                "empty required": original.replace("bootstrap,billing", ""),
+                "empty token": original.replace("bootstrap,billing", "bootstrap,,billing"),
+                "trailing comma": original.replace("overview,cleanup", "overview,cleanup,"),
+                "repeated token": original.replace("overview,cleanup", "overview,overview"),
+                "overlap": original.replace("overview,cleanup", "overview,bootstrap"),
+                "unsafe token": original.replace("cleanup", "private-sentinel/unsafe"),
+                "long token": original.replace("cleanup", "x" * 129),
+                "no final no-store": "HTTP/1.1 103 Early Hints\nCache-Control: no-store\n\n" + original.replace("no-store", "public"),
+                "substring no-store": original.replace("no-store", "x-no-store"),
+                "quoted no-store": original.replace("no-store", 'private="x,no-store,y"'),
+                "trailer cannot supply optional": original.replace("X-Elsa-Cloud-Optional-Capabilities: overview,cleanup\n", "") + "X-Elsa-Cloud-Optional-Capabilities: overview,cleanup\n",
+                "incomplete final block": original.rstrip("\n") + "\n",
+                "wrong final status": original.replace("HTTP/2 200", "HTTP/2 503"),
+                "folded policy": original.replace("overview,cleanup", "overview,\n cleanup"),
+                "invalid field": original.replace("Cache-Control: no-store", "private-sentinel"),
+            }
+            for name, content in cases.items():
+                with self.subTest(name=name):
+                    headers.write_text(content)
+                    result = self.parse_cloud_policy(body, headers)
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertEqual("", result.stdout)
+                    self.assertNotIn("private-sentinel", result.stderr)
+            headers.write_text(original)
+            self.assertNotEqual(0, self.parse_cloud_policy(body, headers, "503").returncode)
+
+    def test_serving_policy_rejects_malformed_body_before_prediction(self) -> None:
+        with self.cloud_policy_fixture() as (_, body, headers):
+            valid = {"state": "compatible", "contractVersion": 1, "capabilities": ["bootstrap", "billing"]}
+            cases = ["not-json-private-sentinel", "{}", "[]",
+                     '{"data":{"state":"compatible","state":"private-sentinel","contractVersion":1,"capabilities":["bootstrap","billing"]}}']
+            for changes in ({"state": "updating"}, {"contractVersion": True}, {"contractVersion": 1.0},
+                            {"contractVersion": "1"}, {"contractVersion": 2}, {"capabilities": []},
+                            {"capabilities": ["bootstrap"]}, {"capabilities": ["bootstrap", "billing", "private-sentinel"]},
+                            {"capabilities": ["bootstrap", "billing", "billing"]}, {"capabilities": [1]},
+                            {"capabilities": ["bootstrap", "billing", "private-sentinel/unsafe"]}):
+                cases.append(json.dumps({"data": {**valid, **changes}}))
+            for content in cases:
+                with self.subTest(content=content):
+                    body.write_text(content)
+                    result = self.parse_cloud_policy(body, headers)
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertEqual("", result.stdout)
+                    self.assertNotIn("private-sentinel", result.stderr)
+
+    def test_capture_predicts_optional_absence_from_one_response_and_refuses_before_write(self) -> None:
+        with self.cloud_policy_fixture() as (root, body, headers):
+            candidate = root / "candidate.json"
+            calls = root / "calls"
+            script = f'''source "{ROLLBACK}"
+                post_bff_compatibility() {{
+                    printf read >> "{calls}"
+                    cp "{body}" "$1"; cp "{headers}" "$2"; printf 200
+                }}
+                rollback_capture_cloud_required_capabilities
+                rollback_predict_bff_outcome "{candidate}"
+                printf 'outcome=%s\\n' "$ROLLBACK_BFF_OUTCOME"
+            '''
+            for caps, version, outcome in [
+                (["bootstrap", "billing"], 1, "compatible"),
+                (["bootstrap", "billing", "overview", "extra"], 1, "compatible"),
+                (["bootstrap"], 1, "gated"),
+                (["bootstrap", "billing"], 2, "gated"),
+            ]:
+                with self.subTest(caps=caps, version=version):
+                    calls.unlink(missing_ok=True)
+                    candidate.write_text(json.dumps({"contractVersion": version, "capabilities": caps}))
+                    result = self.run_bash(script, {})
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertIn(f"outcome={outcome}", result.stdout)
+                    self.assertEqual("read", calls.read_text())
+            headers.write_text("HTTP/2 200\nCache-Control: no-store\n\n")
+            result = self.run_bash(script + '\nprintf unsafe-write\n', {})
+            self.assertNotEqual(0, result.returncode)
+            self.assertNotIn("outcome=", result.stdout)
+            self.assertNotIn("unsafe-write", result.stdout)
+
     def test_instance_proof_uses_real_instance_id_field_and_no_mutating_bootstrap(self) -> None:
         self.assertIn(".items[].instanceId", self.rollback_text)
         self.assertNotIn(".items[].id", self.rollback_text)
