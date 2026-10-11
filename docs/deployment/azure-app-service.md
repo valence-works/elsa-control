@@ -170,9 +170,15 @@ requires unchanged migration sets and the pair-specific persisted-data
 approval, and records non-admin organization, workspace, and paginated
 instance reads as a hash. Compatibility is read through the authenticated
 Control endpoint. N-1's BFF outcome is predicted from its source capability
-list against the deployed Cloud required-capability list; the live proof then
-uses the compatible or `control_update_in_progress` read-compatible response
-accordingly.
+list against the required policy from the serving Cloud BFF. The same authenticated
+HTTP 200 `no-store` response must include exactly one
+`X-Elsa-Cloud-Required-Capabilities` and `X-Elsa-Cloud-Optional-Capabilities` header.
+Both lists and the normalized compatible version-one JSON are validated together;
+missing, ambiguous, or malformed evidence refuses before any write. Optional
+capabilities may be absent from Control without globally gating the BFF. The live
+proof then uses the compatible or `control_update_in_progress` read-compatible
+response accordingly. The independent exact N-1 source-versus-live capability
+comparison remains required.
 
 The schema evidence lists both exact migration sets and their sorted-set hash.
 An unavailable SQL read may use explicitly labeled inference from successful
