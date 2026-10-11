@@ -16,6 +16,7 @@ It returns this envelope with `Cache-Control: no-store`:
     "hosted.studio.handoff.issue.v1",
     "hosted.instances.quota-problem.v1",
     "hosted.instances.confirmed-delete.v1",
+    "hosted.instances.reconciliation-cleanup.v1",
     "hosted.subscription.manage.v1",
     "hosted.deployments.audit.v1"
   ]
@@ -42,8 +43,19 @@ Those checks continue at the corresponding API boundary for every request.
 | `hosted.studio.handoff.issue.v1` | `POST /api/managed-elsa/handoff/issue` issues a short-lived, single-use Studio handoff when configured and authorized. |
 | `hosted.instances.quota-problem.v1` | Managed-instance create returns the stable `instance_limit_reached` problem when the account's instance limit is reached; the response may include its current and maximum counts. Other commercial denials remain endpoint-specific. |
 | `hosted.instances.confirmed-delete.v1` | `POST /api/workspaces/{workspaceId}/instances/{instanceId}/delete-confirmations`, then `POST .../{instanceId}/delete`, followed by `GET .../{instanceId}/delete-operations/{operationId}`. Confirmation, permission, workspace scope, ETag, idempotency, and lifecycle checks still apply. |
+| `hosted.instances.reconciliation-cleanup.v1` | The customer-facing Create/Delete reconciliation lookup and the two Delete cleanup reads documented below. All three require normal workspace access. |
 | `hosted.subscription.manage.v1` | `GET /api/organizations/{organizationId}/billing/hosted-subscription` returns Hosted billing-linkage and copy hooks; `POST .../hosted-portal` opens a Stripe Customer Portal session for the caller's billing customer and a validated Elsa Cloud return URL. `POST .../billing/delete` remains the Hosted billing-deletion request on the same allowlist. |
 | `hosted.deployments.audit.v1` | `GET /api/organizations/{organizationId}/deployments/audit` returns a sanitized, paginated Cloud function-deploy audit feed. Empty organizations return an empty page, not 404. |
+
+The exact three GET routes for `hosted.instances.reconciliation-cleanup.v1`
+are:
+
+- `GET /api/workspaces/{workspaceId}/instances/operations/by-idempotency-key` with `action=Create&slug={submittedSlug}` and the original Create `Idempotency-Key`, or `action=Delete&instanceId={instanceId}` and the stable Delete `Idempotency-Key`. It resolves only the matching accepted operation.
+- `GET /api/workspaces/{workspaceId}/instances/{instanceId}/operations/{operationId}/cleanup-receipt`. This returns historical cleanup evidence.
+- `GET /api/workspaces/{workspaceId}/instances/{instanceId}/operations/{operationId}/cleanup-observation`. When its provider observer is available, this queries the exact owned resource group.
+
+Each request uses workspace authorization and performs its own evidence checks.
+The reads do not mutate lifecycle or provider state.
 
 The Cloud BFF token is admitted only on the explicit route allowlist in
 [`cloud-bff-auth-contract.md`](cloud-bff-auth-contract.md). Capabilities are
@@ -85,6 +97,12 @@ stage status unknown rather than guessing from historical activity.
   the serving BFF no longer depends on the newer contract. This keeps an older
   client compatible with the additive version 1 envelope and avoids a BFF
   calling routes absent from a rolled-back Control deployment.
+- For `hosted.instances.reconciliation-cleanup.v1`, the advertisement adds no
+  route, schema, or lifecycle behavior. Deploy this Control change before a BFF
+  release gates actions on the capability. If Control is rolled back to a
+  version that omits it, a capability-aware BFF disables only these optional
+  reconciliation and cleanup actions. Roll back the BFF first if it cannot
+  safely handle the capability disappearing.
 
 ## Staging compatibility fixture
 

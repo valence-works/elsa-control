@@ -169,6 +169,12 @@ public sealed class CloudBffAuthorizationTests
         Assert.Equal(["contractVersion", "capabilities"],
             root.EnumerateObject().Select(property => property.Name).ToArray());
         Assert.Equal(1, root.GetProperty("contractVersion").GetInt32());
+        var capabilities = root.GetProperty("capabilities")
+            .EnumerateArray()
+            .Select(value => value.GetString()!)
+            .ToArray();
+        Assert.Equal(12, capabilities.Length);
+        Assert.Equal(capabilities.Length, capabilities.Distinct(StringComparer.Ordinal).Count());
         Assert.Equal(
         [
             "cloud.bootstrap.v1",
@@ -180,10 +186,11 @@ public sealed class CloudBffAuthorizationTests
             "hosted.studio.handoff.issue.v1",
             "hosted.instances.quota-problem.v1",
             "hosted.instances.confirmed-delete.v1",
+            "hosted.instances.reconciliation-cleanup.v1",
             "hosted.subscription.manage.v1",
             "hosted.deployments.audit.v1"
         ],
-            root.GetProperty("capabilities").EnumerateArray().Select(value => value.GetString()!).ToArray());
+            capabilities);
         Assert.DoesNotContain("environment", root.GetRawText(), StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("customer", root.GetRawText(), StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("provider", root.GetRawText(), StringComparison.OrdinalIgnoreCase);

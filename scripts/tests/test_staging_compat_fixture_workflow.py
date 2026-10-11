@@ -87,6 +87,7 @@ BASELINE_CAPABILITIES = [
     "hosted.studio.handoff.issue.v1",
     "hosted.instances.quota-problem.v1",
     "hosted.instances.confirmed-delete.v1",
+    "hosted.instances.reconciliation-cleanup.v1",
     "hosted.subscription.manage.v1",
     "hosted.deployments.audit.v1",
 ]

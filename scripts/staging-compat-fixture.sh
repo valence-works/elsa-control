@@ -17,7 +17,7 @@ FREEZE_ISSUE=508
 DEPLOY_STAGING_WORKFLOW_PATH='.github/workflows/azure-api-deploy.yml'
 SUPABASE_PROJECT_REF_PATTERN='^[a-z0-9]{20}$'
 PRODUCTION_SUPABASE_PROJECT_REF='jhrcnclyydzngnyvhdht'
-BASELINE_CAPABILITIES_JSON='["cloud.bootstrap.v1","hosted.instances.list.v1","hosted.instances.create.v1","hosted.instances.status.v1","hosted.instances.provisioning-progress.v1","hosted.instances.overview.v1","hosted.studio.handoff.issue.v1","hosted.instances.quota-problem.v1","hosted.instances.confirmed-delete.v1","hosted.subscription.manage.v1","hosted.deployments.audit.v1"]'
+BASELINE_CAPABILITIES_JSON='["cloud.bootstrap.v1","hosted.instances.list.v1","hosted.instances.create.v1","hosted.instances.status.v1","hosted.instances.provisioning-progress.v1","hosted.instances.overview.v1","hosted.studio.handoff.issue.v1","hosted.instances.quota-problem.v1","hosted.instances.confirmed-delete.v1","hosted.instances.reconciliation-cleanup.v1","hosted.subscription.manage.v1","hosted.deployments.audit.v1"]'
 ARMED_BFF_ENVELOPE_JSON='{"code":"control_update_in_progress","error":"Elsa Cloud is being updated. Managed engine actions are temporarily paused."}'
 K_PROBE_ACTION_LIST=(listOrganizations updateInstance createInstanceDeleteConfirmation)
 
@@ -959,7 +959,7 @@ write_summary() {
       printf -- '  - %s\n' "$name"
     done < "$names_file"
     printf '\n'
-    printf -- 'Baseline compatibility is contractVersion 1 with the 11 capabilities from this commit unless this change adds one.\n'
+    printf -- 'Baseline compatibility is contractVersion 1 with the capabilities defined in this commit.\n'
     printf -- 'Recapture this baseline from the first staging deploy of the merged change.\n'
   } >> "$GITHUB_STEP_SUMMARY"
 }
