@@ -82,7 +82,7 @@ Focused specs:
 
 2. `027-studio-submit-to-elsa-control`
    - Completed for Elsa Control-side package contracts and HTTP submission behavior.
-   - The companion Studio UI integration is merged in `elsa-studio` and injects **Submit to Elsa Control** beside existing publish surfaces through neutral workflow zones.
+   - The companion Studio UI integration is merged in `elsa-studio` (now elsa-core) and injects **Submit to Elsa Control** beside existing publish surfaces through neutral workflow zones.
    - Host-specific authentication and configuration remain packaging/documentation hardening, not a missing platform model slice.
 
 3. `028-runtime-command-sync`
@@ -181,7 +181,7 @@ Tasks:
 - Package workflow definition snapshot, source IDs, display metadata, schema version, and content digest. Completed.
 - Submit artifact metadata and payload reference/content according to the artifact envelope spec. Completed.
 - Add user-facing states for submitted, failed, unauthorized, and duplicate artifact. Completed.
-- Inject **Submit to Elsa Control** in Studio's workflow editor toolbar, definition list bulk menu, and definition row menu through neutral workflow zones. Completed in `elsa-studio/main`.
+- Inject **Submit to Elsa Control** in Studio's workflow editor toolbar, definition list bulk menu, and definition row menu through neutral workflow zones. Completed in `elsa-studio/main` (now elsa-core).
 
 Exit criteria:
 

@@ -4,6 +4,7 @@ This sample shows how an Elsa Studio host wires the upstream
 `Elsa.Studio.PlatformIntegration` module so workflow authors can choose
 **Submit to Elsa Control** from the workflow editor toolbar, workflow
 definition list bulk menu, and workflow definition row menu.
+Studio now lives in `elsa-core`.
 
 ## Package
 
@@ -13,7 +14,7 @@ Add the Studio integration package to the Elsa Studio host:
 <PackageReference Include="Elsa.Studio.PlatformIntegration" Version="0.0.1" />
 ```
 
-Use the same package version as the Control backend until an explicit Control API compatibility range is available.
+Studio now lives in `elsa-core`. Use the same package version as the Control backend until an explicit Control API compatibility range is available.
 
 ## Program Wiring
 
