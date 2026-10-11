@@ -54,8 +54,8 @@ baseline, and the latest GitHub `test` deployment created by
 **Deploy staging** (filtered by that workflow/run — not the latest
 `test` deployment, because this job also creates one). The expected
 authenticated compatibility response stays `contractVersion` 1 with the
-same 11 capabilities unless this change itself adds one; if it does,
-the baseline is the list at that commit.
+capability list defined at the deployed commit. Recapture the baseline
+whenever that list changes.
 
 **Inputs.** `mode`: `missing-capability` or `older-contract`. Test
 environment only. The job mints a per-run Supabase user access token

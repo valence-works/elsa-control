@@ -27,6 +27,7 @@ public sealed class CloudCompatibilityStagingFixtureTests
         "hosted.studio.handoff.issue.v1",
         "hosted.instances.quota-problem.v1",
         "hosted.instances.confirmed-delete.v1",
+        "hosted.instances.reconciliation-cleanup.v1",
         "hosted.subscription.manage.v1",
         "hosted.deployments.audit.v1"
     ];
@@ -41,12 +42,13 @@ public sealed class CloudCompatibilityStagingFixtureTests
         "hosted.studio.handoff.issue.v1",
         "hosted.instances.quota-problem.v1",
         "hosted.instances.confirmed-delete.v1",
+        "hosted.instances.reconciliation-cleanup.v1",
         "hosted.subscription.manage.v1",
         "hosted.deployments.audit.v1"
     ];
 
     [Fact]
-    public async Task Unset_fixture_returns_today_s_exact_eleven_capability_list()
+    public async Task Unset_fixture_returns_exact_twelve_capability_list()
     {
         await using var app = CreateBffApplication();
         using var client = CreateBffClient(app);

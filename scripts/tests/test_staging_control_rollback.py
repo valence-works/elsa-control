@@ -547,22 +547,43 @@ class StagingControlRollbackTests(unittest.TestCase):
                 refused = self.run_bash(shell, {**environment, "PREDECESSOR_STATUS": status})
                 self.assertNotEqual(0, refused.returncode)
 
-    def test_capability_parser_supports_prior_literal_contract_version(self) -> None:
+    def test_capability_parser_supports_prior_version_and_new_literal_capability(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             git = Path(temporary) / "git"
             git.write_text('#!/usr/bin/env bash\nprintf "%s" "$TEST_SOURCE"\n')
             git.chmod(0o700)
             for version in ("const int CurrentContractVersion = 1;", "new CloudCompatibilityResponse(1, capabilities);"):
                 with self.subTest(version=version):
+                    source = "\n".join(
+                        [
+                            version,
+                            "const string ProvisioningProgressCapability = \"hosted.instances.provisioning-progress.v1\";",
+                            "private static readonly string[] Capabilities = [",
+                            "    \"cloud.bootstrap.v1\",",
+                            "    \"hosted.instances.reconciliation-cleanup.v1\",",
+                            "    ProvisioningProgressCapability",
+                            "];",
+                        ]
+                    )
                     result = self.run_bash(
                         f'source "{ROLLBACK}"; rollback_capabilities_at_commit previous',
                         {
                             "PATH": f"{temporary}:{os.environ['PATH']}",
-                            "TEST_SOURCE": version + '\nprivate static readonly string[] Capabilities = ["cloud.bootstrap.v1"];',
+                            "TEST_SOURCE": source,
                         },
                     )
                     self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-                    self.assertEqual({"contractVersion": 1, "capabilities": ["cloud.bootstrap.v1"]}, json.loads(result.stdout))
+                    self.assertEqual(
+                        {
+                            "contractVersion": 1,
+                            "capabilities": [
+                                "cloud.bootstrap.v1",
+                                "hosted.instances.reconciliation-cleanup.v1",
+                                "hosted.instances.provisioning-progress.v1",
+                            ],
+                        },
+                        json.loads(result.stdout),
+                    )
 
     def test_bff_prediction_distinguishes_compatible_and_incompatible_contracts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
