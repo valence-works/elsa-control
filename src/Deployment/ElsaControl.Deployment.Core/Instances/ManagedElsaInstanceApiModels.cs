@@ -151,7 +151,10 @@ public sealed record ElsaInstanceLifecycleTopologyOperation(
     // The authoritative acceptance time for this lifecycle attempt. Initial
     // attempts use AcceptedAt; recovery attempts use the matching append-only
     // recovery ledger row and remain null when legacy authority is absent.
-    [property: JsonIgnore] DateTimeOffset? AttemptStartedAt = null);
+    [property: JsonIgnore] DateTimeOffset? AttemptStartedAt = null,
+    // Internal snapshot freshness for lifecycle/provider hand-off projection.
+    // This is not a provider-progress clock and is not part of the topology contract.
+    [property: JsonIgnore] DateTimeOffset? UpdatedAt = null);
 
 public sealed record ElsaInstanceLifecycleTopologyOutbox(
     Guid Id,

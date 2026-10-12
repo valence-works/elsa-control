@@ -128,5 +128,6 @@ public sealed class AzureManagedElsaProvisioningProgressReader(
             ReconciliationDiagnosticCode: null,
             Outbox: null,
             AttemptStartedAt: operation.AttemptStartedAt ??
-                (operation.AttemptNumber == 1 ? operation.AcceptedAt : null));
+                (operation.AttemptNumber == 1 ? operation.AcceptedAt : null),
+            UpdatedAt: operation.UpdatedAt);
 }
