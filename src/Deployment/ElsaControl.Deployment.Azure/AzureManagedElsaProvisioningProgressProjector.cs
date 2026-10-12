@@ -132,10 +132,13 @@ public static class AzureManagedElsaProvisioningProgressProjector
         var startedAt = lifecycle?.AcceptedAt.ToUniversalTime() ?? provider?.CreatedAt.ToUniversalTime();
         var attemptStartedAt = lifecycle?.AttemptStartedAt ??
             (lifecycle?.AttemptNumber == 1 ? lifecycle.AcceptedAt : null);
+        // Reconciliation can correct the lifecycle state without a provider checkpoint.
+        // Snapshot freshness is separate from the provider-progress timeout below.
         var lastUpdatedAt = Latest(
             lifecycle?.AcceptedAt,
             lifecycle?.StartedAt,
             lifecycle?.CompletedAt,
+            lifecycle?.UpdatedAt,
             provider?.CreatedAt,
             provider?.UpdatedAt,
             provider?.CompletedAt,

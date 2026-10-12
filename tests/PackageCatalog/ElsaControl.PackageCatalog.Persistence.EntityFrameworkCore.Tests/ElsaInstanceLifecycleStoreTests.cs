@@ -235,8 +235,10 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Null(projected);
     }
 
-    [Fact]
-    public async Task Lifecycle_topology_read_rejects_operation_drift_between_serializable_snapshots()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Lifecycle_topology_read_rejects_operation_drift_between_serializable_snapshots(bool timestampOnly)
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -256,12 +258,13 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var store = new EfCoreManagedElsaInstanceApiStore(db, async cancellationToken =>
         {
             revalidationHookCalls++;
-            var nextAttempt = created.Operation.AttemptNumber + 1;
-            await db.Database.ExecuteSqlInterpolatedAsync($"""
-                UPDATE ElsaInstanceOperations
-                SET AttemptNumber = {nextAttempt}
-                WHERE Id = {created.Operation.Id}
-                """, cancellationToken);
+            var nextAttempt = created.Operation.AttemptNumber + (timestampOnly ? 0 : 1);
+            var updatedAt = timestampOnly ? Now.AddSeconds(1) : Now;
+            await db.ElsaInstanceOperations
+                .Where(operation => operation.Id == created.Operation.Id)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(operation => operation.AttemptNumber, nextAttempt)
+                    .SetProperty(operation => operation.UpdatedAt, updatedAt), cancellationToken);
         });
 
         await Assert.ThrowsAsync<ElsaInstanceLifecycleTopologyChangedException>(() =>

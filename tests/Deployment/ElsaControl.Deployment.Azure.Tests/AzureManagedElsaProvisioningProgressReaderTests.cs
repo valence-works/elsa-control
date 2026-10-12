@@ -82,6 +82,7 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
     {
         var operationId = Guid.NewGuid();
         var attemptStartedAt = AcceptedAt.AddMinutes(20);
+        var updatedAt = AcceptedAt.AddMinutes(29);
         var instances = new InstanceStore
         {
             Topology = Topology([], operationId, ElsaObservedLifecycle.Ready),
@@ -101,7 +102,8 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
                 null,
                 ElsaObservedLifecycle.Ready,
                 ElsaInstanceHealth.Healthy,
-                AttemptStartedAt: attemptStartedAt)
+                AttemptStartedAt: attemptStartedAt,
+                UpdatedAt: updatedAt)
         };
         var result = Assert.IsType<ManagedElsaProvisioningProgress>(await Reader(instances, new ProviderStore()).ReadAsync(
             WorkspaceId,
@@ -110,6 +112,7 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
         Assert.Equal(2, result.AttemptNumber);
         Assert.Equal(attemptStartedAt, result.AttemptStartedAt);
         Assert.Equal(AcceptedAt, result.StartedAt);
+        Assert.Equal(updatedAt, result.LastUpdatedAt);
     }
 
     [Fact]

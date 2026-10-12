@@ -327,6 +327,7 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
                         x.AcceptedAt,
                         x.StartedAt,
                         x.CompletedAt,
+                        x.UpdatedAt,
                         x.DeploymentRunId,
                         x.FailureCode,
                         x.DeletionDiagnosticCode,
@@ -415,7 +416,8 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
                         operation.OrganizationId,
                         AttemptStartedAt: operation.AttemptNumber == 1
                             ? operation.AcceptedAt
-                            : recoveryStartsByAttempt.GetValueOrDefault((operation.Id, operation.AttemptNumber)));
+                            : recoveryStartsByAttempt.GetValueOrDefault((operation.Id, operation.AttemptNumber)),
+                        UpdatedAt: operation.UpdatedAt);
                 }).ToList();
                 operationSnapshots = operationSnapshots
                     .Select(operation =>

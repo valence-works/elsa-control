@@ -1,3 +1,4 @@
+using System.Text.Json;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.PackageCatalog.Core.Accounts;
@@ -193,6 +194,7 @@ public sealed class ManagedElsaInstanceApiStoreReadTests
         var operation = NewOperation(workspace, instance, BaseTime, ElsaInstanceOperationAction.Create);
         operation.State = ElsaInstanceOperationState.Running;
         operation.AttemptNumber = 2;
+        operation.UpdatedAt = BaseTime.AddMinutes(5);
         instance.LastOperationId = operation.Id.ToString("D");
         db.ElsaInstances.Add(instance);
         db.ElsaInstanceOperations.Add(operation);
@@ -209,6 +211,8 @@ public sealed class ManagedElsaInstanceApiStoreReadTests
         Assert.Equal(2, topologyOperation.AttemptNumber);
         Assert.Equal(recoveryAcceptedAt, topologyOperation.AttemptStartedAt);
         Assert.Equal(BaseTime, topologyOperation.AcceptedAt);
+        Assert.Equal(operation.UpdatedAt, topologyOperation.UpdatedAt);
+        Assert.DoesNotContain("UpdatedAt", JsonSerializer.Serialize(topologyOperation), StringComparison.Ordinal);
         Assert.Equal(recoveryAcceptedAt, finishedCreate!.AttemptStartedAt);
 
         operation = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == operation.Id);
