@@ -24,7 +24,7 @@ The smoke should stay thin. It exists to prove the seams between packages, APIs,
 ## Preconditions
 
 - `elsa-control/main` includes specs `024` through `030`.
-- `elsa-studio/main` includes the `Elsa.Studio.PlatformIntegration` module and neutral workflow action zones.
+- `elsa-core/main` includes the `Elsa.Studio.PlatformIntegration` module and neutral workflow action zones.
 - A Elsa Control workspace exists with permission to register artifacts, manage desired state, preview promotion, deploy, and roll back.
 - A Elsa Control environment exists with at least one registered runtime target advertising `workflow-definition.apply`.
 - A runtime-integrated Elsa Workflows app can poll Elsa Control runtime commands and apply `elsa.workflow-definition` artifacts.

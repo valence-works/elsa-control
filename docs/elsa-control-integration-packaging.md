@@ -12,10 +12,10 @@ The artifact-driven workflow path has two installable integration roles:
 
 | Role | Package ID | Source repository | Purpose |
 | --- | --- | --- | --- |
-| Studio producer integration | `Elsa.Studio.PlatformIntegration` | `elsa-studio` | Adds **Submit to Elsa Control** actions to Elsa Studio and submits `elsa.workflow-definition` artifact metadata to Elsa Control. |
+| Studio producer integration | `Elsa.Studio.PlatformIntegration` | `elsa-core` | Adds **Submit to Elsa Control** actions to Elsa Studio and submits `elsa.workflow-definition` artifact metadata to Elsa Control. |
 | Workflow runtime consumer integration | `ElsaControl.Workflows.RuntimeApplier` | `elsa-control` | Polls Elsa Control runtime commands, fetches workflow artifact payloads, verifies them, applies them through a runtime store boundary, and reports results. |
 
-The current Elsa Control repository also contains `ElsaControl.Studio.Submit`. Treat it as shared producer-side primitives for non-Studio producers or a future extraction point. The Studio UI module currently owns its host-specific widgets, notification handling, and request customization in `elsa-studio`.
+The current Elsa Control repository also contains `ElsaControl.Studio.Submit`. Treat it as shared producer-side primitives for non-Studio producers or a future extraction point. The Studio UI module currently owns its host-specific widgets, notification handling, and request customization in `elsa-core`.
 
 Version compatibility is same-version by default: integration package versions should match the Elsa Control backend package version until the API exposes an explicit compatibility/version negotiation contract.
 
@@ -202,7 +202,7 @@ Secrets referenced by `ElsaControl:Auth` must resolve through the host's secret 
 Before publishing the integration packages externally:
 
 - Confirm package IDs and repository ownership match the table above.
-- Publish `Elsa.Studio.PlatformIntegration` from `elsa-studio`.
+- Publish `Elsa.Studio.PlatformIntegration` from `elsa-core` (confirm publish source and package ID before release).
 - Publish `ElsaControl.Workflows.RuntimeApplier` from `elsa-control`.
 - Keep `ElsaControl.Studio.Submit` internal unless a non-Studio producer or shared-contract extraction needs it.
 - Document the same-version compatibility rule in package release notes.

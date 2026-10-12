@@ -36,9 +36,9 @@ replace.
 - [Commercial image workflow](https://github.com/valence-works/elsa-production-image/blob/main/.github/workflows/build-and-push.yml)
 - [Commercial image package pins](https://github.com/valence-works/elsa-production-image/blob/main/Directory.Packages.props)
 - [Commercial image README](https://github.com/valence-works/elsa-production-image/blob/main/README.md)
-- [Official OSS application-image workflows](https://github.com/elsa-workflows/elsa-apps/tree/main/.github/workflows)
+- [Official OSS application-image workflows](https://github.com/elsa-workflows/elsa-apps/tree/main/.github/workflows) (historical evidence; `elsa-apps` is retired and folded into `elsa-core`)
 - [Elsa 3 Core releases](https://github.com/elsa-workflows/elsa-core/releases)
-- [Elsa 3 Studio releases](https://github.com/elsa-workflows/elsa-studio/releases)
+- [Elsa 3 Studio releases](https://github.com/elsa-workflows/elsa-core/releases)
 - [Elsa 4 Foundation Docker workflow](https://github.com/elsa-workflows/elsa-foundation/blob/main/.github/workflows/docker.yml)
 - [Elsa 4 Foundation package workflow](https://github.com/elsa-workflows/elsa-foundation/blob/main/.github/workflows/packages.yml)
 - [Elsa 4 Foundation Studio Docker workflow](https://github.com/elsa-workflows/elsa-foundation-studio/blob/main/.github/workflows/docker.yml)
@@ -152,7 +152,8 @@ decision before the Control catalog can offer Elsa 4.
 
 ### Official OSS `elsa-apps`
 
-`elsa-workflows/elsa-apps` is an official OSS application-image repository, not the
+`elsa-workflows/elsa-apps` is retired and folded into `elsa-core`. The following
+remains historical evidence: it was an official OSS application-image repository, not the
 commercial distribution authority. Its workflows publish Docker Hub images with
 hard-coded historical `3.6.1`/`3.6.4` metadata and SHA tags; the README also documents
 legacy `elsaworkflows/elsa-* :latest` names. It demonstrates Server, standalone Studio,
