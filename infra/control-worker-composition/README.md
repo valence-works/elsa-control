@@ -43,10 +43,28 @@ the registry's narrow metadata/pull administration described in
 production workload subscription. A budget alert is not a hard spending cap; bound the rehearsal to
 one engine and remove run-scoped resources promptly. The `test` infrastructure deploy now requires
 `AZURE_PROVISIONER_IDENTITY_ID`, so it cannot silently omit the staging identity attachment.
-The current staging allocation is two EUR 250 monthly alert budgets: one for the existing Control
-staging subscription and one for the dedicated workload subscription. Together they match the EUR 500
-incremental staging ceiling, but Azure budgets only notify and cost data can lag. Check actual spend
-before each rehearsal and stop or clean up if the projection would cross the ceiling.
+
+### Budget checks before a staging rehearsal (#672)
+
+The current human spending instruction is an **approximately EUR 500 aggregate monthly recurring
+target**, covering production, staging, shared infrastructure and non-Azure platform services. It is
+not an incremental staging ceiling. Subscription alert budgets neither reserve that amount nor enforce
+a spending cap, and cost reporting can lag.
+
+Before adding a proof engine, record timestamped, attributed actual cost and forecast coverage,
+including historical proof charges and non-Azure services. Keep missing coverage and remaining
+headroom explicitly unknown; a partial month-to-date subtotal is not the recurring baseline or a
+monthly forecast. Do not attribute an entire shared group to its registry or infer ownership and
+cleanup safety from a resource name or charge alone.
+
+Verify the requested engine profile, estimate the incremental rehearsal cost (including the limits
+of any compute/SQL-only estimate), and require confirmed run-scoped cleanup before another engine.
+If a necessary rehearsal is expected to exceed the aggregate target, explain why and its expected
+cost, then obtain the user's go-ahead **before** the associated spend. A previous one-run approval
+does not authorize another run. Record the scope, cost uncertainty, approval and cleanup evidence on
+#672 and the rehearsal issue; a quota or alert budget is not a guaranteed total-cost bound.
+
+### Authority and activation
 
 Review the subscription, identity, SQL bootstrap egress, registry authority and release-verification
 identity against their **non-secret** identifiers in the staging parameter file.
