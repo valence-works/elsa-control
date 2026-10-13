@@ -265,7 +265,7 @@ external seam. Unit tests can support a row but cannot close it alone.
 | SH-AL-01 | Shared | Unsigned, author-only, wrong-hash, wrong-dependency-hash or missing-provenance package is refused with audit and tenant-visible error | Negative test run |
 | SH-AL-02 | Shared | Direct socket from package code to an undeclared host and any IMDS/MSI request are blocked at the network layer | Packet/denial evidence |
 | SH-AL-03 | Shared | No secret, refresh token or client secret is present in engine memory or environment; packages see only connection handles; no cross-tenant handle or memory exposure via SDK | Memory/env inspection and SDK contract test |
-| SH-AL-04 | Shared | Revoked package: new loads fail closed immediately; in-flight runs fail closed after at most 15 min on a stale revocation list; unconfirmed unload recycles the replica | Staging live run |
+| SH-AL-04 | Shared | Revoked package: new loads fail closed immediately; loads and in-flight runs fail closed once the revocation list exceeds its 120 s hard TTL; security revocation applies within 60 s; unconfirmed unload recycles the replica | Staging live run |
 | SH-AL-05 | Shared | Allowlist governance rejects non-in-house entries, missing reviewer-of-record records and reviewer = author or CI triggerer | CI policy test |
 | DI-01 | Data-isolated | A cannot access B's dedicated database, storage, backup or restore target using API, runtime or provider identity | Database/identity ACLs and negative matrix |
 | DI-02 | Data-isolated | Pooled compute process and network cannot cross customer boundaries | Network traces, endpoint ACLs and process/resource inspection |
