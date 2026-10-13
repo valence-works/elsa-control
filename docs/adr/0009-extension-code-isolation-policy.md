@@ -124,7 +124,7 @@ It does not supersede the prohibition of arbitrary customer packages on Shared o
 - **Any signed package on Shared** (author signature only). Rejected: a signature proves identity, not safety. Compromised or malicious publishers would get process trust on a multi-tenant shard.
 - **Extend the allowlist to Data-isolated now.** Rejected: Data-isolated carries its own isolation promise; it stays as the original decision states.
 - **Open the allowlist to third-party packages once a review step exists.** Rejected: in-house only is permanent; a third-party path needs its own amendment.
-- **Per-tenant process or sandbox isolation on Shared** (worker process per tenant, ACA dynamic sessions, gVisor). Rejected for now: high cost and latency per execution, IPC redesign of activity execution, and a conflict with the Shared price point (€19/month). It stays the path if a security incident demands it, and it would satisfy ADR-0009's "reviewed sandbox" clause.
+- **Per-tenant process or sandbox isolation on Shared** (worker process per tenant, ACA dynamic sessions, gVisor). Rejected for now: high cost and latency per execution, IPC redesign of activity execution, and a conflict with the Shared tier's price point. It stays the path if a security incident demands it, and it would satisfy ADR-0009's "reviewed sandbox" clause.
 
 ### Consequences
 - Shared gains a narrow, reviewed extension surface. Residual risk: a reviewed package or the signing pipeline could be compromised. Mitigated by hash pinning (package and dependencies), provenance, re-review per version, revocation, network-layer egress, credentials outside the engine, IMDS blocking and per-tenant resource limits.
@@ -150,6 +150,5 @@ It does not supersede the prohibition of arbitrary customer packages on Shared o
 - Scope: Shared only (CEO, 13 Oct). Data-isolated unchanged.
 - In-house only, permanent; third-party needs a separate amendment signed off by Sipke and the CEO.
 - Reviewer of record: Elsa Control Architect (never the author); no human co-sign (Sipke, 2026-10-13).
-- The €19/month Shared price is public pricing.
 - Allowlist freshness TTL: 15 minutes maximum. Revocation-list hard TTL: 120 s; past it, loads and in-flight runs fail closed.
 - Merges under the standard Code Review rule.
