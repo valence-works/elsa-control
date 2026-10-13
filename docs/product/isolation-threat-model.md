@@ -27,7 +27,8 @@ process has that process's permissions; package approval and vulnerability
 scanning are governance controls, not a runtime isolation boundary.
 
 This document is the security gate for the initial profile. It does not authorize
-Shared, Data-isolated or arbitrary-package launch. Those profiles remain closed
+Shared, Data-isolated or arbitrary-package launch (ADR-0009 Amendment 1 permits
+in-house allowlisted packages on Shared only after the `SH-*` and `SH-AL-*` gates pass). Those profiles remain closed
 until the profile-specific tests below produce signed evidence. A failed gate is
 an escalation to the program lead, not a marketing exception.
 
@@ -108,7 +109,7 @@ corresponding tests pass in the production provider path.
 
 | Profile | Compute and data boundary | Secret/network/telemetry boundary | Extension policy | Explicit non-guarantees and gate |
 |---|---|---|---|---|
-| Shared | Deferred pooled runtime and pooled data design; no customer may infer process isolation | Must prove organization/instance data, secret, network and telemetry isolation plus noisy-neighbor controls | Built-in only unless an independently reviewed sandbox exists; arbitrary packages prohibited | No shared-compute or arbitrary-code claim before `SH-*` tests and cost/abuse evidence pass |
+| Shared | Deferred pooled runtime and pooled data design; no customer may infer process isolation | Must prove organization/instance data, secret, network and telemetry isolation plus noisy-neighbor controls | Built-in, plus in-house Valence-built allowlisted packages under ADR-0009 Amendment 1 once `SH-AL-*` pass; arbitrary packages prohibited | Allowlisting is a supply-chain and review control, not process isolation; no shared-compute or arbitrary-code claim before `SH-*` tests and cost/abuse evidence pass |
 | Data-isolated | Deferred pooled compute with a dedicated database/data boundary per instance | Must prove pooled compute cannot cross data, secret, network or telemetry boundaries and that one tenant cannot starve another | Built-in only unless sandbox evidence exists; arbitrary packages prohibited | A separate database does not prove process or noisy-neighbor isolation; all `DI-*` gates required |
 | Dedicated | First paid profile: one managed Elsa runtime application and one database per instance; physical host remains provider-managed | Instance-scoped workload identity, secret references, explicit ingress/egress, tenant-scoped telemetry, tested backup/restore | Producer-built and Valence-approved extensions only at launch; arbitrary packages prohibited | Not a physical-host, private-network or arbitrary-code sandbox; all `D-*` launch gates required |
 | Private | Customer-specific isolated compute, persistence, secret and advanced network boundary; exact placement must be provider/customer-agent evidence | Dedicated identity and secret store, customer-controlled or explicitly isolated network, tenant-scoped operations and backups | Arbitrary packages permitted only through reproducible immutable image/artifact and provenance pipeline | No promise until `P-*` attack tests, rollback and operational review pass; a stronger claim requires explicit ADR |
@@ -125,7 +126,7 @@ changes the fact that a loaded assembly is executable code.
 | Class | Meaning | Shared / Data-isolated | Dedicated launch | Private |
 |---|---|---|---|---|
 | Built-in | Included in the producer-owned immutable image and its release manifest | Allowed after image gate | Allowed after image gate | Allowed after image gate |
-| Valence-approved | Reviewed source/package identity, compatibility, vulnerability and provenance evidence; included through a controlled immutable build | Allowed only if the profile's non-code boundary is independently proven | Allowed at launch, subject to image and package gates | Allowed, subject to private image gate |
+| Valence-approved | Reviewed source/package identity, compatibility, vulnerability and provenance evidence; included through a controlled immutable build | Shared: in-house Valence-CI-built packages on the signed Shared allowlist only, after `SH-*` and `SH-AL-*` pass (ADR-0009 Amendment 1). Data-isolated: allowed only if the profile's non-code boundary is independently proven | Allowed at launch, subject to image and package gates | Allowed, subject to private image gate |
 | Arbitrary customer | Customer-selected package or dependency whose code is not part of the approved producer build | **Rejected** | **Rejected at launch** | Allowed only after `P-*` gates and immutable build workflow |
 
 Required behavior:
@@ -258,9 +259,14 @@ external seam. Unit tests can support a row but cannot close it alone.
 | Test ID | Profile(s) | Setup and assertion | Evidence retained |
 |---|---|---|---|
 | SH-01 | Shared | Two organizations cannot read or mutate one another's API, artifacts, commands, logs or audit records | Test run, safe denial codes and query audit |
-| SH-02 | Shared | Package policy rejects arbitrary packages and no unapproved assembly is loaded in pooled compute | Admission record and runtime package inventory |
+| SH-02 | Shared | Package policy rejects arbitrary packages and no assembly outside the signed Shared allowlist is loaded in pooled compute | Admission record and runtime package inventory |
 | SH-03 | Shared | CPU/memory/request/database flood from A cannot breach B's availability/latency/quota envelope | Resource graphs, limits, alerts and recovery |
 | SH-04 | Shared | Secret, metadata, private network and telemetry reads from A are denied for B | Identity policy, denied requests and redacted logs |
+| SH-AL-01 | Shared | Unsigned, author-only, wrong-hash, wrong-dependency-hash or missing-provenance package is refused with audit and tenant-visible error | Negative test run |
+| SH-AL-02 | Shared | Direct socket from package code to an undeclared host and any IMDS/MSI request are blocked at the network layer | Packet/denial evidence |
+| SH-AL-03 | Shared | No secret, refresh token or client secret is present in engine memory or environment; packages see only connection handles; no cross-tenant handle or memory exposure via SDK | Memory/env inspection and SDK contract test |
+| SH-AL-04 | Shared | Revoked package: new loads fail closed immediately; in-flight runs fail closed after at most 15 min on a stale revocation list; unconfirmed unload recycles the replica | Staging live run |
+| SH-AL-05 | Shared | Allowlist governance rejects non-in-house entries, missing reviewer/co-sign records and reviewer = author or CI triggerer | CI policy test |
 | DI-01 | Data-isolated | A cannot access B's dedicated database, storage, backup or restore target using API, runtime or provider identity | Database/identity ACLs and negative matrix |
 | DI-02 | Data-isolated | Pooled compute process and network cannot cross customer boundaries | Network traces, endpoint ACLs and process/resource inspection |
 | DI-03 | Data-isolated | A's exhaustion is throttled/terminated while B remains within objective | Load test and quota/recovery report |
