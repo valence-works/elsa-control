@@ -61,9 +61,9 @@ class CiWorkflowTests(unittest.TestCase):
             azure,
         )
         self.assertNotRegex(azure, r"(?m)^\s+if:")
+        self.assertNotIn("scripts/tests/test_issue_bus.py", azure)
         for command in (
             "python3 scripts/tests/test_ci_workflow.py",
-            "python3 scripts/tests/test_issue_bus.py",
             "python3 scripts/tests/test_azure_api_deploy_workflow.py",
             "python3 scripts/tests/test_deploy_azure_elsa_control.py",
             "python3 scripts/tests/test_control_sql_sku.py",
