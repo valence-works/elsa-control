@@ -41,7 +41,7 @@ Read [`.github/reviewers.md`](.github/reviewers.md) **before opening any PR**. T
 
 ## Issue Bus
 
-Leaf work follows the Issue Bus v1 protocol in `docs/product/issue-bus.md`. Worker lanes:
+Leaf work follows the shared [Issue Bus Lite](https://github.com/elsa-workflows/.github/blob/main/AGENTS.md#issue-bus-lite) protocol (pointer: `docs/product/issue-bus.md`). Worker lanes:
 
 - `worker:codex` / `worker:claude`: self-serve pickup after standing prompts. Do not wait for an operator to assign a Task.
 - `worker:cursor`: CEO / Launch Ops dispatches a Cursor cloud agent. Cursor sessions do not self-poll GitHub search and must not start without `ready-for-agent` + `worker:cursor`.
