@@ -1,3 +1,9 @@
+# AGENTS.md: elsa-control
+
+## Agent collaboration protocol
+
+The org-wide protocol for AI agents (claims, branches, PRs, review and merge rules, handoff, stop conditions, identities, `vw-` mentions, conduct) lives at **https://github.com/elsa-workflows/.github/blob/main/AGENTS.md**. Read it first. This file keeps only notes specific to this repository; where they are stricter or name an owner exception, they apply here.
+
 ## Active Technologies
 - C# on .NET 10. + ASP.NET Core authentication/authorization, ASP.NET Core cookies, JWT bearer validation, EF Core, existing `ElsaControl.PackageCatalog.*` account/workspace services, xUnit and its built-in assertions for tests. (codex/021-identity-tenancy)
 - Existing catalog EF Core stores and migrations for accounts, external identities, workspaces, memberships, entitlements, and workspace-owned resources. (codex/021-identity-tenancy)
