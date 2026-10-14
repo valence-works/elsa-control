@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # DEPRECATED: replaced by Issue Bus Lite (https://github.com/elsa-workflows/.github/blob/main/AGENTS.md#issue-bus-lite).
 # Board sync, lease expiry and drift checks are no longer part of the protocol.
-# Not run in CI; scheduled for removal (see follow-up issue).
+# Scheduled for removal, including its CI step (see follow-up issue).
 """Fail-closed Issue Bus claim and drift checks.
 
 The command deliberately delegates GitHub mutations to the authenticated ``gh``
