@@ -24,11 +24,11 @@ Work is done only when applicable implementation, tests, integration/E2E evidenc
 
 [Issue Bus Lite](https://github.com/elsa-workflows/.github/blob/main/AGENTS.md#issue-bus-lite) (pointer: [`issue-bus.md`](issue-bus.md)) is the shared pickup, claim, and evidence protocol. Codex and Claude self-serve Agent Ready tasks; Cursor cloud agents are CEO/Launch Ops dispatched when `worker:cursor` is set. This section remains the program-level assignment policy; Issue Bus implements it on GitHub.
 
-1. Select an unblocked Agent Ready task from the project.
-2. Mark it assigned/in progress before implementation.
+1. Pick an unblocked issue labelled `ready-for-agent` (plus the matching `worker:*` label) per Issue Bus Lite.
+2. Post a `claim` comment on the issue before implementation.
 3. Provide one objective, issue, PRD/ADRs, repo boundaries, non-goals, acceptance criteria and validation.
 4. Workers produce a branch and PR and report assumption-invalidating discoveries; they do not merge or expand into neighboring tasks.
-5. Program lead reviews architecture/integration, runs or verifies checks, updates the board and merges according to repository policy.
+5. Program lead reviews architecture/integration, runs or verifies checks, and merges according to repository policy. Progress is recorded with labels and `claim` / `pr` / `blocked` issue comments.
 
 ## Pull Request Discipline
 
@@ -40,14 +40,9 @@ Work is done only when applicable implementation, tests, integration/E2E evidenc
 
 ## Status Semantics
 
-- `Backlog`: intentionally not ready or not scheduled.
-- `Ready`: dependencies/decisions satisfied and candidate for dispatch.
-- `In Progress`: actively assigned.
-- `In Review`: PR/evidence awaiting review or required checks.
-- `Blocked`: cannot progress without an external decision/dependency.
-- `Done`: acceptance and closure verified.
+Status lives in labels and Issue Bus Lite comments: `ready-for-agent` means dispatchable, a `claim` comment means in progress, a `pr` comment means in review, a `blocked` comment means blocked, and closure means done.
 
-Agent State is independent: `Not Ready`, `Agent Ready`, `Assigned`, `Review Required`.
+The project board `Status` field (`Backlog`, `Ready`, `In Progress`, `In Review`, `Blocked`, `Done`) and `Agent State` field (`Not Ready`, `Agent Ready`, `Assigned`, `Review Required`) are optional views. Agents are not required to update them and they are not authoritative.
 
 ## Program Cadence
 
