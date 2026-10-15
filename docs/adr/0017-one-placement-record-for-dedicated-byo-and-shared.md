@@ -160,7 +160,7 @@ Kind targets:
   - if the same bind becomes `Active` again, operations resume on the same assignment.
     A different bind always means a move.
 
-### 1a. The lab class is not the Shared isolation profile (CEO/Sipke call)
+### 1a. The lab class is not the Shared isolation profile
 
 `shardClass = lab` shares code with `shared-shard`, but it is **not** the `Shared`
 isolation profile:
@@ -172,7 +172,8 @@ isolation profile:
 - **No Shared allowance.** It **consumes and grants no Shared-tenant allowance** and no
   `MaxInstances`. It uses its own lab entitlement.
 - **Nothing sensitive on it.** It hosts **no paying tenants, no customer data, no
-  managed identity and no secrets** (#794).
+  managed identity and no secrets** (#794). Placement enforces this as invariant **I9**;
+  it isn't left to operator discipline.
 - **Accepted residual risk:** learners placed on the same lab shard **share a process**
   (an AssemblyLoadContext is not a boundary). A learner package can observe or disrupt
   other learners on the same replica. Mitigations: there is nothing sensitive to reach,
@@ -180,9 +181,10 @@ isolation profile:
 - **Precondition:** labs need their **own ADR-0009 amendment** before launch.
   Amendment 1 covers Shared only. This ADR only reserves the placement shape.
 
-Classifying the lab shard as a non-Shared class of `shared-shard`, rather than a
-separate kind, is a **CEO/Sipke call**. Code Review accepted the reasoning but flagged
-it for confirmation.
+**Decided by the Elsa Control Lead on 15 Oct 2026:** the lab shard is a non-Shared class
+of `shared-shard`, not a separate kind. This is consistent with the dedicated,
+activities-only lab shard Sipke approved for #794. The shared-process risk is accepted
+only on the condition that I9 holds.
 
 ### 2. Kind selection happens on the server
 
@@ -229,8 +231,7 @@ and the `SH-*` gates pass.
     `Active` assignment until the flip;
   - the `Retiring` assignment, for cleanup only.
 
-  It and records the assignment
-  records the assignment fingerprint on the operation. That covers create, observe, reconcile, health probe,
+  It records the assignment fingerprint on the operation. That covers create, observe, reconcile, health probe,
   recover, retry and cleanup, including the #747/#752 recovery and delete calls. If
   the operation's fingerprint and the assignment's don't match, the operation is
   refused. There's no global configuration swap. The host `TargetScope` remains the
@@ -248,8 +249,9 @@ and the `SH-*` gates pass.
 - **I6. Shard capacity is enforced under concurrency.** Placement on a shard is refused
   once it would exceed the shard's ceiling, which is set from the measured load test
   (about 70% of peak). It's also refused once the shard exceeds its cap on
-  package-set groups (#798). That cap is proposed at 10 groups per shard and will be set
-  from the AC1 measurement; the value is a **CEO/Sipke call**. Refused placement goes to
+  package-set groups (#798). That cap is **provisionally 10 groups per shard** (decided
+  by the Elsa Control Lead on 15 Oct 2026). It is provisional pending the AC1
+  measurement in elsa-foundation#2757, and the AC1 result will revise it. Refused placement goes to
   the next eligible shard **in the same region** (I8), or fails with a safe reason code
   (`placement.shard.capacity`). Occupancy drops only after cleanup has been
   confirmed (#352).
@@ -266,6 +268,13 @@ and the `SH-*` gates pass.
   Overflow, rebalancing and moves stay **in-region**. If no in-region target exists, or
   a BYO bind can't deploy to that region, placement **fails** with
   `placement.region.unavailable`. It never falls back to another region.
+- **I9. Nothing sensitive is placed on a lab shard.** Placement admits an instance to a
+  `lab` shard only if it has the `training-lab` origin, belongs to an org with no paying
+  commercial provider (`stripe` or `azure-bound`), and its plan carries no secrets,
+  connections, managed identity, or customer data sources. A lab shard's host has no
+  managed identity and no secret store binding. Any other instance is refused with
+  `placement.lab.not-eligible`, and the refusal is audited. This is the condition the
+  shared-process risk in §1a was accepted on.
 
 ### 4. Provider interface keyed by kind
 
@@ -407,6 +416,12 @@ the Console.
   - The 11th package-set group overflows to the next shard.
   - Occupancy is unchanged until cleanup is confirmed.
 - **I7.** Placement of a plan on release line L onto a shard on line M ≠ L is refused.
+- **I9.**
+  - A `training-lab` instance from an org with an active `stripe` or `azure-bound`
+    provider is refused with `placement.lab.not-eligible`.
+  - A lab plan that carries a secret, connection or managed-identity reference is refused
+    the same way.
+  - Lab shard provisioning fails if a managed identity or secret store is attached.
 - **I8.**
   - `RegionCode = westeurope` with the only `westeurope` shard full and a free
     `northeurope` shard: placement fails with `placement.region.unavailable`, and no
