@@ -259,7 +259,7 @@ public sealed class AccountWorkspaceStore(CatalogDbContext dbContext) : IAccount
     public Task<int> ActiveManagedInstanceCountAsync(Guid organizationId, CancellationToken cancellationToken = default) =>
         dbContext.ElsaInstances
             .AsNoTracking()
-            .CountAsync(x => x.OrganizationId == organizationId && x.TargetMode == "managed" && x.DeletedAt == null, cancellationToken);
+            .CountActiveDedicatedManagedAsync(organizationId, cancellationToken);
 
     public Task<bool> OrganizationWorkspaceNameExistsAsync(Guid organizationId, string name, Guid? excludingWorkspaceId, CancellationToken cancellationToken = default)
     {

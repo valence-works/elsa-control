@@ -743,10 +743,15 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                         operation = operation.TransitionTo(ElsaInstanceOperationState.WaitingForPriorOperation);
                 }
 
-                var activeInstanceCount = operation.Action == ElsaInstanceOperationAction.Create
-                    ? await dbContext.ElsaInstances.CountAsync(
-                        x => x.OrganizationId == instance.OrganizationId && x.TargetMode == "managed" && x.DeletedAt == null,
-                        cancellationToken)
+                // MaxInstances is the Dedicated allowance (ADR-0017 F5). Shared and
+                // lab-class creates omit the count so they cannot consume or be
+                // blocked by it. Shared has no separate tenant cap on this path yet.
+                var activeInstanceCount = operation.Action == ElsaInstanceOperationAction.Create &&
+                    ElsaInstanceDedicatedLimit.ConsumesDedicatedInstanceLimit(
+                        instance.PlacementIntent.TargetMode,
+                        instance.PlacementIntent.IsolationProfile)
+                    ? await dbContext.ElsaInstances.CountActiveDedicatedManagedAsync(
+                        instance.OrganizationId, cancellationToken)
                     : (int?)null;
                 var commercialDecision = await _commercialGate.EvaluateAsync(
                     instance.OrganizationId,

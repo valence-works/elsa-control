@@ -69,6 +69,9 @@ public sealed class EfCoreElsaInstanceCommercialGate(CatalogDbContext db, TimePr
                     "An active Azure subscription bind is required for this organization.");
         }
 
+        // MaxInstances is the Dedicated placement allowance (ADR-0017 F5). The
+        // caller passes the Dedicated managed count, and only when the create
+        // itself consumes that allowance. Shared and lab-class creates omit it.
         if (action == ElsaInstanceOperationAction.Create &&
             activeInstanceCount is { } count && count >= entitlement.MaxInstances)
             return new ElsaInstanceCommercialGateDecision(
