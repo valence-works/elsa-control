@@ -6,6 +6,7 @@ Accepted (#739). Elsa Control Code Review (GitHub App `elsa-control-code-review`
 gave APPROVE on the exact head `b5c878ef`, review 5531019241, with required CI
 green; #809 merged as `35c57278`. This ADR is design only. It doesn't implement the record
 (#436, #352 and the #633 leaves do), and it creates no Azure resource.
+Amendment 1 (Shared allowance): Proposed. See the end of this ADR.
 
 ## Date
 
@@ -380,7 +381,8 @@ selected by `Kind`:
   - the allowance consumed:
     - `dedicated-valence` and `byo-subscription` consume `MaxInstances`;
     - `shared-shard` `standard` consumes a separate Shared-tenant allowance, plus quota
-      profiles for runs and storage (#349). It never consumes `MaxInstances`;
+      profiles for runs and storage (#349). It never consumes `MaxInstances`. The
+      Shared-tenant allowance is defined in Amendment 1;
     - `shared-shard` `lab` consumes only the lab entitlement. It never consumes or
       grants the Shared-tenant allowance or `MaxInstances` (§1a).
 - **Required code change (#502 rework):** the counts at
@@ -546,3 +548,56 @@ the Console.
   - Removing the delegation refuses create, update and recover with
     `placement.byo.bind-not-active`, and never touches the Valence subscription.
   - Delete produces a receipt with `retained-customer-owned` resources.
+
+## Amendment 1 (2026-10-15): Shared allowance
+
+Status: **Proposed.** Becomes Accepted when Elsa Control Code Review (GitHub App `elsa-control-code-review`) gives APPROVE on the exact head with required CI green.
+Implementation: #834.
+
+### Context
+
+- ADR-0017 §6 F5 says a `shared-shard` `standard` placement "consumes a separate Shared-tenant allowance" and never consumes `MaxInstances`, and that a `lab` placement consumes neither. It didn't define that allowance: what is counted, where the limit comes from, or what a refusal looks like.
+- #810 found that Shared tenants counted against the Dedicated limit. #818 fixes that, so Shared creates no longer consume `MaxInstances`. As #818 says, there is no Shared tenant cap on that path yet.
+- **CEO ruling on #818 (15 Oct 2026):** updates refuse placement changes per ADR-0017 I1 (`PlacementChangeRequiresMove`). Placement changes only through an explicit move. This amendment builds on that ruling.
+
+### Decision
+
+1. **Definition.** The *Shared allowance* is a per-organization limit on how many Shared tenants the organization may hold. It is separate from `MaxInstances` (the Dedicated limit), from the lab entitlement and from all shard-level caps.
+2. **Count, by placement kind.** The count is the number of the organization's instances that are not yet deleted (the same terminal point at which a Dedicated instance stops counting against `MaxInstances`) and whose *counting assignment* is `shared-shard` with `shardClass = standard`. Once the placement record is persisted (#352, #436), the count is never derived from `TargetMode`, isolation profile or the catalog alone.
+   - The counting assignment is the instance's `Active` assignment. On first placement it's the `Reserved` one.
+   - **A move counts on both sides until the flip commits.** From the moment the target assignment is `Reserved` until the flip commits, the instance counts against **both** the source kind (its existing `Active` slot) and the target kind (the `Reserved` reservation). When the flip commits, the source slot is released in the same transaction as the flip. If the move is abandoned or fails before the flip, only the target reservation is released, and the source is untouched. So a move never leaves an organization above its limit. The only transient exception is the same-kind Shared move in clause 5: at most one per organization, with a hard ceiling of L+1. The `Retiring` assignment never counts.
+   - A `lab` placement never counts.
+   - **Interim proxy (#818).** Until #834 lands the persisted placement kind and `MaxSharedTenants`, the Shared count may use #818's interim proxy: `TargetMode = managed` with `IsolationProfile = shared`, mirroring #818's Dedicated count (`managed` with `IsolationProfile = dedicated`). This is interim only. Once the placement record is persisted, the count reads the counting assignment's `Kind` and `shardClass`, and the proxy is removed.
+3. **Limit.** The organization's own entitlement field `MaxSharedTenants`, on the same entitlement snapshot as `MaxInstances`, read by `ElsaInstanceCommercialGate` inside the same serializable create (#502). Move admission does the same: it reads the target kind's count and writes the `Reserved` target assignment in one serializable transaction (or under an equivalent per-organization lock), exactly as create does. An absent or null value means zero. The ADR names the field, but no value: limit values are commercial terms set outside the ADR (§6). A Shared plan or trial entitlement sets it. The lab entitlement never does.
+4. **Refusal.** A Shared create, or a move into Shared, that would take the count above the limit (other than the single per-organization same-kind transient in clause 5) is refused with `placement.shared-allowance.exceeded`. While an organization holds that transient (count L+1), a same-kind Shared move of another instance is refused with `placement.shared-allowance.move-in-progress` (409). Both codes are checked before shard selection, before any assignment is written and before any provider work, in this order: `instance.operation-active` (another move of the same instance is in flight), then `placement.shared-allowance.move-in-progress`, then `placement.shared-allowance.exceeded`. The code is distinct from `instance_limit_reached` (the Dedicated limit), `placement.shard.capacity` and `placement.entitlement.missing`.
+5. **Interaction with I1.** As ruled on #818: updates (`UpdateIntent`, `ApproveMinorUpgrade`, `MajorMigration`) refuse a placement change with `PlacementChangeRequiresMove`. They never change the count, and the allowance isn't checked on update. Placement changes only through an explicit move. Every move gets a fresh tenant (I1), including every package-set change.
+   - **Same-kind Shared move of an existing instance.** This is a move within the same organization where the source and target are both `shared-shard` `standard`, whether or not the package set changes. It covers package-set changes, shard rebalances and shard changes forced by the I6 package-set group cap. It may hold a transient count of **L+1** from target `Reserved` until the flip, with **at most one such transient per organization** and a hard ceiling of L+1. The both-sides rule (clause 2) returns the count to L on commit, because the source is released atomically with the flip, and on abort, because the target reservation is released. A same-kind Shared move is admitted only while the organization's current Shared count, including any in-flight `Reserved` reservations, is ≤ L. This is evaluated inside the same serializable admission transaction as clause 3. Refusals, in precedence order and before any assignment is written, leave the count unchanged:
+     1. `instance.operation-active` (409): another move of the same instance is already in flight.
+     2. `placement.shared-allowance.move-in-progress` (409): the organization is at L+1 because another instance's same-kind move is in flight.
+     3. `placement.shared-allowance.exceeded`: the count is above L for any other reason, for example a lowered `MaxSharedTenants`.
+   - Every admission that adds to the Shared count (a create, or a move into standard from any other kind or class, including lab) needs a free slot. It never uses the same-kind transient, so at L or L+1 it is refused with `placement.shared-allowance.exceeded`. The same applies to moves into `dedicated-valence` or `byo-subscription`, against `MaxInstances`.
+6. **Interaction with the shard caps (I6).** Per-shard capacity and the provisional package-set group cap for `standard` shards limit *where* a tenant can be placed. The Shared allowance limits *how many* an organization holds. The allowance is checked first. If it passes but no eligible shard has room, the result is `placement.shard.capacity`, and the count doesn't change because the create rolls back. Lab shards, lab admission (I9) and the lab entitlement are unaffected.
+7. **Interaction with the Dedicated limit.** The Shared allowance and `MaxInstances` are independent. An organization at its Dedicated limit can still create a Shared tenant (#810, #818), and an organization at its Shared limit can still create a Dedicated engine.
+8. **Shared trial gate.** The Shared trial (#633) doesn't ship until this amendment is Accepted and an implementation leaf has enforced it in code. Implementation: #834.
+
+### Test sketches
+
+- At the Shared limit, a Shared create is refused with `placement.shared-allowance.exceeded`. No assignment is written, no shard is touched and no provider call is made. A Dedicated create with `MaxInstances` room still succeeds.
+- At the Dedicated limit, a Shared create with allowance room succeeds (#818).
+- No Shared entitlement means a limit of zero: a Shared create is refused with `placement.shared-allowance.exceeded`.
+- Lab placements never change the Shared count, and a lab create is unaffected by the Shared limit.
+- Concurrency: with limit L and L−1 in use, two parallel Shared creates admit exactly one.
+- Concurrency, create against move: with limit L and L−1 Shared in use, a parallel Shared create and a Dedicated to Shared move compete for the last slot. Exactly one succeeds, and the other is refused with `placement.shared-allowance.exceeded`.
+- Same-kind package-set move at the limit: at the Shared limit L, the move is admitted, the count reads L+1 from target `Reserved` until the flip, and it returns to L on commit and on abort (the source is untouched and only the target reservation is released).
+- Same-kind move overflowing its shard (I6 group cap reached): treated the same as above. It is admitted at L and returns to L.
+- Same-kind rebalance: at the Shared limit L, a shard rebalance of an existing Shared instance (same package set) is admitted, reads L+1 during the move, and returns to L on commit and on abort.
+- Parallel same-kind moves of different instances: at the Shared limit L, two same-kind Shared moves of different instances in one organization run in parallel. Exactly one is admitted, and the other gets 409 `placement.shared-allowance.move-in-progress` with no assignment written. The count never exceeds L+1, and after the admitted move commits or aborts it is L.
+- Create during a same-kind transient: at L+1 (one same-kind move in flight), a Shared create is refused with `placement.shared-allowance.exceeded`.
+- Concurrent moves of one instance: while one move of an instance is in flight, a second move of the same instance (package-set change, rebalance or cross-kind) is refused with `instance.operation-active` (409). No assignment is written, and the count never exceeds L+1.
+- Dedicated to Shared move at the limit: at the Shared limit L, refused with `placement.shared-allowance.exceeded`. The source is unchanged.
+- Abandoned cross-kind move: a Shared to Dedicated move abandoned before the flip leaves the Shared count unchanged and frees its `MaxInstances` reservation. It never leaves the organization above `MaxSharedTenants` or `MaxInstances`.
+- Shared to Dedicated move: refused without `MaxInstances` room, and the source stays unchanged. When admitted, from target `Reserved` until the flip the instance counts in both `MaxInstances` and the Shared count. After commit it counts only in `MaxInstances`.
+- Dedicated to Shared move: refused with `placement.shared-allowance.exceeded` without allowance room.
+- An update that changes placement is refused with `PlacementChangeRequiresMove`, and the count is unchanged.
+- Allowance room but every eligible shard full: `placement.shard.capacity`, and the count is unchanged.
+- Delete frees the allowance at the same terminal point as Dedicated.
