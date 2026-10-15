@@ -36,13 +36,11 @@ public sealed class StripeHostedInstanceLimitMigrationTests : IAsyncDisposable
         var internalGrant = await AddEntitlementAsync(BillingProviderNames.Internal, OrganizationSubscriptionState.Active, 3);
 
         await _sqlite.Database.MigrateAsync(SqliteMigration);
-        _sqlite.ChangeTracker.Clear();
 
-        Assert.Equal(1, (await _sqlite.OrganizationEntitlementSnapshots.SingleAsync(x => x.OrganizationId == stripe)).MaxInstances);
-        Assert.Null((await _sqlite.OrganizationEntitlementSnapshots.SingleAsync(x => x.OrganizationId == stripe)).ManagedHostingExpiresAt);
-        var internalEntitlement = await _sqlite.OrganizationEntitlementSnapshots.SingleAsync(x => x.OrganizationId == internalGrant);
-        Assert.Equal(3, internalEntitlement.MaxInstances);
-        Assert.Equal(Now.AddDays(30), internalEntitlement.ManagedHostingExpiresAt);
+        Assert.Equal(1, await ReadMaxInstancesAsync(stripe));
+        Assert.Null(await ReadExpiresAtAsync(stripe));
+        Assert.Equal(3, await ReadMaxInstancesAsync(internalGrant));
+        Assert.Equal(Now.AddDays(30), await ReadExpiresAtAsync(internalGrant));
     }
 
     [Fact]
@@ -86,23 +84,45 @@ public sealed class StripeHostedInstanceLimitMigrationTests : IAsyncDisposable
                 {state.ToString()}, {Now.UtcTicks}, {Now.AddDays(14).UtcTicks}, {activatedAt}, {1},
                 {Now.AddMinutes(1).UtcTicks}, {eventId}, {Now.UtcTicks}, {Now.AddMinutes(1).UtcTicks});
             """);
-        await _sqlite.Database.ExecuteSqlInterpolatedAsync($"""
-            INSERT INTO "OrganizationEntitlementSnapshots" (
-                "Id", "OrganizationId", "SubscriptionId", "SubscriptionState", "CanCreateCustomSources",
-                "MaxSources", "MaxWorkspaces", "MaxInstances", "ManagedHostingEnabled", "ManagedHostingExpiresAt",
-                "DeploymentTargetsEnabled", "PrivateFeedsEnabled", "SyncedAt", "CreatedAt", "UpdatedAt")
-            VALUES (
-                {Guid.NewGuid()}, {organization.Id}, {subscriptionId}, {state.ToString()}, {true},
-                {1}, {1}, {maxInstances}, {true}, {Now.AddDays(30).UtcTicks},
-                {true}, {false}, {Now.AddMinutes(1).UtcTicks}, {Now.UtcTicks}, {Now.AddMinutes(1).UtcTicks});
-            """);
-
-        var entitlement = await _sqlite.OrganizationEntitlementSnapshots.SingleAsync(x => x.OrganizationId == organization.Id);
-        entitlement.MaxInstances = maxInstances;
-        if (provider == BillingProviderNames.Stripe)
-            entitlement.ManagedHostingExpiresAt = Now.AddDays(30);
-        await _sqlite.SaveChangesAsync();
+        await InsertLegacyEntitlementAsync(organization.Id, subscriptionId, state, maxInstances);
         return organization.Id;
+    }
+
+    private async Task InsertLegacyEntitlementAsync(
+        Guid organizationId,
+        Guid subscriptionId,
+        OrganizationSubscriptionState state,
+        int maxInstances)
+    {
+        var snapshotId = Guid.NewGuid();
+        var expiresAt = Now.AddDays(30).UtcTicks;
+        var syncedAt = Now.AddMinutes(1).UtcTicks;
+        await _sqlite.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO OrganizationEntitlementSnapshots
+                (Id, OrganizationId, CanCreateCustomSources, MaxSources, MaxWorkspaces, MaxInstances,
+                 PrivateFeedsEnabled, ManagedHostingEnabled, ManagedHostingExpiresAt, DeploymentTargetsEnabled,
+                 SubscriptionState, SubscriptionId, SyncedAt, CreatedAt, UpdatedAt)
+            VALUES
+                ({snapshotId}, {organizationId}, 1, 1, 1, {maxInstances}, 0, 1, {expiresAt}, 1,
+                 {state.ToString()}, {subscriptionId}, {syncedAt}, {Now.UtcTicks}, {syncedAt});
+            """);
+    }
+
+    private Task<int> ReadMaxInstancesAsync(Guid organizationId) =>
+        _sqlite.Database.SqlQuery<int>($"""
+            SELECT "MaxInstances" AS "Value"
+            FROM OrganizationEntitlementSnapshots
+            WHERE OrganizationId = {organizationId}
+            """).SingleAsync();
+
+    private async Task<DateTimeOffset?> ReadExpiresAtAsync(Guid organizationId)
+    {
+        var ticks = await _sqlite.Database.SqlQuery<long?>($"""
+            SELECT "ManagedHostingExpiresAt" AS "Value"
+            FROM OrganizationEntitlementSnapshots
+            WHERE OrganizationId = {organizationId}
+            """).SingleAsync();
+        return ticks is null ? null : new DateTimeOffset(ticks.Value, TimeSpan.Zero);
     }
 
     public async ValueTask DisposeAsync()

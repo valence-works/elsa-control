@@ -10,9 +10,9 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 
 public sealed class BackfillSharedPlacementAssignmentsMigrationTests
 {
-    private const string PreviousSqliteMigration = "20261015190000_AddSharedAllowance";
+    private const string PreviousSqliteMigration = "20261015191000_AddSharedAllowance";
     private const string SqliteMigration = "20261015200000_BackfillSharedPlacementAssignments";
-    private const string PreviousSqlServerMigration = "20261015190001_AddSharedAllowance";
+    private const string PreviousSqlServerMigration = "20261015191001_AddSharedAllowance";
     private const string SqlServerMigration = "20261015200001_BackfillSharedPlacementAssignments";
 
     [Fact]

@@ -11,7 +11,7 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations;
 /// ADR-0017 Amendment 1. Existing entitlement rows keep a null allowance (zero).
 /// </summary>
 [DbContext(typeof(CatalogDbContext))]
-[Migration("20261015190000_AddSharedAllowance")]
+[Migration("20261015191000_AddSharedAllowance")]
 public sealed class AddSharedAllowance : Migration
 {
     /// <inheritdoc />
