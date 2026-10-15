@@ -80,7 +80,7 @@ public static class ManagedElsaInstanceEndpoints
             }
             return Results.Ok(new ManagedElsaInstanceListResponse(items, currentPage, currentPageSize, pageResult.TotalCount,
                 offset + currentPageSize < pageResult.TotalCount));
-        }).RequireWorkspaceAccess().AllowCloudBff();
+        }).RequireWorkspaceAccess().AllowCloudBff().AllowHubBff();
 
         group.MapGet("/onboarding-options", async (
             Guid workspaceId,

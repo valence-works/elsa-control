@@ -37,7 +37,8 @@ public static class CloudCompatibilityEndpoints
         })
             .WithTags("Cloud Compatibility")
             .RequireAuthorization()
-            .AllowCloudBff();
+            .AllowCloudBff()
+            .AllowHubBff();
 
         return endpoints;
     }

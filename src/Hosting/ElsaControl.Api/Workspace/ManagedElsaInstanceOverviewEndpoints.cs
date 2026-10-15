@@ -204,7 +204,7 @@ public static class ManagedElsaInstanceOverviewEndpoints
                 applyGate);
             context.Response.Headers.ETag = StrongETag(instance.Version);
             return Results.Ok(response);
-        }).RequireWorkspaceAccess().AllowCloudBff();
+        }).RequireWorkspaceAccess().AllowCloudBff().AllowHubBff();
 
         group.MapGet("/{instanceId:guid}/available-releases", async (
             Guid workspaceId,
