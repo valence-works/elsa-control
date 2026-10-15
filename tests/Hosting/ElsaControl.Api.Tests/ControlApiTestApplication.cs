@@ -69,7 +69,13 @@ internal sealed class ControlApiTestApplication : WebApplicationFactory<Program>
                 [$"{ControlIdentityDefaults.ConfigurationSection}:RequireHttpsMetadata"] = "false",
                 [TrustedHeaderWorkspaceIdentityReader.EnabledConfigurationKey] = "true",
                 [TrustedHeaderWorkspaceIdentityReader.AllowedProxyNetworksConfigurationKey] = "127.0.0.1/32,::1/128",
-                [StripeBillingOptions.ExpectedModeConfigurationKey] = StripeBillingOptions.TestMode
+                [StripeBillingOptions.ExpectedModeConfigurationKey] = StripeBillingOptions.TestMode,
+                // Shared hosts reuse one in-memory limiter. Keep lifecycle windows wide so
+                // existing instance tests are not coupled to the production 60/minute default.
+                [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIp:PermitLimit"] = "10000",
+                [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIp:Window"] = "00:01:00",
+                [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIdentity:PermitLimit"] = "10000",
+                [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIdentity:Window"] = "00:01:00"
             };
             foreach (var (key, value) in _configuration)
                 values[key] = value;

@@ -1033,6 +1033,34 @@ public sealed class ManagedElsaHandoffTests
     }
 
     [Fact]
+    public async Task Owner_handoff_through_the_real_authorizer_succeeds_and_an_outsider_is_denied()
+    {
+        var setup = await SeedManagedInstanceAsync(
+            ElsaDesiredLifecycle.Running,
+            ElsaObservedLifecycle.Ready,
+            ElsaInstanceHealth.Healthy,
+            bind: true);
+        await using var app = setup.App;
+        var request = new ManagedElsaHandoffIssueRequest(
+            setup.OrganizationId,
+            setup.InstanceId,
+            setup.Audience,
+            setup.RedirectUri,
+            ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier));
+
+        using var owner = await setup.Client.PostControlJsonAsync("/api/managed-elsa/handoff/issue", request);
+        using var outsider = await app.CreateControlIdentityClient("managed-outsider")
+            .PostControlJsonAsync("/api/managed-elsa/handoff/issue", request);
+
+        Assert.Equal(HttpStatusCode.OK, owner.StatusCode);
+        var issued = await owner.Content.ReadControlJsonAsync<ManagedElsaHandoffIssueResponse>();
+        Assert.False(string.IsNullOrWhiteSpace(issued?.Token));
+        Assert.Equal(HttpStatusCode.Forbidden, outsider.StatusCode);
+        using var body = JsonDocument.Parse(await outsider.Content.ReadAsStringAsync());
+        Assert.Equal("handoff.denied", body.RootElement.GetProperty("code").GetString());
+    }
+
+    [Fact]
     public async Task Handoff_endpoint_rejects_cross_organization_target()
     {
         var authorizer = new FakeHandoffAuthorizer(Guid.NewGuid(), Guid.NewGuid());

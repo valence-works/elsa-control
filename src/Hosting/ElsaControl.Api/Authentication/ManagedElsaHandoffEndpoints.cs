@@ -8,7 +8,7 @@ public static class ManagedElsaHandoffEndpoints
     {
         var group = endpoints.MapGroup("/api/managed-elsa/handoff")
             .WithTags("Managed Elsa Identity Handoff")
-            .RequireRateLimiting("managed-elsa-handoff");
+            .RequireRateLimiting(ManagedElsaHandoffRateLimitDefaults.PolicyName);
 
         group.MapPost("/issue", async (
             HttpContext context,
