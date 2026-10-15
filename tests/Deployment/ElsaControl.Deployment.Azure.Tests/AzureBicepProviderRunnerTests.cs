@@ -8,7 +8,7 @@ using ElsaControl.RuntimeBuilder.Abstractions.Plans;
 
 namespace ElsaControl.Deployment.Azure.Tests;
 
-public sealed class AzureBicepProviderRunnerTests : IDisposable
+public sealed partial class AzureBicepProviderRunnerTests : IDisposable
 {
     private const string OwnedGroupTags = "{\"managed-by\":\"elsa-control\",\"owner\":\"elsa-control\",\"workload-name\":\"proof\",\"sqlBootstrapObjectId\":\"11111111-1111-1111-1111-111111111111\"}";
     private const string EmptyDeletedWorkspaces = """{"value":[]}""";

@@ -733,6 +733,45 @@ Set the **`test` GitHub environment** variables
 passes them only for `test` and fails if any of those variables is set for
 any other target.
 
+### Staging late-success Workload wait lever
+
+Control can shorten the Workload-step wait for one staging allowlisted
+workspace so a late ARM `Succeeded` can auto-resume with no Recover. The
+lever stays off unless all of these are true:
+
+- The deploy pipeline set `Staging:LateSuccessLever:Enabled` and
+  `Staging:LateSuccessLever:AllowedWorkspaceIds`. Those settings come only
+  from the app-mode apply helper; Bicep and committed appsettings keep the
+  lever off.
+- The pipeline target is `test`.
+- Control's configured Stripe secret key starts with `sk_test_`. The prefix
+  is compared only; the key is never logged.
+- The workspace is on the allowlist and is not the staging Hosted smoke
+  owner workspace.
+
+This lever has its own flag and workspace allowlist. The billing lever, the
+recovery lever and this lever never enable each other. Only the Workload
+step wait changes (`min` of the configured Workload timeout and
+`WorkloadWait`, default 00:00:30, range 00:00:15–00:05:00). Foundation,
+AcrPull, SeedSecrets, Sql*, Health, Promotion, Delete and `CommandTimeout`
+stay as they are. The deployment is still submitted with `--no-wait`; the
+runner never cancels or resubmits. When the override applies, the runner
+records one allow-listed diagnostic `staging.late-success-lever.applied`
+with no workspace, instance or subscription identifiers.
+
+Set the **`test` GitHub environment** variables
+`STAGING_LATE_SUCCESS_LEVER_ENABLED`,
+`STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS`,
+`STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT`, and
+`STAGING_SMOKE_OWNER_WORKSPACE_ID`. The Azure Control API Deploy
+workflow passes them only for `test` and fails if any of those variables is
+set for any other target. When the allowlist is non-empty, the smoke-owner
+workspace id is required and the deploy fails closed if it is missing or on
+the allowlist. Leave a workspace on the allowlist only for the
+QA run. Turn the lever off afterwards: reset the four variables to
+empty/`false` and dispatch `azure-api-deploy` (app) again so the
+`Staging__LateSuccessLever__*` app settings are gone.
+
 ### Multi-tenant Microsoft Entra sign-in (guided design partners)
 
 Control can accept work or school sign-ins from customer Microsoft Entra tenants, so a

@@ -1,4 +1,6 @@
 using ElsaControl.Api.Authentication;
+using ElsaControl.Api.OrganizationBilling;
+using ElsaControl.Billing.Stripe;
 using ElsaControl.Deployment.Azure;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -91,11 +93,17 @@ internal static class AzureProviderRunnerComposition
             new ManagedIdentityAzureSecretResolver(
                 provider.GetRequiredService<IAzureSecretAuthorizationStore>(),
                 provider.GetRequiredService<IAzureKeyVaultSecretReader>()));
+        var lateSuccessOptions = configuration.GetSection(StagingLateSuccessLeverOptions.ConfigurationSection)
+            .Get<StagingLateSuccessLeverOptions>() ?? new();
+        var stripe = configuration.GetSection(StripeBillingOptions.ConfigurationSection)
+            .Get<StripeBillingOptions>() ?? new();
+        var lateSuccessLever = StagingLateSuccessLeverFactory.Create(lateSuccessOptions, stripe);
         services.AddScoped<AzureBicepProviderRunner>(provider =>
             new AzureBicepProviderRunner(
                 options,
                 scope,
-                provider.GetRequiredService<IAzureSecretResolver>()));
+                provider.GetRequiredService<IAzureSecretResolver>(),
+                lateSuccessLever));
         services.AddScoped<IAzureProviderRunner>(provider =>
             provider.GetRequiredService<AzureBicepProviderRunner>());
         services.AddScoped<IAzureProviderRecoveryObserver>(provider =>

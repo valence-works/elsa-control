@@ -304,6 +304,9 @@ builder.Services.AddHostedService<StagingBillingLifecycleLeverConfigurationValid
 builder.Services.Configure<StagingRecoveryLifecycleLeverOptions>(
     builder.Configuration.GetSection(StagingRecoveryLifecycleLeverOptions.ConfigurationSection));
 builder.Services.AddHostedService<StagingRecoveryLifecycleLeverConfigurationValidator>();
+builder.Services.Configure<StagingLateSuccessLeverOptions>(
+    builder.Configuration.GetSection(StagingLateSuccessLeverOptions.ConfigurationSection));
+builder.Services.AddHostedService<StagingLateSuccessLeverConfigurationValidator>();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<AdminApiKeyValidator>();
 builder.Services.AddSingleton<BuilderClientApiKeyValidator>();

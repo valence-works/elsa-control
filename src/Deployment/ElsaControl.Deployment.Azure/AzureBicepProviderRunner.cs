@@ -48,12 +48,14 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     private readonly IAzureCommandProcess _process;
     private readonly IAzureSecretResolver _secretResolver;
     private readonly TimeProvider _timeProvider;
+    private readonly StagingLateSuccessLever _lateSuccessLever;
 
     public AzureBicepProviderRunner(
         AzureProviderRunnerOptions options,
         AzureProviderTargetScope scope,
-        IAzureSecretResolver? secretResolver = null)
-        : this(options, scope, new AzureCommandProcess(options.CommandTimeout, options.MaximumOutputCharacters), secretResolver)
+        IAzureSecretResolver? secretResolver = null,
+        StagingLateSuccessLever? lateSuccessLever = null)
+        : this(options, scope, new AzureCommandProcess(options.CommandTimeout, options.MaximumOutputCharacters), secretResolver, timeProvider: null, lateSuccessLever)
     {
     }
 
@@ -62,13 +64,15 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
         AzureProviderTargetScope scope,
         IAzureCommandProcess process,
         IAzureSecretResolver? secretResolver = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        StagingLateSuccessLever? lateSuccessLever = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _scope = scope ?? throw new ArgumentNullException(nameof(scope));
         _process = process ?? throw new ArgumentNullException(nameof(process));
         _secretResolver = secretResolver ?? new UnconfiguredAzureSecretResolver();
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _lateSuccessLever = lateSuccessLever ?? StagingLateSuccessLever.Disabled;
         _options.Validate();
         _scope.Validate();
     }
@@ -1631,10 +1635,12 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             return revision.Error;
 
         var deploymentName = WorkloadDeploymentName(command);
+        var waitLimit = _lateSuccessLever.WorkloadWaitLimit(_options.WorkloadDeploymentTimeout, command.Context.WorkspaceId);
+        var leverApplied = _lateSuccessLever.AppliesTo(command.Context.WorkspaceId);
         var deployment = await DeployAndAwaitAsync(command, AzureProviderOperationPhase.WorkloadReady, deploymentName,
-            WorkloadDeploymentArguments(command, deploymentName, revision.Suffix!, stable), _options.WorkloadDeploymentTimeout, command.Resources, cancellationToken);
+            WorkloadDeploymentArguments(command, deploymentName, revision.Suffix!, stable), waitLimit, command.Resources, cancellationToken);
         if (deployment.Error is not null)
-            return deployment.Error;
+            return leverApplied ? WithLateSuccessLeverApplied(deployment.Error) : deployment.Error;
 
         AzureProviderResourceReferences resources;
         try
@@ -1646,16 +1652,28 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
             return Failed(command, AzureProviderOperationPhase.WorkloadReady, "azure.workload.output-invalid", exception.Message);
         }
         if (!HasExpectedManagedHandoffCallback(command, deployment.Outputs!))
-            return Failed(command, AzureProviderOperationPhase.WorkloadReady, "azure.handoff.callback-mismatch",
-                "The workload handoff callback is not the callback of its verified endpoint origin.", resources);
+            return TagLateSuccess(Failed(command, AzureProviderOperationPhase.WorkloadReady, "azure.handoff.callback-mismatch",
+                "The workload handoff callback is not the callback of its verified endpoint origin.", resources), leverApplied);
 
         var adminReady = await EnsureExactSqlBootstrapAdminAsync(command, allowMissingServer: false, cancellationToken: cancellationToken);
         if (adminReady is null)
-            return Uncertain(command, AzureProviderOperationPhase.WorkloadReady, "azure.sql.admin-verification-uncertain", "The SQL bootstrap administrator could not be confirmed after workload deployment.", resources);
+            return TagLateSuccess(Uncertain(command, AzureProviderOperationPhase.WorkloadReady, "azure.sql.admin-verification-uncertain", "The SQL bootstrap administrator could not be confirmed after workload deployment.", resources), leverApplied);
         if (!adminReady.Value)
-            return Failed(command, AzureProviderOperationPhase.WorkloadReady, "azure.sql.admin-invalid", "The SQL administrator does not match the governed bootstrap identity.", resources);
+            return TagLateSuccess(Failed(command, AzureProviderOperationPhase.WorkloadReady, "azure.sql.admin-invalid", "The SQL administrator does not match the governed bootstrap identity.", resources), leverApplied);
 
-        return Completed(command, AzureProviderOperationPhase.WorkloadReady, resources);
+        return TagLateSuccess(Completed(command, AzureProviderOperationPhase.WorkloadReady, resources), leverApplied);
+    }
+
+    private static AzureProviderRunnerResult TagLateSuccess(AzureProviderRunnerResult result, bool leverApplied) =>
+        leverApplied ? WithLateSuccessLeverApplied(result) : result;
+
+    private static AzureProviderRunnerResult WithLateSuccessLeverApplied(AzureProviderRunnerResult result)
+    {
+        var extra = new AzureProviderDiagnostic(
+            StagingLateSuccessLeverDefaults.AppliedCode,
+            StagingLateSuccessLeverDefaults.AppliedCode);
+        IReadOnlyList<AzureProviderDiagnostic> combined = [..result.Diagnostics, extra];
+        return result with { Diagnostics = AzureProviderSafeDiagnostics.Normalize(combined) };
     }
 
     private async Task<AzureProviderRunnerResult> RunHealthAsync(
@@ -3833,11 +3851,11 @@ public sealed class AzureProviderRunner : IAzureProviderRunner, IAzureProviderRe
 {
     private readonly AzureBicepProviderRunner _inner;
 
-    public AzureProviderRunner(AzureProviderRunnerOptions options, AzureProviderTargetScope scope, IAzureSecretResolver? secretResolver = null) =>
-        _inner = new AzureBicepProviderRunner(options, scope, secretResolver);
+    public AzureProviderRunner(AzureProviderRunnerOptions options, AzureProviderTargetScope scope, IAzureSecretResolver? secretResolver = null, StagingLateSuccessLever? lateSuccessLever = null) =>
+        _inner = new AzureBicepProviderRunner(options, scope, secretResolver, lateSuccessLever);
 
-    internal AzureProviderRunner(AzureProviderRunnerOptions options, AzureProviderTargetScope scope, IAzureCommandProcess process, IAzureSecretResolver? secretResolver = null) =>
-        _inner = new AzureBicepProviderRunner(options, scope, process, secretResolver);
+    internal AzureProviderRunner(AzureProviderRunnerOptions options, AzureProviderTargetScope scope, IAzureCommandProcess process, IAzureSecretResolver? secretResolver = null, StagingLateSuccessLever? lateSuccessLever = null) =>
+        _inner = new AzureBicepProviderRunner(options, scope, process, secretResolver, lateSuccessLever: lateSuccessLever);
 
     public Task<AzureProviderRunnerResult> RunAsync(AzureProviderRunnerCommand command, CancellationToken cancellationToken = default) =>
         _inner.RunAsync(command, cancellationToken);
