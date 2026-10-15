@@ -68,8 +68,9 @@ public sealed class StripeHostedInstanceLimitMigrationTests : IAsyncDisposable
         _sqlite.Organizations.Add(organization);
         await _sqlite.SaveChangesAsync();
 
-        // Seed the pre-cap schema without later subscription columns (including
-        // webhook source) so this fixture stays valid after later billing migrations.
+        // Seed the pre-cap schema without later subscription or entitlement
+        // columns (WebhookSource, MaxSharedTenants, inbox) so this fixture
+        // stays valid after later billing and Shared-allowance migrations.
         var subscriptionId = Guid.NewGuid();
         var customerReference = $"cus-{organization.Id:N}"[..20];
         var subscriptionReference = $"sub-{organization.Id:N}"[..20];
