@@ -26,7 +26,7 @@ public sealed class ElsaInstanceSharedAllowanceSqlServerTests
         Guid shardId;
         await using (var setup = CreateContext(database.ConnectionString))
         {
-            await setup.Database.EnsureCreatedAsync();
+            await setup.Database.MigrateAsync();
             var workspace = await CreateWorkspaceAsync(setup, maxInstances: 2, maxSharedTenants: 2);
             var shard = new ElsaSharedShardEntity
             {
@@ -89,12 +89,19 @@ public sealed class ElsaInstanceSharedAllowanceSqlServerTests
         int maxInstances,
         int? maxSharedTenants)
     {
-        var workspace = new Workspace { Name = "Shared allowance sql " + Guid.NewGuid().ToString("N") };
+        var organization = new Organization { Name = "Shared allowance sql org " + Guid.NewGuid().ToString("N") };
+        db.Organizations.Add(organization);
+        var workspace = new Workspace
+        {
+            Name = "Shared allowance sql " + Guid.NewGuid().ToString("N"),
+            OrganizationId = organization.Id,
+            Organization = organization
+        };
         db.Workspaces.Add(workspace);
         await db.SaveChangesAsync();
         db.OrganizationEntitlementSnapshots.Add(new OrganizationEntitlementSnapshot
         {
-            OrganizationId = workspace.OrganizationId,
+            OrganizationId = organization.Id,
             ManagedHostingEnabled = true,
             SubscriptionState = OrganizationSubscriptionState.Active,
             MaxInstances = maxInstances,
@@ -126,7 +133,11 @@ public sealed class ElsaInstanceSharedAllowanceSqlServerTests
 
     private static CatalogDbContext CreateContext(string connectionString) =>
         new(new DbContextOptionsBuilder<CatalogDbContext>()
-            .UseSqlServer(connectionString, sqlServer => sqlServer.EnableRetryOnFailure())
+            .UseSqlServer(connectionString, sqlServer =>
+            {
+                sqlServer.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqlServerMigrationsAssembly);
+                sqlServer.EnableRetryOnFailure();
+            })
             .Options);
 
     private static string GetLoopbackMasterConnectionString()
