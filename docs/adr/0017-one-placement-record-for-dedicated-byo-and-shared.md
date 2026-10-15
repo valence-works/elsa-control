@@ -552,6 +552,7 @@ the Console.
 ## Amendment 1 (2026-10-15): Shared allowance
 
 Status: **Proposed.** Becomes Accepted when Elsa Control Code Review gives Verdict: APPROVE on the exact head and required CI is green, per .github/reviewers.md.
+Implementation: #834.
 
 ### Context
 
@@ -571,7 +572,7 @@ Status: **Proposed.** Becomes Accepted when Elsa Control Code Review gives Verdi
 5. **Interaction with I1.** As ruled on #818: updates (`UpdateIntent`, `ApproveMinorUpgrade`, `MajorMigration`) refuse a placement change with `PlacementChangeRequiresMove`. They never change the count, and the allowance isn't checked on update. Placement changes only through an explicit move. A move is admitted only if the **target** allowance has room (the Shared allowance for a move into `shared-shard` `standard`, `MaxInstances` for a move into `dedicated-valence` or `byo-subscription`). A same-kind Shared to Shared move, including a same-shard package-set change, needs no extra room, because it counts once.
 6. **Interaction with the shard caps (I6).** Per-shard capacity and the provisional package-set group cap for `standard` shards limit *where* a tenant can be placed. The Shared allowance limits *how many* an organization holds. The allowance is checked first. If it passes but no eligible shard has room, the result is `placement.shard.capacity`, and the count doesn't change because the create rolls back. Lab shards, lab admission (I9) and the lab entitlement are unaffected.
 7. **Interaction with the Dedicated limit.** The Shared allowance and `MaxInstances` are independent. An organization at its Dedicated limit can still create a Shared tenant (#810, #818), and an organization at its Shared limit can still create a Dedicated engine.
-8. **Shared trial gate.** The Shared trial (#633) doesn't ship until this amendment is Accepted and an implementation leaf has enforced it in code. The PR names that leaf, filed separately.
+8. **Shared trial gate.** The Shared trial (#633) doesn't ship until this amendment is Accepted and an implementation leaf has enforced it in code. Implementation: #834.
 
 ### Test sketches
 
