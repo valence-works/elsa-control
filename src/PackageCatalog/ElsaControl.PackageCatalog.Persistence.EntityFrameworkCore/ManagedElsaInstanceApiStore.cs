@@ -280,7 +280,9 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
         if (revalidated is null || !SameLifecycleTopology(snapshot, revalidated))
             throw new ElsaInstanceLifecycleTopologyChangedException();
 
-        return snapshot;
+        // Authority fields matched. Take snapshot freshness from the second read so a
+        // heartbeat or reconciler bump to UpdatedAt is not a retryable 409.
+        return revalidated;
     }
 
     private Task<ElsaInstanceLifecycleTopologySnapshot?> ReadLifecycleTopologyAsync(
@@ -456,7 +458,12 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
         snapshot.DesiredLifecycle == revalidated.DesiredLifecycle &&
         snapshot.ObservedLifecycle == revalidated.ObservedLifecycle &&
         snapshot.LastOperationId == revalidated.LastOperationId &&
-        snapshot.Operations.SequenceEqual(revalidated.Operations);
+        snapshot.Operations.Select(WithoutFreshnessClock).SequenceEqual(
+            revalidated.Operations.Select(WithoutFreshnessClock));
+
+    private static ElsaInstanceLifecycleTopologyOperation WithoutFreshnessClock(
+        ElsaInstanceLifecycleTopologyOperation operation) =>
+        operation with { UpdatedAt = null };
 
     public async Task<IReadOnlyList<ElsaInstanceIntentRevisionSummary>> ListRevisionsAsync(
         Guid workspaceId,

@@ -660,6 +660,14 @@ class StagingControlRollbackTests(unittest.TestCase):
             f'"{body}" "{headers}" "{status}"', {},
         )
 
+    @staticmethod
+    def _without_header(raw_headers: str, name: str) -> str:
+        prefix = name.lower() + ":"
+        return "".join(
+            line for line in raw_headers.splitlines(keepends=True)
+            if not line.lower().startswith(prefix)
+        )
+
     def test_serving_policy_separates_required_from_advertised_optional_capabilities(self) -> None:
         with self.cloud_policy_fixture() as (_, body, headers):
             for optional in (["overview", "cleanup"], ["overview"], ["cleanup"], []):
@@ -697,6 +705,36 @@ class StagingControlRollbackTests(unittest.TestCase):
             )
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual("compatible", result.stdout)
+
+    def test_serving_policy_requires_both_capability_headers(self) -> None:
+        # #786 producer contract: a compatible no-store response must carry both
+        # classification headers. A present-but-empty optional list is allowed;
+        # a missing header is an explicit refusal.
+        with self.cloud_policy_fixture() as (_, body, headers):
+            original = headers.read_text()
+            present = self.parse_cloud_policy(body, headers)
+            self.assertEqual(0, present.returncode, present.stderr)
+            policy = json.loads(present.stdout)
+            self.assertEqual(["bootstrap", "billing"], policy["required"])
+            self.assertEqual(["overview", "cleanup"], policy["optional"])
+
+            missing_required = self._without_header(original, "X-Elsa-Cloud-Required-Capabilities")
+            headers.write_text(missing_required)
+            required_result = self.parse_cloud_policy(body, headers)
+            self.assertNotEqual(0, required_result.returncode)
+            self.assertEqual("", required_result.stdout)
+            self.assertIn("X-Elsa-Cloud-Required-Capabilities", required_result.stderr)
+            self.assertIn("missing", required_result.stderr.lower())
+            self.assertNotIn("private-sentinel", required_result.stderr)
+
+            missing_optional = self._without_header(original, "X-Elsa-Cloud-Optional-Capabilities")
+            headers.write_text(missing_optional)
+            optional_result = self.parse_cloud_policy(body, headers)
+            self.assertNotEqual(0, optional_result.returncode)
+            self.assertEqual("", optional_result.stdout)
+            self.assertIn("X-Elsa-Cloud-Optional-Capabilities", optional_result.stderr)
+            self.assertIn("missing", optional_result.stderr.lower())
+            self.assertNotIn("private-sentinel", optional_result.stderr)
 
     def test_serving_policy_uses_only_final_headers_and_accepts_empty_optional_policy(self) -> None:
         with self.cloud_policy_fixture() as (_, body, headers):

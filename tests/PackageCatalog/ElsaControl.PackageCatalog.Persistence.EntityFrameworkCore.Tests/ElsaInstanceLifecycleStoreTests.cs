@@ -235,10 +235,44 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         Assert.Null(projected);
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Lifecycle_topology_read_rejects_operation_drift_between_serializable_snapshots(bool timestampOnly)
+    [Fact]
+    public async Task Lifecycle_topology_read_does_not_treat_timestamp_only_change_as_topology_drift()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var workspace = await CreateWorkspaceAsync(db, "Topology freshness workspace");
+        var created = await new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now))
+            .CreateAsync(new ElsaInstanceCreateRequest(
+                workspace.OrganizationId,
+                workspace.Id,
+                "Topology freshness Elsa",
+                "topology-freshness-elsa",
+                CreateIntent(),
+                "topology-freshness-create"));
+        db.ChangeTracker.Clear();
+        var revalidationHookCalls = 0;
+        var fresherUpdatedAt = Now.AddSeconds(1);
+        var store = new EfCoreManagedElsaInstanceApiStore(db, async cancellationToken =>
+        {
+            revalidationHookCalls++;
+            await db.ElsaInstanceOperations
+                .Where(operation => operation.Id == created.Operation.Id)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(operation => operation.UpdatedAt, fresherUpdatedAt), cancellationToken);
+        });
+
+        var topology = await store.GetLifecycleTopologyAsync(workspace.Id, created.Instance.Id);
+
+        Assert.NotNull(topology);
+        Assert.Equal(fresherUpdatedAt, Assert.Single(topology.Operations).UpdatedAt);
+        Assert.Equal(created.Operation.AttemptNumber, Assert.Single(topology.Operations).AttemptNumber);
+        Assert.Equal(1, revalidationHookCalls);
+    }
+
+    [Fact]
+    public async Task Lifecycle_topology_read_rejects_authority_field_drift_between_serializable_snapshots()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -258,13 +292,11 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         var store = new EfCoreManagedElsaInstanceApiStore(db, async cancellationToken =>
         {
             revalidationHookCalls++;
-            var nextAttempt = created.Operation.AttemptNumber + (timestampOnly ? 0 : 1);
-            var updatedAt = timestampOnly ? Now.AddSeconds(1) : Now;
             await db.ElsaInstanceOperations
                 .Where(operation => operation.Id == created.Operation.Id)
                 .ExecuteUpdateAsync(setters => setters
-                    .SetProperty(operation => operation.AttemptNumber, nextAttempt)
-                    .SetProperty(operation => operation.UpdatedAt, updatedAt), cancellationToken);
+                    .SetProperty(operation => operation.AttemptNumber, created.Operation.AttemptNumber + 1)
+                    .SetProperty(operation => operation.UpdatedAt, Now), cancellationToken);
         });
 
         await Assert.ThrowsAsync<ElsaInstanceLifecycleTopologyChangedException>(() =>

@@ -426,6 +426,12 @@ MAX_HEADER_BYTES = 64 * 1024
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z", re.ASCII)
 STATUS_LINE = re.compile(r"HTTP/[0-9]+(?:\.[0-9]+)?[ \t]+([0-9]{3})(?:[ \t].*)?\Z", re.ASCII)
 HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z", re.ASCII)
+REQUIRED_CAPABILITY_HEADER = "X-Elsa-Cloud-Required-Capabilities"
+OPTIONAL_CAPABILITY_HEADER = "X-Elsa-Cloud-Optional-Capabilities"
+
+
+class MissingCapabilityHeader(Exception):
+    pass
 
 
 def read_bounded_regular_file(path, limit):
@@ -493,8 +499,12 @@ def parse_header_blocks(raw_headers):
     return blocks[-1]
 
 
-def one_header(headers, name):
+def one_header(headers, name, display_name=None):
     values = [value for header_name, value in headers if header_name == name.lower()]
+    if len(values) == 0:
+        raise MissingCapabilityHeader(
+            f"Cloud compatibility response is missing the {display_name or name} header; refusing rollback."
+        )
     if len(values) != 1:
         raise ValueError
     return values[0]
@@ -547,8 +557,14 @@ def main():
     if final_block["status"] != 200:
         raise ValueError
     headers = final_block["headers"]
-    required = capability_ids(one_header(headers, "x-elsa-cloud-required-capabilities"), allow_empty=False)
-    optional = capability_ids(one_header(headers, "x-elsa-cloud-optional-capabilities"), allow_empty=True)
+    required = capability_ids(
+        one_header(headers, "x-elsa-cloud-required-capabilities", REQUIRED_CAPABILITY_HEADER),
+        allow_empty=False,
+    )
+    optional = capability_ids(
+        one_header(headers, "x-elsa-cloud-optional-capabilities", OPTIONAL_CAPABILITY_HEADER),
+        allow_empty=True,
+    )
     required_set = set(required)
     optional_set = set(optional)
     if required_set & optional_set:
@@ -586,6 +602,9 @@ def main():
 
 try:
     main()
+except MissingCapabilityHeader as error:
+    sys.stderr.write(f"{error}\n")
+    sys.exit(1)
 except Exception:
     sys.stderr.write("Cloud compatibility response evidence was invalid.\n")
     sys.exit(1)
