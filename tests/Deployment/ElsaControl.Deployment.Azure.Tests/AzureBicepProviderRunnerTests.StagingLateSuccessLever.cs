@@ -176,14 +176,23 @@ public sealed partial class AzureBicepProviderRunnerTests
     [InlineData(AzureProviderRunnerStep.Health)]
     [InlineData(AzureProviderRunnerStep.Promotion)]
     [InlineData(AzureProviderRunnerStep.Cleanup)]
-    public void Late_success_wait_limit_is_unused_for_non_workload_steps(AzureProviderRunnerStep step)
+    public async Task Late_success_wait_limit_is_unused_for_non_workload_steps(AzureProviderRunnerStep step)
     {
-        var lever = ArmedLever();
+        var process = ProcessForNonWorkloadStep(step);
+        var originalTimeout = _fixture.Options.CommandTimeout;
+        var command = _fixture.Command(step, ResourcesForNonWorkloadStep(step)) with
+        {
+            Context = _fixture.Context with { WorkspaceId = LateSuccessAllowedWorkspace }
+        };
+
+        var result = await new AzureBicepProviderRunner(
+                _fixture.Options, _fixture.Scope, process, lateSuccessLever: ArmedLever())
+            .RunAsync(command);
+
         Assert.NotEqual(AzureProviderRunnerStep.Workload, step);
-        Assert.Equal(
-            TimeSpan.FromSeconds(30),
-            lever.WorkloadWaitLimit(_fixture.Options.WorkloadDeploymentTimeout, LateSuccessAllowedWorkspace));
-        Assert.Equal(_fixture.Options.CommandTimeout, _fixture.Options.CommandTimeout);
+        Assert.NotEqual(AzureProviderRunnerOutcome.Uncertain, result.Outcome);
+        Assert.Equal(originalTimeout, _fixture.Options.CommandTimeout);
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == StagingLateSuccessLeverDefaults.AppliedCode);
     }
 
     private static StagingLateSuccessLever ArmedLever(
@@ -233,5 +242,90 @@ public sealed partial class AzureBicepProviderRunnerTests
                 _fixture.Options, _fixture.Scope, process, timeProvider: clock, lateSuccessLever: lever)
             .RunAsync(command);
         return (result, process);
+    }
+
+    private AzureProviderResourceReferences ResourcesForNonWorkloadStep(AzureProviderRunnerStep step) =>
+        step switch
+        {
+            AzureProviderRunnerStep.AcrPull => _fixture.FoundationResources,
+            AzureProviderRunnerStep.SeedSecrets => RegistryReadyResources(),
+            AzureProviderRunnerStep.SqlFirewallCreate or
+                AzureProviderRunnerStep.SqlBootstrapScript or
+                AzureProviderRunnerStep.SqlFirewallCleanup => SqlFoundationResources(),
+            AzureProviderRunnerStep.Health or AzureProviderRunnerStep.Promotion => PromotionResources(),
+            AzureProviderRunnerStep.Cleanup => new(),
+            _ => throw new ArgumentOutOfRangeException(nameof(step), step, null)
+        };
+
+    private FakeCommandProcess ProcessForNonWorkloadStep(AzureProviderRunnerStep step)
+    {
+        var process = new FakeCommandProcess();
+        switch (step)
+        {
+            case AzureProviderRunnerStep.AcrPull:
+                process.Success(args => args.Contains("acr") && args.Contains("show"), _fixture.RegistryId);
+                process.Success(args => args.Contains("deployment") && args.Contains("create"),
+                    "{\"roleAssignmentId\":{\"value\":\"" + _fixture.RegistryRoleAssignmentId + "\"}}");
+                process.Success(args => args.Contains("role") && args.Contains("list"),
+                    "[{\"id\":\"" + _fixture.RegistryRoleAssignmentId + "\",\"scope\":\"" + _fixture.RegistryId +
+                    "\",\"principalId\":\"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\",\"roleDefinitionId\":\"/subscriptions/22222222-2222-2222-2222-222222222222/providers/Microsoft.Authorization/roleDefinitions/7f951dda-4ed3-4680-a7ca-43fe172d538d\"}]");
+                break;
+            case AzureProviderRunnerStep.SeedSecrets:
+                break;
+            case AzureProviderRunnerStep.SqlFirewallCreate:
+                process.Success(args => args.Contains("firewall-rule") && args.Contains("list"), "[]");
+                process.Success(args => args.Contains("firewall-rule") && args.Contains("create"));
+                process.Success(args => args.Contains("firewall-rule") && args.Contains("list"), ExactSqlBootstrapFirewall);
+                break;
+            case AzureProviderRunnerStep.SqlBootstrapScript:
+                process.Success(args => args.Contains("-?"), "Microsoft sqlcmd --authentication-method ActiveDirectoryDefault");
+                process.Success(args => args.Contains("--authentication-method"));
+                break;
+            case AzureProviderRunnerStep.SqlFirewallCleanup:
+                process.Success(args => args.Contains("firewall-rule") && args.Contains("list"), ExactSqlBootstrapFirewall);
+                process.Success(args => args.Contains("firewall-rule") && args.Contains("delete"));
+                process.Success(args => args.Contains("firewall-rule") && args.Contains("list"), "[]");
+                break;
+            case AzureProviderRunnerStep.Health:
+                process.Success(
+                    args => args.Contains("containerapp") && args.Contains("show") &&
+                            args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)),
+                    "proof-app.hash.azurecontainerapps.io");
+                process.Success(args => args.Contains("revision") && args.Contains("show"), "Healthy");
+                break;
+            case AzureProviderRunnerStep.Promotion:
+                process.Success(args => args.Any(x => x.Contains("fqdn", StringComparison.Ordinal)),
+                    "proof-app.hash.azurecontainerapps.io");
+                process.Success(args => args.Contains("revision") && args.Contains("show"), HealthyCandidateRevision);
+                process.Success(IsCandidateReadinessProbe, "Healthy");
+                process.Success(args => args.Contains("traffic") && args.Contains("set"));
+                process.Success(
+                    args => args.Contains("show") && args.Any(x => x.Contains("traffic", StringComparison.Ordinal)),
+                    "[{\"revisionName\":\"proof-app--candidate\",\"weight\":100},{\"revisionName\":\"proof-app--stable\",\"weight\":0}]");
+                process.Success(
+                    args => args.Contains("--fail") && args.Contains("https://proof-app.hash.azurecontainerapps.io/health"),
+                    "Healthy");
+                process.Success(IsActiveRevisionList, "[\"proof-app--candidate\",\"proof-app--stable\",\"proof-app--stale\"]");
+                process.Success(args => IsRevisionDeactivation(args, "proof-app--stable"));
+                process.Success(args => IsRevisionDeactivation(args, "proof-app--stale"));
+                process.Success(IsActiveRevisionList, "[\"proof-app--candidate\"]");
+                break;
+            case AzureProviderRunnerStep.Cleanup:
+                process.Success(args => args.Contains("group") && args.Contains("exists"), "true");
+                process.Success(args => args.Contains("group") && args.Contains("show"), OwnedGroupTags);
+                process.Success(args => args.Contains("resource") && args.Contains("list"), "[]");
+                WorkspaceShowNotFound(process);
+                process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
+                process.Success(args => args.Contains("group") && args.Contains("delete"));
+                process.Success(args => args.Contains("group") && args.Contains("exists"), "false");
+                process.Success(args => args.Contains("list-deleted"), "[]");
+                process.Success(args => args.Contains("list-deleted"), "[]");
+                process.Success(IsDeletedWorkspacesQuery, EmptyDeletedWorkspaces);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(step), step, null);
+        }
+
+        return process;
     }
 }

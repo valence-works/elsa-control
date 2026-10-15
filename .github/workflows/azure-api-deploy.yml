@@ -98,6 +98,7 @@ jobs:
       STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT: ${{ vars.STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT }}
       STAGING_SMOKE_OWNER_ORGANIZATION_ID: ${{ vars.STAGING_SMOKE_OWNER_ORGANIZATION_ID }}
       STAGING_SMOKE_OWNER_INSTANCE_ID: ${{ vars.STAGING_SMOKE_OWNER_INSTANCE_ID }}
+      STAGING_SMOKE_OWNER_WORKSPACE_ID: ${{ vars.STAGING_SMOKE_OWNER_WORKSPACE_ID }}
       CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
       EXPECTED_CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
       TELEMETRY_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.telemetry_action || 'what-if' }}
@@ -359,9 +360,9 @@ jobs:
           late_success_normalized=""
           late_success_enabled=""
           late_success_wait=""
-          if [ -n "$late_success_enabled_raw" ] || [ -n "$late_success_allowlist_raw" ] || [ -n "$late_success_wait_raw" ]; then
+          if [ -n "$late_success_enabled_raw" ] || [ -n "$late_success_allowlist_raw" ] || [ -n "$late_success_wait_raw" ] || [ -n "${STAGING_SMOKE_OWNER_WORKSPACE_ID:-}" ]; then
             if [ "$TARGET_ENVIRONMENT" != "test" ]; then
-              echo "::error::STAGING_LATE_SUCCESS_LEVER_ENABLED, STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS, and STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT must be unset for ${TARGET_ENVIRONMENT}; production ships the lever off."
+              echo "::error::STAGING_LATE_SUCCESS_LEVER_ENABLED, STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS, STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT, and STAGING_SMOKE_OWNER_WORKSPACE_ID must be unset for ${TARGET_ENVIRONMENT}; production ships the lever off."
               exit 1
             fi
           fi
@@ -414,6 +415,25 @@ jobs:
             fi
             late_success_wait="$late_success_wait_raw"
           fi
+
+          smoke_owner_workspace_id="${STAGING_SMOKE_OWNER_WORKSPACE_ID:-}"
+          if [ -n "$smoke_owner_workspace_id" ]; then
+            if [[ ! "$smoke_owner_workspace_id" =~ $pairing_guid_pattern ]] || [ "$smoke_owner_workspace_id" = "00000000-0000-0000-0000-000000000000" ]; then
+              echo "::error::STAGING_SMOKE_OWNER_WORKSPACE_ID must be a GUID workspace id."
+              exit 1
+            fi
+          fi
+          if [ "$TARGET_ENVIRONMENT" = "test" ] && [ "$late_success_allowlist_count" -gt 0 ]; then
+            if [ -z "$smoke_owner_workspace_id" ]; then
+              echo "::error::STAGING_SMOKE_OWNER_WORKSPACE_ID must be set on the test environment so the staging late-success lever allowlist can be checked against the Hosted smoke owner workspace."
+              exit 1
+            fi
+            if [[ ",${late_success_normalized,,}," == *",${smoke_owner_workspace_id,,},"* ]]; then
+              echo "::error::STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS must not include the staging Hosted smoke owner workspace."
+              exit 1
+            fi
+          fi
+
           if [ -n "${GITHUB_OUTPUT:-}" ]; then
             {
               printf 'staging_late_success_lever_enabled=%s\n' "$late_success_enabled"
@@ -1004,6 +1024,7 @@ jobs:
           STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS: ${{ steps.deployment-config.outputs.staging_late_success_lever_allowlist }}
           STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT: ${{ steps.deployment-config.outputs.staging_late_success_lever_wait }}
           STAGING_SMOKE_OWNER_INSTANCE_ID: ${{ vars.STAGING_SMOKE_OWNER_INSTANCE_ID }}
+          STAGING_SMOKE_OWNER_WORKSPACE_ID: ${{ vars.STAGING_SMOKE_OWNER_WORKSPACE_ID }}
           BILLING_EXPECTED_MODE: ${{ steps.deployment-config.outputs.billing_expected_mode }}
           PRODUCTION_BILLING_CAPTURE_PATH: ${{ runner.temp }}/elsa-control-production-billing.json
         shell: bash

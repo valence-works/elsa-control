@@ -440,6 +440,7 @@ fi
                     "STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS": "",
                     "STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT": "",
                     "STAGING_SMOKE_OWNER_INSTANCE_ID": "",
+                    "STAGING_SMOKE_OWNER_WORKSPACE_ID": "",
                     "AZURE_HEALTH_ATTEMPTS": "2",
                     "AZURE_HEALTH_RETRY_SECONDS": "0",
                 }
@@ -641,6 +642,7 @@ fi
         self.assertIn("STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT: ${{ vars.STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT }}", self.source)
         self.assertIn("STAGING_SMOKE_OWNER_ORGANIZATION_ID: ${{ vars.STAGING_SMOKE_OWNER_ORGANIZATION_ID }}", self.source)
         self.assertIn("STAGING_SMOKE_OWNER_INSTANCE_ID: ${{ vars.STAGING_SMOKE_OWNER_INSTANCE_ID }}", self.source)
+        self.assertIn("STAGING_SMOKE_OWNER_WORKSPACE_ID: ${{ vars.STAGING_SMOKE_OWNER_WORKSPACE_ID }}", self.source)
         self.assertIn(
             "STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT: ${{ vars.STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT }}",
             self.source,
@@ -709,6 +711,13 @@ fi
         self.assertIn(
             "STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT: ${{ steps.deployment-config.outputs.staging_late_success_lever_wait }}",
             self.source,
+        )
+        deploy_env_start = self.source.index("        env:\n", deploy_start)
+        deploy_env_end = self.source.index("        shell: bash", deploy_env_start)
+        deploy_env = self.source[deploy_env_start:deploy_env_end]
+        self.assertIn(
+            "STAGING_SMOKE_OWNER_WORKSPACE_ID: ${{ vars.STAGING_SMOKE_OWNER_WORKSPACE_ID }}",
+            deploy_env,
         )
 
     def test_cloud_account_issuer_accepts_exact_supabase_projects_only(self) -> None:
@@ -1220,11 +1229,20 @@ fi
         self.assertNotEqual(0, production_wait.returncode)
         self.assertIn("must be unset", production_wait.stdout + production_wait.stderr)
 
+        production_smoke_owner, _, _ = run_check(
+            TARGET_ENVIRONMENT="production",
+            STAGING_SMOKE_OWNER_WORKSPACE_ID=smoke,
+        )
+        self.assertNotEqual(0, production_smoke_owner.returncode)
+        self.assertIn("must be unset", production_smoke_owner.stdout + production_smoke_owner.stderr)
+        self.assertNotIn(smoke, production_smoke_owner.stdout + production_smoke_owner.stderr)
+
         production_empty, production_output, production_env = run_check(
             TARGET_ENVIRONMENT="production",
             STAGING_LATE_SUCCESS_LEVER_ENABLED="",
             STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS="",
             STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT="",
+            STAGING_SMOKE_OWNER_WORKSPACE_ID="",
         )
         self.assertEqual(0, production_empty.returncode, production_empty.stderr)
         self.assertRegex(production_output, r"(?m)^staging_late_success_lever_enabled=$")
@@ -1252,6 +1270,7 @@ fi
             STAGING_LATE_SUCCESS_LEVER_ENABLED="true",
             STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS=rehearsal,
             STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT="00:00:14",
+            STAGING_SMOKE_OWNER_WORKSPACE_ID=smoke,
             **staging_stripe,
         )
         self.assertNotEqual(0, wait_under.returncode)
@@ -1263,6 +1282,7 @@ fi
             STAGING_LATE_SUCCESS_LEVER_ENABLED="true",
             STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS=rehearsal,
             STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT="00:05:01",
+            STAGING_SMOKE_OWNER_WORKSPACE_ID=smoke,
             **staging_stripe,
         )
         self.assertNotEqual(0, wait_over.returncode)
@@ -1277,6 +1297,44 @@ fi
         self.assertNotEqual(0, malformed_wait.returncode)
         self.assertIn("must be a TimeSpan between 00:00:15 and 00:05:00", malformed_wait.stdout + malformed_wait.stderr)
 
+        missing_smoke, _, _ = run_check(
+            TARGET_ENVIRONMENT="test",
+            STAGING_LATE_SUCCESS_LEVER_ENABLED="true",
+            STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS=rehearsal,
+            STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT="00:00:30",
+            **staging_stripe,
+        )
+        self.assertNotEqual(0, missing_smoke.returncode)
+        missing_combined = missing_smoke.stdout + missing_smoke.stderr
+        self.assertIn("must be set on the test environment so the staging late-success lever allowlist", missing_combined)
+        self.assertNotIn(rehearsal, missing_combined)
+
+        malformed_smoke, _, _ = run_check(
+            TARGET_ENVIRONMENT="test",
+            STAGING_LATE_SUCCESS_LEVER_ENABLED="true",
+            STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS=rehearsal,
+            STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT="00:00:30",
+            STAGING_SMOKE_OWNER_WORKSPACE_ID="not-a-guid",
+            **staging_stripe,
+        )
+        self.assertNotEqual(0, malformed_smoke.returncode)
+        self.assertIn("must be a GUID workspace id", malformed_smoke.stdout + malformed_smoke.stderr)
+        self.assertNotIn(rehearsal, malformed_smoke.stdout + malformed_smoke.stderr)
+
+        staging_includes_smoke, _, _ = run_check(
+            TARGET_ENVIRONMENT="test",
+            STAGING_LATE_SUCCESS_LEVER_ENABLED="true",
+            STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS=f"{rehearsal},{smoke}",
+            STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT="00:00:30",
+            STAGING_SMOKE_OWNER_WORKSPACE_ID=smoke,
+            **staging_stripe,
+        )
+        self.assertNotEqual(0, staging_includes_smoke.returncode)
+        includes_combined = staging_includes_smoke.stdout + staging_includes_smoke.stderr
+        self.assertIn("must not include the staging Hosted smoke owner workspace", includes_combined)
+        self.assertNotIn(rehearsal, includes_combined)
+        self.assertNotIn(smoke, includes_combined)
+
         staging_ok, output, github_env = run_check(
             TARGET_ENVIRONMENT="test",
             AZURE_ENV_NAME="valence-control-staging",
@@ -1284,6 +1342,7 @@ fi
             STAGING_LATE_SUCCESS_LEVER_ENABLED="true",
             STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS=f" {rehearsal} ",
             STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT="00:00:30",
+            STAGING_SMOKE_OWNER_WORKSPACE_ID=smoke,
             **staging_stripe,
         )
         self.assertEqual(0, staging_ok.returncode, staging_ok.stdout + staging_ok.stderr)
@@ -2006,6 +2065,7 @@ printf '200'
                         "STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS": "",
                         "STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT": "",
                         "STAGING_SMOKE_OWNER_INSTANCE_ID": "",
+                        "STAGING_SMOKE_OWNER_WORKSPACE_ID": "",
                         # Shared rollback health is intentionally bounded in
                         # production; make the fake provider deterministic and
                         # fast while preserving the two-stable-probe contract.
@@ -3693,6 +3753,7 @@ else:
             environment.pop("STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED", None)
             environment.pop("STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS", None)
             environment.pop("STAGING_SMOKE_OWNER_INSTANCE_ID", None)
+            environment.pop("STAGING_SMOKE_OWNER_WORKSPACE_ID", None)
             environment.pop("STAGING_LATE_SUCCESS_LEVER_ENABLED", None)
             environment.pop("STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS", None)
             environment.pop("STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT", None)
@@ -4197,6 +4258,7 @@ else:
                 f"{prefix}0": rehearsal,
             }
             invalid_inputs = (
+                ("missing smoke owner", rehearsal, "", "00:00:30"),
                 ("malformed allowlist ID", "not-a-guid", smoke, "00:00:30"),
                 ("nil allowlist ID", nil, smoke, "00:00:30"),
                 ("newline suffix owner", f"{rehearsal}\n{smoke}", smoke, "00:00:30"),
@@ -4206,6 +4268,8 @@ else:
                 ("wait under fifteen seconds", rehearsal, smoke, "00:00:14"),
                 ("wait over five minutes", rehearsal, smoke, "00:05:01"),
                 ("malformed wait", rehearsal, smoke, "30s"),
+                ("malformed smoke owner", rehearsal, "not-a-guid", "00:00:30"),
+                ("nil smoke owner", rehearsal, nil, "00:00:30"),
                 ("case-insensitive owner collision", smoke.upper(), smoke.lower(), "00:00:30"),
             )
             for label, allowlist, smoke_owner, wait in invalid_inputs:

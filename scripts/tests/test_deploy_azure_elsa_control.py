@@ -239,6 +239,12 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         self.assertNotEqual(0, wait_refused.returncode)
         self.assertIn("only permitted for the test (staging) environment", wait_refused.stderr)
 
+        non_boolean = self.environment()
+        non_boolean["STAGING_LATE_SUCCESS_LEVER_ENABLED"] = "yes"
+        non_boolean_refused = self.run_deploy(non_boolean, "--environment", "prod")
+        self.assertNotEqual(0, non_boolean_refused.returncode)
+        self.assertIn("must be true or false", non_boolean_refused.stderr)
+
         recovery_only = self.environment()
         recovery_only["STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED"] = "true"
         recovery_only["STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS"] = (

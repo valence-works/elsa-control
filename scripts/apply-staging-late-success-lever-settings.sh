@@ -100,6 +100,10 @@ fi
 # configuration. Surrounding allowlist whitespace is normalized above, as in
 # the deployment workflow; empty entries and malformed or nil GUIDs are errors.
 if is_staging_lever_target; then
+  if [ "$expected_count" -gt 0 ] && [ -z "$SMOKE_OWNER_WORKSPACE_ID" ]; then
+    echo "::error::STAGING_SMOKE_OWNER_WORKSPACE_ID must be set so live staging late-success lever settings can be checked against the Hosted smoke owner workspace."
+    exit 1
+  fi
   if [ -n "$SMOKE_OWNER_WORKSPACE_ID" ]; then
     if [[ ! "$SMOKE_OWNER_WORKSPACE_ID" =~ $lever_guid_pattern ]] || [ "$SMOKE_OWNER_WORKSPACE_ID" = "00000000-0000-0000-0000-000000000000" ]; then
       echo "::error::STAGING_SMOKE_OWNER_WORKSPACE_ID must be a GUID workspace id."

@@ -155,8 +155,15 @@ fi
 if [[ "${STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED,,}" == "false" ]]; then
   STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED=""
 fi
-if [[ "${STAGING_LATE_SUCCESS_LEVER_ENABLED,,}" == "false" ]]; then
-  STAGING_LATE_SUCCESS_LEVER_ENABLED=""
+if [[ -n "$STAGING_LATE_SUCCESS_LEVER_ENABLED" ]]; then
+  case "${STAGING_LATE_SUCCESS_LEVER_ENABLED,,}" in
+    true) ;;
+    false) STAGING_LATE_SUCCESS_LEVER_ENABLED="" ;;
+    *)
+      echo "STAGING_LATE_SUCCESS_LEVER_ENABLED must be true or false." >&2
+      exit 1
+      ;;
+  esac
 fi
 if [[ ( "${STAGING_BILLING_LIFECYCLE_LEVER_ENABLED,,}" == "true" || -n "$STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS" ) ]] && ! is_staging_billing_lever_target; then
   echo "STAGING_BILLING_LIFECYCLE_LEVER_ENABLED and STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS are only permitted for the test (staging) environment." >&2

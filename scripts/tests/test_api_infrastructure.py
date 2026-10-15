@@ -520,6 +520,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("STAGING_LATE_SUCCESS_LEVER_ENABLED", documentation)
         self.assertIn("STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS", documentation)
         self.assertIn("STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT", documentation)
+        self.assertIn("STAGING_SMOKE_OWNER_WORKSPACE_ID", documentation)
         self.assertIn("Turn the lever off afterwards", documentation)
         self.assertIn("STAGING_SMOKE_OWNER_ORGANIZATION_ID", documentation)
         self.assertIn("`test` GitHub environment", documentation)
