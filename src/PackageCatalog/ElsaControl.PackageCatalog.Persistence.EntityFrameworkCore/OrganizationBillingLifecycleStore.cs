@@ -334,6 +334,10 @@ public sealed partial class OrganizationBillingStore
             verificationCleanupId = cleanup.Id;
             verificationLeaseToken = leaseToken;
             verificationAttemptCount = cleanup.AttemptCount;
+            var webhookSource = await dbContext.OrganizationSubscriptions.AsNoTracking()
+                .Where(x => x.Id == cleanup.SubscriptionId)
+                .Select(x => x.WebhookSource)
+                .FirstOrDefaultAsync(cancellationToken);
             return new OrganizationBillingCleanupWorkItem(
                 cleanup.Id,
                 cleanup.OrganizationId,
@@ -343,7 +347,8 @@ public sealed partial class OrganizationBillingStore
                 cleanup.ProviderCustomerReference,
                 cleanup.ProviderSubscriptionReference,
                 cleanup.AttemptCount,
-                leaseToken);
+                leaseToken,
+                webhookSource);
         },
             async (result, verificationCancellationToken) =>
             {
@@ -436,6 +441,20 @@ public sealed partial class OrganizationBillingStore
 
                     break;
                 }
+                case OrganizationBillingCleanupOutcome.ManagedByHub:
+                    cleanup.State = OrganizationBillingCleanupState.Failed;
+                    cleanup.CompletedAt = completedAt;
+                    cleanup.LastFailureCode = BillingDiagnosticCodes.ManagedByHub;
+                    dbContext.OrganizationAuditRecords.Add(new OrganizationAuditRecord
+                    {
+                        OrganizationId = completion.OrganizationId,
+                        Action = OrganizationAuditAction.BillingCleanupCompleted,
+                        TargetType = "subscription",
+                        TargetId = completion.SubscriptionId.ToString("D"),
+                        Summary = "Provider-neutral billing cleanup was refused because the subscription is managed by Hub.",
+                        CreatedAt = completedAt
+                    });
+                    break;
                 case OrganizationBillingCleanupOutcome.RetryableFailure:
                 case OrganizationBillingCleanupOutcome.Unknown:
                     cleanup.State = OrganizationBillingCleanupState.Queued;

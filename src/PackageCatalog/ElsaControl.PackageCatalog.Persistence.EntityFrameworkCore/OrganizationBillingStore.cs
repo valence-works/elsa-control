@@ -53,9 +53,9 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         {
             return await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
             {
-                await EnsureOrganizationExistsAsync(providerEvent.OrganizationId, cancellationToken);
-                var existingEvent = await dbContext.BillingProviderEvents
-                    .SingleOrDefaultAsync(x => x.Provider == providerEvent.Provider && x.ProviderEventId == providerEvent.ProviderEventId, cancellationToken);
+                if (!await TryEnsureOrganizationExistsAsync(providerEvent.OrganizationId, providerEvent.WebhookSource, cancellationToken))
+                    return new BillingEventConsumptionResult(BillingEventConsumptionOutcome.Ignored, null, null, null);
+                var existingEvent = await FindInboxAsync(providerEvent, cancellationToken);
                 if (existingEvent is not null)
                 {
                     EnsureSameEvent(existingEvent, providerEvent);
@@ -88,7 +88,8 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                     ReceivedAt = now,
                     ProcessedAt = now,
                     ProcessingStatus = BillingProviderEventProcessingStatus.RecordedUnknown,
-                    RejectionCode = "provider.event.unknown"
+                    RejectionCode = "provider.event.unknown",
+                    WebhookSource = BillingWebhookSources.Normalize(providerEvent.WebhookSource)
                 };
                 dbContext.BillingProviderEvents.Add(inbox);
                 AddBillingAudit(providerEvent.OrganizationId, inbox.Id, "A correlated unsupported billing provider event was recorded.", now);
@@ -104,8 +105,7 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         catch (Exception exception) when (attempt < 2 && IsRetryableConflict(exception))
         {
             dbContext.ChangeTracker.Clear();
-            var existing = await dbContext.BillingProviderEvents.AsNoTracking()
-                .SingleOrDefaultAsync(x => x.Provider == providerEvent.Provider && x.ProviderEventId == providerEvent.ProviderEventId, cancellationToken);
+            var existing = await FindInboxAsNoTrackingAsync(providerEvent, cancellationToken);
             if (existing is not null)
             {
                 EnsureSameEvent(existing, providerEvent);
@@ -141,8 +141,7 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             // A concurrent consumer may have committed the same inbox key or
             // a subscription row. Re-read and retry the normalized event so
             // both same-key and different-key concurrent deliveries converge.
-            var existing = await dbContext.BillingProviderEvents.AsNoTracking()
-                .SingleOrDefaultAsync(x => x.Provider == providerEvent.Provider && x.ProviderEventId == providerEvent.ProviderEventId, cancellationToken);
+            var existing = await FindInboxAsNoTrackingAsync(providerEvent, cancellationToken);
             if (existing is not null)
             {
                 EnsureSameEvent(existing, providerEvent);
@@ -168,9 +167,9 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         CancellationToken cancellationToken) =>
         dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
         {
-            await EnsureOrganizationExistsAsync(providerEvent.OrganizationId, cancellationToken);
-            var existingEvent = await dbContext.BillingProviderEvents
-                .SingleOrDefaultAsync(x => x.Provider == providerEvent.Provider && x.ProviderEventId == providerEvent.ProviderEventId, cancellationToken);
+            if (!await TryEnsureOrganizationExistsAsync(providerEvent.OrganizationId, providerEvent.WebhookSource, cancellationToken))
+                return new BillingEventConsumptionResult(BillingEventConsumptionOutcome.Ignored, null, null, null);
+            var existingEvent = await FindInboxAsync(providerEvent, cancellationToken);
             if (existingEvent is not null)
             {
                 EnsureSameEvent(existingEvent, providerEvent);
@@ -209,7 +208,13 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                     subscription, providerEvent, occurrence, cancellationToken))
                 subscription = null;
             var existingSubscription = subscription;
-            if (subscription is not null)
+            var sourceConflict = subscription is not null &&
+                                 OrganizationSubscriptionLifecycle.IsLive(subscription.State) &&
+                                 !string.Equals(
+                                     BillingWebhookSources.Normalize(subscription.WebhookSource),
+                                     BillingWebhookSources.Normalize(providerEvent.WebhookSource),
+                                     StringComparison.Ordinal);
+            if (subscription is not null && !sourceConflict)
             {
                 EnsureSameProvider(subscription, providerEvent.Provider);
                 EnsureReferenceMatches(subscription.ProviderCustomerReference, providerEvent.ProviderCustomerReference, "customer");
@@ -230,15 +235,29 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                 AmountMinorUnits = providerEvent.AmountMinorUnits,
                 OccurredAt = occurrence,
                 ReceivedAt = now,
-                ProcessingStatus = BillingProviderEventProcessingStatus.Accepted
+                ProcessingStatus = BillingProviderEventProcessingStatus.Accepted,
+                WebhookSource = BillingWebhookSources.Normalize(providerEvent.WebhookSource)
             };
             dbContext.BillingProviderEvents.Add(inbox);
 
+            if (sourceConflict)
+            {
+                inbox.ProcessingStatus = BillingProviderEventProcessingStatus.Rejected;
+                inbox.RejectionCode = BillingDiagnosticCodes.SubscriptionSourceConflict;
+                inbox.ProcessedAt = now;
+                AddBillingAudit(providerEvent.OrganizationId, inbox.Id, "A normalized billing provider event was refused because the organization already has a live subscription from another webhook source.", now);
+                await dbContext.SaveChangesAsync(cancellationToken);
+                var conflictEntitlement = await CurrentEntitlementAsync(providerEvent.OrganizationId, cancellationToken);
+                return new(BillingEventConsumptionOutcome.Rejected, subscription, conflictEntitlement, inbox, inbox.RejectionCode);
+            }
+
             // A Stripe trialing event must never create a late trial or move its
-            // end date; checkout starts it first. Legacy/provider reconciliation
-            // may still materialize a non-trial lifecycle row for an active event
-            // so it can be audited and converged on the next checkout.
-            if (subscription is null && providerEvent.State == OrganizationSubscriptionState.Trial)
+            // end date; checkout starts it first. Hub-sourced Cloud subscriptions
+            // materialize the control-plane row from the signed event because Hub
+            // checkout does not call Control's trial preparation endpoint.
+            if (subscription is null &&
+                providerEvent.State == OrganizationSubscriptionState.Trial &&
+                !BillingWebhookSources.IsHub(providerEvent.WebhookSource))
             {
                 inbox.ProcessingStatus = BillingProviderEventProcessingStatus.Rejected;
                 inbox.RejectionCode = "subscription.missing";
@@ -280,6 +299,7 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             OrganizationSubscriptionLifecycle.ApplyState(subscription, providerEvent.State.Value, occurrence);
             subscription.ProviderCustomerReference ??= providerEvent.ProviderCustomerReference;
             subscription.ProviderSubscriptionReference ??= providerEvent.ProviderSubscriptionReference;
+            subscription.WebhookSource = BillingWebhookSources.Normalize(providerEvent.WebhookSource);
             await BackfillQueuedCleanupReferencesAsync(subscription, cancellationToken);
             if (isNewSubscription)
                 dbContext.OrganizationSubscriptions.Add(subscription);
@@ -397,6 +417,7 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             }
 
             var subscription = OrganizationSubscriptionLifecycle.CreateTrial(organizationId, provider, started);
+            subscription.WebhookSource = BillingWebhookSources.Control;
             dbContext.OrganizationSubscriptions.Add(subscription);
             var entitlement = await ProjectEntitlementAsync(subscription, started, cancellationToken);
             dbContext.OrganizationAuditRecords.Add(new OrganizationAuditRecord
@@ -586,10 +607,40 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             throw new BillingProviderEventConflictException($"A subscription cannot change its provider {referenceName} reference.");
     }
 
-    private async Task EnsureOrganizationExistsAsync(Guid organizationId, CancellationToken cancellationToken)
+    private async Task<bool> TryEnsureOrganizationExistsAsync(
+        Guid organizationId,
+        string? webhookSource,
+        CancellationToken cancellationToken)
     {
-        if (!await dbContext.Organizations.AsNoTracking().AnyAsync(x => x.Id == organizationId, cancellationToken))
-            throw new ArgumentException("Billing event organization does not exist.", nameof(organizationId));
+        if (await dbContext.Organizations.AsNoTracking().AnyAsync(x => x.Id == organizationId, cancellationToken))
+            return true;
+        if (BillingWebhookSources.IsHub(webhookSource))
+            return false;
+        throw new ArgumentException("Billing event organization does not exist.", nameof(organizationId));
+    }
+
+    private Task<BillingProviderEventInboxEntry?> FindInboxAsync(
+        BillingProviderEvent providerEvent,
+        CancellationToken cancellationToken) =>
+        FindInboxCoreAsync(dbContext.BillingProviderEvents, providerEvent, cancellationToken);
+
+    private Task<BillingProviderEventInboxEntry?> FindInboxAsNoTrackingAsync(
+        BillingProviderEvent providerEvent,
+        CancellationToken cancellationToken) =>
+        FindInboxCoreAsync(dbContext.BillingProviderEvents.AsNoTracking(), providerEvent, cancellationToken);
+
+    private static Task<BillingProviderEventInboxEntry?> FindInboxCoreAsync(
+        IQueryable<BillingProviderEventInboxEntry> events,
+        BillingProviderEvent providerEvent,
+        CancellationToken cancellationToken)
+    {
+        var source = BillingWebhookSources.Normalize(providerEvent.WebhookSource);
+        var treatNullAsControl = string.Equals(source, BillingWebhookSources.Control, StringComparison.Ordinal);
+        return events.SingleOrDefaultAsync(
+            x => x.Provider == providerEvent.Provider &&
+                 x.ProviderEventId == providerEvent.ProviderEventId &&
+                 (x.WebhookSource == source || (treatNullAsControl && x.WebhookSource == null)),
+            cancellationToken);
     }
 
     private static void ValidateEvent(BillingProviderEvent providerEvent, bool allowUnknown)
@@ -643,7 +694,8 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             ProviderSubscriptionReference = string.IsNullOrWhiteSpace(providerEvent.ProviderSubscriptionReference) ? null : providerEvent.ProviderSubscriptionReference.Trim(),
             ProviderObjectReference = string.IsNullOrWhiteSpace(providerEvent.ProviderObjectReference) ? null : providerEvent.ProviderObjectReference.Trim(),
             PriceReference = string.IsNullOrWhiteSpace(providerEvent.PriceReference) ? null : providerEvent.PriceReference.Trim(),
-            OccurredAt = providerEvent.OccurredAt.ToUniversalTime()
+            OccurredAt = providerEvent.OccurredAt.ToUniversalTime(),
+            WebhookSource = BillingWebhookSources.Normalize(providerEvent.WebhookSource)
         };
     }
 

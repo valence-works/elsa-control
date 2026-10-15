@@ -523,6 +523,86 @@ public sealed class OrganizationBillingApiTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Hub_webhook_for_an_unknown_organization_returns_2xx_without_persistence()
+    {
+        await _app.SeedAsync(_ => Task.CompletedTask);
+        var missingOrganizationId = Guid.NewGuid();
+        _provider.WebhookResult = BillingWebhookNormalizationResult.KnownEvent(new BillingProviderEvent(
+            missingOrganizationId,
+            BillingProviderNames.Stripe,
+            "evt-hub-unknown-organization",
+            "customer.subscription.updated",
+            OrganizationSubscriptionState.Active,
+            DateTimeOffset.UtcNow,
+            Sha256("hub-unknown-organization"),
+            WebhookSource: BillingWebhookSources.Hub));
+
+        var response = await PostWebhookAsync("hub-unknown-organization-body");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("ignored", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        await using var scope = _app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Empty(await db.BillingProviderEvents.ToListAsync());
+        Assert.Empty(await db.OrganizationSubscriptions.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Ignored_webhook_returns_2xx_without_persistence()
+    {
+        await _app.SeedAsync(_ => Task.CompletedTask);
+        _provider.WebhookResult = BillingWebhookNormalizationResult.Ignored(
+            "webhook.price-not-cloud",
+            new BillingProviderEvent(
+                Guid.NewGuid(),
+                BillingProviderNames.Stripe,
+                "evt-academy",
+                "customer.subscription.created",
+                OrganizationSubscriptionState.Active,
+                DateTimeOffset.UtcNow,
+                Sha256("academy"),
+                WebhookSource: BillingWebhookSources.Hub));
+
+        var response = await PostWebhookAsync("academy-body");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("ignored", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        await using var scope = _app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Empty(await db.BillingProviderEvents.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Billing_delete_for_a_hub_sourced_subscription_returns_managed_by_hub()
+    {
+        await _app.SeedAsync(_ => Task.CompletedTask);
+        var owner = _app.CreateControlIdentityClient(subject: "hub-cleanup-owner");
+        var organizationId = (await owner.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces"))!.Organizations.Single().Id;
+        await using (var scope = _app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            var now = DateTimeOffset.UtcNow;
+            var subscription = OrganizationSubscriptionLifecycle.CreateTrial(organizationId, BillingProviderNames.Stripe, now);
+            OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Active, now);
+            subscription.ProviderCustomerReference = "cus_hub";
+            subscription.ProviderSubscriptionReference = "sub_hub";
+            subscription.WebhookSource = BillingWebhookSources.Hub;
+            db.OrganizationSubscriptions.Add(subscription);
+            await db.SaveChangesAsync();
+        }
+
+        var response = await owner.PostControlJsonAsync($"/api/organizations/{organizationId}/billing/delete", new { });
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Contains(BillingDiagnosticCodes.ManagedByHub, await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        await using var verify = _app.Services.CreateAsyncScope();
+        var catalog = verify.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Empty(await catalog.OrganizationBillingCleanups.ToListAsync());
+        Assert.Equal(OrganizationSubscriptionState.Active,
+            (await catalog.OrganizationSubscriptions.SingleAsync(x => x.OrganizationId == organizationId)).State);
+    }
+
+    [Fact]
     public async Task Disabled_stripe_webhook_returns_safe_bad_request_without_constructing_a_client()
     {
         await using var app = new ControlApiTestApplication();

@@ -8,7 +8,9 @@ public sealed class StripeBillingConfigurationValidator(
 {
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        var errors = options.Value.ValidateExpectedMode().ToArray();
+        var errors = options.Value.ValidateExpectedMode()
+            .Concat(options.Value.ValidateWebhookSources())
+            .ToArray();
         if (errors.Length > 0)
             throw new InvalidOperationException(
                 $"Stripe billing configuration is invalid: {string.Join(" ", errors)}");

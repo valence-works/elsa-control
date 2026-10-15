@@ -112,11 +112,15 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("WebhookSource")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
                     b.HasKey("Id");
 
                     b.HasIndex("OrganizationId", "OccurredAt");
 
-                    b.HasIndex("Provider", "ProviderEventId")
+                    b.HasIndex("Provider", "ProviderEventId", "WebhookSource")
                         .IsUnique();
 
                     b.ToTable("BillingProviderEvents");
@@ -666,6 +670,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
 
                     b.Property<long>("UpdatedAt")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("WebhookSource")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
 
                     b.HasKey("Id");
 

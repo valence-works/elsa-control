@@ -123,11 +123,15 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("nvarchar(32)");
 
+                    b.Property<string>("WebhookSource")
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
                     b.HasKey("Id");
 
                     b.HasIndex("OrganizationId", "OccurredAt");
 
-                    b.HasIndex("Provider", "ProviderEventId")
+                    b.HasIndex("Provider", "ProviderEventId", "WebhookSource")
                         .IsUnique();
 
                     b.ToTable("BillingProviderEvents");
@@ -684,6 +688,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
 
                     b.Property<long>("UpdatedAt")
                         .HasColumnType("bigint");
+
+                    b.Property<string>("WebhookSource")
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
 
                     b.HasKey("Id");
 

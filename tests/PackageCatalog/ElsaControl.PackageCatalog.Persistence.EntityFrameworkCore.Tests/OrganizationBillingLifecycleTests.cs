@@ -276,6 +276,33 @@ public sealed class OrganizationBillingLifecycleTests
     }
 
     [Fact]
+    public async Task Hub_sourced_cleanup_fails_terminal_without_tombstoning_or_retry()
+    {
+        await using var fixture = await LifecycleFixture.CreateAsync();
+        var subscription = await fixture.StartTrialAsync(fixture.OrganizationId, Start);
+        subscription.WebhookSource = BillingWebhookSources.Hub;
+        subscription.ProviderCustomerReference = "cus_hub";
+        subscription.ProviderSubscriptionReference = "sub_hub";
+        await fixture.Db.SaveChangesAsync();
+        await fixture.Store.RequestDeletionAsync(fixture.OrganizationId, Start.AddDays(1));
+        var provider = new SequencedCleanupProvider(OrganizationBillingCleanupOutcome.ManagedByHub);
+        var worker = new OrganizationBillingLifecycleWorker(fixture.Store, new TestTimeProvider(Start.AddDays(1)), provider);
+
+        var result = await worker.ProcessAvailableAsync("worker");
+
+        Assert.Equal(1, result.CleanupAttempts);
+        Assert.Equal(BillingWebhookSources.Hub, Assert.Single(provider.Requests).WebhookSource);
+        Assert.Equal(OrganizationSubscriptionState.Suspended, await fixture.StateAsync(fixture.OrganizationId));
+        var current = await fixture.SubscriptionAsync(fixture.OrganizationId);
+        Assert.Equal("cus_hub", current.ProviderCustomerReference);
+        Assert.Equal("sub_hub", current.ProviderSubscriptionReference);
+        var cleanup = await fixture.Db.OrganizationBillingCleanups.SingleAsync();
+        Assert.Equal(OrganizationBillingCleanupState.Failed, cleanup.State);
+        Assert.Equal(BillingDiagnosticCodes.ManagedByHub, cleanup.LastFailureCode);
+        Assert.Equal(0, (await worker.ProcessAvailableAsync("worker")).CleanupAttempts);
+    }
+
+    [Fact]
     public async Task Provider_timeout_is_recorded_as_retryable_when_the_host_token_is_not_cancelled()
     {
         await using var fixture = await LifecycleFixture.CreateAsync();

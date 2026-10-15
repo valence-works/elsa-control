@@ -355,12 +355,222 @@ public sealed class StripeBillingProviderTests
     private static string CheckoutEventJson(long timestamp, int pendingWebhooks, long amountTotal, string customer = "cus_123") =>
         $"{{\"id\":\"evt_checkout_replay\",\"object\":\"event\",\"api_version\":\"2026-08-26.dahlia\",\"created\":{timestamp},\"pending_webhooks\":{pendingWebhooks},\"type\":\"checkout.session.completed\",\"data\":{{\"object\":{{\"id\":\"cs_123\",\"object\":\"checkout.session\",\"amount_total\":{amountTotal},\"client_reference_id\":\"{OrganizationId:D}\",\"customer\":\"{customer}\",\"metadata\":{{\"elsa_control_organization_id\":\"{OrganizationId:D}\"}}}}}}}}";
 
+    private const string HubWebhookSecret = "whsec_hub";
+    private const string CloudPriceId = "price_cloud_hosted";
+
+    [Fact]
+    public void Hub_source_event_is_accepted_when_signed_with_the_hub_secret()
+    {
+        var provider = CreateDualSourceProvider();
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var json = SubscriptionEventJson("evt_hub_active", "customer.subscription.created", "active", timestamp, CloudPriceId);
+        var signature = EventUtility.GenerateSignatureHeader(json, HubWebhookSecret, timestamp);
+
+        var result = provider.VerifyAndNormalizeWebhook(
+            System.Text.Encoding.UTF8.GetBytes(json),
+            signature,
+            DateTimeOffset.FromUnixTimeSeconds(timestamp));
+
+        Assert.Equal(BillingWebhookNormalizationStatus.Known, result.Status);
+        Assert.Equal(BillingWebhookSources.Hub, result.Event!.WebhookSource);
+        Assert.Equal(OrganizationSubscriptionState.Active, result.Event.State);
+        Assert.Equal(CloudPriceId, result.Event.PriceReference);
+    }
+
+    [Fact]
+    public void Control_source_event_is_accepted_when_both_sources_are_configured()
+    {
+        var provider = CreateDualSourceProvider();
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var json = SubscriptionEventJson("evt_control_active", "customer.subscription.created", "active", timestamp, CloudPriceId);
+        var signature = EventUtility.GenerateSignatureHeader(json, WebhookSecret, timestamp);
+
+        var result = provider.VerifyAndNormalizeWebhook(
+            System.Text.Encoding.UTF8.GetBytes(json),
+            signature,
+            DateTimeOffset.FromUnixTimeSeconds(timestamp));
+
+        Assert.Equal(BillingWebhookNormalizationStatus.Known, result.Status);
+        Assert.Equal(BillingWebhookSources.Control, result.Event!.WebhookSource);
+        Assert.Equal(OrganizationSubscriptionState.Active, result.Event.State);
+    }
+
+    [Fact]
+    public void Event_signed_with_neither_secret_is_rejected()
+    {
+        var provider = CreateDualSourceProvider();
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var json = SubscriptionEventJson("evt_foreign", "customer.subscription.created", "active", timestamp, CloudPriceId);
+        var signature = EventUtility.GenerateSignatureHeader(json, "whsec_other", timestamp);
+
+        var result = provider.VerifyAndNormalizeWebhook(
+            System.Text.Encoding.UTF8.GetBytes(json),
+            signature,
+            DateTimeOffset.FromUnixTimeSeconds(timestamp));
+
+        Assert.Equal(BillingWebhookNormalizationStatus.Invalid, result.Status);
+        Assert.Null(result.Event);
+    }
+
+    [Fact]
+    public void Hub_event_whose_mode_does_not_match_the_source_is_rejected()
+    {
+        var provider = CreateDualSourceProvider();
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var json = SubscriptionEventJson("evt_live_hub", "customer.subscription.created", "active", timestamp, CloudPriceId, livemode: true);
+        var signature = EventUtility.GenerateSignatureHeader(json, HubWebhookSecret, timestamp);
+
+        var result = provider.VerifyAndNormalizeWebhook(
+            System.Text.Encoding.UTF8.GetBytes(json),
+            signature,
+            DateTimeOffset.FromUnixTimeSeconds(timestamp));
+
+        Assert.Equal(BillingWebhookNormalizationStatus.Invalid, result.Status);
+        Assert.Equal("webhook.mode-mismatch", result.FailureCode);
+        Assert.Null(result.Event);
+    }
+
+    [Fact]
+    public void Hub_non_cloud_price_is_ignored()
+    {
+        var provider = CreateDualSourceProvider();
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var json = SubscriptionEventJson("evt_academy", "customer.subscription.created", "active", timestamp, "price_academy");
+        var signature = EventUtility.GenerateSignatureHeader(json, HubWebhookSecret, timestamp);
+
+        var result = provider.VerifyAndNormalizeWebhook(
+            System.Text.Encoding.UTF8.GetBytes(json),
+            signature,
+            DateTimeOffset.FromUnixTimeSeconds(timestamp));
+
+        Assert.Equal(BillingWebhookNormalizationStatus.Ignored, result.Status);
+        Assert.Equal("webhook.price-not-cloud", result.FailureCode);
+        Assert.Equal("evt_academy", result.Event!.ProviderEventId);
+        Assert.Equal("customer.subscription.created", result.Event.EventType);
+        Assert.Equal(BillingWebhookSources.Hub, result.Event.WebhookSource);
+    }
+
+    [Fact]
+    public void Hub_event_without_organization_metadata_is_ignored()
+    {
+        var provider = CreateDualSourceProvider();
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var json = SubscriptionEventJson("evt_hub_uncorrelated", "customer.subscription.created", "active", timestamp, CloudPriceId, includeOrganization: false);
+        var signature = EventUtility.GenerateSignatureHeader(json, HubWebhookSecret, timestamp);
+
+        var result = provider.VerifyAndNormalizeWebhook(
+            System.Text.Encoding.UTF8.GetBytes(json),
+            signature,
+            DateTimeOffset.FromUnixTimeSeconds(timestamp));
+
+        Assert.Equal(BillingWebhookNormalizationStatus.Ignored, result.Status);
+        Assert.Equal("webhook.organization-correlation-missing", result.FailureCode);
+        Assert.Equal("evt_hub_uncorrelated", result.Event!.ProviderEventId);
+        Assert.Equal(Guid.Empty, result.Event.OrganizationId);
+    }
+
+    [Fact]
+    public void Control_event_without_organization_metadata_stays_invalid()
+    {
+        var provider = CreateProvider();
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var json = $"{{\"id\":\"evt_control_uncorrelated\",\"object\":\"event\",\"api_version\":\"2026-08-26.dahlia\",\"created\":{timestamp},\"type\":\"customer.subscription.updated\",\"data\":{{\"object\":{{\"id\":\"sub_123\",\"object\":\"subscription\",\"customer\":\"cus_123\",\"status\":\"active\",\"metadata\":{{}}}}}}}}";
+        var signature = EventUtility.GenerateSignatureHeader(json, WebhookSecret, timestamp);
+
+        var result = provider.VerifyAndNormalizeWebhook(
+            System.Text.Encoding.UTF8.GetBytes(json),
+            signature,
+            DateTimeOffset.FromUnixTimeSeconds(timestamp));
+
+        Assert.Equal(BillingWebhookNormalizationStatus.Invalid, result.Status);
+        Assert.Equal("webhook.organization-correlation-missing", result.FailureCode);
+    }
+
+    [Fact]
+    public void Cancel_at_period_end_keeps_an_active_subscription_state()
+    {
+        var provider = CreateProvider();
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var json = $"{{\"id\":\"evt_cancel_at_period_end\",\"object\":\"event\",\"api_version\":\"2026-08-26.dahlia\",\"created\":{timestamp},\"type\":\"customer.subscription.updated\",\"data\":{{\"object\":{{\"id\":\"sub_123\",\"object\":\"subscription\",\"customer\":\"cus_123\",\"status\":\"active\",\"cancel_at_period_end\":true,\"metadata\":{{\"elsa_control_organization_id\":\"{OrganizationId:D}\"}}}}}}}}";
+        var signature = EventUtility.GenerateSignatureHeader(json, WebhookSecret, timestamp);
+
+        var result = provider.VerifyAndNormalizeWebhook(
+            System.Text.Encoding.UTF8.GetBytes(json),
+            signature,
+            DateTimeOffset.FromUnixTimeSeconds(timestamp));
+
+        Assert.Equal(BillingWebhookNormalizationStatus.Known, result.Status);
+        Assert.Equal(OrganizationSubscriptionState.Active, result.Event!.State);
+    }
+
+    [Fact]
+    public async Task Cleanup_for_a_hub_source_does_not_call_stripe()
+    {
+        var cleanup = new RecordingCleanupGateway();
+        var provider = CreateProvider(cleanup: cleanup);
+
+        var result = await provider.CleanupAsync(new(
+            OrganizationId, Guid.NewGuid(), "cleanup-key", "stripe", "cus_123", "sub_123", 1, BillingWebhookSources.Hub));
+
+        Assert.Equal(OrganizationBillingCleanupOutcome.ManagedByHub, result);
+        Assert.Null(cleanup.SubscriptionReference);
+        Assert.Equal(0, cleanup.Calls);
+    }
+
+    private static string SubscriptionEventJson(
+        string eventId,
+        string type,
+        string status,
+        long timestamp,
+        string priceId,
+        bool livemode = false,
+        bool includeOrganization = true)
+    {
+        var metadata = includeOrganization
+            ? $",\"metadata\":{{\"elsa_control_organization_id\":\"{OrganizationId:D}\"}}"
+            : ",\"metadata\":{}";
+        var livemodeJson = livemode ? "true" : "false";
+        return $"{{\"id\":\"{eventId}\",\"object\":\"event\",\"api_version\":\"2026-08-26.dahlia\",\"created\":{timestamp},\"livemode\":{livemodeJson},\"type\":\"{type}\",\"data\":{{\"object\":{{\"id\":\"sub_123\",\"object\":\"subscription\",\"customer\":\"cus_123\",\"status\":\"{status}\",\"items\":{{\"object\":\"list\",\"data\":[{{\"id\":\"si_1\",\"object\":\"subscription_item\",\"price\":{{\"id\":\"{priceId}\",\"object\":\"price\",\"unit_amount\":1000}}}}]}}{metadata}}}}}}}";
+    }
+
+    private static StripeBillingProvider CreateDualSourceProvider(IStripeSubscriptionCleanupGateway? cleanup = null) =>
+        CreateProvider(
+            cleanup: cleanup,
+            options: new StripeBillingOptions
+            {
+                Enabled = true,
+                SecretKey = "sk_test_no_network",
+                ExpectedMode = StripeBillingOptions.TestMode,
+                WebhookSources =
+                [
+                    new StripeWebhookSourceOptions
+                    {
+                        Name = BillingWebhookSources.Control,
+                        SigningSecret = WebhookSecret,
+                        ExpectedMode = StripeBillingOptions.TestMode,
+                        CloudPriceIds = []
+                    },
+                    new StripeWebhookSourceOptions
+                    {
+                        Name = BillingWebhookSources.Hub,
+                        SigningSecret = HubWebhookSecret,
+                        ExpectedMode = StripeBillingOptions.TestMode,
+                        CloudPriceIds = [CloudPriceId]
+                    }
+                ],
+                DefaultPriceId = "price_configured",
+                CheckoutSuccessUrl = "https://console.test/success",
+                CheckoutCancelUrl = "https://console.test/cancel",
+                PortalReturnUrl = "https://console.test/billing"
+            });
+
     private static StripeBillingProvider CreateProvider(
         IStripeCheckoutSessionGateway? checkout = null,
         IStripeCustomerPortalGateway? portal = null,
-        IStripeSubscriptionCleanupGateway? cleanup = null) =>
+        IStripeSubscriptionCleanupGateway? cleanup = null,
+        StripeBillingOptions? options = null) =>
         new(
-            Options.Create(new StripeBillingOptions
+            Options.Create(options ?? new StripeBillingOptions
             {
                 Enabled = true,
                 SecretKey = "sk_test_no_network",
@@ -419,9 +629,11 @@ public sealed class StripeBillingProviderTests
     {
         public string? SubscriptionReference { get; private set; }
         public RequestOptions? RequestOptions { get; private set; }
+        public int Calls { get; private set; }
 
         public Task<bool> CancelOrConfirmAbsentAsync(string subscriptionReference, RequestOptions requestOptions, CancellationToken cancellationToken)
         {
+            Calls++;
             SubscriptionReference = subscriptionReference;
             RequestOptions = requestOptions;
             return Task.FromResult(true);
