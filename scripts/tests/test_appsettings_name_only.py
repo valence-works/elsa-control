@@ -21,6 +21,7 @@ for path in (str(SCRIPTS), str(LIB)):
 
 from hosted_appsettings import (  # noqa: E402
     classify_appsettings_list_query,
+    iter_backstop_findings,
     iter_python_listing_queries,
     iter_shell_listing_queries,
     require_exact_setting_name,
@@ -479,6 +480,7 @@ class AppSettingsNameOnlyScanTests(unittest.TestCase):
             "eval \"az webapp config appsettings list --query '[].name'\"\n",
             'cmd="az webapp config appsettings list"\n$cmd --query \'[].name\'\n',
             "alias ll='az webapp config appsettings list'\n",
+            'f() { az webapp config appsettings list "$@"; }\n',
         ):
             with self.subTest(fail_closed=source):
                 queries = list(iter_shell_listing_queries(source))
@@ -493,6 +495,46 @@ class AppSettingsNameOnlyScanTests(unittest.TestCase):
         )
         self.assertEqual(1, len(equals_form))
         self.assertEqual("unsafe", classify_appsettings_list_query(equals_form[0]))
+
+    def test_backstop_fails_closed_on_unrecognized_appsettings(self) -> None:
+        cases = (
+            (
+                "snippet.py",
+                'cmd = "az webapp config appsettings list -o json"\n'
+                "subprocess.run(cmd, shell=True)\n",
+            ),
+            (
+                "snippet.py",
+                'cmd = "az webapp config appsettings list -o json"\n'
+                "subprocess.run(cmd.split())\n",
+            ),
+            (
+                "snippet.py",
+                'subprocess.run("az webapp config " + "appsettings list -o json", shell=True)\n',
+            ),
+            (
+                "snippet.py",
+                'argv = [AZ, "webapp", "config", "appsettings", "list"]\n'
+                "subprocess.run(argv)\n",
+            ),
+            ("snippet.sh", "echo list | xargs az webapp config appsettings\n"),
+            ("snippet.sh", 'f() { az webapp config appsettings list "$@"; }\n'),
+        )
+        for filename, source in cases:
+            with self.subTest(source=source):
+                findings = list(iter_backstop_findings(Path(filename), source))
+                self.assertTrue(findings, source)
+                self.assertTrue(all(line >= 1 and message for line, message in findings), findings)
+
+        safe = list(
+            iter_backstop_findings(
+                Path("ok.sh"),
+                "az webapp config appsettings set --settings @payload --output none\n"
+                "az webapp config appsettings delete --setting-names X --output none\n"
+                "az webapp config appsettings list --query '[].name' --output tsv\n",
+            )
+        )
+        self.assertEqual([], safe)
 
 
 class AppSettingsNameOnlyAzureWebAppTests(unittest.TestCase):

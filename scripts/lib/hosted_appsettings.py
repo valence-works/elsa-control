@@ -664,6 +664,347 @@ def iter_listing_queries(path: Path, text: str | None = None) -> Iterator[tuple[
         yield path, query
 
 
+APPSETTINGS_TOKEN = re.compile(r"(?i)(?<![A-Za-z0-9_-])appsettings(?![A-Za-z0-9_-])")
+SAFE_APPSETTINGS_VERBS = frozenset({"list", "set", "delete"})
+SAFE_LIST_CLASSES = frozenset({"names", "exact-value", "helper"})
+INDIRECT_BACKSTOP_WORDS = INDIRECT_COMMAND_WORDS | {"xargs"}
+CONTROL_TOKENS = frozenset({";", "&", "&&", "|", "||", "|&", ";;", "(", ")"})
+BACKSTOP_EXEMPT_PATHS = frozenset(
+    {
+        HELPER_REPO_PATH,
+        Path("scripts") / "lib" / "hosted_appsettings.py",
+    }
+)
+BACKSTOP_MESSAGE = "unrecognized appsettings occurrence; not a names-only listing, set, or delete"
+SCAN_SUFFIXES = {".sh", ".py", ".yml", ".yaml", ".ps1"}
+
+
+def _mask_hash_comments(text: str) -> str:
+    """Replace `#` comments outside quotes with spaces so offsets stay stable."""
+
+    chars: list[str] = []
+    index = 0
+    length = len(text)
+    quote = None
+    while index < length:
+        char = text[index]
+        if quote == "'":
+            chars.append(char)
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if quote == '"':
+            chars.append(char)
+            if char == "\\" and index + 1 < length:
+                chars.append(text[index + 1])
+                index += 2
+                continue
+            if char == '"':
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            chars.append(char)
+            index += 1
+            continue
+        if char == "#" and _is_unquoted_comment(text, index, chars):
+            while index < length and text[index] != "\n":
+                chars.append(" ")
+                index += 1
+            continue
+        chars.append(char)
+        index += 1
+    return "".join(chars)
+
+
+def _line_number(text: str, index: int) -> int:
+    return text.count("\n", 0, index) + 1
+
+
+def _is_unquoted_separator(text: str, index: int) -> int:
+    """Return the separator length at ``index``, or 0 if this is not a boundary."""
+
+    char = text[index]
+    if char in {";", "\n"}:
+        return 1
+    if text.startswith("&&", index) or text.startswith("||", index):
+        return 2
+    if char in {"|", "&"}:
+        return 1
+    return 0
+
+
+def _split_token_commands(tokens: list[str]) -> list[list[str]]:
+    groups: list[list[str]] = [[]]
+    for token in tokens:
+        if token in CONTROL_TOKENS:
+            groups.append([])
+            continue
+        groups[-1].append(token)
+    return [group for group in groups if group]
+
+
+def _tokens_recognized_safe(
+    tokens: list[str],
+    *,
+    path: Path | None,
+    root: Path | None,
+) -> bool:
+    if any(token in INDIRECT_BACKSTOP_WORDS for token in tokens):
+        return False
+    if any(token in {"$@", "$*", "${@}", "${*}"} for token in tokens):
+        return False
+    found = False
+    for index, token in enumerate(tokens):
+        if token.casefold() != "appsettings":
+            continue
+        found = True
+        if (
+            index < 2
+            or tokens[index - 2].casefold() != "webapp"
+            or tokens[index - 1].casefold() != "config"
+        ):
+            return False
+        if index + 1 >= len(tokens):
+            return False
+        verb = tokens[index + 1].casefold()
+        if verb not in SAFE_APPSETTINGS_VERBS:
+            return False
+        if verb != "list":
+            continue
+        query = _query_arguments(tokens)
+        if classify_appsettings_list_query(query, path=path, root=root) not in SAFE_LIST_CLASSES:
+            return False
+    return found
+
+
+def _shell_command_is_recognized_safe(
+    command: str,
+    *,
+    path: Path | None,
+    root: Path | None,
+) -> bool:
+    tokens = _tokenize_shell(command)
+    if tokens is None:
+        return False
+    relevant = [
+        group
+        for group in _split_token_commands(tokens)
+        if any(token.casefold() == "appsettings" for token in group)
+    ]
+    return bool(relevant) and all(
+        _tokens_recognized_safe(group, path=path, root=root) for group in relevant
+    )
+
+
+def _argv_is_recognized_safe(
+    words: list[str | None],
+    *,
+    path: Path | None,
+    root: Path | None,
+) -> bool:
+    tokens = [word if word is not None else "" for word in words]
+    return _tokens_recognized_safe(tokens, path=path, root=root)
+
+
+def _az_clause_at(text: str, index: int) -> str:
+    lookback_start = max(0, index - 80)
+    lookback = text[lookback_start:index]
+    start = index
+    for pattern in (r"(?i)\baz\b", r"(?i)\bwebapp\b"):
+        matches = list(re.finditer(pattern, lookback))
+        if matches:
+            start = lookback_start + matches[-1].start()
+            break
+    end = start
+    quote = None
+    length = len(text)
+    while end < length:
+        char = text[end]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            end += 1
+            continue
+        if quote == '"':
+            if char == "\\" and end + 1 < length:
+                end += 2
+                continue
+            if char == '"':
+                quote = None
+            end += 1
+            continue
+        if text.startswith("\\\n", end):
+            end += 2
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            end += 1
+            continue
+        if char == ")" or _is_unquoted_separator(text, end):
+            break
+        end += 1
+    return text[start:end].replace("\\\n", " ").strip().strip("`")
+
+
+def _all_appsettings_in_text_are_safe(
+    text: str,
+    *,
+    path: Path | None,
+    root: Path | None,
+) -> bool:
+    matches = list(APPSETTINGS_TOKEN.finditer(text))
+    if not matches:
+        return True
+    return all(
+        _shell_command_is_recognized_safe(_az_clause_at(text, match.start()), path=path, root=root)
+        for match in matches
+    )
+
+
+def _fold_python_string(node: ast.AST) -> str | None:
+    constant = _constant_str(node)
+    if constant is not None:
+        return constant
+    if isinstance(node, ast.JoinedStr):
+        return _joined_str(node)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _fold_python_string(node.left)
+        right = _fold_python_string(node.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+def _fold_python_sequence(node: ast.AST) -> list[str | None] | None:
+    if isinstance(node, (ast.List, ast.Tuple)):
+        words: list[str | None] = []
+        for element in node.elts:
+            if isinstance(element, ast.Starred):
+                words.append(None)
+                continue
+            folded = _fold_python_string(element)
+            words.append(folded)
+        return words
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _fold_python_sequence(node.left)
+        right = _fold_python_sequence(node.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+def _python_child_of_fold(tree: ast.AST) -> set[int]:
+    children: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            if _fold_python_string(node) is not None or _fold_python_sequence(node) is not None:
+                children.add(id(node.left))
+                children.add(id(node.right))
+        if isinstance(node, ast.JoinedStr):
+            for value in node.values:
+                children.add(id(value))
+        if isinstance(node, (ast.List, ast.Tuple)):
+            for element in node.elts:
+                children.add(id(element))
+    return children
+
+
+def iter_backstop_findings(
+    path: Path,
+    text: str,
+    root: Path | None = None,
+) -> Iterator[tuple[int, str]]:
+    """Yield ``(line, message)`` for every unrecognized ``appsettings`` token."""
+
+    if path.suffix == ".py":
+        yield from _iter_python_backstop(path, text, root)
+        return
+    yield from _iter_shell_backstop(path, text, root)
+
+
+def _iter_shell_backstop(
+    path: Path,
+    text: str,
+    root: Path | None,
+) -> Iterator[tuple[int, str]]:
+    masked = _mask_hash_comments(text)
+    for match in APPSETTINGS_TOKEN.finditer(masked):
+        command = _az_clause_at(masked, match.start())
+        if _shell_command_is_recognized_safe(command, path=path, root=root):
+            continue
+        yield _line_number(text, match.start()), BACKSTOP_MESSAGE
+
+
+def _iter_python_backstop(
+    path: Path,
+    text: str,
+    root: Path | None,
+) -> Iterator[tuple[int, str]]:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        for match in APPSETTINGS_TOKEN.finditer(_mask_hash_comments(text)):
+            yield _line_number(text, match.start()), BACKSTOP_MESSAGE
+        return
+
+    folded_children = _python_child_of_fold(tree)
+    covered_lines: set[int] = set()
+    reported: set[int] = set()
+
+    def cover(node: ast.AST) -> None:
+        start = getattr(node, "lineno", 1)
+        end = getattr(node, "end_lineno", start) or start
+        covered_lines.update(range(start, end + 1))
+
+    for node in ast.walk(tree):
+        if id(node) in folded_children:
+            continue
+        sequence = _fold_python_sequence(node)
+        if sequence is not None and any(
+            isinstance(word, str) and APPSETTINGS_TOKEN.search(word) for word in sequence
+        ):
+            cover(node)
+            if not _argv_is_recognized_safe(sequence, path=path, root=root):
+                line = getattr(node, "lineno", 1)
+                if line not in reported:
+                    reported.add(line)
+                    yield line, BACKSTOP_MESSAGE
+            continue
+        folded = _fold_python_string(node)
+        if folded is not None and APPSETTINGS_TOKEN.search(folded):
+            cover(node)
+            if not _all_appsettings_in_text_are_safe(folded, path=path, root=root):
+                line = getattr(node, "lineno", 1)
+                if line not in reported:
+                    reported.add(line)
+                    yield line, BACKSTOP_MESSAGE
+
+    masked = _mask_hash_comments(text)
+    for match in APPSETTINGS_TOKEN.finditer(masked):
+        line = _line_number(text, match.start())
+        if line in covered_lines or line in reported:
+            continue
+        snippet = _az_clause_at(masked, match.start())
+        if _shell_command_is_recognized_safe(snippet, path=path, root=root):
+            continue
+        reported.add(line)
+        yield line, BACKSTOP_MESSAGE
+
+
+def _is_test_fixture(path: Path) -> bool:
+    return path.name.endswith(".py") and path.parent.name == "tests" and path.name.startswith("test_")
+
+
+def _is_backstop_exempt(path: Path, root: Path) -> bool:
+    relative = _repo_relative(path, root)
+    if relative in BACKSTOP_EXEMPT_PATHS:
+        return True
+    return _is_test_fixture(path)
+
+
 def scan_operator_listings(root: Path) -> list[tuple[Path, str | None, str]]:
     """Classify every hosted app-settings listing under scripts and workflows."""
 
@@ -673,11 +1014,12 @@ def scan_operator_listings(root: Path) -> list[tuple[Path, str | None, str]]:
         if not base.exists():
             continue
         for path in sorted(base.rglob("*")):
-            if not path.is_file() or path.suffix not in {".sh", ".py", ".yml", ".yaml"}:
+            if not path.is_file() or path.suffix not in SCAN_SUFFIXES:
                 continue
-            if path.name.endswith(".py") and path.parent.name == "tests" and path.name.startswith("test_"):
+            if _is_test_fixture(path):
                 continue
-            for listing_path, query in iter_listing_queries(path):
+            source = path.read_text()
+            for listing_path, query in iter_listing_queries(path, source):
                 findings.append(
                     (
                         listing_path,
@@ -685,4 +1027,8 @@ def scan_operator_listings(root: Path) -> list[tuple[Path, str | None, str]]:
                         classify_appsettings_list_query(query, path=listing_path, root=root),
                     )
                 )
+            if _is_backstop_exempt(path, root):
+                continue
+            for line, message in iter_backstop_findings(path, source, root):
+                findings.append((path, f"{path.name}:{line}: {message}", "unsafe"))
     return findings
