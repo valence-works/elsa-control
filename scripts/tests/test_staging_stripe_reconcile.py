@@ -173,11 +173,20 @@ class FakeAzure:
         self.applications: list[dict[str, str]] = []
         self.deleted: list[str] = []
 
-    def app_settings(self) -> dict[str, str]:
-        return dict(self.values)
+    def list_names(self) -> list[str]:
+        return list(self.values)
 
-    def app_setting_records(self) -> dict[str, AzureAppSetting]:
-        return {name: AzureAppSetting(value, False) for name, value in self.values.items()}
+    def app_settings(self, names: list[str] | None = None) -> dict[str, str]:
+        values = dict(self.values)
+        if names is None:
+            return values
+        return {name: values[name] for name in names if name in values}
+
+    def app_setting_records(self, names: list[str] | None = None) -> dict[str, AzureAppSetting]:
+        records = {name: AzureAppSetting(value, False) for name, value in self.values.items()}
+        if names is None:
+            return records
+        return {name: records[name] for name in names if name in records}
 
     def apply_billing_settings(self, settings: Mapping[str, str]) -> None:
         self.applied = dict(settings)
@@ -279,12 +288,13 @@ class StagingStripeReconciliationTests(unittest.TestCase):
 
     def test_apply_rejects_slot_sticky_billing_settings_before_mutation(self) -> None:
         class StickyAzure(FakeAzure):
-            def app_setting_records(self) -> dict[str, AzureAppSetting]:
-                records = super().app_setting_records()
-                records["Billing__Stripe__SecretKey"] = AzureAppSetting(
-                    records["Billing__Stripe__SecretKey"].value,
-                    True,
-                )
+            def app_setting_records(self, names: list[str] | None = None) -> dict[str, AzureAppSetting]:
+                records = super().app_setting_records(names)
+                if "Billing__Stripe__SecretKey" in records:
+                    records["Billing__Stripe__SecretKey"] = AzureAppSetting(
+                        records["Billing__Stripe__SecretKey"].value,
+                        True,
+                    )
                 return records
 
         azure = StickyAzure()
@@ -760,7 +770,9 @@ class AzureWebAppTests(unittest.TestCase):
             return Result()
 
         with self.assertRaisesRegex(ReconciliationError, "Azure CLI request failed"):
-            AzureWebApp("resource-group", "webapp", runner=runner).app_settings()
+            AzureWebApp("resource-group", "webapp", runner=runner).app_settings(
+                ["Billing__Stripe__SecretKey"]
+            )
 
     def test_app_setting_records_preserve_slot_metadata(self) -> None:
         def runner(*args: Any, **kwargs: Any):
@@ -771,10 +783,34 @@ class AzureWebAppTests(unittest.TestCase):
 
             return Result()
 
-        records = AzureWebApp("resource-group", "webapp", runner=runner).app_setting_records()
+        records = AzureWebApp("resource-group", "webapp", runner=runner).app_setting_records(
+            ["Billing__Stripe__SecretKey"]
+        )
 
         self.assertEqual("sk_test_safe", records["Billing__Stripe__SecretKey"].value)
         self.assertTrue(records["Billing__Stripe__SecretKey"].slot_setting)
+
+    def test_app_setting_records_require_exact_names(self) -> None:
+        with self.assertRaisesRegex(ReconciliationError, "exact setting names"):
+            AzureWebApp("resource-group", "webapp").app_setting_records()
+
+    def test_list_names_requests_names_only(self) -> None:
+        observed: list[str] = []
+
+        def runner(command: list[str], **kwargs: Any):
+            class Result:
+                returncode = 0
+                stdout = "Billing__Stripe__Enabled\nBilling__Stripe__SecretKey\n"
+                stderr = ""
+
+            observed.extend(command)
+            return Result()
+
+        names = AzureWebApp("resource-group", "webapp", runner=runner).list_names()
+
+        self.assertEqual(["Billing__Stripe__Enabled", "Billing__Stripe__SecretKey"], names)
+        self.assertIn("[].name", observed)
+        self.assertNotIn("[].value", " ".join(observed))
 
     def test_apply_uses_a_private_payload_file_and_removes_it(self) -> None:
         observed: dict[str, Any] = {}

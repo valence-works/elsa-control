@@ -11,6 +11,15 @@ App Service module.
 The previous manually provisioned Web App can be deleted once anything important
 has been backed up.
 
+## Hosted application settings listings
+
+Operator listings of App Service application settings print **names
+only**. Read a value only with one exact setting name. Use
+`scripts/hosted-appsettings.sh list` and `get`. Wildcard, prefix, and
+bulk value reads are rejected. The same rule is in the
+[managed lifecycle operations runbook](../product/managed-lifecycle-operations-runbook.md#hosted-application-settings-listings)
+and in `AGENTS.md` for agent operator sessions.
+
 ## Local Tooling
 
 Install the current .NET 10 SDK before deploying. As of May 15, 2026, the

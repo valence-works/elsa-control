@@ -3719,9 +3719,10 @@ else:
 
             live_smoke, live_store = run_helper(smoke, {})
             self.assertNotEqual(0, live_smoke.returncode)
-            self.assertIn("Live pairing allowlist includes the staging Hosted smoke owner organization", live_smoke.stdout + live_smoke.stderr)
+            self.assertIn("Pairing allowlist includes the staging Hosted smoke owner organization", live_smoke.stdout + live_smoke.stderr)
             self.assertNotIn(smoke, live_smoke.stdout + live_smoke.stderr)
-            self.assertEqual({f"{prefix}0": smoke}, live_store)
+            self.assertEqual({}, live_store)
+            self.assertEqual("", call_log.read_text())
 
     def test_production_config_output_does_not_apply_lever_settings(self) -> None:
         check_script = self._deployment_config_script()
@@ -4457,6 +4458,14 @@ else:
         )
         fake_az.chmod(0o755)
         return store, call_log, fake_az
+
+
+from test_appsettings_name_only import (  # noqa: E402
+    AppSettingsNameOnlyAzureWebAppTests,
+    AppSettingsNameOnlyCliTests,
+    AppSettingsNameOnlyHelperSyntaxTests,
+    AppSettingsNameOnlyScanTests,
+)
 
 
 if __name__ == "__main__":

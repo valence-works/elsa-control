@@ -48,6 +48,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+_LIB = Path(__file__).resolve().parent / "lib"
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+from hosted_appsettings import HostedAppSettingsError, require_exact_setting_name
+
 
 DEFAULT_WEBHOOK_EVENTS = frozenset(
     {
@@ -326,6 +331,20 @@ class AzureAppSetting:
     slot_setting: bool
 
 
+STAGING_BILLING_SETTING_NAMES = (
+    "Billing__Lifecycle__Enabled",
+    "Billing__Lifecycle__PollInterval",
+    "Billing__Stripe__Enabled",
+    "Billing__Stripe__SecretKey",
+    "Billing__Stripe__WebhookSigningSecret",
+    "Billing__Stripe__DefaultPriceId",
+    "Billing__Stripe__CloudPortalReturnUrl",
+    "Billing__Stripe__CheckoutSuccessUrl",
+    "Billing__Stripe__CheckoutCancelUrl",
+    "Billing__Stripe__PortalReturnUrl",
+)
+
+
 class AzureWebApp:
     """Read and reconcile app settings without exposing secret values."""
 
@@ -334,52 +353,97 @@ class AzureWebApp:
         self._webapp_name = webapp_name
         self._runner = runner or subprocess.run
 
-    def app_setting_records(self) -> dict[str, AzureAppSetting]:
-        command = [
-            "az",
-            "webapp",
-            "config",
-            "appsettings",
-            "list",
-            "--resource-group",
-            self._resource_group,
-            "--name",
-            self._webapp_name,
-            "--output",
-            "json",
-            "--only-show-errors",
-        ]
+    def _run_az(self, command: Sequence[str]) -> subprocess.CompletedProcess[str]:
         try:
-            result = self._runner(command, capture_output=True, text=True, check=False, timeout=60)
+            result = self._runner(list(command), capture_output=True, text=True, check=False, timeout=60)
         except (OSError, subprocess.SubprocessError, TimeoutError) as error:
             raise ReconciliationError("Azure CLI request failed") from error
         if result.returncode != 0:
             raise ReconciliationError("Azure CLI request failed")
+        return result
+
+    def list_names(self) -> list[str]:
+        """Return setting names only. Values are never requested."""
+
+        result = self._run_az(
+            [
+                "az",
+                "webapp",
+                "config",
+                "appsettings",
+                "list",
+                "--resource-group",
+                self._resource_group,
+                "--name",
+                self._webapp_name,
+                "--query",
+                "[].name",
+                "--output",
+                "tsv",
+                "--only-show-errors",
+            ]
+        )
+        return [line for line in result.stdout.splitlines() if line]
+
+    def app_setting_record(self, name: str) -> AzureAppSetting | None:
+        try:
+            name = require_exact_setting_name(name)
+        except HostedAppSettingsError as error:
+            raise ReconciliationError(str(error)) from error
+        result = self._run_az(
+            [
+                "az",
+                "webapp",
+                "config",
+                "appsettings",
+                "list",
+                "--resource-group",
+                self._resource_group,
+                "--name",
+                self._webapp_name,
+                "--query",
+                f"[?name=='{name}']",
+                "--output",
+                "json",
+                "--only-show-errors",
+            ]
+        )
         try:
             values = json.loads(result.stdout)
         except json.JSONDecodeError as error:
             raise ReconciliationError("Azure returned invalid app settings") from error
-        if not isinstance(values, list):
+        if values == []:
+            return None
+        if not isinstance(values, list) or len(values) != 1:
             raise ReconciliationError("Azure returned invalid app settings")
+        item = values[0]
+        if not isinstance(item, Mapping) or item.get("name") != name:
+            raise ReconciliationError("Azure returned invalid app settings")
+        value = item.get("value")
+        if value is None:
+            value = ""
+        if not isinstance(value, str):
+            raise ReconciliationError("Azure returned invalid app settings")
+        slot_setting = item.get("slotSetting", False)
+        if not isinstance(slot_setting, bool):
+            raise ReconciliationError("Azure returned invalid app settings")
+        return AzureAppSetting(value, slot_setting)
+
+    def app_setting_records(self, names: Sequence[str] | None = None) -> dict[str, AzureAppSetting]:
+        if names is None:
+            raise ReconciliationError("Reading values requires exact setting names")
         settings: dict[str, AzureAppSetting] = {}
-        for item in values:
-            if not isinstance(item, Mapping) or not isinstance(item.get("name"), str):
-                raise ReconciliationError("Azure returned invalid app settings")
-            if item["name"] in settings:
+        for name in names:
+            record = self.app_setting_record(name)
+            if record is None:
+                continue
+            if name in settings:
                 raise ReconciliationError("Azure returned duplicate app settings")
-            value = item.get("value")
-            if value is None:
-                value = ""
-            if not isinstance(value, str):
-                raise ReconciliationError("Azure returned invalid app settings")
-            slot_setting = item.get("slotSetting", False)
-            if not isinstance(slot_setting, bool):
-                raise ReconciliationError("Azure returned invalid app settings")
-            settings[item["name"]] = AzureAppSetting(value, slot_setting)
+            settings[name] = record
         return settings
 
-    def app_settings(self) -> dict[str, str]:
-        return {name: setting.value for name, setting in self.app_setting_records().items()}
+    def app_settings(self, names: Sequence[str] | None = None) -> dict[str, str]:
+        return {name: setting.value for name, setting in self.app_setting_records(names).items()}
 
     def apply_billing_settings(self, settings: Mapping[str, str]) -> None:
         """Apply one complete billing payload through a private temporary file.
@@ -486,7 +550,7 @@ class StagingStripeReconciler:
             "Billing__Stripe__CloudPortalReturnUrl": self._config.cloud_portal_return_url,
         }
         if apply_azure_settings:
-            previous_records = self._azure.app_setting_records()
+            previous_records = self._azure.app_setting_records(tuple(desired_settings))
             previous = {name: setting.value for name, setting in previous_records.items()}
             previous_secret = previous.get("Billing__Stripe__SecretKey", "")
             if previous_secret and not previous_secret.startswith(TEST_SECRET_PREFIX):
@@ -529,7 +593,7 @@ class StagingStripeReconciler:
                 self._azure.apply_billing_settings(values)
             if missing:
                 self._azure.delete_billing_settings(missing)
-            restored = self._azure.app_settings()
+            restored = self._azure.app_settings(tuple(previous))
             if any(restored.get(name) != value for name, value in values.items()):
                 raise ReconciliationError("Azure billing settings rollback failed")
             if any(name in restored for name in missing):
@@ -590,7 +654,7 @@ class StagingStripeReconciler:
         validate_portal_policy(configuration)
 
     def check_azure_settings(self, *, expected_stripe_secret_key: str | None = None) -> None:
-        settings = self._azure.app_settings()
+        settings = self._azure.app_settings(STAGING_BILLING_SETTING_NAMES)
         expected = {
             "Billing__Lifecycle__Enabled": "true",
             "Billing__Lifecycle__PollInterval": "00:00:15",
