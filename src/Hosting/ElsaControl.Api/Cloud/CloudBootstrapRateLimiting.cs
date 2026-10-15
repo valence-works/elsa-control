@@ -16,7 +16,9 @@ public static class CloudBootstrapRateLimitDefaults
     public const string ConfigurationSection = "RateLimiting:CloudBootstrap";
     public const string ExceededCode = "rate-limit.exceeded";
     public const string ExceededTitle = "Cloud bootstrap rate limit was exceeded.";
-    public const int DefaultPermitLimit = 60;
+    public const int DefaultPerIdentityPermitLimit = 60;
+    public const int DefaultPerIpPermitLimit = DefaultPerIdentityPermitLimit * 10;
+    public const int UnresolvedIdentityPermitLimit = 1;
     public const int MinPermitLimit = 1;
     public const int MaxPermitLimit = 10_000;
     public static readonly TimeSpan DefaultWindow = TimeSpan.FromMinutes(1);
@@ -26,7 +28,7 @@ public static class CloudBootstrapRateLimitDefaults
 
 public sealed class CloudBootstrapFixedWindowRateLimitOptions
 {
-    public int PermitLimit { get; init; } = CloudBootstrapRateLimitDefaults.DefaultPermitLimit;
+    public int PermitLimit { get; init; } = CloudBootstrapRateLimitDefaults.DefaultPerIdentityPermitLimit;
     public TimeSpan Window { get; init; } = CloudBootstrapRateLimitDefaults.DefaultWindow;
 }
 
@@ -34,8 +36,27 @@ public sealed class CloudBootstrapRateLimitOptions
 {
     public const string ConfigurationSection = CloudBootstrapRateLimitDefaults.ConfigurationSection;
 
-    public CloudBootstrapFixedWindowRateLimitOptions PerIp { get; init; } = new();
-    public CloudBootstrapFixedWindowRateLimitOptions PerIdentity { get; init; } = new();
+    /// <summary>
+    /// Fixed window applied to every request, including validated Cloud/Hub BFF
+    /// sessions and authenticated cookies. The default permit is ten times the
+    /// per-identity default so shared BFF egress has aggregate headroom while
+    /// per-identity remains the binding limit for signed-in callers.
+    /// </summary>
+    public CloudBootstrapFixedWindowRateLimitOptions PerIp { get; init; } = new()
+    {
+        PermitLimit = CloudBootstrapRateLimitDefaults.DefaultPerIpPermitLimit
+    };
+
+    /// <summary>
+    /// Fixed window keyed on validated issuer plus subject. This is the main
+    /// limit for signed-in callers. Authenticated sessions that cannot resolve
+    /// both values use a separate low-permit fallback bucket partitioned by IP.
+    /// Unauthenticated requests use the per-IP window only.
+    /// </summary>
+    public CloudBootstrapFixedWindowRateLimitOptions PerIdentity { get; init; } = new()
+    {
+        PermitLimit = CloudBootstrapRateLimitDefaults.DefaultPerIdentityPermitLimit
+    };
 
     internal IEnumerable<string> Validate()
     {
@@ -77,8 +98,6 @@ public sealed class CloudBootstrapRateLimitConfigurationValidator(
 
 public sealed class CloudBootstrapRateLimiterPolicy : IRateLimiterPolicy<string>
 {
-    internal const string AnonymousIdentityPartition = "anonymous";
-
     private readonly CloudBootstrapChainedRateLimiter _limiter;
 
     public CloudBootstrapRateLimiterPolicy(
@@ -106,7 +125,8 @@ public sealed class CloudBootstrapRateLimiterPolicy : IRateLimiterPolicy<string>
 
 internal sealed class CloudBootstrapChainedRateLimiter : RateLimiter
 {
-    internal const string BffSessionIpPartition = "bff-session";
+    internal const string UnresolvedIdentityPartitionPrefix = "unresolved";
+    internal const string AnonymousIdentityPartition = "anonymous";
     private const string CachedPrincipalItemKey = "__cloud-bootstrap.principal";
 
     private static readonly AsyncLocal<HttpContext?> Current = new();
@@ -119,19 +139,28 @@ internal sealed class CloudBootstrapChainedRateLimiter : RateLimiter
         CloudAccountIdentityOptions cloudAccount,
         HubAccountIdentityOptions hubAccount)
     {
+        var unresolvedIdentity = new CloudBootstrapFixedWindowRateLimitOptions
+        {
+            PermitLimit = CloudBootstrapRateLimitDefaults.UnresolvedIdentityPermitLimit,
+            Window = options.PerIdentity.Window
+        };
         _inner = PartitionedRateLimiter.CreateChained(
             PartitionedRateLimiter.Create<HttpContext, string>(context =>
-                ShouldSkipPerIpLimit(context, cloudAccount, hubAccount)
-                    ? RateLimitPartition.GetNoLimiter<string>(BffSessionIpPartition)
-                    : RateLimitPartition.GetFixedWindowLimiter(
-                        GetIpPartitionKey(context),
-                        _ => CreateWindow(options.PerIp))),
+                RateLimitPartition.GetFixedWindowLimiter(
+                    GetIpPartitionKey(context),
+                    _ => CreateWindow(options.PerIp))),
             PartitionedRateLimiter.Create<HttpContext, string>(context =>
             {
-                var identity = GetIdentityPartitionKey(context, controlIdentity, cloudAccount, hubAccount);
-                return identity is null
-                    ? RateLimitPartition.GetNoLimiter<string>(CloudBootstrapRateLimiterPolicy.AnonymousIdentityPartition)
-                    : RateLimitPartition.GetFixedWindowLimiter(identity, _ => CreateWindow(options.PerIdentity));
+                var principal = GetAuthenticatedPrincipal(context);
+                var identity = ControlRateLimitIdentity.PartitionKey(
+                    principal, controlIdentity, cloudAccount, hubAccount);
+                if (identity is not null)
+                    return RateLimitPartition.GetFixedWindowLimiter(identity, _ => CreateWindow(options.PerIdentity));
+                if (principal is not null)
+                    return RateLimitPartition.GetFixedWindowLimiter(
+                        UnresolvedIdentityKey(context),
+                        _ => CreateWindow(unresolvedIdentity));
+                return RateLimitPartition.GetNoLimiter<string>(AnonymousIdentityPartition);
             }));
     }
 
@@ -196,21 +225,8 @@ internal sealed class CloudBootstrapChainedRateLimiter : RateLimiter
             hubAccount);
     }
 
-    internal static bool ShouldSkipPerIpLimit(
-        HttpContext context,
-        CloudAccountIdentityOptions cloudAccount,
-        HubAccountIdentityOptions hubAccount)
-    {
-        var principal = GetAuthenticatedPrincipal(context);
-        if (principal is null)
-            return false;
-
-        if (ControlIdentityReader.IsBffForwardedSession(principal, cloudAccount, hubAccount))
-            return true;
-
-        return context.User.Identity is not { IsAuthenticated: true }
-            && context.Request.Cookies.ContainsKey(CustomerAuthenticationDefaults.CookieName);
-    }
+    internal static string UnresolvedIdentityKey(HttpContext context) =>
+        ControlRateLimitIdentity.Format(UnresolvedIdentityPartitionPrefix, GetIpPartitionKey(context));
 
     private static ClaimsPrincipal? GetAuthenticatedPrincipal(HttpContext context)
     {

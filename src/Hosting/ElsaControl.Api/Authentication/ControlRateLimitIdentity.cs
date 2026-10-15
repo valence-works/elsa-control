@@ -40,18 +40,16 @@ internal static class ControlRateLimitIdentity
 
         if (HubAccountTokenSelector.IsValidatedHubAccount(user, hubAccount))
         {
-            var identity = ControlClaimsIdentityMapper.ToHubTrustedWorkspaceIdentity(user);
-            issuer = identity.Issuer;
-            subject = identity.Subject;
-            return true;
+            issuer = user.FindFirst("iss")?.Value;
+            subject = user.FindFirst("sub")?.Value;
+            return !string.IsNullOrWhiteSpace(issuer) && !string.IsNullOrWhiteSpace(subject);
         }
 
         if (CloudAccountTokenSelector.IsValidatedCloudAccount(user, cloudAccount))
         {
-            var identity = ControlClaimsIdentityMapper.ToCloudTrustedWorkspaceIdentity(user);
-            issuer = identity.Issuer;
-            subject = identity.Subject;
-            return true;
+            issuer = user.FindFirst("iss")?.Value;
+            subject = user.FindFirst("sub")?.Value;
+            return !string.IsNullOrWhiteSpace(issuer) && !string.IsNullOrWhiteSpace(subject);
         }
 
         issuer = ControlClaimsIdentityMapper.Issuer(user, controlIdentity);

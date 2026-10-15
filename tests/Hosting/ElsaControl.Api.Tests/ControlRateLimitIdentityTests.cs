@@ -43,4 +43,32 @@ public sealed class ControlRateLimitIdentityTests
 
         Assert.Null(key);
     }
+
+    [Fact]
+    public void Authenticated_session_without_sub_has_no_partition_key()
+    {
+        var user = new ClaimsPrincipal(new ClaimsIdentity(
+            [new Claim("iss", "https://control.test")],
+            CustomerAuthenticationDefaults.CookieScheme));
+
+        Assert.Null(ControlRateLimitIdentity.PartitionKey(
+            user,
+            new ControlIdentityOptions { Issuer = "https://control.test" },
+            new CloudAccountIdentityOptions(),
+            new HubAccountIdentityOptions()));
+    }
+
+    [Fact]
+    public void Authenticated_session_without_issuer_claim_or_config_has_no_partition_key()
+    {
+        var user = new ClaimsPrincipal(new ClaimsIdentity(
+            [new Claim("sub", "subject-without-issuer")],
+            CustomerAuthenticationDefaults.CookieScheme));
+
+        Assert.Null(ControlRateLimitIdentity.PartitionKey(
+            user,
+            new ControlIdentityOptions(),
+            new CloudAccountIdentityOptions(),
+            new HubAccountIdentityOptions()));
+    }
 }

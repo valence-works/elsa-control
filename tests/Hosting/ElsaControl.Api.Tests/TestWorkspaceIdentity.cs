@@ -44,16 +44,27 @@ internal static class TestWorkspaceIdentity
         HttpClient client,
         string subject,
         DateTimeOffset? expiresUtc,
+        params Claim[] additionalClaims) =>
+        AddControlSessionCookie(app, client, subject, ControlApiTestApplication.TestControlIdentityIssuer, expiresUtc, additionalClaims);
+
+    public static void AddControlSessionCookie(
+        this ControlApiTestApplication app,
+        HttpClient client,
+        string? subject,
+        string? issuer,
+        DateTimeOffset? expiresUtc,
         params Claim[] additionalClaims)
     {
         var options = app.Services.GetRequiredService<IOptionsMonitor<CookieAuthenticationOptions>>()
             .Get(CustomerAuthenticationDefaults.CookieScheme);
         var claims = new List<Claim>
         {
-            new("sub", subject),
-            new("iss", ControlApiTestApplication.TestControlIdentityIssuer),
             new("name", "Admin User")
         };
+        if (!string.IsNullOrWhiteSpace(subject))
+            claims.Add(new Claim("sub", subject));
+        if (!string.IsNullOrWhiteSpace(issuer))
+            claims.Add(new Claim("iss", issuer));
         claims.AddRange(additionalClaims);
 
         var properties = new AuthenticationProperties();

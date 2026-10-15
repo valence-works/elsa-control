@@ -158,22 +158,22 @@ public sealed class CloudBootstrapRateLimitTests
     }
 
     [Fact]
-    public async Task Distinct_cloud_session_identities_from_one_ip_are_not_limited_by_per_ip()
+    public async Task Validated_bff_sessions_are_counted_per_ip()
     {
         const string issuer = "https://cloud-account.test/auth/v1";
-        const string sharedIp = "203.0.113.73";
-        const string firstSubject = "11111111-1111-4111-8111-111111111111";
-        await using var app = CreateCloudApplication(perIp: 1, perIdentity: 1, issuer);
+        const string subject = "11111111-1111-4111-8111-111111111111";
+        await using var app = CreateCloudApplication(perIp: 1, perIdentity: 20, issuer);
         await app.SeedAsync(_ => Task.CompletedTask);
-        using var first = CloudClient(app, issuer, firstSubject, sharedIp);
-        using var second = CloudClient(app, issuer, "22222222-2222-4222-8222-222222222222", sharedIp);
-        using var firstAgain = CloudClient(app, issuer, firstSubject, sharedIp);
+        using var first = CloudClient(app, issuer, subject, "203.0.113.73");
+        using var sameIp = CloudClient(app, issuer, subject, "203.0.113.73");
+        using var otherIp = CloudClient(app, issuer, subject, "203.0.113.74");
 
         Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(first)).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(second)).StatusCode);
-        using var firstRejected = await PostBootstrapAsync(firstAgain);
+        using var sameIpRejected = await PostBootstrapAsync(sameIp);
+        using var otherIpAllowed = await PostBootstrapAsync(otherIp);
 
-        await AssertRateLimitExceeded(firstRejected);
+        await AssertRateLimitExceeded(sameIpRejected);
+        Assert.Equal(HttpStatusCode.OK, otherIpAllowed.StatusCode);
     }
 
     [Fact]
@@ -195,39 +195,71 @@ public sealed class CloudBootstrapRateLimitTests
     }
 
     [Fact]
-    public async Task Distinct_hub_session_identities_from_one_ip_are_not_limited_by_per_ip()
+    public async Task Hub_and_cloud_sessions_on_one_ip_have_separate_identities_and_share_per_ip()
     {
-        const string issuer = "https://hub-account.test/auth/v1";
+        const string hubIssuer = "https://hub-account.test/auth/v1";
+        const string cloudIssuer = "https://cloud-account.test/auth/v1";
         const string sharedIp = "203.0.113.77";
-        const string firstSubject = "c0a80101-0000-4000-8000-000000000011";
-        await using var app = CreateHubApplication(perIp: 1, perIdentity: 1, issuer);
+        await using var app = CreateCloudAndHubApplication(perIp: 2, perIdentity: 1, hubIssuer, cloudIssuer);
         await app.SeedAsync(_ => Task.CompletedTask);
-        using var first = HubClient(app, issuer, firstSubject, sharedIp);
-        using var second = HubClient(app, issuer, "c0a80101-0000-4000-8000-000000000012", sharedIp);
-        using var firstAgain = HubClient(app, issuer, firstSubject, sharedIp);
+        using var hub = HubClient(app, hubIssuer, "c0a80101-0000-4000-8000-000000000011", sharedIp);
+        using var cloud = CloudClient(app, cloudIssuer, "c0a80101-0000-4000-8000-000000000021", sharedIp);
+        using var hubAgain = HubClient(app, hubIssuer, "c0a80101-0000-4000-8000-000000000011", sharedIp);
+        using var third = CloudClient(app, cloudIssuer, "c0a80101-0000-4000-8000-000000000031", sharedIp);
 
-        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(first)).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(second)).StatusCode);
-        using var firstRejected = await PostBootstrapAsync(firstAgain);
+        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(hub)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(cloud)).StatusCode);
+        using var hubIdentityRejected = await PostBootstrapAsync(hubAgain);
+        using var ipRejected = await PostBootstrapAsync(third);
 
-        await AssertRateLimitExceeded(firstRejected);
+        await AssertRateLimitExceeded(hubIdentityRejected);
+        await AssertRateLimitExceeded(ipRejected);
     }
 
     [Fact]
-    public async Task Distinct_cookie_sessions_from_one_ip_are_not_limited_by_per_ip()
+    public async Task Cookie_session_without_sub_uses_the_unresolved_identity_fallback()
     {
-        const string sharedIp = "203.0.113.74";
-        await using var app = CreateApplication(perIp: 1, perIdentity: 1);
+        const string sharedIp = "203.0.113.78";
+        await using var app = CreateApplication(perIp: 20, perIdentity: 20);
         await app.SeedAsync(_ => Task.CompletedTask);
-        using var first = CookieClient(app, "cookie-one", sharedIp);
-        using var second = CookieClient(app, "cookie-two", sharedIp);
-        using var firstAgain = CookieClient(app, "cookie-one", sharedIp);
+        using var first = IncompleteCookieClient(app, sharedIp, subject: null, issuer: ControlApiTestApplication.TestControlIdentityIssuer);
+        using var second = IncompleteCookieClient(app, sharedIp, subject: null, issuer: ControlApiTestApplication.TestControlIdentityIssuer);
+        using var signedIn = CookieClient(app, "cookie-complete", sharedIp);
+        using var otherIp = IncompleteCookieClient(app, "203.0.113.79", subject: null, issuer: ControlApiTestApplication.TestControlIdentityIssuer);
 
-        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(first)).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(second)).StatusCode);
-        using var firstRejected = await PostBootstrapAsync(firstAgain);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await PostBootstrapAsync(first)).StatusCode);
+        using var fallbackRejected = await PostBootstrapAsync(second);
+        using var signedInAllowed = await PostBootstrapAsync(signedIn);
+        using var otherIpUnauthorized = await PostBootstrapAsync(otherIp);
 
-        await AssertRateLimitExceeded(firstRejected);
+        await AssertRateLimitExceeded(fallbackRejected);
+        Assert.Equal(HttpStatusCode.OK, signedInAllowed.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, otherIpUnauthorized.StatusCode);
+    }
+
+    [Fact]
+    public async Task Cookie_session_without_issuer_uses_the_unresolved_identity_fallback()
+    {
+        const string sharedIp = "203.0.113.80";
+        await using var app = CreateApplication(
+            perIp: 20,
+            perIdentity: 20,
+            extra: new Dictionary<string, string?>
+            {
+                [$"{ControlIdentityDefaults.ConfigurationSection}:Issuer"] = "",
+                [$"{ControlIdentityDefaults.ConfigurationSection}:Authority"] = ""
+            });
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var first = IncompleteCookieClient(app, sharedIp, subject: "cookie-no-issuer", issuer: null);
+        using var second = IncompleteCookieClient(app, sharedIp, subject: "cookie-no-issuer", issuer: null);
+        using var otherIp = IncompleteCookieClient(app, "203.0.113.83", subject: "cookie-no-issuer-other", issuer: null);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await PostBootstrapAsync(first)).StatusCode);
+        using var fallbackRejected = await PostBootstrapAsync(second);
+        using var otherIpUnauthorized = await PostBootstrapAsync(otherIp);
+
+        await AssertRateLimitExceeded(fallbackRejected);
+        Assert.Equal(HttpStatusCode.Unauthorized, otherIpUnauthorized.StatusCode);
     }
 
     [Fact]
@@ -289,9 +321,20 @@ public sealed class CloudBootstrapRateLimitTests
         Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Default_per_ip_permit_is_ten_times_per_identity()
+    {
+        var options = new CloudBootstrapRateLimitOptions();
+
+        Assert.Equal(CloudBootstrapRateLimitDefaults.DefaultPerIdentityPermitLimit, options.PerIdentity.PermitLimit);
+        Assert.Equal(CloudBootstrapRateLimitDefaults.DefaultPerIpPermitLimit, options.PerIp.PermitLimit);
+        Assert.Equal(options.PerIdentity.PermitLimit * 10, options.PerIp.PermitLimit);
+    }
+
     [Theory]
     [InlineData(1, "00:00:01")]
     [InlineData(60, "00:01:00")]
+    [InlineData(600, "00:01:00")]
     [InlineData(10000, "01:00:00")]
     public async Task Valid_limits_are_accepted(int permitLimit, string window)
     {
@@ -390,6 +433,28 @@ public sealed class CloudBootstrapRateLimitTests
                     ControlApiTestApplication.TestControlIdentitySigningKey
             });
 
+    private static ControlApiTestApplication CreateCloudAndHubApplication(
+        int perIp,
+        int perIdentity,
+        string hubIssuer,
+        string cloudIssuer) =>
+        CreateApplication(
+            perIp,
+            perIdentity,
+            extra: new Dictionary<string, string?>
+            {
+                [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
+                [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Issuer"] = cloudIssuer,
+                [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Audience"] = "authenticated",
+                [$"{CloudAccountIdentityDefaults.ConfigurationSection}:TestSigningKey"] =
+                    ControlApiTestApplication.TestControlIdentitySigningKey,
+                [$"{HubAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
+                [$"{HubAccountIdentityDefaults.ConfigurationSection}:Issuer"] = hubIssuer,
+                [$"{HubAccountIdentityDefaults.ConfigurationSection}:Audience"] = "authenticated",
+                [$"{HubAccountIdentityDefaults.ConfigurationSection}:TestSigningKey"] =
+                    ControlApiTestApplication.TestControlIdentitySigningKey
+            });
+
     private static CloudBootstrapRateLimitConfigurationValidator CreateValidator(
         int perIpLimit = 60,
         TimeSpan? perIpWindow = null,
@@ -420,6 +485,18 @@ public sealed class CloudBootstrapRateLimitTests
     {
         var client = app.CreateClient();
         app.AddControlSessionCookie(client, subject, DateTimeOffset.UtcNow.AddHours(2));
+        SetRemoteIp(client, ip);
+        return client;
+    }
+
+    private static HttpClient IncompleteCookieClient(
+        ControlApiTestApplication app,
+        string ip,
+        string? subject,
+        string? issuer)
+    {
+        var client = app.CreateClient();
+        app.AddControlSessionCookie(client, subject, issuer, DateTimeOffset.UtcNow.AddHours(2));
         SetRemoteIp(client, ip);
         return client;
     }
