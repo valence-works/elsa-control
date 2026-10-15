@@ -168,6 +168,27 @@ az webapp restart --subscription "$STAGING_CONTROL_SUBSCRIPTION" \
   --resource-group "$STAGING_CONTROL_RESOURCE_GROUP" --name "$STAGING_CONTROL_WEBAPP"
 ```
 
+## Handoff verification-key overlap (staging rehearsal)
+
+The Control API key ring accepts one active signing key plus indexed previous
+verification keys (`ManagedElsa__Handoff__PreviousVerificationKeys__N__KeyId` and
+`...__PublicKeyPem`). Rehearse rotation on isolated staging with **test keys
+only**. Do not apply this to production.
+
+1. Keep the current public key as previous verification key `0`.
+2. Cut `ActiveKeyId` over to the new test key. Confirm a code issued under the
+   previous key still redeems.
+3. Wait at least the maximum handoff-code lifetime plus one minute, then remove
+   the previous public key and restart.
+4. Confirm a leftover previous-key code is rejected, and that
+   `ManagedElsaHandoffAuditEvents` contains `key_ring.active:<id>`,
+   `key_ring.previous:<id>` (while overlapping) and `key_ring.retired:<id>`
+   after removal. Record key ids, timestamps and pass/fail only.
+
+Evidence is value-free: no PEM, token, verifier or other key material. Connector
+protocol `"1"` and advertised capabilities are unchanged. A production rotation
+needs a separate operator go.
+
 ## What the template binds
 
 - Lifecycle worker, provider worker and instance provider are enabled together; the startup validator

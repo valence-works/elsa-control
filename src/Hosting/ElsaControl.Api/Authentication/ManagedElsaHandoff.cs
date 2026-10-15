@@ -28,6 +28,21 @@ public static class ManagedElsaHandoffDefaults
     public static readonly TimeSpan MaximumLifetime = TimeSpan.FromMinutes(5);
     public static readonly TimeSpan DefaultRuntimeSessionMaximumLifetime = TimeSpan.FromHours(8);
     public static readonly TimeSpan MaximumRuntimeSessionLifetime = TimeSpan.FromHours(8);
+    /// <summary>
+    /// Allowance for host clock drift when deciding when a previous verification
+    /// key may be removed. Token validation itself uses zero skew.
+    /// </summary>
+    public static readonly TimeSpan VerificationClockSkewAllowance = TimeSpan.FromMinutes(1);
+    /// <summary>
+    /// Minimum time to keep a previous verification key trusted after signing
+    /// cuts over: the maximum handoff-code lifetime plus clock-skew allowance.
+    /// </summary>
+    public static readonly TimeSpan PreviousVerificationKeyOverlap =
+        MaximumLifetime + VerificationClockSkewAllowance;
+
+    public const string KeyRingActiveAuditActionPrefix = "key_ring.active:";
+    public const string KeyRingPreviousAuditActionPrefix = "key_ring.previous:";
+    public const string KeyRingRetiredAuditActionPrefix = "key_ring.retired:";
 
     /// <summary>
     /// Console page a managed runtime returns the browser to with <c>instanceId</c>, <c>state</c> and
@@ -50,7 +65,25 @@ public sealed class ManagedElsaHandoffOptions
     public string? CloudContinuationUrl { get; init; }
     public string? ActiveKeyId { get; init; }
     public string? ActivePrivateKeyPem { get; init; }
+    /// <summary>
+    /// JSON-object map of previous verification key ids to public PEMs. Prefer
+    /// <see cref="PreviousVerificationKeys"/> on Azure App Settings, Container
+    /// Apps, and other environment-variable hosts.
+    /// </summary>
     public Dictionary<string, string> PreviousPublicKeys { get; init; } = new(StringComparer.Ordinal);
+    /// <summary>
+    /// Indexed list of previous verification keys. This is the shape Azure App
+    /// Settings and Container Apps accept:
+    /// <c>ManagedElsa__Handoff__PreviousVerificationKeys__0__KeyId</c> and
+    /// <c>...__0__PublicKeyPem</c>.
+    /// </summary>
+    public List<ManagedElsaHandoffPreviousVerificationKey> PreviousVerificationKeys { get; init; } = [];
+}
+
+public sealed class ManagedElsaHandoffPreviousVerificationKey
+{
+    public string? KeyId { get; init; }
+    public string? PublicKeyPem { get; init; }
 }
 
 public sealed class ManagedElsaHandoffConfigurationValidator(
@@ -79,7 +112,13 @@ public sealed class ManagedElsaHandoffConfigurationValidator(
                 throw new InvalidOperationException(
                     "Managed Elsa handoff requires a configured active signing key outside local environments.");
             if (hasAnyConfiguredKey || !localEnvironment)
-                _ = services.GetRequiredService<ManagedElsaHandoffKeyRing>().ActiveKeyId;
+            {
+                var keyRing = services.GetRequiredService<ManagedElsaHandoffKeyRing>();
+                _ = keyRing.ActiveKeyId;
+                if (!localEnvironment)
+                    await ManagedElsaHandoffKeyRingAudit.RecordLoadedAsync(
+                        services, keyRing, cancellationToken);
+            }
             if (!localEnvironment)
             {
                 await using var scope = services.CreateAsyncScope();
@@ -202,11 +241,19 @@ public sealed class ManagedElsaHandoffKeyRing : IDisposable
 
     public ManagedElsaHandoffKeyRing(string activeKeyId, RSA activeKey, IEnumerable<(string KeyId, RSA Key)>? validationKeys = null)
     {
-        if (string.IsNullOrWhiteSpace(activeKeyId))
+        if (!ManagedElsaHandoffKeyIds.IsAllowed(activeKeyId))
             throw new ArgumentException("An active key id is required.", nameof(activeKeyId));
 
         ArgumentNullException.ThrowIfNull(activeKey);
         var keys = (validationKeys ?? []).ToList();
+        foreach (var (keyId, _) in keys)
+        {
+            if (!ManagedElsaHandoffKeyIds.IsAllowed(keyId))
+                throw new ArgumentException("Validation key ids must use the allowed identifier format.", nameof(validationKeys));
+        }
+
+        if (keys.Select(x => x.KeyId).Distinct(StringComparer.Ordinal).Count() != keys.Count)
+            throw new ArgumentException("Validation key ids must be unique.", nameof(validationKeys));
         if (keys.Any(x => string.Equals(x.KeyId, activeKeyId, StringComparison.Ordinal)))
             throw new ArgumentException("Validation keys must not duplicate the active key id.", nameof(validationKeys));
 
@@ -219,6 +266,15 @@ public sealed class ManagedElsaHandoffKeyRing : IDisposable
     }
 
     public string ActiveKeyId { get; }
+
+    public IReadOnlyList<string> PreviousVerificationKeyIds =>
+        _keys.Keys
+            .Where(keyId => !string.Equals(keyId, ActiveKeyId, StringComparison.Ordinal))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+    public IReadOnlyList<string> TrustedKeyIds =>
+        _keys.Keys.Order(StringComparer.Ordinal).ToArray();
 
     public SigningCredentials ActiveSigningCredentials =>
         new(_keys[ActiveKeyId], SecurityAlgorithms.RsaSha256);
@@ -234,32 +290,17 @@ public sealed class ManagedElsaHandoffKeyRing : IDisposable
     {
         if (string.IsNullOrWhiteSpace(options.ActiveKeyId) || string.IsNullOrWhiteSpace(options.ActivePrivateKeyPem))
             throw new InvalidOperationException("Managed Elsa handoff active signing-key configuration is incomplete.");
+        if (!ManagedElsaHandoffKeyIds.IsAllowed(options.ActiveKeyId))
+            throw new InvalidOperationException("Managed Elsa handoff key identifier is not an allowed format.");
 
+        var previousMaterial = CollectPreviousKeyMaterial(options.ActiveKeyId, options);
         var active = RSA.Create();
         var previous = new List<(string KeyId, RSA Key)>();
         try
         {
-            active.ImportFromPem(options.ActivePrivateKeyPem);
-            _ = active.ExportParameters(includePrivateParameters: true);
-            if (active.KeySize < 2048)
-                throw new InvalidOperationException("Managed Elsa handoff signing keys must be at least 2048 bits.");
-
-            foreach (var configured in options.PreviousPublicKeys)
-            {
-                var key = RSA.Create();
-                try
-                {
-                    key.ImportFromPem(configured.Value);
-                    if (key.KeySize < 2048)
-                        throw new InvalidOperationException("Managed Elsa handoff validation keys must be at least 2048 bits.");
-                    previous.Add((configured.Key, key));
-                }
-                catch
-                {
-                    key.Dispose();
-                    throw;
-                }
-            }
+            ImportActiveSigningKey(active, options.ActiveKeyId, options.ActivePrivateKeyPem);
+            foreach (var (keyId, pem) in previousMaterial)
+                previous.Add((keyId, ImportPreviousVerificationKey(keyId, pem)));
 
             return new ManagedElsaHandoffKeyRing(options.ActiveKeyId, active, previous);
         }
@@ -277,6 +318,88 @@ public sealed class ManagedElsaHandoffKeyRing : IDisposable
         foreach (var key in _keys.Values)
             key.Rsa?.Dispose();
     }
+
+    private static List<(string KeyId, string Pem)> CollectPreviousKeyMaterial(
+        string activeKeyId,
+        ManagedElsaHandoffOptions options)
+    {
+        var entries = new List<(string KeyId, string Pem)>();
+        foreach (var configured in options.PreviousPublicKeys)
+            entries.Add((configured.Key, configured.Value));
+        foreach (var configured in options.PreviousVerificationKeys)
+            entries.Add((configured.KeyId ?? "", configured.PublicKeyPem ?? ""));
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (keyId, _) in entries)
+        {
+            if (!ManagedElsaHandoffKeyIds.IsAllowed(keyId))
+                throw new InvalidOperationException("Managed Elsa handoff key identifier is not an allowed format.");
+            if (string.Equals(keyId, activeKeyId, StringComparison.Ordinal) || !seen.Add(keyId))
+                throw new InvalidOperationException($"Managed Elsa handoff key '{keyId}' is duplicated.");
+        }
+
+        return entries;
+    }
+
+    private static void ImportActiveSigningKey(RSA active, string keyId, string pem)
+    {
+        try
+        {
+            active.ImportFromPem(pem);
+            _ = active.ExportParameters(includePrivateParameters: true);
+            if (active.KeySize < 2048)
+                throw InvalidKey(keyId);
+        }
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch
+        {
+            throw InvalidKey(keyId);
+        }
+    }
+
+    private static RSA ImportPreviousVerificationKey(string keyId, string pem)
+    {
+        if (string.IsNullOrWhiteSpace(pem) || ContainsPrivateKeyLabel(pem))
+            throw InvalidKey(keyId);
+
+        var key = RSA.Create();
+        try
+        {
+            key.ImportFromPem(pem);
+            if (key.KeySize < 2048)
+                throw InvalidKey(keyId);
+            _ = key.ExportParameters(includePrivateParameters: false);
+            try
+            {
+                _ = key.ExportParameters(includePrivateParameters: true);
+            }
+            catch (CryptographicException)
+            {
+                return key;
+            }
+
+            throw InvalidKey(keyId);
+        }
+        catch (InvalidOperationException)
+        {
+            key.Dispose();
+            throw;
+        }
+        catch
+        {
+            key.Dispose();
+            throw InvalidKey(keyId);
+        }
+    }
+
+    private static bool ContainsPrivateKeyLabel(string pem) =>
+        pem.Contains("PRIVATE KEY", StringComparison.Ordinal);
+
+    private static InvalidOperationException InvalidKey(string keyId) =>
+        new($"Managed Elsa handoff key '{keyId}' is invalid.");
 }
 
 public sealed record ManagedElsaHandoffIssueResult(
