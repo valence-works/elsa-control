@@ -142,7 +142,7 @@ public static class ManagedElsaInstanceEndpoints
                 .ThenBy(x => x.TopologyId, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
             return Results.Ok(new ManagedElsaInstanceOnboardingOptionsResponse(releases, InitialLaunchProfile, previewReleases));
-        }).RequireWorkspaceAccess().AllowCloudBff()
+        }).RequireWorkspaceAccess().AllowCloudBff().AllowHubBff()
             .AddEndpointFilter<EngineProvisioningRequiredFilter>();
 
         group.MapPost("", async (
@@ -202,7 +202,7 @@ public static class ManagedElsaInstanceEndpoints
             {
                 return Problem("instance.shape-invalid", "The instance request is invalid.", StatusCodes.Status422UnprocessableEntity);
             }
-        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff()
+        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff().AllowHubBff()
             .AddEndpointFilter<EngineProvisioningRequiredFilter>();
 
         group.MapGet("/{instanceId:guid}", async (
@@ -246,7 +246,7 @@ public static class ManagedElsaInstanceEndpoints
                     "Provisioning state changed while it was being read. Retry the request.",
                     StatusCodes.Status409Conflict);
             }
-        }).RequireWorkspaceAccess().AllowCloudBff();
+        }).RequireWorkspaceAccess().AllowCloudBff().AllowHubBff();
 
         group.MapGet("/{instanceId:guid}/health", async (
             Guid workspaceId,
@@ -313,7 +313,7 @@ public static class ManagedElsaInstanceEndpoints
             {
                 return Problem("instance.shape-invalid", "The instance request is invalid.", StatusCodes.Status422UnprocessableEntity);
             }
-        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff();
+        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff().AllowHubBff();
 
         // Keep Cloud BFF deletion on a dedicated route. The general operations
         // contract remains customer-only because it also accepts start, stop,
@@ -346,7 +346,7 @@ public static class ManagedElsaInstanceEndpoints
                 confirmation.Id,
                 confirmation.ExpiresAt,
                 HostedBillingCopy.EngineDeletion));
-        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff();
+        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff().AllowHubBff();
 
         group.MapPost("/{instanceId:guid}/delete", async (
             Guid workspaceId,
@@ -483,7 +483,7 @@ public static class ManagedElsaInstanceEndpoints
             {
                 return Problem("instance.operation-invalid", "The requested deletion is invalid.", StatusCodes.Status422UnprocessableEntity);
             }
-        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff();
+        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff().AllowHubBff();
 
         group.MapGet("/{instanceId:guid}/delete-operations/{operationId:guid}", async (
             Guid workspaceId,
@@ -503,7 +503,7 @@ public static class ManagedElsaInstanceEndpoints
 
             context.Response.Headers.ETag = ETag(instance.Version);
             return Results.Ok(ToDeleteOperationResponse(operation));
-        }).RequireWorkspaceAccess().AllowCloudBff();
+        }).RequireWorkspaceAccess().AllowCloudBff().AllowHubBff();
 
         group.MapPost("/{instanceId:guid}/operations", async (
             Guid workspaceId,
@@ -716,7 +716,7 @@ public static class ManagedElsaInstanceEndpoints
             return Results.Ok(new ManagedElsaInstanceOperationReconciliationResponse(
                 instanceResponse,
                 ToOperationResponse(workspaceId, instance.Id, summary)));
-        }).RequireWorkspaceAccess().AllowCloudBff();
+        }).RequireWorkspaceAccess().AllowCloudBff().AllowHubBff();
 
         group.MapGet("/{instanceId:guid}/operations/{operationId:guid}/cleanup-receipt", async (
             Guid workspaceId,
@@ -743,7 +743,7 @@ public static class ManagedElsaInstanceEndpoints
                 return Results.NotFound();
 
             return Results.Ok(ManagedElsaCleanupEvidenceReader.ToReceiptResponse(evidence));
-        }).RequireWorkspaceAccess().AllowCloudBff();
+        }).RequireWorkspaceAccess().AllowCloudBff().AllowHubBff();
 
         group.MapGet("/{instanceId:guid}/operations/{operationId:guid}/cleanup-observation", async (
             Guid workspaceId,
@@ -783,7 +783,7 @@ public static class ManagedElsaInstanceEndpoints
 
             return Results.Ok(ManagedElsaCleanupEvidenceReader.ToFreshObservationResponse(
                 result.Evidence!, result.Observation!));
-        }).RequireWorkspaceAccess().AllowCloudBff();
+        }).RequireWorkspaceAccess().AllowCloudBff().AllowHubBff();
 
         group.MapGet("/{instanceId:guid}/revisions", async (
             Guid workspaceId, Guid instanceId,
