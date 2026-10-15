@@ -155,7 +155,7 @@ public sealed class AccountWorkspaceServiceTests
         public Task<bool> WorkspaceExistsAsync(Guid workspaceId, CancellationToken cancellationToken = default) => throw Unsupported();
         public Task<OrganizationEntitlementSnapshot?> GetLatestOrganizationEntitlementAsync(Guid organizationId, CancellationToken cancellationToken = default) => throw Unsupported();
         public Task<int> ActiveWorkspaceCountAsync(Guid organizationId, CancellationToken cancellationToken = default) => throw Unsupported();
-        public Task<int> ActiveManagedInstanceCountAsync(Guid organizationId, CancellationToken cancellationToken = default) => throw Unsupported();
+        public Task<int> ActiveDedicatedInstanceCountAsync(Guid organizationId, CancellationToken cancellationToken = default) => throw Unsupported();
         public Task<bool> OrganizationWorkspaceNameExistsAsync(Guid organizationId, string name, Guid? excludingWorkspaceId, CancellationToken cancellationToken = default) => throw Unsupported();
         public Task<bool> WorkspaceBelongsToOrganizationAsync(Guid organizationId, Guid workspaceId, CancellationToken cancellationToken = default) => throw Unsupported();
         public Task<bool> OrganizationAccountMembershipExistsAsync(Guid organizationId, Guid accountId, CancellationToken cancellationToken = default) => throw Unsupported();

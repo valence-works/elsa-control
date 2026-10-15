@@ -87,15 +87,14 @@ public sealed class AccountWorkspaceStoreTests
             CreatePlacement(workspace, isolationProfile: "dedicated"),
             CreatePlacement(workspace, isolationProfile: "dedicated"),
             CreatePlacement(workspace, isolationProfile: "shared"),
-            CreateLabClassPlacement(workspace),
             CreatePlacement(workspace, isolationProfile: "dedicated", targetMode: "customer-owned"),
             Tombstone(CreatePlacement(workspace, isolationProfile: "dedicated")),
             CreatePlacement(other, isolationProfile: "dedicated"));
         await db.SaveChangesAsync();
         var store = new AccountWorkspaceStore(db);
 
-        Assert.Equal(2, await store.ActiveManagedInstanceCountAsync(workspace.OrganizationId));
-        Assert.Equal(1, await store.ActiveManagedInstanceCountAsync(other.OrganizationId));
+        Assert.Equal(2, await store.ActiveDedicatedInstanceCountAsync(workspace.OrganizationId));
+        Assert.Equal(1, await store.ActiveDedicatedInstanceCountAsync(other.OrganizationId));
     }
 
     [Theory]
@@ -125,14 +124,6 @@ public sealed class AccountWorkspaceStoreTests
         var instance = ElsaInstancePersistenceTests.NewInstance(workspace.OrganizationId, workspace.Id);
         instance.IsolationProfile = isolationProfile;
         instance.TargetMode = targetMode;
-        return instance;
-    }
-
-    private static ElsaInstanceEntity CreateLabClassPlacement(Workspace workspace)
-    {
-        // Lab-class is a shared-shard class, not Dedicated isolation (ADR-0017 §1a).
-        var instance = CreatePlacement(workspace, isolationProfile: "shared");
-        instance.CapacityProfile = "lab";
         return instance;
     }
 

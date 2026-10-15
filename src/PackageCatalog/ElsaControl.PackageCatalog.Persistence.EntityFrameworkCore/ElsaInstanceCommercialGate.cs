@@ -71,7 +71,7 @@ public sealed class EfCoreElsaInstanceCommercialGate(CatalogDbContext db, TimePr
 
         // MaxInstances is the Dedicated placement allowance (ADR-0017 F5). The
         // caller passes the Dedicated managed count, and only when the create
-        // itself consumes that allowance. Shared and lab-class creates omit it.
+        // itself consumes that allowance. Shared creates omit it.
         if (action == ElsaInstanceOperationAction.Create &&
             activeInstanceCount is { } count && count >= entitlement.MaxInstances)
             return new ElsaInstanceCommercialGateDecision(

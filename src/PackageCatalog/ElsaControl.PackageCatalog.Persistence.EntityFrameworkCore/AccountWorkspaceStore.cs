@@ -256,7 +256,7 @@ public sealed class AccountWorkspaceStore(CatalogDbContext dbContext) : IAccount
             .AsNoTracking()
             .CountAsync(x => x.OrganizationId == organizationId && x.SoftDeletedAt == null, cancellationToken);
 
-    public Task<int> ActiveManagedInstanceCountAsync(Guid organizationId, CancellationToken cancellationToken = default) =>
+    public Task<int> ActiveDedicatedInstanceCountAsync(Guid organizationId, CancellationToken cancellationToken = default) =>
         dbContext.ElsaInstances
             .AsNoTracking()
             .CountActiveDedicatedManagedAsync(organizationId, cancellationToken);

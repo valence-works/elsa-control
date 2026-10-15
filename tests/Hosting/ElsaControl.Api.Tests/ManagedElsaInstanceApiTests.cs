@@ -401,6 +401,17 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public void Placement_change_conflict_maps_to_stable_api_code()
+    {
+        var code = ManagedElsaInstanceEndpoints.ConflictCode(
+            new ElsaInstanceLifecycleConflictException(
+                "Placement cannot be changed on update. Placement changes need an explicit move.",
+                ElsaInstanceLifecycleConflictReason.PlacementChangeRequiresMove));
+
+        Assert.Equal("instance.placement-change-requires-move", code);
+    }
+
+    [Fact]
     public async Task Healthy_bound_instance_is_openable_but_deleting_instance_fails_closed()
     {
         var healthy = Guid.NewGuid();

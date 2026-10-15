@@ -434,6 +434,7 @@ public enum ElsaInstanceStateConflictReason
     VersionConflict,
     OperationActive,
     ActiveOperationOwnershipMismatch,
+    PlacementChangeRequiresMove,
     InvalidState,
 }
 
@@ -445,6 +446,8 @@ public sealed class ElsaInstanceStateConflictException : InvalidOperationExcepti
             ElsaInstanceStateConflictReason.VersionConflict => "Instance version conflict.",
             ElsaInstanceStateConflictReason.OperationActive => "An instance operation is already active.",
             ElsaInstanceStateConflictReason.ActiveOperationOwnershipMismatch => "The active operation belongs to a different instance.",
+            ElsaInstanceStateConflictReason.PlacementChangeRequiresMove =>
+                "Placement cannot be changed on update. Placement changes need an explicit move.",
             ElsaInstanceStateConflictReason.InvalidState => "The requested operation is not valid for the current instance state.",
             _ => "The instance state conflicts with the requested operation."
         })
@@ -763,6 +766,8 @@ public static class ElsaInstanceStateMachine
     {
         if (intent.DesiredLifecycle != instance.Intent.DesiredLifecycle)
             throw new ElsaInstanceStateConflictException(ElsaInstanceStateConflictReason.InvalidState);
+        if (intent.Placement != instance.Intent.Placement)
+            throw new ElsaInstanceStateConflictException(ElsaInstanceStateConflictReason.PlacementChangeRequiresMove);
 
         var transition = ElsaReleaseTransitionRules.Classify(instance.Intent.Release.Selection, intent.Release.Selection);
         if (!transition.IsAllowed(minorApproved, migrationAuthorized))

@@ -5,12 +5,10 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 
 /// <summary>
 /// Dedicated instance-limit accounting (ADR-0017 F5). <c>MaxInstances</c> is
-/// consumed only by Dedicated placements: live managed instances whose isolation
-/// profile is Dedicated. That is the current catalog proxy for
-/// <c>dedicated-valence</c> and <c>byo-subscription</c>. Shared-shard tenants
-/// (isolation Shared) and lab-class placements do not consume it; they are not
-/// Dedicated isolation. Placement kind is not persisted yet, so this filter is
-/// the single count used by both the workspace and lifecycle store paths.
+/// consumed only by live managed instances whose isolation profile is Dedicated,
+/// the current catalog proxy for <c>dedicated-valence</c> and
+/// <c>byo-subscription</c>. Shared isolation does not consume it. Lab placement
+/// isn't modelled yet (ADR-0017).
 /// </summary>
 internal static class ElsaInstanceDedicatedLimit
 {

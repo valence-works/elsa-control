@@ -411,16 +411,21 @@ public sealed class ElsaInstanceLifecycleService(
         }
         catch (ElsaInstanceStateConflictException exception)
         {
+            var reason = exception.Reason switch
+            {
+                ElsaInstanceStateConflictReason.VersionConflict => ElsaInstanceLifecycleConflictReason.VersionConflict,
+                ElsaInstanceStateConflictReason.OperationActive => ElsaInstanceLifecycleConflictReason.OperationActive,
+                ElsaInstanceStateConflictReason.ActiveOperationOwnershipMismatch => ElsaInstanceLifecycleConflictReason.InvalidState,
+                ElsaInstanceStateConflictReason.PlacementChangeRequiresMove =>
+                    ElsaInstanceLifecycleConflictReason.PlacementChangeRequiresMove,
+                ElsaInstanceStateConflictReason.InvalidState => ElsaInstanceLifecycleConflictReason.InvalidState,
+                _ => ElsaInstanceLifecycleConflictReason.InvalidState
+            };
             throw new ElsaInstanceLifecycleConflictException(
-                "The request conflicts with the current instance state.",
-                exception.Reason switch
-                {
-                    ElsaInstanceStateConflictReason.VersionConflict => ElsaInstanceLifecycleConflictReason.VersionConflict,
-                    ElsaInstanceStateConflictReason.OperationActive => ElsaInstanceLifecycleConflictReason.OperationActive,
-                    ElsaInstanceStateConflictReason.ActiveOperationOwnershipMismatch => ElsaInstanceLifecycleConflictReason.InvalidState,
-                    ElsaInstanceStateConflictReason.InvalidState => ElsaInstanceLifecycleConflictReason.InvalidState,
-                    _ => ElsaInstanceLifecycleConflictReason.InvalidState
-                });
+                reason == ElsaInstanceLifecycleConflictReason.PlacementChangeRequiresMove
+                    ? exception.Message
+                    : "The request conflicts with the current instance state.",
+                reason);
         }
     }
 

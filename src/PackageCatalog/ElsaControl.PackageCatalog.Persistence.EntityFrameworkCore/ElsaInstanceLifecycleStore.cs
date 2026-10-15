@@ -743,9 +743,9 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                         operation = operation.TransitionTo(ElsaInstanceOperationState.WaitingForPriorOperation);
                 }
 
-                // MaxInstances is the Dedicated allowance (ADR-0017 F5). Shared and
-                // lab-class creates omit the count so they cannot consume or be
-                // blocked by it. Shared has no separate tenant cap on this path yet.
+                // MaxInstances is the Dedicated allowance (ADR-0017 F5). Shared
+                // creates omit the count. Shared has no separate tenant cap on this
+                // path yet.
                 var activeInstanceCount = operation.Action == ElsaInstanceOperationAction.Create &&
                     ElsaInstanceDedicatedLimit.ConsumesDedicatedInstanceLimit(
                         instance.PlacementIntent.TargetMode,
@@ -3719,6 +3719,23 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         return entity;
     }
 
+    private static void EnsurePlacementUnchanged(ElsaInstanceEntity entity, ElsaPlacementIntent placement)
+    {
+        if (entity.TargetMode.Length == 0)
+            return;
+        if (string.Equals(entity.TargetMode, placement.TargetMode, StringComparison.Ordinal) &&
+            string.Equals(entity.RegionCode, placement.RegionCode, StringComparison.Ordinal) &&
+            string.Equals(entity.IsolationProfile, placement.IsolationProfile, StringComparison.Ordinal) &&
+            string.Equals(entity.CapacityProfile, placement.CapacityProfile, StringComparison.Ordinal) &&
+            string.Equals(entity.NetworkOutcome, placement.NetworkOutcome, StringComparison.Ordinal) &&
+            string.Equals(entity.DomainOutcome, placement.DomainOutcome, StringComparison.Ordinal))
+            return;
+
+        throw Conflict(
+            "Placement cannot be changed on update. Placement changes need an explicit move.",
+            ElsaInstanceLifecycleConflictReason.PlacementChangeRequiresMove);
+    }
+
     private static void ApplyAggregate(ElsaInstanceEntity entity, ElsaInstance instance)
     {
         if (!string.Equals(entity.Slug, instance.Slug, StringComparison.Ordinal) && entity.Id != Guid.Empty)
@@ -3742,6 +3759,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         entity.FeatureOverridesJson = SerializeFeatureOverrides(application.FeatureOverrides);
         entity.PackagePolicy = application.PackagePolicy;
         entity.ConfigurationShapeRevisionId = application.ConfigurationShapeRevisionId;
+        EnsurePlacementUnchanged(entity, placement);
         entity.TargetMode = placement.TargetMode;
         entity.RegionCode = placement.RegionCode;
         entity.IsolationProfile = placement.IsolationProfile;
