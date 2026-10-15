@@ -281,7 +281,7 @@ external seam. Unit tests can support a row but cannot close it alone.
 | D-09 | Dedicated | Support elevation is scoped, expires/revokes, is customer-visible as allowed and leaves an audit trail | Role/elevation events and access query |
 | D-10 | Dedicated | Control-plane interruption and repeated apply remain idempotent; workload remains safe | Reconciliation timeline and final state hash |
 | D-CP-01 | Dedicated (ADR-0009 Am. 2, proposed) | Every engine credential (environment, files, Key Vault, database logins) is instance-unique; no Control, fleet, feed or telemetry secret is present | Inventory diff across two instances |
-| D-CP-02 | Dedicated (ADR-0009 Am. 2, proposed) | Hostile customer package reaches declared hosts only; undeclared hosts, other instances, Control private endpoints and other customers' SQL/Key Vault fail at the network layer | Packet/denial evidence |
+| D-CP-02 | Dedicated (ADR-0009 Am. 2, proposed) | Hostile customer package reaches only its own instance's declared hosts via the shared egress proxy (per-tenant policy); proxy bypass, other instances' declared hosts, undeclared hosts, other instances, Control private endpoints and other customers' SQL/Key Vault fail at the network layer | Packet/denial evidence and proxy policy log |
 | D-CP-03 | Dedicated (ADR-0009 Am. 2, proposed) | Instance metadata and identity token endpoints are blocked from the workload and the engine stays healthy | Runtime test and health record |
 | D-CP-04 | Dedicated (ADR-0009 Am. 2, proposed) | No refresh token or client secret in engine memory or environment; packages get broker handles only | Memory/env inspection and SDK contract test |
 | D-CP-05 | Dedicated (ADR-0009 Am. 2, proposed) | Organization A's hostile package cannot read or mutate organization B's API data, runtime, database, secrets, telemetry or backups | Two-organization negative matrix |
@@ -378,9 +378,11 @@ model; it does not prove executable-code or noisy-neighbor isolation.
 
 ### Dedicated customer packages (ADR-0009 Amendment 2, proposed)
 
-Not in force until Amendment 2 is accepted. Customer, learner and community
-packages may then run on Dedicated only in that customer's own engine, after
-`D-CP-01` through `D-CP-06`, D-04 and D-06 pass. The boundary is the
+Not in force until Amendment 2 is accepted. Learner and community packages
+(and customer-written packages, pending Sipke) may then run on Dedicated only in
+that customer's own engine, activities only, after `D-CP-01` through `D-CP-06`,
+D-04 and D-06 pass. Egress runs through a shared proxy with per-tenant policy.
+The lab shard needs its own amendment before it launches. The boundary is the
 per-customer engine with its network, identity and credential isolation; it is
 not an in-process sandbox, and the instance's own data and secrets are exposed
 to its packages by design (accepted, customer-acknowledged residual risk).
