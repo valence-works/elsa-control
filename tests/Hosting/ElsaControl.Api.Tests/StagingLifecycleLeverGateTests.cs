@@ -48,6 +48,24 @@ public sealed class StagingLifecycleLeverGateTests
     }
 
     [Fact]
+    public void Billing_and_recovery_flags_never_arm_the_late_success_lever()
+    {
+        var stripe = new StripeBillingOptions
+        {
+            Enabled = true,
+            SecretKey = "sk_test_harness",
+            ExpectedMode = StripeBillingOptions.TestMode
+        };
+        var lateSuccess = new ElsaControl.Deployment.Azure.StagingLateSuccessLeverOptions { Enabled = false };
+        var billingOn = StagingLifecycleLeverGate.IsArmed(true, stripe);
+        var recoveryOn = StagingLifecycleLeverGate.IsArmed(true, stripe);
+
+        Assert.True(billingOn);
+        Assert.True(recoveryOn);
+        Assert.False(StagingLateSuccessLeverFactory.Create(lateSuccess, stripe).AppliesTo(Guid.NewGuid()));
+    }
+
+    [Fact]
     public void Stripe_test_prefix_is_shared_and_ordinal()
     {
         Assert.Equal("sk_test_", StagingLifecycleLeverGate.StripeTestSecretKeyPrefix);

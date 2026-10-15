@@ -4,7 +4,7 @@ using ElsaControl.Deployment.Core.Instances;
 
 namespace ElsaControl.Deployment.Azure.Tests;
 
-public sealed class AzureProviderExecutorTests
+public sealed partial class AzureProviderExecutorTests
 {
     private static readonly Guid WorkspaceId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
     private static readonly DateTimeOffset Now = new(2026, 8, 29, 12, 0, 0, TimeSpan.Zero);
@@ -1668,6 +1668,10 @@ public sealed class AzureProviderExecutorTests
         public AzureProviderRunnerOutcome FoundationOutcome { get; init; } = AzureProviderRunnerOutcome.Completed;
         public AzureProviderRunnerOutcome? FirstFoundationOutcome { get; init; }
         public AzureProviderRunnerOutcome PromotionOutcome { get; init; } = AzureProviderRunnerOutcome.Completed;
+        public AzureProviderRunnerStep? UncertainStep { get; init; }
+        public string UncertainCode { get; init; } = "azure.step.uncertain";
+        public IReadOnlyList<AzureProviderDiagnostic> UncertainDiagnostics { get; init; } = [];
+        public AzureProviderResourceReferences? UncertainResources { get; init; }
         public AzureProviderHealth Health { get; init; } = AzureProviderHealth.Healthy;
         public bool StableTrafficRestored { get; init; } = true;
         public AzureProviderResourceReferences CleanupResources { get; init; } = new(ResourceGroupName: "proof-rg");
@@ -1752,6 +1756,16 @@ public sealed class AzureProviderExecutorTests
 
         private AzureProviderRunnerResult CreateResult(AzureProviderRunnerCommand command)
         {
+            if (command.Step == UncertainStep)
+                return new(
+                    AzureProviderRunnerOutcome.Uncertain,
+                    RunnerPhase(command.Step),
+                    UncertainResources ?? ResourcesOverride ?? CompleteResources(),
+                    AzureProviderHealth.Unknown,
+                    null,
+                    UncertainDiagnostics,
+                    UncertainCode,
+                    "The Azure deployment was not observed to finish within its configured wait limit. It was neither cancelled nor resubmitted.");
             if (command.Step == FailureStep)
                 return new(
                     AzureProviderRunnerOutcome.Failed,

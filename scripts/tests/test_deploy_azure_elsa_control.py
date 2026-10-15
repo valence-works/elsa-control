@@ -91,9 +91,17 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS", self.source)
         self.assertIn("STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED", self.source)
         self.assertIn("STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS", self.source)
+        self.assertIn("STAGING_LATE_SUCCESS_LEVER_ENABLED", self.source)
+        self.assertIn("STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS", self.source)
+        self.assertIn("STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT", self.source)
         self.assertIn("STAGING_SMOKE_OWNER_INSTANCE_ID", self.source)
         self.assertIn("scripts/lib/staging-lever-target.sh", self.source)
         self.assertEqual(3, self.source.count("is_staging_billing_lever_target"))
+        self.assertIn(
+            "STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT\" ) ]] && ! is_staging_lever_target",
+            self.source,
+        )
+        self.assertNotIn("staginglatesuccesslever", self.source)
         self.assertIn("EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS\" ]] && ! is_staging_billing_lever_target", self.source)
         self.assertNotIn("is_staging_pairing_allowlist_target", self.source)
         self.assertIn("from control_sql_sku import sku_parameters", self.source)
@@ -213,6 +221,77 @@ class DeployAzureElsaControlTests(unittest.TestCase):
                 environment, "--environment", "valence-control-staging", "--what-if"
             )
             self.assertEqual(0, allowed.returncode, allowed.stdout + allowed.stderr)
+
+    def test_refuses_the_staging_late_success_lever_unless_the_target_is_staging(self) -> None:
+        environment = self.environment()
+        environment["STAGING_LATE_SUCCESS_LEVER_ENABLED"] = "true"
+        environment["STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS"] = (
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        result = self.run_deploy(environment, "--environment", "prod")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("only permitted for the test (staging) environment", result.stderr)
+        self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
+
+        wait_only = self.environment()
+        wait_only["STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT"] = "00:00:30"
+        wait_refused = self.run_deploy(wait_only, "--environment", "prod")
+        self.assertNotEqual(0, wait_refused.returncode)
+        self.assertIn("only permitted for the test (staging) environment", wait_refused.stderr)
+
+        non_boolean = self.environment()
+        non_boolean["STAGING_LATE_SUCCESS_LEVER_ENABLED"] = "yes"
+        non_boolean_refused = self.run_deploy(non_boolean, "--environment", "prod")
+        self.assertNotEqual(0, non_boolean_refused.returncode)
+        self.assertIn("must be true or false", non_boolean_refused.stderr)
+
+        recovery_only = self.environment()
+        recovery_only["STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED"] = "true"
+        recovery_only["STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS"] = (
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        recovery_only.pop("STAGING_LATE_SUCCESS_LEVER_ENABLED", None)
+        recovery_only.pop("STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS", None)
+        recovery_only.pop("STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT", None)
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            call_log = temporary_path / "az-calls"
+            self.write_fake_az(temporary_path)
+            recovery_only["PATH"] = f"{temporary_path}{os.pathsep}{recovery_only['PATH']}"
+            recovery_only["AZ_CALL_LOG"] = str(call_log)
+            allowed = self.run_deploy(
+                recovery_only, "--environment", "valence-control-staging", "--what-if"
+            )
+            self.assertEqual(0, allowed.returncode, allowed.stdout + allowed.stderr)
+            self.assertNotIn("staginglatesuccesslever", call_log.read_text())
+
+    def test_allows_the_real_staging_azure_env_name_for_the_late_success_lever(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            call_log = temporary_path / "az-calls"
+            self.write_fake_az(temporary_path)
+
+            environment = self.environment()
+            environment["PATH"] = f"{temporary_path}{os.pathsep}{environment['PATH']}"
+            environment["AZ_CALL_LOG"] = str(call_log)
+            environment["STAGING_LATE_SUCCESS_LEVER_ENABLED"] = "true"
+            environment["STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS"] = (
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            )
+            environment["STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT"] = "00:00:30"
+            result = self.run_deploy(
+                environment, "--environment", "valence-control-staging", "--what-if"
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("deployment sub what-if", call_log.read_text())
+            self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", result.stdout + result.stderr)
+            self.assertNotIn("staginglatesuccesslever", call_log.read_text())
+
+            environment["TARGET_ENVIRONMENT"] = "production"
+            refused = self.run_deploy(environment, "--environment", "valence-control-staging")
+            self.assertNotEqual(0, refused.returncode)
+            self.assertIn("Staging lever target names disagree", refused.stderr)
+            self.assertNotIn("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", refused.stdout + refused.stderr)
 
     def test_refuses_the_staging_recovery_lifecycle_lever_unless_the_target_is_staging(self) -> None:
         environment = self.environment()
