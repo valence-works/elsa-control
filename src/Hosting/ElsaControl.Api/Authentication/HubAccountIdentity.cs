@@ -3,6 +3,7 @@ using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
 
 namespace ElsaControl.Api.Authentication;
@@ -97,7 +98,7 @@ public static class HubAccountJwtBearer
         {
             OnTokenValidated = context =>
             {
-                if (!HubAccountTokenSelector.IsValidatedHubAccount(context.Principal, hub))
+                if (!HubAccountTokenSelector.IsValidatedHubAccount(context.Principal, hub, context.SecurityToken))
                     context.Fail("A signed Elsa Hub user session is required.");
                 return Task.CompletedTask;
             }
@@ -131,17 +132,31 @@ public static class HubAccountTokenSelector
         }
     }
 
-    public static bool IsValidatedHubAccount(ClaimsPrincipal? principal, HubAccountIdentityOptions options) =>
+    public static bool IsValidatedHubAccount(
+        ClaimsPrincipal? principal,
+        HubAccountIdentityOptions options,
+        SecurityToken? token = null) =>
         options.IsConfigured && principal?.Identity?.IsAuthenticated == true &&
         string.Equals(principal.FindFirst("iss")?.Value, options.Issuer, StringComparison.Ordinal) &&
         Guid.TryParse(principal.FindFirst("sub")?.Value, out _) &&
         string.Equals(principal.FindFirst("role")?.Value, "authenticated", StringComparison.Ordinal) &&
-        IsNonAnonymous(principal);
+        IsNonAnonymous(principal, token);
 
-    private static bool IsNonAnonymous(ClaimsPrincipal principal)
+    private static bool IsNonAnonymous(ClaimsPrincipal principal, SecurityToken? token)
     {
-        var value = principal.FindFirst("is_anonymous")?.Value;
-        return string.IsNullOrWhiteSpace(value) ||
-               string.Equals(value, "false", StringComparison.OrdinalIgnoreCase);
+        if (token is JsonWebToken jwt)
+            return !jwt.TryGetPayloadValue("is_anonymous", out object? value) || value is false;
+
+        if (token is JwtSecurityToken jwtSecurityToken)
+            return !jwtSecurityToken.Payload.TryGetValue("is_anonymous", out var value) || value is false;
+
+        if (token is not null)
+            return false;
+
+        var claims = principal.FindAll("is_anonymous").ToArray();
+        return claims.Length == 0 ||
+               (claims.Length == 1 &&
+                claims[0].ValueType == ClaimValueTypes.Boolean &&
+                string.Equals(claims[0].Value, "false", StringComparison.Ordinal));
     }
 }

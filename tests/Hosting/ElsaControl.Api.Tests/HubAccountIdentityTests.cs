@@ -1,6 +1,9 @@
+using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Claims;
+using System.Text;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Cloud;
 using ElsaControl.PackageCatalog.Core.Accounts;
@@ -9,6 +12,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.IdentityModel.Tokens;
 namespace ElsaControl.Api.Tests;
 
 public sealed class HubAccountIdentityTests
@@ -103,6 +107,8 @@ public sealed class HubAccountIdentityTests
     [InlineData("true")]
     [InlineData("TRUE")]
     [InlineData("1")]
+    [InlineData("false")]
+    [InlineData("")]
     public async Task Anonymous_hub_session_never_provisions_a_control_account(string isAnonymous)
     {
         await using var app = CreateHubApplication();
@@ -117,6 +123,37 @@ public sealed class HubAccountIdentityTests
         var database = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
         Assert.Empty(await database.Accounts.ToListAsync());
     }
+
+    [Fact]
+    public async Task Json_boolean_false_is_anonymous_bootstraps_a_workspace()
+    {
+        await using var app = CreateHubApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateClientWithAnonymousPayload(app, false);
+
+        using var response = await client.PostAsJsonAsync("/api/cloud/bootstrap", new CloudBootstrapRequest());
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        await using var scope = app.Services.CreateAsyncScope();
+        var database = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Single(await database.Accounts.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Null_is_anonymous_never_provisions_a_control_account() =>
+        await AssertAnonymousPayloadIsRefused(null);
+
+    [Fact]
+    public async Task Empty_string_is_anonymous_never_provisions_a_control_account() =>
+        await AssertAnonymousPayloadIsRefused("");
+
+    [Fact]
+    public async Task Array_is_anonymous_never_provisions_a_control_account() =>
+        await AssertAnonymousPayloadIsRefused(new object[] { false });
+
+    [Fact]
+    public async Task Object_is_anonymous_never_provisions_a_control_account() =>
+        await AssertAnonymousPayloadIsRefused(new Dictionary<string, object>());
 
     [Fact]
     public async Task Expired_hub_session_is_refused()
@@ -209,6 +246,20 @@ public sealed class HubAccountIdentityTests
         [$"{CloudAccountIdentityDefaults.ConfigurationSection}:TestSigningKey"] = ControlApiTestApplication.TestControlIdentitySigningKey
     });
 
+    private static async Task AssertAnonymousPayloadIsRefused(object? isAnonymous)
+    {
+        await using var app = CreateHubApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateClientWithAnonymousPayload(app, isAnonymous);
+
+        using var response = await client.PostAsJsonAsync("/api/cloud/bootstrap", new CloudBootstrapRequest());
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        await using var scope = app.Services.CreateAsyncScope();
+        var database = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Empty(await database.Accounts.ToListAsync());
+    }
+
     private static HttpClient CreateClient(
         ControlApiTestApplication app,
         string issuer,
@@ -228,6 +279,31 @@ public sealed class HubAccountIdentityTests
         var client = app.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", TestWorkspaceIdentity.CreateToken(
             subject, issuer, audience, expires, claims));
+        return client;
+    }
+
+    private static HttpClient CreateClientWithAnonymousPayload(ControlApiTestApplication app, object? isAnonymous)
+    {
+        var now = DateTime.UtcNow;
+        var payload = new JwtPayload(
+            HubIssuer,
+            "authenticated",
+            [
+                new Claim(JwtRegisteredClaimNames.Sub, HubSubject),
+                new Claim("role", "authenticated"),
+                new Claim("email", "buyer@example.test")
+            ],
+            now.AddMinutes(-1),
+            now.AddMinutes(15));
+        payload["is_anonymous"] = isAnonymous;
+        var token = new JwtSecurityToken(
+            new JwtHeader(new SigningCredentials(
+                new SymmetricSecurityKey(Encoding.UTF8.GetBytes(ControlApiTestApplication.TestControlIdentitySigningKey)),
+                SecurityAlgorithms.HmacSha256)),
+            payload);
+        var client = app.CreateClient();
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", new JwtSecurityTokenHandler().WriteToken(token));
         return client;
     }
 }

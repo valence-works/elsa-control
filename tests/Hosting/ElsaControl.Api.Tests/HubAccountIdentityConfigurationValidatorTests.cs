@@ -69,6 +69,7 @@ public sealed class HubAccountIdentityConfigurationValidatorTests
     [InlineData("https://shared-account.test/auth/v1", "https://shared-account.test/auth/v1")]
     [InlineData("https://shared-account.test/auth/v1/", "https://shared-account.test/auth/v1")]
     [InlineData("https://Shared-Account.TEST/auth/v1", "https://shared-account.test/auth/v1")]
+    [InlineData(" https://shared-account.test/auth/v1 ", "https://shared-account.test/auth/v1")]
     public async Task Enabled_hub_and_cloud_paths_refuse_the_same_issuer(string hubIssuer, string cloudIssuer)
     {
         var validator = CreateValidator(
