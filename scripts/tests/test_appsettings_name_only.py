@@ -22,6 +22,7 @@ for path in (str(SCRIPTS), str(LIB)):
 from hosted_appsettings import (  # noqa: E402
     classify_appsettings_list_query,
     require_exact_setting_name,
+    resolve_setting_name,
     scan_operator_listings,
 )
 from staging_stripe_reconcile import AzureWebApp, ReconciliationError  # noqa: E402
@@ -46,6 +47,13 @@ joined = " ".join(args)
 if args[:4] != ["webapp", "config", "appsettings", "list"]:
     sys.exit(1)
 query = args[args.index("--query") + 1] if "--query" in args else ""
+
+def lookup(requested):
+    for key, value in store.items():
+        if key.casefold() == requested.casefold():
+            return key, value
+    return None, None
+
 if query == "[].name":
     print("\\n".join(store))
 elif query.endswith(".name"):
@@ -55,13 +63,15 @@ elif query.endswith("| length(@)") or query == "length(@)":
     print(len(store))
 elif query.startswith("[?name=='") and query.endswith("']"):
     name = query[len("[?name=='"):-2]
-    if name in store:
-        print(json.dumps([{{"name": name, "value": store[name], "slotSetting": False}}]))
+    canonical, value = lookup(name)
+    if canonical is not None:
+        print(json.dumps([{{"name": canonical, "value": value, "slotSetting": False}}]))
     else:
         print("[]")
 elif " | [0].value" in query:
     name = query.split("name=='", 1)[1].split("']", 1)[0]
-    print(store.get(name, ""))
+    canonical, value = lookup(name)
+    print("" if value is None else value)
 else:
     sys.exit(2)
 """
@@ -181,6 +191,60 @@ class AppSettingsNameOnlyCliTests(unittest.TestCase):
                         or "raw queries" in combined
                     )
 
+    def test_get_missing_setting_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temporary = Path(temp_dir)
+            write_fake_az(temporary, {"Billing__Stripe__Enabled": "true"})
+            missing = self.run_cli(
+                temporary,
+                "get",
+                "--resource-group",
+                "rg-test",
+                "--name",
+                "api-test",
+                "--setting",
+                "Billing__Stripe__SecretKey",
+            )
+            combined = missing.stdout + missing.stderr
+            self.assertNotEqual(0, missing.returncode, combined)
+            self.assertIn("not found", missing.stderr)
+            self.assertEqual("", missing.stdout)
+            self.assertNotIn("true", combined)
+
+    def test_get_matches_setting_name_case_insensitively(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temporary = Path(temp_dir)
+            write_fake_az(temporary, {"Billing__Stripe__Enabled": "true"})
+            result = self.run_cli(
+                temporary,
+                "get",
+                "--resource-group",
+                "rg-test",
+                "--name",
+                "api-test",
+                "--setting",
+                "billing__stripe__enabled",
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual("true\n", result.stdout)
+
+    def test_get_empty_value_is_found(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temporary = Path(temp_dir)
+            write_fake_az(temporary, {"Billing__Stripe__WebhookSecret": ""})
+            result = self.run_cli(
+                temporary,
+                "get",
+                "--resource-group",
+                "rg-test",
+                "--name",
+                "api-test",
+                "--setting",
+                "Billing__Stripe__WebhookSecret",
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual("\n", result.stdout)
+
 
 class AppSettingsNameOnlyScanTests(unittest.TestCase):
     def test_repo_listings_never_project_values_in_bulk(self) -> None:
@@ -209,6 +273,59 @@ class AppSettingsNameOnlyScanTests(unittest.TestCase):
             "exact-value",
             classify_appsettings_list_query("[?name=='Billing__Stripe__Enabled'] | [0].value"),
         )
+        self.assertEqual(
+            "exact-value",
+            classify_appsettings_list_query("[?name=='Billing__Stripe__Enabled']"),
+        )
+        self.assertEqual(
+            "exact-value",
+            classify_appsettings_list_query("[?name=='Application__BuildNumber'] | [0].slotSetting"),
+        )
+        self.assertEqual(
+            "exact-value",
+            classify_appsettings_list_query("[?name=='ELSA_CONTROL_IMAGE_ID'] | length(@)"),
+        )
+        self.assertEqual(
+            "unsafe",
+            classify_appsettings_list_query(
+                "[?name=='Billing__Stripe__ExpectedMode' || name=='Billing__Stripe__Enabled'].value"
+            ),
+        )
+        self.assertEqual(
+            "unsafe",
+            classify_appsettings_list_query(
+                "[?name=='Billing__Stripe__ExpectedMode' && name=='Billing__Stripe__Enabled'] | [0].value"
+            ),
+        )
+        self.assertEqual(
+            "unsafe",
+            classify_appsettings_list_query("[?contains(name, 'Billing__')] | [0].value"),
+        )
+        self.assertEqual(
+            "unsafe",
+            classify_appsettings_list_query("[?starts_with(name, 'Billing__')] | [0].value"),
+        )
+        self.assertEqual(
+            "unsafe",
+            classify_appsettings_list_query(
+                "[?name=='Billing__Stripe__ExpectedMode' || name=='Billing__Stripe__Enabled']"
+            ),
+        )
+        self.assertEqual(
+            "unsafe",
+            classify_appsettings_list_query("[].value | [].name"),
+        )
+        self.assertEqual(
+            "names",
+            classify_appsettings_list_query(
+                "[?name=='Billing__Stripe__Enabled' || name=='Billing__Lifecycle__Enabled'].name"
+            ),
+        )
+        self.assertEqual("Billing__Stripe__Enabled", resolve_setting_name(
+            "billing__stripe__enabled",
+            ["Billing__Stripe__Enabled", "Billing__Stripe__SecretKey"],
+        ))
+        self.assertIsNone(resolve_setting_name("Missing__Setting", ["Billing__Stripe__Enabled"]))
         with self.assertRaisesRegex(Exception, "exact setting name"):
             require_exact_setting_name("Billing__*")
         with self.assertRaisesRegex(Exception, "exact setting name"):
@@ -222,6 +339,32 @@ class AppSettingsNameOnlyAzureWebAppTests(unittest.TestCase):
             azure.app_setting_record("Billing__*")
         with self.assertRaisesRegex(ReconciliationError, "exact setting names"):
             azure.app_settings()
+
+    def test_app_setting_record_matches_name_case_insensitively(self) -> None:
+        observed: list[str] = []
+
+        def runner(command: list[str], **kwargs):
+            query = command[command.index("--query") + 1]
+
+            class Result:
+                returncode = 0
+                stderr = ""
+                stdout = (
+                    "Billing__Stripe__Enabled\n"
+                    if query == "[].name"
+                    else '[{"name":"Billing__Stripe__Enabled","value":"true","slotSetting":false}]'
+                )
+
+            observed.append(query)
+            return Result()
+
+        record = AzureWebApp("rg-test", "api-test", runner=runner).app_setting_record(
+            "billing__stripe__enabled"
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual("true", record.value)
+        self.assertIn("[].name", observed)
+        self.assertIn("[?name=='Billing__Stripe__Enabled']", observed)
 
 
 class AppSettingsNameOnlyHelperSyntaxTests(unittest.TestCase):

@@ -51,7 +51,7 @@ from typing import Any, Callable, Mapping, Sequence
 _LIB = Path(__file__).resolve().parent / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
-from hosted_appsettings import HostedAppSettingsError, require_exact_setting_name
+from hosted_appsettings import HostedAppSettingsError, require_exact_setting_name, resolve_setting_name
 
 
 DEFAULT_WEBHOOK_EVENTS = frozenset(
@@ -388,8 +388,11 @@ class AzureWebApp:
     def app_setting_record(self, name: str) -> AzureAppSetting | None:
         try:
             name = require_exact_setting_name(name)
+            canonical = resolve_setting_name(name, self.list_names())
         except HostedAppSettingsError as error:
             raise ReconciliationError(str(error)) from error
+        if canonical is None:
+            return None
         result = self._run_az(
             [
                 "az",
@@ -402,7 +405,7 @@ class AzureWebApp:
                 "--name",
                 self._webapp_name,
                 "--query",
-                f"[?name=='{name}']",
+                f"[?name=='{canonical}']",
                 "--output",
                 "json",
                 "--only-show-errors",
@@ -417,7 +420,7 @@ class AzureWebApp:
         if not isinstance(values, list) or len(values) != 1:
             raise ReconciliationError("Azure returned invalid app settings")
         item = values[0]
-        if not isinstance(item, Mapping) or item.get("name") != name:
+        if not isinstance(item, Mapping) or item.get("name") != canonical:
             raise ReconciliationError("Azure returned invalid app settings")
         value = item.get("value")
         if value is None:

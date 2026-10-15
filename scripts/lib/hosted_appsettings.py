@@ -9,6 +9,11 @@ from typing import Iterable, Iterator
 EXACT_SETTING_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:-]*$")
 UNSAFE_NAME_TOKENS = ("*", "?", "[", "]", ",", " ")
 LISTING_COMMAND = re.compile(r"webapp\s+config\s+appsettings\s+list\b")
+EXACT_VALUE_QUERY = re.compile(
+    r"^\[\?name==(?:'[^']+'|\"[^\"]+\")\]"
+    r"(?: \| \[0\]\.(?:value|slotSetting)| \| length\(@\))?$"
+)
+NAMES_ONLY_FILTERED = re.compile(r"^\[\?.+\](?:\.name| \| length\(@\))$")
 QUERY_ARGUMENT = re.compile(
     r"""--query\s+('(?:\\'|[^'])*'|"(?:\\"|[^"])*"|\S+)""",
 )
@@ -33,6 +38,19 @@ def require_exact_setting_name(name: str) -> str:
     return name
 
 
+def resolve_setting_name(requested: str, names: Iterable[str]) -> str | None:
+    """Return the hosted name that matches ``requested`` case-insensitively."""
+
+    requested = require_exact_setting_name(requested)
+    needle = requested.casefold()
+    matches = {name for name in names if isinstance(name, str) and name.casefold() == needle}
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise HostedAppSettingsError("Setting name matches more than one hosted name")
+    return next(iter(matches))
+
+
 def classify_appsettings_list_query(query: str | None) -> str:
     """Return ``names``, ``exact-value``, ``helper``, or ``unsafe``."""
 
@@ -47,16 +65,14 @@ def classify_appsettings_list_query(query: str | None) -> str:
     text = re.sub(r"\s+", " ", text)
     if not text:
         return "unsafe"
-    if ".value" in text and "starts_with" in text:
-        return "unsafe"
     if text in {"[].name", "length(@)"}:
         return "names"
-    if text.endswith(".name") or text.endswith("| length(@)"):
-        return "names"
-    if "starts_with" in text and ".name" not in text and "length(@)" not in text:
-        return "unsafe"
-    if re.search(r"name=='[^']+'", text) or re.search(r'name=="[^"]+"', text) or "name=='" in text:
+    if EXACT_VALUE_QUERY.fullmatch(text):
         return "exact-value"
+    if ".value" in text:
+        return "unsafe"
+    if NAMES_ONLY_FILTERED.fullmatch(text):
+        return "names"
     return "unsafe"
 
 

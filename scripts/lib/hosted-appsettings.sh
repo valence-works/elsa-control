@@ -141,7 +141,35 @@ hosted_appsettings_count() {
   fi
 }
 
+# Resolve one setting name the way App Service does: case-insensitive,
+# names-only listing first, then the hosted spelling for an exact read.
+# Returns 2 when the name is absent.
+hosted_appsettings_resolve_name() {
+  local requested="${1:-}"
+  hosted_appsettings_require_exact_name "$requested" || return 1
+  local names
+  names="$(hosted_appsettings_az_list '[].name' tsv)" || return 1
+  local match=""
+  local name
+  local requested_folded="${requested,,}"
+  while IFS= read -r name || [ -n "$name" ]; do
+    [ -z "$name" ] && continue
+    if [ "${name,,}" = "$requested_folded" ]; then
+      if [ -n "$match" ] && [ "$match" != "$name" ]; then
+        echo "hosted-appsettings: setting name matches more than one hosted name." >&2
+        return 1
+      fi
+      match="$name"
+    fi
+  done <<< "$names"
+  if [ -z "$match" ]; then
+    return 2
+  fi
+  printf '%s' "$match"
+}
+
 # Read one value by exact setting name. Rejects wildcard, prefix, and bulk reads.
+# A missing setting fails with a not-found error. An empty value is still found.
 hosted_appsettings_get_value() {
   local setting="${1:-}"
   hosted_appsettings_require_exact_name "$setting" || return 1
@@ -149,18 +177,45 @@ hosted_appsettings_get_value() {
     echo "hosted-appsettings: reading a value requires one exact setting name." >&2
     return 1
   fi
-  hosted_appsettings_az_list "[?name=='${setting}'] | [0].value" tsv
+  local records
+  records="$(hosted_appsettings_get_record "$setting")" || return 1
+  if ! printf '%s' "$records" | jq -e 'type == "array" and length == 1' >/dev/null; then
+    echo "hosted-appsettings: setting not found: ${setting}" >&2
+    return 1
+  fi
+  printf '%s' "$records" | jq -r '.[0].value // empty'
 }
 
 hosted_appsettings_get_slot_setting() {
   local setting="${1:-}"
   hosted_appsettings_require_exact_name "$setting" || return 1
-  hosted_appsettings_az_list "[?name=='${setting}'] | [0].slotSetting" json
+  local canonical
+  local status=0
+  canonical="$(hosted_appsettings_resolve_name "$setting")" && status=0 || status=$?
+  if [ "$status" -eq 2 ]; then
+    echo "hosted-appsettings: setting not found: ${setting}" >&2
+    return 1
+  fi
+  if [ "$status" -ne 0 ]; then
+    return "$status"
+  fi
+  hosted_appsettings_az_list "[?name=='${canonical}'] | [0].slotSetting" json
 }
 
 # One exact setting as a JSON array of zero or one objects.
+# A missing setting is an empty array so callers can treat absence as valid.
 hosted_appsettings_get_record() {
   local setting="${1:-}"
   hosted_appsettings_require_exact_name "$setting" || return 1
-  hosted_appsettings_az_list "[?name=='${setting}']" json
+  local canonical
+  local status=0
+  canonical="$(hosted_appsettings_resolve_name "$setting")" && status=0 || status=$?
+  if [ "$status" -eq 2 ]; then
+    printf '%s\n' "[]"
+    return 0
+  fi
+  if [ "$status" -ne 0 ]; then
+    return "$status"
+  fi
+  hosted_appsettings_az_list "[?name=='${canonical}']" json
 }

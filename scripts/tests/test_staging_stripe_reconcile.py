@@ -775,10 +775,16 @@ class AzureWebAppTests(unittest.TestCase):
             )
 
     def test_app_setting_records_preserve_slot_metadata(self) -> None:
-        def runner(*args: Any, **kwargs: Any):
+        def runner(command: list[str], **kwargs: Any):
+            query = command[command.index("--query") + 1] if "--query" in command else ""
+
             class Result:
                 returncode = 0
-                stdout = '[{"name":"Billing__Stripe__SecretKey","value":"sk_test_safe","slotSetting":true}]'
+                stdout = (
+                    "Billing__Stripe__SecretKey\n"
+                    if query == "[].name"
+                    else '[{"name":"Billing__Stripe__SecretKey","value":"sk_test_safe","slotSetting":true}]'
+                )
                 stderr = ""
 
             return Result()

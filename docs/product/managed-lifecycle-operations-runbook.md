@@ -25,7 +25,8 @@ scripts/hosted-appsettings.sh get --resource-group "$AZURE_RESOURCE_GROUP" --nam
 ```
 
 Do not run `az webapp config appsettings list` without a name-only
-projection. Agent operator sessions follow the same rule; see `AGENTS.md`.
+projection. Never pass `--debug` to `az webapp config appsettings`
+commands. Agent operator sessions follow the same rule; see `AGENTS.md`.
 
 ## Operator contract
 
