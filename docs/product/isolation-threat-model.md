@@ -281,11 +281,13 @@ external seam. Unit tests can support a row but cannot close it alone.
 | D-09 | Dedicated | Support elevation is scoped, expires/revokes, is customer-visible as allowed and leaves an audit trail | Role/elevation events and access query |
 | D-10 | Dedicated | Control-plane interruption and repeated apply remain idempotent; workload remains safe | Reconciliation timeline and final state hash |
 | D-CP-01 | Dedicated (ADR-0009 Am. 2, proposed) | Every engine credential (environment, files, Key Vault, database logins) is instance-unique; no Control, fleet, feed or telemetry secret is present | Inventory diff across two instances |
-| D-CP-02 | Dedicated (ADR-0009 Am. 2, proposed) | Hostile customer package reaches only its own instance's declared hosts via the shared egress proxy (per-tenant policy); proxy bypass, other instances' declared hosts, undeclared hosts, other instances, Control private endpoints and other customers' SQL/Key Vault fail at the network layer | Packet/denial evidence and proxy policy log |
+| D-CP-02 | Dedicated (ADR-0009 Am. 2, proposed) | Hostile customer package reaches only its own instance's declared hosts via the shared egress proxy (per-tenant policy); proxy bypass, other instances' declared hosts, undeclared hosts, other instances, Control private endpoints and other customers' SQL/Key Vault fail at the network layer; a tenant declaration of a prohibited destination (Control management/private endpoint, Azure Resource Manager, provider/IaC endpoint, metadata/identity endpoint, another customer's instance, SQL, Key Vault or store) is refused at plan resolution (`egress.destination.prohibited`) and still denied by the proxy regardless of the declaration | Packet/denial evidence and proxy policy log |
 | D-CP-03 | Dedicated (ADR-0009 Am. 2, proposed) | Instance metadata and identity token endpoints are blocked from the workload and the engine stays healthy | Runtime test and health record |
-| D-CP-04 | Dedicated (ADR-0009 Am. 2, proposed) | No refresh token or client secret in engine memory or environment; packages get broker handles only | Memory/env inspection and SDK contract test |
-| D-CP-05 | Dedicated (ADR-0009 Am. 2, proposed) | Organization A's hostile package cannot read or mutate organization B's API data, runtime, database, secrets, telemetry or backups | Two-organization negative matrix |
-| D-CP-06 | Dedicated (ADR-0009 Am. 2, proposed) | Customer package without `packages.customer`, opt-in or pinned closure is rejected before provider mutation; caller classification cannot upgrade; Shared still rejects | API, lifecycle and provider tests (extends #221) |
+| D-CP-04 | Dedicated (ADR-0009 Am. 2, proposed) | No refresh token or client secret in engine memory or environment; packages get broker handles only; a cross-origin redirect gets no injected credentials or auth headers, and a redirect to an undeclared or prohibited host is rejected | Memory/env inspection and SDK contract tests (incl. redirects) |
+| D-CP-05 | Dedicated (ADR-0009 Am. 2, proposed) | Organization A's hostile package cannot read or mutate organization B's API data, runtime, database, secrets, telemetry or backups; the engine identity cannot delete, shorten retention of or overwrite its own backups or PITR data | Two-organization negative matrix and role-assignment check |
+| D-CP-06 | Dedicated (ADR-0009 Am. 2, proposed) | Customer package without `packages.customer`, opt-in or pinned closure is rejected before provider mutation; caller classification cannot upgrade; Shared and Elsa 3.8 Dedicated still reject | API, lifecycle and provider tests (extends #221) |
+| D-CP-07 | Dedicated (ADR-0009 Am. 2, proposed) | Organization A cannot list, resolve or pull organization B's packages from the per-org store, even by digest; every lock entry records uploader, source and digest; invalid signatures and malware detections never reach a lock | Cross-org isolation test and import tests |
+| D-CP-08 | Dedicated (ADR-0009 Am. 2, proposed) | A security entry on the signed fleet-wide digest denylist faults in-flight use and restarts affected engines in every org within 60 s of publication, with no replica running it after 120 s; Control and the store refuse the digest; a denylist past its 120 s hard TTL fails closed for customer packages | Staging live run and stale-list test |
 | P-01 | Private | Arbitrary package can read only the explicitly granted instance resources and cannot cross the private boundary | Hostile package test and identity/network evidence |
 | P-02 | Private | Reproducible build from locked inputs yields expected digest; tamper/rollback/revocation fail closed | Build attestation, SBOM, signature and admission log |
 | P-03 | Private | Secret, metadata, filesystem, process, network and telemetry canary attempts remain inside the declared boundary | Full canary report with safe output |
@@ -380,9 +382,10 @@ model; it does not prove executable-code or noisy-neighbor isolation.
 
 Not in force until Amendment 2 is accepted. Learner, community and customer-written
 packages may then run on Dedicated only in
-that customer's own engine, activities only, after `D-CP-01` through `D-CP-06`,
-D-04 and D-06 pass. Egress runs through a shared proxy with per-tenant policy.
-The lab shard needs its own amendment before it launches. The boundary is the
+that customer's own engine (Elsa 4 host), activities only, after `D-CP-01` through `D-CP-08`,
+D-04 and D-06 pass. Egress runs through a shared proxy with per-tenant policy;
+the shared proxy and credential broker are a stated residual risk. The lab shard is
+governed by ADR-0017 (#809), not by this amendment. The boundary is the
 per-customer engine with its network, identity and credential isolation; it is
 not an in-process sandbox, and the instance's own data and secrets are exposed
 to its packages by design (accepted, customer-acknowledged residual risk).
