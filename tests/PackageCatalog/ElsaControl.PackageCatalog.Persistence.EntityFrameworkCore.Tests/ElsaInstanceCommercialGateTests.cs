@@ -183,6 +183,144 @@ public sealed class ElsaInstanceCommercialGateTests
         Assert.Equal(1, await verify.ElsaInstanceLifecycleOutbox.CountAsync(x => x.OrganizationId == organizationId));
     }
 
+    [Fact]
+    public async Task Account_at_dedicated_limit_can_still_create_a_shared_tenant()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateContext(connection);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = await CreateWorkspaceAsync(db, OrganizationSubscriptionState.Active, managedHostingEnabled: true, maxInstances: 1);
+        var service = CreateLifecycleService(db);
+
+        await service.CreateAsync(new ElsaInstanceCreateRequest(
+            workspace.OrganizationId,
+            workspace.Id,
+            "Dedicated engine",
+            "dedicated-engine",
+            CreateIntent(),
+            "create-dedicated"));
+
+        var shared = await service.CreateAsync(new ElsaInstanceCreateRequest(
+            workspace.OrganizationId,
+            workspace.Id,
+            "Shared tenant",
+            "shared-tenant",
+            CreateIntent("shared"),
+            "create-shared"));
+
+        Assert.Equal("shared", shared.Instance.PlacementIntent.IsolationProfile);
+        Assert.Equal(1, await new AccountWorkspaceStore(db).ActiveDedicatedInstanceCountAsync(workspace.OrganizationId));
+        Assert.Equal(2, await db.ElsaInstances.CountAsync(x => x.OrganizationId == workspace.OrganizationId && x.DeletedAt == null));
+    }
+
+    [Fact]
+    public async Task Shared_tenants_do_not_increase_the_dedicated_count_on_the_lifecycle_path()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateContext(connection);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = await CreateWorkspaceAsync(db, OrganizationSubscriptionState.Active, managedHostingEnabled: true, maxInstances: 1);
+        var service = CreateLifecycleService(db);
+
+        await service.CreateAsync(new ElsaInstanceCreateRequest(
+            workspace.OrganizationId,
+            workspace.Id,
+            "Shared tenant",
+            "shared-tenant",
+            CreateIntent("shared"),
+            "create-shared"));
+
+        var dedicated = await service.CreateAsync(new ElsaInstanceCreateRequest(
+            workspace.OrganizationId,
+            workspace.Id,
+            "Dedicated engine",
+            "dedicated-engine",
+            CreateIntent(),
+            "create-dedicated"));
+
+        Assert.Equal("dedicated", dedicated.Instance.PlacementIntent.IsolationProfile);
+        Assert.Equal(1, await new AccountWorkspaceStore(db).ActiveDedicatedInstanceCountAsync(workspace.OrganizationId));
+
+        var blocked = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            service.CreateAsync(new ElsaInstanceCreateRequest(
+                workspace.OrganizationId,
+                workspace.Id,
+                "Second dedicated",
+                "second-dedicated",
+                CreateIntent(),
+                "create-second-dedicated")));
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.CommercialDenied, blocked.Reason);
+        Assert.Equal(ElsaInstanceCommercialOperation.InstanceLimitReached, blocked.CommercialCode);
+        Assert.Equal(1, blocked.CurrentInstanceCount);
+        Assert.Equal(1, blocked.MaxInstances);
+    }
+
+    [Fact]
+    public async Task Shared_to_dedicated_update_is_denied_and_requires_an_explicit_move()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateContext(connection);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = await CreateWorkspaceAsync(db, OrganizationSubscriptionState.Active, managedHostingEnabled: true, maxInstances: 1);
+        var service = CreateLifecycleService(db);
+        var shared = await service.CreateAsync(new ElsaInstanceCreateRequest(
+            workspace.OrganizationId,
+            workspace.Id,
+            "Shared tenant",
+            "shared-tenant",
+            CreateIntent("shared"),
+            "create-shared"));
+        await CompleteOperationAsync(db, shared.Operation.Id);
+
+        var denied = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            service.UpdateIntentAsync(new ElsaInstanceIntentUpdateRequest(
+                workspace.Id,
+                shared.Instance.Id,
+                CreateIntent("dedicated"),
+                shared.Instance.Version,
+                "update-shared-to-dedicated")));
+
+        Assert.Equal(ElsaInstanceLifecycleConflictReason.PlacementChangeRequiresMove, denied.Reason);
+        Assert.Contains("explicit move", denied.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("shared", (await db.ElsaInstances.SingleAsync(x => x.Id == shared.Instance.Id)).IsolationProfile);
+        Assert.Equal(0, await new AccountWorkspaceStore(db).ActiveDedicatedInstanceCountAsync(workspace.OrganizationId));
+    }
+
+    [Fact]
+    public async Task Update_with_unchanged_placement_is_accepted()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateContext(connection);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = await CreateWorkspaceAsync(db, OrganizationSubscriptionState.Active, managedHostingEnabled: true, maxInstances: 1);
+        var service = CreateLifecycleService(db);
+        var created = await service.CreateAsync(new ElsaInstanceCreateRequest(
+            workspace.OrganizationId,
+            workspace.Id,
+            "Shared tenant",
+            "shared-tenant",
+            CreateIntent("shared"),
+            "create-shared"));
+        await CompleteOperationAsync(db, created.Operation.Id);
+
+        var updated = await service.UpdateIntentAsync(new ElsaInstanceIntentUpdateRequest(
+            workspace.Id,
+            created.Instance.Id,
+            CreateIntent("shared"),
+            created.Instance.Version,
+            "update-same-placement",
+            Name: "Shared tenant renamed"));
+
+        Assert.Equal("Shared tenant renamed", updated.Instance.Name);
+        Assert.Equal("shared", updated.Instance.PlacementIntent.IsolationProfile);
+        Assert.Equal("managed", updated.Instance.PlacementIntent.TargetMode);
+        Assert.Equal(0, await new AccountWorkspaceStore(db).ActiveDedicatedInstanceCountAsync(workspace.OrganizationId));
+    }
+
     private static async Task<(ElsaInstanceLifecycleAcceptance? Acceptance, Exception? Error)> CreateConcurrentlyAsync(
         string connectionString,
         Guid organizationId,
@@ -253,10 +391,23 @@ public sealed class ElsaInstanceCommercialGateTests
     private static CatalogDbContext CreateContext(SqliteConnection connection) =>
         new(new DbContextOptionsBuilder<CatalogDbContext>().UseRetryingSqlite(connection).Options);
 
-    private static ElsaInstanceIntent CreateIntent() => new(
+    private static ElsaInstanceLifecycleService CreateLifecycleService(CatalogDbContext db) =>
+        new(
+            new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now)),
+            new FixedTimeProvider(Now));
+
+    private static async Task CompleteOperationAsync(CatalogDbContext db, Guid operationId)
+    {
+        db.ChangeTracker.Clear();
+        var operation = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == operationId);
+        operation.State = ElsaInstanceOperationState.Succeeded;
+        await db.SaveChangesAsync();
+    }
+
+    private static ElsaInstanceIntent CreateIntent(string isolationProfile = "dedicated") => new(
         new ElsaReleaseIntent("valence-runtime", "3.8", "3.8.0", "stable"),
         new ElsaApplicationIntent("combined", "starter", new Dictionary<string, ElsaFeatureOverride>()),
-        new ElsaPlacementIntent("managed", "westeurope", "dedicated", "standard-small", "public", "managed"));
+        new ElsaPlacementIntent("managed", "westeurope", isolationProfile, "standard-small", "public", "managed"));
 
     private sealed class EmptyResolutionInputSource : IElsaInstanceLifecycleResolutionInputSource
     {

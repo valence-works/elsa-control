@@ -1223,6 +1223,7 @@ public static class ManagedElsaInstanceEndpoints
         ElsaInstanceLifecycleConflictReason.IdempotencyConflict => "instance.idempotency-conflict",
         ElsaInstanceLifecycleConflictReason.CommercialDenied when exception.CommercialCode == ElsaInstanceCommercialOperation.InstanceLimitReached => "instance_limit_reached",
         ElsaInstanceLifecycleConflictReason.CommercialDenied when exception.CommercialCode is not null => exception.CommercialCode,
+        ElsaInstanceLifecycleConflictReason.PlacementChangeRequiresMove => "instance.placement-change-requires-move",
         ElsaInstanceLifecycleConflictReason.RecoveryAuthorityUnavailable => "instance.recovery-authority-unavailable",
         _ => "instance.invalid-state",
     };

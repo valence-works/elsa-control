@@ -257,6 +257,12 @@ public enum ElsaInstanceLifecycleConflictReason
     CommercialDenied,
 
     /// <summary>
+    /// Placement, including IsolationProfile, is immutable on update (ADR-0017 I1).
+    /// A different placement requires an explicit move.
+    /// </summary>
+    PlacementChangeRequiresMove,
+
+    /// <summary>
     /// Azure delete recovery cannot capture correlatable provider authority, and the
     /// durable assignment inventory does not prove the workload is already absent.
     /// </summary>

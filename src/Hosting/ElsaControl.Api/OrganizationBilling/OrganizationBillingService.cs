@@ -24,7 +24,7 @@ public sealed class OrganizationBillingApiService(
         var entitlement = await accounts.GetLatestOrganizationEntitlementAsync(organizationId, cancellationToken);
         var subscription = await billing.GetSubscriptionAsync(organizationId, cancellationToken);
         var activeWorkspaces = await accounts.ActiveWorkspaceCountAsync(organizationId, cancellationToken);
-        var activeManagedInstances = await accounts.ActiveManagedInstanceCountAsync(organizationId, cancellationToken);
+        var activeDedicatedInstances = await accounts.ActiveDedicatedInstanceCountAsync(organizationId, cancellationToken);
 
         return OrganizationBillingStatusApiResult.Success(
             OrganizationBillingStatusResponse.From(
@@ -32,7 +32,7 @@ public sealed class OrganizationBillingApiService(
                 subscription,
                 entitlement,
                 activeWorkspaces,
-                activeManagedInstances));
+                activeDedicatedInstances));
     }
 
     public async Task<OrganizationBillingApiResult> CreateCheckoutAsync(

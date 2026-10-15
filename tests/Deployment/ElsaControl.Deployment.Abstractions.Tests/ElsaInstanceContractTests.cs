@@ -580,6 +580,38 @@ public sealed class ElsaInstanceContractTests
     }
 
     [Fact]
+    public void Placement_cannot_change_on_update_and_needs_an_explicit_move()
+    {
+        var instance = CreateInstance(ElsaObservedLifecycle.Ready);
+        var movedPlacement = instance.Intent with
+        {
+            Placement = instance.Intent.Placement with { IsolationProfile = "shared" }
+        };
+        var samePlacement = InstanceIntent("3.8", "3.8.1");
+
+        foreach (var action in new[]
+        {
+            ElsaInstanceOperationAction.UpdateIntent,
+            ElsaInstanceOperationAction.ApproveMinorUpgrade,
+            ElsaInstanceOperationAction.MajorMigration
+        })
+        {
+            var denied = Assert.Throws<ElsaInstanceStateConflictException>(() =>
+                ElsaInstanceStateMachine.Request(
+                    instance,
+                    action,
+                    requestedIntent: movedPlacement,
+                    migrationAuthorized: true));
+            Assert.Equal(ElsaInstanceStateConflictReason.PlacementChangeRequiresMove, denied.Reason);
+            Assert.Contains("explicit move", denied.Message, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var updated = ElsaInstanceStateMachine.WithIntent(instance, samePlacement, instance.Version);
+        Assert.Equal("3.8.1", updated.Instance.Intent.Release.RequestedVersion);
+        Assert.Equal(instance.Intent.Placement, updated.Instance.Intent.Placement);
+    }
+
+    [Fact]
     public void Waiting_for_a_prior_operation_can_leave_the_waiting_state()
     {
         var operation = ElsaInstanceOperation.Create(
