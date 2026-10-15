@@ -70,7 +70,8 @@ public sealed class ManagedElsaHandoffRateLimiterPolicy : ControlIdentityAndIpRa
             controlIdentity.Value,
             cloudAccount.Value,
             hubAccount.Value,
-            ControlIdentityAndIpLimitBehavior.None)
+            ControlIdentityAndIpLimitBehavior.AlwaysApplyPerIp |
+            ControlIdentityAndIpLimitBehavior.FailClosedUnresolvedIdentity)
     {
     }
 }

@@ -31,13 +31,16 @@ public enum ControlIdentityAndIpLimitBehavior
     None = 0,
     SkipPerIpForBffSessions = 1,
     SkipPerIpForCookieSessions = 2,
-    LimitIdentityForNonBff = 4
+    LimitIdentityForNonBff = 4,
+    AlwaysApplyPerIp = 8,
+    FailClosedUnresolvedIdentity = 16
 }
 
 internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
 {
     internal const string BffSessionIpPartition = "bff-session";
     internal const string AnonymousIdentityPartition = "anonymous";
+    internal const string UnresolvedIdentityPartition = "unresolved-identity";
     private const string CachedPrincipalItemKey = "__control.rate-limit.principal";
 
     private static readonly AsyncLocal<HttpContext?> Current = new();
@@ -128,11 +131,18 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
         if (principal is null)
             return null;
 
+        var identity = ControlRateLimitIdentity.PartitionKey(
+            principal, controlIdentity, cloudAccount, hubAccount);
+        if (identity is null)
+            return behavior.HasFlag(ControlIdentityAndIpLimitBehavior.FailClosedUnresolvedIdentity)
+                ? UnresolvedIdentityPartition
+                : null;
+
         if (!behavior.HasFlag(ControlIdentityAndIpLimitBehavior.LimitIdentityForNonBff) &&
             !ControlIdentityReader.IsBffForwardedSession(principal, cloudAccount, hubAccount))
             return null;
 
-        return ControlRateLimitIdentity.PartitionKey(principal, controlIdentity, cloudAccount, hubAccount);
+        return identity;
     }
 
     internal static bool ShouldSkipPerIpLimit(
@@ -142,6 +152,9 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
         HubAccountIdentityOptions hubAccount,
         ControlIdentityAndIpLimitBehavior behavior)
     {
+        if (behavior.HasFlag(ControlIdentityAndIpLimitBehavior.AlwaysApplyPerIp))
+            return false;
+
         var principal = GetAuthenticatedPrincipal(context);
         if (principal is null)
             return false;

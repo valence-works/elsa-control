@@ -224,6 +224,29 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
     [Theory]
     [InlineData("restart")]
     [InlineData("apply-release")]
+    public async Task Cookie_session_without_identity_uses_shared_fallback_bucket(string action)
+    {
+        await using var app = CreateApplication(perIp: 20, perIdentity: 1);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var first = CookieClient(app, subject: "", "203.0.113.93");
+        using var second = CookieClient(app, subject: "", "203.0.113.94");
+        using var resolved = ControlClient(app, "lifecycle-resolved", "203.0.113.93");
+        using var cookieResolved = CookieClient(app, "cookie-resolved", "203.0.113.93");
+
+        using var firstAllowed = await PostActionAsync(first, action);
+        using var rejected = await PostActionAsync(second, action);
+        using var resolvedAllowed = await PostActionAsync(resolved, action);
+        using var cookieAllowed = await PostActionAsync(cookieResolved, action);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, firstAllowed.StatusCode);
+        await AssertLifecycleRateLimited(rejected);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, resolvedAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, cookieAllowed.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("restart")]
+    [InlineData("apply-release")]
     public async Task Same_subject_under_cloud_and_hub_issuers_uses_separate_buckets(string action)
     {
         const string cloudIssuer = "https://cloud-account.test/auth/v1";

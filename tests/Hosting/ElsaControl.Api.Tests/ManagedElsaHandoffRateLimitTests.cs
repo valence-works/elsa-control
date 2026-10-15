@@ -186,6 +186,27 @@ public sealed class ManagedElsaHandoffRateLimitTests
         Assert.NotEqual(HttpStatusCode.TooManyRequests, allowed.StatusCode);
     }
 
+    [Fact]
+    public async Task Cookie_session_without_identity_uses_shared_fallback_bucket()
+    {
+        await using var app = CreateApplication(perIp: 20, perIdentity: 1);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var first = CookieClient(app, subject: "", "203.0.113.93");
+        using var second = CookieClient(app, subject: "", "203.0.113.94");
+        using var resolved = ControlClient(app, "handoff-resolved", "203.0.113.93");
+        using var cookieResolved = CookieClient(app, "cookie-resolved", "203.0.113.93");
+
+        using var firstAllowed = await PostIssueAsync(first);
+        using var rejected = await PostIssueAsync(second);
+        using var resolvedAllowed = await PostIssueAsync(resolved);
+        using var cookieAllowed = await PostIssueAsync(cookieResolved);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, firstAllowed.StatusCode);
+        await AssertHandoffRateLimited(rejected);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, resolvedAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, cookieAllowed.StatusCode);
+    }
+
     [Theory]
     [InlineData(0, "00:01:00", "PerIp:PermitLimit")]
     [InlineData(-1, "00:01:00", "PerIp:PermitLimit")]
