@@ -70,6 +70,9 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                     return new(BillingEventConsumptionOutcome.Replayed, replaySubscription, replayEntitlement, existingEvent);
                 }
 
+                if (!await IsHubEventLinkedToOrganizationAsync(providerEvent, cancellationToken))
+                    return await RejectUnlinkedHubEventAsync(providerEvent, receivedAt.ToUniversalTime(), cancellationToken);
+
                 var now = receivedAt.ToUniversalTime();
                 var inbox = new BillingProviderEventInboxEntry
                 {
@@ -183,6 +186,9 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                     .SingleOrDefaultAsync(x => x.OrganizationId == existingEvent.OrganizationId, cancellationToken);
                 return new(BillingEventConsumptionOutcome.Replayed, replaySubscription, replayEntitlement, existingEvent);
             }
+
+            if (!await IsHubEventLinkedToOrganizationAsync(providerEvent, cancellationToken))
+                return await RejectUnlinkedHubEventAsync(providerEvent, receivedAt.ToUniversalTime(), cancellationToken);
 
             var now = receivedAt.ToUniversalTime();
             var occurrence = providerEvent.OccurredAt.ToUniversalTime();
@@ -626,6 +632,72 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         if (BillingWebhookSources.IsHub(webhookSource))
             return false;
         throw new ArgumentException("Billing event organization does not exist.", nameof(organizationId));
+    }
+
+    private async Task<bool> IsHubEventLinkedToOrganizationAsync(
+        BillingProviderEvent providerEvent,
+        CancellationToken cancellationToken)
+    {
+        if (!BillingWebhookSources.IsHub(providerEvent.WebhookSource))
+            return true;
+
+        if (!string.IsNullOrWhiteSpace(providerEvent.ProviderCustomerReference))
+        {
+            var boundOrganizationId = await dbContext.OrganizationSubscriptions.AsNoTracking()
+                .Where(x => x.Provider == providerEvent.Provider &&
+                            x.ProviderCustomerReference == providerEvent.ProviderCustomerReference)
+                .OrderByDescending(x => x.UpdatedAt)
+                .ThenByDescending(x => x.CreatedAt)
+                .Select(x => (Guid?)x.OrganizationId)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (boundOrganizationId is not null)
+                return boundOrganizationId == providerEvent.OrganizationId;
+        }
+
+        return await (
+            from membership in dbContext.OrganizationMemberships.AsNoTracking()
+            join identity in dbContext.ExternalIdentities.AsNoTracking()
+                on membership.AccountId equals identity.AccountId
+            where membership.OrganizationId == providerEvent.OrganizationId &&
+                  membership.DisabledAt == null &&
+                  identity.Kind == ExternalIdentityKinds.Hub
+            select membership.Id).AnyAsync(cancellationToken);
+    }
+
+    private async Task<BillingEventConsumptionResult> RejectUnlinkedHubEventAsync(
+        BillingProviderEvent providerEvent,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var inbox = new BillingProviderEventInboxEntry
+        {
+            OrganizationId = providerEvent.OrganizationId,
+            Provider = providerEvent.Provider,
+            ProviderEventId = providerEvent.ProviderEventId,
+            EventType = providerEvent.EventType,
+            State = providerEvent.State,
+            EventHash = providerEvent.EventHash,
+            ProviderCustomerReference = providerEvent.ProviderCustomerReference,
+            ProviderSubscriptionReference = providerEvent.ProviderSubscriptionReference,
+            ProviderObjectReference = providerEvent.ProviderObjectReference,
+            PriceReference = providerEvent.PriceReference,
+            AmountMinorUnits = providerEvent.AmountMinorUnits,
+            OccurredAt = providerEvent.OccurredAt.ToUniversalTime(),
+            ReceivedAt = now,
+            ProcessingStatus = BillingProviderEventProcessingStatus.Rejected,
+            RejectionCode = BillingDiagnosticCodes.HubOrganizationUnlinked,
+            ProcessedAt = now,
+            WebhookSource = BillingWebhookSources.Normalize(providerEvent.WebhookSource)
+        };
+        dbContext.BillingProviderEvents.Add(inbox);
+        AddBillingAudit(
+            providerEvent.OrganizationId,
+            inbox.Id,
+            "A Hub-sourced billing provider event was refused because the organization is not linked to that Hub customer or account.",
+            now);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        var entitlement = await CurrentEntitlementAsync(providerEvent.OrganizationId, cancellationToken);
+        return new(BillingEventConsumptionOutcome.Rejected, null, entitlement, inbox, inbox.RejectionCode);
     }
 
     private Task<BillingProviderEventInboxEntry?> FindInboxAsync(

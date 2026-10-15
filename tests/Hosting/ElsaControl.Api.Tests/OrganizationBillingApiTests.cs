@@ -548,6 +548,44 @@ public sealed class OrganizationBillingApiTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Hub_webhook_for_an_unlinked_organization_returns_2xx_without_applying()
+    {
+        await _app.SeedAsync(_ => Task.CompletedTask);
+        Guid organizationId;
+        await using (var scope = _app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            var organization = new Organization { Name = "Unlinked Hub org" };
+            db.Organizations.Add(organization);
+            await db.SaveChangesAsync();
+            organizationId = organization.Id;
+        }
+
+        _provider.WebhookResult = BillingWebhookNormalizationResult.KnownEvent(new BillingProviderEvent(
+            organizationId,
+            BillingProviderNames.Stripe,
+            "evt-hub-unlinked-organization",
+            "customer.subscription.updated",
+            OrganizationSubscriptionState.Active,
+            DateTimeOffset.UtcNow,
+            Sha256("hub-unlinked-organization"),
+            "cus_hub_unlinked",
+            "sub_hub_unlinked",
+            WebhookSource: BillingWebhookSources.Hub));
+
+        var response = await PostWebhookAsync("hub-unlinked-organization-body");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("rejected", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        await using var verify = _app.Services.CreateAsyncScope();
+        var catalog = verify.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Empty(await catalog.OrganizationSubscriptions.ToListAsync());
+        var inbox = await catalog.BillingProviderEvents.SingleAsync();
+        Assert.Equal(BillingDiagnosticCodes.HubOrganizationUnlinked, inbox.RejectionCode);
+        Assert.Equal("evt-hub-unlinked-organization", inbox.ProviderEventId);
+    }
+
+    [Fact]
     public async Task Ignored_webhook_returns_2xx_without_persistence()
     {
         await _app.SeedAsync(_ => Task.CompletedTask);

@@ -1158,8 +1158,7 @@ public sealed class OrganizationBillingPersistenceTests
         await connection.OpenAsync();
         await using var db = CreateDb(connection);
         await db.Database.EnsureCreatedAsync();
-        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
-        await db.SaveChangesAsync();
+        await EnsureHubAccountLinkAsync(db, OrganizationId);
 
         var result = await new OrganizationBillingStore(db).ConsumeAsync(
             Event("evt-hub-cloud", OrganizationSubscriptionState.Active, Now.AddMinutes(1), BillingWebhookSources.Hub),
@@ -1194,7 +1193,7 @@ public sealed class OrganizationBillingPersistenceTests
     }
 
     [Fact]
-    public async Task Hub_subscription_does_not_merge_into_a_live_control_subscription()
+    public async Task Hub_event_for_an_organization_without_a_hub_account_link_is_rejected_without_applying()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -1202,6 +1201,64 @@ public sealed class OrganizationBillingPersistenceTests
         await db.Database.EnsureCreatedAsync();
         db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
         await db.SaveChangesAsync();
+
+        var result = await new OrganizationBillingStore(db).ConsumeAsync(
+            Event(OrganizationId, "evt-hub-unlinked", OrganizationSubscriptionState.Active, Now.AddMinutes(1), "cus_hub", "sub_hub") with
+            {
+                WebhookSource = BillingWebhookSources.Hub
+            },
+            Now.AddMinutes(2));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Rejected, result.Outcome);
+        Assert.Equal(BillingDiagnosticCodes.HubOrganizationUnlinked, result.RejectionCode);
+        Assert.Null(result.Subscription);
+        Assert.Empty(await db.OrganizationSubscriptions.ToListAsync());
+        var inbox = await db.BillingProviderEvents.SingleAsync();
+        Assert.Equal(BillingDiagnosticCodes.HubOrganizationUnlinked, inbox.RejectionCode);
+        Assert.Equal(BillingWebhookSources.Hub, inbox.WebhookSource);
+    }
+
+    [Fact]
+    public async Task Hub_event_for_an_organization_that_does_not_own_the_hub_customer_is_rejected_without_applying()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        var otherOrganizationId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        await EnsureHubAccountLinkAsync(db, OrganizationId);
+        await EnsureHubAccountLinkAsync(db, otherOrganizationId);
+        var store = new OrganizationBillingStore(db);
+        await store.ConsumeAsync(
+            Event(OrganizationId, "evt-hub-owner", OrganizationSubscriptionState.Active, Now.AddMinutes(1), "cus_hub", "sub_hub") with
+            {
+                WebhookSource = BillingWebhookSources.Hub
+            },
+            Now.AddMinutes(2));
+
+        var result = await store.ConsumeAsync(
+            Event(otherOrganizationId, "evt-hub-wrong-org", OrganizationSubscriptionState.Active, Now.AddMinutes(3), "cus_hub", "sub_hub_other") with
+            {
+                WebhookSource = BillingWebhookSources.Hub
+            },
+            Now.AddMinutes(4));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Rejected, result.Outcome);
+        Assert.Equal(BillingDiagnosticCodes.HubOrganizationUnlinked, result.RejectionCode);
+        Assert.Null(await store.GetSubscriptionAsync(otherOrganizationId));
+        Assert.Equal("sub_hub", (await store.GetSubscriptionAsync(OrganizationId))!.ProviderSubscriptionReference);
+        var inbox = await db.BillingProviderEvents.SingleAsync(x => x.ProviderEventId == "evt-hub-wrong-org");
+        Assert.Equal(BillingDiagnosticCodes.HubOrganizationUnlinked, inbox.RejectionCode);
+    }
+
+    [Fact]
+    public async Task Hub_subscription_does_not_merge_into_a_live_control_subscription()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        await EnsureHubAccountLinkAsync(db, OrganizationId);
         var store = new OrganizationBillingStore(db);
         await store.StartTrialAsync(OrganizationId, "stripe", Now);
         await store.ConsumeAsync(Event("evt-control-active", OrganizationSubscriptionState.Active, Now.AddMinutes(1)), Now.AddMinutes(2));
@@ -1234,8 +1291,7 @@ public sealed class OrganizationBillingPersistenceTests
         await connection.OpenAsync();
         await using var db = CreateDb(connection);
         await db.Database.EnsureCreatedAsync();
-        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
-        await db.SaveChangesAsync();
+        await EnsureHubAccountLinkAsync(db, OrganizationId);
         var store = new OrganizationBillingStore(db);
         await store.ConsumeAsync(
             Event(OrganizationId, "evt-hub-active", OrganizationSubscriptionState.Active, Now.AddMinutes(1), "cus_hub", "sub_hub") with
@@ -1268,8 +1324,7 @@ public sealed class OrganizationBillingPersistenceTests
         await connection.OpenAsync();
         await using var db = CreateDb(connection);
         await db.Database.EnsureCreatedAsync();
-        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
-        await db.SaveChangesAsync();
+        await EnsureHubAccountLinkAsync(db, OrganizationId);
         var store = new OrganizationBillingStore(db);
         await DriveControlToAsync(store, OrganizationSubscriptionState.Retained);
         var retainedId = (await store.GetSubscriptionAsync(OrganizationId))!.Id;
@@ -1301,8 +1356,7 @@ public sealed class OrganizationBillingPersistenceTests
         await connection.OpenAsync();
         await using var db = CreateDb(connection);
         await db.Database.EnsureCreatedAsync();
-        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
-        await db.SaveChangesAsync();
+        await EnsureHubAccountLinkAsync(db, OrganizationId);
         var store = new OrganizationBillingStore(db);
         await DriveControlToAsync(store, OrganizationSubscriptionState.Deleted);
         var deletedId = (await db.OrganizationSubscriptions.SingleAsync()).Id;
@@ -1333,8 +1387,7 @@ public sealed class OrganizationBillingPersistenceTests
         await connection.OpenAsync();
         await using var db = CreateDb(connection);
         await db.Database.EnsureCreatedAsync();
-        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
-        await db.SaveChangesAsync();
+        await EnsureHubAccountLinkAsync(db, OrganizationId);
         var store = new OrganizationBillingStore(db);
         var created = Event("evt-hub-created", OrganizationSubscriptionState.Active, Now.AddMinutes(2), BillingWebhookSources.Hub);
         var older = Event("evt-hub-older", OrganizationSubscriptionState.PastDue, Now.AddMinutes(1), BillingWebhookSources.Hub);
@@ -1359,8 +1412,8 @@ public sealed class OrganizationBillingPersistenceTests
         await db.Database.EnsureCreatedAsync();
         db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
         var otherOrganizationId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
-        db.Organizations.Add(new Organization { Id = otherOrganizationId, Name = "Other" });
         await db.SaveChangesAsync();
+        await EnsureHubAccountLinkAsync(db, otherOrganizationId);
         var store = new OrganizationBillingStore(db);
 
         await store.ConsumeAsync(Event("evt-shared", OrganizationSubscriptionState.Active, Now.AddMinutes(1)), Now.AddMinutes(2));
@@ -1374,6 +1427,97 @@ public sealed class OrganizationBillingPersistenceTests
         Assert.Equal(BillingEventConsumptionOutcome.Applied, hub.Outcome);
         Assert.Equal(2, await db.BillingProviderEvents.CountAsync());
         Assert.Equal(BillingWebhookSources.Hub, (await store.GetSubscriptionAsync(otherOrganizationId))!.WebhookSource);
+    }
+
+    [Theory]
+    [InlineData(OrganizationSubscriptionState.Retained)]
+    [InlineData(OrganizationSubscriptionState.Deleted)]
+    public async Task Control_event_starts_a_new_lifecycle_after_a_terminal_hub_subscription(
+        OrganizationSubscriptionState terminalState)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        await EnsureHubAccountLinkAsync(db, OrganizationId);
+        var store = new OrganizationBillingStore(db);
+        await DriveToAsync(store, BillingWebhookSources.Hub, "cus_hub", "sub_hub", terminalState);
+        var terminalId = (await db.OrganizationSubscriptions.SingleAsync()).Id;
+
+        var result = await store.ConsumeAsync(
+            Event(OrganizationId, "evt-control-after-hub", OrganizationSubscriptionState.Active, Now.AddMinutes(12), "cus_control", "sub_control"),
+            Now.AddMinutes(13));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Applied, result.Outcome);
+        Assert.Equal(BillingWebhookSources.Control, BillingWebhookSources.Normalize(result.Subscription!.WebhookSource));
+        Assert.Equal("sub_control", result.Subscription.ProviderSubscriptionReference);
+        Assert.NotEqual(terminalId, result.Subscription.Id);
+        db.ChangeTracker.Clear();
+        Assert.Equal(terminalState, (await db.OrganizationSubscriptions.SingleAsync(x => x.Id == terminalId)).State);
+        Assert.Equal(2, await db.OrganizationSubscriptions.CountAsync());
+    }
+
+    private static async Task EnsureHubAccountLinkAsync(CatalogDbContext db, Guid organizationId)
+    {
+        if (!await db.Organizations.AnyAsync(x => x.Id == organizationId))
+            db.Organizations.Add(new Organization { Id = organizationId, Name = $"Org {organizationId:N}"[..20] });
+
+        var account = new Account { Email = $"hub-{organizationId:N}@example.test" };
+        db.Accounts.Add(account);
+        db.ExternalIdentities.Add(new ExternalIdentity
+        {
+            Account = account,
+            Issuer = "https://hub-account.test/auth/v1",
+            Subject = organizationId.ToString("D"),
+            Kind = ExternalIdentityKinds.Hub,
+            Email = account.Email
+        });
+        db.OrganizationMemberships.Add(new OrganizationMembership
+        {
+            Account = account,
+            OrganizationId = organizationId,
+            Role = OrganizationRole.Owner
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private static async Task DriveToAsync(
+        OrganizationBillingStore store,
+        string webhookSource,
+        string customerReference,
+        string subscriptionReference,
+        OrganizationSubscriptionState target)
+    {
+        await store.ConsumeAsync(
+            Event(OrganizationId, $"evt-{webhookSource}-active", OrganizationSubscriptionState.Active, Now.AddMinutes(1), customerReference, subscriptionReference) with
+            {
+                WebhookSource = webhookSource
+            },
+            Now.AddMinutes(2));
+        if (target == OrganizationSubscriptionState.Active)
+            return;
+        await store.ConsumeAsync(
+            Event(OrganizationId, $"evt-{webhookSource}-suspended", OrganizationSubscriptionState.Suspended, Now.AddMinutes(3), customerReference, subscriptionReference) with
+            {
+                WebhookSource = webhookSource
+            },
+            Now.AddMinutes(4));
+        if (target == OrganizationSubscriptionState.Suspended)
+            return;
+        await store.ConsumeAsync(
+            Event(OrganizationId, $"evt-{webhookSource}-retained", OrganizationSubscriptionState.Retained, Now.AddMinutes(5), customerReference, subscriptionReference) with
+            {
+                WebhookSource = webhookSource
+            },
+            Now.AddMinutes(6));
+        if (target == OrganizationSubscriptionState.Retained)
+            return;
+        await store.ConsumeAsync(
+            Event(OrganizationId, $"evt-{webhookSource}-deleted", OrganizationSubscriptionState.Deleted, Now.AddMinutes(7), customerReference, subscriptionReference) with
+            {
+                WebhookSource = webhookSource
+            },
+            Now.AddMinutes(8));
     }
 
     private static async Task DriveControlToAsync(OrganizationBillingStore store, OrganizationSubscriptionState target)

@@ -231,6 +231,44 @@ public sealed class StripeBillingProviderTests
     }
 
     [Fact]
+    public void Control_source_with_cloud_price_ids_still_records_checkout_events_without_a_price()
+    {
+        var provider = CreateProvider(options: new StripeBillingOptions
+        {
+            Enabled = true,
+            SecretKey = "sk_test_no_network",
+            ExpectedMode = StripeBillingOptions.TestMode,
+            WebhookSources =
+            [
+                new StripeWebhookSourceOptions
+                {
+                    Name = BillingWebhookSources.Control,
+                    SigningSecret = WebhookSecret,
+                    ExpectedMode = StripeBillingOptions.TestMode,
+                    CloudPriceIds = ["price_cloud_hosted"]
+                }
+            ],
+            DefaultPriceId = "price_configured",
+            CheckoutSuccessUrl = "https://console.test/success",
+            CheckoutCancelUrl = "https://console.test/cancel",
+            PortalReturnUrl = "https://console.test/billing"
+        });
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var json = $"{{\"id\":\"evt_checkout_no_price\",\"object\":\"event\",\"api_version\":\"2026-08-26.dahlia\",\"created\":{timestamp},\"type\":\"checkout.session.completed\",\"data\":{{\"object\":{{\"id\":\"cs_123\",\"object\":\"checkout.session\",\"client_reference_id\":\"{OrganizationId:D}\",\"customer\":\"cus_123\",\"metadata\":{{\"elsa_control_organization_id\":\"{OrganizationId:D}\"}}}}}}}}";
+        var signature = EventUtility.GenerateSignatureHeader(json, WebhookSecret, timestamp);
+
+        var result = provider.VerifyAndNormalizeWebhook(
+            System.Text.Encoding.UTF8.GetBytes(json),
+            signature,
+            DateTimeOffset.FromUnixTimeSeconds(timestamp));
+
+        Assert.Equal(BillingWebhookNormalizationStatus.Unknown, result.Status);
+        Assert.Null(result.Event!.PriceReference);
+        Assert.Equal("cus_123", result.Event.ProviderCustomerReference);
+        Assert.Equal(OrganizationId, result.Event.OrganizationId);
+    }
+
+    [Fact]
     public void Checkout_redelivery_that_only_changes_pending_webhooks_keeps_the_same_replay_facts()
     {
         var provider = CreateProvider();

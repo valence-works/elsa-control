@@ -107,6 +107,7 @@ public static class BillingWebhookSources
 public static class BillingDiagnosticCodes
 {
     public const string SubscriptionSourceConflict = "billing.subscription-source-conflict";
+    public const string HubOrganizationUnlinked = "billing.hub-organization-unlinked";
     public const string ManagedByHub = "billing.managed-by-hub";
 }
 

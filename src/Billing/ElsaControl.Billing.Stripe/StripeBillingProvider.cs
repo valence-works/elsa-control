@@ -410,7 +410,17 @@ public sealed class StripeBillingProvider(
     private static string? ReadCheckoutPrice(global::Stripe.Checkout.Session checkoutSession)
     {
         var priceId = checkoutSession.LineItems?.Data?.FirstOrDefault()?.Price?.Id;
-        return string.IsNullOrWhiteSpace(priceId) ? null : priceId;
+        if (!string.IsNullOrWhiteSpace(priceId))
+            return priceId;
+
+        if (checkoutSession.Subscription is Subscription subscription)
+        {
+            var (price, _) = ReadSubscriptionPrice(subscription);
+            if (!string.IsNullOrWhiteSpace(price))
+                return price;
+        }
+
+        return null;
     }
 
     private static Guid ReadOrganizationId(IReadOnlyDictionary<string, string>? metadata) =>

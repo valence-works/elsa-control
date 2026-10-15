@@ -177,7 +177,13 @@ public sealed class StripeBillingOptions
         if (allowed.Count == 0)
             return !string.Equals(NormalizeSourceName(source.Name), BillingWebhookSources.Hub, StringComparison.Ordinal);
 
-        return priceReference is not null && allowed.Contains(priceReference);
+        if (!string.IsNullOrWhiteSpace(priceReference))
+            return allowed.Contains(priceReference);
+
+        // Control events such as checkout.session.completed often have no
+        // price on the payload. Do not drop them when CloudPriceIds is set;
+        // the store correlates by subscription or customer reference.
+        return !string.Equals(NormalizeSourceName(source.Name), BillingWebhookSources.Hub, StringComparison.Ordinal);
     }
 
     public bool IsPortalConfigured =>
