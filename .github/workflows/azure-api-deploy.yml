@@ -93,6 +93,9 @@ jobs:
       STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS: ${{ vars.STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS }}
       STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED: ${{ vars.STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED }}
       STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS: ${{ vars.STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS }}
+      STAGING_LATE_SUCCESS_LEVER_ENABLED: ${{ vars.STAGING_LATE_SUCCESS_LEVER_ENABLED }}
+      STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS: ${{ vars.STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS }}
+      STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT: ${{ vars.STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT }}
       STAGING_SMOKE_OWNER_ORGANIZATION_ID: ${{ vars.STAGING_SMOKE_OWNER_ORGANIZATION_ID }}
       STAGING_SMOKE_OWNER_INSTANCE_ID: ${{ vars.STAGING_SMOKE_OWNER_INSTANCE_ID }}
       CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
@@ -349,9 +352,86 @@ jobs:
             fi
           fi
 
+          late_success_enabled_raw="${STAGING_LATE_SUCCESS_LEVER_ENABLED:-}"
+          late_success_allowlist_raw="${STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS:-}"
+          late_success_wait_raw="${STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT:-}"
+          late_success_allowlist_count=0
+          late_success_normalized=""
+          late_success_enabled=""
+          late_success_wait=""
+          if [ -n "$late_success_enabled_raw" ] || [ -n "$late_success_allowlist_raw" ] || [ -n "$late_success_wait_raw" ]; then
+            if [ "$TARGET_ENVIRONMENT" != "test" ]; then
+              echo "::error::STAGING_LATE_SUCCESS_LEVER_ENABLED, STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS, and STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT must be unset for ${TARGET_ENVIRONMENT}; production ships the lever off."
+              exit 1
+            fi
+          fi
+          if [ -n "$late_success_enabled_raw" ]; then
+            case "${late_success_enabled_raw,,}" in
+              true) late_success_enabled=true ;;
+              false) late_success_enabled="" ;;
+              *)
+                echo "::error::STAGING_LATE_SUCCESS_LEVER_ENABLED must be true or false."
+                exit 1
+                ;;
+            esac
+          fi
+          if [ -n "$late_success_allowlist_raw" ]; then
+            if [[ "$late_success_allowlist_raw" =~ (^|,)[[:space:]]*(,|$) ]]; then
+              echo "::error::STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS contains an empty workspace id."
+              exit 1
+            fi
+            IFS=',' read -r -a late_success_entries <<< "$late_success_allowlist_raw"
+            for entry in "${late_success_entries[@]}"; do
+              trimmed="${entry#"${entry%%[![:space:]]*}"}"
+              trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+              if [ -z "$trimmed" ]; then
+                echo "::error::STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS contains an empty workspace id."
+                exit 1
+              fi
+              if [[ ! "$trimmed" =~ $pairing_guid_pattern ]] || [ "$trimmed" = "00000000-0000-0000-0000-000000000000" ]; then
+                echo "::error::STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS contains an entry that is not a GUID workspace id."
+                exit 1
+              fi
+              if [ -n "$late_success_normalized" ]; then
+                late_success_normalized+=","
+              fi
+              late_success_normalized+="$trimmed"
+              late_success_allowlist_count=$((late_success_allowlist_count + 1))
+            done
+          fi
+          if [ -n "$late_success_wait_raw" ]; then
+            if [[ ! "$late_success_wait_raw" =~ ^([0-9]{2}):([0-9]{2}):([0-9]{2})$ ]]; then
+              echo "::error::STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT must be a TimeSpan between 00:00:15 and 00:05:00."
+              exit 1
+            fi
+            late_success_wait_hours=$((10#${BASH_REMATCH[1]}))
+            late_success_wait_minutes=$((10#${BASH_REMATCH[2]}))
+            late_success_wait_seconds=$((10#${BASH_REMATCH[3]}))
+            late_success_wait_total=$((late_success_wait_hours * 3600 + late_success_wait_minutes * 60 + late_success_wait_seconds))
+            if [ "$late_success_wait_total" -lt 15 ] || [ "$late_success_wait_total" -gt 300 ]; then
+              echo "::error::STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT must be a TimeSpan between 00:00:15 and 00:05:00."
+              exit 1
+            fi
+            late_success_wait="$late_success_wait_raw"
+          fi
+          if [ -n "${GITHUB_OUTPUT:-}" ]; then
+            {
+              printf 'staging_late_success_lever_enabled=%s\n' "$late_success_enabled"
+              printf 'staging_late_success_lever_allowlist_count=%s\n' "$late_success_allowlist_count"
+              printf 'staging_late_success_lever_allowlist=%s\n' "$late_success_normalized"
+              printf 'staging_late_success_lever_wait=%s\n' "$late_success_wait"
+            } >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "${GITHUB_ENV:-}" ]; then
+            printf 'STAGING_LATE_SUCCESS_LEVER_ENABLED=%s\n' "$late_success_enabled" >> "$GITHUB_ENV"
+            printf 'STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS=%s\n' "$late_success_normalized" >> "$GITHUB_ENV"
+            printf 'STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT=%s\n' "$late_success_wait" >> "$GITHUB_ENV"
+          fi
+
           echo "External-engine pairing allowlist: ${pairing_allowlist_count} organization id(s)."
           echo "Staging billing lifecycle lever: enabled=${lever_enabled}; allowlist=${lever_allowlist_count} organization id(s)."
           echo "Staging recovery lifecycle lever: enabled=${recovery_enabled}; allowlist=${recovery_allowlist_count} instance id(s)."
+          echo "Staging late-success lever: enabled=${late_success_enabled}; allowlist=${late_success_allowlist_count} workspace id(s)."
 
           required=(
             AZURE_CLIENT_ID
@@ -920,6 +1000,9 @@ jobs:
           STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS: ${{ steps.deployment-config.outputs.staging_billing_lever_allowlist }}
           STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED: ${{ steps.deployment-config.outputs.staging_recovery_lever_enabled }}
           STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS: ${{ steps.deployment-config.outputs.staging_recovery_lever_allowlist }}
+          STAGING_LATE_SUCCESS_LEVER_ENABLED: ${{ steps.deployment-config.outputs.staging_late_success_lever_enabled }}
+          STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS: ${{ steps.deployment-config.outputs.staging_late_success_lever_allowlist }}
+          STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT: ${{ steps.deployment-config.outputs.staging_late_success_lever_wait }}
           STAGING_SMOKE_OWNER_INSTANCE_ID: ${{ vars.STAGING_SMOKE_OWNER_INSTANCE_ID }}
           BILLING_EXPECTED_MODE: ${{ steps.deployment-config.outputs.billing_expected_mode }}
           PRODUCTION_BILLING_CAPTURE_PATH: ${{ runner.temp }}/elsa-control-production-billing.json
@@ -1312,6 +1395,7 @@ jobs:
           PAIRING_BEFORE_COUNT="$pairing_before_count" scripts/apply-external-engine-pairing-settings.sh
           scripts/apply-staging-billing-lifecycle-lever-settings.sh
           scripts/apply-staging-recovery-lifecycle-lever-settings.sh
+          scripts/apply-staging-late-success-lever-settings.sh
 
           if [ -n "$production_billing_capture_path" ]; then
             python3 scripts/production_stripe_reconcile.py --reapply "$production_billing_capture_path"

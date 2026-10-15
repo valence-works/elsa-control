@@ -436,6 +436,9 @@ fi
                     "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS": "",
                     "STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED": "",
                     "STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS": "",
+                    "STAGING_LATE_SUCCESS_LEVER_ENABLED": "",
+                    "STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS": "",
+                    "STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT": "",
                     "STAGING_SMOKE_OWNER_INSTANCE_ID": "",
                     "AZURE_HEALTH_ATTEMPTS": "2",
                     "AZURE_HEALTH_RETRY_SECONDS": "0",
@@ -633,6 +636,9 @@ fi
         self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS: ${{ vars.STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS }}", self.source)
         self.assertIn("STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED: ${{ vars.STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED }}", self.source)
         self.assertIn("STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS: ${{ vars.STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS }}", self.source)
+        self.assertIn("STAGING_LATE_SUCCESS_LEVER_ENABLED: ${{ vars.STAGING_LATE_SUCCESS_LEVER_ENABLED }}", self.source)
+        self.assertIn("STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS: ${{ vars.STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS }}", self.source)
+        self.assertIn("STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT: ${{ vars.STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT }}", self.source)
         self.assertIn("STAGING_SMOKE_OWNER_ORGANIZATION_ID: ${{ vars.STAGING_SMOKE_OWNER_ORGANIZATION_ID }}", self.source)
         self.assertIn("STAGING_SMOKE_OWNER_INSTANCE_ID: ${{ vars.STAGING_SMOKE_OWNER_INSTANCE_ID }}", self.source)
         self.assertIn(
@@ -683,12 +689,25 @@ fi
         self.assertIn("scripts/apply-external-engine-pairing-settings.sh", self.source)
         self.assertIn("scripts/apply-staging-billing-lifecycle-lever-settings.sh", self.source)
         self.assertIn("scripts/apply-staging-recovery-lifecycle-lever-settings.sh", self.source)
+        self.assertIn("scripts/apply-staging-late-success-lever-settings.sh", self.source)
         self.assertIn(
             "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS: ${{ steps.deployment-config.outputs.staging_billing_lever_allowlist }}",
             self.source,
         )
         self.assertIn(
             "STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS: ${{ steps.deployment-config.outputs.staging_recovery_lever_allowlist }}",
+            self.source,
+        )
+        self.assertIn(
+            "STAGING_LATE_SUCCESS_LEVER_ENABLED: ${{ steps.deployment-config.outputs.staging_late_success_lever_enabled }}",
+            self.source,
+        )
+        self.assertIn(
+            "STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS: ${{ steps.deployment-config.outputs.staging_late_success_lever_allowlist }}",
+            self.source,
+        )
+        self.assertIn(
+            "STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT: ${{ steps.deployment-config.outputs.staging_late_success_lever_wait }}",
             self.source,
         )
 
@@ -1135,6 +1154,153 @@ fi
         self.assertIn("scripts/lib/staging-lever-target.sh", helper)
         self.assertNotIn("echo \"$STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS\"", self.source)
         self.assertNotIn("echo \"$STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS\"", helper)
+
+    def test_staging_late_success_lever_is_staging_only_and_bounds_the_wait(self) -> None:
+        check_script = self._deployment_config_script()
+        rehearsal = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        smoke = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        billing_org = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        base = {
+            "DEPLOY_MODE": "app",
+            "AZURE_CLIENT_ID": "00000000-0000-0000-0000-000000000001",
+            "AZURE_TENANT_ID": "00000000-0000-0000-0000-000000000002",
+            "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
+            "AZURE_CONTAINER_REGISTRY_ENDPOINT": "test.azurecr.io",
+            "AZURE_ENV_NAME": "test",
+            "AZURE_LOCATION": "westeurope",
+            "AZURE_RESOURCE_GROUP": "rg-test",
+            "AZURE_WEBAPP_NAME": "test-api",
+        }
+
+        def run_check(**extra: str) -> tuple[subprocess.CompletedProcess[str], str, str]:
+            with tempfile.NamedTemporaryFile() as output, tempfile.NamedTemporaryFile() as github_env:
+                environment = os.environ.copy()
+                environment.update(base)
+                environment.update(extra)
+                if environment.get("TARGET_ENVIRONMENT") == "production":
+                    environment.update(PRODUCTION_BILLING_FIXTURE)
+                environment["GITHUB_OUTPUT"] = output.name
+                environment["GITHUB_ENV"] = github_env.name
+                result = subprocess.run(
+                    ["bash", "-c", check_script],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                return result, Path(output.name).read_text(), Path(github_env.name).read_text()
+
+        staging_stripe = {
+            "ELSA_CLOUD_STAGING_ORIGIN": "https://staging.example.test",
+            "STRIPE_HOSTED_PRICE_ID": "price_test",
+            "STRIPE_TEST_SECRET_KEY": "sk_test_fixture",
+            "STRIPE_TEST_WEBHOOK_SIGNING_SECRET": "whsec_fixture",
+        }
+
+        production_enabled, _, _ = run_check(
+            TARGET_ENVIRONMENT="production",
+            AZURE_ENV_NAME="valence-control-staging",
+            STAGING_LATE_SUCCESS_LEVER_ENABLED="true",
+        )
+        self.assertNotEqual(0, production_enabled.returncode)
+        self.assertIn("must be unset", production_enabled.stdout + production_enabled.stderr)
+
+        production_allowlist, _, _ = run_check(
+            TARGET_ENVIRONMENT="production",
+            STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS=rehearsal,
+        )
+        self.assertNotEqual(0, production_allowlist.returncode)
+        self.assertIn("must be unset", production_allowlist.stdout + production_allowlist.stderr)
+        self.assertNotIn(rehearsal, production_allowlist.stdout + production_allowlist.stderr)
+
+        production_wait, _, _ = run_check(
+            TARGET_ENVIRONMENT="production",
+            STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT="00:00:30",
+        )
+        self.assertNotEqual(0, production_wait.returncode)
+        self.assertIn("must be unset", production_wait.stdout + production_wait.stderr)
+
+        production_empty, production_output, production_env = run_check(
+            TARGET_ENVIRONMENT="production",
+            STAGING_LATE_SUCCESS_LEVER_ENABLED="",
+            STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS="",
+            STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT="",
+        )
+        self.assertEqual(0, production_empty.returncode, production_empty.stderr)
+        self.assertRegex(production_output, r"(?m)^staging_late_success_lever_enabled=$")
+        self.assertRegex(production_output, r"(?m)^staging_late_success_lever_allowlist=$")
+        self.assertRegex(production_output, r"(?m)^staging_late_success_lever_allowlist_count=0$")
+        self.assertRegex(production_output, r"(?m)^staging_late_success_lever_wait=$")
+        self.assertNotIn("staging_late_success_lever_enabled=false", production_output)
+        self.assertNotIn("staging_late_success_lever_enabled=true", production_output)
+
+        billing_only, billing_output, _ = run_check(
+            TARGET_ENVIRONMENT="test",
+            STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="true",
+            STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS=billing_org,
+            STAGING_SMOKE_OWNER_ORGANIZATION_ID=smoke,
+            **staging_stripe,
+        )
+        self.assertEqual(0, billing_only.returncode, billing_only.stdout + billing_only.stderr)
+        self.assertIn("staging_billing_lever_enabled=true", billing_output)
+        self.assertRegex(billing_output, r"(?m)^staging_late_success_lever_enabled=$")
+        self.assertRegex(billing_output, r"(?m)^staging_late_success_lever_allowlist=$")
+        self.assertRegex(billing_output, r"(?m)^staging_late_success_lever_allowlist_count=0$")
+
+        wait_under, _, _ = run_check(
+            TARGET_ENVIRONMENT="test",
+            STAGING_LATE_SUCCESS_LEVER_ENABLED="true",
+            STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS=rehearsal,
+            STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT="00:00:14",
+            **staging_stripe,
+        )
+        self.assertNotEqual(0, wait_under.returncode)
+        self.assertIn("must be a TimeSpan between 00:00:15 and 00:05:00", wait_under.stdout + wait_under.stderr)
+        self.assertNotIn(rehearsal, wait_under.stdout + wait_under.stderr)
+
+        wait_over, _, _ = run_check(
+            TARGET_ENVIRONMENT="test",
+            STAGING_LATE_SUCCESS_LEVER_ENABLED="true",
+            STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS=rehearsal,
+            STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT="00:05:01",
+            **staging_stripe,
+        )
+        self.assertNotEqual(0, wait_over.returncode)
+        self.assertIn("must be a TimeSpan between 00:00:15 and 00:05:00", wait_over.stdout + wait_over.stderr)
+
+        malformed_wait, _, _ = run_check(
+            TARGET_ENVIRONMENT="test",
+            STAGING_LATE_SUCCESS_LEVER_ENABLED="true",
+            STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT="30s",
+            **staging_stripe,
+        )
+        self.assertNotEqual(0, malformed_wait.returncode)
+        self.assertIn("must be a TimeSpan between 00:00:15 and 00:05:00", malformed_wait.stdout + malformed_wait.stderr)
+
+        staging_ok, output, github_env = run_check(
+            TARGET_ENVIRONMENT="test",
+            AZURE_ENV_NAME="valence-control-staging",
+            AZURE_RESOURCE_GROUP="rg-valence-control-staging",
+            STAGING_LATE_SUCCESS_LEVER_ENABLED="true",
+            STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS=f" {rehearsal} ",
+            STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT="00:00:30",
+            **staging_stripe,
+        )
+        self.assertEqual(0, staging_ok.returncode, staging_ok.stdout + staging_ok.stderr)
+        self.assertNotIn(rehearsal, staging_ok.stdout + staging_ok.stderr)
+        self.assertIn("staging_late_success_lever_enabled=true", output)
+        self.assertIn(f"staging_late_success_lever_allowlist={rehearsal}", output)
+        self.assertIn("staging_late_success_lever_allowlist_count=1", output)
+        self.assertIn("staging_late_success_lever_wait=00:00:30", output)
+        self.assertRegex(output, r"(?m)^staging_billing_lever_enabled=$")
+        self.assertIn("STAGING_LATE_SUCCESS_LEVER_ENABLED=true", github_env)
+        self.assertIn(f"STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS={rehearsal}", github_env)
+        self.assertIn("STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT=00:00:30", github_env)
+        helper = (ROOT / "scripts" / "apply-staging-late-success-lever-settings.sh").read_text()
+        self.assertIn("Staging late-success lever app setting count: before=", helper)
+        self.assertIn("scripts/lib/staging-lever-target.sh", helper)
+        self.assertNotIn("echo \"$STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS\"", self.source)
+        self.assertNotIn("echo \"$STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS\"", helper)
 
     def test_staging_infra_requires_a_provisioner_identity(self) -> None:
         check_start = self.source.index("        run: |\n", self.source.index("      - name: Check deployment configuration"))
@@ -1836,6 +2002,9 @@ printf '200'
                         "STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS": "",
                         "STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED": "",
                         "STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS": "",
+                        "STAGING_LATE_SUCCESS_LEVER_ENABLED": "",
+                        "STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS": "",
+                        "STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT": "",
                         "STAGING_SMOKE_OWNER_INSTANCE_ID": "",
                         # Shared rollback health is intentionally bounded in
                         # production; make the fake provider deterministic and
@@ -3524,6 +3693,9 @@ else:
             environment.pop("STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED", None)
             environment.pop("STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS", None)
             environment.pop("STAGING_SMOKE_OWNER_INSTANCE_ID", None)
+            environment.pop("STAGING_LATE_SUCCESS_LEVER_ENABLED", None)
+            environment.pop("STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS", None)
+            environment.pop("STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT", None)
             environment["GITHUB_OUTPUT"] = output.name
             environment["GITHUB_ENV"] = github_env.name
             config = subprocess.run(
@@ -3542,6 +3714,10 @@ else:
         self.assertEqual("", emitted.get("staging_recovery_lever_enabled", "missing"))
         self.assertEqual("", emitted.get("staging_recovery_lever_allowlist", "missing"))
         self.assertEqual("0", emitted.get("staging_recovery_lever_allowlist_count", "missing"))
+        self.assertEqual("", emitted.get("staging_late_success_lever_enabled", "missing"))
+        self.assertEqual("", emitted.get("staging_late_success_lever_allowlist", "missing"))
+        self.assertEqual("0", emitted.get("staging_late_success_lever_allowlist_count", "missing"))
+        self.assertEqual("", emitted.get("staging_late_success_lever_wait", "missing"))
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -3935,6 +4111,120 @@ else:
             self.assertEqual("", call_log.read_text())
             self.assertNotIn(rehearsal, refused.stdout + refused.stderr)
 
+    def test_late_success_lever_helper_applies_on_test_and_refuses_when_production_is_enabled(self) -> None:
+        rehearsal = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        smoke = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        second = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        nil = "00000000-0000-0000-0000-000000000000"
+        helper = ROOT / "scripts" / "apply-staging-late-success-lever-settings.sh"
+        enabled_name = "Staging__LateSuccessLever__Enabled"
+        prefix = "Staging__LateSuccessLever__AllowedWorkspaceIds__"
+        wait_name = "Staging__LateSuccessLever__WorkloadWait"
+        smoke_name = "Staging__LateSuccessLever__SmokeOwnerWorkspaceId"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            store, call_log, _ = self._write_late_success_lever_fake_az(temp_path)
+
+            def run_helper(
+                target: str,
+                enabled: str,
+                allowlist: str,
+                initial: dict[str, str],
+                wait: str = "00:00:30",
+                smoke_owner: str = smoke,
+            ) -> subprocess.CompletedProcess[str]:
+                store.write_text(json.dumps(initial))
+                call_log.write_text("")
+                environment = os.environ.copy()
+                environment.update(
+                    {
+                        "PATH": f"{temp_path}{os.pathsep}{environment['PATH']}",
+                        "AZ_CALL_LOG": str(call_log),
+                        "SETTINGS_STORE": str(store),
+                        "AZURE_RESOURCE_GROUP": "test-rg",
+                        "AZURE_WEBAPP_NAME": "test-api",
+                        "TARGET_ENVIRONMENT": target,
+                        "STAGING_LATE_SUCCESS_LEVER_ENABLED": enabled,
+                        "STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS": allowlist,
+                        "STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT": wait,
+                        "STAGING_SMOKE_OWNER_WORKSPACE_ID": smoke_owner,
+                    }
+                )
+                return subprocess.run(
+                    [str(helper)],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+
+            applied = run_helper("test", "true", f"\t{rehearsal} \t, \t{second}\t", {})
+            self.assertEqual(0, applied.returncode, applied.stdout + applied.stderr)
+            self.assertEqual(
+                {
+                    enabled_name: "true",
+                    wait_name: "00:00:30",
+                    smoke_name: smoke,
+                    f"{prefix}0": rehearsal,
+                    f"{prefix}1": second,
+                },
+                json.loads(store.read_text()),
+            )
+            self.assertIn("appsettings set", call_log.read_text())
+            self.assertNotIn(rehearsal, applied.stdout + applied.stderr)
+            self.assertNotIn(second, applied.stdout + applied.stderr)
+            self.assertIn("Staging late-success lever app setting count: before=0 after=5.", applied.stdout)
+
+            stale_cleared = run_helper(
+                "test",
+                "",
+                "",
+                {enabled_name: "true", wait_name: "00:00:30", smoke_name: smoke, f"{prefix}0": rehearsal},
+                wait="",
+                smoke_owner="",
+            )
+            self.assertEqual(0, stale_cleared.returncode, stale_cleared.stdout + stale_cleared.stderr)
+            self.assertEqual({}, json.loads(store.read_text()))
+            self.assertIn("appsettings delete", call_log.read_text())
+            self.assertNotIn("appsettings set", call_log.read_text())
+
+            existing = {
+                enabled_name: "true",
+                wait_name: "00:00:30",
+                smoke_name: smoke,
+                f"{prefix}0": rehearsal,
+            }
+            invalid_inputs = (
+                ("malformed allowlist ID", "not-a-guid", smoke, "00:00:30"),
+                ("nil allowlist ID", nil, smoke, "00:00:30"),
+                ("newline suffix owner", f"{rehearsal}\n{smoke}", smoke, "00:00:30"),
+                ("leading empty allowlist item", f",{rehearsal}", smoke, "00:00:30"),
+                ("empty allowlist item", f"{rehearsal},,{second}", smoke, "00:00:30"),
+                ("trailing empty allowlist item", f"{rehearsal},", smoke, "00:00:30"),
+                ("wait under fifteen seconds", rehearsal, smoke, "00:00:14"),
+                ("wait over five minutes", rehearsal, smoke, "00:05:01"),
+                ("malformed wait", rehearsal, smoke, "30s"),
+                ("case-insensitive owner collision", smoke.upper(), smoke.lower(), "00:00:30"),
+            )
+            for label, allowlist, smoke_owner, wait in invalid_inputs:
+                with self.subTest(label=label):
+                    rejected = run_helper("test", "true", allowlist, existing, wait=wait, smoke_owner=smoke_owner)
+                    self.assertNotEqual(0, rejected.returncode, rejected.stdout + rejected.stderr)
+                    self.assertEqual(existing, json.loads(store.read_text()))
+                    self.assertEqual("", call_log.read_text())
+                    self.assertNotIn(rehearsal, rejected.stdout + rejected.stderr)
+                    self.assertNotIn(second, rejected.stdout + rejected.stderr)
+                    self.assertNotIn(smoke, rejected.stdout + rejected.stderr)
+
+            refused = run_helper("production", "true", rehearsal, {})
+            self.assertNotEqual(0, refused.returncode)
+            self.assertIn("must be unset", refused.stdout + refused.stderr)
+            self.assertEqual({}, json.loads(store.read_text()))
+            self.assertEqual("", call_log.read_text())
+            self.assertNotIn(rehearsal, refused.stdout + refused.stderr)
+
     @staticmethod
     def _parse_kv(text: str) -> dict[str, str]:
         values: dict[str, str] = {}
@@ -4011,6 +4301,61 @@ prefix = "Staging__RecoveryLifecycleLever__AllowedInstanceIds__"
 enabled = "Staging__RecoveryLifecycleLever__Enabled"
 smoke = "Staging__RecoveryLifecycleLever__SmokeOwnerInstanceId"
 items = {name: value for name, value in store.items() if name.startswith(prefix) or name in (enabled, smoke)}
+allowlist = {name: value for name, value in store.items() if name.startswith(prefix)}
+if "appsettings list" in joined:
+    if "starts_with(name, '%s')" % prefix in joined and "].value" in joined:
+        print("\\n".join(allowlist.values()))
+    elif "].name" in joined:
+        print("\\n".join(items))
+    elif "].value" in joined:
+        print("\\n".join(allowlist.values()))
+    else:
+        print(len(items))
+elif "appsettings delete" in joined:
+    args = sys.argv[1:]
+    names = []
+    for item in args[args.index("--setting-names") + 1:]:
+        if item.startswith("--"):
+            break
+        names.append(item)
+    for name in names:
+        store.pop(name, None)
+    open(store_path, "w", encoding="utf-8").write(json.dumps(store))
+elif "appsettings set" in joined:
+    args = sys.argv[1:]
+    values = []
+    for item in args[args.index("--settings") + 1:]:
+        if item.startswith("--"):
+            break
+        values.append(item)
+    for item in values:
+        name, value = item.split("=", 1)
+        store[name] = value
+    open(store_path, "w", encoding="utf-8").write(json.dumps(store))
+else:
+    sys.exit(1)
+"""
+        )
+        fake_az.chmod(0o755)
+        return store, call_log, fake_az
+
+    @staticmethod
+    def _write_late_success_lever_fake_az(temp_path: Path) -> tuple[Path, Path, Path]:
+        store = temp_path / "settings.json"
+        call_log = temp_path / "az-calls"
+        fake_az = temp_path / "az"
+        fake_az.write_text(
+            """#!/usr/bin/env python3
+import json, os, sys
+open(os.environ["AZ_CALL_LOG"], "a", encoding="utf-8").write(" ".join(sys.argv[1:]) + "\\n")
+store_path = os.environ["SETTINGS_STORE"]
+store = json.loads(open(store_path, encoding="utf-8").read())
+joined = " ".join(sys.argv[1:])
+prefix = "Staging__LateSuccessLever__AllowedWorkspaceIds__"
+enabled = "Staging__LateSuccessLever__Enabled"
+wait = "Staging__LateSuccessLever__WorkloadWait"
+smoke = "Staging__LateSuccessLever__SmokeOwnerWorkspaceId"
+items = {name: value for name, value in store.items() if name.startswith(prefix) or name in (enabled, wait, smoke)}
 allowlist = {name: value for name, value in store.items() if name.startswith(prefix)}
 if "appsettings list" in joined:
     if "starts_with(name, '%s')" % prefix in joined and "].value" in joined:

@@ -125,6 +125,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertNotIn("Staging__RecoveryLifecycleLever__Enabled", settings)
         self.assertFalse(any(name.startswith("Staging__RecoveryLifecycleLever__AllowedInstanceIds__") for name in settings))
         self.assertNotIn("Staging__RecoveryLifecycleLever__SmokeOwnerInstanceId", settings)
+        self.assertFalse(any(name.startswith("Staging__LateSuccessLever__") for name in settings))
 
     @staticmethod
     def generated_api_module() -> str:
@@ -339,6 +340,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertEqual(on_settings["Billing__StagingLifecycleLever__AllowedOrganizationIds__1"], second)
         self.assertNotIn("Staging__RecoveryLifecycleLever__Enabled", on_settings)
         self.assertFalse(any(name.startswith("Staging__RecoveryLifecycleLever__AllowedInstanceIds__") for name in on_settings))
+        self.assertFalse(any(name.startswith("Staging__LateSuccessLever__") for name in on_settings))
 
     def test_bicep_module_emits_staging_recovery_lever_settings_only_when_set(self) -> None:
         first = "11111111-1111-1111-1111-111111111111"
@@ -376,6 +378,9 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertNotIn("Billing__StagingLifecycleLever__Enabled", on_settings)
         self.assertNotIn("Staging__RecoveryLifecycleLever__Enabled", billing_settings)
         self.assertFalse(any(name.startswith("Staging__RecoveryLifecycleLever__AllowedInstanceIds__") for name in billing_settings))
+        self.assertFalse(any(name.startswith("Staging__LateSuccessLever__") for name in off_settings))
+        self.assertFalse(any(name.startswith("Staging__LateSuccessLever__") for name in on_settings))
+        self.assertFalse(any(name.startswith("Staging__LateSuccessLever__") for name in billing_settings))
 
     def test_bicep_module_drops_empty_pairing_allowlist_entries(self) -> None:
         first = "11111111-1111-1111-1111-111111111111"
@@ -470,6 +475,9 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertNotIn(".Env.EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS", parameters)
         self.assertNotIn(".Env.STAGING_BILLING_LIFECYCLE_LEVER_ENABLED", parameters)
         self.assertNotIn(".Env.STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS", parameters)
+        self.assertNotIn(".Env.STAGING_LATE_SUCCESS_LEVER_ENABLED", parameters)
+        self.assertNotIn("Staging__LateSuccessLever__", parameters)
+        self.assertNotIn("Staging__LateSuccessLever__", module)
         self.assertIn("same Microsoft Entra tenant", module)
         self.assertIn("userAssignedIdentities: union(", module)
         self.assertIn("empty(provisioner_identity_outputs_id)", module)
@@ -509,6 +517,10 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS", documentation)
         self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED", documentation)
         self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS", documentation)
+        self.assertIn("STAGING_LATE_SUCCESS_LEVER_ENABLED", documentation)
+        self.assertIn("STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS", documentation)
+        self.assertIn("STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT", documentation)
+        self.assertIn("Turn the lever off afterwards", documentation)
         self.assertIn("STAGING_SMOKE_OWNER_ORGANIZATION_ID", documentation)
         self.assertIn("`test` GitHub environment", documentation)
         self.assertIn("same Microsoft Entra tenant", documentation)

@@ -70,6 +70,14 @@ claims it with a lease, and checkpoints the following runner steps:
 4. the contained-identity SQL bootstrap from `sql-bootstrap.sql`;
 5. workload deployment, candidate health verification and traffic promotion.
 
+A staging-only late-success lever may shorten the Workload-step wait for one
+allowlisted workspace so a late ARM Succeeded can auto-resume with no Recover.
+It is off unless the pipeline target is `test`, Stripe is in test mode, its
+own flag is on, and the workspace is allowlisted and not the Hosted smoke
+owner. Billing and recovery lever flags never arm it. Foundation and the
+other steps, and `CommandTimeout`, stay unchanged. Turn it off after the QA
+run.
+
 The runner receives only the typed plan, safe resource references and secret
 locators. Secret values and raw ARM/Bicep payloads are not representable in the
 executor contract. Evidence references are absolute OCI/HTTPS locators with a

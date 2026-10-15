@@ -125,6 +125,8 @@ class RenderTests(unittest.TestCase):
     def test_production_render_succeeds_with_every_decision_made(self):
         rendered = renderer.render(self.workers, self.resolved, self.pending)
         self.assertEqual("9.160.165.252", rendered["Deployment__AzureProvider__Runner__SqlBootstrapIp"])
+        self.assertFalse(any(key.startswith("Staging__LateSuccessLever__") for key in rendered))
+        self.assertFalse(any(key.startswith("Staging__LateSuccessLever__") for key in self.workers))
 
     def test_render_with_resolved_decisions_produces_only_template_keys(self):
         rendered = renderer.render(self.workers, self.resolved, self.pending, self.overrides)
