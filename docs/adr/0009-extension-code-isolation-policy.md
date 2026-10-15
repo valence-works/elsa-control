@@ -152,3 +152,94 @@ It does not supersede the prohibition of arbitrary customer packages on Shared o
 - Reviewer of record: Elsa Control Architect (never the author); no human co-sign (Sipke, 2026-10-13).
 - Allowlist freshness TTL: 15 minutes maximum. Revocation-list hard TTL: 120 s; past it, loads and in-flight runs fail closed.
 - Merges under the standard Code Review rule.
+
+## Amendment 2 (2026-10-15): Customer, learner and community packages on Valence Dedicated, isolated per customer
+
+Status: **Proposed.** It isn't in force until the CEO settles the open decisions at the end of this amendment and it merges under the standard Code Review rule. Until then, #221's Dedicated admission behaviour is unchanged: arbitrary packages fail closed. Scope: the **Valence Dedicated** profile only. Shared stays under Amendment 1. Data-isolated, the lab shard and Private are unchanged.
+
+### Context
+- **Original decision (this ADR):** arbitrary customer packages are prohibited at managed launch. Dedicated admits built-in and Valence-approved packages only, and #221 enforces that at plan resolution and again before provider submission.
+- **Sipke, 13 Oct 2026 (#795 decision 1, recorded in Amendment 1's context):** learner and community packages stay off Shared and run only on dedicated engines (lab shard, Dedicated, BYO).
+- **CEO, 13 Oct 2026, delivery plan §5b:** no runtime packages for paying Shared customers; they're for Dedicated and BYO only.
+- **#629 decision (CEO, 13 Oct 2026, #729 carry-over):** customer-built *images* run only in BYO subscriptions. A future isolated Valence-hosted tier stays open and needs its own isolation ADR before any build.
+- **#355:** the Private profile and extension-policy matrix, which proposed `packages.arbitrary` for Private only.
+- **ADR-0016:** each Dedicated instance already gets its own resource group, Container Apps environment, Azure SQL database, user-assigned identity and Key Vault. Engine secrets reach the container as Container Apps Key Vault references, which the platform resolves outside the engine process.
+- **An AssemblyLoadContext is not a security boundary** (TB-03). A package loaded into an Elsa engine has that engine's full process trust: memory, environment, files, database connection and network. Nuplane loading, an IL pre-scan and package approval are governance controls. None of them is a sandbox.
+
+### Decision
+1. **What's admitted.** On Valence Dedicated, a customer may run **customer-authored, learner and community packages** (the "customer package" class: arbitrary code, not Valence-reviewed) in that customer's own engines. This needs:
+   - the `packages.customer` entitlement, a capability rather than a plan name;
+   - an explicit customer opt-in per instance, recorded with the actor and an acknowledgement that the code runs with the engine's full trust;
+   - every clause 12 precondition to have passed.
+
+   Classification stays server-derived (as in #221). Caller-supplied classification can never upgrade a package, and a customer package never becomes "Valence-approved".
+2. **The boundary is the per-customer engine.** "Isolated per customer" means all of the following. Each is a provider-template invariant with a test:
+   - **Own engine or process:** each customer package runs only inside an Elsa engine that belongs to one customer (organization). There's no engine, replica, process or Container Apps environment shared with another customer, and no co-hosting of two organizations' tenants in one engine.
+   - **Own identity:** one workload identity per instance (ADR-0016). Its role assignments cover only that instance's own resources. It has no role on Control, the provider subscription scope, the registry beyond pulling the governed image, or any other customer's resources.
+   - **No shared credentials:** nothing in the engine's environment, files, database or Key Vault is valid outside that instance. That includes no Control API key, no fleet-wide signing key, no shared telemetry ingestion secret, no shared feed credential and no shared database login. Every engine credential is unique to the instance and revocable on its own.
+   - **Network-layer egress default deny stays:** egress is enforced outside the engine process (network policy, firewall or egress proxy), with a per-instance allowlist that the customer declares and Control records. Package code can't open sockets to undeclared hosts. Lateral and private targets are not routable, including other instances, Control's private endpoints, the provider and IaC plane, and other customers' SQL and Key Vault.
+   - **Credential broker stays:** outbound connection credentials (OAuth and API connections) come from a broker outside the engine process, as in Amendment 1 clause 7. Package code gets scoped, short-lived connection handles, and no refresh tokens or client secrets enter the engine.
+   - **Managed-identity blocking stays:** the instance metadata endpoint and the platform identity token endpoint are blocked from the workload at the network layer. The engine gets its own secrets through platform-resolved Key Vault references, so it needs no runtime token endpoint. Clause 12 makes "the engine still starts and runs with the endpoint blocked" a precondition.
+   - **No route into Control or other customers:** a customer package can't reach Control's management plane, internal or private endpoints, the provider subscription or another customer's resources. Control's **public** endpoints that the engine legitimately uses (for example handoff redemption) stay internet-reachable, as for any client. They accept only credentials bound to this one instance, so a package can do no more there than its own instance already could. Anything an engine reports to Control is treated as untrusted input from that instance.
+3. **Reproducible package set.** Customer packages are pinned by package id, version and SHA-512 over the full dependency closure in the instance's resolved plan (the immutable lock). The resolved plan plus the governed image digest defines the revision. Floating versions, runtime resolution from public feeds and public-feed fallback are not allowed. For Dedicated customer packages, this lock **replaces the "immutable image" requirement** in the original decision. The governed Valence image is never rebuilt or mutated per customer. Rollback restores a previous lock.
+4. **Load mode.** **Activities only** by default: no `HostIntegrated` load mode, hosted services, HTTP endpoints or EF migrations from customer packages. Widening this is open decision D2. Unloading is not a security control on Dedicated. The engine is the boundary, so a package change becomes a new revision or engine restart.
+5. **Resource limits.** Per-instance CPU, memory, replica, request and execution-time limits come from the entitlement-backed profile (#349). A customer package can exhaust only its own instance. It can't take capacity from other customers or from Control (D-06).
+6. **Kill switch and revocation.** Operators can disable a customer package or an instance's whole customer-package capability. The effect is fail closed on the next revision, with a forced revision restart for a security incident. The audit records the actor, reason and digests. Revocation never deletes customer data.
+7. **Support posture.** Valence supports the platform, not the behaviour of customer packages. Support elevation into an engine running customer packages follows D-09 and treats the engine as possibly hostile: no operator credential is typed or pasted into it.
+8. **Shared is unchanged.** Shared stays limited to the in-house Valence-built, signed-allowlist packages of Amendment 1. Customer, learner and community packages never load on Shared, and Shared customers can't upload packages (Amendment 1 clause 10).
+9. **Customer images are unchanged.** Customer-built **images** stay BYO-only under the #629 decision. This amendment covers packages loaded into the governed Valence image on Dedicated. It doesn't authorise customer images on Valence Hosted.
+10. **Lab shard is out of scope.** The lab shard (#794) co-hosts several learners' packages in one engine, with per-tenant collectible ALCs. Under this ADR's own premise, that isn't isolation between learners. It needs its own amendment before labs launch (open decision D5). Labs are on the roadmap, so this doesn't block anything now.
+11. **Prices:** none here. Packaging and pricing of `packages.customer` is a commercial decision outside this ADR.
+12. **Preconditions before any customer package is admitted on Dedicated.** None of these is a follow-up:
+    - **network:** D-04 and #351 implemented for Dedicated: default-deny egress outside the engine, a per-instance allowlist, private endpoints for SQL and Key Vault, and no lateral route. Proven by `D-CP-02`.
+    - **identity:** the identity-endpoint block is live, and the engine runs with it in place (`D-CP-03`).
+    - **credentials:** the credential broker is live for Dedicated (`D-CP-04`).
+    - **no shared credentials:** an inventory proves every engine credential is instance-unique, with no Control or fleet secret in the engine (`D-CP-01`).
+    - **separation:** two organizations' instances show no cross-access over API, runtime, database, Key Vault, network or telemetry while running a hostile canary package (`D-CP-05`).
+    - **admission:** #221's admission is extended with `packages.customer`, opt-in and lock checks, and still fails closed without them (`D-CP-06`).
+    - **resource exhaustion:** D-06 evidence covers a hostile package.
+    - **threat model** (`docs/product/isolation-threat-model.md`): the Dedicated contract, package policy and D-03 claim are updated as listed below, and the `D-CP-*` rows pass.
+    - **customer terms and the product page** say plainly that customer packages run with full engine trust, that the boundary is the customer's own engine, and that Valence doesn't sandbox package code.
+
+### Threat-model updates (land with acceptance)
+- **Profile contracts, Dedicated:** extension policy becomes: "Producer-built and Valence-approved; customer packages (`packages.customer`, opt-in) after the `D-CP-*` gates; boundary is the per-customer engine". The non-guarantees gain "no in-engine isolation between packages, or between a customer's packages and that engine's data and secrets".
+- **Package policy, arbitrary customer, Dedicated column:** "Rejected at launch" becomes "Allowed only with entitlement, opt-in, pinned lock and passed `D-CP-*`".
+- **D-03** is re-worded from "cannot affect the launch fleet" to "is confined to its own customer's engine: no other-customer, Control or provider reach".
+- **Hostile-package attack paths (secret exfiltration, cross-tenant access, resource exhaustion):** add the Dedicated customer-package case. Self-scoped exposure of the instance's own secrets and data is **accepted residual risk**. Cross-customer and control-plane exposure is mitigated by clause 2.
+- **New tests `D-CP-01` to `D-CP-06`:** added to the executable test matrix, marked proposed until acceptance.
+- **New actor nuance:** community and learner package authors are third parties to the customer who installs them. The customer's opt-in is the trust decision, and Valence does not vet their behaviour.
+
+### Residual risk (stated plainly)
+- **Inside its engine, a customer package has everything that engine has.** That means the instance's database, its Elsa identity signing key, its admin credential, its workflow data and its handoff sessions. A malicious community or learner package can read or destroy that customer's own data and act as that engine. This amendment doesn't reduce that risk. It contains it to the customer who opted in.
+- The boundary is the engine and its network, identity and credential isolation, enforced by the Azure platform and our provider templates. A container escape or a cloud-provider compromise is outside the product guarantee, as it already is for Dedicated today.
+- Control's public endpoints stay reachable from the internet, including from package code. Safety there relies on instance-bound credentials and on treating engine input as untrusted.
+
+### Alternatives considered
+- **Keep the prohibition (status quo).** Rejected: it contradicts Sipke's 13 Oct decision, and it pushes every custom-code need to BYO even when the customer accepts the risk on their own engine.
+- **Treat a per-tenant ALC or the IL pre-scan as the boundary, and co-host customers in one engine.** Rejected: an AssemblyLoadContext isn't a security boundary (TB-03), and the pre-scan is bypassable by reflection, dynamic code and native interop.
+- **Require a Valence-built customer image per customer (the original "immutable image" route, #358).** Rejected for packages: it puts build compute and registry authority on Valence, which the #629 decision rejected. A pinned package lock in the resolved plan gives reproducibility and rollback without a per-customer image.
+- **A per-package sandbox inside the engine** (worker process per package, ACA dynamic sessions, gVisor). Rejected for now: it means an IPC redesign of activity execution plus extra cost and latency for every run. The per-customer engine already confines the risk to the customer who chose it. It stays the path if in-engine isolation between a customer's own packages is ever required.
+- **Valence review of every customer package (allowlist like Shared).** Rejected: there's no review capacity for arbitrary third-party code, and a review would imply a safety claim we can't make. Review stays Shared-only (Amendment 1).
+
+### Consequences
+- Dedicated gains a custom-code path without an in-process sandbox claim. The security work moves to network, identity and credential isolation per instance, most of which Dedicated needed anyway (D-04, D-08, #351).
+- #221's admission code gains a third admitted class on Dedicated, gated by entitlement, opt-in and lock. All of its existing fail-closed tests stay.
+- The Private profile (#355) is narrowed. What remains for Private is a stronger boundary than Dedicated (customer-controlled network, dedicated hosts or the isolated tier), and that is the future isolated-tier ADR.
+
+### Proofs and acceptance criteria
+1. **`D-CP-01` no shared credentials:** an inventory of the engine's environment, mounted files, Key Vault and database logins shows only instance-unique credentials, with no Control, fleet, feed or telemetry secret. Proof: an automated inventory diff across two instances.
+2. **`D-CP-02` egress:** a hostile canary package can reach declared hosts only. Direct sockets to undeclared hosts, other instances, Control's private endpoints and other customers' SQL and Key Vault fail at the network layer. Proof: packet and denial evidence.
+3. **`D-CP-03` identity:** requests from package code to the instance metadata and identity token endpoints are blocked, and the engine passes health with the block in place. Proof: a runtime test.
+4. **`D-CP-04` credential broker:** no refresh token or client secret is present in engine memory or environment, and package code gets handles only. Proof: an inspection plus SDK contract test.
+5. **`D-CP-05` cross-customer:** organization A's hostile package can't read or change organization B's API data, runtime, database, secrets, telemetry or backups. Proof: an automated two-organization negative matrix.
+6. **`D-CP-06` admission:** a customer package without the entitlement, opt-in or a pinned closure is rejected before any provider mutation. A caller-supplied classification can't upgrade it, and Shared still rejects it. Proof: API, lifecycle and provider tests extending #221's suite.
+
+**Merge gate:** Code Review APPROVE on the exact head plus green CI.
+
+### Open decisions for the CEO (and Sipke where marked)
+- **D1, scope of "customer packages":** Sipke's 13 Oct wording covers **learner and community** packages on dedicated engines. This amendment also admits **customer-authored** packages. Confirm with Sipke.
+- **D2, load mode:** activities only (proposed), or also allow `HostIntegrated` (hosted services, endpoints) on Dedicated, where the engine is the boundary anyway?
+- **D3, #629 alignment:** confirm that packages in the governed image on Dedicated are distinct from customer **images** (still BYO-only), and that this amendment is the "own isolation ADR" for packages, but not for customer images.
+- **D4, egress implementation and cost for Dedicated (#351):** per-instance VNet with NSG or firewall, versus a shared egress proxy. Each has a cost; no figures are given here.
+- **D5, lab shard:** the lab shard needs a per-learner engine or process, or its own amendment accepting co-hosted learners, before labs launch.
+- **D6, opt-in wording and customer terms:** acknowledging full engine trust needs a legal and terms review before launch.
