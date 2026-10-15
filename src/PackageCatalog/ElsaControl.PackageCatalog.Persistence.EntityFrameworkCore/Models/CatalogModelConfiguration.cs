@@ -168,6 +168,24 @@ internal sealed class ExternalIdentityConfiguration : IEntityTypeConfiguration<E
         builder.Property(x => x.DisplayName).HasMaxLength(256);
         builder.Property(x => x.Email).HasMaxLength(320);
         builder.HasIndex(x => new { x.Issuer, x.Subject }).IsUnique();
+        builder.HasIndex(x => x.AccountId)
+            .IsUnique()
+            .HasFilter("Kind = 'hub'")
+            .HasDatabaseName("IX_ExternalIdentities_AccountId_Hub");
+    }
+}
+
+internal sealed class AccountIdentityLinkAuditRecordConfiguration : IEntityTypeConfiguration<AccountIdentityLinkAuditRecord>
+{
+    public void Configure(EntityTypeBuilder<AccountIdentityLinkAuditRecord> builder)
+    {
+        builder.ToTable("AccountIdentityLinkAuditRecords");
+        builder.HasKey(x => x.Id);
+        builder.Property(x => x.OperatorSubject).HasMaxLength(512);
+        builder.Property(x => x.Action).HasConversion<string>().HasMaxLength(32);
+        builder.Property(x => x.CreatedAt)
+            .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        builder.HasIndex(x => new { x.AccountId, x.CreatedAt });
     }
 }
 
