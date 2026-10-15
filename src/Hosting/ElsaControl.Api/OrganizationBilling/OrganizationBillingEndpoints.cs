@@ -1,6 +1,7 @@
 using ElsaControl.Api.Authentication;
 using ElsaControl.Billing.Stripe;
 using ElsaControl.PackageCatalog.Core.Accounts;
+using Microsoft.Extensions.Logging;
 
 namespace ElsaControl.Api.OrganizationBilling;
 
@@ -102,7 +103,7 @@ public static class OrganizationBillingEndpoints
             return result.Failure is OrganizationWorkspaceFailure.OrganizationNotAllowed
                 ? Results.NotFound(new { code = "organization.not-found" })
                 : Results.Forbid();
-        }).AllowCloudBff();
+        }).AllowCloudBff().AllowHubBff();
 
         group.MapPost("/hosted-portal", async (
             Guid organizationId,
@@ -149,6 +150,7 @@ public static class OrganizationBillingEndpoints
         HttpContext context,
         IBillingProvider provider,
         OrganizationBillingService billing,
+        ILoggerFactory loggerFactory,
         CancellationToken cancellationToken)
     {
         // The route is Stripe-specific. Fail closed if dependency injection is
@@ -177,6 +179,12 @@ public static class OrganizationBillingEndpoints
         {
             return Results.BadRequest(new { code = "webhook.invalid" });
         }
+        if (normalized.Status == BillingWebhookNormalizationStatus.Ignored)
+        {
+            LogIgnoredWebhook(loggerFactory, normalized);
+            return Results.Ok(new { status = "ignored" });
+        }
+
         if (normalized.Status == BillingWebhookNormalizationStatus.Invalid || normalized.Event is null)
             return Results.BadRequest(new { code = normalized.FailureCode ?? "webhook.invalid" });
 
@@ -195,7 +203,23 @@ public static class OrganizationBillingEndpoints
         {
             return Results.Conflict(new { code = "webhook.conflict" });
         }
+
+        if (result.Outcome == BillingEventConsumptionOutcome.Ignored)
+        {
+            LogIgnoredWebhook(loggerFactory, normalized);
+            return Results.Ok(new { status = "ignored" });
+        }
+
         return Results.Ok(new { status = ToWireStatus(result.Outcome) });
+    }
+
+    private static void LogIgnoredWebhook(ILoggerFactory loggerFactory, BillingWebhookNormalizationResult normalized)
+    {
+        loggerFactory.CreateLogger("ElsaControl.Api.OrganizationBilling.StripeWebhook").LogInformation(
+            "Ignored Stripe webhook {ProviderEventId} {EventType} from source {WebhookSource}.",
+            normalized.Event?.ProviderEventId,
+            normalized.Event?.EventType,
+            normalized.Event?.WebhookSource);
     }
 
     private static async Task<ReadOnlyMemory<byte>?> ReadBodyAsync(Stream body, CancellationToken cancellationToken)
@@ -273,6 +297,7 @@ public static class OrganizationBillingEndpoints
         BillingEventConsumptionOutcome.IgnoredOutOfOrder => "ignored-out-of-order",
         BillingEventConsumptionOutcome.Rejected => "rejected",
         BillingEventConsumptionOutcome.RecordedUnknown => "recorded-unknown",
+        BillingEventConsumptionOutcome.Ignored => "ignored",
         _ => "unknown"
     };
 
@@ -286,6 +311,8 @@ public static class OrganizationBillingEndpoints
             return Results.NotFound(new { code = "organization.not-found" });
         if (result.Failure is OrganizationWorkspaceFailure.OrganizationRoleNotAllowed)
             return Results.Forbid();
+        if (result.ManagedByHub)
+            return Results.Conflict(new { code = BillingDiagnosticCodes.ManagedByHub });
         return Results.BadRequest(new { code = "billing.deletion.invalid" });
     }
 }

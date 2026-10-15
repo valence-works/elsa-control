@@ -42,7 +42,8 @@ public enum BillingWebhookNormalizationStatus
 {
     Known,
     Unknown,
-    Invalid
+    Invalid,
+    Ignored
 }
 
 /// <summary>
@@ -63,6 +64,9 @@ public sealed record BillingWebhookNormalizationResult(
 
     public static BillingWebhookNormalizationResult Invalid(string code) =>
         new(BillingWebhookNormalizationStatus.Invalid, null, code);
+
+    public static BillingWebhookNormalizationResult Ignored(string code, BillingProviderEvent? providerEvent = null) =>
+        new(BillingWebhookNormalizationStatus.Ignored, providerEvent, code);
 }
 
 public static class BillingProviderNames

@@ -41,6 +41,11 @@ public sealed class OrganizationSubscription
     public int LifecycleVersion { get; set; }
     public DateTimeOffset LastProviderEventOccurredAt { get; set; }
     public string? LastProviderEventId { get; set; }
+    /// <summary>
+    /// Named Stripe webhook source that last authorized this subscription
+    /// (<c>control</c> or <c>hub</c>). Legacy rows are treated as <c>control</c>.
+    /// </summary>
+    public string? WebhookSource { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 }
@@ -78,7 +83,33 @@ public sealed record BillingProviderEvent(
     string? ProviderSubscriptionReference = null,
     string? ProviderObjectReference = null,
     string? PriceReference = null,
-    long? AmountMinorUnits = null);
+    long? AmountMinorUnits = null,
+    string? WebhookSource = null);
+
+public static class BillingWebhookSources
+{
+    public const string Control = "control";
+    public const string Hub = "hub";
+
+    public static string Normalize(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return Control;
+        if (string.Equals(value.Trim(), Hub, StringComparison.OrdinalIgnoreCase))
+            return Hub;
+        return Control;
+    }
+
+    public static bool IsHub(string? value) =>
+        string.Equals(Normalize(value), Hub, StringComparison.Ordinal);
+}
+
+public static class BillingDiagnosticCodes
+{
+    public const string SubscriptionSourceConflict = "billing.subscription-source-conflict";
+    public const string HubOrganizationUnlinked = "billing.hub-organization-unlinked";
+    public const string ManagedByHub = "billing.managed-by-hub";
+}
 
 public enum BillingProviderEventProcessingStatus
 {
@@ -164,7 +195,8 @@ public enum OrganizationBillingCleanupOutcome
 {
     ConfirmedAbsent,
     RetryableFailure,
-    Unknown
+    Unknown,
+    ManagedByHub
 }
 
 public sealed record OrganizationBillingLifecycleAdvance(
@@ -185,7 +217,8 @@ public sealed record OrganizationBillingCleanupWorkItem(
     string? ProviderCustomerReference,
     string? ProviderSubscriptionReference,
     int AttemptCount,
-    string LeaseToken);
+    string LeaseToken,
+    string? WebhookSource = null);
 
 public sealed record OrganizationBillingCleanupCompletion(
     Guid CleanupId,
@@ -208,7 +241,8 @@ public sealed record OrganizationBillingCleanupRequest(
     string Provider,
     string? ProviderCustomerReference,
     string? ProviderSubscriptionReference,
-    int AttemptCount);
+    int AttemptCount,
+    string? WebhookSource = null);
 
 /// <summary>Provider-neutral port used by the durable cleanup worker.</summary>
 public interface IOrganizationBillingLifecycleStore
@@ -321,6 +355,7 @@ public sealed class BillingProviderEventInboxEntry
     public DateTimeOffset? ProcessedAt { get; set; }
     public BillingProviderEventProcessingStatus ProcessingStatus { get; set; }
     public string? RejectionCode { get; set; }
+    public string? WebhookSource { get; set; }
 }
 
 public enum BillingEventConsumptionOutcome
@@ -329,7 +364,8 @@ public enum BillingEventConsumptionOutcome
     Replayed,
     IgnoredOutOfOrder,
     Rejected,
-    RecordedUnknown
+    RecordedUnknown,
+    Ignored
 }
 
 public sealed record BillingEventConsumptionResult(
@@ -382,6 +418,13 @@ public static class OrganizationSubscriptionLifecycle
             (OrganizationSubscriptionState.Retained, OrganizationSubscriptionState.Deleted) => true,
             _ => false
         };
+
+    public static bool IsLive(OrganizationSubscriptionState state) =>
+        state is OrganizationSubscriptionState.Trial
+            or OrganizationSubscriptionState.Active
+            or OrganizationSubscriptionState.PastDue
+            or OrganizationSubscriptionState.Constrained
+            or OrganizationSubscriptionState.Suspended;
 
     public static bool CanTransition(OrganizationSubscription subscription, OrganizationSubscriptionState next) =>
         CanTransition(subscription.State, next) ||

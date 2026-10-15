@@ -45,7 +45,8 @@ public sealed record HostedSubscriptionManagementResponse(
     bool PortalAvailable,
     bool CanManageSubscription,
     string ManagementAction,
-    HostedBillingCopyHooks Copy);
+    HostedBillingCopyHooks Copy,
+    string? Source = null);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record HostedPortalSessionRequest(string? ReturnUrl = null);
