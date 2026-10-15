@@ -167,7 +167,7 @@ Status: **Proposed.** CEO calls of 15 Oct 2026 are applied (see Resolved). One d
 - **An AssemblyLoadContext is not a security boundary** (TB-03). A package loaded into an Elsa engine has that engine's full process trust: memory, environment, files, database connection and network. Nuplane loading, an IL pre-scan and package approval are governance controls. None of them is a sandbox.
 
 ### Decision
-1. **What's admitted.** On Valence Dedicated, a customer may run **learner and community packages** (arbitrary code, not Valence-reviewed) in that customer's own engines. **Customer-written packages are pending Sipke:** they go beyond his 13 Oct wording, so they stay in this draft but aren't admitted until he confirms (open decision D1). Together these form the "customer package" class. Admission needs:
+1. **What's admitted.** On Valence Dedicated, a customer may run **learner, community and customer-written packages** (arbitrary code, not Valence-reviewed) in that customer's own engines (Sipke, 15 Oct 2026). Together these form the "customer package" class. Admission needs:
    - the `packages.customer` entitlement, a capability rather than a plan name;
    - an explicit customer opt-in per instance, recorded with the actor and an acknowledgement that the code runs with the engine's full trust;
    - every clause 12 precondition to have passed.
@@ -245,5 +245,5 @@ Status: **Proposed.** CEO calls of 15 Oct 2026 are applied (see Resolved). One d
 - **Opt-in terms:** legal review before GA. It doesn't block merging this amendment as Proposed (clause 12).
 - **"No route into Control":** covers the management and private plane only. Public endpoints rely on credentials bound to one instance (clause 2).
 
-### Open decision (pending Sipke)
-- **D1, customer-written packages:** Sipke's 13 Oct wording covers **learner and community** packages on dedicated engines. Admitting **customer-written** packages goes beyond it. They stay in this draft, marked pending, and aren't admitted until Sipke confirms. If he declines, clause 1 drops them and nothing else changes.
+### Resolved (Sipke, 15 Oct 2026)
+- **Customer-written packages:** allowed on Valence Dedicated, isolated per customer, activities only.

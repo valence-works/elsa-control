@@ -378,8 +378,8 @@ model; it does not prove executable-code or noisy-neighbor isolation.
 
 ### Dedicated customer packages (ADR-0009 Amendment 2, proposed)
 
-Not in force until Amendment 2 is accepted. Learner and community packages
-(and customer-written packages, pending Sipke) may then run on Dedicated only in
+Not in force until Amendment 2 is accepted. Learner, community and customer-written
+packages may then run on Dedicated only in
 that customer's own engine, activities only, after `D-CP-01` through `D-CP-06`,
 D-04 and D-06 pass. Egress runs through a shared proxy with per-tenant policy.
 The lab shard needs its own amendment before it launches. The boundary is the
