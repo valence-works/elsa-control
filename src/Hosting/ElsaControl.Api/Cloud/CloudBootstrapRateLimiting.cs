@@ -160,9 +160,7 @@ internal sealed class CloudBootstrapChainedRateLimiter : RateLimiter
         return ValueTask.CompletedTask;
     }
 
-    // RemoteIpAddress is the forwarded client IP when ASPNETCORE_FORWARDEDHEADERS_ENABLED
-    // is set (App Service / Container Apps). Tightening KnownProxies/KnownNetworks is a
-    // host-wide change and is tracked separately from this policy.
+    // Uses Connection.RemoteIpAddress. KnownProxies and KnownNetworks are unchanged.
     internal static string GetIpPartitionKey(HttpContext context)
     {
         var address = context.Connection.RemoteIpAddress;
@@ -191,15 +189,11 @@ internal sealed class CloudBootstrapChainedRateLimiter : RateLimiter
         CloudAccountIdentityOptions cloudAccount,
         HubAccountIdentityOptions hubAccount)
     {
-        var identity = ControlIdentityReader.MapIdentity(
+        return ControlRateLimitIdentity.PartitionKey(
             GetAuthenticatedPrincipal(context),
             controlIdentity,
             cloudAccount,
             hubAccount);
-        if (identity is null || string.IsNullOrWhiteSpace(identity.Issuer) || string.IsNullOrWhiteSpace(identity.Subject))
-            return null;
-
-        return string.Concat(identity.Issuer, "\u001f", identity.Subject);
     }
 
     internal static bool ShouldSkipPerIpLimit(
@@ -214,7 +208,6 @@ internal sealed class CloudBootstrapChainedRateLimiter : RateLimiter
         if (ControlIdentityReader.IsBffForwardedSession(principal, cloudAccount, hubAccount))
             return true;
 
-        // CustomerSession cookies are Hub BFF sessions and share the BFF egress address.
         return context.User.Identity is not { IsAuthenticated: true }
             && context.Request.Cookies.ContainsKey(CustomerAuthenticationDefaults.CookieName);
     }

@@ -162,37 +162,35 @@ public sealed class CloudBootstrapRateLimitTests
     {
         const string issuer = "https://cloud-account.test/auth/v1";
         const string sharedIp = "203.0.113.73";
-        await using var app = CreateCloudApplication(perIp: 1, perIdentity: 20, issuer);
+        const string firstSubject = "11111111-1111-4111-8111-111111111111";
+        await using var app = CreateCloudApplication(perIp: 1, perIdentity: 1, issuer);
         await app.SeedAsync(_ => Task.CompletedTask);
-        using var first = CloudClient(app, issuer, "11111111-1111-4111-8111-111111111111", sharedIp);
+        using var first = CloudClient(app, issuer, firstSubject, sharedIp);
         using var second = CloudClient(app, issuer, "22222222-2222-4222-8222-222222222222", sharedIp);
-        using var third = CloudClient(app, issuer, "33333333-3333-4333-8333-333333333333", sharedIp);
-        using var control = Client(app, "direct-control", sharedIp);
-
-        using var secondControl = Client(app, "direct-control-two", sharedIp);
+        using var firstAgain = CloudClient(app, issuer, firstSubject, sharedIp);
 
         Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(first)).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(second)).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(third)).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(control)).StatusCode);
-        using var secondControlRejected = await PostBootstrapAsync(secondControl);
+        using var firstRejected = await PostBootstrapAsync(firstAgain);
 
-        await AssertRateLimitExceeded(secondControlRejected);
+        await AssertRateLimitExceeded(firstRejected);
     }
 
     [Fact]
     public async Task Distinct_cookie_sessions_from_one_ip_are_not_limited_by_per_ip()
     {
         const string sharedIp = "203.0.113.74";
-        await using var app = CreateApplication(perIp: 1, perIdentity: 20);
+        await using var app = CreateApplication(perIp: 1, perIdentity: 1);
         await app.SeedAsync(_ => Task.CompletedTask);
         using var first = CookieClient(app, "cookie-one", sharedIp);
         using var second = CookieClient(app, "cookie-two", sharedIp);
-        using var third = CookieClient(app, "cookie-three", sharedIp);
+        using var firstAgain = CookieClient(app, "cookie-one", sharedIp);
 
         Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(first)).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(second)).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(third)).StatusCode);
+        using var firstRejected = await PostBootstrapAsync(firstAgain);
+
+        await AssertRateLimitExceeded(firstRejected);
     }
 
     [Fact]
