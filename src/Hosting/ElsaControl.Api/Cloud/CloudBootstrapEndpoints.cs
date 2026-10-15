@@ -47,13 +47,9 @@ public static class CloudBootstrapEndpoints
 
             return Results.Ok(new CloudBootstrapResponse(workspace.OrganizationId, workspace.Id));
         }).WithTags("Cloud Bootstrap")
-<<<<<<< HEAD
+            .RequireRateLimiting(CloudBootstrapRateLimitDefaults.PolicyName)
             .AllowCloudBff()
             .AllowHubBff();
-=======
-            .RequireRateLimiting(CloudBootstrapRateLimitDefaults.PolicyName)
-            .AllowCloudBff();
->>>>>>> 407369af (feat: rate-limit POST /api/cloud/bootstrap per IP and identity)
 
         return endpoints;
     }
