@@ -95,7 +95,7 @@ instance keeps `ElsaPlacementAssignmentReference` exactly as today.
 | `Kind` | `dedicated-valence` \| `byo-subscription` \| `shared-shard`. A catalog value, not a C# enum in the public contract, so a later kind needs no schema change (ADR-0007). |
 | `KindSchemaVersion` | The version of the kind's target shape. |
 | `Target` | The kind-specific target (below). Control-internal; never in a customer API. |
-| `Fingerprint` | SHA-256 over the canonical `{kind, kindSchemaVersion, target}`. |
+| `Fingerprint` | SHA-256 (lowercase hex) over the RFC 8785 (JCS) canonical UTF-8 serialization of `{kind, kindSchemaVersion, target}`. |
 | `State` | `Reserved` → `Active` → `Retiring` → `Retired`. |
 | `SupersedesAssignmentId` | Set when this assignment replaces another one (a move). |
 | `CreatedAt`, `ActivatedAt`, `RetiredAt` | Lifecycle timestamps. |
@@ -105,35 +105,108 @@ Kind targets:
 | Kind | Target | Provider record below it |
 |---|---|---|
 | `dedicated-valence` | `{ scopeRef: "valence-workload" }`. It resolves to the host `AzureProviderTargetScope` (ADR-0016). | `AzureProviderResourceAssignment` (unchanged) |
-| `byo-subscription` | `{ bindId }`, the Active `azure-bound` bind (#434). The subscription and tenant are read from the bind at assignment time and frozen into the fingerprint. | `AzureProviderResourceAssignment` with the bind's subscription (#436 AC1) |
-| `shared-shard` | `{ shardId, tenantId, shardClass, packageSetDigest }` | A provider-owned shard (stamp) record (#352, ADR-0010) plus a tenant entry |
+| `byo-subscription` | `{ bindId, subscriptionId, tenantId, location }`. The bind is the Active `azure-bound` bind (#434). The subscription and tenant are read from the bind at assignment time and frozen into the target and the fingerprint. | `AzureProviderResourceAssignment` with the bind's subscription (#436 AC1) |
+| `shared-shard` | `{ shardId, region, tenantId, shardClass, packageSetDigest }` | A provider-owned shard (stamp) record (#352, ADR-0010) plus a tenant entry |
 
-- **`shardClass`** is `standard` or `lab`. The lab shard is a class of `shared-shard`,
-  not a fourth kind. It uses the same shard lifecycle, capacity accounting and
-  provider code; only the admission rule and the package policy differ (invariant I5).
-- **`packageSetDigest`** is the closure hash of the tenant's Verified packages (#798).
-  It's `base` when the tenant has none, which is every tenant on an Elsa 3 shard,
-  because Integrations are Elsa 4 only.
+- **`shardClass`** is `standard` or `lab`. The lab shard is a class of `shared-shard`
+  **for the code only**. It's not a fourth kind: it uses the same shard lifecycle,
+  capacity accounting and provider code. Only the admission rule and the package policy
+  differ (invariant I5). See §1a for what the lab class is *not*.
+- **`packageSetDigest`** (#798) identifies the tenant's Verified package set on a
+  `standard` shard. Its definition:
+  - **Inputs:** the **full dependency closure** of the tenant's selected Verified
+    packages, as a list of `{packageId, version, contentHash}`. `packageId` is
+    lowercased, `version` is normalized SemVer, and `contentHash` is the SHA-512 package
+    hash taken from the **signed Shared allowlist entry** (ADR-0009 Amendment 1, clause 4),
+    never from the package bytes alone.
+  - **Canonical form:** the list is sorted by `packageId`, then `version` (ordinal),
+    serialized with RFC 8785 (JCS) as UTF-8, and hashed with SHA-256 (lowercase hex).
+  - **Empty set:** the empty set is the reserved value `base`. That's every tenant on an
+    Elsa 3 shard, because Integrations are Elsa 4 only.
+  - **Load-time check:** the engine **recomputes** the digest at tenant load from the
+    allowlist entries it verified. A mismatch with the assignment **fails closed**: no
+    load, an audit event and safe reason code `placement.package-set.mismatch`.
+  - **Revocation:** a revoked closure member invalidates the digest within the
+    revocation list's **120 s** hard TTL (Amendment 1, clause 9). Loads under that digest
+    then fail closed until the tenant is moved to a new digest.
+  - **Changes:** the digest changes **only through a move** (I1), never by an in-place
+    edit of the assignment.
+  - **On a `lab` shard:** the field holds the reserved value `per-tenant`. Each lab tenant
+    gets its own shell, and learner packages swap inside it under #794's drain rules, so
+    no shared package-set group exists to identify.
 - **What the customer sees (ADR-0007):** a customer API exposes the kind as a label
-  only (`Dedicated`, `Your Azure subscription`, `Shared`). It never exposes a shard id,
-  tenant id, subscription id, bind id or fingerprint (#352 AC2).
+  only (`Dedicated`, `Your Azure subscription`, `Shared`, and `Training lab` for the lab
+  class). It never exposes a shard id, tenant id, subscription id, bind id or
+  fingerprint (#352 AC2).
+- **Uniqueness:**
+  - an instance has **at most one `Active` assignment**;
+  - `(shardId, tenantId)` is **unique** across all non-`Retired` `shared-shard`
+    assignments.
+
+  Both are enforced by database constraints.
+- **BYO stores no customer secrets.** Neither the placement record nor the bind stores
+  customer credentials, keys or secrets. Control acts in the customer subscription only
+  through the **Azure Lighthouse delegation** (#434), under Valence's own managed
+  identity. If the bind stops being `Active` (delegation removed, bind suspended or
+  revoked):
+  - every new provider operation on that assignment is refused with
+    `placement.byo.bind-not-active`, with no fallback to the Valence subscription and no
+    retarget;
+  - observation projects the instance as `Unknown` with that reason;
+  - Delete records Control-side cleanup and marks the customer-subscription resources
+    `retained-customer-owned` in the cleanup receipt (#774–#777), because Valence can no
+    longer reach them. The assignment goes `Retired` without claiming the resources
+    were removed;
+  - if the same bind becomes `Active` again, operations resume on the same assignment.
+    A different bind always means a move.
+
+### 1a. The lab class is not the Shared isolation profile (CEO/Sipke call)
+
+`shardClass = lab` shares code with `shared-shard`, but it is **not** the `Shared`
+isolation profile:
+
+- **No Shared claims.** It makes **no ADR-0009 Shared claims** and no `SH-*` or
+  `SH-AL-*` claims, and the signed Shared allowlist doesn't govern it.
+- **Never shown as Shared.** Its label is `Training lab`, and `IsAvailableForManagedLaunch`
+  opening to Shared never opens it.
+- **No Shared allowance.** It **consumes and grants no Shared-tenant allowance** and no
+  `MaxInstances`. It uses its own lab entitlement.
+- **Nothing sensitive on it.** It hosts **no paying tenants, no customer data, no
+  managed identity and no secrets** (#794).
+- **Accepted residual risk:** learners placed on the same lab shard **share a process**
+  (an AssemblyLoadContext is not a boundary). A learner package can observe or disrupt
+  other learners on the same replica. Mitigations: there is nothing sensitive to reach,
+  egress is restricted, quotas apply, and the shard is recycled on a schedule (#794).
+- **Precondition:** labs need their **own ADR-0009 amendment** before launch.
+  Amendment 1 covers Shared only. This ADR only reserves the placement shape.
+
+Classifying the lab shard as a non-Shared class of `shared-shard`, rather than a
+separate kind, is a **CEO/Sipke call**. Code Review accepted the reasoning but flagged
+it for confirmation.
 
 ### 2. Kind selection happens on the server
 
 Control derives the kind when it resolves the plan, from facts the customer can't
-forge:
+forge. The rows are **evaluated in order and the first match wins**, so exactly one
+outcome applies. This holds because an org has exactly one active commercial provider,
+and a lab instance is a separate instance:
 
-| Inputs | Kind |
-|---|---|
-| `IsolationProfile = Dedicated`, no Active `azure-bound` bind for the org | `dedicated-valence` |
-| `IsolationProfile = Dedicated`, the org's active commercial provider is `azure-bound` with an Active bind | `byo-subscription` |
-| `IsolationProfile = Shared` (Shared plan or trial entitlement) | `shared-shard`, class `standard` |
-| A Training-lab entitlement | `shared-shard`, class `lab` |
-| `Data-isolated`, `Private`, customer-built image (#629) | No kind yet. Refused, as today. #629 images go to `byo-subscription` only (#729 decision); an isolated Valence-hosted tier needs its own ADR. |
+| # | Inputs | Kind | Allowance consumed |
+|---|---|---|---|
+| 1 | The instance was created by the Training-labs flow (server-set origin `training-lab`, only through its purpose-built endpoint, which requires a lab entitlement) | `shared-shard`, class `lab` | Lab entitlement only |
+| 2 | `IsolationProfile` is `Data-isolated` or `Private`, or the plan uses a customer-built image (#629) | **Refused**, as today, with `isolation.profile.unavailable`. #629 images go to `byo-subscription` only (#729 decision); an isolated Valence-hosted tier needs its own ADR. | — |
+| 3 | `IsolationProfile = Shared` | `shared-shard`, class `standard`. Requires a Shared plan or trial entitlement, else refused with `placement.entitlement.missing`. Binds are ignored. | Shared-tenant allowance |
+| 4 | `IsolationProfile = Dedicated`, and the org's active commercial provider is `azure-bound` | `byo-subscription`, using that provider's bind. If the bind isn't `Active`, the request is **refused** with `placement.byo.bind-not-active`, never downgraded to `dedicated-valence`. | `MaxInstances` |
+| 5 | `IsolationProfile = Dedicated`, and the active commercial provider is anything else (`stripe`, `internal`) | `dedicated-valence`. Any bind record is ignored; a bind alone never selects BYO. | `MaxInstances` |
+| 6 | Anything else | **Refused** with `placement.kind.unresolved` | — |
+
+A **lab entitlement never changes the kind of another instance**. A Dedicated or Shared
+request from an org that also holds a lab entitlement resolves by rows 3–5. A lab
+instance exists only when the labs flow creates one (row 1).
 
 Customer intent can't name a subscription, shard or tenant. Today `IsAvailableForManagedLaunch`
-stays Dedicated-only; it opens to Shared only when the #633 build and the
-`SH-*` gates pass.
+stays Dedicated-only. It opens to Shared (class `standard` only) when the #633 build
+and the `SH-*` gates pass.
 
 ### 3. Invariants
 
@@ -143,13 +216,21 @@ stays Dedicated-only; it opens to Shared only when the #633 build and the
   `SupersedesAssignmentId`, created by an explicit move operation. Examples are a
   shard rebalance, Shared → Dedicated, Dedicated → BYO, or a package-set change that
   overflows the shard. The old assignment goes `Retiring` → `Retired` only after the
-  move has been confirmed and cleanup is complete. The existing provider-scope
+  move has been confirmed and cleanup is complete. A move flips states atomically: the
+  new assignment goes `Reserved` → `Active` and the old one goes `Active` → `Retiring`
+  in one transaction, so there's never more than one `Active` assignment. The existing provider-scope
   *rebind* (template or tool fingerprint rotation with placement unchanged) remains
   the only in-place change, and it stays below the placement record.
 - **I2. Each operation resolves its target from the placement record.** Every provider
-  operation resolves its target from the instance's `Active` (or, for cleanup,
-  `Retiring`) assignment when it claims the lease, and records the assignment
-  fingerprint on the operation. That covers create, observe, reconcile, health probe,
+  operation resolves its target, when it claims the lease, from exactly one assignment:
+  - the instance's `Active` assignment, for normal operations;
+  - during a move, the **new `Reserved`** assignment, for the move's own provisioning,
+    import and verification steps only. Every other operation keeps using the old
+    `Active` assignment until the flip;
+  - the `Retiring` assignment, for cleanup only.
+
+  It and records the assignment
+  records the assignment fingerprint on the operation. That covers create, observe, reconcile, health probe,
   recover, retry and cleanup, including the #747/#752 recovery and delete calls. If
   the operation's fingerprint and the assignment's don't match, the operation is
   refused. There's no global configuration swap. The host `TargetScope` remains the
@@ -160,19 +241,31 @@ stays Dedicated-only; it opens to Shared only when the #633 build and the
   `SubscriptionId` or any operation fingerprint.
 - **I4. Customers can't steer placement.** No customer or BFF input selects a kind,
   subscription, shard or tenant. A request carrying one is rejected.
-- **I5. Shard classes never mix.** A `lab` shard admits only lab-entitled tenants. A
-  `standard` shard never loads learner or community packages, and loads only built-in
-  packages plus, after `SH-AL-*`, the signed Shared allowlist (ADR-0009 Amendment 1).
+- **I5. Shard classes never mix.** A `lab` shard admits only `training-lab`-origin
+  instances (§2 row 1). A `standard` shard never hosts one, never loads learner or
+  community packages, and loads only built-in packages plus, after `SH-AL-*`, the
+  signed Shared allowlist (ADR-0009 Amendment 1).
 - **I6. Shard capacity is enforced under concurrency.** Placement on a shard is refused
   once it would exceed the shard's ceiling, which is set from the measured load test
   (about 70% of peak). It's also refused once the shard exceeds its cap on
-  package-set groups (#798). Refused placement goes to the next eligible shard, or
-  fails with a safe reason code. Occupancy drops only after cleanup has been
+  package-set groups (#798). That cap is proposed at 10 groups per shard and will be set
+  from the AC1 measurement; the value is a **CEO/Sipke call**. Refused placement goes to
+  the next eligible shard **in the same region** (I8), or fails with a safe reason code
+  (`placement.shard.capacity`). Occupancy drops only after cleanup has been
   confirmed (#352).
 - **I7. Release lines must match.** A tenant is placed only on a shard whose single
   Elsa release line satisfies the instance's resolved plan (#340: same line; patch may
   differ). A shard upgrade moves all of its tenants together. It isn't a placement
   change.
+- **I8. Data residency: the target region equals the intent's region.** The resolved
+  target's region must equal `ElsaPlacementIntent.RegionCode` for every kind:
+  - for `dedicated-valence`, the host scope `Location`;
+  - for `byo-subscription`, the deployment `location` frozen into the target;
+  - for `shared-shard`, the shard's `region`.
+
+  Overflow, rebalancing and moves stay **in-region**. If no in-region target exists, or
+  a BYO bind can't deploy to that region, placement **fails** with
+  `placement.region.unavailable`. It never falls back to another region.
 
 ### 4. Provider interface keyed by kind
 
@@ -200,6 +293,8 @@ selected by `Kind`:
   (ADR-0009 Amendment 1). No customer uploads and no custom images (#633 Q8).
 - `shared-shard` `lab`: the governed image plus learner activity packages, loaded per
   tenant as collectible (#794). Evidence: `SelfReported` for anything learner-supplied.
+  This is not the Shared profile (§1a), and it needs its own ADR-0009 amendment before
+  launch.
 
 ### 6. F5: commercial gate and entitlement
 
@@ -209,8 +304,10 @@ selected by `Kind`:
   - the provider: `stripe` or `internal` for Valence kinds, `azure-bound` for BYO (#435);
   - the allowance consumed:
     - `dedicated-valence` and `byo-subscription` consume `MaxInstances`;
-    - `shared-shard` consumes a separate Shared-tenant allowance, plus quota profiles
-      for runs and storage (#349). It never consumes `MaxInstances`.
+    - `shared-shard` `standard` consumes a separate Shared-tenant allowance, plus quota
+      profiles for runs and storage (#349). It never consumes `MaxInstances`;
+    - `shared-shard` `lab` consumes only the lab entitlement. It never consumes or
+      grants the Shared-tenant allowance or `MaxInstances` (§1a).
 - **Required code change (#502 rework):** the counts at
   `AccountWorkspaceStore.cs:262` and `ElsaInstanceLifecycleStore.cs:748` must filter
   by placement kind, not by `TargetMode = managed` alone.
@@ -310,3 +407,31 @@ the Console.
   - The 11th package-set group overflows to the next shard.
   - Occupancy is unchanged until cleanup is confirmed.
 - **I7.** Placement of a plan on release line L onto a shard on line M ≠ L is refused.
+- **I8.**
+  - `RegionCode = westeurope` with the only `westeurope` shard full and a free
+    `northeurope` shard: placement fails with `placement.region.unavailable`, and no
+    tenant is created in `northeurope`.
+  - The same check holds for a BYO request whose region the bind can't deploy to, and
+    for a `dedicated-valence` request whose host `Location` differs from `RegionCode`.
+  - A move or rebalance to another region is rejected.
+- **Kind selection (§2).** A table test over every combination of isolation profile,
+  commercial provider, bind state and lab entitlement resolves to exactly one row,
+  including:
+  - Dedicated + `azure-bound` + bind not `Active` → refused;
+  - Dedicated + `stripe` + an Active bind → `dedicated-valence`;
+  - Dedicated + lab entitlement → `dedicated-valence` or `byo-subscription` (never lab);
+  - Shared + lab entitlement → `standard`.
+- **Uniqueness and canonical form.**
+  - A second `Active` assignment for one instance, or a duplicate non-`Retired`
+    `(shardId, tenantId)`, is rejected by the database.
+  - The fingerprint golden test: JCS bytes and their SHA-256 for fixed targets of each
+    kind.
+- **packageSetDigest.**
+  - A golden digest is computed for a fixed closure, and reordering the inputs doesn't
+    change it.
+  - An engine-recomputed mismatch fails closed with `placement.package-set.mismatch`.
+  - Revoking a member blocks loads under that digest within 120 s.
+- **BYO bind not Active.**
+  - Removing the delegation refuses create, update and recover with
+    `placement.byo.bind-not-active`, and never touches the Valence subscription.
+  - Delete produces a receipt with `retained-customer-owned` resources.
