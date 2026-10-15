@@ -54,7 +54,7 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
     {
         _inner = PartitionedRateLimiter.CreateChained(
             PartitionedRateLimiter.Create<HttpContext, string>(context =>
-                ShouldSkipPerIpLimit(context, cloudAccount, hubAccount, behavior)
+                ShouldSkipPerIpLimit(context, controlIdentity, cloudAccount, hubAccount, behavior)
                     ? RateLimitPartition.GetNoLimiter<string>(BffSessionIpPartition)
                     : RateLimitPartition.GetFixedWindowLimiter(
                         GetIpPartitionKey(context),
@@ -137,12 +137,17 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
 
     internal static bool ShouldSkipPerIpLimit(
         HttpContext context,
+        ControlIdentityOptions controlIdentity,
         CloudAccountIdentityOptions cloudAccount,
         HubAccountIdentityOptions hubAccount,
         ControlIdentityAndIpLimitBehavior behavior)
     {
         var principal = GetAuthenticatedPrincipal(context);
         if (principal is null)
+            return false;
+
+        // A skip flag without a resolvable identity would leave the request unlimited.
+        if (ControlRateLimitIdentity.PartitionKey(principal, controlIdentity, cloudAccount, hubAccount) is null)
             return false;
 
         if (behavior.HasFlag(ControlIdentityAndIpLimitBehavior.SkipPerIpForBffSessions) &&

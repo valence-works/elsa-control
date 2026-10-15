@@ -9,7 +9,7 @@ public static class ManagedElsaInstanceLifecycleRateLimitDefaults
     public const string ConfigurationSection = "RateLimiting:ManagedElsaInstanceLifecycle";
     public const string ExceededCode = "rate-limit.exceeded";
     public const string ExceededTitle = "Managed Elsa instance lifecycle rate limit was exceeded.";
-    public const int DefaultPermitLimit = 60;
+    public const int DefaultPermitLimit = 10;
     public static readonly TimeSpan DefaultWindow = TimeSpan.FromMinutes(1);
 }
 
@@ -77,8 +77,6 @@ public sealed class ManagedElsaInstanceLifecycleRateLimiterPolicy : ControlIdent
             controlIdentity.Value,
             cloudAccount.Value,
             hubAccount.Value,
-            ControlIdentityAndIpLimitBehavior.SkipPerIpForBffSessions |
-            ControlIdentityAndIpLimitBehavior.SkipPerIpForCookieSessions |
             ControlIdentityAndIpLimitBehavior.LimitIdentityForNonBff)
     {
     }
