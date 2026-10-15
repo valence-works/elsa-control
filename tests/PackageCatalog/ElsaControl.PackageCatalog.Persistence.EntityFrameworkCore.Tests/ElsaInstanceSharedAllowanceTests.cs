@@ -583,6 +583,36 @@ public sealed class ElsaInstanceSharedAllowanceTests
     }
 
     [Fact]
+    public async Task Shared_create_during_a_same_kind_transient_is_refused()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateContext(connection);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = await CreateWorkspaceAsync(db, maxInstances: 1, maxSharedTenants: 1);
+        var shard = SeedShard(db, workspace, capacity: 4);
+        await db.SaveChangesAsync();
+        var service = CreateLifecycleService(db);
+        var created = await service.CreateAsync(CreateRequest(workspace, "Shared tenant", "shared-tenant", "shared"));
+        await service.MovePlacementAsync(new ElsaInstancePlacementMoveRequest(
+            workspace.OrganizationId,
+            workspace.Id,
+            created.Instance.Id,
+            ElsaPlacementKinds.SharedShard,
+            ElsaShardClasses.Standard,
+            PackageSetDigest: "in-flight",
+            TargetShardId: shard.Id));
+        Assert.Equal(2, await ElsaInstanceAllowanceAccounting.CountSharedStandardAsync(db, workspace.OrganizationId));
+
+        var denied = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            service.CreateAsync(CreateRequest(workspace, "Shared extra", "shared-extra", "shared")));
+
+        Assert.Equal(ElsaInstanceCommercialOperation.SharedAllowanceExceeded, denied.CommercialCode);
+        Assert.Equal(2, await ElsaInstanceAllowanceAccounting.CountSharedStandardAsync(db, workspace.OrganizationId));
+        Assert.Equal(1, await db.ElsaInstances.CountAsync(x => x.DeletedAt == null));
+    }
+
+    [Fact]
     public async Task Lab_to_Shared_move_at_the_limit_is_refused()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
