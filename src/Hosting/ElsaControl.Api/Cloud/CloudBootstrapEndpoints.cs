@@ -47,7 +47,8 @@ public static class CloudBootstrapEndpoints
 
             return Results.Ok(new CloudBootstrapResponse(workspace.OrganizationId, workspace.Id));
         }).WithTags("Cloud Bootstrap")
-            .AllowCloudBff();
+            .AllowCloudBff()
+            .AllowHubBff();
 
         return endpoints;
     }

@@ -19,7 +19,7 @@ public static class WorkspaceMeEndpoints
 
             var accountContext = await accounts.GetOrCreateAsync(identity, cancellationToken);
             return Results.Ok(ToResponse(accountContext));
-        }).WithTags("Workspace Identity").AllowCloudBff();
+        }).WithTags("Workspace Identity").AllowCloudBff().AllowHubBff();
 
         endpoints.MapGet("/api/me/organizations", async (
             HttpContext context,
@@ -33,7 +33,7 @@ public static class WorkspaceMeEndpoints
 
             var accountContext = await accounts.GetOrCreateAsync(identity, cancellationToken);
             return Results.Ok(ToResponse(accountContext));
-        }).WithTags("Workspace Identity").AllowCloudBff();
+        }).WithTags("Workspace Identity").AllowCloudBff().AllowHubBff();
 
         return endpoints;
     }
