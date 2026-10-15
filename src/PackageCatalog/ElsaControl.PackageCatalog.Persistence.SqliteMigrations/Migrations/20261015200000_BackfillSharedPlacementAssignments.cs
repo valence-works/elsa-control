@@ -21,11 +21,7 @@ public sealed class BackfillSharedPlacementAssignments : Migration
                 "Kind", "ShardClass", "State", "SupersedesAssignmentId",
                 "ShardId", "PackageSetDigest", "CreatedAt")
             SELECT
-                lower(hex(randomblob(4))) || '-' ||
-                lower(hex(randomblob(2))) || '-' ||
-                lower(hex(randomblob(2))) || '-' ||
-                lower(hex(randomblob(2))) || '-' ||
-                lower(hex(randomblob(6))),
+                upper(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-' || hex(randomblob(2)) || '-' || hex(randomblob(2)) || '-' || hex(randomblob(6))),
                 i."Id",
                 i."OrganizationId",
                 i."WorkspaceId",

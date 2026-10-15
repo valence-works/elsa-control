@@ -1,6 +1,8 @@
+using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
+using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -89,8 +91,101 @@ public sealed class BackfillSharedPlacementAssignmentsMigrationTests
         Assert.Equal(ElsaShardClasses.Standard, liveAssignment.ShardClass);
         Assert.Null(liveAssignment.SupersedesAssignmentId);
         Assert.Equal(createdAt, liveAssignment.CreatedAt.UtcTicks);
+        var storedId = await db.Database
+            .SqlQueryRaw<string>("""SELECT "Id" AS "Value" FROM "ElsaPlacementAssignments" WHERE "InstanceId" = {0}""", liveId)
+            .SingleAsync();
+        Assert.Equal(storedId.ToUpperInvariant(), storedId);
         Assert.False(await db.ElsaPlacementAssignments.AnyAsync(x => x.InstanceId == deletedId));
         Assert.Equal(assignedAssignmentId, (await db.ElsaPlacementAssignments.SingleAsync(x => x.InstanceId == assignedId)).Id);
+    }
+
+    [Fact]
+    public async Task Sqlite_backfill_assignment_can_be_moved_then_aborted_and_committed()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateSqliteContext(connection);
+        await db.Database.MigrateAsync(PreviousSqliteMigration);
+
+        var organization = new Organization { Name = "Backfill move organization" };
+        db.Organizations.Add(organization);
+        var workspace = new Workspace
+        {
+            Name = "Backfill move workspace",
+            OrganizationId = organization.Id,
+            Organization = organization
+        };
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+        db.OrganizationEntitlementSnapshots.Add(new OrganizationEntitlementSnapshot
+        {
+            OrganizationId = organization.Id,
+            ManagedHostingEnabled = true,
+            SubscriptionState = OrganizationSubscriptionState.Active,
+            MaxInstances = 1,
+            MaxSharedTenants = 1,
+            SyncedAt = Now,
+            CreatedAt = Now,
+            UpdatedAt = Now
+        });
+        var shard = new ElsaSharedShardEntity
+        {
+            Id = Guid.NewGuid(),
+            RegionCode = "westeurope",
+            ShardClass = ElsaShardClasses.Standard,
+            Capacity = 4
+        };
+        db.ElsaSharedShards.Add(shard);
+        await db.SaveChangesAsync();
+        var instanceId = Guid.NewGuid();
+        await InsertInstanceAsync(db, instanceId, workspace, "shared", deleted: false, Now.UtcTicks);
+
+        await db.Database.MigrateAsync(SqliteMigration);
+        db.ChangeTracker.Clear();
+        Assert.Equal(1, await ElsaInstanceAllowanceAccounting.CountSharedStandardAsync(db, organization.Id));
+
+        var service = CreateLifecycleService(db);
+        var moved = await service.MovePlacementAsync(new ElsaInstancePlacementMoveRequest(
+            organization.Id,
+            workspace.Id,
+            instanceId,
+            ElsaPlacementKinds.SharedShard,
+            ElsaShardClasses.Standard,
+            PackageSetDigest: "after-backfill",
+            TargetShardId: shard.Id));
+
+        Assert.Equal(ElsaPlacementAssignmentStates.Reserved, moved.TargetState);
+        Assert.True(await ElsaInstanceAllowanceAccounting.HasSameKindSharedMoveInFlightAsync(db, organization.Id));
+        Assert.Equal(2, await ElsaInstanceAllowanceAccounting.CountSharedStandardAsync(db, organization.Id));
+
+        var aborted = await service.AbortPlacementMoveAsync(new ElsaInstancePlacementMoveCompletionRequest(
+            organization.Id,
+            workspace.Id,
+            instanceId,
+            moved.TargetAssignmentId));
+        Assert.Equal(ElsaPlacementAssignmentStates.Retired, aborted.TargetState);
+        Assert.False(await ElsaInstanceAllowanceAccounting.HasSameKindSharedMoveInFlightAsync(db, organization.Id));
+        Assert.Equal(1, await ElsaInstanceAllowanceAccounting.CountSharedStandardAsync(db, organization.Id));
+
+        var reservedAgain = await service.MovePlacementAsync(new ElsaInstancePlacementMoveRequest(
+            organization.Id,
+            workspace.Id,
+            instanceId,
+            ElsaPlacementKinds.SharedShard,
+            ElsaShardClasses.Standard,
+            PackageSetDigest: "after-backfill-retry",
+            TargetShardId: shard.Id));
+        Assert.True(await ElsaInstanceAllowanceAccounting.HasSameKindSharedMoveInFlightAsync(db, organization.Id));
+
+        var committed = await service.CommitPlacementMoveAsync(new ElsaInstancePlacementMoveCompletionRequest(
+            organization.Id,
+            workspace.Id,
+            instanceId,
+            reservedAgain.TargetAssignmentId));
+        Assert.Equal(ElsaPlacementAssignmentStates.Active, committed.TargetState);
+        Assert.Equal(ElsaPlacementAssignmentStates.Retired, committed.SourceState);
+        Assert.False(await ElsaInstanceAllowanceAccounting.HasSameKindSharedMoveInFlightAsync(db, organization.Id));
+        Assert.Equal(1, await ElsaInstanceAllowanceAccounting.CountSharedStandardAsync(db, organization.Id));
     }
 
     private static async Task InsertInstanceAsync(
@@ -133,11 +228,34 @@ public sealed class BackfillSharedPlacementAssignmentsMigrationTests
         }
     }
 
+    private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-10-15T10:00:00Z");
+
+    private static ElsaInstanceLifecycleService CreateLifecycleService(CatalogDbContext db) =>
+        new(
+            new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance, new FixedTimeProvider(Now)),
+            new FixedTimeProvider(Now));
+
     private static CatalogDbContext CreateSqliteContext(SqliteConnection connection) =>
         new(new DbContextOptionsBuilder<CatalogDbContext>()
             .UseRetryingSqlite(connection, sqlite => sqlite.MigrationsAssembly(
                 CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
             .Options);
+
+    private sealed class EmptyResolutionInputSource : IElsaInstanceLifecycleResolutionInputSource
+    {
+        public static EmptyResolutionInputSource Instance { get; } = new();
+
+        public Task<ElsaInstanceLifecycleResolutionInput?> GetAsync(
+            ElsaInstance instance,
+            ElsaInstanceOperation operation,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<ElsaInstanceLifecycleResolutionInput?>(null);
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
 
     private static CatalogDbContext CreateSqlServerContext() =>
         new(new DbContextOptionsBuilder<CatalogDbContext>()
