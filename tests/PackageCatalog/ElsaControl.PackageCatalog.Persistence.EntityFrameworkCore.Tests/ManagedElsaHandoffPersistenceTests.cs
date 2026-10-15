@@ -175,6 +175,32 @@ public sealed class ManagedElsaHandoffPersistenceTests
     }
 
     [Fact]
+    public async Task Latest_key_ring_snapshot_is_the_most_recent_loaded_set()
+    {
+        await using var connection = NewConnection();
+        await connection.OpenAsync();
+        await using var db = CreateContext(connection);
+        await db.Database.MigrateAsync();
+        var store = new EfCoreManagedElsaHandoffStore(db);
+        var first = new DateTimeOffset(2026, 10, 15, 17, 0, 0, TimeSpan.Zero);
+        var second = first.AddSeconds(1);
+        await store.RecordAsync(new ManagedElsaHandoffAuditRecord(
+            "key_ring.active:old-2026-09", "", null, null, null, null, null, null, first));
+        await store.RecordAsync(new ManagedElsaHandoffAuditRecord(
+            "key_ring.previous:older-2026-08", "", null, null, null, null, null, null, first));
+        await store.RecordAsync(new ManagedElsaHandoffAuditRecord(
+            "key_ring.retired:older-2026-08", "", null, null, null, null, null, null, second));
+        await store.RecordAsync(new ManagedElsaHandoffAuditRecord(
+            "key_ring.active:old-2026-09", "", null, null, null, null, null, null, second));
+
+        var snapshot = await store.GetLatestKeyRingSnapshotActionsAsync("key_ring.active:", "key_ring.previous:");
+        var retired = await store.ListActionsStartingWithAsync("key_ring.retired:");
+
+        Assert.Equal(["key_ring.active:old-2026-09"], snapshot);
+        Assert.Equal(["key_ring.retired:older-2026-08"], retired);
+    }
+
+    [Fact]
     public async Task Handoff_audit_rows_are_append_only_and_reject_unsafe_correlation()
     {
         await using var connection = NewConnection();

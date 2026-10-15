@@ -3,8 +3,12 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Cryptography;
 using ElsaControl.Api.Authentication;
 using ElsaControl.PackageCatalog.Core.Accounts;
+using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Api.Tests;
@@ -242,10 +246,9 @@ public sealed class ManagedElsaHandoffKeyRingTests
         var audit = new RecordingAuditSink();
         var clock = new TestTimeProvider(DateTimeOffset.UtcNow);
 
-        await ManagedElsaHandoffKeyRingAudit.RecordLoadedAsync(audit, overlap, clock);
-        await ManagedElsaHandoffKeyRingAudit.RecordRetiredAsync(
-            audit, overlap.TrustedKeyIds, retired.TrustedKeyIds, clock);
-        await ManagedElsaHandoffKeyRingAudit.RecordLoadedAsync(audit, retired, clock);
+        await ManagedElsaHandoffKeyRingAudit.RecordTransitionAsync(audit, overlap, clock);
+        clock.Advance(TimeSpan.FromSeconds(1));
+        await ManagedElsaHandoffKeyRingAudit.RecordTransitionAsync(audit, retired, clock);
 
         var actions = audit.Events.Select(item => item.Action).ToArray();
         Assert.Contains("key_ring.active:active-2026-10", actions);
@@ -260,6 +263,93 @@ public sealed class ManagedElsaHandoffKeyRingTests
         });
         Assert.Equal(["previous-2026-09"], ManagedElsaHandoffKeyIds.RetiredKeyIds(
             overlap.TrustedKeyIds, retired.TrustedKeyIds));
+    }
+
+    [Fact]
+    public async Task Revoking_the_previous_signer_records_a_revoked_reason()
+    {
+        using var previousSigner = RSA.Create(2048);
+        using var replacement = RSA.Create(2048);
+        using var first = new ManagedElsaHandoffKeyRing("signer-2026-09", CloneRsa(previousSigner));
+        using var second = new ManagedElsaHandoffKeyRing("signer-2026-10", CloneRsa(replacement));
+        var audit = new RecordingAuditSink();
+        var clock = new TestTimeProvider(DateTimeOffset.UtcNow);
+
+        await ManagedElsaHandoffKeyRingAudit.RecordTransitionAsync(audit, first, clock);
+        clock.Advance(TimeSpan.FromSeconds(1));
+        await ManagedElsaHandoffKeyRingAudit.RecordTransitionAsync(audit, second, clock);
+
+        Assert.Contains("key_ring.retired:signer-2026-09:revoked", audit.Events.Select(item => item.Action));
+    }
+
+    [Fact]
+    public async Task Production_restart_without_the_previous_key_persists_a_retired_audit_row()
+    {
+        using var previous = RSA.Create(2048);
+        using var active = RSA.Create(2048);
+        await using var connection = new SqliteConnection(
+            $"Data Source=file:handoff-key-ring-{Guid.NewGuid():N};Mode=Memory;Cache=Shared");
+        await connection.OpenAsync();
+        await using (var setup = CreateCatalogContext(connection))
+            await setup.Database.MigrateAsync();
+
+        var clock = new TestTimeProvider(DateTimeOffset.UtcNow);
+        using (var overlapRing = CreateOverlapRing(active, "active-2026-10", previous, "previous-2026-09"))
+        await using (var overlapHost = CreateProductionKeyRingHost(connection, overlapRing, clock))
+        {
+            await overlapHost.GetRequiredService<ManagedElsaHandoffConfigurationValidator>()
+                .StartAsync(CancellationToken.None);
+        }
+
+        clock.Advance(TimeSpan.FromSeconds(1));
+        using (var retiredRing = new ManagedElsaHandoffKeyRing("active-2026-10", CloneRsa(active)))
+        await using (var retiredHost = CreateProductionKeyRingHost(connection, retiredRing, clock))
+        {
+            await retiredHost.GetRequiredService<ManagedElsaHandoffConfigurationValidator>()
+                .StartAsync(CancellationToken.None);
+        }
+
+        await using var verify = CreateCatalogContext(connection);
+        var store = new EfCoreManagedElsaHandoffStore(verify);
+        var retired = await store.ListActionsStartingWithAsync(
+            ManagedElsaHandoffDefaults.KeyRingRetiredAuditActionPrefix);
+        Assert.Equal(["key_ring.retired:previous-2026-09"], retired);
+        var snapshot = await store.GetLatestKeyRingSnapshotActionsAsync(
+            ManagedElsaHandoffDefaults.KeyRingActiveAuditActionPrefix,
+            ManagedElsaHandoffDefaults.KeyRingPreviousAuditActionPrefix);
+        Assert.Equal(["key_ring.active:active-2026-10"], snapshot);
+        Assert.DoesNotContain(snapshot, action => action.Contains("BEGIN", StringComparison.Ordinal));
+    }
+
+    private static CatalogDbContext CreateCatalogContext(SqliteConnection connection) =>
+        new(new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseSqlite(connection, sqlite =>
+                sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .Options);
+
+    private static ServiceProvider CreateProductionKeyRingHost(
+        SqliteConnection connection,
+        ManagedElsaHandoffKeyRing keyRing,
+        TimeProvider clock)
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton(clock);
+        services.AddSingleton(keyRing);
+        services.AddSingleton(Options.Create(new ManagedElsaHandoffOptions
+        {
+            Enabled = true,
+            Issuer = "https://cloud.example.test",
+            ActiveKeyId = keyRing.ActiveKeyId,
+            ActivePrivateKeyPem = "configured"
+        }));
+        services.AddDbContext<CatalogDbContext>(options =>
+            options.UseSqlite(connection, sqlite =>
+                sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly)));
+        services.AddScoped<EfCoreManagedElsaHandoffStore>();
+        services.AddScoped<IManagedElsaHandoffAuditSink, EfCoreManagedElsaHandoffAuditSink>();
+        services.AddSingleton<IHostEnvironment>(new TestHostEnvironment(Environments.Production));
+        services.AddSingleton<ManagedElsaHandoffConfigurationValidator>();
+        return services.BuildServiceProvider();
     }
 
     private static ManagedElsaHandoffKeyRing CreateOverlapRing(
@@ -385,6 +475,22 @@ public sealed class ManagedElsaHandoffKeyRingTests
             Events.Enqueue(auditEvent);
             return ValueTask.CompletedTask;
         }
+
+        public ValueTask<ManagedElsaHandoffTrustedKeySnapshot> GetLastTrustedSnapshotAsync(
+            CancellationToken cancellationToken = default)
+        {
+            var loaded = Events
+                .Where(item =>
+                    item.Action.StartsWith(ManagedElsaHandoffDefaults.KeyRingActiveAuditActionPrefix, StringComparison.Ordinal) ||
+                    item.Action.StartsWith(ManagedElsaHandoffDefaults.KeyRingPreviousAuditActionPrefix, StringComparison.Ordinal))
+                .ToArray();
+            if (loaded.Length == 0)
+                return ValueTask.FromResult(ManagedElsaHandoffTrustedKeySnapshot.Empty);
+
+            var latest = loaded.Max(item => item.OccurredAt);
+            return ValueTask.FromResult(ManagedElsaHandoffKeyRingAudit.ParseTrustedSnapshot(
+                loaded.Where(item => item.OccurredAt == latest).Select(item => item.Action)));
+        }
     }
 
     private sealed class TestTimeProvider(DateTimeOffset current) : TimeProvider
@@ -394,5 +500,14 @@ public sealed class ManagedElsaHandoffKeyRingTests
         public override DateTimeOffset GetUtcNow() => _current;
 
         public void Advance(TimeSpan duration) => _current = _current.Add(duration);
+    }
+
+    private sealed class TestHostEnvironment(string environmentName) : IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = environmentName;
+        public string ApplicationName { get; set; } = nameof(ManagedElsaHandoffKeyRingTests);
+        public string ContentRootPath { get; set; } = "";
+        public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } =
+            new Microsoft.Extensions.FileProviders.NullFileProvider();
     }
 }

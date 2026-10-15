@@ -175,15 +175,25 @@ verification keys (`ManagedElsa__Handoff__PreviousVerificationKeys__N__KeyId` an
 `...__PublicKeyPem`). Rehearse rotation on isolated staging with **test keys
 only**. Do not apply this to production.
 
-1. Keep the current public key as previous verification key `0`.
-2. Cut `ActiveKeyId` over to the new test key. Confirm a code issued under the
-   previous key still redeems.
+Each phase is one settings change, then a restart. Do not put the active key
+id into `PreviousVerificationKeys`.
+
+1. Pre-publish the **new** public key as previous verification key `0`. Keep
+   the current `ActiveKeyId`. Deploy that change to every replica.
+2. In one atomic settings change, make the new key active and the old public
+   key previous. Confirm a code issued under the previous key still redeems.
 3. Wait at least the maximum handoff-code lifetime plus one minute, then remove
-   the previous public key and restart.
+   the previous public key and restart every replica.
 4. Confirm a leftover previous-key code is rejected, and that
    `ManagedElsaHandoffAuditEvents` contains `key_ring.active:<id>`,
    `key_ring.previous:<id>` (while overlapping) and `key_ring.retired:<id>`
    after removal. Record key ids, timestamps and pass/fail only.
+
+Emergency revocation (compromised signer): skip the overlap. Remove the key
+from both active and previous in one settings change, install a replacement
+active key, restart every replica, and expect `key_ring.retired:<id>:revoked`
+plus rejection of leftover codes signed with the withdrawn key. The key ring
+is loaded at startup only.
 
 Evidence is value-free: no PEM, token, verifier or other key material. Connector
 protocol `"1"` and advertised capabilities are unchanged. A production rotation

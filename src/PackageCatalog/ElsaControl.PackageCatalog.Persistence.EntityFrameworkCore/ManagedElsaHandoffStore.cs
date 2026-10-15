@@ -92,6 +92,51 @@ public sealed class EfCoreManagedElsaHandoffStore(
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
+    /// <summary>
+    /// Returns actions from the latest loaded key-ring snapshot: the most recent
+    /// row whose action starts with <paramref name="activePrefix"/>, plus every
+    /// row at that timestamp whose action starts with that prefix or
+    /// <paramref name="previousPrefix"/>.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> GetLatestKeyRingSnapshotActionsAsync(
+        string activePrefix,
+        string previousPrefix,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(activePrefix);
+        ArgumentException.ThrowIfNullOrWhiteSpace(previousPrefix);
+
+        var latest = await dbContext.ManagedElsaHandoffAuditEvents
+            .AsNoTracking()
+            .Where(x => x.Action.StartsWith(activePrefix))
+            .OrderByDescending(x => x.OccurredAt)
+            .Select(x => (DateTimeOffset?)x.OccurredAt)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (latest is null)
+            return [];
+
+        return await dbContext.ManagedElsaHandoffAuditEvents
+            .AsNoTracking()
+            .Where(x => x.OccurredAt == latest.Value &&
+                        (x.Action.StartsWith(activePrefix) || x.Action.StartsWith(previousPrefix)))
+            .OrderBy(x => x.Action)
+            .Select(x => x.Action)
+            .ToListAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<string>> ListActionsStartingWithAsync(
+        string prefix,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(prefix);
+        return await dbContext.ManagedElsaHandoffAuditEvents
+            .AsNoTracking()
+            .Where(x => x.Action.StartsWith(prefix))
+            .OrderBy(x => x.OccurredAt)
+            .Select(x => x.Action)
+            .ToListAsync(cancellationToken);
+    }
+
 }
 
 internal static class EfCoreDatabaseExceptionPolicy

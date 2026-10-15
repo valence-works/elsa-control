@@ -32,4 +32,14 @@ public sealed class EfCoreManagedElsaHandoffAuditSink(EfCoreManagedElsaHandoffSt
                 auditEvent.CorrelationId,
                 auditEvent.OccurredAt),
             cancellationToken);
+
+    public async ValueTask<ManagedElsaHandoffTrustedKeySnapshot> GetLastTrustedSnapshotAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var actions = await store.GetLatestKeyRingSnapshotActionsAsync(
+            ManagedElsaHandoffDefaults.KeyRingActiveAuditActionPrefix,
+            ManagedElsaHandoffDefaults.KeyRingPreviousAuditActionPrefix,
+            cancellationToken);
+        return ManagedElsaHandoffKeyRingAudit.ParseTrustedSnapshot(actions);
+    }
 }

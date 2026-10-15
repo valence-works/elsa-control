@@ -43,6 +43,7 @@ public static class ManagedElsaHandoffDefaults
     public const string KeyRingActiveAuditActionPrefix = "key_ring.active:";
     public const string KeyRingPreviousAuditActionPrefix = "key_ring.previous:";
     public const string KeyRingRetiredAuditActionPrefix = "key_ring.retired:";
+    public const string KeyRingRetiredRevokedSuffix = ":revoked";
 
     /// <summary>
     /// Console page a managed runtime returns the browser to with <c>instanceId</c>, <c>state</c> and
@@ -116,7 +117,7 @@ public sealed class ManagedElsaHandoffConfigurationValidator(
                 var keyRing = services.GetRequiredService<ManagedElsaHandoffKeyRing>();
                 _ = keyRing.ActiveKeyId;
                 if (!localEnvironment)
-                    await ManagedElsaHandoffKeyRingAudit.RecordLoadedAsync(
+                    await ManagedElsaHandoffKeyRingAudit.RecordTransitionAsync(
                         services, keyRing, cancellationToken);
             }
             if (!localEnvironment)
@@ -504,15 +505,30 @@ public sealed record ManagedElsaHandoffAuditEvent(
     }
 }
 
+public sealed record ManagedElsaHandoffTrustedKeySnapshot(
+    string? ActiveKeyId,
+    IReadOnlyList<string> TrustedKeyIds)
+{
+    public static ManagedElsaHandoffTrustedKeySnapshot Empty { get; } = new(null, []);
+}
+
 public interface IManagedElsaHandoffAuditSink
 {
     ValueTask RecordAsync(ManagedElsaHandoffAuditEvent auditEvent, CancellationToken cancellationToken = default);
+
+    ValueTask<ManagedElsaHandoffTrustedKeySnapshot> GetLastTrustedSnapshotAsync(
+        CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult(ManagedElsaHandoffTrustedKeySnapshot.Empty);
 }
 
 public sealed class NullManagedElsaHandoffAuditSink : IManagedElsaHandoffAuditSink
 {
     public ValueTask RecordAsync(ManagedElsaHandoffAuditEvent auditEvent, CancellationToken cancellationToken = default) =>
         ValueTask.CompletedTask;
+
+    public ValueTask<ManagedElsaHandoffTrustedKeySnapshot> GetLastTrustedSnapshotAsync(
+        CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult(ManagedElsaHandoffTrustedKeySnapshot.Empty);
 }
 
 public sealed class ManagedElsaHandoffIssuer(

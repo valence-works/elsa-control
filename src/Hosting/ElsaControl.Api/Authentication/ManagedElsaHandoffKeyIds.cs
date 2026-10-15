@@ -57,7 +57,7 @@ public static class ManagedElsaHandoffKeyIds
 /// </summary>
 public static class ManagedElsaHandoffKeyRingAudit
 {
-    public static async Task RecordLoadedAsync(
+    public static async Task RecordTransitionAsync(
         IServiceProvider services,
         ManagedElsaHandoffKeyRing keyRing,
         CancellationToken cancellationToken = default)
@@ -73,10 +73,10 @@ public static class ManagedElsaHandoffKeyRingAudit
         if (audit is null)
             return;
 
-        await RecordLoadedAsync(audit, keyRing, timeProvider, cancellationToken);
+        await RecordTransitionAsync(audit, keyRing, timeProvider, cancellationToken);
     }
 
-    public static async Task RecordLoadedAsync(
+    public static async Task RecordTransitionAsync(
         IManagedElsaHandoffAuditSink audit,
         ManagedElsaHandoffKeyRing keyRing,
         TimeProvider timeProvider,
@@ -86,17 +86,48 @@ public static class ManagedElsaHandoffKeyRingAudit
         ArgumentNullException.ThrowIfNull(keyRing);
         ArgumentNullException.ThrowIfNull(timeProvider);
 
+        var previous = await audit.GetLastTrustedSnapshotAsync(cancellationToken);
+        var occurredAt = timeProvider.GetUtcNow();
+        await RecordRetiredAsync(
+            audit,
+            previous.TrustedKeyIds,
+            keyRing.TrustedKeyIds,
+            previous.ActiveKeyId,
+            occurredAt,
+            cancellationToken);
+        await RecordLoadedAsync(audit, keyRing, occurredAt, cancellationToken);
+    }
+
+    public static Task RecordLoadedAsync(
+        IManagedElsaHandoffAuditSink audit,
+        ManagedElsaHandoffKeyRing keyRing,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(timeProvider);
+        return RecordLoadedAsync(audit, keyRing, timeProvider.GetUtcNow(), cancellationToken);
+    }
+
+    public static async Task RecordLoadedAsync(
+        IManagedElsaHandoffAuditSink audit,
+        ManagedElsaHandoffKeyRing keyRing,
+        DateTimeOffset occurredAt,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(audit);
+        ArgumentNullException.ThrowIfNull(keyRing);
+
         await RecordAsync(
             audit,
             ManagedElsaHandoffDefaults.KeyRingActiveAuditActionPrefix + keyRing.ActiveKeyId,
-            timeProvider,
+            occurredAt,
             cancellationToken);
         foreach (var keyId in keyRing.PreviousVerificationKeyIds)
         {
             await RecordAsync(
                 audit,
                 ManagedElsaHandoffDefaults.KeyRingPreviousAuditActionPrefix + keyId,
-                timeProvider,
+                occurredAt,
                 cancellationToken);
         }
     }
@@ -108,22 +139,81 @@ public static class ManagedElsaHandoffKeyRingAudit
         TimeProvider timeProvider,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(audit);
         ArgumentNullException.ThrowIfNull(timeProvider);
+        await RecordRetiredAsync(
+            audit,
+            previouslyTrusted,
+            currentlyTrusted,
+            previousActiveKeyId: null,
+            timeProvider.GetUtcNow(),
+            cancellationToken);
+    }
+
+    public static async Task RecordRetiredAsync(
+        IManagedElsaHandoffAuditSink audit,
+        IReadOnlyCollection<string> previouslyTrusted,
+        IReadOnlyCollection<string> currentlyTrusted,
+        string? previousActiveKeyId,
+        DateTimeOffset occurredAt,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(audit);
         foreach (var keyId in ManagedElsaHandoffKeyIds.RetiredKeyIds(previouslyTrusted, currentlyTrusted))
         {
-            await RecordAsync(
-                audit,
-                ManagedElsaHandoffDefaults.KeyRingRetiredAuditActionPrefix + keyId,
-                timeProvider,
-                cancellationToken);
+            var signerRevoked = string.Equals(keyId, previousActiveKeyId, StringComparison.Ordinal);
+            await RecordAsync(audit, RetiredAction(keyId, signerRevoked), occurredAt, cancellationToken);
         }
+    }
+
+    public static ManagedElsaHandoffTrustedKeySnapshot ParseTrustedSnapshot(IEnumerable<string> actions)
+    {
+        ArgumentNullException.ThrowIfNull(actions);
+        string? activeKeyId = null;
+        var trusted = new List<string>();
+        foreach (var action in actions)
+        {
+            if (TryReadKeyId(action, ManagedElsaHandoffDefaults.KeyRingActiveAuditActionPrefix, out var active) &&
+                active is not null)
+            {
+                activeKeyId = active;
+                if (!trusted.Contains(active, StringComparer.Ordinal))
+                    trusted.Add(active);
+            }
+            else if (TryReadKeyId(action, ManagedElsaHandoffDefaults.KeyRingPreviousAuditActionPrefix, out var previous) &&
+                     previous is not null &&
+                     !trusted.Contains(previous, StringComparer.Ordinal))
+            {
+                trusted.Add(previous);
+            }
+        }
+
+        return activeKeyId is null && trusted.Count == 0
+            ? ManagedElsaHandoffTrustedKeySnapshot.Empty
+            : new ManagedElsaHandoffTrustedKeySnapshot(activeKeyId, trusted);
+    }
+
+    public static string RetiredAction(string keyId, bool signerRevoked) =>
+        signerRevoked
+            ? ManagedElsaHandoffDefaults.KeyRingRetiredAuditActionPrefix + keyId +
+              ManagedElsaHandoffDefaults.KeyRingRetiredRevokedSuffix
+            : ManagedElsaHandoffDefaults.KeyRingRetiredAuditActionPrefix + keyId;
+
+    private static bool TryReadKeyId(string action, string prefix, out string? keyId)
+    {
+        keyId = null;
+        if (!action.StartsWith(prefix, StringComparison.Ordinal))
+            return false;
+        var candidate = action[prefix.Length..];
+        if (!ManagedElsaHandoffKeyIds.IsAllowed(candidate))
+            return false;
+        keyId = candidate;
+        return true;
     }
 
     private static Task RecordAsync(
         IManagedElsaHandoffAuditSink audit,
         string action,
-        TimeProvider timeProvider,
+        DateTimeOffset occurredAt,
         CancellationToken cancellationToken) =>
         audit.RecordAsync(
             new ManagedElsaHandoffAuditEvent(
@@ -133,6 +223,6 @@ public static class ManagedElsaHandoffKeyRingAudit
                 null,
                 null,
                 null,
-                timeProvider.GetUtcNow()),
+                occurredAt),
             cancellationToken).AsTask();
 }
