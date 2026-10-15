@@ -21,6 +21,7 @@ for path in (str(SCRIPTS), str(LIB)):
 
 from hosted_appsettings import (  # noqa: E402
     classify_appsettings_list_query,
+    iter_python_listing_queries,
     iter_shell_listing_queries,
     require_exact_setting_name,
     resolve_setting_name,
@@ -263,7 +264,6 @@ class AppSettingsNameOnlyScanTests(unittest.TestCase):
             ("[].name", "names"),
             ("length(@)", "names"),
             ("[?starts_with(name, 'Billing__')].name", "names"),
-            ("[?starts_with(name, '${pairing_allowlist_prefix}')] | length(@)", "names"),
             (
                 "[?name=='Billing__Stripe__Enabled' || name=='Billing__Lifecycle__Enabled'].name",
                 "names",
@@ -272,11 +272,43 @@ class AppSettingsNameOnlyScanTests(unittest.TestCase):
             ("[?name=='Billing__Stripe__Enabled'] | [0].value", "exact-value"),
             ("[?name=='Application__BuildNumber'] | [0].slotSetting", "exact-value"),
             ("[?name=='ELSA_CONTROL_IMAGE_ID'] | length(@)", "exact-value"),
-            ("[?name=='{canonical}']", "exact-value"),
-            ("[?name=='{name}']", "exact-value"),
         ):
             with self.subTest(query=query):
                 self.assertEqual(expected, classify_appsettings_list_query(query))
+
+        workflow = ROOT / ".github" / "workflows" / "azure-api-deploy.yml"
+        staging = ROOT / "scripts" / "staging_stripe_reconcile.py"
+        pairing = "[?starts_with(name, '${pairing_allowlist_prefix}')] | length(@)"
+        self.assertEqual(
+            "names",
+            classify_appsettings_list_query(pairing, path=workflow, root=ROOT),
+        )
+        self.assertEqual("unsafe", classify_appsettings_list_query(pairing))
+        self.assertEqual(
+            "unsafe",
+            classify_appsettings_list_query(
+                pairing,
+                path=ROOT / "scripts" / "apply-external-engine-pairing-settings.sh",
+                root=ROOT,
+            ),
+        )
+        self.assertEqual(
+            "exact-value",
+            classify_appsettings_list_query("[?name=='{canonical}']", path=staging, root=ROOT),
+        )
+        self.assertEqual(
+            "exact-value",
+            classify_appsettings_list_query("[?name=='{name}']", path=helper, root=ROOT),
+        )
+        self.assertEqual("unsafe", classify_appsettings_list_query("[?name=='{canonical}']"))
+        self.assertEqual(
+            "unsafe",
+            classify_appsettings_list_query(
+                "[?name=='{canonical}']",
+                path=ROOT / "scripts" / "apply-external-engine-pairing-settings.sh",
+                root=ROOT,
+            ),
+        )
 
         self.assertEqual(
             "helper",
@@ -394,6 +426,73 @@ class AppSettingsNameOnlyScanTests(unittest.TestCase):
             require_exact_setting_name("Billing__*")
         with self.assertRaisesRegex(Exception, "exact setting name"):
             require_exact_setting_name("Billing__,Other")
+
+    def test_scanner_rejects_python_and_shell_bypass_shapes(self) -> None:
+        one_line = (
+            'subprocess.run(["az", "webapp", "config", "appsettings", "list", '
+            '"--output", "json"])\n'
+        )
+        self.assertEqual([None], list(iter_python_listing_queries(one_line)))
+
+        one_line_names = (
+            'subprocess.check_output(["az", "webapp", "config", "appsettings", '
+            '"list", "--query", "[].name"])\n'
+        )
+        self.assertEqual(["[].name"], list(iter_python_listing_queries(one_line_names)))
+
+        shell_true = (
+            'subprocess.run("az webapp config appsettings list --output json", shell=True)\n'
+        )
+        self.assertEqual([None], list(iter_python_listing_queries(shell_true)))
+
+        shell_true_names = (
+            "subprocess.Popen(\"az webapp config appsettings list --query '[].name'\", "
+            "shell=True)\n"
+        )
+        self.assertEqual(["[].name"], list(iter_python_listing_queries(shell_true_names)))
+
+        unparseable = 'subprocess.run(command_for("appsettings", "list"))\n'
+        self.assertEqual([None], list(iter_python_listing_queries(unparseable)))
+
+        duplicate = (
+            "az webapp config appsettings list --query '[].name' --query '[].value'\n"
+        )
+        self.assertEqual([None], list(iter_shell_listing_queries(duplicate)))
+
+        quoted = "az webapp config \"appsettings\" 'list' --query '[].name'\n"
+        quoted_queries = list(iter_shell_listing_queries(quoted))
+        self.assertEqual(1, len(quoted_queries))
+        self.assertEqual("names", classify_appsettings_list_query(quoted_queries[0]))
+
+        self.assertEqual(
+            [None],
+            list(iter_shell_listing_queries("az webapp config $w list --query '[].name'\n")),
+        )
+        self.assertEqual(
+            [None],
+            list(iter_shell_listing_queries("az webapp config ${w} list --query '[].name'\n")),
+        )
+
+        for source in (
+            "az webapp config appsettings list --query '[].name\n",
+            "az webapp config appsettings list --query `cat query`\n",
+            "eval \"az webapp config appsettings list --query '[].name'\"\n",
+            'cmd="az webapp config appsettings list"\n$cmd --query \'[].name\'\n',
+            "alias ll='az webapp config appsettings list'\n",
+        ):
+            with self.subTest(fail_closed=source):
+                queries = list(iter_shell_listing_queries(source))
+                self.assertTrue(queries, source)
+                self.assertTrue(
+                    all(classify_appsettings_list_query(query) == "unsafe" for query in queries),
+                    queries,
+                )
+
+        equals_form = list(
+            iter_shell_listing_queries("az webapp config appsettings list --query='[].value'\n")
+        )
+        self.assertEqual(1, len(equals_form))
+        self.assertEqual("unsafe", classify_appsettings_list_query(equals_form[0]))
 
 
 class AppSettingsNameOnlyAzureWebAppTests(unittest.TestCase):
