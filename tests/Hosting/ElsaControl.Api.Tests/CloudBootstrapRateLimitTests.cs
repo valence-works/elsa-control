@@ -177,6 +177,43 @@ public sealed class CloudBootstrapRateLimitTests
     }
 
     [Fact]
+    public async Task Hub_account_sessions_share_the_per_identity_limit_across_ips()
+    {
+        const string issuer = "https://hub-account.test/auth/v1";
+        await using var app = CreateHubApplication(perIp: 20, perIdentity: 1, issuer);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var first = HubClient(app, issuer, "c0a80101-0000-4000-8000-000000000001", "203.0.113.75");
+        using var second = HubClient(app, issuer, "c0a80101-0000-4000-8000-000000000001", "203.0.113.76");
+        using var other = HubClient(app, issuer, "c0a80101-0000-4000-8000-000000000002", "203.0.113.75");
+
+        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(first)).StatusCode);
+        using var rejected = await PostBootstrapAsync(second);
+        using var allowed = await PostBootstrapAsync(other);
+
+        await AssertRateLimitExceeded(rejected);
+        Assert.Equal(HttpStatusCode.OK, allowed.StatusCode);
+    }
+
+    [Fact]
+    public async Task Distinct_hub_session_identities_from_one_ip_are_not_limited_by_per_ip()
+    {
+        const string issuer = "https://hub-account.test/auth/v1";
+        const string sharedIp = "203.0.113.77";
+        const string firstSubject = "c0a80101-0000-4000-8000-000000000011";
+        await using var app = CreateHubApplication(perIp: 1, perIdentity: 1, issuer);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var first = HubClient(app, issuer, firstSubject, sharedIp);
+        using var second = HubClient(app, issuer, "c0a80101-0000-4000-8000-000000000012", sharedIp);
+        using var firstAgain = HubClient(app, issuer, firstSubject, sharedIp);
+
+        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(first)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(second)).StatusCode);
+        using var firstRejected = await PostBootstrapAsync(firstAgain);
+
+        await AssertRateLimitExceeded(firstRejected);
+    }
+
+    [Fact]
     public async Task Distinct_cookie_sessions_from_one_ip_are_not_limited_by_per_ip()
     {
         const string sharedIp = "203.0.113.74";
@@ -340,6 +377,19 @@ public sealed class CloudBootstrapRateLimitTests
                     ControlApiTestApplication.TestControlIdentitySigningKey
             });
 
+    private static ControlApiTestApplication CreateHubApplication(int perIp, int perIdentity, string issuer) =>
+        CreateApplication(
+            perIp,
+            perIdentity,
+            extra: new Dictionary<string, string?>
+            {
+                [$"{HubAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
+                [$"{HubAccountIdentityDefaults.ConfigurationSection}:Issuer"] = issuer,
+                [$"{HubAccountIdentityDefaults.ConfigurationSection}:Audience"] = "authenticated",
+                [$"{HubAccountIdentityDefaults.ConfigurationSection}:TestSigningKey"] =
+                    ControlApiTestApplication.TestControlIdentitySigningKey
+            });
+
     private static CloudBootstrapRateLimitConfigurationValidator CreateValidator(
         int perIpLimit = 60,
         TimeSpan? perIpWindow = null,
@@ -387,6 +437,9 @@ public sealed class CloudBootstrapRateLimitTests
         SetRemoteIp(client, ip);
         return client;
     }
+
+    private static HttpClient HubClient(ControlApiTestApplication app, string issuer, string subject, string ip) =>
+        CloudClient(app, issuer, subject, ip);
 
     private static HttpClient AnonymousClient(ControlApiTestApplication app, string ip)
     {

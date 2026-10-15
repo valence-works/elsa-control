@@ -22,12 +22,13 @@ public sealed class ControlRateLimitIdentityTests
             Entra = new ControlEntraIdentityOptions { MultiTenant = true }
         };
         var cloudAccount = new CloudAccountIdentityOptions();
+        var hubAccount = new HubAccountIdentityOptions();
 
         Assert.True(controlIdentity.IsEntraMultiTenant);
-        Assert.Null(ControlIdentityReader.MapIdentity(user, controlIdentity, cloudAccount));
+        Assert.Null(ControlIdentityReader.MapIdentity(user, controlIdentity, cloudAccount, hubAccount));
         Assert.Equal(
             ControlRateLimitIdentity.Format(issuer, subject),
-            ControlRateLimitIdentity.PartitionKey(user, controlIdentity, cloudAccount));
+            ControlRateLimitIdentity.PartitionKey(user, controlIdentity, cloudAccount, hubAccount));
     }
 
     [Fact]
@@ -37,7 +38,8 @@ public sealed class ControlRateLimitIdentityTests
         var key = ControlRateLimitIdentity.PartitionKey(
             user,
             new ControlIdentityOptions { Issuer = "https://control.test" },
-            new CloudAccountIdentityOptions());
+            new CloudAccountIdentityOptions(),
+            new HubAccountIdentityOptions());
 
         Assert.Null(key);
     }
