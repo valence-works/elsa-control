@@ -138,8 +138,10 @@ Kind targets:
     outside the shard. Quota usage, telemetry, audit history, the lab retention clock
     (#794) and entitlement usage are keyed by **`InstanceId`**. Tenant-scoped tokens carry
     `InstanceId` and are re-issued on the flip. The move's import step **re-keys** the
-    tenant-scoped state that lives inside the shard (workflows, bookmarks, packages,
-    per-tenant run counters) to the new `tenantId`. The Retiring assignment's cleanup
+    tenant-scoped state that lives inside the shard (workflows, bookmarks, packages)
+    to the new `tenantId`. The **durable run and quota counters are keyed by
+    `InstanceId` and are authoritative**. The shard's own per-tenant counters are only a
+    cache, which the move re-keys or rebuilds from the authoritative counters. The Retiring assignment's cleanup
     **destroys** the old copy, and only then does the old `tenantId` stop being occupied.
   - **On a `lab` shard:** the field holds the reserved value `per-tenant`. Each lab tenant
     gets its own shell, and learner packages swap inside it under #794's drain rules, so
@@ -483,9 +485,11 @@ the Console.
     The new assignment gets a new `tenantId`, and the uniqueness constraint holds while
     the old one is `Retiring`. The old tenant never loads after the flip. Cleanup removes
     it, and only then does occupancy drop.
-  - **State carries across the move:** quota usage, run counters, the audit history and
-    the lab retention clock are unchanged by a same-shard move, because they're keyed by
-    `InstanceId`. Tenant-scoped state is reachable under the new `tenantId`, and the old
+  - **State carries across the move:** the authoritative quota usage and run counters,
+    the audit history and the lab retention clock are unchanged by a same-shard move,
+    because they're keyed by `InstanceId`. After the flip, the shard's per-tenant counter
+    cache under the new `tenantId` matches the authoritative counters, whether it was
+    re-keyed or rebuilt. Tenant-scoped state is reachable under the new `tenantId`, and the old
     copy is destroyed by cleanup. A `tenantId` is never allocated twice on one shard,
     even after `Retired`.
   - Occupancy is unchanged until cleanup is confirmed.
