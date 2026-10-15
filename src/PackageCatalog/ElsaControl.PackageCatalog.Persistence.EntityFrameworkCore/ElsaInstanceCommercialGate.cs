@@ -127,6 +127,12 @@ public sealed class EfCoreElsaInstanceCommercialGate(CatalogDbContext db, TimePr
     {
         if (placement is null || !placement.Selection.ConsumesSharedAllowance)
             return false;
+        // Same-kind Shared moves of an existing instance may hold a transient
+        // L+1 until commit or abort. Creates and moves that add Shared
+        // capacity still need a free slot.
+        if (placement.IsMove &&
+            placement.Selection.IsSameKindAs(placement.SourceKind, placement.SourceShardClass))
+            return false;
         return action == ElsaInstanceOperationAction.Create || placement.CreatesTargetTenant;
     }
 

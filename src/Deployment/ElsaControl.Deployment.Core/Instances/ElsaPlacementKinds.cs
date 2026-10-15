@@ -93,8 +93,8 @@ public sealed record ElsaInstanceCommercialPlacementRequest(
     public ElsaPlacementKindSelection Selection => new(Kind, ShardClass);
 
     /// <summary>
-    /// A move that writes a new target assignment. In-place package-set
-    /// changes on an existing tenant are not moves and do not set this.
+    /// A move that writes a new target assignment. Every package-set change
+    /// is a move to a fresh tenant (ADR-0017 I1).
     /// </summary>
     public bool CreatesTargetTenant => IsMove;
 }
@@ -123,17 +123,6 @@ public sealed record ElsaInstancePlacementMoveCompletionRequest(
     Guid InstanceId,
     Guid TargetAssignmentId);
 
-public sealed record ElsaInstancePackageSetUpdateRequest(
-    Guid OrganizationId,
-    Guid WorkspaceId,
-    Guid InstanceId,
-    string PackageSetDigest);
-
-public sealed record ElsaInstancePackageSetUpdateResult(
-    Guid InstanceId,
-    Guid AssignmentId,
-    string? PackageSetDigest);
-
 public interface IElsaInstancePlacementAdmissionStore
 {
     Task<ElsaInstancePlacementMoveResult> MovePlacementAsync(
@@ -146,9 +135,5 @@ public interface IElsaInstancePlacementAdmissionStore
 
     Task<ElsaInstancePlacementMoveResult> AbortPlacementMoveAsync(
         ElsaInstancePlacementMoveCompletionRequest request,
-        CancellationToken cancellationToken = default);
-
-    Task<ElsaInstancePackageSetUpdateResult> UpdatePackageSetDigestAsync(
-        ElsaInstancePackageSetUpdateRequest request,
         CancellationToken cancellationToken = default);
 }

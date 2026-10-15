@@ -21,11 +21,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
         {
             var instance = await LoadPlacementInstanceAsync(
                 request.OrganizationId, request.WorkspaceId, request.InstanceId, cancellationToken);
-            var source = await FindSourceAssignmentAsync(instance.Id, cancellationToken: cancellationToken);
             if (await HasInFlightTargetAsync(instance.Id, cancellationToken))
                 throw Conflict(
                     "A placement move is already in progress.",
-                    ElsaInstanceLifecycleConflictReason.InvalidState);
+                    ElsaInstanceLifecycleConflictReason.OperationActive);
+            var source = await FindSourceAssignmentAsync(instance.Id, cancellationToken: cancellationToken);
 
             var target = new ElsaPlacementKindSelection(request.TargetKind, request.TargetShardClass);
             var dedicatedCount = await ElsaInstanceAllowanceAccounting.CountDedicatedAsync(
@@ -128,38 +128,6 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
         }, cancellationToken);
     }
 
-    public Task<ElsaInstancePackageSetUpdateResult> UpdatePackageSetDigestAsync(
-        ElsaInstancePackageSetUpdateRequest request,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        if (string.IsNullOrWhiteSpace(request.PackageSetDigest))
-            throw new ArgumentException("Package-set digest is required.", nameof(request));
-
-        dbContext.ChangeTracker.Clear();
-        return dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
-        {
-            var instance = await LoadPlacementInstanceAsync(
-                request.OrganizationId, request.WorkspaceId, request.InstanceId, cancellationToken);
-            if (await HasInFlightTargetAsync(instance.Id, cancellationToken))
-                throw Conflict(
-                    "A placement move is already in progress.",
-                    ElsaInstanceLifecycleConflictReason.InvalidState);
-
-            var assignment = await FindSourceAssignmentAsync(instance.Id, cancellationToken: cancellationToken)
-                ?? throw Conflict(
-                    "The instance has no counting assignment.",
-                    ElsaInstanceLifecycleConflictReason.InvalidState);
-            assignment.PackageSetDigest = request.PackageSetDigest.Trim();
-            instance.UpdatedAt = _timeProvider.GetUtcNow().ToUniversalTime();
-            await dbContext.SaveChangesAsync(cancellationToken);
-            return new ElsaInstancePackageSetUpdateResult(
-                instance.Id,
-                assignment.Id,
-                assignment.PackageSetDigest);
-        }, cancellationToken);
-    }
-
     private async Task<(bool ShardsConfigured, Guid? ShardId)> TryReserveSharedShardAsync(
         string regionCode,
         string shardClass,
@@ -259,7 +227,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
             1 => assignments[0],
             _ => throw Conflict(
                 "A placement move is already in progress.",
-                ElsaInstanceLifecycleConflictReason.InvalidState)
+                ElsaInstanceLifecycleConflictReason.OperationActive)
         };
     }
 

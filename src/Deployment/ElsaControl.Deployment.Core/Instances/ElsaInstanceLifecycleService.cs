@@ -118,14 +118,6 @@ public sealed class ElsaInstanceLifecycleService(
         return RequireAdmissionStore().AbortPlacementMoveAsync(request, cancellationToken);
     }
 
-    public Task<ElsaInstancePackageSetUpdateResult> UpdatePackageSetDigestAsync(
-        ElsaInstancePackageSetUpdateRequest request,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        return RequireAdmissionStore().UpdatePackageSetDigestAsync(request, cancellationToken);
-    }
-
     private IElsaInstancePlacementAdmissionStore RequireAdmissionStore()
     {
         if (store is not IElsaInstancePlacementAdmissionStore admission)
