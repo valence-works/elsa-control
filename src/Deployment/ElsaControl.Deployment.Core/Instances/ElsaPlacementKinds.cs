@@ -97,6 +97,16 @@ public sealed record ElsaInstanceCommercialPlacementRequest(
     /// is a move to a fresh tenant (ADR-0017 I1).
     /// </summary>
     public bool CreatesTargetTenant => IsMove;
+
+    /// <summary>
+    /// Same-kind Shared move of an existing instance (package-set change,
+    /// rebalance, or I6 overflow). May hold one org-wide transient slot
+    /// above L until commit or abort. The org never exceeds L+1.
+    /// </summary>
+    public bool IsSameKindSharedMove =>
+        IsMove &&
+        Selection.ConsumesSharedAllowance &&
+        Selection.IsSameKindAs(SourceKind, SourceShardClass);
 }
 
 public sealed record ElsaInstancePlacementMoveRequest(

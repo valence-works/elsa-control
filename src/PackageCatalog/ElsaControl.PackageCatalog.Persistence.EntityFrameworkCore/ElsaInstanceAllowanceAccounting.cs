@@ -8,7 +8,8 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 /// Assignment-based Dedicated and Shared counts (ADR-0017 Amendment 1).
 /// Reserved and Active count; Retiring never does. During a move both the
 /// source assignment and the Reserved target count until the flip commits.
-/// Lab never counts. Instances with <c>DeletedAt</c> set stop counting at
+/// Same-kind Shared moves may read L+1 for one in-flight move per org;
+/// a second org-wide same-kind move is refused. Lab never counts. Instances with <c>DeletedAt</c> set stop counting at
 /// the same terminal point as Dedicated. Shared counts the persisted
 /// assignment <c>Kind</c>/<c>shardClass</c> against <c>MaxSharedTenants</c>,
 /// not #818's isolation-profile proxy.

@@ -102,10 +102,21 @@ public sealed class EfCoreElsaInstanceCommercialGate(CatalogDbContext db, TimePr
         {
             var sharedLimit = entitlement.MaxSharedTenants ?? 0;
             var sharedCount = placement?.ActiveSharedCount ?? 0;
-            if (sharedCount >= sharedLimit)
+            if (placement?.IsSameKindSharedMove == true)
+            {
+                // Hard org ceiling: admit only while count <= L. One in-flight
+                // same-kind move may read L+1; a second org-wide move is 409.
+                if (sharedCount > sharedLimit)
+                    return Deny(
+                        ElsaInstanceCommercialOperation.SharedAllowanceMoveInProgress,
+                        "A Shared placement move is already using the transient allowance.");
+            }
+            else if (sharedCount >= sharedLimit)
+            {
                 return Deny(
                     ElsaInstanceCommercialOperation.SharedAllowanceExceeded,
                     "The organization has reached its Shared-tenant allowance.");
+            }
         }
 
         return ElsaInstanceCommercialGateDecision.Allow();
@@ -127,12 +138,8 @@ public sealed class EfCoreElsaInstanceCommercialGate(CatalogDbContext db, TimePr
     {
         if (placement is null || !placement.Selection.ConsumesSharedAllowance)
             return false;
-        // Same-kind Shared moves of an existing instance may hold a transient
-        // L+1 until commit or abort. Creates and moves that add Shared
-        // capacity still need a free slot.
-        if (placement.IsMove &&
-            placement.Selection.IsSameKindAs(placement.SourceKind, placement.SourceShardClass))
-            return false;
+        if (placement.IsSameKindSharedMove)
+            return true;
         return action == ElsaInstanceOperationAction.Create || placement.CreatesTargetTenant;
     }
 

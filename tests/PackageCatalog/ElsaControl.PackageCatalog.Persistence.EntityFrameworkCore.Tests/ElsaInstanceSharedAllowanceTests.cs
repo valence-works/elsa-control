@@ -504,6 +504,110 @@ public sealed class ElsaInstanceSharedAllowanceTests
     }
 
     [Fact]
+    public async Task Second_same_kind_move_for_another_instance_at_L_is_refused_at_the_org_ceiling()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateContext(connection);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = await CreateWorkspaceAsync(db, maxInstances: 2, maxSharedTenants: 2);
+        var shard = SeedShard(db, workspace, capacity: 8);
+        await db.SaveChangesAsync();
+        var service = CreateLifecycleService(db);
+        var first = await service.CreateAsync(CreateRequest(workspace, "Shared one", "shared-one", "shared"));
+        var second = await service.CreateAsync(CreateRequest(workspace, "Shared two", "shared-two", "shared"));
+
+        var admitted = await service.MovePlacementAsync(new ElsaInstancePlacementMoveRequest(
+            workspace.OrganizationId,
+            workspace.Id,
+            first.Instance.Id,
+            ElsaPlacementKinds.SharedShard,
+            ElsaShardClasses.Standard,
+            PackageSetDigest: "first",
+            TargetShardId: shard.Id));
+        Assert.Equal(3, await ElsaInstanceAllowanceAccounting.CountSharedStandardAsync(db, workspace.OrganizationId));
+
+        var denied = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            service.MovePlacementAsync(new ElsaInstancePlacementMoveRequest(
+                workspace.OrganizationId,
+                workspace.Id,
+                second.Instance.Id,
+                ElsaPlacementKinds.SharedShard,
+                ElsaShardClasses.Standard,
+                PackageSetDigest: "second",
+                TargetShardId: shard.Id)));
+
+        Assert.Equal(ElsaInstanceCommercialOperation.SharedAllowanceMoveInProgress, denied.CommercialCode);
+        Assert.Equal(3, await ElsaInstanceAllowanceAccounting.CountSharedStandardAsync(db, workspace.OrganizationId));
+        Assert.Equal(1, await db.ElsaPlacementAssignments.CountAsync(x =>
+            x.State == ElsaPlacementAssignmentStates.Reserved && x.SupersedesAssignmentId != null));
+        Assert.Equal(admitted.TargetAssignmentId, (await db.ElsaPlacementAssignments.SingleAsync(x =>
+            x.State == ElsaPlacementAssignmentStates.Reserved && x.SupersedesAssignmentId != null)).Id);
+    }
+
+    [Fact]
+    public async Task Parallel_same_kind_moves_of_different_instances_at_L_admit_exactly_one()
+    {
+        const string connectionString = "Data Source=file:shared-allowance-org-ceiling;Mode=Memory;Cache=Shared";
+        await using var keeper = new SqliteConnection(connectionString);
+        await keeper.OpenAsync();
+        Guid organizationId;
+        Guid workspaceId;
+        Guid firstId;
+        Guid secondId;
+        Guid shardId;
+        await using (var setup = CreateContext(keeper))
+        {
+            await setup.Database.EnsureCreatedAsync();
+            var workspace = await CreateWorkspaceAsync(setup, maxInstances: 2, maxSharedTenants: 2);
+            var shard = SeedShard(setup, workspace, capacity: 8);
+            await setup.SaveChangesAsync();
+            organizationId = workspace.OrganizationId;
+            workspaceId = workspace.Id;
+            shardId = shard.Id;
+            var service = CreateLifecycleService(setup);
+            firstId = (await service.CreateAsync(CreateRequest(workspace, "Shared one", "shared-one", "shared"))).Instance.Id;
+            secondId = (await service.CreateAsync(CreateRequest(workspace, "Shared two", "shared-two", "shared"))).Instance.Id;
+        }
+
+        var outcomes = await Task.WhenAll(
+            AdmitSameKindSharedMoveAsync(connectionString, organizationId, workspaceId, firstId, shardId, "first"),
+            AdmitSameKindSharedMoveAsync(connectionString, organizationId, workspaceId, secondId, shardId, "second"));
+
+        Assert.Equal(1, outcomes.Count(x => x.Error is null));
+        var loser = Assert.Single(outcomes, x => x.Error is not null);
+        var conflict = Assert.IsType<ElsaInstanceLifecycleConflictException>(loser.Error);
+        Assert.Equal(ElsaInstanceCommercialOperation.SharedAllowanceMoveInProgress, conflict.CommercialCode);
+        await using var verify = CreateContext(keeper);
+        Assert.Equal(3, await ElsaInstanceAllowanceAccounting.CountSharedStandardAsync(verify, organizationId));
+    }
+
+    [Fact]
+    public async Task Lab_to_Shared_move_at_the_limit_is_refused()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateContext(connection);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = await CreateWorkspaceAsync(db, maxInstances: 1, maxSharedTenants: 1);
+        var service = CreateLifecycleService(db);
+        await service.CreateAsync(CreateRequest(workspace, "Shared seated", "shared-seated", "shared"));
+        var lab = await service.CreateAsync(CreateRequest(workspace, "Lab tenant", "lab-tenant", "lab"));
+
+        var denied = await Assert.ThrowsAsync<ElsaInstanceLifecycleConflictException>(() =>
+            service.MovePlacementAsync(new ElsaInstancePlacementMoveRequest(
+                workspace.OrganizationId,
+                workspace.Id,
+                lab.Instance.Id,
+                ElsaPlacementKinds.SharedShard,
+                ElsaShardClasses.Standard)));
+
+        Assert.Equal(ElsaInstanceCommercialOperation.SharedAllowanceExceeded, denied.CommercialCode);
+        Assert.Equal("lab", (await db.ElsaInstances.SingleAsync(x => x.Id == lab.Instance.Id)).IsolationProfile);
+        Assert.Equal(1, await ElsaInstanceAllowanceAccounting.CountSharedStandardAsync(db, workspace.OrganizationId));
+    }
+
+    [Fact]
     public async Task Update_that_changes_placement_is_refused_and_the_count_is_unchanged()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -604,6 +708,35 @@ public sealed class ElsaInstanceSharedAllowanceTests
     {
         var outcome = await CreateConcurrentlyAsync(connectionString, organizationId, workspaceId, suffix);
         return (outcome.Error is null, outcome.Error);
+    }
+
+    private static async Task<(bool Succeeded, Exception? Error)> AdmitSameKindSharedMoveAsync(
+        string connectionString,
+        Guid organizationId,
+        Guid workspaceId,
+        Guid instanceId,
+        Guid shardId,
+        string digest)
+    {
+        try
+        {
+            await using var connection = new SqliteConnection(connectionString);
+            await connection.OpenAsync();
+            await using var db = CreateContext(connection);
+            await CreateLifecycleService(db).MovePlacementAsync(new ElsaInstancePlacementMoveRequest(
+                organizationId,
+                workspaceId,
+                instanceId,
+                ElsaPlacementKinds.SharedShard,
+                ElsaShardClasses.Standard,
+                PackageSetDigest: digest,
+                TargetShardId: shardId));
+            return (true, null);
+        }
+        catch (Exception error)
+        {
+            return (false, error);
+        }
     }
 
     private static async Task<(bool Succeeded, Exception? Error)> AdmitDedicatedToSharedMoveAsync(

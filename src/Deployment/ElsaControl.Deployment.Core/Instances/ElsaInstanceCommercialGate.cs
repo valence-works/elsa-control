@@ -42,5 +42,6 @@ public static class ElsaInstanceCommercialOperation
     public const string BindingRequired = "instance.binding-required";
     public const string EntitlementSafeExitSuperseded = "instance.entitlement-safe-exit-superseded";
     public const string SharedAllowanceExceeded = "placement.shared-allowance.exceeded";
+    public const string SharedAllowanceMoveInProgress = "shared-allowance.move-in-progress";
     public const string ShardCapacity = "placement.shard.capacity";
 }
