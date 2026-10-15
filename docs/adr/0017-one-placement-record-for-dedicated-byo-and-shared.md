@@ -2,9 +2,9 @@
 
 ## Status
 
-Accepted (#739). Elsa Control Code Review gave **Verdict: APPROVE** on the exact
-head with required CI green, per `.github/reviewers.md`, and #809 merged as
-`35c57278`. This ADR is design only. It doesn't implement the record
+Accepted (#739). Elsa Control Code Review (GitHub App `elsa-control-code-review`)
+gave APPROVE on the exact head `b5c878ef`, review 5531019241, with required CI
+green; #809 merged as `35c57278`. This ADR is design only. It doesn't implement the record
 (#436, #352 and the #633 leaves do), and it creates no Azure resource.
 
 ## Date
@@ -142,8 +142,8 @@ Kind targets:
     to the new `tenantId`. The **durable run and quota counters are keyed by
     `InstanceId` and are authoritative**. The shard's own per-tenant counters are only a
     cache, which the move re-keys or rebuilds from the authoritative counters. The
-    Retiring assignment's cleanup
-    **destroys** the old copy, and only then does the old `tenantId` stop being occupied.
+    Retiring assignment's cleanup **destroys** the old copy, and only then does the old
+    `tenantId` stop being occupied.
   - **On a `lab` shard:** the field holds the reserved value `per-tenant`. Each lab tenant
     gets its own shell, and learner packages swap inside it under #794's drain rules, so
     no shared package-set group exists to identify.
