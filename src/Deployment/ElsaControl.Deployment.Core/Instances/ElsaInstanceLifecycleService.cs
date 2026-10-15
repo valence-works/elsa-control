@@ -94,6 +94,45 @@ public sealed class ElsaInstanceLifecycleService(
                 ProvisioningContext: provisioningContext), cancellationToken);
     }
 
+    public Task<ElsaInstancePlacementMoveResult> MovePlacementAsync(
+        ElsaInstancePlacementMoveRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return RequireAdmissionStore().MovePlacementAsync(request, cancellationToken);
+    }
+
+    public Task<ElsaInstancePlacementMoveResult> CommitPlacementMoveAsync(
+        ElsaInstancePlacementMoveCompletionRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return RequireAdmissionStore().CommitPlacementMoveAsync(request, cancellationToken);
+    }
+
+    public Task<ElsaInstancePlacementMoveResult> AbortPlacementMoveAsync(
+        ElsaInstancePlacementMoveCompletionRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return RequireAdmissionStore().AbortPlacementMoveAsync(request, cancellationToken);
+    }
+
+    public Task<ElsaInstancePackageSetUpdateResult> UpdatePackageSetDigestAsync(
+        ElsaInstancePackageSetUpdateRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return RequireAdmissionStore().UpdatePackageSetDigestAsync(request, cancellationToken);
+    }
+
+    private IElsaInstancePlacementAdmissionStore RequireAdmissionStore()
+    {
+        if (store is not IElsaInstancePlacementAdmissionStore admission)
+            throw new InvalidOperationException("Placement moves require assignment admission.");
+        return admission;
+    }
+
     public Task<ElsaInstanceLifecycleAcceptance> UpdateIntentAsync(
         ElsaInstanceIntentUpdateRequest request,
         CancellationToken cancellationToken = default)
