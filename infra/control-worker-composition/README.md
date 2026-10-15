@@ -46,7 +46,7 @@ one engine and remove run-scoped resources promptly. The `test` infrastructure d
 
 ### Budget checks before a staging rehearsal (#672)
 
-The current human spending instruction from the owner (per #672) is an **approximately EUR 500
+The current human spending instruction from the founder (Sipke), per #672, is an **approximately EUR 500
 aggregate monthly recurring target**, covering production, staging, shared infrastructure and
 non-Azure platform services. It is not an incremental staging ceiling. Subscription alert budgets
 neither reserve that amount nor enforce a spending cap, and cost reporting can lag.
@@ -60,7 +60,7 @@ cleanup safety from a resource name or charge alone.
 Verify the requested engine profile, estimate the incremental rehearsal cost (including the limits
 of any compute/SQL-only estimate), and require confirmed run-scoped cleanup before another engine.
 If a necessary rehearsal is expected to exceed the aggregate target, explain why and its expected
-cost, then obtain the owner's go-ahead (per #672) **before** the associated spend. A previous
+cost, then obtain the founder's (Sipke's) go-ahead, per #672, **before** the associated spend. A previous
 one-run approval does not authorize another run. Record the scope, cost uncertainty, approval and
 cleanup evidence on #672 and the rehearsal issue; a quota or alert budget is not a guaranteed
 total-cost bound.
