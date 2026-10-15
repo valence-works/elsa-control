@@ -8,12 +8,14 @@ namespace ElsaControl.Api.Authentication;
 
 public sealed class ControlIdentityReader(
     IOptions<ControlIdentityOptions> options,
-    IOptions<CloudAccountIdentityOptions> cloudAccountOptions) :
+    IOptions<CloudAccountIdentityOptions> cloudAccountOptions,
+    IOptions<HubAccountIdentityOptions> hubAccountOptions) :
     IWorkspaceIdentityReader,
     IAuthenticatedControlSessionReader
 {
     private readonly ControlIdentityOptions _options = options.Value;
     private readonly CloudAccountIdentityOptions _cloudAccountOptions = cloudAccountOptions.Value;
+    private readonly HubAccountIdentityOptions _hubAccountOptions = hubAccountOptions.Value;
 
     public static bool HasBearerToken(HttpContext context)
     {
@@ -57,9 +59,11 @@ public sealed class ControlIdentityReader(
     }
 
     private TrustedWorkspaceIdentity? MapIdentity(ClaimsPrincipal? user) =>
-        CloudAccountTokenSelector.IsValidatedCloudAccount(user, _cloudAccountOptions)
-            ? ControlClaimsIdentityMapper.ToCloudTrustedWorkspaceIdentity(user!)
-            : ControlClaimsIdentityMapper.ToTrustedWorkspaceIdentity(user, _options);
+        HubAccountTokenSelector.IsValidatedHubAccount(user, _hubAccountOptions)
+            ? ControlClaimsIdentityMapper.ToHubTrustedWorkspaceIdentity(user!)
+            : CloudAccountTokenSelector.IsValidatedCloudAccount(user, _cloudAccountOptions)
+                ? ControlClaimsIdentityMapper.ToCloudTrustedWorkspaceIdentity(user!)
+                : ControlClaimsIdentityMapper.ToTrustedWorkspaceIdentity(user, _options);
 
     internal static bool TryReadBearerExpiry(ClaimsPrincipal principal, out DateTimeOffset expiresAt)
     {
@@ -91,6 +95,16 @@ internal static class ControlClaimsIdentityMapper
             user.FindFirst("sub")!.Value,
             user.FindFirst("name")?.Value,
             user.FindFirst("email")?.Value);
+
+    public static TrustedWorkspaceIdentity ToHubTrustedWorkspaceIdentity(ClaimsPrincipal user) =>
+        new(
+            user.FindFirst("iss")!.Value,
+            user.FindFirst("sub")!.Value,
+            user.FindFirst("name")?.Value,
+            user.FindFirst("email")?.Value)
+        {
+            Kind = ExternalIdentityKinds.Hub
+        };
 
     public static TrustedWorkspaceIdentity? ToTrustedWorkspaceIdentity(ClaimsPrincipal? user, ControlIdentityOptions options)
     {

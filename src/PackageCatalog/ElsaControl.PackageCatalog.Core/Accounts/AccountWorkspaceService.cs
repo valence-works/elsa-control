@@ -70,6 +70,7 @@ public sealed class AccountWorkspaceService
             Account = account,
             Issuer = identity.Issuer,
             Subject = identity.Subject,
+            Kind = identity.Kind,
             DisplayName = identity.DisplayName,
             Email = identity.Email
         });
@@ -414,10 +415,16 @@ public sealed record TrustedWorkspaceIdentity(string Issuer, string Subject, str
     /// </summary>
     public string? CustomerEntraTenantId { get; init; }
 
+    /// <summary>
+    /// Recorded identity kind. Hub sessions use <see cref="ExternalIdentityKinds.Hub"/>.
+    /// </summary>
+    public string? Kind { get; init; }
+
     public TrustedWorkspaceIdentity Normalize() =>
         new(Issuer.Trim(), Subject.Trim(), NormalizeBlank(DisplayName), NormalizeBlank(Email))
         {
-            CustomerEntraTenantId = NormalizeBlank(CustomerEntraTenantId)
+            CustomerEntraTenantId = NormalizeBlank(CustomerEntraTenantId),
+            Kind = NormalizeBlank(Kind)
         };
 
     private static string? NormalizeBlank(string? value) =>

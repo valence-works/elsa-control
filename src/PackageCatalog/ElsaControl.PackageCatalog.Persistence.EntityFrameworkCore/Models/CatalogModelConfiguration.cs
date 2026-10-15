@@ -164,6 +164,7 @@ internal sealed class ExternalIdentityConfiguration : IEntityTypeConfiguration<E
         builder.HasKey(x => x.Id);
         builder.Property(x => x.Issuer).HasMaxLength(512).IsRequired();
         builder.Property(x => x.Subject).HasMaxLength(512).IsRequired();
+        builder.Property(x => x.Kind).HasMaxLength(32);
         builder.Property(x => x.DisplayName).HasMaxLength(256);
         builder.Property(x => x.Email).HasMaxLength(320);
         builder.HasIndex(x => new { x.Issuer, x.Subject }).IsUnique();

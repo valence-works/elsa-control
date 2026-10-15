@@ -113,6 +113,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 builder.Services.Configure<ControlIdentityOptions>(builder.Configuration.GetSection(ControlIdentityDefaults.ConfigurationSection));
 builder.Services.Configure<CloudBffOptions>(builder.Configuration.GetSection(CloudBffOptions.ConfigurationSection));
 builder.Services.Configure<CloudAccountIdentityOptions>(builder.Configuration.GetSection(CloudAccountIdentityDefaults.ConfigurationSection));
+builder.Services.Configure<HubAccountIdentityOptions>(builder.Configuration.GetSection(HubAccountIdentityDefaults.ConfigurationSection));
 builder.Services.Configure<ManagedElsaHandoffOptions>(builder.Configuration.GetSection(ManagedElsaHandoffDefaults.ConfigurationSection));
 var configuredControlIdentity = builder.Configuration.GetSection(ControlIdentityDefaults.ConfigurationSection).Get<ControlIdentityOptions>() ?? new ControlIdentityOptions();
 var authentication = builder.Services.AddAuthentication(options =>
@@ -122,13 +123,21 @@ var authentication = builder.Services.AddAuthentication(options =>
     })
     .AddPolicyScheme(CloudAccountIdentityDefaults.SelectorScheme, null, options =>
     {
-        options.ForwardDefaultSelector = context => CloudAccountTokenSelector.Matches(
-                context, context.RequestServices.GetRequiredService<IOptions<CloudAccountIdentityOptions>>().Value)
-            ? CloudAccountIdentityDefaults.Scheme
-            : ControlIdentityDefaults.Scheme;
+        options.ForwardDefaultSelector = context =>
+        {
+            var hub = context.RequestServices.GetRequiredService<IOptions<HubAccountIdentityOptions>>().Value;
+            if (HubAccountTokenSelector.Matches(context, hub))
+                return HubAccountIdentityDefaults.Scheme;
+
+            return CloudAccountTokenSelector.Matches(
+                    context, context.RequestServices.GetRequiredService<IOptions<CloudAccountIdentityOptions>>().Value)
+                ? CloudAccountIdentityDefaults.Scheme
+                : ControlIdentityDefaults.Scheme;
+        };
     })
     .AddJwtBearer(ControlIdentityDefaults.Scheme)
     .AddJwtBearer(CloudAccountIdentityDefaults.Scheme)
+    .AddJwtBearer(HubAccountIdentityDefaults.Scheme)
     .AddScheme<AuthenticationSchemeOptions, ApiKeyAuthenticationHandler>(ApiKeyAuthenticationDefaults.Scheme, _ => { })
     .AddScheme<AuthenticationSchemeOptions, BuilderClientApiKeyAuthenticationHandler>(BuilderClientApiKeyAuthenticationDefaults.Scheme, _ => { })
     .AddCookie(CustomerAuthenticationDefaults.CookieScheme, options =>
@@ -224,6 +233,9 @@ builder.Services.AddOptions<JwtBearerOptions>(CloudAccountIdentityDefaults.Schem
             }
         };
     });
+builder.Services.AddOptions<JwtBearerOptions>(HubAccountIdentityDefaults.Scheme)
+    .Configure<IOptions<HubAccountIdentityOptions>>((options, hubAccountOptions) =>
+        HubAccountJwtBearer.Configure(options, hubAccountOptions.Value));
 // The public Runtime Builder API is called from browsers on other origins (the Elsa Hub
 // configurator), so those origins must be allow-listed. Everything else on this host is
 // same-origin and needs no CORS.
@@ -339,6 +351,7 @@ builder.Services.AddScoped<ManagedElsaHandoffService>();
 builder.Services.AddHostedService<ManagedElsaHandoffConfigurationValidator>();
 builder.Services.AddHostedService<CloudBffConfigurationValidator>();
 builder.Services.AddHostedService<CloudAccountIdentityConfigurationValidator>();
+builder.Services.AddHostedService<HubAccountIdentityConfigurationValidator>();
 builder.Services.Configure<CloudCompatibilityOptions>(
     builder.Configuration.GetSection(CloudCompatibilityOptions.ConfigurationSection));
 builder.Services.AddHostedService<CloudCompatibilityStagingFixtureValidator>();

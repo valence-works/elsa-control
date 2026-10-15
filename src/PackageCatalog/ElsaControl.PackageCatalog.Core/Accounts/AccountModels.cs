@@ -12,6 +12,11 @@ public sealed class Account
     public List<WorkspaceMembership> Memberships { get; set; } = [];
 }
 
+public static class ExternalIdentityKinds
+{
+    public const string Hub = "hub";
+}
+
 public sealed class ExternalIdentity
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -19,6 +24,7 @@ public sealed class ExternalIdentity
     public Account? Account { get; set; }
     public string Issuer { get; set; } = "";
     public string Subject { get; set; } = "";
+    public string? Kind { get; set; }
     public string? DisplayName { get; set; }
     public string? Email { get; set; }
     public DateTimeOffset LastSeenAt { get; set; } = DateTimeOffset.UtcNow;
