@@ -4438,11 +4438,24 @@ smoke = "Staging__LateSuccessLever__SmokeOwnerWorkspaceId"
 items = {name: value for name, value in store.items() if name.startswith(prefix) or name in (enabled, wait, smoke)}
 allowlist = {name: value for name, value in store.items() if name.startswith(prefix)}
 if "appsettings list" in joined:
-    if "starts_with(name, '%s')" % prefix in joined and "].value" in joined:
-        print("\\n".join(allowlist.values()))
-    elif "].name" in joined:
-        print("\\n".join(items))
-    elif "].value" in joined:
+    args = sys.argv[1:]
+    query = args[args.index("--query") + 1] if "--query" in args else ""
+    if query == "[].name":
+        print("\\n".join(store))
+    elif query.endswith(".name"):
+        if "||" in query:
+            print("\\n".join(items))
+        elif "starts_with(name, '%s')" % prefix in query:
+            print("\\n".join(allowlist))
+        else:
+            print("\\n".join(items))
+    elif query.startswith("[?name=='") and query.endswith("']"):
+        name = query[len("[?name=='"):-2]
+        if name in store:
+            print(json.dumps([{"name": name, "value": store[name], "slotSetting": False}]))
+        else:
+            print("[]")
+    elif "].value" in query:
         print("\\n".join(allowlist.values()))
     else:
         print(len(items))
