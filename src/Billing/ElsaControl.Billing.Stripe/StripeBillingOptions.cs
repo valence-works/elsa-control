@@ -101,7 +101,7 @@ public sealed class StripeBillingOptions
             {
                 Name = name,
                 SigningSecret = source.SigningSecret,
-                ExpectedMode = source.ExpectedMode,
+                ExpectedMode = string.IsNullOrWhiteSpace(source.ExpectedMode) ? ExpectedMode : source.ExpectedMode,
                 CloudPriceIds = [.. source.CloudPriceIds]
             });
         }
@@ -152,7 +152,8 @@ public sealed class StripeBillingOptions
                 yield break;
             }
 
-            if (!string.IsNullOrWhiteSpace(source.ExpectedMode) && NormalizeMode(source.ExpectedMode) is null)
+            var effectiveMode = string.IsNullOrWhiteSpace(source.ExpectedMode) ? ExpectedMode : source.ExpectedMode;
+            if (NormalizeMode(effectiveMode) is null)
             {
                 yield return $"{ConfigurationSection}:WebhookSources:{name}:ExpectedMode must be 'test' or 'live'.";
                 yield break;

@@ -303,11 +303,12 @@ public sealed class StripeBillingProvider(
         return matchCount == 1;
     }
 
-    private static bool ModeMatches(StripeWebhookSourceOptions source, bool livemode)
+    private bool ModeMatches(StripeWebhookSourceOptions source, bool livemode)
     {
-        var expected = StripeBillingOptions.NormalizeMode(source.ExpectedMode);
+        var expected = StripeBillingOptions.NormalizeMode(source.ExpectedMode)
+            ?? StripeBillingOptions.NormalizeMode(_options.ExpectedMode);
         if (expected is null)
-            return true;
+            return false;
         return expected == StripeBillingOptions.LiveMode ? livemode : !livemode;
     }
 

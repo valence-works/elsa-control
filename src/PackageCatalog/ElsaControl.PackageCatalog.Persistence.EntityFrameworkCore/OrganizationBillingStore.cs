@@ -207,13 +207,22 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                 await CanStartPaidSubscriptionAfterConfirmedDeletionAsync(
                     subscription, providerEvent, occurrence, cancellationToken))
                 subscription = null;
+            var sourceConflict = false;
+            if (subscription is not null &&
+                !string.Equals(
+                    BillingWebhookSources.Normalize(subscription.WebhookSource),
+                    BillingWebhookSources.Normalize(providerEvent.WebhookSource),
+                    StringComparison.Ordinal))
+            {
+                if (OrganizationSubscriptionLifecycle.IsLive(subscription.State))
+                    sourceConflict = true;
+                else
+                    // A terminal Control (or Hub) row is not a live commercial
+                    // owner. Start a new lifecycle instead of treating the other
+                    // source's customer/subscription references as a mutation.
+                    subscription = null;
+            }
             var existingSubscription = subscription;
-            var sourceConflict = subscription is not null &&
-                                 OrganizationSubscriptionLifecycle.IsLive(subscription.State) &&
-                                 !string.Equals(
-                                     BillingWebhookSources.Normalize(subscription.WebhookSource),
-                                     BillingWebhookSources.Normalize(providerEvent.WebhookSource),
-                                     StringComparison.Ordinal);
             if (subscription is not null && !sourceConflict)
             {
                 EnsureSameProvider(subscription, providerEvent.Provider);

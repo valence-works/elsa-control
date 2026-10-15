@@ -431,6 +431,42 @@ public sealed class StripeBillingProviderTests
     }
 
     [Fact]
+    public void Hub_source_without_expected_mode_inherits_the_account_mode()
+    {
+        var provider = CreateProvider(options: new StripeBillingOptions
+        {
+            Enabled = true,
+            SecretKey = "sk_test_no_network",
+            ExpectedMode = StripeBillingOptions.TestMode,
+            WebhookSources =
+            [
+                new StripeWebhookSourceOptions
+                {
+                    Name = BillingWebhookSources.Hub,
+                    SigningSecret = HubWebhookSecret,
+                    CloudPriceIds = [CloudPriceId]
+                }
+            ],
+            DefaultPriceId = "price_configured",
+            CheckoutSuccessUrl = "https://console.test/success",
+            CheckoutCancelUrl = "https://console.test/cancel",
+            PortalReturnUrl = "https://console.test/billing"
+        });
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var json = SubscriptionEventJson("evt_live_inherited", "customer.subscription.created", "active", timestamp, CloudPriceId, livemode: true);
+        var signature = EventUtility.GenerateSignatureHeader(json, HubWebhookSecret, timestamp);
+
+        var result = provider.VerifyAndNormalizeWebhook(
+            System.Text.Encoding.UTF8.GetBytes(json),
+            signature,
+            DateTimeOffset.FromUnixTimeSeconds(timestamp));
+
+        Assert.Equal(BillingWebhookNormalizationStatus.Invalid, result.Status);
+        Assert.Equal("webhook.mode-mismatch", result.FailureCode);
+        Assert.Null(result.Event);
+    }
+
+    [Fact]
     public void Hub_non_cloud_price_is_ignored()
     {
         var provider = CreateDualSourceProvider();
@@ -574,6 +610,7 @@ public sealed class StripeBillingProviderTests
             {
                 Enabled = true,
                 SecretKey = "sk_test_no_network",
+                ExpectedMode = StripeBillingOptions.TestMode,
                 WebhookSigningSecret = WebhookSecret,
                 DefaultPriceId = "price_configured",
                 CheckoutSuccessUrl = "https://console.test/success",
