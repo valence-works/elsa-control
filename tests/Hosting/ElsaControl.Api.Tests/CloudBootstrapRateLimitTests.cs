@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Cloud;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Api.Tests;
@@ -142,17 +143,7 @@ public sealed class CloudBootstrapRateLimitTests
     public async Task Cloud_account_sessions_share_the_per_identity_limit_across_ips()
     {
         const string issuer = "https://cloud-account.test/auth/v1";
-        await using var app = CreateApplication(
-            perIp: 20,
-            perIdentity: 1,
-            extra: new Dictionary<string, string?>
-            {
-                [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
-                [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Issuer"] = issuer,
-                [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Audience"] = "authenticated",
-                [$"{CloudAccountIdentityDefaults.ConfigurationSection}:TestSigningKey"] =
-                    ControlApiTestApplication.TestControlIdentitySigningKey
-            });
+        await using var app = CreateCloudApplication(perIp: 20, perIdentity: 1, issuer);
         await app.SeedAsync(_ => Task.CompletedTask);
         using var first = CloudClient(app, issuer, "b6f73e84-5b47-4f4d-ad52-e3c4c9a815c6", "203.0.113.71");
         using var second = CloudClient(app, issuer, "b6f73e84-5b47-4f4d-ad52-e3c4c9a815c6", "203.0.113.72");
@@ -164,6 +155,44 @@ public sealed class CloudBootstrapRateLimitTests
 
         await AssertRateLimitExceeded(rejected);
         Assert.Equal(HttpStatusCode.OK, allowed.StatusCode);
+    }
+
+    [Fact]
+    public async Task Distinct_cloud_session_identities_from_one_ip_are_not_limited_by_per_ip()
+    {
+        const string issuer = "https://cloud-account.test/auth/v1";
+        const string sharedIp = "203.0.113.73";
+        await using var app = CreateCloudApplication(perIp: 1, perIdentity: 20, issuer);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var first = CloudClient(app, issuer, "11111111-1111-4111-8111-111111111111", sharedIp);
+        using var second = CloudClient(app, issuer, "22222222-2222-4222-8222-222222222222", sharedIp);
+        using var third = CloudClient(app, issuer, "33333333-3333-4333-8333-333333333333", sharedIp);
+        using var control = Client(app, "direct-control", sharedIp);
+
+        using var secondControl = Client(app, "direct-control-two", sharedIp);
+
+        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(first)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(second)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(third)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(control)).StatusCode);
+        using var secondControlRejected = await PostBootstrapAsync(secondControl);
+
+        await AssertRateLimitExceeded(secondControlRejected);
+    }
+
+    [Fact]
+    public async Task Distinct_cookie_sessions_from_one_ip_are_not_limited_by_per_ip()
+    {
+        const string sharedIp = "203.0.113.74";
+        await using var app = CreateApplication(perIp: 1, perIdentity: 20);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var first = CookieClient(app, "cookie-one", sharedIp);
+        using var second = CookieClient(app, "cookie-two", sharedIp);
+        using var third = CookieClient(app, "cookie-three", sharedIp);
+
+        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(first)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(second)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(third)).StatusCode);
     }
 
     [Fact]
@@ -189,8 +218,12 @@ public sealed class CloudBootstrapRateLimitTests
     [Theory]
     [InlineData(0, "00:01:00", "PerIp:PermitLimit")]
     [InlineData(-1, "00:01:00", "PerIp:PermitLimit")]
+    [InlineData(10001, "00:01:00", "PerIp:PermitLimit")]
+    [InlineData(int.MaxValue, "00:01:00", "PerIp:PermitLimit")]
     [InlineData(1, "00:00:00", "PerIp:Window")]
-    public async Task Non_positive_per_ip_configuration_is_refused(
+    [InlineData(1, "01:00:01", "PerIp:Window")]
+    [InlineData(1, "3650.00:00:00", "PerIp:Window")]
+    public async Task Invalid_per_ip_configuration_is_refused(
         int permitLimit,
         string window,
         string expected)
@@ -204,8 +237,12 @@ public sealed class CloudBootstrapRateLimitTests
     [Theory]
     [InlineData(0, "00:01:00", "PerIdentity:PermitLimit")]
     [InlineData(-3, "00:01:00", "PerIdentity:PermitLimit")]
+    [InlineData(10001, "00:01:00", "PerIdentity:PermitLimit")]
+    [InlineData(int.MaxValue, "00:01:00", "PerIdentity:PermitLimit")]
     [InlineData(1, "00:00:00", "PerIdentity:Window")]
-    public async Task Non_positive_per_identity_configuration_is_refused(
+    [InlineData(1, "01:00:01", "PerIdentity:Window")]
+    [InlineData(1, "3650.00:00:00", "PerIdentity:Window")]
+    public async Task Invalid_per_identity_configuration_is_refused(
         int permitLimit,
         string window,
         string expected)
@@ -217,10 +254,48 @@ public sealed class CloudBootstrapRateLimitTests
         Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task Valid_limits_are_accepted()
+    [Theory]
+    [InlineData(1, "00:00:01")]
+    [InlineData(60, "00:01:00")]
+    [InlineData(10000, "01:00:00")]
+    public async Task Valid_limits_are_accepted(int permitLimit, string window)
     {
-        await CreateValidator().StartAsync(CancellationToken.None);
+        await CreateValidator(
+            perIpLimit: permitLimit,
+            perIpWindow: TimeSpan.Parse(window),
+            perIdentityLimit: permitLimit,
+            perIdentityWindow: TimeSpan.Parse(window)).StartAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public void Ipv6_clients_share_a_64_prefix_key()
+    {
+        Assert.Equal(
+            GetIpKey("2001:db8:1:1::1"),
+            GetIpKey("2001:db8:1:1::2"));
+        Assert.NotEqual(
+            GetIpKey("2001:db8:1:1::1"),
+            GetIpKey("2001:db8:1:2::1"));
+        Assert.Equal("203.0.113.20", GetIpKey("203.0.113.20"));
+        Assert.Equal("203.0.113.20", GetIpKey("::ffff:203.0.113.20"));
+        Assert.NotEqual(GetIpKey("192.0.2.1"), GetIpKey("192.0.2.2"));
+    }
+
+    [Fact]
+    public async Task Ipv6_addresses_in_the_same_64_share_the_per_ip_limit()
+    {
+        await using var app = CreateApplication(perIp: 1, perIdentity: 20);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var first = Client(app, "ipv6-one", "2001:db8:1:1::1");
+        using var second = Client(app, "ipv6-two", "2001:db8:1:1::2");
+        using var otherPrefix = Client(app, "ipv6-three", "2001:db8:1:2::1");
+
+        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(first)).StatusCode);
+        using var samePrefixRejected = await PostBootstrapAsync(second);
+        using var otherPrefixAllowed = await PostBootstrapAsync(otherPrefix);
+
+        await AssertRateLimitExceeded(samePrefixRejected);
+        Assert.Equal(HttpStatusCode.OK, otherPrefixAllowed.StatusCode);
     }
 
     [Fact]
@@ -253,6 +328,19 @@ public sealed class CloudBootstrapRateLimitTests
 
         return new ControlApiTestApplication(configuration);
     }
+
+    private static ControlApiTestApplication CreateCloudApplication(int perIp, int perIdentity, string issuer) =>
+        CreateApplication(
+            perIp,
+            perIdentity,
+            extra: new Dictionary<string, string?>
+            {
+                [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
+                [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Issuer"] = issuer,
+                [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Audience"] = "authenticated",
+                [$"{CloudAccountIdentityDefaults.ConfigurationSection}:TestSigningKey"] =
+                    ControlApiTestApplication.TestControlIdentitySigningKey
+            });
 
     private static CloudBootstrapRateLimitConfigurationValidator CreateValidator(
         int perIpLimit = 60,
@@ -313,6 +401,13 @@ public sealed class CloudBootstrapRateLimitTests
     {
         client.DefaultRequestHeaders.Remove(ControlApiTestApplication.TestRemoteIpHeader);
         client.DefaultRequestHeaders.TryAddWithoutValidation(ControlApiTestApplication.TestRemoteIpHeader, ip);
+    }
+
+    private static string GetIpKey(string address)
+    {
+        var context = new DefaultHttpContext();
+        context.Connection.RemoteIpAddress = IPAddress.Parse(address);
+        return CloudBootstrapChainedRateLimiter.GetIpPartitionKey(context);
     }
 
     private static Task<HttpResponseMessage> PostBootstrapAsync(HttpClient client) =>

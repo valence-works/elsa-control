@@ -59,11 +59,29 @@ public sealed class ControlIdentityReader(
     }
 
     private TrustedWorkspaceIdentity? MapIdentity(ClaimsPrincipal? user) =>
-        HubAccountTokenSelector.IsValidatedHubAccount(user, _hubAccountOptions)
-            ? ControlClaimsIdentityMapper.ToHubTrustedWorkspaceIdentity(user!)
-            : CloudAccountTokenSelector.IsValidatedCloudAccount(user, _cloudAccountOptions)
-                ? ControlClaimsIdentityMapper.ToCloudTrustedWorkspaceIdentity(user!)
-                : ControlClaimsIdentityMapper.ToTrustedWorkspaceIdentity(user, _options);
+        MapIdentity(user, _options, _cloudAccountOptions, _hubAccountOptions);
+
+    internal static TrustedWorkspaceIdentity? MapIdentity(
+        ClaimsPrincipal? user,
+        ControlIdentityOptions options,
+        CloudAccountIdentityOptions cloudAccountOptions,
+        HubAccountIdentityOptions hubAccountOptions)
+    {
+        if (HubAccountTokenSelector.IsValidatedHubAccount(user, hubAccountOptions))
+            return ControlClaimsIdentityMapper.ToHubTrustedWorkspaceIdentity(user!);
+
+        if (CloudAccountTokenSelector.IsValidatedCloudAccount(user, cloudAccountOptions))
+            return ControlClaimsIdentityMapper.ToCloudTrustedWorkspaceIdentity(user!);
+
+        return ControlClaimsIdentityMapper.ToTrustedWorkspaceIdentity(user, options);
+    }
+
+    internal static bool IsBffForwardedSession(
+        ClaimsPrincipal? user,
+        CloudAccountIdentityOptions cloudAccountOptions,
+        HubAccountIdentityOptions hubAccountOptions) =>
+        HubAccountTokenSelector.IsValidatedHubAccount(user, hubAccountOptions) ||
+        CloudAccountTokenSelector.IsValidatedCloudAccount(user, cloudAccountOptions);
 
     internal static bool TryReadBearerExpiry(ClaimsPrincipal principal, out DateTimeOffset expiresAt)
     {

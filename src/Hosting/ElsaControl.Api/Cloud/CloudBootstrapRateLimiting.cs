@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Net;
+using System.Net.Sockets;
 using System.Security.Claims;
 using System.Threading.RateLimiting;
 using ElsaControl.Api.Authentication;
@@ -15,7 +17,11 @@ public static class CloudBootstrapRateLimitDefaults
     public const string ExceededCode = "rate-limit.exceeded";
     public const string ExceededTitle = "Cloud bootstrap rate limit was exceeded.";
     public const int DefaultPermitLimit = 60;
+    public const int MinPermitLimit = 1;
+    public const int MaxPermitLimit = 10_000;
     public static readonly TimeSpan DefaultWindow = TimeSpan.FromMinutes(1);
+    public static readonly TimeSpan MinWindow = TimeSpan.FromSeconds(1);
+    public static readonly TimeSpan MaxWindow = TimeSpan.FromHours(1);
 }
 
 public sealed class CloudBootstrapFixedWindowRateLimitOptions
@@ -44,10 +50,12 @@ public sealed class CloudBootstrapRateLimitOptions
         string prefix)
     {
         var value = window ?? new CloudBootstrapFixedWindowRateLimitOptions { PermitLimit = 0, Window = TimeSpan.Zero };
-        if (value.PermitLimit <= 0)
-            yield return $"{prefix}:PermitLimit must be a positive integer.";
-        if (value.Window <= TimeSpan.Zero)
-            yield return $"{prefix}:Window must be a positive duration.";
+        if (value.PermitLimit < CloudBootstrapRateLimitDefaults.MinPermitLimit ||
+            value.PermitLimit > CloudBootstrapRateLimitDefaults.MaxPermitLimit)
+            yield return $"{prefix}:PermitLimit must be between {CloudBootstrapRateLimitDefaults.MinPermitLimit} and {CloudBootstrapRateLimitDefaults.MaxPermitLimit}.";
+        if (value.Window < CloudBootstrapRateLimitDefaults.MinWindow ||
+            value.Window > CloudBootstrapRateLimitDefaults.MaxWindow)
+            yield return $"{prefix}:Window must be between {CloudBootstrapRateLimitDefaults.MinWindow} and {CloudBootstrapRateLimitDefaults.MaxWindow}.";
     }
 }
 
@@ -76,15 +84,21 @@ public sealed class CloudBootstrapRateLimiterPolicy : IRateLimiterPolicy<string>
     public CloudBootstrapRateLimiterPolicy(
         IOptions<CloudBootstrapRateLimitOptions> options,
         IOptions<ControlIdentityOptions> controlIdentity,
-        IOptions<CloudAccountIdentityOptions> cloudAccount)
+        IOptions<CloudAccountIdentityOptions> cloudAccount,
+        IOptions<HubAccountIdentityOptions> hubAccount)
     {
-        _limiter = new CloudBootstrapChainedRateLimiter(options.Value, controlIdentity.Value, cloudAccount.Value);
+        _limiter = new CloudBootstrapChainedRateLimiter(
+            options.Value, controlIdentity.Value, cloudAccount.Value, hubAccount.Value);
     }
 
     public Func<OnRejectedContext, CancellationToken, ValueTask>? OnRejected => null;
 
     public RateLimitPartition<string> GetPartition(HttpContext httpContext)
     {
+        // Named IRateLimiterPolicy factories cannot take HttpContext on Acquire.
+        // GetPartition runs on the same call stack as AttemptAcquire, so AsyncLocal
+        // carries the context into the shared limiter. IdleDuration = TimeSpan.Zero
+        // keeps this partition from being evicted; the inner chained limiter owns eviction.
         CloudBootstrapChainedRateLimiter.SetCurrent(httpContext);
         return RateLimitPartition.Get(CloudBootstrapRateLimitDefaults.PolicyName, _ => _limiter);
     }
@@ -92,6 +106,9 @@ public sealed class CloudBootstrapRateLimiterPolicy : IRateLimiterPolicy<string>
 
 internal sealed class CloudBootstrapChainedRateLimiter : RateLimiter
 {
+    internal const string BffSessionIpPartition = "bff-session";
+    private const string CachedPrincipalItemKey = "__cloud-bootstrap.principal";
+
     private static readonly AsyncLocal<HttpContext?> Current = new();
 
     private readonly PartitionedRateLimiter<HttpContext> _inner;
@@ -99,16 +116,19 @@ internal sealed class CloudBootstrapChainedRateLimiter : RateLimiter
     public CloudBootstrapChainedRateLimiter(
         CloudBootstrapRateLimitOptions options,
         ControlIdentityOptions controlIdentity,
-        CloudAccountIdentityOptions cloudAccount)
+        CloudAccountIdentityOptions cloudAccount,
+        HubAccountIdentityOptions hubAccount)
     {
         _inner = PartitionedRateLimiter.CreateChained(
             PartitionedRateLimiter.Create<HttpContext, string>(context =>
-                RateLimitPartition.GetFixedWindowLimiter(
-                    GetIpPartitionKey(context),
-                    _ => CreateWindow(options.PerIp))),
+                ShouldSkipPerIpLimit(context, cloudAccount, hubAccount)
+                    ? RateLimitPartition.GetNoLimiter<string>(BffSessionIpPartition)
+                    : RateLimitPartition.GetFixedWindowLimiter(
+                        GetIpPartitionKey(context),
+                        _ => CreateWindow(options.PerIp))),
             PartitionedRateLimiter.Create<HttpContext, string>(context =>
             {
-                var identity = GetIdentityPartitionKey(context, controlIdentity, cloudAccount);
+                var identity = GetIdentityPartitionKey(context, controlIdentity, cloudAccount, hubAccount);
                 return identity is null
                     ? RateLimitPartition.GetNoLimiter<string>(CloudBootstrapRateLimiterPolicy.AnonymousIdentityPartition)
                     : RateLimitPartition.GetFixedWindowLimiter(identity, _ => CreateWindow(options.PerIdentity));
@@ -140,43 +160,91 @@ internal sealed class CloudBootstrapChainedRateLimiter : RateLimiter
         return ValueTask.CompletedTask;
     }
 
-    internal static string GetIpPartitionKey(HttpContext context) =>
-        context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    // RemoteIpAddress is the forwarded client IP when ASPNETCORE_FORWARDEDHEADERS_ENABLED
+    // is set (App Service / Container Apps). Tightening KnownProxies/KnownNetworks is a
+    // host-wide change and is tracked separately from this policy.
+    internal static string GetIpPartitionKey(HttpContext context)
+    {
+        var address = context.Connection.RemoteIpAddress;
+        if (address is null)
+            return "unknown";
+
+        if (address.IsIPv4MappedToIPv6)
+            address = address.MapToIPv4();
+
+        if (address.AddressFamily == AddressFamily.InterNetwork)
+            return address.ToString();
+
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+        {
+            var bytes = address.GetAddressBytes();
+            Array.Clear(bytes, 8, 8);
+            return new IPAddress(bytes).ToString();
+        }
+
+        return address.ToString();
+    }
 
     internal static string? GetIdentityPartitionKey(
         HttpContext context,
         ControlIdentityOptions controlIdentity,
-        CloudAccountIdentityOptions cloudAccount)
+        CloudAccountIdentityOptions cloudAccount,
+        HubAccountIdentityOptions hubAccount)
     {
-        var principal = GetAuthenticatedPrincipal(context);
-        if (principal is null)
-            return null;
-
-        var identity = CloudAccountTokenSelector.IsValidatedCloudAccount(principal, cloudAccount)
-            ? ControlClaimsIdentityMapper.ToCloudTrustedWorkspaceIdentity(principal)
-            : ControlClaimsIdentityMapper.ToTrustedWorkspaceIdentity(principal, controlIdentity);
+        var identity = ControlIdentityReader.MapIdentity(
+            GetAuthenticatedPrincipal(context),
+            controlIdentity,
+            cloudAccount,
+            hubAccount);
         if (identity is null || string.IsNullOrWhiteSpace(identity.Issuer) || string.IsNullOrWhiteSpace(identity.Subject))
             return null;
 
         return string.Concat(identity.Issuer, "\u001f", identity.Subject);
     }
 
+    internal static bool ShouldSkipPerIpLimit(
+        HttpContext context,
+        CloudAccountIdentityOptions cloudAccount,
+        HubAccountIdentityOptions hubAccount)
+    {
+        var principal = GetAuthenticatedPrincipal(context);
+        if (principal is null)
+            return false;
+
+        if (ControlIdentityReader.IsBffForwardedSession(principal, cloudAccount, hubAccount))
+            return true;
+
+        // CustomerSession cookies are Hub BFF sessions and share the BFF egress address.
+        return context.User.Identity is not { IsAuthenticated: true }
+            && context.Request.Cookies.ContainsKey(CustomerAuthenticationDefaults.CookieName);
+    }
+
     private static ClaimsPrincipal? GetAuthenticatedPrincipal(HttpContext context)
     {
+        if (context.Items.TryGetValue(CachedPrincipalItemKey, out var cached))
+            return cached as ClaimsPrincipal;
+
+        ClaimsPrincipal? principal;
         if (context.User.Identity is { IsAuthenticated: true })
-            return context.User;
+            principal = context.User;
+        else if (!context.Request.Cookies.ContainsKey(CustomerAuthenticationDefaults.CookieName))
+            principal = null;
+        else
+        {
+            // CustomerSession is not the default authenticate scheme. The partitioner is
+            // synchronous, so cookie decryption runs inline. That blocks a thread for the
+            // duration of unprotect, which is acceptable for this request rate.
+            var result = context.AuthenticateAsync(CustomerAuthenticationDefaults.CookieScheme)
+                .ConfigureAwait(false)
+                .GetAwaiter()
+                .GetResult();
+            principal = result.Succeeded && result.Principal?.Identity is { IsAuthenticated: true }
+                ? result.Principal
+                : null;
+        }
 
-        if (!context.Request.Cookies.ContainsKey(CustomerAuthenticationDefaults.CookieName))
-            return null;
-
-        // Hub cookies are not the default authenticate scheme, and the partitioner is sync.
-        var result = context.AuthenticateAsync(CustomerAuthenticationDefaults.CookieScheme)
-            .ConfigureAwait(false)
-            .GetAwaiter()
-            .GetResult();
-        return result.Succeeded && result.Principal?.Identity is { IsAuthenticated: true }
-            ? result.Principal
-            : null;
+        context.Items[CachedPrincipalItemKey] = principal;
+        return principal;
     }
 
     private static HttpContext RequireCurrent() =>
