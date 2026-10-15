@@ -68,51 +68,33 @@ public sealed class StripeHostedInstanceLimitMigrationTests : IAsyncDisposable
         _sqlite.Organizations.Add(organization);
         await _sqlite.SaveChangesAsync();
 
-        if (provider == BillingProviderNames.Stripe)
-        {
-            // Seed the pre-cap schema without the current billing inbox model so
-            // this fixture stays valid after later inbox columns are added.
-            var subscription = new OrganizationSubscription
-            {
-                OrganizationId = organization.Id,
-                Provider = provider,
-                ProviderCustomerReference = $"cus-{organization.Id:N}"[..20],
-                ProviderSubscriptionReference = $"sub-{organization.Id:N}"[..20],
-                State = state,
-                TrialStartedAt = Now,
-                TrialEndsAt = Now.AddDays(14),
-                ActivatedAt = state == OrganizationSubscriptionState.Active ? Now.AddMinutes(1) : null,
-                LastProviderEventOccurredAt = Now.AddMinutes(1),
-                LastProviderEventId = $"evt-{organization.Id:N}",
-                CreatedAt = Now,
-                UpdatedAt = Now.AddMinutes(1),
-                LifecycleVersion = 1
-            };
-            _sqlite.OrganizationSubscriptions.Add(subscription);
-            _sqlite.OrganizationEntitlementSnapshots.Add(new OrganizationEntitlementSnapshot
-            {
-                OrganizationId = organization.Id,
-                SubscriptionId = subscription.Id,
-                SubscriptionState = state,
-                CanCreateCustomSources = true,
-                MaxSources = 1,
-                MaxWorkspaces = 1,
-                MaxInstances = maxInstances,
-                ManagedHostingEnabled = true,
-                ManagedHostingExpiresAt = Now.AddDays(30),
-                DeploymentTargetsEnabled = true,
-                SyncedAt = Now.AddMinutes(1),
-                CreatedAt = Now,
-                UpdatedAt = Now.AddMinutes(1)
-            });
-            await _sqlite.SaveChangesAsync();
-        }
-        else
-        {
-            await new OrganizationBillingStore(_sqlite).GrantInternalEntitlementAsync(
-                new(organization.Id, new("Migration fixture", maxInstances, Now.AddDays(30)), "test-operator"),
-                Now);
-        }
+        // Seed the pre-cap schema without later subscription columns (including
+        // webhook source) so this fixture stays valid after later billing migrations.
+        var subscriptionId = Guid.NewGuid();
+        var customerReference = $"cus-{organization.Id:N}"[..20];
+        var subscriptionReference = $"sub-{organization.Id:N}"[..20];
+        var eventId = $"evt-{organization.Id:N}";
+        var activatedAt = state == OrganizationSubscriptionState.Active ? Now.AddMinutes(1).UtcTicks : (long?)null;
+        await _sqlite.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO "OrganizationSubscriptions" (
+                "Id", "OrganizationId", "Provider", "ProviderCustomerReference", "ProviderSubscriptionReference",
+                "State", "TrialStartedAt", "TrialEndsAt", "ActivatedAt", "LifecycleVersion",
+                "LastProviderEventOccurredAt", "LastProviderEventId", "CreatedAt", "UpdatedAt")
+            VALUES (
+                {subscriptionId}, {organization.Id}, {provider}, {customerReference}, {subscriptionReference},
+                {state.ToString()}, {Now.UtcTicks}, {Now.AddDays(14).UtcTicks}, {activatedAt}, {1},
+                {Now.AddMinutes(1).UtcTicks}, {eventId}, {Now.UtcTicks}, {Now.AddMinutes(1).UtcTicks});
+            """);
+        await _sqlite.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO "OrganizationEntitlementSnapshots" (
+                "Id", "OrganizationId", "SubscriptionId", "SubscriptionState", "CanCreateCustomSources",
+                "MaxSources", "MaxWorkspaces", "MaxInstances", "ManagedHostingEnabled", "ManagedHostingExpiresAt",
+                "DeploymentTargetsEnabled", "PrivateFeedsEnabled", "SyncedAt", "CreatedAt", "UpdatedAt")
+            VALUES (
+                {Guid.NewGuid()}, {organization.Id}, {subscriptionId}, {state.ToString()}, {true},
+                {1}, {1}, {maxInstances}, {true}, {Now.AddDays(30).UtcTicks},
+                {true}, {false}, {Now.AddMinutes(1).UtcTicks}, {Now.UtcTicks}, {Now.AddMinutes(1).UtcTicks});
+            """);
 
         var entitlement = await _sqlite.OrganizationEntitlementSnapshots.SingleAsync(x => x.OrganizationId == organization.Id);
         entitlement.MaxInstances = maxInstances;

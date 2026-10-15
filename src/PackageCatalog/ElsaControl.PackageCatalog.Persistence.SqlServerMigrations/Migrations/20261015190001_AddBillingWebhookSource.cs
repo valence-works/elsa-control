@@ -31,7 +31,8 @@ public sealed class AddBillingWebhookSource : Migration
             name: "IX_BillingProviderEvents_Provider_ProviderEventId_WebhookSource",
             table: "BillingProviderEvents",
             columns: ["Provider", "ProviderEventId", "WebhookSource"],
-            unique: true);
+            unique: true,
+            filter: "[WebhookSource] IS NOT NULL");
     }
 
     protected override void Down(MigrationBuilder migrationBuilder)

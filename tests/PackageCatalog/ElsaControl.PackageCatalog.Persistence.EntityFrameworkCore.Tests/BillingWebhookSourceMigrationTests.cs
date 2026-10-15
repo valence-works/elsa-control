@@ -78,6 +78,7 @@ public sealed class BillingWebhookSourceMigrationTests : IAsyncDisposable
         Assert.Contains("UPDATE [OrganizationSubscriptions] SET [WebhookSource] = N'control'", script, StringComparison.Ordinal);
         Assert.Contains("UPDATE [BillingProviderEvents] SET [WebhookSource] = N'control'", script, StringComparison.Ordinal);
         Assert.Contains("IX_BillingProviderEvents_Provider_ProviderEventId_WebhookSource", script, StringComparison.Ordinal);
+        Assert.Contains("[WebhookSource] IS NOT NULL", script, StringComparison.Ordinal);
         Assert.DoesNotContain("sk_live_", script, StringComparison.Ordinal);
         Assert.DoesNotContain("whsec_", script, StringComparison.Ordinal);
     }
