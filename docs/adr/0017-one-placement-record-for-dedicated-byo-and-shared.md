@@ -178,8 +178,10 @@ isolation profile:
   (an AssemblyLoadContext is not a boundary). A learner package can observe or disrupt
   other learners on the same replica. Mitigations: there is nothing sensitive to reach,
   egress is restricted, quotas apply, and the shard is recycled on a schedule (#794).
-- **Precondition:** labs need their **own ADR-0009 amendment** before launch.
-  Amendment 1 covers Shared only. This ADR only reserves the placement shape.
+- **Governing record:** this ADR governs the lab class: lab-only orgs (§2), I9 and
+  this section. ADR-0009 Amendment 2 (#812) points here and doesn't add a separate
+  lab precondition (Elsa Control Lead, 15 Oct 2026). Lab launch still requires #794's
+  acceptance criteria, including egress, quotas, recycle and scale-to-zero.
 
 **Decided by the Elsa Control Lead on 15 Oct 2026:** the lab shard is a non-Shared class
 of `shared-shard`, not a separate kind. This is consistent with #794's decision
@@ -338,8 +340,8 @@ selected by `Kind`:
   (ADR-0009 Amendment 1). No customer uploads and no custom images (#633 Q8).
 - `shared-shard` `lab`: the governed image plus learner activity packages, loaded per
   tenant as collectible (#794). Evidence: `SelfReported` for anything learner-supplied.
-  This is not the Shared profile (§1a), and it needs its own ADR-0009 amendment before
-  launch.
+  This is not the Shared profile (§1a). The lab class is governed by this ADR (§1a,
+  I9), not by an ADR-0009 lab amendment.
 
 ### 6. F5: commercial gate and entitlement
 
