@@ -27,6 +27,7 @@ public sealed class HubAccountIdentityOptions
 
 public sealed class HubAccountIdentityConfigurationValidator(
     IOptions<HubAccountIdentityOptions> options,
+    IOptions<CloudAccountIdentityOptions> cloudAccountOptions,
     IHostEnvironment environment) : IHostedService
 {
     public Task StartAsync(CancellationToken cancellationToken)
@@ -42,10 +43,30 @@ public sealed class HubAccountIdentityConfigurationValidator(
             (!environment.IsEnvironment("Testing") && !string.IsNullOrEmpty(value.TestSigningKey)))
             throw new InvalidOperationException("Hub account JWT validation requires an HTTPS issuer, an audience, and published signing keys.");
 
+        var cloud = cloudAccountOptions.Value;
+        if (cloud.Enabled && IssuersEqual(value.Issuer, cloud.Issuer))
+            throw new InvalidOperationException("Hub account and Cloud account JWT issuers must be different when both paths are enabled.");
+
         return Task.CompletedTask;
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    private static bool IssuersEqual(string? left, string? right)
+    {
+        var normalizedLeft = NormalizeIssuer(left);
+        var normalizedRight = NormalizeIssuer(right);
+        return normalizedLeft is not null &&
+               string.Equals(normalizedLeft, normalizedRight, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? NormalizeIssuer(string? issuer)
+    {
+        if (string.IsNullOrWhiteSpace(issuer))
+            return null;
+
+        return issuer.Trim().TrimEnd('/');
+    }
 }
 
 public static class HubAccountJwtBearer
@@ -114,5 +135,13 @@ public static class HubAccountTokenSelector
         options.IsConfigured && principal?.Identity?.IsAuthenticated == true &&
         string.Equals(principal.FindFirst("iss")?.Value, options.Issuer, StringComparison.Ordinal) &&
         Guid.TryParse(principal.FindFirst("sub")?.Value, out _) &&
-        string.Equals(principal.FindFirst("role")?.Value, "authenticated", StringComparison.Ordinal);
+        string.Equals(principal.FindFirst("role")?.Value, "authenticated", StringComparison.Ordinal) &&
+        IsNonAnonymous(principal);
+
+    private static bool IsNonAnonymous(ClaimsPrincipal principal)
+    {
+        var value = principal.FindFirst("is_anonymous")?.Value;
+        return string.IsNullOrWhiteSpace(value) ||
+               string.Equals(value, "false", StringComparison.OrdinalIgnoreCase);
+    }
 }

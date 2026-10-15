@@ -65,7 +65,60 @@ public sealed class HubAccountIdentityConfigurationValidatorTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => validator.StartAsync(CancellationToken.None));
     }
 
+    [Theory]
+    [InlineData("https://shared-account.test/auth/v1", "https://shared-account.test/auth/v1")]
+    [InlineData("https://shared-account.test/auth/v1/", "https://shared-account.test/auth/v1")]
+    [InlineData("https://Shared-Account.TEST/auth/v1", "https://shared-account.test/auth/v1")]
+    public async Task Enabled_hub_and_cloud_paths_refuse_the_same_issuer(string hubIssuer, string cloudIssuer)
+    {
+        var validator = CreateValidator(
+            new HubAccountIdentityOptions
+            {
+                Enabled = true,
+                Issuer = hubIssuer,
+                Audience = "authenticated"
+            },
+            "Production",
+            new CloudAccountIdentityOptions
+            {
+                Enabled = true,
+                Issuer = cloudIssuer,
+                Audience = "authenticated"
+            });
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => validator.StartAsync(CancellationToken.None));
+
+        Assert.Contains("issuers must be different", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Enabled_hub_and_cloud_paths_allow_distinct_issuers()
+    {
+        var validator = CreateValidator(
+            new HubAccountIdentityOptions
+            {
+                Enabled = true,
+                Issuer = "https://hub-account.test/auth/v1",
+                Audience = "authenticated"
+            },
+            "Production",
+            new CloudAccountIdentityOptions
+            {
+                Enabled = true,
+                Issuer = "https://cloud-account.test/auth/v1",
+                Audience = "authenticated"
+            });
+
+        await validator.StartAsync(CancellationToken.None);
+    }
+
     private static HubAccountIdentityConfigurationValidator CreateValidator(
-        HubAccountIdentityOptions options, string environment) =>
-        new(Options.Create(options), new HostingEnvironment { EnvironmentName = environment });
+        HubAccountIdentityOptions options,
+        string environment,
+        CloudAccountIdentityOptions? cloud = null) =>
+        new(
+            Options.Create(options),
+            Options.Create(cloud ?? new CloudAccountIdentityOptions()),
+            new HostingEnvironment { EnvironmentName = environment });
 }

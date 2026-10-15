@@ -99,6 +99,25 @@ public sealed class HubAccountIdentityTests
         Assert.Empty(await database.Accounts.ToListAsync());
     }
 
+    [Theory]
+    [InlineData("true")]
+    [InlineData("TRUE")]
+    [InlineData("1")]
+    public async Task Anonymous_hub_session_never_provisions_a_control_account(string isAnonymous)
+    {
+        await using var app = CreateHubApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateClient(
+            app, HubIssuer, HubSubject, extraClaims: new Dictionary<string, string> { ["is_anonymous"] = isAnonymous });
+
+        using var response = await client.PostAsJsonAsync("/api/cloud/bootstrap", new CloudBootstrapRequest());
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        await using var scope = app.Services.CreateAsyncScope();
+        var database = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Empty(await database.Accounts.ToListAsync());
+    }
+
     [Fact]
     public async Task Expired_hub_session_is_refused()
     {
@@ -196,12 +215,19 @@ public sealed class HubAccountIdentityTests
         string subject,
         string audience = "authenticated",
         string role = "authenticated",
-        DateTimeOffset? expires = null)
+        DateTimeOffset? expires = null,
+        IReadOnlyDictionary<string, string>? extraClaims = null)
     {
+        var claims = new Dictionary<string, string> { ["role"] = role, ["email"] = "buyer@example.test" };
+        if (extraClaims is not null)
+        {
+            foreach (var claim in extraClaims)
+                claims[claim.Key] = claim.Value;
+        }
+
         var client = app.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", TestWorkspaceIdentity.CreateToken(
-            subject, issuer, audience, expires,
-            claims: new Dictionary<string, string> { ["role"] = role, ["email"] = "buyer@example.test" }));
+            subject, issuer, audience, expires, claims));
         return client;
     }
 }
