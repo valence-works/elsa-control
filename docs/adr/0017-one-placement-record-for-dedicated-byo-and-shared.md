@@ -117,14 +117,14 @@ Kind targets:
   - **Inputs:** the **full dependency closure** of the tenant's selected Verified
     packages, as a list of `{packageId, version, contentHash}`. `packageId` is
     lowercased, `version` is normalized SemVer, and `contentHash` is the SHA-512 package
-    hash taken from the **signed Shared allowlist entry** (ADR-0009 Amendment 1, clause 4),
+    hash taken from the **signed Shared allowlist entry** (ADR-0009 Amendment 1, clauses 1–2),
     never from the package bytes alone.
   - **Canonical form:** the list is sorted by `packageId`, then `version` (ordinal),
     serialized with RFC 8785 (JCS) as UTF-8, and hashed with SHA-256 (lowercase hex).
   - **Empty set:** the empty set is the reserved value `base`. That's every tenant on an
     Elsa 3 shard, because Integrations are Elsa 4 only.
   - **Load-time check:** the engine **recomputes** the digest at tenant load from the
-    allowlist entries it verified. A mismatch with the assignment **fails closed**: no
+    allowlist entries it verified. A mismatch with the assignment **fails closed** (ADR-0009 Amendment 1, clause 4): no
     load, an audit event and safe reason code `placement.package-set.mismatch`.
   - **Revocation:** a revoked closure member invalidates the digest within the
     revocation list's **120 s** hard TTL (Amendment 1, clause 9). Loads under that digest
@@ -182,8 +182,10 @@ isolation profile:
   Amendment 1 covers Shared only. This ADR only reserves the placement shape.
 
 **Decided by the Elsa Control Lead on 15 Oct 2026:** the lab shard is a non-Shared class
-of `shared-shard`, not a separate kind. This is consistent with the dedicated,
-activities-only lab shard Sipke approved for #794. The shared-process risk is accepted
+of `shared-shard`, not a separate kind. This is consistent with #794's decision
+record ([#794 comment 6146018113](https://github.com/valence-works/elsa-control/issues/794#issuecomment-6146018113),
+13 Oct): Sipke approved the dedicated lab shard, and the CEO set the lab package scope to
+activities only. The shared-process risk is accepted
 only on the condition that I9 holds.
 
 ### 2. Kind selection happens on the server
@@ -195,16 +197,22 @@ and a lab instance is a separate instance:
 
 | # | Inputs | Kind | Allowance consumed |
 |---|---|---|---|
-| 1 | The instance was created by the Training-labs flow (server-set origin `training-lab`, only through its purpose-built endpoint, which requires a lab entitlement) | `shared-shard`, class `lab` | Lab entitlement only |
-| 2 | `IsolationProfile` is `Data-isolated` or `Private`, or the plan uses a customer-built image (#629) | **Refused**, as today, with `isolation.profile.unavailable`. #629 images go to `byo-subscription` only (#729 decision); an isolated Valence-hosted tier needs its own ADR. | — |
+| 1 | The instance was created by the Training-labs flow (server-set origin `training-lab`, only through its purpose-built endpoint) in a **lab org** that holds a lab entitlement (see below) | `shared-shard`, class `lab` | Lab entitlement only |
+| 2 | `IsolationProfile` is `Data-isolated` or `Private`, or the plan uses a customer-built image (#629) | **Refused**, as today, with `isolation.profile.unavailable`. Until #629 lands, customer-built images are refused for every kind. When #629 lands, this row will exclude `byo-subscription`, which is where those images go (#729 decision). An isolated Valence-hosted tier needs its own ADR. | — |
 | 3 | `IsolationProfile = Shared` | `shared-shard`, class `standard`. Requires a Shared plan or trial entitlement, else refused with `placement.entitlement.missing`. Binds are ignored. | Shared-tenant allowance |
 | 4 | `IsolationProfile = Dedicated`, and the org's active commercial provider is `azure-bound` | `byo-subscription`, using that provider's bind. If the bind isn't `Active`, the request is **refused** with `placement.byo.bind-not-active`, never downgraded to `dedicated-valence`. | `MaxInstances` |
-| 5 | `IsolationProfile = Dedicated`, and the active commercial provider is anything else (`stripe`, `internal`) | `dedicated-valence`. Any bind record is ignored; a bind alone never selects BYO. | `MaxInstances` |
+| 5 | `IsolationProfile = Dedicated`, and the active commercial provider is `stripe` or `internal` | `dedicated-valence`. Any bind record is ignored; a bind alone never selects BYO. | `MaxInstances` |
 | 6 | Anything else | **Refused** with `placement.kind.unresolved` | — |
 
-A **lab entitlement never changes the kind of another instance**. A Dedicated or Shared
-request from an org that also holds a lab entitlement resolves by rows 3–5. A lab
-instance exists only when the labs flow creates one (row 1).
+**Who holds a lab entitlement.** Only a **lab org** does. A lab org is created only by
+the Training-labs flow, holds only a lab entitlement, and **never has a commercial
+provider**: attaching `stripe` or `azure-bound` to it is refused with
+`placement.lab.not-eligible`. A paying Cloud org never holds a lab entitlement. A
+learner from a paying customer gets a separate lab org, linked only through their
+Training identity, never through the customer's org, data or secrets. So a lab instance
+always belongs to a lab org, and a Dedicated or Shared request never sees a lab
+entitlement; it resolves by rows 2–6. A lab instance exists only when the labs flow
+creates one (row 1).
 
 Customer intent can't name a subscription, shard or tenant. Today `IsAvailableForManagedLaunch`
 stays Dedicated-only. It opens to Shared (class `standard` only) when the #633 build
@@ -268,13 +276,41 @@ and the `SH-*` gates pass.
   Overflow, rebalancing and moves stay **in-region**. If no in-region target exists, or
   a BYO bind can't deploy to that region, placement **fails** with
   `placement.region.unavailable`. It never falls back to another region.
-- **I9. Nothing sensitive is placed on a lab shard.** Placement admits an instance to a
-  `lab` shard only if it has the `training-lab` origin, belongs to an org with no paying
-  commercial provider (`stripe` or `azure-bound`), and its plan carries no secrets,
-  connections, managed identity, or customer data sources. A lab shard's host has no
-  managed identity and no secret store binding. Any other instance is refused with
-  `placement.lab.not-eligible`, and the refusal is audited. This is the condition the
-  shared-process risk in §1a was accepted on.
+- **I9. Nothing sensitive is placed on a lab shard.** An instance is **lab-eligible**
+  only if all of these hold:
+  - it has the `training-lab` origin;
+  - it belongs to a lab org (§2), which has no commercial provider;
+  - in its resolved plan (`ResolvedElsaApplicationPlan`):
+    - no `Configuration.Entries` item has `Secret = true` or a `SecretReference`;
+    - every `Configuration.Entries` key is on the lab configuration allowlist, which
+      is deny by default;
+    - no `ProviderCapabilities` item requires a managed identity, key vault or secret
+      store;
+    - every `Capacity` storage item is lab storage that the lab shard provisions itself;
+    - every `Packages` item is a built-in package or an activities-only learner package
+      (#794).
+  
+  A **customer data source** is any database, storage account, queue, connection
+  string or endpoint credential that the plan supplies rather than the lab shard
+  provisioning it. The allowlist and storage rules above exclude all of them.
+
+  A lab shard's host has no managed identity and no secret store binding.
+
+  **When it's checked.** Eligibility is checked at first placement, and **re-checked
+  on every** plan resolve, plan update and reconcile, and on any provider change on the
+  instance's org. A failed check at placement or on an update is **refused**. A failed
+  check on a running lab instance **quiesces** it: no new executions, scaled to zero, and
+  never moved to another class. Either outcome uses `placement.lab.not-eligible` and is
+  audited. A quiesced instance resumes only after a clean re-check, and otherwise it is
+  wiped under #794's retention rule.
+
+  **Residual risk.** I9 governs what the *plan* brings. It can't stop a learner typing
+  sensitive data or a credential into a workflow input or a learner package. Another
+  learner on the same replica could read it. The labs terms and the lab UI say a lab is
+  not for real data or credentials. The nightly recycle and the 30-day wipe (#794) bound
+  how long such data persists. This risk is part of the residual risk accepted in §1a.
+
+  This is the condition the shared-process risk in §1a was accepted on.
 
 ### 4. Provider interface keyed by kind
 
@@ -413,15 +449,9 @@ the Console.
 - **I6.**
   - N parallel placements against a shard with ceiling C never yield more than C active
     tenants (a database constraint test, #352 AC1).
-  - The 11th package-set group overflows to the next shard.
+  - The package-set group beyond the configured cap overflows to the next shard.
   - Occupancy is unchanged until cleanup is confirmed.
 - **I7.** Placement of a plan on release line L onto a shard on line M ≠ L is refused.
-- **I9.**
-  - A `training-lab` instance from an org with an active `stripe` or `azure-bound`
-    provider is refused with `placement.lab.not-eligible`.
-  - A lab plan that carries a secret, connection or managed-identity reference is refused
-    the same way.
-  - Lab shard provisioning fails if a managed identity or secret store is attached.
 - **I8.**
   - `RegionCode = westeurope` with the only `westeurope` shard full and a free
     `northeurope` shard: placement fails with `placement.region.unavailable`, and no
@@ -429,13 +459,29 @@ the Console.
   - The same check holds for a BYO request whose region the bind can't deploy to, and
     for a `dedicated-valence` request whose host `Location` differs from `RegionCode`.
   - A move or rebalance to another region is rejected.
+- **I9.**
+  - **Admitted:** a `training-lab` instance in a lab org, with only allowlisted
+    non-secret configuration and lab-provisioned storage, is placed on a `lab` shard.
+  - Attaching `stripe` or `azure-bound` to a lab org is refused with
+    `placement.lab.not-eligible`.
+  - A lab plan with `Secret = true`, a `SecretReference`, a non-allowlisted
+    configuration key, a managed-identity, key vault or secret store capability, or
+    plan-supplied storage is refused the same way.
+  - A running lab instance whose plan update or reconcile fails the check is quiesced
+    (scaled to zero, with no new executions) and audited, and it's never moved off the
+    lab class.
+  - Lab shard provisioning fails if a managed identity or secret store is attached.
 - **Kind selection (§2).** A table test over every combination of isolation profile,
   commercial provider, bind state and lab entitlement resolves to exactly one row,
   including:
   - Dedicated + `azure-bound` + bind not `Active` → refused;
   - Dedicated + `stripe` + an Active bind → `dedicated-valence`;
-  - Dedicated + lab entitlement → `dedicated-valence` or `byo-subscription` (never lab);
-  - Shared + lab entitlement → `standard`.
+  - a lab org requesting Dedicated → refused with `placement.kind.unresolved` (row 6),
+    because it has no commercial provider;
+  - a lab org requesting Shared → refused with `placement.entitlement.missing` (row 3);
+  - a paying org calling the labs endpoint → refused (`placement.lab.not-eligible`),
+    because it can't hold a lab entitlement;
+  - a lab org through the labs flow → `shared-shard`, class `lab`.
 - **Uniqueness and canonical form.**
   - A second `Active` assignment for one instance, or a duplicate non-`Retired`
     `(shardId, tenantId)`, is rejected by the database.
