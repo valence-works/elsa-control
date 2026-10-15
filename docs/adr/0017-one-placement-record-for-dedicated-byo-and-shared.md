@@ -131,9 +131,16 @@ Kind targets:
     then fail closed until the tenant is moved to a new digest.
   - **Changes:** the digest changes **only through a move** (I1), never by an in-place
     edit of the assignment. A move always gets a **new `tenantId`**, even when it targets
-    the same shard. The move's import step carries the tenant's state across, and the old
-    `tenantId` is removed by the Retiring assignment's cleanup. So a same-shard package-set
-    change never reuses a `(shardId, tenantId)` that a `Retiring` assignment still holds.
+    the same shard (I1). So a same-shard package-set change never reuses a
+    `(shardId, tenantId)` that a `Retiring` assignment still holds.
+  - **What `tenantId` is:** a shard-internal address only, allocated by the shard and
+    **never reused** on that shard, even after `Retired`. Nothing durable is keyed on it
+    outside the shard. Quota usage, telemetry, audit history, the lab retention clock
+    (#794) and entitlement usage are keyed by **`InstanceId`**. Tenant-scoped tokens carry
+    `InstanceId` and are re-issued on the flip. The move's import step **re-keys** the
+    tenant-scoped state that lives inside the shard (workflows, bookmarks, packages,
+    per-tenant run counters) to the new `tenantId`. The Retiring assignment's cleanup
+    **destroys** the old copy, and only then does the old `tenantId` stop being occupied.
   - **On a `lab` shard:** the field holds the reserved value `per-tenant`. Each lab tenant
     gets its own shell, and learner packages swap inside it under #794's drain rules, so
     no shared package-set group exists to identify.
@@ -234,7 +241,9 @@ and the `SH-*` gates pass.
   overflows the shard. The old assignment goes `Retiring` → `Retired` only after the
   move has been confirmed and cleanup is complete. A move flips states atomically: the
   new assignment goes `Reserved` → `Active` and the old one goes `Active` → `Retiring`
-  in one transaction, so there's never more than one `Active` assignment. The existing provider-scope
+  in one transaction, so there's never more than one `Active` assignment. On `shared-shard`,
+  every move, same-shard ones included, allocates a **fresh, never-reused `tenantId`**
+  (§1, `packageSetDigest` and "What `tenantId` is"). The existing provider-scope
   *rebind* (template or tool fingerprint rotation with placement unchanged) remains
   the only in-place change, and it stays below the placement record.
 - **I2. Each operation resolves its target from the placement record.** Every provider
@@ -294,11 +303,13 @@ and the `SH-*` gates pass.
     - no `Configuration.Entries` item has `Secret = true` or a `SecretReference`;
     - every `Configuration.Entries` item matches an entry on the lab configuration
       allowlist, which is deny by default. Each allowlist entry pins the **key**, the
-      allowed **`JsonType`**, and a **value domain**: an enum, a bounded number range, or a
-      bounded-length string pattern. A URL or host value must be on the lab egress
-      allowlist. No allowlisted value may hold a connection string, credential, token or
-      a reference to customer storage. A key whose value fails its type or domain is
-      treated like a non-allowlisted key;
+      allowed **`JsonType`** (fixed per key), and an **allowed set of values**: an enum, a
+      bounded number range or a boolean. **Free-form strings are denied by default.** A
+      string key is allowlisted only with a closed pattern that can't express a URL,
+      host, connection string or token. Any URL, host or connection-string value is a
+      **customer data source** unless the lab shard issued it. Only shard-issued values,
+      which the labs flow writes and the plan can't set, are admitted. A value that fails
+      its type or set is treated like a non-allowlisted key;
     - no `ProviderCapabilities` item requires a managed identity, key vault or secret
       store;
     - every `Capacity` storage item is lab storage that the lab shard provisions itself;
@@ -306,8 +317,8 @@ and the `SH-*` gates pass.
       (#794).
   
   A **customer data source** is any database, storage account, queue, connection
-  string or endpoint credential that the plan supplies rather than the lab shard
-  provisioning it. The allowlist and storage rules above exclude all of them.
+  string, URL, host or endpoint credential that the plan supplies rather than the lab
+  shard issuing or provisioning it. The allowlist and storage rules above exclude all of them.
 
   A lab shard's host has no managed identity and no secret store binding.
 
@@ -472,6 +483,11 @@ the Console.
     The new assignment gets a new `tenantId`, and the uniqueness constraint holds while
     the old one is `Retiring`. The old tenant never loads after the flip. Cleanup removes
     it, and only then does occupancy drop.
+  - **State carries across the move:** quota usage, run counters, the audit history and
+    the lab retention clock are unchanged by a same-shard move, because they're keyed by
+    `InstanceId`. Tenant-scoped state is reachable under the new `tenantId`, and the old
+    copy is destroyed by cleanup. A `tenantId` is never allocated twice on one shard,
+    even after `Retired`.
   - Occupancy is unchanged until cleanup is confirmed.
 - **I7.** Placement of a plan on release line L onto a shard on line M ≠ L is refused.
 - **I8.**
@@ -489,9 +505,11 @@ the Console.
   - A lab plan with `Secret = true`, a `SecretReference`, a non-allowlisted
     configuration key, a managed-identity, key vault or secret store capability, or
     plan-supplied storage is refused the same way.
-  - An allowlisted key with the wrong `JsonType`, or a value outside its domain (for example a
-    connection-string-shaped string, or a URL not on the lab egress allowlist), is
+  - An allowlisted key with the wrong `JsonType`, or a value outside its allowed set, is
     refused the same way.
+  - **Negative:** an allowlisted key with `Secret = false` carrying an endpoint URL, a
+    host name, a connection string or a credential-shaped token is refused with
+    `placement.lab.not-eligible`. The same URL issued by the lab shard is admitted.
   - A running lab instance whose plan update or reconcile fails the check is quiesced
     (scaled to zero, with no new executions) and audited, and it's never moved off the
     lab class.
