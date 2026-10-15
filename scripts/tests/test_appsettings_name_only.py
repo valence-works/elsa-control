@@ -58,8 +58,7 @@ def lookup(requested):
 if query == "[].name":
     print("\\n".join(store))
 elif query.endswith(".name"):
-    prefix = "Enabled"
-    print("\\n".join(name for name in store if name.endswith(prefix) or True))
+    print("\\n".join(store))
 elif query.endswith("| length(@)") or query == "length(@)":
     print(len(store))
 elif query.startswith("[?name=='") and query.endswith("']"):
@@ -258,84 +257,34 @@ class AppSettingsNameOnlyScanTests(unittest.TestCase):
         ]
         self.assertEqual([], unsafe)
 
-    def test_scanner_rejects_a_value_bearing_listing(self) -> None:
-        self.assertEqual("unsafe", classify_appsettings_list_query(None))
-        self.assertEqual("unsafe", classify_appsettings_list_query("[].value"))
-        self.assertEqual(
-            "unsafe",
-            classify_appsettings_list_query("[?starts_with(name, 'Billing__')].value"),
-        )
-        self.assertEqual("names", classify_appsettings_list_query("[].name"))
-        self.assertEqual(
-            "names",
-            classify_appsettings_list_query("[?starts_with(name, 'Billing__')].name"),
-        )
-        self.assertEqual(
-            "exact-value",
-            classify_appsettings_list_query("[?name=='Billing__Stripe__Enabled'] | [0].value"),
-        )
-        self.assertEqual(
-            "exact-value",
-            classify_appsettings_list_query("[?name=='Billing__Stripe__Enabled']"),
-        )
-        self.assertEqual(
-            "exact-value",
-            classify_appsettings_list_query("[?name=='Application__BuildNumber'] | [0].slotSetting"),
-        )
-        self.assertEqual(
-            "exact-value",
-            classify_appsettings_list_query("[?name=='ELSA_CONTROL_IMAGE_ID'] | length(@)"),
-        )
-        self.assertEqual(
-            "unsafe",
-            classify_appsettings_list_query(
-                "[?name=='Billing__Stripe__ExpectedMode' || name=='Billing__Stripe__Enabled'].value"
-            ),
-        )
-        self.assertEqual(
-            "unsafe",
-            classify_appsettings_list_query(
-                "[?name=='Billing__Stripe__ExpectedMode' && name=='Billing__Stripe__Enabled'] | [0].value"
-            ),
-        )
-        self.assertEqual(
-            "unsafe",
-            classify_appsettings_list_query("[?contains(name, 'Billing__')] | [0].value"),
-        )
-        self.assertEqual(
-            "unsafe",
-            classify_appsettings_list_query("[?starts_with(name, 'Billing__')] | [0].value"),
-        )
-        self.assertEqual(
-            "unsafe",
-            classify_appsettings_list_query(
-                "[?name=='Billing__Stripe__ExpectedMode' || name=='Billing__Stripe__Enabled']"
-            ),
-        )
-        self.assertEqual(
-            "unsafe",
-            classify_appsettings_list_query("[].value | [].name"),
-        )
-        self.assertEqual(
-            "names",
-            classify_appsettings_list_query(
-                "[?name=='Billing__Stripe__Enabled' || name=='Billing__Lifecycle__Enabled'].name"
-            ),
-        )
-        self.assertEqual(
-            "unsafe",
-            classify_appsettings_list_query(
-                "[?name!=''] | [].{name: value} | [?name!=''].name"
-            ),
-        )
-        self.assertEqual(
-            "unsafe",
-            classify_appsettings_list_query("[?starts_with(value,'x')].name"),
-        )
+    def test_scanner_accepts_repo_call_sites_and_rejects_bypasses(self) -> None:
         helper = ROOT / "scripts" / "lib" / "hosted-appsettings.sh"
+        for query, expected in (
+            ("[].name", "names"),
+            ("length(@)", "names"),
+            ("[?starts_with(name, 'Billing__')].name", "names"),
+            ("[?starts_with(name, '${pairing_allowlist_prefix}')] | length(@)", "names"),
+            (
+                "[?name=='Billing__Stripe__Enabled' || name=='Billing__Lifecycle__Enabled'].name",
+                "names",
+            ),
+            ("[?name=='Billing__Stripe__Enabled']", "exact-value"),
+            ("[?name=='Billing__Stripe__Enabled'] | [0].value", "exact-value"),
+            ("[?name=='Application__BuildNumber'] | [0].slotSetting", "exact-value"),
+            ("[?name=='ELSA_CONTROL_IMAGE_ID'] | length(@)", "exact-value"),
+            ("[?name=='{canonical}']", "exact-value"),
+            ("[?name=='{name}']", "exact-value"),
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(expected, classify_appsettings_list_query(query))
+
         self.assertEqual(
             "helper",
-            classify_appsettings_list_query('"$query"', path=helper),
+            classify_appsettings_list_query("$query", path=helper, root=ROOT),
+        )
+        self.assertEqual(
+            "helper",
+            classify_appsettings_list_query('"$query"', path=helper, root=ROOT),
         )
         self.assertEqual("unsafe", classify_appsettings_list_query('"$query"'))
         self.assertEqual(
@@ -343,8 +292,50 @@ class AppSettingsNameOnlyScanTests(unittest.TestCase):
             classify_appsettings_list_query(
                 '"$query"',
                 path=ROOT / "scripts" / "apply-external-engine-pairing-settings.sh",
+                root=ROOT,
             ),
         )
+        self.assertEqual(
+            "unsafe",
+            classify_appsettings_list_query(
+                "$query",
+                path=ROOT / "scripts" / "vendor" / "scripts" / "lib" / "hosted-appsettings.sh",
+                root=ROOT,
+            ),
+        )
+        self.assertEqual(
+            "unsafe",
+            classify_appsettings_list_query(
+                "$query",
+                path=ROOT / ".github" / "workflows" / "scripts" / "lib" / "hosted-appsettings.sh",
+                root=ROOT,
+            ),
+        )
+
+        for query in (
+            None,
+            "[].value",
+            "[?starts_with(name, 'Billing__')].value",
+            "[?name=='Billing__Stripe__ExpectedMode' || name=='Billing__Stripe__Enabled'].value",
+            "[?name=='Billing__Stripe__ExpectedMode' && name=='Billing__Stripe__Enabled'] | [0].value",
+            "[?contains(name, 'Billing__')] | [0].value",
+            "[?starts_with(name, 'Billing__')] | [0].value",
+            "[?name=='Billing__Stripe__ExpectedMode' || name=='Billing__Stripe__Enabled']",
+            "[].value | [].name",
+            "[?name!=''] | [].{name: value} | [?name!=''].name",
+            "[?starts_with(value,'x')].name",
+            "[?contains(to_string(@),'x')].name",
+            "[?to_string(@)!=''].name",
+            "[?contains(values(@),'x')].name",
+            "[?contains(@.*,'x')].name",
+            "[?contains(*,'x')].name",
+            r"[?starts_with('\u0076alue','x')].name",
+            '[?starts_with("\\u0076alue",\'x\')].name',
+            "[?contains(to_string(@),'x')] | length(@)",
+        ):
+            with self.subTest(bypass=query):
+                self.assertEqual("unsafe", classify_appsettings_list_query(query))
+
         self.assertEqual(
             [None],
             list(
@@ -363,6 +354,23 @@ class AppSettingsNameOnlyScanTests(unittest.TestCase):
                 )
             ),
         )
+        self.assertEqual(
+            [None],
+            list(
+                iter_shell_listing_queries(
+                    'x="$(az webapp config appsettings list -g a -n b -o json)"\n'
+                    'y="$(az webapp list --query "[].name" -o tsv)"\n'
+                )
+            ),
+        )
+        self.assertEqual(
+            [None],
+            list(
+                iter_shell_listing_queries(
+                    "az webapp config appsettings list -g a -n b -o json # --query '[].name'\n"
+                )
+            ),
+        )
         continued = list(
             iter_shell_listing_queries(
                 'az webapp config appsettings list \\\n  --query "[].name" && echo ok\n'
@@ -370,6 +378,13 @@ class AppSettingsNameOnlyScanTests(unittest.TestCase):
         )
         self.assertEqual(1, len(continued))
         self.assertEqual("names", classify_appsettings_list_query(continued[0]))
+        substituted = list(
+            iter_shell_listing_queries(
+                'x="$(az webapp config appsettings list -g a -n b --query "[].name" -o tsv)"\n'
+            )
+        )
+        self.assertEqual(1, len(substituted))
+        self.assertEqual("names", classify_appsettings_list_query(substituted[0]))
         self.assertEqual("Billing__Stripe__Enabled", resolve_setting_name(
             "billing__stripe__enabled",
             ["Billing__Stripe__Enabled", "Billing__Stripe__SecretKey"],
