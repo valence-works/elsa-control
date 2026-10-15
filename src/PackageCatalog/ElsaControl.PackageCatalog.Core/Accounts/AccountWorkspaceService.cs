@@ -250,8 +250,8 @@ public sealed class AccountWorkspaceService
     public Task<int> ActiveWorkspaceCountAsync(Guid organizationId, CancellationToken cancellationToken = default) =>
         _store.ActiveWorkspaceCountAsync(organizationId, cancellationToken);
 
-    public Task<int> ActiveManagedInstanceCountAsync(Guid organizationId, CancellationToken cancellationToken = default) =>
-        _store.ActiveManagedInstanceCountAsync(organizationId, cancellationToken);
+    public Task<int> ActiveDedicatedInstanceCountAsync(Guid organizationId, CancellationToken cancellationToken = default) =>
+        _store.ActiveDedicatedInstanceCountAsync(organizationId, cancellationToken);
 
     public async Task<OrganizationWorkspaceListResult> ListOrganizationWorkspacesAsync(TrustedWorkspaceIdentity identity, Guid organizationId, CancellationToken cancellationToken = default)
     {
@@ -388,7 +388,7 @@ public interface IAccountWorkspaceStore
     Task<bool> WorkspaceExistsAsync(Guid workspaceId, CancellationToken cancellationToken = default);
     Task<OrganizationEntitlementSnapshot?> GetLatestOrganizationEntitlementAsync(Guid organizationId, CancellationToken cancellationToken = default);
     Task<int> ActiveWorkspaceCountAsync(Guid organizationId, CancellationToken cancellationToken = default);
-    Task<int> ActiveManagedInstanceCountAsync(Guid organizationId, CancellationToken cancellationToken = default);
+    Task<int> ActiveDedicatedInstanceCountAsync(Guid organizationId, CancellationToken cancellationToken = default);
     Task<bool> OrganizationWorkspaceNameExistsAsync(Guid organizationId, string name, Guid? excludingWorkspaceId, CancellationToken cancellationToken = default);
     Task<bool> WorkspaceBelongsToOrganizationAsync(Guid organizationId, Guid workspaceId, CancellationToken cancellationToken = default);
     Task<bool> OrganizationAccountMembershipExistsAsync(Guid organizationId, Guid accountId, CancellationToken cancellationToken = default);

@@ -159,10 +159,61 @@ exists.
 
 ## Key rotation and session policy
 
-The prototype key ring supports one active `kid` plus retained validation keys.
-Production rotation is: publish the new public key, begin signing with the new
-`kid`, retain the old public key for at least the maximum token lifetime plus clock
-skew, then retire it. Key changes and failed validation spikes are audit events.
+The key ring accepts one active signing `kid` plus zero or more previous
+verification keys. Identifiers must match the allowed format (1–64 characters,
+alphanumeric, with `.` `_` `-` only in the body, no `__`). A malformed identifier
+or key fails closed at startup and the error names no key material.
+
+The platform-safe configuration shape for Azure App Settings, Container Apps,
+JSON, and environment variables is an indexed list:
+
+```text
+ManagedElsa__Handoff__ActiveKeyId
+ManagedElsa__Handoff__ActivePrivateKeyPem
+ManagedElsa__Handoff__PreviousVerificationKeys__0__KeyId
+ManagedElsa__Handoff__PreviousVerificationKeys__0__PublicKeyPem
+```
+
+A JSON map (`PreviousPublicKeys:<kid>`) remains valid for hosts that bind objects.
+
+### Rotation runbook
+
+Each phase is a single settings change applied to every replica, then a restart
+or new revision. The key ring is loaded at startup; it has no runtime refresh.
+
+1. Generate a new RSA key privately. Do not print it. Production keys are 3072
+   bits or larger; this overlap support does not itself rotate production.
+2. **Pre-publish the new public key.** Add it as `PreviousVerificationKeys:0`
+   while the current key remains `ActiveKeyId`. Deploy that change everywhere
+   so every replica can verify codes the new signer will issue. A previous key
+   must not reuse the active key id.
+3. **Cut signing over in one atomic settings change:** set `ActiveKeyId` /
+   `ActivePrivateKeyPem` to the new key and set `PreviousVerificationKeys:0`
+   to the old public key. Codes already in flight still verify against the
+   previous public key. During a rolling cut-over, old replicas verify new-key
+   codes because step 2 already published that public key.
+4. Keep the previous verification key for at least the maximum handoff-code
+   lifetime (five minutes) plus one minute of clock-skew allowance
+   (`PreviousVerificationKeyOverlap`).
+5. **Retire the old key** in one settings change: remove it from
+   `PreviousVerificationKeys` and restart every replica. Startup diffs the
+   last `key_ring.active` / `key_ring.previous` snapshot and writes
+   `key_ring.retired:<id>` (key ids only), then records the new loaded set.
+6. Record the rehearsal with key ids, timestamps, and pass/fail only. Do not
+   retain PEM, tokens, or other key material.
+
+### Emergency key revocation
+
+If the active key must be withdrawn immediately, skip the overlap window:
+remove it from both `ActiveKeyId` and `PreviousVerificationKeys` in one
+settings change, install a replacement active key, and restart every replica.
+In-flight codes signed with the withdrawn key are rejected (they are at most
+the maximum token lifetime old). Startup writes `key_ring.retired:<id>:revoked`
+for the withdrawn signer. This takes effect only on restart or a new revision.
+
+Staging rehearsal uses test keys on the isolated staging Control API. A
+production cut-over needs a separate operator go. This runbook does not change
+connector protocol `"1"` or advertised connector capabilities.
 
 The runtime session lifetime is independent from the code lifetime. Control derives
 `session_exp` only from the authentication handler that produced the current cookie

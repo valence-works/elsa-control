@@ -1,5 +1,7 @@
+using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
+using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
@@ -67,5 +69,69 @@ public sealed class AccountWorkspaceStoreTests
         Assert.Equal(result.OrganizationId, (await db.Organizations.SingleAsync()).Id);
         Assert.Equal(result.WorkspaceId, (await db.Workspaces.SingleAsync()).Id);
         Assert.Equal(1, await db.OrganizationAuditRecords.CountAsync());
+    }
+
+    [Fact]
+    public async Task Active_managed_instance_count_includes_only_live_dedicated_placements()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateStoreContext(connection);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = new Workspace { Name = "Dedicated limit workspace" };
+        var other = new Workspace { Name = "Other organization workspace" };
+        db.Workspaces.AddRange(workspace, other);
+        await db.SaveChangesAsync();
+
+        db.ElsaInstances.AddRange(
+            CreatePlacement(workspace, isolationProfile: "dedicated"),
+            CreatePlacement(workspace, isolationProfile: "dedicated"),
+            CreatePlacement(workspace, isolationProfile: "shared"),
+            CreatePlacement(workspace, isolationProfile: "dedicated", targetMode: "customer-owned"),
+            Tombstone(CreatePlacement(workspace, isolationProfile: "dedicated")),
+            CreatePlacement(other, isolationProfile: "dedicated"));
+        await db.SaveChangesAsync();
+        var store = new AccountWorkspaceStore(db);
+
+        Assert.Equal(2, await store.ActiveDedicatedInstanceCountAsync(workspace.OrganizationId));
+        Assert.Equal(1, await store.ActiveDedicatedInstanceCountAsync(other.OrganizationId));
+    }
+
+    [Theory]
+    [InlineData("managed", "dedicated", true)]
+    [InlineData("managed", "Dedicated", true)]
+    [InlineData("managed", "shared", false)]
+    [InlineData("managed", "data-isolated", false)]
+    [InlineData("customer-owned", "dedicated", false)]
+    public void Dedicated_limit_is_consumed_only_by_managed_dedicated_isolation(
+        string targetMode,
+        string isolationProfile,
+        bool consumes)
+    {
+        Assert.Equal(
+            consumes,
+            ElsaInstanceDedicatedLimit.ConsumesDedicatedInstanceLimit(targetMode, isolationProfile));
+    }
+
+    private static CatalogDbContext CreateStoreContext(SqliteConnection connection) =>
+        new(new DbContextOptionsBuilder<CatalogDbContext>().UseRetryingSqlite(connection).Options);
+
+    private static ElsaInstanceEntity CreatePlacement(
+        Workspace workspace,
+        string isolationProfile,
+        string targetMode = "managed")
+    {
+        var instance = ElsaInstancePersistenceTests.NewInstance(workspace.OrganizationId, workspace.Id);
+        instance.IsolationProfile = isolationProfile;
+        instance.TargetMode = targetMode;
+        return instance;
+    }
+
+    private static ElsaInstanceEntity Tombstone(ElsaInstanceEntity instance)
+    {
+        instance.DesiredLifecycle = ElsaDesiredLifecycle.Deleting;
+        instance.ObservedLifecycle = ElsaObservedLifecycle.Deleted;
+        instance.DeletedAt = DateTimeOffset.UtcNow;
+        return instance;
     }
 }

@@ -304,7 +304,7 @@ public sealed record OrganizationBillingStatusResponse(
         OrganizationSubscription? subscription,
         OrganizationEntitlementSnapshot? entitlement,
         int activeWorkspaces,
-        int activeManagedInstances) =>
+        int activeDedicatedInstances) =>
         new(
             organizationId,
             subscription is null ? null : new OrganizationBillingSubscriptionResponse(
@@ -331,7 +331,7 @@ public sealed record OrganizationBillingStatusResponse(
                 entitlement.DeploymentTargetsEnabled,
                 entitlement.SyncedAt),
             new OrganizationBillingCapacityResponse(
-                activeManagedInstances,
+                activeDedicatedInstances,
                 entitlement?.MaxInstances,
                 activeWorkspaces,
                 entitlement?.MaxWorkspaces),
@@ -381,6 +381,7 @@ public sealed record OrganizationBillingEntitlementResponse(
     DateTimeOffset SyncedAt);
 
 public sealed record OrganizationBillingCapacityResponse(
+    /// <summary>Live Dedicated managed placements counted against MaxInstances.</summary>
     int ManagedInstancesUsed,
     int? ManagedInstancesLimit,
     int WorkspacesUsed,

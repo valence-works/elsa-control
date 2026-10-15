@@ -1408,12 +1408,13 @@ public sealed class ManagedElsaHandoffTests
     [Fact]
     public async Task Production_configuration_validator_rejects_malformed_signing_key_at_startup()
     {
+        const string malformedPem = "not a pem -----BEGIN RSA PRIVATE KEY----- leak-me -----END RSA PRIVATE KEY-----";
         var handoffOptions = new ManagedElsaHandoffOptions
         {
             Enabled = true,
             Issuer = "https://cloud.example.test",
             ActiveKeyId = "active-2026-09",
-            ActivePrivateKeyPem = "not a pem"
+            ActivePrivateKeyPem = malformedPem
         };
         await using var services = CreateKeyRingServices(handoffOptions);
         var validator = new ManagedElsaHandoffConfigurationValidator(
@@ -1421,13 +1422,17 @@ public sealed class ManagedElsaHandoffTests
             Options.Create(handoffOptions),
             services);
 
-        await Assert.ThrowsAsync<ArgumentException>(() => validator.StartAsync(CancellationToken.None));
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => validator.StartAsync(CancellationToken.None));
+        Assert.DoesNotContain("BEGIN", exception.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("leak-me", exception.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(malformedPem, exception.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task Production_configuration_validator_rejects_malformed_previous_key_at_startup()
     {
         using var active = RSA.Create(2048);
+        const string malformedPem = "not a pem -----BEGIN PUBLIC KEY----- leak-me -----END PUBLIC KEY-----";
         var handoffOptions = new ManagedElsaHandoffOptions
         {
             Enabled = true,
@@ -1436,7 +1441,7 @@ public sealed class ManagedElsaHandoffTests
             ActivePrivateKeyPem = active.ExportRSAPrivateKeyPem(),
             PreviousPublicKeys = new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["previous-2026-08"] = "not a pem"
+                ["previous-2026-08"] = malformedPem
             }
         };
         await using var services = CreateKeyRingServices(handoffOptions);
@@ -1445,7 +1450,11 @@ public sealed class ManagedElsaHandoffTests
             Options.Create(handoffOptions),
             services);
 
-        await Assert.ThrowsAsync<ArgumentException>(() => validator.StartAsync(CancellationToken.None));
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => validator.StartAsync(CancellationToken.None));
+        Assert.DoesNotContain("BEGIN", exception.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("leak-me", exception.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(malformedPem, exception.ToString(), StringComparison.Ordinal);
+        Assert.Contains("previous-2026-08", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
