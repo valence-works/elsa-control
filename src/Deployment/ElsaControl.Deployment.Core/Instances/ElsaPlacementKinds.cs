@@ -88,7 +88,8 @@ public sealed record ElsaInstanceCommercialPlacementRequest(
     string? SourceKind = null,
     string? SourceShardClass = null,
     int? ActiveSharedCount = null,
-    int? ActiveDedicatedCount = null)
+    int? ActiveDedicatedCount = null,
+    bool SameKindSharedMoveInFlight = false)
 {
     public ElsaPlacementKindSelection Selection => new(Kind, ShardClass);
 

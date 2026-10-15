@@ -104,12 +104,20 @@ public sealed class EfCoreElsaInstanceCommercialGate(CatalogDbContext db, TimePr
             var sharedCount = placement?.ActiveSharedCount ?? 0;
             if (placement?.IsSameKindSharedMove == true)
             {
-                // Hard org ceiling: admit only while count <= L. One in-flight
-                // same-kind move may read L+1; a second org-wide move is 409.
+                // Admit while count <= L. Return move-in-progress only when the
+                // org is at the single transient L+1 because another same-kind
+                // move is in flight. Any other over-L case is exceeded.
                 if (sharedCount > sharedLimit)
+                {
+                    if (placement.SameKindSharedMoveInFlight && sharedCount == sharedLimit + 1)
+                        return Deny(
+                            ElsaInstanceCommercialOperation.SharedAllowanceMoveInProgress,
+                            "A Shared placement move is already using the transient allowance.");
+
                     return Deny(
-                        ElsaInstanceCommercialOperation.SharedAllowanceMoveInProgress,
-                        "A Shared placement move is already using the transient allowance.");
+                        ElsaInstanceCommercialOperation.SharedAllowanceExceeded,
+                        "The organization has reached its Shared-tenant allowance.");
+                }
             }
             else if (sharedCount >= sharedLimit)
             {

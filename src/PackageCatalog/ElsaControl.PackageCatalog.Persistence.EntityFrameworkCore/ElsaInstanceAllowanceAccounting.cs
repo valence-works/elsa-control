@@ -81,7 +81,21 @@ internal static class ElsaInstanceAllowanceAccounting
                 select assignment.Id).CountAsync(cancellationToken);
 
         if (!dedicated)
-            return assignmentCount;
+        {
+            // Legacy Shared rows written before assignment admission still
+            // consume MaxSharedTenants. Assigned instances are counted above.
+            var unassignedShared = await db.ElsaInstances
+                .AsNoTracking()
+                .CountAsync(
+                    instance => instance.OrganizationId == organizationId &&
+                                instance.DeletedAt == null &&
+                                instance.TargetMode == "managed" &&
+                                instance.IsolationProfile == "shared" &&
+                                !db.ElsaPlacementAssignments.Any(assignment => assignment.InstanceId == instance.Id),
+                    cancellationToken);
+
+            return assignmentCount + unassignedShared;
+        }
 
         // Legacy Dedicated rows written before assignment admission still
         // consume MaxInstances. Assigned instances are counted above.
@@ -97,4 +111,25 @@ internal static class ElsaInstanceAllowanceAccounting
 
         return assignmentCount + unassignedDedicated;
     }
+
+    /// <summary>
+    /// True when this organization already holds a same-kind Shared-to-Shared
+    /// reservation (the single allowed transient above L).
+    /// </summary>
+    public static Task<bool> HasSameKindSharedMoveInFlightAsync(
+        CatalogDbContext db,
+        Guid organizationId,
+        CancellationToken cancellationToken = default) =>
+        (
+            from target in db.ElsaPlacementAssignments.AsNoTracking()
+            join source in db.ElsaPlacementAssignments.AsNoTracking()
+                on target.SupersedesAssignmentId equals source.Id
+            where target.OrganizationId == organizationId &&
+                  target.State == ElsaPlacementAssignmentStates.Reserved &&
+                  target.SupersedesAssignmentId != null &&
+                  target.Kind == ElsaPlacementKinds.SharedShard &&
+                  target.ShardClass == ElsaShardClasses.Standard &&
+                  source.Kind == ElsaPlacementKinds.SharedShard &&
+                  source.ShardClass == ElsaShardClasses.Standard
+            select target.Id).AnyAsync(cancellationToken);
 }

@@ -32,6 +32,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                 dbContext, instance.OrganizationId, cancellationToken);
             var sharedCount = await ElsaInstanceAllowanceAccounting.CountSharedStandardAsync(
                 dbContext, instance.OrganizationId, cancellationToken);
+            var sameKindMoveInFlight = await ElsaInstanceAllowanceAccounting.HasSameKindSharedMoveInFlightAsync(
+                dbContext, instance.OrganizationId, cancellationToken);
             var placement = new ElsaInstanceCommercialPlacementRequest(
                 target.Kind,
                 target.ShardClass,
@@ -39,7 +41,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                 SourceKind: source?.Kind,
                 SourceShardClass: source?.ShardClass,
                 ActiveSharedCount: sharedCount,
-                ActiveDedicatedCount: dedicatedCount);
+                ActiveDedicatedCount: dedicatedCount,
+                SameKindSharedMoveInFlight: sameKindMoveInFlight);
 
             var decision = await _commercialGate.EvaluateAsync(
                 instance.OrganizationId,
@@ -56,17 +59,22 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                     decision.MaxInstances);
 
             Guid? shardId = request.TargetShardId;
-            if (target.ConsumesSharedAllowance && shardId is null)
+            if (shardId is { } requested)
+            {
+                await EnsureEligibleSharedShardAsync(
+                    requested,
+                    instance.RegionCode,
+                    target.ShardClass,
+                    cancellationToken);
+            }
+            else if (target.ConsumesSharedAllowance)
             {
                 var reservation = await TryReserveSharedShardAsync(
                     instance.RegionCode,
                     target.ShardClass!,
                     cancellationToken);
                 if (reservation.ShardsConfigured && reservation.ShardId is null)
-                    throw new ElsaInstanceLifecycleConflictException(
-                        "No eligible Shared shard has remaining capacity.",
-                        ElsaInstanceLifecycleConflictReason.CommercialDenied,
-                        ElsaInstanceCommercialOperation.ShardCapacity);
+                    throw ShardCapacityConflict();
                 shardId = reservation.ShardId;
             }
 
@@ -96,10 +104,9 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
         {
             var instance = await LoadPlacementInstanceAsync(
                 request.OrganizationId, request.WorkspaceId, request.InstanceId, cancellationToken);
-            var target = await FindTargetReservationAsync(instance.Id, request.TargetAssignmentId, cancellationToken);
-            var source = await FindSourceAssignmentAsync(instance.Id, excludingAssignmentId: target.Id, cancellationToken: cancellationToken);
-            if (source is not null)
-                source.State = ElsaPlacementAssignmentStates.Retired;
+            var target = await FindMoveReservationAsync(instance.Id, request.TargetAssignmentId, cancellationToken);
+            var source = await FindSupersededSourceAsync(instance.Id, target.SupersedesAssignmentId!.Value, cancellationToken);
+            source.State = ElsaPlacementAssignmentStates.Retired;
             target.State = ElsaPlacementAssignmentStates.Active;
             instance.IsolationProfile = ElsaPlacementKindResolver.IsolationFor(
                 new ElsaPlacementKindSelection(target.Kind, target.ShardClass));
@@ -119,14 +126,37 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
         {
             var instance = await LoadPlacementInstanceAsync(
                 request.OrganizationId, request.WorkspaceId, request.InstanceId, cancellationToken);
-            var target = await FindTargetReservationAsync(instance.Id, request.TargetAssignmentId, cancellationToken);
-            var source = await FindSourceAssignmentAsync(instance.Id, excludingAssignmentId: target.Id, cancellationToken: cancellationToken);
+            var target = await FindMoveReservationAsync(instance.Id, request.TargetAssignmentId, cancellationToken);
+            var source = await FindSupersededSourceAsync(instance.Id, target.SupersedesAssignmentId!.Value, cancellationToken);
             target.State = ElsaPlacementAssignmentStates.Retired;
             instance.UpdatedAt = _timeProvider.GetUtcNow().ToUniversalTime();
             await dbContext.SaveChangesAsync(cancellationToken);
             return ToMoveResult(instance.Id, target, source);
         }, cancellationToken);
     }
+
+    private async Task EnsureEligibleSharedShardAsync(
+        Guid shardId,
+        string regionCode,
+        string? shardClass,
+        CancellationToken cancellationToken)
+    {
+        var shard = await dbContext.ElsaSharedShards.AsNoTracking()
+            .SingleOrDefaultAsync(
+                x => x.Id == shardId &&
+                     x.RegionCode == regionCode &&
+                     x.ShardClass == shardClass,
+                cancellationToken);
+        if (shard is null ||
+            await ElsaInstanceAllowanceAccounting.CountShardOccupancyAsync(dbContext, shard.Id, cancellationToken) >= shard.Capacity)
+            throw ShardCapacityConflict();
+    }
+
+    private static ElsaInstanceLifecycleConflictException ShardCapacityConflict() =>
+        new(
+            "No eligible Shared shard has remaining capacity.",
+            ElsaInstanceLifecycleConflictReason.CommercialDenied,
+            ElsaInstanceCommercialOperation.ShardCapacity);
 
     private async Task<(bool ShardsConfigured, Guid? ShardId)> TryReserveSharedShardAsync(
         string regionCode,
@@ -238,7 +268,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
                  x.SupersedesAssignmentId != null,
             cancellationToken);
 
-    private async Task<ElsaPlacementAssignmentEntity> FindTargetReservationAsync(
+    private async Task<ElsaPlacementAssignmentEntity> FindMoveReservationAsync(
         Guid instanceId,
         Guid targetAssignmentId,
         CancellationToken cancellationToken)
@@ -247,12 +277,27 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore
             .SingleOrDefaultAsync(
                 x => x.Id == targetAssignmentId &&
                      x.InstanceId == instanceId &&
-                     x.State == ElsaPlacementAssignmentStates.Reserved,
+                     x.State == ElsaPlacementAssignmentStates.Reserved &&
+                     x.SupersedesAssignmentId != null,
                 cancellationToken)
             ?? throw Conflict(
                 "The placement move reservation is not active.",
                 ElsaInstanceLifecycleConflictReason.InvalidState);
         return target;
+    }
+
+    private async Task<ElsaPlacementAssignmentEntity> FindSupersededSourceAsync(
+        Guid instanceId,
+        Guid sourceAssignmentId,
+        CancellationToken cancellationToken)
+    {
+        return await dbContext.ElsaPlacementAssignments
+            .SingleOrDefaultAsync(
+                x => x.Id == sourceAssignmentId && x.InstanceId == instanceId,
+                cancellationToken)
+            ?? throw Conflict(
+                "The placement move reservation is not active.",
+                ElsaInstanceLifecycleConflictReason.InvalidState);
     }
 
     private static ElsaInstancePlacementMoveResult ToMoveResult(
