@@ -11,7 +11,7 @@ SETTING_NAME='CloudCompatibility__StagingFixture'
 IMAGE_REFERENCE_PATTERN='([[:alnum:]][[:alnum:].-]*)(:[[:digit:]]+)?/[[:alnum:]][[:alnum:]._/-]*(:[[:alnum:]][[:alnum:]._+-]*)?(@sha256:[[:xdigit:]]{64})?'
 DIGEST_PATTERN='^sha256:[0-9a-f]{64}$'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/lib/hosted-appsettings.sh
+# shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/hosted-appsettings.sh"
 EXCLUSIVE_HELPER="${SCRIPT_DIR}/lib/staging_compat_exclusive.py"
 QA_WINDOW_ISSUES=(637 661)
