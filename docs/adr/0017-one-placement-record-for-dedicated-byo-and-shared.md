@@ -130,7 +130,10 @@ Kind targets:
     revocation list's **120 s** hard TTL (Amendment 1, clause 9). Loads under that digest
     then fail closed until the tenant is moved to a new digest.
   - **Changes:** the digest changes **only through a move** (I1), never by an in-place
-    edit of the assignment.
+    edit of the assignment. A move always gets a **new `tenantId`**, even when it targets
+    the same shard. The move's import step carries the tenant's state across, and the old
+    `tenantId` is removed by the Retiring assignment's cleanup. So a same-shard package-set
+    change never reuses a `(shardId, tenantId)` that a `Retiring` assignment still holds.
   - **On a `lab` shard:** the field holds the reserved value `per-tenant`. Each lab tenant
     gets its own shell, and learner packages swap inside it under #794's drain rules, so
     no shared package-set group exists to identify.
@@ -141,7 +144,8 @@ Kind targets:
 - **Uniqueness:**
   - an instance has **at most one `Active` assignment**;
   - `(shardId, tenantId)` is **unique** across all non-`Retired` `shared-shard`
-    assignments.
+    assignments, `Retiring` included. Moves allocate a fresh `tenantId` (above), so this
+    holds for same-shard moves too. A `Retiring` tenant never loads (I2: cleanup only).
 
   Both are enforced by database constraints.
 - **BYO stores no customer secrets.** Neither the placement record nor the bind stores
@@ -199,7 +203,7 @@ and a lab instance is a separate instance:
 
 | # | Inputs | Kind | Allowance consumed |
 |---|---|---|---|
-| 1 | The instance was created by the Training-labs flow (server-set origin `training-lab`, only through its purpose-built endpoint) in a **lab org** that holds a lab entitlement (see below) | `shared-shard`, class `lab` | Lab entitlement only |
+| 1 | The instance was created by the Training-labs flow (server-set origin `training-lab`, only through its purpose-built endpoint) in a **lab org** that holds a lab entitlement (see below), **and** its `IsolationProfile` is not `Data-isolated` or `Private` **and** it uses the governed image (no customer-built image). Otherwise the instance falls through to row 2 and is refused. | `shared-shard`, class `lab` | Lab entitlement only |
 | 2 | `IsolationProfile` is `Data-isolated` or `Private`, or the plan uses a customer-built image (#629) | **Refused**, as today, with `isolation.profile.unavailable`. Until #629 lands, customer-built images are refused for every kind. When #629 lands, this row will exclude `byo-subscription`, which is where those images go (#729 decision). An isolated Valence-hosted tier needs its own ADR. | — |
 | 3 | `IsolationProfile = Shared` | `shared-shard`, class `standard`. Requires a Shared plan or trial entitlement, else refused with `placement.entitlement.missing`. Binds are ignored. | Shared-tenant allowance |
 | 4 | `IsolationProfile = Dedicated`, and the org's active commercial provider is `azure-bound` | `byo-subscription`, using that provider's bind. If the bind isn't `Active`, the request is **refused** with `placement.byo.bind-not-active`, never downgraded to `dedicated-valence`. | `MaxInstances` |
@@ -208,8 +212,8 @@ and a lab instance is a separate instance:
 
 **Who holds a lab entitlement.** Only a **lab org** does. A lab org is created only by
 the Training-labs flow, holds only a lab entitlement, and **never has a commercial
-provider**: attaching `stripe` or `azure-bound` to it is refused with
-`placement.lab.not-eligible`. A paying Cloud org never holds a lab entitlement. A
+provider of any kind**: attaching **any** provider (`stripe`, `azure-bound` or
+`internal`) to it is refused with `placement.lab.not-eligible`. A paying Cloud org never holds a lab entitlement. A
 learner from a paying customer gets a separate lab org, linked only through their
 Training identity, never through the customer's org, data or secrets. So a lab instance
 always belongs to a lab org, and a Dedicated or Shared request never sees a lab
@@ -258,8 +262,10 @@ and the `SH-*` gates pass.
   signed Shared allowlist (ADR-0009 Amendment 1).
 - **I6. Shard capacity is enforced under concurrency.** Placement on a shard is refused
   once it would exceed the shard's ceiling, which is set from the measured load test
-  (about 70% of peak). It's also refused once the shard exceeds its cap on
-  package-set groups (#798). That cap is **provisionally 10 groups per shard** (decided
+  (about 70% of peak). On a `standard` shard, it's also refused once the shard
+  exceeds its cap on package-set groups (#798). The cap applies to `standard` shards
+  only. On a `lab` shard every tenant is `per-tenant`, so the cap doesn't apply, and only
+  the ceiling limits it. That cap is **provisionally 10 groups per shard** (decided
   by the Elsa Control Lead on 15 Oct 2026). It is provisional pending the AC1
   measurement in elsa-foundation#2757, and the AC1 result will revise it. Refused placement goes to
   the next eligible shard **in the same region** (I8), or fails with a safe reason code
@@ -281,7 +287,9 @@ and the `SH-*` gates pass.
 - **I9. Nothing sensitive is placed on a lab shard.** An instance is **lab-eligible**
   only if all of these hold:
   - it has the `training-lab` origin;
-  - it belongs to a lab org (§2), which has no commercial provider;
+  - it belongs to a lab org (§2), which has no provider of any kind;
+  - its `IsolationProfile` is not `Data-isolated` or `Private`, and it uses the governed
+    image (no customer-built image);
   - in its resolved plan (`ResolvedElsaApplicationPlan`):
     - no `Configuration.Entries` item has `Secret = true` or a `SecretReference`;
     - every `Configuration.Entries` key is on the lab configuration allowlist, which
@@ -309,8 +317,9 @@ and the `SH-*` gates pass.
   **Residual risk.** I9 governs what the *plan* brings. It can't stop a learner typing
   sensitive data or a credential into a workflow input or a learner package. Another
   learner on the same replica could read it. The labs terms and the lab UI say a lab is
-  not for real data or credentials. The nightly recycle and the 30-day wipe (#794) bound
-  how long such data persists. This risk is part of the residual risk accepted in §1a.
+  not for real data or credentials. The scheduled recycle (for example nightly) and the
+  retention wipe (30 days after last activity is the current input, #794) bound how
+  long such data persists. This risk is part of the residual risk accepted in §1a.
 
   This is the condition the shared-process risk in §1a was accepted on.
 
@@ -451,7 +460,13 @@ the Console.
 - **I6.**
   - N parallel placements against a shard with ceiling C never yield more than C active
     tenants (a database constraint test, #352 AC1).
-  - The package-set group beyond the configured cap overflows to the next shard.
+  - On a `standard` shard, the package-set group beyond the configured cap overflows to
+    the next shard.
+  - On a `lab` shard, more lab tenants than the cap are admitted up to the ceiling.
+  - **Same-shard package-set change:** a tenant on shard S moves to a new digest on S.
+    The new assignment gets a new `tenantId`, and the uniqueness constraint holds while
+    the old one is `Retiring`. The old tenant never loads after the flip. Cleanup removes
+    it, and only then does occupancy drop.
   - Occupancy is unchanged until cleanup is confirmed.
 - **I7.** Placement of a plan on release line L onto a shard on line M ≠ L is refused.
 - **I8.**
@@ -464,7 +479,7 @@ the Console.
 - **I9.**
   - **Admitted:** a `training-lab` instance in a lab org, with only allowlisted
     non-secret configuration and lab-provisioned storage, is placed on a `lab` shard.
-  - Attaching `stripe` or `azure-bound` to a lab org is refused with
+  - Attaching `stripe`, `azure-bound` or `internal` to a lab org is refused with
     `placement.lab.not-eligible`.
   - A lab plan with `Secret = true`, a `SecretReference`, a non-allowlisted
     configuration key, a managed-identity, key vault or secret store capability, or
@@ -483,7 +498,9 @@ the Console.
   - a lab org requesting Shared → refused with `placement.entitlement.missing` (row 3);
   - a paying org calling the labs endpoint → refused (`placement.lab.not-eligible`),
     because it can't hold a lab entitlement;
-  - a lab org through the labs flow → `shared-shard`, class `lab`.
+  - a lab org through the labs flow → `shared-shard`, class `lab`;
+  - a labs-flow instance with `Data-isolated`/`Private` or a customer-built image →
+    refused by row 2 (`isolation.profile.unavailable`), never row 1.
 - **Uniqueness and canonical form.**
   - A second `Active` assignment for one instance, or a duplicate non-`Retired`
     `(shardId, tenantId)`, is rejected by the database.
