@@ -292,8 +292,13 @@ and the `SH-*` gates pass.
     image (no customer-built image);
   - in its resolved plan (`ResolvedElsaApplicationPlan`):
     - no `Configuration.Entries` item has `Secret = true` or a `SecretReference`;
-    - every `Configuration.Entries` key is on the lab configuration allowlist, which
-      is deny by default;
+    - every `Configuration.Entries` item matches an entry on the lab configuration
+      allowlist, which is deny by default. Each allowlist entry pins the **key**, the
+      allowed **`JsonType`**, and a **value domain**: an enum, a bounded number range, or a
+      bounded-length string pattern. A URL or host value must be on the lab egress
+      allowlist. No allowlisted value may hold a connection string, credential, token or
+      a reference to customer storage. A key whose value fails its type or domain is
+      treated like a non-allowlisted key;
     - no `ProviderCapabilities` item requires a managed identity, key vault or secret
       store;
     - every `Capacity` storage item is lab storage that the lab shard provisions itself;
@@ -484,6 +489,9 @@ the Console.
   - A lab plan with `Secret = true`, a `SecretReference`, a non-allowlisted
     configuration key, a managed-identity, key vault or secret store capability, or
     plan-supplied storage is refused the same way.
+  - An allowlisted key with the wrong `JsonType`, or a value outside its domain (for example a
+    connection-string-shaped string, or a URL not on the lab egress allowlist), is
+    refused the same way.
   - A running lab instance whose plan update or reconcile fails the check is quiesced
     (scaled to zero, with no new executions) and audited, and it's never moved off the
     lab class.
