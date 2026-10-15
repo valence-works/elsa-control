@@ -14,6 +14,9 @@ EXACT_VALUE_QUERY = re.compile(
     r"(?: \| \[0\]\.(?:value|slotSetting)| \| length\(@\))?$"
 )
 NAMES_ONLY_FILTERED = re.compile(r"^\[\?.+\](?:\.name| \| length\(@\))$")
+HELPER_QUERY_VALUES = {"$query", '"$query"', "'$query'"}
+HELPER_QUERY_PATH_SUFFIX = ("scripts", "lib", "hosted-appsettings.sh")
+BASH_PARAMETER = re.compile(r"\$\{[^}]*\}")
 QUERY_ARGUMENT = re.compile(
     r"""--query\s+('(?:\\'|[^'])*'|"(?:\\"|[^"])*"|\S+)""",
 )
@@ -51,14 +54,18 @@ def resolve_setting_name(requested: str, names: Iterable[str]) -> str | None:
     return next(iter(matches))
 
 
-def classify_appsettings_list_query(query: str | None) -> str:
+def _helper_query_allowed(path: Path | None) -> bool:
+    return path is not None and path.parts[-3:] == HELPER_QUERY_PATH_SUFFIX
+
+
+def classify_appsettings_list_query(query: str | None, *, path: Path | None = None) -> str:
     """Return ``names``, ``exact-value``, ``helper``, or ``unsafe``."""
 
     if query is None:
         return "unsafe"
     raw = query.strip()
-    if raw in {"$query", '"$query"', "'$query'"}:
-        return "helper"
+    if raw in HELPER_QUERY_VALUES:
+        return "helper" if _helper_query_allowed(path) else "unsafe"
     if raw.startswith("f'") or raw.startswith('f"'):
         raw = raw[1:]
     text = raw.strip("'\"")
@@ -69,7 +76,12 @@ def classify_appsettings_list_query(query: str | None) -> str:
         return "names"
     if EXACT_VALUE_QUERY.fullmatch(text):
         return "exact-value"
-    if ".value" in text:
+    without_expansions = BASH_PARAMETER.sub("", text)
+    if re.search(r"\bvalue\b", without_expansions) or "{" in without_expansions:
+        return "unsafe"
+    if without_expansions.count(" | ") > 1:
+        return "unsafe"
+    if without_expansions.count(" | ") == 1 and not without_expansions.endswith(" | length(@)"):
         return "unsafe"
     if NAMES_ONLY_FILTERED.fullmatch(text):
         return "names"
@@ -80,10 +92,44 @@ def _collapse_continuations(text: str) -> str:
     return re.sub(r"\\\n", " ", text)
 
 
+def _shell_command_window(text: str, start: int) -> str:
+    """Return the listing command starting at ``start``, not the next command.
+
+    Continuations are already collapsed. The window ends at the first newline,
+    ``;``, ``&&``, ``||``, or ``|`` outside quotes.
+    """
+
+    quote = None
+    index = start
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if quote is not None:
+            if char == "\\" and index + 1 < length:
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if char in {";", "\n"}:
+            break
+        if char == "&" and index + 1 < length and text[index + 1] == "&":
+            break
+        if char == "|":
+            break
+        index += 1
+    return text[start:index]
+
+
 def iter_shell_listing_queries(text: str) -> Iterator[str | None]:
     collapsed = _collapse_continuations(text)
     for match in LISTING_COMMAND.finditer(collapsed):
-        window = collapsed[match.end() : match.end() + 800]
+        window = _shell_command_window(collapsed, match.end())
         found = QUERY_ARGUMENT.search(window)
         if found is None:
             yield None
@@ -128,5 +174,7 @@ def scan_operator_listings(root: Path) -> list[tuple[Path, str | None, str]]:
             if path.name.endswith(".py") and path.parent.name == "tests" and path.name.startswith("test_"):
                 continue
             for listing_path, query in iter_listing_queries(path):
-                findings.append((listing_path, query, classify_appsettings_list_query(query)))
+                findings.append(
+                    (listing_path, query, classify_appsettings_list_query(query, path=listing_path))
+                )
     return findings

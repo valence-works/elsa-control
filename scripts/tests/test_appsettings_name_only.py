@@ -21,6 +21,7 @@ for path in (str(SCRIPTS), str(LIB)):
 
 from hosted_appsettings import (  # noqa: E402
     classify_appsettings_list_query,
+    iter_shell_listing_queries,
     require_exact_setting_name,
     resolve_setting_name,
     scan_operator_listings,
@@ -321,6 +322,54 @@ class AppSettingsNameOnlyScanTests(unittest.TestCase):
                 "[?name=='Billing__Stripe__Enabled' || name=='Billing__Lifecycle__Enabled'].name"
             ),
         )
+        self.assertEqual(
+            "unsafe",
+            classify_appsettings_list_query(
+                "[?name!=''] | [].{name: value} | [?name!=''].name"
+            ),
+        )
+        self.assertEqual(
+            "unsafe",
+            classify_appsettings_list_query("[?starts_with(value,'x')].name"),
+        )
+        helper = ROOT / "scripts" / "lib" / "hosted-appsettings.sh"
+        self.assertEqual(
+            "helper",
+            classify_appsettings_list_query('"$query"', path=helper),
+        )
+        self.assertEqual("unsafe", classify_appsettings_list_query('"$query"'))
+        self.assertEqual(
+            "unsafe",
+            classify_appsettings_list_query(
+                '"$query"',
+                path=ROOT / "scripts" / "apply-external-engine-pairing-settings.sh",
+            ),
+        )
+        self.assertEqual(
+            [None],
+            list(
+                iter_shell_listing_queries(
+                    "az webapp config appsettings list --resource-group rg --name app --output json\n"
+                    'az webapp list --query "[].name" --output tsv\n'
+                )
+            ),
+        )
+        self.assertEqual(
+            [None],
+            list(
+                iter_shell_listing_queries(
+                    "az webapp config appsettings list --resource-group rg --name app --output json && "
+                    'az webapp list --query "[].name"\n'
+                )
+            ),
+        )
+        continued = list(
+            iter_shell_listing_queries(
+                'az webapp config appsettings list \\\n  --query "[].name" && echo ok\n'
+            )
+        )
+        self.assertEqual(1, len(continued))
+        self.assertEqual("names", classify_appsettings_list_query(continued[0]))
         self.assertEqual("Billing__Stripe__Enabled", resolve_setting_name(
             "billing__stripe__enabled",
             ["Billing__Stripe__Enabled", "Billing__Stripe__SecretKey"],
