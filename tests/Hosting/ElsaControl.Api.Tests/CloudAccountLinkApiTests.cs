@@ -422,6 +422,33 @@ public sealed class CloudAccountLinkApiTests
     }
 
     [Fact]
+    public async Task Hub_account_with_extra_workspace_memberships_returns_has_state()
+    {
+        await using var app = CreateApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var cloud = CreateCloudClient(app, CloudSubject);
+        using var hub = CreateHubClient(app, HubSubject);
+        await BootstrapAsync(cloud);
+        var hubOwned = await BootstrapAsync(hub);
+        await SeedExtraWorkspaceMembershipAsync(app, hubOwned);
+        using var linker = CreateLinkClient(app, HubIssuer, HubSubject, CloudIssuer, CloudSubject);
+
+        using var conflict = await linker.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
+
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        await AssertProblemAsync(conflict, CloudAccountLinkEndpoints.HubAccountHasStateCode);
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var hubAccountId = await db.OrganizationMemberships
+            .Where(membership => membership.OrganizationId == hubOwned.OrganizationId)
+            .Select(membership => membership.AccountId)
+            .SingleAsync();
+        Assert.Empty(await db.AccountIdentityLinkAuditRecords.ToListAsync());
+        Assert.Equal(2, await db.Accounts.CountAsync());
+        Assert.Equal(hubAccountId, (await db.ExternalIdentities.SingleAsync(identity => identity.Subject == HubSubject)).AccountId);
+    }
+
+    [Fact]
     public async Task Hub_account_with_other_org_memberships_returns_has_state()
     {
         await using var app = CreateApplication();
@@ -549,6 +576,32 @@ public sealed class CloudAccountLinkApiTests
         var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
         Assert.DoesNotContain(await db.ExternalIdentities.ToListAsync(), identity => identity.Kind == ExternalIdentityKinds.Hub);
         Assert.Empty(await db.AccountIdentityLinkAuditRecords.ToListAsync());
+    }
+
+    private static async Task SeedExtraWorkspaceMembershipAsync(
+        ControlApiTestApplication app,
+        CloudBootstrapResponse owned)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var accountId = await db.OrganizationMemberships
+            .Where(membership => membership.OrganizationId == owned.OrganizationId)
+            .Select(membership => membership.AccountId)
+            .SingleAsync();
+        var workspace = new ElsaControl.PackageCatalog.Core.Accounts.Workspace
+        {
+            OrganizationId = owned.OrganizationId,
+            Name = "extra-workspace",
+            Kind = WorkspaceKind.Shared
+        };
+        db.Workspaces.Add(workspace);
+        db.WorkspaceMemberships.Add(new WorkspaceMembership
+        {
+            AccountId = accountId,
+            Workspace = workspace,
+            Role = WorkspaceRole.Owner
+        });
+        await db.SaveChangesAsync();
     }
 
     private static async Task SeedExtraOrganizationMembershipAsync(

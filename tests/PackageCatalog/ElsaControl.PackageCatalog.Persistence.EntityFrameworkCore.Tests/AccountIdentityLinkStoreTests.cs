@@ -122,7 +122,7 @@ public sealed class AccountIdentityLinkStoreTests
         await using var db = await CreateDatabaseAsync();
         var cloud = await SeedAccountAsync(db, CloudIssuer, "cloud-user");
         var hub = await SeedAccountAsync(db, HubIssuer, "hub-user", ExternalIdentityKinds.Hub);
-        await SeedExternalEngineConnectionAsync(db, hub);
+        await SeedExternalEngineConnectionAsync(db, hub, ExternalEngineConnectionStatus.Connected);
         var store = new AccountIdentityLinkStore(db);
 
         var result = await store.LinkAsync(CloudIdentity("cloud-user"), HubIdentity("hub-user"));
@@ -132,6 +132,41 @@ public sealed class AccountIdentityLinkStoreTests
         Assert.Equal(hub.Id, (await db.ExternalIdentities.SingleAsync(x => x.Subject == "hub-user")).AccountId);
         Assert.DoesNotContain(await db.ExternalIdentities.ToListAsync(), identity =>
             identity.AccountId == cloud.Id && identity.Kind == ExternalIdentityKinds.Hub);
+    }
+
+    [Fact]
+    public async Task Hub_account_with_extra_workspace_memberships_is_refused_and_is_not_migrated()
+    {
+        await using var db = await CreateDatabaseAsync();
+        var cloud = await SeedAccountAsync(db, CloudIssuer, "cloud-user");
+        var hub = await SeedAccountAsync(db, HubIssuer, "hub-user", ExternalIdentityKinds.Hub);
+        await SeedExtraWorkspaceMembershipAsync(db, hub);
+        var store = new AccountIdentityLinkStore(db);
+
+        var result = await store.LinkAsync(CloudIdentity("cloud-user"), HubIdentity("hub-user"));
+
+        Assert.Equal(AccountIdentityLinkOutcome.HubAccountHasState, result.Outcome);
+        Assert.Empty(await db.AccountIdentityLinkAuditRecords.ToListAsync());
+        Assert.Equal(hub.Id, (await db.ExternalIdentities.SingleAsync(x => x.Subject == "hub-user")).AccountId);
+        Assert.DoesNotContain(await db.ExternalIdentities.ToListAsync(), identity =>
+            identity.AccountId == cloud.Id && identity.Kind == ExternalIdentityKinds.Hub);
+    }
+
+    [Fact]
+    public async Task Hub_account_with_a_revoked_external_engine_connection_still_moves()
+    {
+        await using var db = await CreateDatabaseAsync();
+        var cloud = await SeedAccountAsync(db, CloudIssuer, "cloud-user");
+        var hub = await SeedAccountAsync(db, HubIssuer, "hub-user", ExternalIdentityKinds.Hub);
+        await SeedExternalEngineConnectionAsync(db, hub, ExternalEngineConnectionStatus.Revoked);
+        var store = new AccountIdentityLinkStore(db);
+
+        var result = await store.LinkAsync(CloudIdentity("cloud-user"), HubIdentity("hub-user"));
+
+        Assert.Equal(AccountIdentityLinkOutcome.Linked, result.Outcome);
+        Assert.Equal(cloud.Id, (await db.ExternalIdentities.SingleAsync(x => x.Subject == "hub-user")).AccountId);
+        var audit = Assert.Single(await db.AccountIdentityLinkAuditRecords.ToListAsync());
+        Assert.Equal(hub.Id, audit.SourceAccountId);
     }
 
     [Fact]
@@ -358,6 +393,29 @@ public sealed class AccountIdentityLinkStoreTests
         db.ChangeTracker.Clear();
     }
 
+    private static async Task SeedExtraWorkspaceMembershipAsync(CatalogDbContext db, Account account)
+    {
+        var organizationId = await db.OrganizationMemberships
+            .Where(membership => membership.AccountId == account.Id)
+            .Select(membership => membership.OrganizationId)
+            .SingleAsync();
+        var workspace = new Workspace
+        {
+            OrganizationId = organizationId,
+            Name = "extra-workspace",
+            Kind = WorkspaceKind.Shared
+        };
+        db.Workspaces.Add(workspace);
+        db.WorkspaceMemberships.Add(new WorkspaceMembership
+        {
+            AccountId = account.Id,
+            Workspace = workspace,
+            Role = WorkspaceRole.Owner
+        });
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+    }
+
     private static async Task SeedExtraOrganizationMembershipAsync(CatalogDbContext db, Account account)
     {
         var organization = new Organization { Name = "extra-org", CreatedByAccountId = account.Id };
@@ -372,7 +430,10 @@ public sealed class AccountIdentityLinkStoreTests
         db.ChangeTracker.Clear();
     }
 
-    private static async Task SeedExternalEngineConnectionAsync(CatalogDbContext db, Account account)
+    private static async Task SeedExternalEngineConnectionAsync(
+        CatalogDbContext db,
+        Account account,
+        ExternalEngineConnectionStatus status)
     {
         var membership = await db.WorkspaceMemberships.AsNoTracking().SingleAsync(x => x.AccountId == account.Id);
         var organizationId = await db.Workspaces.Where(x => x.Id == membership.WorkspaceId).Select(x => x.OrganizationId).SingleAsync();
@@ -384,7 +445,7 @@ public sealed class AccountIdentityLinkStoreTests
             WorkspaceId = membership.WorkspaceId,
             DisplayName = "Hub connection",
             OwnershipMode = ExternalEngineConnection.OwnershipMode,
-            Status = ExternalEngineConnectionStatus.Connected.ToString(),
+            Status = status.ToString(),
             RuntimeHealth = ExternalEngineRuntimeHealth.Unknown.ToString(),
             ConnectorReachability = ExternalEngineConnectorReachability.Unknown.ToString(),
             ReleaseEvidenceLevel = ExternalEngineReleaseEvidenceLevel.None.ToString(),
@@ -393,6 +454,7 @@ public sealed class AccountIdentityLinkStoreTests
             CreateRequestDigest = "digest",
             CreatedAt = now,
             UpdatedAt = now,
+            RevokedAt = status == ExternalEngineConnectionStatus.Revoked ? now : null,
             Version = 1
         });
         await db.SaveChangesAsync();

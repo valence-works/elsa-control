@@ -303,6 +303,11 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
 
     private async Task<bool> AccountHasBlockingStateAsync(Guid accountId, CancellationToken cancellationToken)
     {
+        if (await dbContext.WorkspaceMemberships.CountAsync(
+                membership => membership.AccountId == accountId,
+                cancellationToken) > 1)
+            return true;
+
         var memberships = dbContext.OrganizationMemberships.Where(membership => membership.AccountId == accountId);
         if (await memberships.CountAsync(cancellationToken) > 1)
             return true;

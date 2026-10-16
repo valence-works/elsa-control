@@ -56,7 +56,7 @@ public static class CloudAccountLinkEndpoints
                 AccountIdentityLinkOutcome.HubAccountHasState =>
                     Problem(
                         HubAccountHasStateCode,
-                        "The Hub identity already belongs to a Control account that has organization or subscription state.",
+                        "The Hub identity already belongs to a Control account that has organization, workspace, or subscription state.",
                         StatusCodes.Status409Conflict),
                 _ => Problem(
                     AccountAlreadyLinkedCode,
