@@ -13,20 +13,26 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
     {
         var cloud = cloudIdentity.Normalize();
         var hub = hubIdentity.Normalize();
+        var auditId = Guid.Empty;
         return dbContext.ExecuteInTransactionAsync(
             IsolationLevel.Serializable,
-            () => LinkCoreAsync(cloud, hub, cancellationToken),
+            () => LinkCoreAsync(cloud, hub, id => auditId = id, cancellationToken),
+            (result, token) => VerifyLinkAsync(hub, result, auditId, token),
             cancellationToken);
     }
 
     public Task<AccountIdentityUnlinkResult> UnlinkAsync(
         Guid accountId,
         string? operatorSubject,
-        CancellationToken cancellationToken = default) =>
-        dbContext.ExecuteInTransactionAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var auditId = Guid.Empty;
+        return dbContext.ExecuteInTransactionAsync(
             IsolationLevel.Serializable,
-            () => UnlinkCoreAsync(accountId, operatorSubject, cancellationToken),
+            () => UnlinkCoreAsync(accountId, operatorSubject, id => auditId = id, cancellationToken),
+            (result, token) => VerifyUnlinkAsync(accountId, result, auditId, token),
             cancellationToken);
+    }
 
     public async Task<AccountIdentityLinkStatus> GetStatusAsync(
         Guid accountId,
@@ -49,6 +55,7 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
     private async Task<AccountIdentityLinkResult> LinkCoreAsync(
         TrustedWorkspaceIdentity cloud,
         TrustedWorkspaceIdentity hub,
+        Action<Guid> auditIdSink,
         CancellationToken cancellationToken)
     {
         var cloudLookup = await FindIdentityAsync(cloud.Issuer, cloud.Subject, cancellationToken);
@@ -94,20 +101,23 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
             });
         }
 
-        dbContext.AccountIdentityLinkAuditRecords.Add(new AccountIdentityLinkAuditRecord
+        var audit = new AccountIdentityLinkAuditRecord
         {
             AccountId = cloudAccountId,
             SourceAccountId = sourceAccountId,
             ActorAccountId = cloudAccountId,
             Action = AccountIdentityLinkAction.Linked
-        });
+        };
+        dbContext.AccountIdentityLinkAuditRecords.Add(audit);
         await dbContext.SaveChangesAsync(cancellationToken);
+        auditIdSink(audit.Id);
         return AccountIdentityLinkResult.Success(AccountIdentityLinkOutcome.Linked, cloudAccountId);
     }
 
     private async Task<AccountIdentityUnlinkResult> UnlinkCoreAsync(
         Guid accountId,
         string? operatorSubject,
+        Action<Guid> auditIdSink,
         CancellationToken cancellationToken)
     {
         var identities = await dbContext.ExternalIdentities
@@ -117,16 +127,71 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
             return AccountIdentityUnlinkResult.Missing(accountId);
 
         dbContext.ExternalIdentities.RemoveRange(identities);
-        dbContext.AccountIdentityLinkAuditRecords.Add(new AccountIdentityLinkAuditRecord
+        var audit = new AccountIdentityLinkAuditRecord
         {
             AccountId = accountId,
             ActorAccountId = accountId,
             OperatorSubject = operatorSubject,
             Action = AccountIdentityLinkAction.Unlinked
-        });
+        };
+        dbContext.AccountIdentityLinkAuditRecords.Add(audit);
         await dbContext.SaveChangesAsync(cancellationToken);
+        auditIdSink(audit.Id);
         return AccountIdentityUnlinkResult.Success(accountId);
     }
+
+    private async Task<bool> VerifyLinkAsync(
+        TrustedWorkspaceIdentity hub,
+        AccountIdentityLinkResult result,
+        Guid auditId,
+        CancellationToken cancellationToken)
+    {
+        if (result.Outcome == AccountIdentityLinkOutcome.AlreadyLinked)
+            return result.AccountId is { } alreadyLinkedAccountId &&
+                   await HubLinkedToAccountAsync(hub, alreadyLinkedAccountId, cancellationToken);
+
+        if (result.Outcome != AccountIdentityLinkOutcome.Linked || result.AccountId is not { } accountId)
+            return true;
+
+        return auditId != Guid.Empty &&
+               await dbContext.AccountIdentityLinkAuditRecords.AsNoTracking().AnyAsync(
+                   record => record.Id == auditId &&
+                             record.AccountId == accountId &&
+                             record.Action == AccountIdentityLinkAction.Linked,
+                   cancellationToken) &&
+               await HubLinkedToAccountAsync(hub, accountId, cancellationToken);
+    }
+
+    private async Task<bool> VerifyUnlinkAsync(
+        Guid accountId,
+        AccountIdentityUnlinkResult result,
+        Guid auditId,
+        CancellationToken cancellationToken)
+    {
+        if (result.Outcome != AccountIdentityUnlinkOutcome.Unlinked)
+            return true;
+
+        return auditId != Guid.Empty &&
+               await dbContext.AccountIdentityLinkAuditRecords.AsNoTracking().AnyAsync(
+                   record => record.Id == auditId &&
+                             record.AccountId == accountId &&
+                             record.Action == AccountIdentityLinkAction.Unlinked,
+                   cancellationToken) &&
+               !await dbContext.ExternalIdentities.AsNoTracking().AnyAsync(
+                   identity => identity.AccountId == accountId && identity.Kind == ExternalIdentityKinds.Hub,
+                   cancellationToken);
+    }
+
+    private Task<bool> HubLinkedToAccountAsync(
+        TrustedWorkspaceIdentity hub,
+        Guid accountId,
+        CancellationToken cancellationToken) =>
+        dbContext.ExternalIdentities.AsNoTracking().AnyAsync(
+            identity => identity.AccountId == accountId &&
+                        identity.Kind == ExternalIdentityKinds.Hub &&
+                        identity.Issuer == hub.Issuer &&
+                        identity.Subject == hub.Subject,
+            cancellationToken);
 
     private Task<ExternalIdentity?> FindIdentityAsync(string issuer, string subject, CancellationToken cancellationToken) =>
         dbContext.ExternalIdentities.SingleOrDefaultAsync(
