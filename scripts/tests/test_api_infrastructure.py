@@ -617,6 +617,9 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("basicPublishingCredentialsPolicies", documentation)
         self.assertIn("existing classic `DOCKER` deployment mode", documentation)
         self.assertIn("Do not convert it to `SITECONTAINERS`", documentation)
+        self.assertIn("API_KEY_VAULT_SECRETS_WRITTEN", documentation)
+        self.assertIn("az keyvault recover", documentation)
+        self.assertIn("--settings \"@$HOME/.elsa-control-rollback-settings.json\"", documentation)
 
     def test_regeneration_patch_reconstructs_generated_module_idempotently(self) -> None:
         module = API_MODULE.read_text()

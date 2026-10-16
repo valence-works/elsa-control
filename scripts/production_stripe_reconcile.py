@@ -55,8 +55,6 @@ PRODUCTION_PREFIX = "Billing__Stripe__"
 PRODUCTION_PRESERVED_SETTINGS = frozenset(
     {
         "Billing__Stripe__Enabled",
-        "Billing__Stripe__SecretKey",
-        "Billing__Stripe__WebhookSigningSecret",
         "Billing__Stripe__DefaultPriceId",
         "Billing__Stripe__CheckoutSuccessUrl",
         "Billing__Stripe__CheckoutCancelUrl",
@@ -68,6 +66,8 @@ PRODUCTION_AUDIT_SETTINGS = frozenset(
     {
         *PRODUCTION_PRESERVED_SETTINGS,
         "Billing__Stripe__ExpectedMode",
+        "Billing__Stripe__SecretKey",
+        "Billing__Stripe__WebhookSigningSecret",
     }
 )
 PRICE_ID_PATTERN = re.compile(r"^price_[A-Za-z0-9]+$")
@@ -308,9 +308,6 @@ def validate_preserved_production_mode(settings: Mapping[str, AzureAppSetting]) 
 
     if settings["Billing__Stripe__Enabled"].value.strip().lower() != "true":
         return
-    for name, setting in settings.items():
-        if name in SECRET_APP_SETTING_NAMES and not is_key_vault_reference(setting.value):
-            raise ReconciliationError(f"azure-setting: {name} must be a Key Vault reference")
     expected_mode = settings.get("Billing__Stripe__ExpectedMode")
     if expected_mode is not None and expected_mode.value.strip().lower() not in {"live", "production"}:
         raise ReconciliationError("Production Stripe capture has an unexpected expected mode")
@@ -321,6 +318,8 @@ def write_capture(settings: Mapping[str, AzureAppSetting], destination: Path) ->
         raise ReconciliationError("Production Stripe capture destination must be a new file")
     if not destination.parent.is_dir():
         raise ReconciliationError("Production Stripe capture destination directory does not exist")
+    if set(settings).intersection(SECRET_APP_SETTING_NAMES):
+        raise ReconciliationError("Production Stripe capture refuses secret App Service settings")
     if not PRODUCTION_PRESERVED_SETTINGS.issubset(settings):
         raise ReconciliationError("Production Stripe settings are incomplete; refusing an unprotected deployment")
     validate_preserved_production_mode(settings)
@@ -358,6 +357,8 @@ def read_capture(source: Path) -> dict[str, AzureAppSetting]:
         if not isinstance(value, str) or not isinstance(slot_setting, bool):
             raise ReconciliationError("Production Stripe capture is invalid")
         settings[name] = AzureAppSetting(value, slot_setting)
+    if set(settings).intersection(SECRET_APP_SETTING_NAMES):
+        raise ReconciliationError("Production Stripe capture refuses secret App Service settings")
     if not PRODUCTION_PRESERVED_SETTINGS.issubset(settings):
         raise ReconciliationError("Production Stripe capture is incomplete")
     validate_preserved_production_mode(settings)
@@ -379,9 +380,15 @@ class ProductionStripeReconciler:
 
     def capture(self) -> dict[str, AzureAppSetting]:
         listed = self._azure.list_names()
-        wanted = [name for name in listed if name.startswith(PRODUCTION_PREFIX)]
+        wanted = [
+            name
+            for name in listed
+            if name.startswith(PRODUCTION_PREFIX) and name not in SECRET_APP_SETTING_NAMES
+        ]
         records = self._azure.app_setting_records(wanted)
         settings = {name: setting for name, setting in records.items() if name.startswith(PRODUCTION_PREFIX)}
+        if set(settings).intersection(SECRET_APP_SETTING_NAMES):
+            raise ReconciliationError("Production Stripe capture refuses secret App Service settings")
         if not PRODUCTION_PRESERVED_SETTINGS.issubset(settings):
             raise ReconciliationError("Production Stripe settings are incomplete; refusing an unprotected deployment")
         validate_preserved_production_mode(settings)
@@ -389,6 +396,8 @@ class ProductionStripeReconciler:
 
     def reapply(self, settings: Mapping[str, AzureAppSetting]) -> tuple[str, ...]:
         names = set(settings)
+        if names.intersection(SECRET_APP_SETTING_NAMES):
+            raise ReconciliationError("Production Stripe reapply refuses secret App Service settings")
         if not PRODUCTION_PRESERVED_SETTINGS.issubset(names):
             raise ReconciliationError("Production Stripe settings are incomplete; refusing a partial replacement")
         validate_preserved_production_mode(settings)

@@ -12,16 +12,17 @@ This directory is hand-maintained. `dev/regenerate-infra.sh` preserves it.
 | --- | --- |
 | Key Vault (RBAC, soft delete, purge protection) | Secret store. This module never writes secret values. |
 | Key Vault Secrets User on the API identity | Runtime resolution of App Service Key Vault references. |
-| Key Vault Secrets User on the deploy identity | Read-only. CI may list secret **names** and reference status. It never writes a secret value. |
+| Key Vault Secrets User on the deploy identity | Includes `secrets/getSecret`. Nothing in this repo reads values as that identity; `scripts/check-key-vault-references.sh` uses the ARM `configreferences` endpoint (`Microsoft.Web/sites/config/read`) and prints names and status only. |
 
 No other identity receives a data-plane role. An operator writes each secret
-value after the vault exists.
+value after the vault exists. CI never writes a secret value.
 
 A private endpoint is out of scope (#839). Network access is the vault
-firewall: default deny, the API egress subnet, the operator write-path CIDRs,
-and optional API outbound NAT CIDRs. App Service Key Vault references are
-platform configuration traffic, not application egress, so the vault also
-bypasses trusted Azure services for resolution.
+firewall: default deny, bypass none, the API egress subnet (which must expose
+the `Microsoft.KeyVault` service endpoint), the operator write-path CIDRs,
+and optional API outbound NAT CIDRs. Trusted-services bypass does not cover
+App Service Key Vault reference resolution. The site reaches this vault
+through VNet integration and that subnet service endpoint.
 
 ## Secret names
 
@@ -39,17 +40,36 @@ bypasses trusted Azure services for resolution.
 `Authentication__ControlIdentity__ClientSecret` stays a client secret in this
 vault. Switching that identity to a federated credential is #838.
 
+## Who applies this module
+
+`infra/control-deploy-identity` grants the GitHub deploy identity Reader,
+Website Contributor on the API site, and AcrPush. That is not enough to
+create the vault or its role assignments. The identity that runs
+`scripts/deploy-azure-elsa-control.sh --vault-only` needs, on the Control
+resource group:
+
+- permission to create and update `Microsoft.KeyVault/vaults`
+- `Microsoft.Authorization/roleAssignments/write`, scoped as narrowly as
+  possible (for example Role Based Access Control Administrator with a
+  condition limited to Key Vault Secrets User)
+
+The operator may apply this module with a privileged identity, then leave
+later site deploys to the GitHub deploy identity.
+
 ## Operator write path
 
-1. Deploy this module (the Azure Control API Deploy `infra` path does that
-   before it applies the API site).
-2. If your client is not already on `operatorWriteIpCidrs`, add one IPv4 CIDR
+1. Apply `infra/control-egress` so `snet-api-egress` has the Key Vault
+   service endpoint. Record `AZURE_API_EGRESS_SUBNET_ID`.
+2. Deploy this module with
+   `scripts/deploy-azure-elsa-control.sh --vault-only`. Do not apply the
+   site yet.
+3. If your client is not already on `operatorWriteIpCidrs`, add one IPv4 CIDR
    through the management plane (`az keyvault network-rule add`). That does
    not require data-plane access.
-3. Grant yourself a temporary Key Vault Secrets Officer assignment scoped to
+4. Grant yourself a temporary Key Vault Secrets Officer assignment scoped to
    this vault, or use an existing privileged operator identity. Do not grant
    CI a write role.
-4. Write each secret by name. Do not print the value.
+5. Write each secret by name. Do not print the value.
 
 ```bash
 az keyvault secret set \
@@ -59,9 +79,24 @@ az keyvault secret set \
   --output none
 ```
 
-5. Remove the temporary write role.
-6. Confirm every listed reference reports `Resolved` with
+6. Remove the temporary write role.
+7. Set `API_KEY_VAULT_SECRETS_WRITTEN=true` in the GitHub environment, then
+   apply the site. Confirm every listed reference reports `Resolved` with
    `scripts/check-key-vault-references.sh` (names and status only).
+
+## Purge protection
+
+Purge protection cannot be turned off. The vault name is
+`ecapikv` plus `uniqueString(resourceGroup().id)`, so it is fixed per
+resource group. Deleting and recreating the resource group (`test`
+teardown) keeps that name reserved for 90 days. Recover it before
+redeploying:
+
+```bash
+az keyvault recover --name "<vault-name>" --resource-group "<rg>" --output none
+```
+
+A held name blocks a new vault until recovery or the retention period ends.
 
 ## Rotation
 
@@ -84,6 +119,6 @@ az webapp restart --resource-group "<rg>" --name "<webapp>"
 | --- | --- |
 | `apiIdentityPrincipalId` | API identity principal. Required. |
 | `deployIdentityPrincipalId` | Deploy identity principal. Required. |
-| `apiEgressSubnetId` | `AZURE_API_EGRESS_SUBNET_ID` when the site is attached. |
+| `apiEgressSubnetId` | `AZURE_API_EGRESS_SUBNET_ID`. Required. |
 | `operatorWriteIpCidrs` | Operator write-path CIDRs (`KEY_VAULT_OPERATOR_WRITE_IP_CIDRS`). |
 | `apiOutboundIpCidrs` | Optional NAT `/32` CIDRs (`KEY_VAULT_API_OUTBOUND_IP_CIDRS`). |

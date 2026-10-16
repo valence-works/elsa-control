@@ -442,14 +442,19 @@ cutover; see [API Key Vault](#api-key-vault)):
 The Control API site stores secret settings as versionless Key Vault
 references. `keyVaultReferenceIdentity` stays the API user-assigned identity.
 `infra/api-key-vault/` provisions one vault per environment (RBAC, soft
-delete, purge protection). The vault firewall allows the API egress subnet
-and the operator write-path CIDRs. A private endpoint is #839.
+delete, purge protection). The vault firewall default-denies public access
+and does not bypass trusted Azure services. The site reaches the vault
+through VNet integration and the `Microsoft.KeyVault` service endpoint on
+`snet-api-egress` (`AZURE_API_EGRESS_SUBNET_ID` is required). Operator
+write-path CIDRs are optional extras. A private endpoint is #839.
 
 Role assignments on that vault are exactly Key Vault Secrets User for the API
-identity and Key Vault Secrets User (read only) for the deploy identity. No
-other identity gets a data-plane role. CI never writes a secret value to Key
-Vault or to App Service. An operator writes each secret after the vault
-exists.
+identity and Key Vault Secrets User for the deploy identity. Key Vault
+Secrets User includes `secrets/getSecret`. Nothing in this repo reads values
+as the deploy identity; the check script uses the ARM `configreferences`
+endpoint. No other identity gets a data-plane role. CI never writes a secret
+value to Key Vault or to App Service. An operator writes each secret after
+the vault exists.
 
 | App setting | Vault secret name |
 | --- | --- |
@@ -462,27 +467,43 @@ exists.
 | `Billing__Stripe__WebhookSources__1__SigningSecret` | `Billing-Stripe-WebhookSources-hub-SigningSecret` |
 | `ManagedElsa__Handoff__ActivePrivateKeyPem` | `ManagedElsa-Handoff-ActivePrivateKeyPem` |
 
+Required deploy inputs for vault and site apply:
+
+- `AZURE_API_EGRESS_SUBNET_ID`: egress subnet with the Key Vault service
+  endpoint. Empty refuses the vault and the site.
+- `AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID`: deploy identity principal. Required.
+  The helper does not resolve it through Microsoft Graph.
+- `API_KEY_VAULT_SECRETS_WRITTEN`: must be `true` before the site is applied.
+
 Optional deploy inputs:
 
 - `KEY_VAULT_OPERATOR_WRITE_IP_CIDRS`: comma-separated IPv4 CIDRs for the
   operator write path.
 - `KEY_VAULT_API_OUTBOUND_IP_CIDRS`: optional NAT `/32` CIDRs.
-- `AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID`: deploy identity principal. When empty,
-  the helper resolves it from `AZURE_CLIENT_ID`.
+
+The GitHub deploy identity in `infra/control-deploy-identity` cannot create
+the vault or its role assignments. Apply the vault with
+`scripts/deploy-azure-elsa-control.sh --vault-only` using an identity that
+can write Key Vaults and `Microsoft.Authorization/roleAssignments` (scoped
+as narrowly as possible, for example RBAC Administrator conditioned to Key
+Vault Secrets User). Later site deploys can use the GitHub deploy identity.
 
 SCM and FTP basic-auth publishing credentials are off
 (`basicPublishingCredentialsPolicies` `scm` and `ftp`, `allow: false`).
 
 ### Operator write path
 
-1. Deploy infrastructure so the vault exists.
-2. If needed, add your client CIDR with `az keyvault network-rule add`
+1. Apply `infra/control-egress` so the Key Vault service endpoint exists.
+2. Deploy the vault only:
+   `scripts/deploy-azure-elsa-control.sh --vault-only`.
+3. If needed, add your client CIDR with `az keyvault network-rule add`
    (management plane).
-3. Grant yourself a temporary Key Vault Secrets Officer assignment on that
+4. Grant yourself a temporary Key Vault Secrets Officer assignment on that
    vault only. Do not grant CI a write role.
-4. Write each secret by name from a private file. Do not print the value.
-5. Remove the temporary write role.
-6. Confirm every listed reference reports `Resolved` with
+5. Write each secret by name from a private file. Do not print the value.
+6. Remove the temporary write role.
+7. Set `API_KEY_VAULT_SECRETS_WRITTEN=true` in the GitHub environment, then
+   apply the site. Confirm every listed reference reports `Resolved` with
    `scripts/check-key-vault-references.sh` (names and status only).
 
 ### Rotation
@@ -491,19 +512,44 @@ Write a new version of the same secret name, then restart the API App Service
 so the versionless reference refreshes immediately. Without a restart, App
 Service can take up to 24 hours to pick up the new version.
 
+### Purge protection
+
+Purge protection cannot be turned off. The vault name is derived from
+`uniqueString(resourceGroup().id)` and is therefore fixed per resource
+group. Deleting and recreating a resource group (`test` teardown) reserves
+that name for 90 days. Recover it before redeploying:
+
+```bash
+az keyvault recover --name "<vault-name>" --resource-group "$AZURE_RESOURCE_GROUP" --output none
+```
+
 ### Rollback
 
-Set the plain App Service value again from the GitHub environment secret.
-Keep those rollback copies in the GitHub environment for 14 days after each
+Set the plain App Service value again from the GitHub environment secret
+through a private JSON file so values do not appear in argv. Keep those
+rollback copies in the GitHub environment for 14 days after each
 environment's cutover, then delete them.
+
+A manual rollback lasts only until the next `infra` deploy, which
+re-applies the Key Vault references. Pause `infra` deploys, or revert this
+change, until the rollback is resolved.
 
 Staging:
 
 ```bash
+python3 - <<'PY'
+import json, os
+from pathlib import Path
+payload = [{"name": "Authentication__ApiKey", "value": os.environ["ADMIN_API_KEY"], "slotSetting": False}]
+path = Path.home() / ".elsa-control-rollback-settings.json"
+path.write_text(json.dumps(payload) + "\n")
+path.chmod(0o600)
+print(path)
+PY
 az webapp config appsettings set \
   --resource-group "$AZURE_RESOURCE_GROUP" \
   --name "$AZURE_WEBAPP_NAME" \
-  --settings "Authentication__ApiKey=$ADMIN_API_KEY" \
+  --settings "@$HOME/.elsa-control-rollback-settings.json" \
   --output none
 ```
 
@@ -511,14 +557,28 @@ Repeat for `Authentication__ControlIdentity__ClientSecret`,
 `Authentication__BuilderClientApiKey`, `Billing__Stripe__SecretKey`,
 `Billing__Stripe__WebhookSigningSecret`, the per-source signing secrets, and
 `ManagedElsa__Handoff__ActivePrivateKeyPem` using the matching environment
-secret. Then restart the app.
+secret. The JSON file also handles the multi-line handoff PEM. Then restart
+the app and delete the private file.
 
-Production uses the same commands against the `production` GitHub
-environment and the production App Service. The Elsa Control Lead applies
-production through the normal deploy path, before
-`Authentication:HubAccount:Enabled` is turned on. After that cutover, the
-same name-and-status checks (`Resolved` references, SCM/FTP basic-auth off)
-must hold on production. No CI job writes a secret value.
+### Production apply
+
+The current production host stays in classic `DOCKER` deployment mode. Do
+not convert it to `SITECONTAINERS` by redeploying the full generated
+`api-website.module.bicep`. The Elsa Control Lead applies production as
+follows, before `Authentication:HubAccount:Enabled` is turned on:
+
+1. Apply `infra/control-egress` if the Key Vault service endpoint is missing.
+2. Apply `infra/api-key-vault` (`--vault-only`) with a privileged identity.
+3. Write the listed secrets.
+4. Set the listed App Service settings to the versionless
+   `@Microsoft.KeyVault(SecretUri=...)` references and turn off SCM/FTP
+   basic-auth publishing, without changing `linuxFxVersion`.
+5. Confirm names and status only with
+   `scripts/check-key-vault-references.sh`.
+
+Production Stripe `--capture` / `--reapply` exclude secret settings. The
+template (or the operator patch above) owns those names. No CI job writes a
+secret value.
 
 The host refuses to start when one of these settings still holds an
 unresolved `@Microsoft.KeyVault(...)` string.

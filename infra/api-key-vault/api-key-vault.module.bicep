@@ -1,6 +1,7 @@
 // One Control API Key Vault per environment. RBAC authorization, soft delete,
 // and purge protection. Network access is the vault firewall: the API egress
-// subnet plus the operator write-path CIDRs. A private endpoint is #839.
+// subnet (Microsoft.KeyVault service endpoint) plus the operator write-path
+// CIDRs. Trusted-services bypass is off. A private endpoint is #839.
 // Secret values are written by an operator, never by this module or by CI.
 targetScope = 'resourceGroup'
 
@@ -13,8 +14,9 @@ param apiIdentityPrincipalId string
 @description('Principal ID of the deploy identity. Receives Key Vault Secrets User (read only) on this vault only. It never writes secret values.')
 param deployIdentityPrincipalId string
 
-@description('Optional resource ID of the API egress subnet from infra/control-egress. Empty omits the virtual-network firewall rule.')
-param apiEgressSubnetId string = ''
+@description('Resource ID of the API egress subnet from infra/control-egress. Required so Key Vault references resolve through the subnet Microsoft.KeyVault service endpoint.')
+@minLength(1)
+param apiEgressSubnetId string
 
 @description('IPv4 CIDRs allowed to write secret values (operator write path). Management-plane updates can add a CIDR later if this starts empty.')
 param operatorWriteIpCidrs array = []
@@ -28,10 +30,10 @@ var keyVaultSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6'
 
 var vaultName = take('ecapikv${uniqueString(resourceGroup().id)}', 24)
 
-var subnetRules = empty(apiEgressSubnetId) ? [] : [
+var subnetRules = [
   {
     id: apiEgressSubnetId
-    ignoreMissingVnetServiceEndpoint: true
+    ignoreMissingVnetServiceEndpoint: false
   }
 ]
 
@@ -67,10 +69,10 @@ resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     softDeleteRetentionInDays: 90
     publicNetworkAccess: 'Enabled'
     networkAcls: {
-      // App Service Key Vault references are platform configuration traffic, not
-      // application egress, so AzureServices bypass is required for resolution.
-      // Application and operator data-plane access stay on the subnet and IP rules.
-      bypass: 'AzureServices'
+      // Trusted-services bypass does not cover App Service Key Vault reference
+      // resolution. The site reaches this vault through VNet integration and
+      // the Microsoft.KeyVault service endpoint on snet-api-egress.
+      bypass: 'None'
       defaultAction: 'Deny'
       virtualNetworkRules: subnetRules
       ipRules: ipRules

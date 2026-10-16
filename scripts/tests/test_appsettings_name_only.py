@@ -21,6 +21,7 @@ for path in (str(SCRIPTS), str(LIB)):
 
 from hosted_appsettings import (  # noqa: E402
     classify_appsettings_list_query,
+    is_configreferences_status_read,
     iter_backstop_findings,
     iter_python_listing_queries,
     iter_shell_listing_queries,
@@ -535,6 +536,23 @@ class AppSettingsNameOnlyScanTests(unittest.TestCase):
             )
         )
         self.assertEqual([], safe)
+
+    def test_configreferences_status_read_is_allowlisted_only_in_the_check_script(self) -> None:
+        command = (
+            'az rest --method get --uri "${id}/config/configreferences/appsettings'
+            '?api-version=2022-03-01" --output json --only-show-errors'
+        )
+        check_script = ROOT / "scripts" / "check-key-vault-references.sh"
+        self.assertTrue(
+            is_configreferences_status_read(command, path=check_script, root=ROOT)
+        )
+        self.assertEqual([], list(iter_backstop_findings(check_script, check_script.read_text(), ROOT)))
+        other = ROOT / "scripts" / "deploy-azure-elsa-control.sh"
+        self.assertFalse(is_configreferences_status_read(command, path=other, root=ROOT))
+        findings = list(iter_backstop_findings(Path("other.sh"), command + "\n", ROOT))
+        self.assertTrue(findings)
+        post = command.replace("--method get", "--method post")
+        self.assertFalse(is_configreferences_status_read(post, path=check_script, root=ROOT))
 
 
 class AppSettingsNameOnlyAzureWebAppTests(unittest.TestCase):

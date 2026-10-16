@@ -74,6 +74,10 @@ jobs:
       CONTROL_ENTRA_TENANT_ID: ${{ vars.CONTROL_ENTRA_TENANT_ID }}
       AZURE_PROVISIONER_IDENTITY_ID: ${{ vars.AZURE_PROVISIONER_IDENTITY_ID }}
       AZURE_API_EGRESS_SUBNET_ID: ${{ vars.AZURE_API_EGRESS_SUBNET_ID }}
+      AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID: ${{ vars.AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID }}
+      KEY_VAULT_OPERATOR_WRITE_IP_CIDRS: ${{ vars.KEY_VAULT_OPERATOR_WRITE_IP_CIDRS }}
+      KEY_VAULT_API_OUTBOUND_IP_CIDRS: ${{ vars.KEY_VAULT_API_OUTBOUND_IP_CIDRS }}
+      API_KEY_VAULT_SECRETS_WRITTEN: ${{ vars.API_KEY_VAULT_SECRETS_WRITTEN }}
       # Staging (`test`) only. Production must leave this unset. Org ids are not
       # secret; do not echo the list. The Hosted smoke owner org is minted with
       # Guid.NewGuid() on first Cloud sign-in, so its id is recorded on `test`
@@ -126,9 +130,6 @@ jobs:
       - name: Check deployment configuration
         id: deployment-config
         env:
-          ADMIN_API_KEY: ${{ env.DEPLOY_MODE == 'infra' && secrets.ADMIN_API_KEY || '' }}
-          BUILDER_CLIENT_API_KEY: ${{ env.DEPLOY_MODE == 'infra' && secrets.BUILDER_CLIENT_API_KEY || '' }}
-          CONTROL_ENTRA_CLIENT_SECRET: ${{ env.DEPLOY_MODE == 'infra' && secrets.CONTROL_ENTRA_CLIENT_SECRET || '' }}
           STRIPE_TEST_SECRET_KEY: ${{ env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' && secrets.STRIPE_TEST_SECRET_KEY || '' }}
           STRIPE_TEST_WEBHOOK_SIGNING_SECRET: ${{ env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' && secrets.STRIPE_TEST_WEBHOOK_SIGNING_SECRET || '' }}
           ELSA_CLOUD_STAGING_ORIGIN: ${{ env.TARGET_ENVIRONMENT == 'test' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' && vars.ELSA_CLOUD_STAGING_ORIGIN || '' }}
@@ -520,12 +521,16 @@ jobs:
 
           if [ "$DEPLOY_MODE" = "infra" ]; then
             required+=(
-              ADMIN_API_KEY
-              BUILDER_CLIENT_API_KEY
               CONTROL_ENTRA_CLIENT_ID
-              CONTROL_ENTRA_CLIENT_SECRET
               CONTROL_ENTRA_TENANT_ID
+              AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID
+              AZURE_API_EGRESS_SUBNET_ID
+              API_KEY_VAULT_SECRETS_WRITTEN
             )
+            if [ "${API_KEY_VAULT_SECRETS_WRITTEN:-}" != "true" ]; then
+              echo "::error::API_KEY_VAULT_SECRETS_WRITTEN must be true before the site is applied."
+              exit 1
+            fi
             if [ "$TARGET_ENVIRONMENT" = "test" ]; then
               required+=(AZURE_PROVISIONER_IDENTITY_ID)
             fi
@@ -1011,9 +1016,6 @@ jobs:
         env:
           VALIDATED_CANDIDATE_IMAGE: ${{ steps.candidate-authority.outputs.candidate_image }}
           VALIDATED_CANDIDATE_BUILD_NUMBER: ${{ steps.candidate-authority.outputs.candidate_build_number }}
-          ADMIN_API_KEY: ${{ env.DEPLOY_MODE == 'infra' && secrets.ADMIN_API_KEY || '' }}
-          BUILDER_CLIENT_API_KEY: ${{ env.DEPLOY_MODE == 'infra' && secrets.BUILDER_CLIENT_API_KEY || '' }}
-          CONTROL_ENTRA_CLIENT_SECRET: ${{ env.DEPLOY_MODE == 'infra' && secrets.CONTROL_ENTRA_CLIENT_SECRET || '' }}
           APPLICATION_BUILD_NUMBER: ${{ github.run_number }}
           EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ steps.deployment-config.outputs.pairing_allowlist }}
           STAGING_BILLING_LIFECYCLE_LEVER_ENABLED: ${{ steps.deployment-config.outputs.staging_billing_lever_enabled }}

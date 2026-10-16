@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from scripts.production_stripe_reconcile import (
+    PRODUCTION_PRESERVED_SETTINGS,
     ProductionAuditConfig,
     ProductionStripeReconciler,
     ReconciliationError,
@@ -61,6 +62,17 @@ def records() -> dict[str, AzureAppSetting]:
     return {
         name: AzureAppSetting(value, name.endswith("ExpectedMode"))
         for name, value in EXPECTED_SETTINGS.items()
+    }
+
+
+def preserved_records() -> dict[str, AzureAppSetting]:
+    return {
+        name: setting
+        for name, setting in records().items()
+        if name not in {
+            "Billing__Stripe__SecretKey",
+            "Billing__Stripe__WebhookSigningSecret",
+        }
     }
 
 
@@ -139,8 +151,9 @@ class ProductionStripeReconcileTests(unittest.TestCase):
 
             self.assertEqual(0o600, stat.S_IMODE(destination.stat().st_mode))
             restored = read_capture(destination)
-            self.assertEqual(set(EXPECTED_SETTINGS), set(restored))
-            self.assertEqual(EXPECTED_SETTINGS["Billing__Stripe__SecretKey"], restored["Billing__Stripe__SecretKey"].value)
+            self.assertTrue(PRODUCTION_PRESERVED_SETTINGS.issubset(restored))
+            self.assertNotIn("Billing__Stripe__SecretKey", restored)
+            self.assertNotIn("Billing__Stripe__WebhookSigningSecret", restored)
 
     def test_capture_preserves_legacy_settings_before_expected_mode_exists(self) -> None:
         legacy = records()
@@ -153,7 +166,10 @@ class ProductionStripeReconcileTests(unittest.TestCase):
         azure.settings = {}
         ProductionStripeReconciler(FakeStripe(), azure, config()).reapply(captured)
 
-        self.assertEqual({name: setting.value for name, setting in legacy.items()}, azure.app_settings())
+        restored = {name: setting.value for name, setting in azure.app_setting_records().items()}
+        self.assertNotIn("Billing__Stripe__SecretKey", restored)
+        self.assertNotIn("Billing__Stripe__WebhookSigningSecret", restored)
+        self.assertEqual(legacy["Billing__Stripe__Enabled"].value, restored["Billing__Stripe__Enabled"])
 
     def test_publishing_modes_preserve_billing_around_fake_provider_operations(self) -> None:
         for publishing_mode in ("app", "infra", "promote"):
@@ -169,11 +185,23 @@ class ProductionStripeReconcileTests(unittest.TestCase):
                 reconciler.reapply(read_capture(destination))
                 destination.unlink()
 
-                self.assertEqual(EXPECTED_SETTINGS, {
-                    name: setting.value
-                    for name, setting in azure.app_setting_records().items()
-                    if name.startswith("Billing__Stripe__")
-                })
+                self.assertTrue(
+                    all(
+                        name not in application
+                        for application in azure.applied
+                        for name in (
+                            "Billing__Stripe__SecretKey",
+                            "Billing__Stripe__WebhookSigningSecret",
+                        )
+                    )
+                )
+                self.assertEqual("true", azure.app_settings()["Billing__Stripe__Enabled"])
+                self.assertEqual(
+                    EXPECTED_SETTINGS["Billing__Stripe__DefaultPriceId"],
+                    azure.app_settings()["Billing__Stripe__DefaultPriceId"],
+                )
+                if publishing_mode == "infra":
+                    self.assertNotIn("Billing__Stripe__SecretKey", azure.app_settings())
                 self.assertEqual([f"replace:{publishing_mode}", "set-mode:live", "reapply"], azure.events)
                 self.assertTrue(azure.app_setting_records()["Billing__Stripe__ExpectedMode"].slot_setting)
                 self.assertFalse(destination.exists())
@@ -219,17 +247,16 @@ class ProductionStripeReconcileTests(unittest.TestCase):
             finally:
                 destination.unlink(missing_ok=True)
 
-            self.assertEqual(EXPECTED_SETTINGS, {
-                name: setting.value
-                for name, setting in azure.app_setting_records().items()
-                if name.startswith("Billing__Stripe__")
-            })
+            restored = azure.app_settings()
+            self.assertNotIn("Billing__Stripe__SecretKey", restored)
+            self.assertEqual("true", restored["Billing__Stripe__Enabled"])
+            self.assertEqual("live", restored["Billing__Stripe__ExpectedMode"])
             self.assertEqual(["replace:infra", "set-mode:live", "reapply"], azure.events)
 
     def test_partial_payload_is_rejected_before_any_replacement(self) -> None:
         azure = FakeAzure()
         captured = ProductionStripeReconciler(FakeStripe(), azure, config()).capture()
-        captured.pop("Billing__Stripe__WebhookSigningSecret")
+        captured.pop("Billing__Stripe__CheckoutCancelUrl")
         previous = azure.app_settings()
 
         with self.assertRaisesRegex(ReconciliationError, "incomplete"):
@@ -239,7 +266,7 @@ class ProductionStripeReconcileTests(unittest.TestCase):
         self.assertEqual([], azure.applied)
 
     def test_stale_expected_mode_is_rejected_before_reapply(self) -> None:
-        stale = records()
+        stale = preserved_records()
         stale["Billing__Stripe__ExpectedMode"] = AzureAppSetting("test", True)
         azure = FakeAzure(stale)
         previous = azure.app_settings()
@@ -297,6 +324,28 @@ class ProductionStripeReconcileTests(unittest.TestCase):
         with self.assertRaisesRegex(ReconciliationError, "incomplete"):
             ProductionStripeReconciler(FakeStripe(), FakeAzure(incomplete), config()).capture()
 
+    def test_capture_accepts_plain_secret_values_pre_cutover(self) -> None:
+        values = records()
+        values["Billing__Stripe__SecretKey"] = AzureAppSetting("sk_live_still_on_the_site", False)
+        values["Billing__Stripe__WebhookSigningSecret"] = AzureAppSetting("whsec_still_on_the_site", False)
+
+        captured = ProductionStripeReconciler(FakeStripe(), FakeAzure(values), config()).capture()
+
+        self.assertNotIn("Billing__Stripe__SecretKey", captured)
+        self.assertNotIn("Billing__Stripe__WebhookSigningSecret", captured)
+        self.assertTrue(PRODUCTION_PRESERVED_SETTINGS.issubset(captured))
+
+    def test_reapply_never_writes_a_secret_setting(self) -> None:
+        captured = ProductionStripeReconciler(FakeStripe(), FakeAzure(), config()).capture()
+        captured["Billing__Stripe__SecretKey"] = AzureAppSetting("sk_live_must_not_write", False)
+        azure = FakeAzure({"Unrelated__Setting": AzureAppSetting("keep", False)})
+
+        with self.assertRaisesRegex(ReconciliationError, "refuses secret App Service settings"):
+            ProductionStripeReconciler(FakeStripe(), azure, config()).reapply(captured)
+
+        self.assertEqual([], azure.applied)
+        self.assertNotIn("Billing__Stripe__SecretKey", azure.app_settings())
+
     def test_audit_configuration_requires_explicit_production_return_urls(self) -> None:
         values = {
             "STRIPE_PRODUCTION_PRICE_ID": "price_live",
@@ -318,7 +367,7 @@ class ProductionStripeReconcileTests(unittest.TestCase):
     def test_capture_file_with_broad_permissions_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary) / "capture.json"
-            write_capture(records(), destination)
+            write_capture(preserved_records(), destination)
             os.chmod(destination, 0o644)
 
             with self.assertRaisesRegex(ReconciliationError, "permissions"):
@@ -771,7 +820,7 @@ class ProductionStripeAuditReasonTests(unittest.TestCase):
 
     def test_main_capture_failure_keeps_generic_line_and_exit_code(self) -> None:
         incomplete = records()
-        incomplete.pop("Billing__Stripe__WebhookSigningSecret")
+        incomplete.pop("Billing__Stripe__CheckoutCancelUrl")
 
         class IncompleteAzure:
             def __init__(self, *args: object, **kwargs: object) -> None:

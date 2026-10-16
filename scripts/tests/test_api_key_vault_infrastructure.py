@@ -48,8 +48,9 @@ class ApiKeyVaultInfrastructureTests(unittest.TestCase):
         self.assertEqual("Enabled", props["publicNetworkAccess"])
         acls = props["networkAcls"]
         self.assertEqual("Deny", acls["defaultAction"])
-        self.assertEqual("AzureServices", acls["bypass"])
+        self.assertEqual("None", acls["bypass"])
         self.assertIn("virtualNetworkRules", acls)
+        self.assertIn("ignoreMissingVnetServiceEndpoint: false", self.source)
         self.assertIn("ipRules", acls)
         self.assertNotIn("Microsoft.KeyVault/vaults/secrets", json.dumps(self.template))
 

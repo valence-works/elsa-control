@@ -22,6 +22,7 @@ CLOUD_ACCOUNT_ISSUER="${CLOUD_ACCOUNT_ISSUER:-}"
 EXPECTED_CLOUD_ACCOUNT_ISSUER="${EXPECTED_CLOUD_ACCOUNT_ISSUER:-}"
 AZURE_PROVISIONER_IDENTITY_ID="${AZURE_PROVISIONER_IDENTITY_ID:-}"
 AZURE_API_EGRESS_SUBNET_ID="${AZURE_API_EGRESS_SUBNET_ID:-}"
+API_KEY_VAULT_SECRETS_WRITTEN="${API_KEY_VAULT_SECRETS_WRITTEN:-}"
 EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS="${EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS:-}"
 STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="${STAGING_BILLING_LIFECYCLE_LEVER_ENABLED:-}"
 STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS="${STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS:-}"
@@ -34,6 +35,7 @@ STAGING_SMOKE_OWNER_INSTANCE_ID="${STAGING_SMOKE_OWNER_INSTANCE_ID:-}"
 APPLICATION_BUILD_NUMBER="${APPLICATION_BUILD_NUMBER:-}"
 WHAT_IF=false
 BASE_ONLY=false
+VAULT_ONLY=false
 
 usage() {
   cat <<'USAGE'
@@ -51,12 +53,18 @@ Options:
   --docker-platform <value>  Docker target platform. Default: linux/amd64.
   --what-if                  Preview the base infrastructure deployment only.
   --base-only                Apply only the base infrastructure, then stop before image deployment.
+  --vault-only               Apply base infrastructure and the API Key Vault, then stop.
   -h, --help                 Show this help.
 
 Required environment variables for a full deployment:
   CONTROL_ENTRA_TENANT_ID
   CONTROL_ENTRA_CLIENT_ID
-  AZURE_CLIENT_ID or AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID
+  AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID
+  AZURE_API_EGRESS_SUBNET_ID
+  API_KEY_VAULT_SECRETS_WRITTEN=true
+
+Order: vault (--vault-only), operator writes secrets, then the site.
+API_KEY_VAULT_SECRETS_WRITTEN must be true before the site is applied.
 
 Secret App Service settings are Key Vault references. This helper never
 writes a secret value to Key Vault or to App Service. An operator writes
@@ -126,6 +134,10 @@ while [[ $# -gt 0 ]]; do
       BASE_ONLY=true
       shift
       ;;
+    --vault-only)
+      VAULT_ONLY=true
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -144,6 +156,10 @@ if [[ ! "$ENVIRONMENT_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,62}$ ]]; then
 fi
 if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
   echo "Image tag has an invalid container tag format." >&2
+  exit 1
+fi
+if [[ "$BASE_ONLY" == true && "$VAULT_ONLY" == true ]]; then
+  echo "--base-only and --vault-only cannot be combined." >&2
   exit 1
 fi
 # Shared staging-target predicate. Explicit --environment / TARGET_ENVIRONMENT
@@ -321,6 +337,14 @@ if [[ "$BASE_ONLY" == true ]]; then
   echo "Base deployment completed. Bootstrap the API identity in Catalog before deploying the Web App."
   exit 0
 fi
+if [[ ! "$AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+  echo "AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID is required." >&2
+  exit 1
+fi
+if [[ -z "$AZURE_API_EGRESS_SUBNET_ID" ]]; then
+  echo "AZURE_API_EGRESS_SUBNET_ID is required so Key Vault references resolve through the egress subnet." >&2
+  exit 1
+fi
 
 export CONTROL_ENTRA_TENANT_ID CONTROL_ENTRA_CLIENT_ID
 export AZURE_CLIENT_ID AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID
@@ -359,17 +383,6 @@ if [[ ! "$API_IDENTITY_PRINCIPAL_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
   echo "The API identity principal ID could not be resolved." >&2
   exit 1
 fi
-if [[ -z "$AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID" ]]; then
-  AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID="$(az ad sp show \
-    --id "$AZURE_CLIENT_ID" \
-    --query id \
-    --output tsv \
-    --only-show-errors)"
-fi
-if [[ ! "$AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
-  echo "The deploy identity principal ID could not be resolved." >&2
-  exit 1
-fi
 export API_IDENTITY_PRINCIPAL_ID AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID
 
 VAULT_DEPLOYMENT_NAME="$BASE_DEPLOYMENT_NAME-api-key-vault"
@@ -384,7 +397,7 @@ print(json.dumps({
     "location": os.environ["LOCATION"],
     "apiIdentityPrincipalId": os.environ["API_IDENTITY_PRINCIPAL_ID"],
     "deployIdentityPrincipalId": os.environ["AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID"],
-    "apiEgressSubnetId": os.environ.get("AZURE_API_EGRESS_SUBNET_ID", ""),
+    "apiEgressSubnetId": os.environ["AZURE_API_EGRESS_SUBNET_ID"],
     "operatorWriteIpCidrs": cidrs("KEY_VAULT_OPERATOR_WRITE_IP_CIDRS"),
     "apiOutboundIpCidrs": cidrs("KEY_VAULT_API_OUTBOUND_IP_CIDRS"),
 }))
@@ -413,6 +426,15 @@ if [[ ! "$API_KEY_VAULT_URI" =~ ^https://[A-Za-z0-9-]+\.vault\.azure\.net/?$ ]];
   exit 1
 fi
 export API_KEY_VAULT_URI
+
+if [[ "$VAULT_ONLY" == true ]]; then
+  echo "Vault deployment completed. Write the listed secrets, then apply the site with API_KEY_VAULT_SECRETS_WRITTEN=true."
+  exit 0
+fi
+if [[ "${API_KEY_VAULT_SECRETS_WRITTEN,,}" != "true" ]]; then
+  echo "API_KEY_VAULT_SECRETS_WRITTEN=true is required before applying the site. Write the vault secrets first." >&2
+  exit 1
+fi
 
 ACR_NAME="${ACR_LOGIN_SERVER%%.azurecr.io}"
 IMAGE_REPOSITORY="$ACR_LOGIN_SERVER/elsa-control/api"

@@ -625,15 +625,20 @@ fi
         job_env = self.source[job_env_start:job_env_end]
         self.assertNotIn("ADMIN_API_KEY:", job_env)
         self.assertNotIn("BUILDER_CLIENT_API_KEY:", job_env)
+        self.assertNotIn("CONTROL_ENTRA_CLIENT_SECRET:", job_env)
         self.assertNotIn("SQL_ADMINISTRATOR_PASSWORD:", job_env)
 
-        self.assertIn("env.DEPLOY_MODE == 'infra' && secrets.ADMIN_API_KEY", self.source)
-        self.assertIn("env.DEPLOY_MODE == 'infra' && secrets.BUILDER_CLIENT_API_KEY", self.source)
-        self.assertIn("env.DEPLOY_MODE == 'infra' && secrets.CONTROL_ENTRA_CLIENT_SECRET", self.source)
+        self.assertNotIn("secrets.ADMIN_API_KEY", self.source)
+        self.assertNotIn("secrets.BUILDER_CLIENT_API_KEY", self.source)
+        self.assertNotIn("secrets.CONTROL_ENTRA_CLIENT_SECRET", self.source)
         self.assertIn("CONTROL_ENTRA_CLIENT_ID", self.source)
         self.assertIn("CONTROL_ENTRA_TENANT_ID", self.source)
         self.assertIn("AZURE_PROVISIONER_IDENTITY_ID: ${{ vars.AZURE_PROVISIONER_IDENTITY_ID }}", self.source)
         self.assertIn("AZURE_API_EGRESS_SUBNET_ID: ${{ vars.AZURE_API_EGRESS_SUBNET_ID }}", self.source)
+        self.assertIn("AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID: ${{ vars.AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID }}", self.source)
+        self.assertIn("KEY_VAULT_OPERATOR_WRITE_IP_CIDRS: ${{ vars.KEY_VAULT_OPERATOR_WRITE_IP_CIDRS }}", self.source)
+        self.assertIn("KEY_VAULT_API_OUTBOUND_IP_CIDRS: ${{ vars.KEY_VAULT_API_OUTBOUND_IP_CIDRS }}", self.source)
+        self.assertIn("API_KEY_VAULT_SECRETS_WRITTEN: ${{ vars.API_KEY_VAULT_SECRETS_WRITTEN }}", self.source)
         self.assertIn("EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS: ${{ vars.EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS }}", self.source)
         self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ENABLED: ${{ vars.STAGING_BILLING_LIFECYCLE_LEVER_ENABLED }}", self.source)
         self.assertIn("STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS: ${{ vars.STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS }}", self.source)
@@ -670,6 +675,9 @@ fi
         deploy_start = self.source.index("      - name: Deploy API app")
         deploy_end = self.source.index("\n      - name:", deploy_start)
         deploy_step = self.source[deploy_start:deploy_end]
+        self.assertNotIn("ADMIN_API_KEY", deploy_step)
+        self.assertNotIn("BUILDER_CLIENT_API_KEY", deploy_step)
+        self.assertNotIn("CONTROL_ENTRA_CLIENT_SECRET", deploy_step)
         self.assertIn('elif [ "$DEPLOY_MODE" = "app" ]; then', deploy_step)
         self.assertIn("docker build", deploy_step)
         self.assertIn("az webapp sitecontainers update", deploy_step)
@@ -1376,10 +1384,11 @@ fi
             "AZURE_CONTAINER_REGISTRY_ENDPOINT": "test.azurecr.io",
             "AZURE_ENV_NAME": "test", "AZURE_LOCATION": "westeurope",
             "AZURE_RESOURCE_GROUP": "rg-test", "AZURE_WEBAPP_NAME": "test-api",
-            "ADMIN_API_KEY": "test-only", "BUILDER_CLIENT_API_KEY": "test-only",
             "CONTROL_ENTRA_CLIENT_ID": "00000000-0000-0000-0000-000000000004",
-            "CONTROL_ENTRA_CLIENT_SECRET": "test-only",
             "CONTROL_ENTRA_TENANT_ID": "00000000-0000-0000-0000-000000000005",
+            "AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID": "00000000-0000-0000-0000-000000000006",
+            "AZURE_API_EGRESS_SUBNET_ID": "/subscriptions/00000000-0000-0000-0000-000000000003/resourceGroups/rg-test/providers/Microsoft.Network/virtualNetworks/vnet/subnets/snet-api-egress",
+            "API_KEY_VAULT_SECRETS_WRITTEN": "true",
             "ELSA_CLOUD_STAGING_ORIGIN": "https://staging.example.test",
             "STRIPE_HOSTED_PRICE_ID": "price_test", "STRIPE_TEST_SECRET_KEY": "sk_test_fixture",
             "STRIPE_TEST_WEBHOOK_SIGNING_SECRET": "whsec_fixture",
