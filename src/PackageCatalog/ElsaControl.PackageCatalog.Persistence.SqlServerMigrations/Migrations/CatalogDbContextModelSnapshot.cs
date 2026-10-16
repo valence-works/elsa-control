@@ -5135,6 +5135,12 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         .HasMaxLength(128)
                         .HasColumnType("nvarchar(128)");
 
+                    b.Property<Guid?>("KeyRingPreviousSnapshotId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("KeyRingSnapshotId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<long>("OccurredAt")
                         .HasColumnType("bigint");
 
@@ -5146,6 +5152,13 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.HasIndex("OccurredAt");
 
                     b.HasIndex("Jti", "OccurredAt");
+
+                    b.HasIndex("KeyRingSnapshotId");
+
+                    b.HasIndex("KeyRingPreviousSnapshotId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_ManagedElsaHandoffAuditEvents_KeyRingPreviousSnapshot")
+                        .HasFilter("KeyRingPreviousSnapshotId IS NOT NULL AND Action LIKE 'key_ring.active:%'");
 
                     b.ToTable("ManagedElsaHandoffAuditEvents", null, t =>
                         {

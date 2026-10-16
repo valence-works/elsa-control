@@ -197,9 +197,12 @@ or new revision. The key ring is loaded at startup; it has no runtime refresh.
    (`PreviousVerificationKeyOverlap`).
 5. **Retire the old key** in one settings change: remove it from
    `PreviousVerificationKeys` and restart every replica. Startup diffs the
-   last `key_ring.active` / `key_ring.previous` snapshot and writes
+   last key-ring snapshot (by snapshot id, written atomically) and writes
    `key_ring.retired:<id>` (key ids only), then records the new loaded set.
-6. Record the rehearsal with key ids, timestamps, and pass/fail only. Do not
+6. Prove **removal**, not expiry: using the removed test key, sign a **fresh**
+   code whose lifetime has not elapsed and redeem it against staging. Expect
+   rejection. Do not reuse a leftover code that has already passed `exp`.
+   Record the rehearsal with key ids, timestamps, and pass/fail only. Do not
    retain PEM, tokens, or other key material.
 
 ### Emergency key revocation
@@ -207,8 +210,8 @@ or new revision. The key ring is loaded at startup; it has no runtime refresh.
 If the active key must be withdrawn immediately, skip the overlap window:
 remove it from both `ActiveKeyId` and `PreviousVerificationKeys` in one
 settings change, install a replacement active key, and restart every replica.
-In-flight codes signed with the withdrawn key are rejected (they are at most
-the maximum token lifetime old). Startup writes `key_ring.retired:<id>:revoked`
+Codes signed with the withdrawn key are rejected, including a freshly signed
+code made after the restart. Startup writes `key_ring.retired:<id>:revoked`
 for the withdrawn signer. This takes effect only on restart or a new revision.
 
 Staging rehearsal uses test keys on the isolated staging Control API. A

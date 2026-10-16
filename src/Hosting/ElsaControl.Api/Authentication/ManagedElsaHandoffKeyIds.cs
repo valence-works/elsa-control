@@ -86,16 +86,11 @@ public static class ManagedElsaHandoffKeyRingAudit
         ArgumentNullException.ThrowIfNull(keyRing);
         ArgumentNullException.ThrowIfNull(timeProvider);
 
-        var previous = await audit.GetLastTrustedSnapshotAsync(cancellationToken);
-        var occurredAt = timeProvider.GetUtcNow();
-        await RecordRetiredAsync(
-            audit,
-            previous.TrustedKeyIds,
-            keyRing.TrustedKeyIds,
-            previous.ActiveKeyId,
-            occurredAt,
+        await audit.RecordKeyRingTransitionAsync(
+            keyRing.ActiveKeyId,
+            keyRing.PreviousVerificationKeyIds,
+            timeProvider.GetUtcNow(),
             cancellationToken);
-        await RecordLoadedAsync(audit, keyRing, occurredAt, cancellationToken);
     }
 
     public static Task RecordLoadedAsync(
