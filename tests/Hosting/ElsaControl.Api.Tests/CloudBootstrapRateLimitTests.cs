@@ -140,24 +140,6 @@ public sealed class CloudBootstrapRateLimitTests
     }
 
     [Fact]
-    public async Task Cookie_session_without_identity_falls_back_to_per_ip()
-    {
-        await using var app = CreateApplication(perIp: 1, perIdentity: 20);
-        await app.SeedAsync(_ => Task.CompletedTask);
-        using var first = CookieClient(app, subject: "", "203.0.113.91");
-        using var second = CookieClient(app, subject: "", "203.0.113.91");
-        using var otherIp = CookieClient(app, subject: "", "203.0.113.92");
-
-        using var firstAllowed = await PostBootstrapAsync(first);
-        using var rejected = await PostBootstrapAsync(second);
-        using var allowed = await PostBootstrapAsync(otherIp);
-
-        Assert.NotEqual(HttpStatusCode.TooManyRequests, firstAllowed.StatusCode);
-        await AssertRateLimitExceeded(rejected);
-        Assert.NotEqual(HttpStatusCode.TooManyRequests, allowed.StatusCode);
-    }
-
-    [Fact]
     public async Task Cloud_account_sessions_share_the_per_identity_limit_across_ips()
     {
         const string issuer = "https://cloud-account.test/auth/v1";

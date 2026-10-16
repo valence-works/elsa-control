@@ -77,9 +77,7 @@ public sealed class ManagedElsaInstanceLifecycleRateLimiterPolicy : ControlIdent
             controlIdentity.Value,
             cloudAccount.Value,
             hubAccount.Value,
-            ControlIdentityAndIpLimitBehavior.AlwaysApplyPerIp |
-            ControlIdentityAndIpLimitBehavior.FailClosedUnresolvedIdentity |
-            ControlIdentityAndIpLimitBehavior.LimitIdentityForNonBff)
+            limitIdentityForNonBff: true)
     {
     }
 }

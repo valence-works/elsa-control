@@ -208,9 +208,9 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
     {
         await using var app = CreateApplication(perIp: 1, perIdentity: 20);
         await app.SeedAsync(_ => Task.CompletedTask);
-        using var first = CookieClient(app, subject: "", "203.0.113.91");
-        using var second = CookieClient(app, subject: "", "203.0.113.91");
-        using var otherIp = CookieClient(app, subject: "", "203.0.113.92");
+        using var first = IncompleteCookieClient(app, "203.0.113.91");
+        using var second = IncompleteCookieClient(app, "203.0.113.91");
+        using var otherIp = IncompleteCookieClient(app, "203.0.113.92");
 
         using var firstAllowed = await PostActionAsync(first, action);
         using var rejected = await PostActionAsync(second, action);
@@ -224,24 +224,28 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
     [Theory]
     [InlineData("restart")]
     [InlineData("apply-release")]
-    public async Task Cookie_session_without_identity_uses_shared_fallback_bucket(string action)
+    public async Task Cookie_session_without_identity_uses_the_unresolved_identity_fallback(string action)
     {
-        await using var app = CreateApplication(perIp: 20, perIdentity: 1);
+        const string sharedIp = "203.0.113.93";
+        await using var app = CreateApplication(perIp: 20, perIdentity: 20);
         await app.SeedAsync(_ => Task.CompletedTask);
-        using var first = CookieClient(app, subject: "", "203.0.113.93");
-        using var second = CookieClient(app, subject: "", "203.0.113.94");
-        using var resolved = ControlClient(app, "lifecycle-resolved", "203.0.113.93");
-        using var cookieResolved = CookieClient(app, "cookie-resolved", "203.0.113.93");
+        using var first = IncompleteCookieClient(app, sharedIp);
+        using var second = IncompleteCookieClient(app, sharedIp);
+        using var resolved = ControlClient(app, "lifecycle-resolved", sharedIp);
+        using var cookieResolved = CookieClient(app, "cookie-resolved", sharedIp);
+        using var otherIp = IncompleteCookieClient(app, "203.0.113.94");
 
         using var firstAllowed = await PostActionAsync(first, action);
         using var rejected = await PostActionAsync(second, action);
         using var resolvedAllowed = await PostActionAsync(resolved, action);
         using var cookieAllowed = await PostActionAsync(cookieResolved, action);
+        using var otherIpAllowed = await PostActionAsync(otherIp, action);
 
         Assert.NotEqual(HttpStatusCode.TooManyRequests, firstAllowed.StatusCode);
         await AssertLifecycleRateLimited(rejected);
         Assert.NotEqual(HttpStatusCode.TooManyRequests, resolvedAllowed.StatusCode);
         Assert.NotEqual(HttpStatusCode.TooManyRequests, cookieAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, otherIpAllowed.StatusCode);
     }
 
     [Theory]
@@ -407,6 +411,19 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
     {
         var client = app.CreateClient();
         app.AddControlSessionCookie(client, subject, DateTimeOffset.UtcNow.AddHours(2));
+        client.DefaultRequestHeaders.Add("Origin", client.BaseAddress?.GetLeftPart(UriPartial.Authority) ?? "http://localhost");
+        SetRemoteIp(client, ip);
+        return client;
+    }
+
+    private static HttpClient IncompleteCookieClient(ControlApiTestApplication app, string ip)
+    {
+        var client = app.CreateClient();
+        app.AddControlSessionCookie(
+            client,
+            subject: null,
+            issuer: ControlApiTestApplication.TestControlIdentityIssuer,
+            DateTimeOffset.UtcNow.AddHours(2));
         client.DefaultRequestHeaders.Add("Origin", client.BaseAddress?.GetLeftPart(UriPartial.Authority) ?? "http://localhost");
         SetRemoteIp(client, ip);
         return client;

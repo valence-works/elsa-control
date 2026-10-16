@@ -173,9 +173,9 @@ public sealed class ManagedElsaHandoffRateLimitTests
     {
         await using var app = CreateApplication(perIp: 1, perIdentity: 20);
         await app.SeedAsync(_ => Task.CompletedTask);
-        using var first = CookieClient(app, subject: "", "203.0.113.91");
-        using var second = CookieClient(app, subject: "", "203.0.113.91");
-        using var otherIp = CookieClient(app, subject: "", "203.0.113.92");
+        using var first = IncompleteCookieClient(app, "203.0.113.91");
+        using var second = IncompleteCookieClient(app, "203.0.113.91");
+        using var otherIp = IncompleteCookieClient(app, "203.0.113.92");
 
         using var firstAllowed = await PostIssueAsync(first);
         using var rejected = await PostIssueAsync(second);
@@ -187,24 +187,28 @@ public sealed class ManagedElsaHandoffRateLimitTests
     }
 
     [Fact]
-    public async Task Cookie_session_without_identity_uses_shared_fallback_bucket()
+    public async Task Cookie_session_without_identity_uses_the_unresolved_identity_fallback()
     {
-        await using var app = CreateApplication(perIp: 20, perIdentity: 1);
+        const string sharedIp = "203.0.113.93";
+        await using var app = CreateApplication(perIp: 20, perIdentity: 20);
         await app.SeedAsync(_ => Task.CompletedTask);
-        using var first = CookieClient(app, subject: "", "203.0.113.93");
-        using var second = CookieClient(app, subject: "", "203.0.113.94");
-        using var resolved = ControlClient(app, "handoff-resolved", "203.0.113.93");
-        using var cookieResolved = CookieClient(app, "cookie-resolved", "203.0.113.93");
+        using var first = IncompleteCookieClient(app, sharedIp);
+        using var second = IncompleteCookieClient(app, sharedIp);
+        using var resolved = ControlClient(app, "handoff-resolved", sharedIp);
+        using var cookieResolved = CookieClient(app, "cookie-resolved", sharedIp);
+        using var otherIp = IncompleteCookieClient(app, "203.0.113.94");
 
         using var firstAllowed = await PostIssueAsync(first);
         using var rejected = await PostIssueAsync(second);
         using var resolvedAllowed = await PostIssueAsync(resolved);
         using var cookieAllowed = await PostIssueAsync(cookieResolved);
+        using var otherIpAllowed = await PostIssueAsync(otherIp);
 
         Assert.NotEqual(HttpStatusCode.TooManyRequests, firstAllowed.StatusCode);
         await AssertHandoffRateLimited(rejected);
         Assert.NotEqual(HttpStatusCode.TooManyRequests, resolvedAllowed.StatusCode);
         Assert.NotEqual(HttpStatusCode.TooManyRequests, cookieAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, otherIpAllowed.StatusCode);
     }
 
     [Theory]
@@ -348,6 +352,18 @@ public sealed class ManagedElsaHandoffRateLimitTests
     {
         var client = app.CreateClient();
         app.AddControlSessionCookie(client, subject, DateTimeOffset.UtcNow.AddHours(2));
+        SetRemoteIp(client, ip);
+        return client;
+    }
+
+    private static HttpClient IncompleteCookieClient(ControlApiTestApplication app, string ip)
+    {
+        var client = app.CreateClient();
+        app.AddControlSessionCookie(
+            client,
+            subject: null,
+            issuer: ControlApiTestApplication.TestControlIdentityIssuer,
+            DateTimeOffset.UtcNow.AddHours(2));
         SetRemoteIp(client, ip);
         return client;
     }

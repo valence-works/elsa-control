@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Security.Claims;
 using System.Threading.RateLimiting;
 using ElsaControl.Api.Authentication;
+using ElsaControl.Api.Workspace;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
@@ -283,7 +284,8 @@ internal static class ApiRateLimitRejection
     {
         var policyName = context.HttpContext.GetEndpoint()?.Metadata.GetMetadata<EnableRateLimitingAttribute>()?.PolicyName;
         var (title, code) = CodeFor(policyName);
-        if (string.Equals(policyName, CloudBootstrapRateLimitDefaults.PolicyName, StringComparison.Ordinal))
+        if (string.Equals(policyName, CloudBootstrapRateLimitDefaults.PolicyName, StringComparison.Ordinal) ||
+            string.Equals(policyName, ManagedElsaInstanceLifecycleRateLimitDefaults.PolicyName, StringComparison.Ordinal))
         {
             context.HttpContext.Response.Headers.RetryAfter = RetryAfterSeconds(context.Lease)
                 .ToString(CultureInfo.InvariantCulture);
@@ -307,6 +309,9 @@ internal static class ApiRateLimitRejection
             CloudBootstrapRateLimitDefaults.PolicyName => (
                 CloudBootstrapRateLimitDefaults.ExceededTitle,
                 CloudBootstrapRateLimitDefaults.ExceededCode),
+            ManagedElsaInstanceLifecycleRateLimitDefaults.PolicyName => (
+                ManagedElsaInstanceLifecycleRateLimitDefaults.ExceededTitle,
+                ManagedElsaInstanceLifecycleRateLimitDefaults.ExceededCode),
             ExternalEngineHeartbeatPolicyName => (HeartbeatExceededTitle, HeartbeatExceededCode),
             _ => (HandoffExceededTitle, HandoffExceededCode)
         };

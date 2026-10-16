@@ -25,22 +25,11 @@ internal static class ControlRateLimitWindowRules
 
 public readonly record struct ControlRateLimitWindow(int PermitLimit, TimeSpan Window);
 
-[Flags]
-public enum ControlIdentityAndIpLimitBehavior
-{
-    None = 0,
-    SkipPerIpForBffSessions = 1,
-    SkipPerIpForCookieSessions = 2,
-    LimitIdentityForNonBff = 4,
-    AlwaysApplyPerIp = 8,
-    FailClosedUnresolvedIdentity = 16
-}
-
 internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
 {
-    internal const string BffSessionIpPartition = "bff-session";
     internal const string AnonymousIdentityPartition = "anonymous";
-    internal const string UnresolvedIdentityPartition = "unresolved-identity";
+    internal const string UnresolvedIdentityPartitionPrefix = "unresolved";
+    internal const int UnresolvedIdentityPermitLimit = 1;
     private const string CachedPrincipalItemKey = "__control.rate-limit.principal";
 
     private static readonly AsyncLocal<HttpContext?> Current = new();
@@ -53,22 +42,35 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
         ControlIdentityOptions controlIdentity,
         CloudAccountIdentityOptions cloudAccount,
         HubAccountIdentityOptions hubAccount,
-        ControlIdentityAndIpLimitBehavior behavior)
+        bool limitIdentityForNonBff)
     {
+        var unresolvedIdentity = new ControlRateLimitWindow(
+            UnresolvedIdentityPermitLimit,
+            perIdentity.Window);
         _inner = PartitionedRateLimiter.CreateChained(
             PartitionedRateLimiter.Create<HttpContext, string>(context =>
-                ShouldSkipPerIpLimit(context, controlIdentity, cloudAccount, hubAccount, behavior)
-                    ? RateLimitPartition.GetNoLimiter<string>(BffSessionIpPartition)
-                    : RateLimitPartition.GetFixedWindowLimiter(
-                        GetIpPartitionKey(context),
-                        _ => CreateWindow(perIp))),
+                RateLimitPartition.GetFixedWindowLimiter(
+                    GetIpPartitionKey(context),
+                    _ => CreateWindow(perIp))),
             PartitionedRateLimiter.Create<HttpContext, string>(context =>
             {
-                var identity = GetIdentityPartitionKey(
-                    context, controlIdentity, cloudAccount, hubAccount, behavior);
-                return identity is null
-                    ? RateLimitPartition.GetNoLimiter<string>(AnonymousIdentityPartition)
-                    : RateLimitPartition.GetFixedWindowLimiter(identity, _ => CreateWindow(perIdentity));
+                var principal = GetAuthenticatedPrincipal(context);
+                var identity = ControlRateLimitIdentity.PartitionKey(
+                    principal, controlIdentity, cloudAccount, hubAccount);
+                if (identity is not null)
+                {
+                    if (limitIdentityForNonBff || IsBffSession(principal, cloudAccount, hubAccount))
+                        return RateLimitPartition.GetFixedWindowLimiter(identity, _ => CreateWindow(perIdentity));
+
+                    return RateLimitPartition.GetNoLimiter<string>(AnonymousIdentityPartition);
+                }
+
+                if (principal is not null)
+                    return RateLimitPartition.GetFixedWindowLimiter(
+                        UnresolvedIdentityKey(context),
+                        _ => CreateWindow(unresolvedIdentity));
+
+                return RateLimitPartition.GetNoLimiter<string>(AnonymousIdentityPartition);
             }));
     }
 
@@ -98,6 +100,7 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
     }
 
     // Uses Connection.RemoteIpAddress. KnownProxies and KnownNetworks are unchanged.
+    // IPv6 addresses are grouped on the /64 prefix, matching cloud-bootstrap.
     internal static string GetIpPartitionKey(HttpContext context)
     {
         var address = context.Connection.RemoteIpAddress;
@@ -120,59 +123,15 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
         return address.ToString();
     }
 
-    internal static string? GetIdentityPartitionKey(
-        HttpContext context,
-        ControlIdentityOptions controlIdentity,
+    internal static string UnresolvedIdentityKey(HttpContext context) =>
+        ControlRateLimitIdentity.Format(UnresolvedIdentityPartitionPrefix, GetIpPartitionKey(context));
+
+    private static bool IsBffSession(
+        ClaimsPrincipal? principal,
         CloudAccountIdentityOptions cloudAccount,
-        HubAccountIdentityOptions hubAccount,
-        ControlIdentityAndIpLimitBehavior behavior)
-    {
-        var principal = GetAuthenticatedPrincipal(context);
-        if (principal is null)
-            return null;
-
-        var identity = ControlRateLimitIdentity.PartitionKey(
-            principal, controlIdentity, cloudAccount, hubAccount);
-        if (identity is null)
-            return behavior.HasFlag(ControlIdentityAndIpLimitBehavior.FailClosedUnresolvedIdentity)
-                ? UnresolvedIdentityPartition
-                : null;
-
-        if (!behavior.HasFlag(ControlIdentityAndIpLimitBehavior.LimitIdentityForNonBff) &&
-            !ControlIdentityReader.IsBffForwardedSession(principal, cloudAccount, hubAccount))
-            return null;
-
-        return identity;
-    }
-
-    internal static bool ShouldSkipPerIpLimit(
-        HttpContext context,
-        ControlIdentityOptions controlIdentity,
-        CloudAccountIdentityOptions cloudAccount,
-        HubAccountIdentityOptions hubAccount,
-        ControlIdentityAndIpLimitBehavior behavior)
-    {
-        if (behavior.HasFlag(ControlIdentityAndIpLimitBehavior.AlwaysApplyPerIp))
-            return false;
-
-        var principal = GetAuthenticatedPrincipal(context);
-        if (principal is null)
-            return false;
-
-        // A skip flag without a resolvable identity would leave the request unlimited.
-        if (ControlRateLimitIdentity.PartitionKey(principal, controlIdentity, cloudAccount, hubAccount) is null)
-            return false;
-
-        if (behavior.HasFlag(ControlIdentityAndIpLimitBehavior.SkipPerIpForBffSessions) &&
-            ControlIdentityReader.IsBffForwardedSession(principal, cloudAccount, hubAccount))
-            return true;
-
-        if (!behavior.HasFlag(ControlIdentityAndIpLimitBehavior.SkipPerIpForCookieSessions))
-            return false;
-
-        return context.User.Identity is not { IsAuthenticated: true }
-            && context.Request.Cookies.ContainsKey(CustomerAuthenticationDefaults.CookieName);
-    }
+        HubAccountIdentityOptions hubAccount) =>
+        HubAccountTokenSelector.IsValidatedHubAccount(principal, hubAccount) ||
+        CloudAccountTokenSelector.IsValidatedCloudAccount(principal, cloudAccount);
 
     private static ClaimsPrincipal? GetAuthenticatedPrincipal(HttpContext context)
     {
@@ -228,11 +187,11 @@ public abstract class ControlIdentityAndIpRateLimiterPolicy : IRateLimiterPolicy
         ControlIdentityOptions controlIdentity,
         CloudAccountIdentityOptions cloudAccount,
         HubAccountIdentityOptions hubAccount,
-        ControlIdentityAndIpLimitBehavior behavior)
+        bool limitIdentityForNonBff)
     {
         _policyName = policyName;
         _limiter = new ControlIdentityAndIpRateLimiter(
-            perIp, perIdentity, controlIdentity, cloudAccount, hubAccount, behavior);
+            perIp, perIdentity, controlIdentity, cloudAccount, hubAccount, limitIdentityForNonBff);
     }
 
     public Func<OnRejectedContext, CancellationToken, ValueTask>? OnRejected => null;
