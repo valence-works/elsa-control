@@ -1521,7 +1521,15 @@ public sealed class ManagedElsaHandoffTests
     public async Task Rate_limit_rejection_has_stable_code_and_correlation()
     {
         var authorizer = new FakeHandoffAuthorizer(Guid.NewGuid(), Guid.NewGuid());
-        await using var app = CreateApplication(authorizer);
+        await using var app = CreateApplication(authorizer, new Dictionary<string, string?>
+        {
+            [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIp:PermitLimit"] = "20",
+            [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIp:Window"] = "00:01:00",
+            [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:BffPerIp:PermitLimit"] = "20",
+            [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:BffPerIp:Window"] = "00:01:00",
+            [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIdentity:PermitLimit"] = "20",
+            [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIdentity:Window"] = "00:01:00"
+        });
         await app.SeedAsync(_ => Task.CompletedTask);
         var client = app.CreateControlIdentityClient("rate-limited-handoff");
         HttpResponseMessage? response = null;
