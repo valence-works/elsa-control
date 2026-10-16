@@ -4,11 +4,11 @@ using Microsoft.EntityFrameworkCore;
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 
 /// <summary>
-/// Dedicated instance-limit accounting (ADR-0017 F5). <c>MaxInstances</c> is
-/// consumed only by live managed instances whose isolation profile is Dedicated,
-/// the current catalog proxy for <c>dedicated-valence</c> and
-/// <c>byo-subscription</c>. Shared isolation does not consume it. Lab placement
-/// isn't modelled yet (ADR-0017).
+/// Dedicated billing-display count (ADR-0017 F5). <c>MaxInstances</c> admission
+/// and Shared allowance use counting assignments and
+/// <c>MaxSharedTenants</c>; this helper remains the catalog projection for
+/// Dedicated billing capacity. Shared isolation does not consume
+/// <c>MaxInstances</c>.
 /// </summary>
 internal static class ElsaInstanceDedicatedLimit
 {

@@ -1232,9 +1232,11 @@ public static class ManagedElsaInstanceEndpoints
         exception.Reason is ElsaInstanceLifecycleConflictReason.VersionConflict
             or ElsaInstanceLifecycleConflictReason.ChangedSinceRead
             ? StatusCodes.Status412PreconditionFailed
-            : exception.Reason == ElsaInstanceLifecycleConflictReason.CommercialDenied
-                ? StatusCodes.Status422UnprocessableEntity
-                : StatusCodes.Status409Conflict;
+            : exception.CommercialCode == ElsaInstanceCommercialOperation.SharedAllowanceMoveInProgress
+                ? StatusCodes.Status409Conflict
+                : exception.Reason == ElsaInstanceLifecycleConflictReason.CommercialDenied
+                    ? StatusCodes.Status422UnprocessableEntity
+                    : StatusCodes.Status409Conflict;
 
     internal static IResult ConflictProblem(ElsaInstanceLifecycleConflictException exception)
     {
