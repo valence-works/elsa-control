@@ -216,6 +216,28 @@ public sealed class ManagedElsaHandoffKeyRingTests
 
         Assert.Equal(ManagedElsaHandoffRedeemFailure.InvalidToken, result.Failure);
         Assert.False(retired.ContainsKey("previous-2026-09"));
+        Assert.True(new JwtSecurityTokenHandler().ReadJwtToken(token).ValidTo > clock.GetUtcNow().UtcDateTime);
+    }
+
+    [Fact]
+    public async Task Rehearsal_rejects_a_fresh_unexpired_code_signed_with_the_removed_key()
+    {
+        using var previous = RSA.Create(2048);
+        using var active = RSA.Create(2048);
+        var clock = new TestTimeProvider(DateTimeOffset.UtcNow);
+        using var fixture = CreateSignedFixture(previous, "previous-2026-09", clock);
+        using var retired = new ManagedElsaHandoffKeyRing("active-2026-10", CloneRsa(active));
+        using var retiredFixture = CreateRedeemFixture(retired, fixture.Authorizer, clock);
+
+        var token = fixture.Issue();
+        var jwt = new JwtSecurityTokenHandler().ReadJwtToken(token);
+
+        Assert.True(jwt.ValidTo > clock.GetUtcNow().UtcDateTime);
+        Assert.Equal("previous-2026-09", jwt.Header.Kid);
+        var result = await retiredFixture.RedeemAsync(token);
+
+        Assert.Equal(ManagedElsaHandoffRedeemFailure.InvalidToken, result.Failure);
+        Assert.False(retired.ContainsKey("previous-2026-09"));
     }
 
     [Fact]
@@ -263,6 +285,8 @@ public sealed class ManagedElsaHandoffKeyRingTests
         });
         Assert.Equal(["previous-2026-09"], ManagedElsaHandoffKeyIds.RetiredKeyIds(
             overlap.TrustedKeyIds, retired.TrustedKeyIds));
+        Assert.All(audit.Events, item => Assert.NotNull(item.KeyRingSnapshotId));
+        Assert.Equal(2, audit.Events.Select(item => item.KeyRingSnapshotId).Distinct().Count());
     }
 
     [Fact]
@@ -319,6 +343,70 @@ public sealed class ManagedElsaHandoffKeyRingTests
             ManagedElsaHandoffDefaults.KeyRingPreviousAuditActionPrefix);
         Assert.Equal(["key_ring.active:active-2026-10"], snapshot);
         Assert.DoesNotContain(snapshot, action => action.Contains("BEGIN", StringComparison.Ordinal));
+        var snapshotIds = await verify.ManagedElsaHandoffAuditEvents
+            .Where(x => x.KeyRingSnapshotId != null)
+            .Select(x => x.KeyRingSnapshotId)
+            .Distinct()
+            .ToListAsync();
+        Assert.Equal(2, snapshotIds.Count);
+    }
+
+    [Fact]
+    public async Task Concurrent_replica_startups_persist_exactly_one_retired_row_per_removed_key()
+    {
+        using var previous = RSA.Create(2048);
+        using var active = RSA.Create(2048);
+        var databaseName = "handoff-key-ring-concurrent-" + Guid.NewGuid().ToString("N");
+        await using var setupConnection = new SqliteConnection(
+            $"Data Source=file:{databaseName};Mode=Memory;Cache=Shared;Default Timeout=30");
+        await setupConnection.OpenAsync();
+        await using (var setup = CreateCatalogContext(setupConnection))
+            await setup.Database.MigrateAsync();
+
+        var clock = new TestTimeProvider(DateTimeOffset.UtcNow);
+        using (var overlapRing = CreateOverlapRing(active, "active-2026-10", previous, "previous-2026-09"))
+        await using (var overlapHost = CreateProductionKeyRingHost(setupConnection, overlapRing, clock))
+        {
+            await overlapHost.GetRequiredService<ManagedElsaHandoffConfigurationValidator>()
+                .StartAsync(CancellationToken.None);
+        }
+
+        var connections = Enumerable.Range(0, 4)
+            .Select(_ => new SqliteConnection(
+                $"Data Source=file:{databaseName};Mode=Memory;Cache=Shared;Default Timeout=30"))
+            .ToArray();
+        var rings = Enumerable.Range(0, 4)
+            .Select(_ => new ManagedElsaHandoffKeyRing("active-2026-10", CloneRsa(active)))
+            .ToArray();
+        try
+        {
+            foreach (var connection in connections)
+                await connection.OpenAsync();
+
+            await Task.WhenAll(connections.Zip(rings, (connection, ring) => (connection, ring)).Select(async pair =>
+            {
+                await using var host = CreateProductionKeyRingHost(pair.connection, pair.ring, clock);
+                await host.GetRequiredService<ManagedElsaHandoffConfigurationValidator>()
+                    .StartAsync(CancellationToken.None);
+            }));
+        }
+        finally
+        {
+            foreach (var ring in rings)
+                ring.Dispose();
+            foreach (var connection in connections)
+                await connection.DisposeAsync();
+        }
+
+        await using var verify = CreateCatalogContext(setupConnection);
+        var store = new EfCoreManagedElsaHandoffStore(verify);
+        var retired = await store.ListActionsStartingWithAsync(
+            ManagedElsaHandoffDefaults.KeyRingRetiredAuditActionPrefix);
+        Assert.Equal(["key_ring.retired:previous-2026-09"], retired);
+        var snapshot = await store.GetLatestKeyRingSnapshotActionsAsync(
+            ManagedElsaHandoffDefaults.KeyRingActiveAuditActionPrefix,
+            ManagedElsaHandoffDefaults.KeyRingPreviousAuditActionPrefix);
+        Assert.Equal(["key_ring.active:active-2026-10"], snapshot);
     }
 
     private static CatalogDbContext CreateCatalogContext(SqliteConnection connection) =>
@@ -466,6 +554,7 @@ public sealed class ManagedElsaHandoffKeyRingTests
 
     private sealed class RecordingAuditSink : IManagedElsaHandoffAuditSink
     {
+        private readonly object _gate = new();
         public ConcurrentQueue<ManagedElsaHandoffAuditEvent> Events { get; } = new();
 
         public ValueTask RecordAsync(
@@ -476,8 +565,84 @@ public sealed class ManagedElsaHandoffKeyRingTests
             return ValueTask.CompletedTask;
         }
 
-        public ValueTask<ManagedElsaHandoffTrustedKeySnapshot> GetLastTrustedSnapshotAsync(
+        public ValueTask RecordKeyRingTransitionAsync(
+            string activeKeyId,
+            IReadOnlyList<string> previousKeyIds,
+            DateTimeOffset occurredAt,
             CancellationToken cancellationToken = default)
+        {
+            lock (_gate)
+            {
+                var previous = ReadLastTrustedSnapshot();
+                var previousKeyList = previousKeyIds
+                    .Distinct(StringComparer.Ordinal)
+                    .Order(StringComparer.Ordinal)
+                    .ToArray();
+                var currentTrusted = previousKeyList
+                    .Append(activeKeyId)
+                    .Distinct(StringComparer.Ordinal)
+                    .Order(StringComparer.Ordinal)
+                    .ToArray();
+                if (string.Equals(previous.ActiveKeyId, activeKeyId, StringComparison.Ordinal) &&
+                    previous.TrustedKeyIds.ToHashSet(StringComparer.Ordinal).SetEquals(currentTrusted))
+                    return ValueTask.CompletedTask;
+
+                var snapshotId = Guid.NewGuid();
+                var previousSnapshotId = Events
+                    .Where(item =>
+                        item.KeyRingSnapshotId is not null &&
+                        item.Action.StartsWith(
+                            ManagedElsaHandoffDefaults.KeyRingActiveAuditActionPrefix, StringComparison.Ordinal))
+                    .OrderByDescending(item => item.OccurredAt)
+                    .ThenByDescending(item => item.KeyRingSnapshotId)
+                    .Select(item => item.KeyRingSnapshotId)
+                    .FirstOrDefault() ?? Guid.Empty;
+                foreach (var keyId in ManagedElsaHandoffKeyIds.RetiredKeyIds(previous.TrustedKeyIds, currentTrusted))
+                {
+                    var signerRevoked = string.Equals(keyId, previous.ActiveKeyId, StringComparison.Ordinal);
+                    Events.Enqueue(new ManagedElsaHandoffAuditEvent(
+                        ManagedElsaHandoffKeyRingAudit.RetiredAction(keyId, signerRevoked),
+                        "",
+                        null,
+                        null,
+                        null,
+                        null,
+                        occurredAt,
+                        KeyRingSnapshotId: snapshotId));
+                }
+
+                Events.Enqueue(new ManagedElsaHandoffAuditEvent(
+                    ManagedElsaHandoffDefaults.KeyRingActiveAuditActionPrefix + activeKeyId,
+                    "",
+                    null,
+                    null,
+                    null,
+                    null,
+                    occurredAt,
+                    KeyRingSnapshotId: snapshotId,
+                    KeyRingPreviousSnapshotId: previousSnapshotId));
+                foreach (var keyId in previousKeyList)
+                {
+                    Events.Enqueue(new ManagedElsaHandoffAuditEvent(
+                        ManagedElsaHandoffDefaults.KeyRingPreviousAuditActionPrefix + keyId,
+                        "",
+                        null,
+                        null,
+                        null,
+                        null,
+                        occurredAt,
+                        KeyRingSnapshotId: snapshotId));
+                }
+            }
+
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask<ManagedElsaHandoffTrustedKeySnapshot> GetLastTrustedSnapshotAsync(
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(ReadLastTrustedSnapshot());
+
+        private ManagedElsaHandoffTrustedKeySnapshot ReadLastTrustedSnapshot()
         {
             var loaded = Events
                 .Where(item =>
@@ -485,11 +650,35 @@ public sealed class ManagedElsaHandoffKeyRingTests
                     item.Action.StartsWith(ManagedElsaHandoffDefaults.KeyRingPreviousAuditActionPrefix, StringComparison.Ordinal))
                 .ToArray();
             if (loaded.Length == 0)
-                return ValueTask.FromResult(ManagedElsaHandoffTrustedKeySnapshot.Empty);
+                return ManagedElsaHandoffTrustedKeySnapshot.Empty;
+
+            var withIds = loaded.Where(item => item.KeyRingSnapshotId is not null).ToArray();
+            if (withIds.Length > 0)
+            {
+                var referenced = loaded
+                    .Where(item => item.KeyRingPreviousSnapshotId is not null)
+                    .Select(item => item.KeyRingPreviousSnapshotId!.Value)
+                    .ToHashSet();
+                var active = withIds
+                    .Where(item => item.Action.StartsWith(
+                        ManagedElsaHandoffDefaults.KeyRingActiveAuditActionPrefix, StringComparison.Ordinal))
+                    .ToArray();
+                var tip = active
+                    .Where(item => !referenced.Contains(item.KeyRingSnapshotId!.Value))
+                    .OrderByDescending(item => item.OccurredAt)
+                    .ThenByDescending(item => item.KeyRingSnapshotId)
+                    .FirstOrDefault()
+                    ?? active
+                        .OrderByDescending(item => item.OccurredAt)
+                        .ThenByDescending(item => item.KeyRingSnapshotId)
+                        .First();
+                return ManagedElsaHandoffKeyRingAudit.ParseTrustedSnapshot(
+                    withIds.Where(item => item.KeyRingSnapshotId == tip.KeyRingSnapshotId).Select(item => item.Action));
+            }
 
             var latest = loaded.Max(item => item.OccurredAt);
-            return ValueTask.FromResult(ManagedElsaHandoffKeyRingAudit.ParseTrustedSnapshot(
-                loaded.Where(item => item.OccurredAt == latest).Select(item => item.Action)));
+            return ManagedElsaHandoffKeyRingAudit.ParseTrustedSnapshot(
+                loaded.Where(item => item.OccurredAt == latest).Select(item => item.Action));
         }
     }
 

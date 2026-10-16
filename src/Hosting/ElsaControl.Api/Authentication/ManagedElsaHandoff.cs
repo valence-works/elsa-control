@@ -490,7 +490,9 @@ public sealed record ManagedElsaHandoffAuditEvent(
     string? Audience,
     DateTimeOffset OccurredAt,
     int? BindingVersion = null,
-    string? CorrelationId = null)
+    string? CorrelationId = null,
+    Guid? KeyRingSnapshotId = null,
+    Guid? KeyRingPreviousSnapshotId = null)
 {
     public ManagedElsaHandoffAuditEvent(
         string action,
@@ -516,6 +518,13 @@ public interface IManagedElsaHandoffAuditSink
 {
     ValueTask RecordAsync(ManagedElsaHandoffAuditEvent auditEvent, CancellationToken cancellationToken = default);
 
+    ValueTask RecordKeyRingTransitionAsync(
+        string activeKeyId,
+        IReadOnlyList<string> previousKeyIds,
+        DateTimeOffset occurredAt,
+        CancellationToken cancellationToken = default) =>
+        ValueTask.CompletedTask;
+
     ValueTask<ManagedElsaHandoffTrustedKeySnapshot> GetLastTrustedSnapshotAsync(
         CancellationToken cancellationToken = default) =>
         ValueTask.FromResult(ManagedElsaHandoffTrustedKeySnapshot.Empty);
@@ -524,6 +533,13 @@ public interface IManagedElsaHandoffAuditSink
 public sealed class NullManagedElsaHandoffAuditSink : IManagedElsaHandoffAuditSink
 {
     public ValueTask RecordAsync(ManagedElsaHandoffAuditEvent auditEvent, CancellationToken cancellationToken = default) =>
+        ValueTask.CompletedTask;
+
+    public ValueTask RecordKeyRingTransitionAsync(
+        string activeKeyId,
+        IReadOnlyList<string> previousKeyIds,
+        DateTimeOffset occurredAt,
+        CancellationToken cancellationToken = default) =>
         ValueTask.CompletedTask;
 
     public ValueTask<ManagedElsaHandoffTrustedKeySnapshot> GetLastTrustedSnapshotAsync(
