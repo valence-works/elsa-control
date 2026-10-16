@@ -74,10 +74,14 @@ internal sealed class ControlApiTestApplication : WebApplicationFactory<Program>
                 // windows wide so existing tests are not coupled to production defaults.
                 [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIp:PermitLimit"] = "10000",
                 [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIp:Window"] = "00:01:00",
+                [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:BffPerIp:PermitLimit"] = "10000",
+                [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:BffPerIp:Window"] = "00:01:00",
                 [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIdentity:PermitLimit"] = "10000",
                 [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIdentity:Window"] = "00:01:00",
                 [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIp:PermitLimit"] = "10000",
                 [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIp:Window"] = "00:01:00",
+                [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:BffPerIp:PermitLimit"] = "10000",
+                [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:BffPerIp:Window"] = "00:01:00",
                 [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIdentity:PermitLimit"] = "10000",
                 [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIdentity:Window"] = "00:01:00"
             };

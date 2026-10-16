@@ -11,6 +11,7 @@ public static class ManagedElsaInstanceLifecycleRateLimitDefaults
     public const string ExceededTitle = "Managed Elsa instance lifecycle rate limit was exceeded.";
     public const int DefaultPerIdentityPermitLimit = 10;
     public const int DefaultPerIpPermitLimit = DefaultPerIdentityPermitLimit * 10;
+    public const int DefaultBffPerIpPermitLimit = ControlRateLimitWindowRules.MaxPermitLimit;
     public static readonly TimeSpan DefaultWindow = TimeSpan.FromMinutes(1);
 }
 
@@ -25,15 +26,26 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitOptions
     public const string ConfigurationSection = ManagedElsaInstanceLifecycleRateLimitDefaults.ConfigurationSection;
 
     /// <summary>
-    /// Fixed window applied to every request, including validated Cloud/Hub BFF
-    /// sessions, Control JWT callers, and authenticated cookies. The default
-    /// permit is ten times the per-identity default so shared BFF egress has
-    /// aggregate headroom while per-identity remains the binding limit for
-    /// signed-in callers.
+    /// Fixed window for non-BFF callers and for authenticated sessions that
+    /// cannot resolve issuer plus subject. Default is ten times the per-identity
+    /// permit.
     /// </summary>
     public ManagedElsaInstanceLifecycleFixedWindowRateLimitOptions PerIp { get; init; } = new()
     {
         PermitLimit = ManagedElsaInstanceLifecycleRateLimitDefaults.DefaultPerIpPermitLimit
+    };
+
+    /// <summary>
+    /// Fixed window for validated Cloud/Hub BFF sessions that resolve issuer
+    /// plus subject. Those calls reach Control from the BFF host, so many
+    /// identities share one egress address. The default is the maximum allowed
+    /// permit so this ceiling is not a global cap across BFF users; per-identity
+    /// remains binding. Unresolved BFF sessions still use <see cref="PerIp"/>
+    /// plus the 1-permit unresolved fallback.
+    /// </summary>
+    public ManagedElsaInstanceLifecycleFixedWindowRateLimitOptions BffPerIp { get; init; } = new()
+    {
+        PermitLimit = ManagedElsaInstanceLifecycleRateLimitDefaults.DefaultBffPerIpPermitLimit
     };
 
     /// <summary>
@@ -50,6 +62,8 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitOptions
     internal IEnumerable<string> Validate()
     {
         foreach (var error in ValidateWindow(PerIp, $"{ConfigurationSection}:PerIp"))
+            yield return error;
+        foreach (var error in ValidateWindow(BffPerIp, $"{ConfigurationSection}:BffPerIp"))
             yield return error;
         foreach (var error in ValidateWindow(PerIdentity, $"{ConfigurationSection}:PerIdentity"))
             yield return error;
@@ -98,7 +112,8 @@ public sealed class ManagedElsaInstanceLifecycleRateLimiterPolicy : ControlIdent
             controlIdentity.Value,
             cloudAccount.Value,
             hubAccount.Value,
-            limitIdentityForNonBff: true)
+            limitIdentityForNonBff: true,
+            bffPerIp: new ControlRateLimitWindow(options.Value.BffPerIp.PermitLimit, options.Value.BffPerIp.Window))
     {
     }
 }

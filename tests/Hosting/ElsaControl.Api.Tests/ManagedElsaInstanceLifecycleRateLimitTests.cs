@@ -123,6 +123,30 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
     [Theory]
     [InlineData("restart")]
     [InlineData("apply-release")]
+    public async Task Resolved_bff_identities_on_shared_egress_are_not_capped_by_per_ip(string action)
+    {
+        const string cloudIssuer = "https://cloud-account.test/auth/v1";
+        const string hubIssuer = "https://hub-account.test/auth/v1";
+        const string sharedIp = "203.0.113.56";
+        await using var app = CreateCloudAndHubApplication(
+            perIp: 1, perIdentity: 1, cloudIssuer, hubIssuer, bffPerIp: 20);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var cloud = CloudClient(app, cloudIssuer, "11111111-1111-4111-8111-111111111241", sharedIp);
+        using var hub = HubClient(app, hubIssuer, "c0a80101-0000-4000-8000-000000000241", sharedIp);
+        using var cloudAgain = CloudClient(app, cloudIssuer, "11111111-1111-4111-8111-111111111241", sharedIp);
+
+        using var cloudAllowed = await PostActionAsync(cloud, action);
+        using var hubAllowed = await PostActionAsync(hub, action);
+        using var cloudRejected = await PostActionAsync(cloudAgain, action);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, cloudAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, hubAllowed.StatusCode);
+        await AssertLifecycleRateLimited(cloudRejected);
+    }
+
+    [Theory]
+    [InlineData("restart")]
+    [InlineData("apply-release")]
     public async Task Hub_account_sessions_share_the_per_identity_limit_across_ips(string action)
     {
         const string issuer = "https://hub-account.test/auth/v1";
@@ -320,17 +344,23 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
         Assert.Equal(ManagedElsaInstanceLifecycleRateLimitDefaults.DefaultPerIdentityPermitLimit, options.PerIdentity.PermitLimit);
         Assert.Equal(ManagedElsaInstanceLifecycleRateLimitDefaults.DefaultPerIpPermitLimit, options.PerIp.PermitLimit);
         Assert.Equal(options.PerIdentity.PermitLimit * 10, options.PerIp.PermitLimit);
+        Assert.Equal(ManagedElsaInstanceLifecycleRateLimitDefaults.DefaultBffPerIpPermitLimit, options.BffPerIp.PermitLimit);
+        Assert.Equal(ControlRateLimitWindowRules.MaxPermitLimit, options.BffPerIp.PermitLimit);
     }
 
     private static ControlApiTestApplication CreateApplication(
         int perIp,
         int perIdentity,
-        IReadOnlyDictionary<string, string?>? extra = null)
+        IReadOnlyDictionary<string, string?>? extra = null,
+        int? bffPerIp = null)
     {
+        var bffIp = bffPerIp ?? perIp;
         var configuration = new Dictionary<string, string?>
         {
             [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIp:PermitLimit"] = perIp.ToString(),
             [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIp:Window"] = "00:01:00",
+            [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:BffPerIp:PermitLimit"] = bffIp.ToString(),
+            [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:BffPerIp:Window"] = "00:01:00",
             [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIdentity:PermitLimit"] = perIdentity.ToString(),
             [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIdentity:Window"] = "00:01:00"
         };
@@ -373,10 +403,12 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
         int perIp,
         int perIdentity,
         string cloudIssuer,
-        string hubIssuer) =>
+        string hubIssuer,
+        int? bffPerIp = null) =>
         CreateApplication(
             perIp,
             perIdentity,
+            bffPerIp: bffPerIp,
             extra: new Dictionary<string, string?>
             {
                 [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",

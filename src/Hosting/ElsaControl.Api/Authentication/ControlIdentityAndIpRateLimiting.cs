@@ -29,6 +29,7 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
 {
     internal const string AnonymousIdentityPartition = "anonymous";
     internal const string UnresolvedIdentityPartitionPrefix = "unresolved";
+    internal const string BffIpPartitionPrefix = "bff:";
     internal const int UnresolvedIdentityPermitLimit = 1;
     private const string CachedPrincipalItemKey = "__control.rate-limit.principal";
 
@@ -42,16 +43,27 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
         ControlIdentityOptions controlIdentity,
         CloudAccountIdentityOptions cloudAccount,
         HubAccountIdentityOptions hubAccount,
-        bool limitIdentityForNonBff)
+        bool limitIdentityForNonBff,
+        ControlRateLimitWindow? bffPerIp = null)
     {
         var unresolvedIdentity = new ControlRateLimitWindow(
             UnresolvedIdentityPermitLimit,
             perIdentity.Window);
+        var resolvedBffPerIp = bffPerIp ?? perIp;
         _inner = PartitionedRateLimiter.CreateChained(
             PartitionedRateLimiter.Create<HttpContext, string>(context =>
-                RateLimitPartition.GetFixedWindowLimiter(
-                    GetIpPartitionKey(context),
-                    _ => CreateWindow(perIp))),
+            {
+                var ipKey = GetIpPartitionKey(context);
+                var principal = GetAuthenticatedPrincipal(context);
+                var identity = ControlRateLimitIdentity.PartitionKey(
+                    principal, controlIdentity, cloudAccount, hubAccount);
+                if (identity is not null && IsBffSession(principal, cloudAccount, hubAccount))
+                    return RateLimitPartition.GetFixedWindowLimiter(
+                        BffIpPartitionPrefix + ipKey,
+                        _ => CreateWindow(resolvedBffPerIp));
+
+                return RateLimitPartition.GetFixedWindowLimiter(ipKey, _ => CreateWindow(perIp));
+            }),
             PartitionedRateLimiter.Create<HttpContext, string>(context =>
             {
                 var principal = GetAuthenticatedPrincipal(context);
@@ -187,11 +199,12 @@ public abstract class ControlIdentityAndIpRateLimiterPolicy : IRateLimiterPolicy
         ControlIdentityOptions controlIdentity,
         CloudAccountIdentityOptions cloudAccount,
         HubAccountIdentityOptions hubAccount,
-        bool limitIdentityForNonBff)
+        bool limitIdentityForNonBff,
+        ControlRateLimitWindow? bffPerIp = null)
     {
         _policyName = policyName;
         _limiter = new ControlIdentityAndIpRateLimiter(
-            perIp, perIdentity, controlIdentity, cloudAccount, hubAccount, limitIdentityForNonBff);
+            perIp, perIdentity, controlIdentity, cloudAccount, hubAccount, limitIdentityForNonBff, bffPerIp);
     }
 
     public Func<OnRejectedContext, CancellationToken, ValueTask>? OnRejected => null;
