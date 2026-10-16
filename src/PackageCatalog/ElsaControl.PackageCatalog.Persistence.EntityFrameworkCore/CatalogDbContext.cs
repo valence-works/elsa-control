@@ -968,6 +968,10 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             audit.CorrelationId = OptionalSafeReference(audit.CorrelationId, nameof(audit.CorrelationId), 128);
             if (audit.AccountId == Guid.Empty || audit.OrganizationId == Guid.Empty || audit.InstanceId == Guid.Empty)
                 throw new InvalidOperationException("Managed Elsa handoff audit identifiers must be non-empty when supplied.");
+            if (audit.KeyRingSnapshotId == Guid.Empty)
+                throw new InvalidOperationException("Managed Elsa handoff key-ring snapshot identifiers must be non-empty when supplied.");
+            if (audit.KeyRingPreviousSnapshotId is not null && audit.KeyRingSnapshotId is null)
+                throw new InvalidOperationException("Managed Elsa handoff key-ring previous snapshot requires a snapshot identifier.");
             audit.OccurredAt = audit.OccurredAt.ToUniversalTime();
             if (audit.OccurredAt == default)
                 throw new InvalidOperationException("Managed Elsa handoff audit timestamp is required.");

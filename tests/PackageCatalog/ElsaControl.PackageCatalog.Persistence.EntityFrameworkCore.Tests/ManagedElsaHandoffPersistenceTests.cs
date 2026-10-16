@@ -201,6 +201,84 @@ public sealed class ManagedElsaHandoffPersistenceTests
     }
 
     [Fact]
+    public async Task Equal_timestamp_snapshots_are_grouped_by_snapshot_id_not_host_clock()
+    {
+        await using var connection = NewConnection();
+        await connection.OpenAsync();
+        await using var db = CreateContext(connection);
+        await db.Database.MigrateAsync();
+        var store = new EfCoreManagedElsaHandoffStore(db);
+        var occurredAt = new DateTimeOffset(2026, 10, 16, 3, 0, 0, TimeSpan.Zero);
+
+        await store.RecordKeyRingSnapshotAsync(KeyRingSnapshot(
+            "active-2026-10", ["previous-2026-09"], occurredAt));
+        await store.RecordKeyRingSnapshotAsync(KeyRingSnapshot(
+            "active-2026-10", [], occurredAt));
+
+        var snapshot = await store.GetLatestKeyRingSnapshotActionsAsync("key_ring.active:", "key_ring.previous:");
+        var retired = await store.ListActionsStartingWithAsync("key_ring.retired:");
+        var snapshotIds = await db.ManagedElsaHandoffAuditEvents
+            .Where(x => x.KeyRingSnapshotId != null)
+            .Select(x => x.KeyRingSnapshotId)
+            .Distinct()
+            .ToListAsync();
+
+        Assert.Equal(["key_ring.active:active-2026-10"], snapshot);
+        Assert.Equal(["key_ring.retired:previous-2026-09"], retired);
+        Assert.Equal(2, snapshotIds.Count);
+        Assert.All(await db.ManagedElsaHandoffAuditEvents.ToListAsync(), row =>
+            Assert.DoesNotContain("BEGIN", row.Action, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Concurrent_key_ring_transitions_persist_exactly_one_retired_row()
+    {
+        var databaseName = "handoff-key-ring-concurrent-" + Guid.NewGuid().ToString("N");
+        await using var setupConnection = NewConnection(databaseName);
+        await setupConnection.OpenAsync();
+        await using (var setup = CreateContext(setupConnection))
+        {
+            await setup.Database.MigrateAsync();
+            await new EfCoreManagedElsaHandoffStore(setup).RecordKeyRingSnapshotAsync(KeyRingSnapshot(
+                "active-2026-10", ["previous-2026-09"], DateTimeOffset.UtcNow));
+        }
+
+        var occurredAt = DateTimeOffset.UtcNow;
+        var connections = Enumerable.Range(0, 4).Select(_ => NewConnection(databaseName)).ToArray();
+        try
+        {
+            foreach (var connection in connections)
+                await connection.OpenAsync();
+
+            await Task.WhenAll(connections.Select(async connection =>
+            {
+                await using var db = CreateContext(connection);
+                await new EfCoreManagedElsaHandoffStore(db).RecordKeyRingSnapshotAsync(KeyRingSnapshot(
+                    "active-2026-10", [], occurredAt));
+            }));
+        }
+        finally
+        {
+            foreach (var connection in connections)
+                await connection.DisposeAsync();
+        }
+
+        await using var verify = CreateContext(setupConnection);
+        var store = new EfCoreManagedElsaHandoffStore(verify);
+        var retired = await store.ListActionsStartingWithAsync("key_ring.retired:");
+        Assert.Equal(["key_ring.retired:previous-2026-09"], retired);
+        Assert.Equal(["key_ring.active:active-2026-10"],
+            await store.GetLatestKeyRingSnapshotActionsAsync("key_ring.active:", "key_ring.previous:"));
+    }
+
+    private static ManagedElsaHandoffKeyRingSnapshotWrite KeyRingSnapshot(
+        string activeKeyId,
+        IReadOnlyList<string> previousKeyIds,
+        DateTimeOffset occurredAt) =>
+        new(activeKeyId, previousKeyIds, occurredAt,
+            "key_ring.active:", "key_ring.previous:", "key_ring.retired:", ":revoked");
+
+    [Fact]
     public async Task Handoff_audit_rows_are_append_only_and_reject_unsafe_correlation()
     {
         await using var connection = NewConnection();

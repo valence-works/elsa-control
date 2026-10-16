@@ -184,16 +184,17 @@ id into `PreviousVerificationKeys`.
    key previous. Confirm a code issued under the previous key still redeems.
 3. Wait at least the maximum handoff-code lifetime plus one minute, then remove
    the previous public key and restart every replica.
-4. Confirm a leftover previous-key code is rejected, and that
-   `ManagedElsaHandoffAuditEvents` contains `key_ring.active:<id>`,
+4. Using the removed test key, sign a **fresh** code whose lifetime has not
+   elapsed and redeem it. Expect rejection. This proves key removal, not token
+   expiry. Confirm `ManagedElsaHandoffAuditEvents` contains `key_ring.active:<id>`,
    `key_ring.previous:<id>` (while overlapping) and `key_ring.retired:<id>`
    after removal. Record key ids, timestamps and pass/fail only.
 
 Emergency revocation (compromised signer): skip the overlap. Remove the key
 from both active and previous in one settings change, install a replacement
 active key, restart every replica, and expect `key_ring.retired:<id>:revoked`
-plus rejection of leftover codes signed with the withdrawn key. The key ring
-is loaded at startup only.
+plus rejection of a freshly signed code made with the withdrawn key. The key
+ring is loaded at startup only.
 
 Evidence is value-free: no PEM, token, verifier or other key material. Connector
 protocol `"1"` and advertised capabilities are unchanged. A production rotation
