@@ -49,7 +49,7 @@ public static class WorkspaceMeEndpoints
             var accountContext = await accounts.FindAsync(identity, cancellationToken);
             var response = accountContext is null ? null : ToResponse(accountContext);
             return Results.Ok(new MeWorkspaceMembershipsResponse(response?.Account, response?.Workspaces ?? [], response?.Organizations ?? []));
-        }).WithTags("Workspace Identity").AllowCloudBff().AllowHubBff();
+        }).WithTags("Workspace Identity").AllowCloudBff().AllowHubBff().PrivateNoStore();
 
         return endpoints;
     }

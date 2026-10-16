@@ -11,6 +11,7 @@ public sealed class WorkspaceMeCacheControlTests : IClassFixture<DefaultControlA
     [Theory]
     [InlineData("/api/me/workspaces")]
     [InlineData("/api/me/organizations")]
+    [InlineData("/api/me/workspace-memberships")]
     public async Task Me_read_sets_private_no_store_cache_control(string path)
     {
         await _app.SeedAsync(_ => Task.CompletedTask);
