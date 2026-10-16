@@ -46,7 +46,7 @@ public static class CloudAccountLinkEndpoints
                 AccountIdentityLinkOutcome.AccountAlreadyLinked =>
                     Problem(
                         AccountAlreadyLinkedCode,
-                        "The Control account already has a different Hub identity.",
+                        "The request conflicts with an existing Hub identity link.",
                         StatusCodes.Status409Conflict),
                 AccountIdentityLinkOutcome.HubAccountHasEngines =>
                     Problem(
@@ -60,7 +60,7 @@ public static class CloudAccountLinkEndpoints
                         StatusCodes.Status409Conflict),
                 _ => Problem(
                     AccountAlreadyLinkedCode,
-                    "The Control account already has a different Hub identity.",
+                    "The request conflicts with an existing Hub identity link.",
                     StatusCodes.Status409Conflict)
             };
         }).WithTags("Cloud Account Links")

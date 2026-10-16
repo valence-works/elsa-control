@@ -22,6 +22,7 @@ public sealed class CloudAccountLinkApiTests
     private const string HubSubject = "c0a80101-0000-4000-8000-000000000001";
     private const string OtherHubSubject = "c0a80101-0000-4000-8000-000000000002";
     private const string CloudSubject = "b6f73e84-5b47-4f4d-ad52-e3c4c9a815c6";
+    private const string OtherCloudSubject = "d4e9a1c2-7f18-4b60-9c33-2a8e5f0d1479";
 
     [Fact]
     public async Task Linked_hub_session_sees_the_cloud_organizations_and_engines()
@@ -347,6 +348,77 @@ public sealed class CloudAccountLinkApiTests
         await using var scope = app.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
         Assert.True(await db.ExternalIdentities.AnyAsync(identity => identity.Kind == ExternalIdentityKinds.Hub));
+    }
+
+    [Fact]
+    public async Task Already_linked_hub_identity_is_not_moved_to_a_different_cloud_account()
+    {
+        await using var app = CreateApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var firstCloud = CreateCloudClient(app, CloudSubject);
+        var firstOwned = await BootstrapAsync(firstCloud);
+        using var firstLink = CreateLinkClient(app, HubIssuer, HubSubject, CloudIssuer, CloudSubject);
+        using var linked = await firstLink.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
+        using var secondCloud = CreateCloudClient(app, OtherCloudSubject);
+        var secondOwned = await BootstrapAsync(secondCloud);
+        using var secondLink = CreateLinkClient(app, HubIssuer, HubSubject, CloudIssuer, OtherCloudSubject);
+
+        using var conflict = await secondLink.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
+
+        Assert.Equal(HttpStatusCode.OK, linked.StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        await AssertProblemAsync(conflict, CloudAccountLinkEndpoints.AccountAlreadyLinkedCode);
+        using var hubOnly = CreateHubClient(app, HubSubject);
+        using var organizations = await hubOnly.GetAsync("/api/me/organizations");
+        var hubMe = await organizations.Content.ReadControlJsonAsync<MeWorkspacesResponse>();
+        Assert.Contains(hubMe!.Organizations, organization => organization.Id == firstOwned.OrganizationId);
+        Assert.DoesNotContain(hubMe.Organizations, organization => organization.Id == secondOwned.OrganizationId);
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Single(await db.AccountIdentityLinkAuditRecords.ToListAsync());
+        Assert.Single(await db.ExternalIdentities.Where(identity => identity.Kind == ExternalIdentityKinds.Hub).ToListAsync());
+        Assert.Equal(
+            (await db.ExternalIdentities.SingleAsync(identity => identity.Subject == CloudSubject)).AccountId,
+            (await db.ExternalIdentities.SingleAsync(identity => identity.Kind == ExternalIdentityKinds.Hub)).AccountId);
+    }
+
+    [Fact]
+    public async Task Hub_only_source_account_moves_onto_the_cloud_account_and_is_audited()
+    {
+        await using var app = CreateApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var cloud = CreateCloudClient(app, CloudSubject);
+        using var hub = CreateHubClient(app, HubSubject);
+        var cloudOwned = await BootstrapAsync(cloud);
+        await BootstrapAsync(hub);
+        using var hubMeBefore = await hub.GetAsync("/api/me/organizations");
+        var hubAccountId = (await hubMeBefore.Content.ReadControlJsonAsync<MeWorkspacesResponse>())!.Account.Id;
+        using var linker = CreateLinkClient(app, HubIssuer, HubSubject, CloudIssuer, CloudSubject);
+
+        using var linked = await linker.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
+        var body = await linked.Content.ReadFromJsonAsync<CloudAccountLinkResponse>(ControlApiTestApplication.JsonOptions);
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        using var audit = await admin.GetAsync($"/api/admin/accounts/{body!.AccountId:D}/hub-link/audit");
+        using var organizations = await hub.GetAsync("/api/me/organizations");
+
+        Assert.Equal(HttpStatusCode.OK, linked.StatusCode);
+        Assert.False(body.AlreadyLinked);
+        var cloudAccountId = body.AccountId;
+        var history = await audit.Content.ReadFromJsonAsync<AdminAccountHubLinkAuditResponse>(ControlApiTestApplication.JsonOptions);
+        var item = Assert.Single(history!.Items);
+        Assert.Equal("Linked", item.Action);
+        Assert.Equal("Account", item.ActorKind);
+        Assert.Equal(cloudAccountId, item.ActorAccountId);
+        Assert.Equal(hubAccountId, item.SourceAccountId);
+        var hubMe = await organizations.Content.ReadControlJsonAsync<MeWorkspacesResponse>();
+        Assert.Equal(cloudAccountId, hubMe!.Account.Id);
+        Assert.Contains(hubMe.Organizations, organization => organization.Id == cloudOwned.OrganizationId);
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.DoesNotContain(
+            await db.AccountIdentityLinkAuditRecords.ToListAsync(),
+            record => record.Action == AccountIdentityLinkAction.Unlinked);
     }
 
     [Fact]

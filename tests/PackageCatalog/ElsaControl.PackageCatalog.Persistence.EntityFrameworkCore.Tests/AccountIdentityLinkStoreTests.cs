@@ -1,4 +1,5 @@
 using ElsaControl.Deployment.Abstractions.Instances;
+using ElsaControl.Deployment.Core.ExternalConnections;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
@@ -86,8 +87,51 @@ public sealed class AccountIdentityLinkStoreTests
         Assert.Equal(AccountIdentityLinkOutcome.Linked, result.Outcome);
         Assert.Equal(cloud.Id, (await db.ExternalIdentities.SingleAsync(x => x.Subject == "hub-user")).AccountId);
         var audit = Assert.Single(await db.AccountIdentityLinkAuditRecords.ToListAsync());
+        Assert.Equal(AccountIdentityLinkAction.Linked, audit.Action);
+        Assert.Equal(AccountIdentityLinkActorKind.Account, audit.ActorKind);
         Assert.Equal(hub.Id, audit.SourceAccountId);
         Assert.Equal(cloud.Id, audit.AccountId);
+        Assert.Equal(cloud.Id, audit.ActorAccountId);
+        Assert.DoesNotContain(
+            await db.AccountIdentityLinkAuditRecords.ToListAsync(),
+            record => record.Action == AccountIdentityLinkAction.Unlinked);
+    }
+
+    [Fact]
+    public async Task Already_linked_hub_identity_is_not_moved_to_a_different_account()
+    {
+        await using var db = await CreateDatabaseAsync();
+        var first = await SeedAccountAsync(db, CloudIssuer, "cloud-user");
+        var second = await SeedAccountAsync(db, CloudIssuer, "other-cloud");
+        var store = new AccountIdentityLinkStore(db);
+        await store.LinkAsync(CloudIdentity("cloud-user"), HubIdentity("hub-user"));
+
+        var result = await store.LinkAsync(CloudIdentity("other-cloud"), HubIdentity("hub-user"));
+
+        Assert.Equal(AccountIdentityLinkOutcome.AccountAlreadyLinked, result.Outcome);
+        Assert.Equal(first.Id, (await db.ExternalIdentities.SingleAsync(x => x.Subject == "hub-user")).AccountId);
+        Assert.DoesNotContain(await db.ExternalIdentities.ToListAsync(), identity =>
+            identity.AccountId == second.Id && identity.Kind == ExternalIdentityKinds.Hub);
+        Assert.Single(await db.AccountIdentityLinkAuditRecords.ToListAsync());
+        Assert.Equal(first.Id, (await db.AccountIdentityLinkAuditRecords.SingleAsync()).AccountId);
+    }
+
+    [Fact]
+    public async Task Hub_account_with_an_active_external_engine_connection_is_refused_and_is_not_migrated()
+    {
+        await using var db = await CreateDatabaseAsync();
+        var cloud = await SeedAccountAsync(db, CloudIssuer, "cloud-user");
+        var hub = await SeedAccountAsync(db, HubIssuer, "hub-user", ExternalIdentityKinds.Hub);
+        await SeedExternalEngineConnectionAsync(db, hub);
+        var store = new AccountIdentityLinkStore(db);
+
+        var result = await store.LinkAsync(CloudIdentity("cloud-user"), HubIdentity("hub-user"));
+
+        Assert.Equal(AccountIdentityLinkOutcome.HubAccountHasEngines, result.Outcome);
+        Assert.Empty(await db.AccountIdentityLinkAuditRecords.ToListAsync());
+        Assert.Equal(hub.Id, (await db.ExternalIdentities.SingleAsync(x => x.Subject == "hub-user")).AccountId);
+        Assert.DoesNotContain(await db.ExternalIdentities.ToListAsync(), identity =>
+            identity.AccountId == cloud.Id && identity.Kind == ExternalIdentityKinds.Hub);
     }
 
     [Fact]
@@ -192,6 +236,22 @@ public sealed class AccountIdentityLinkStoreTests
 
         Assert.Equal(AccountIdentityLinkOutcome.AccountAlreadyLinked, remapped.Outcome);
         Assert.Single(await db.ExternalIdentities.Where(identity => identity.Kind == ExternalIdentityKinds.Hub).ToListAsync());
+    }
+
+    [Fact]
+    public async Task Unique_violation_remap_returns_account_already_linked_when_hub_is_on_another_cloud_account()
+    {
+        await using var db = await CreateDatabaseAsync();
+        var first = await SeedAccountAsync(db, CloudIssuer, "cloud-user");
+        await SeedAccountAsync(db, CloudIssuer, "other-cloud");
+        var store = new AccountIdentityLinkStore(db);
+        await store.LinkAsync(CloudIdentity("cloud-user"), HubIdentity("hub-user"));
+
+        var remapped = await store.MapUniqueViolationAsync(CloudIdentity("other-cloud"), HubIdentity("hub-user"), CancellationToken.None);
+
+        Assert.Equal(AccountIdentityLinkOutcome.AccountAlreadyLinked, remapped.Outcome);
+        Assert.Equal(first.Id, (await db.ExternalIdentities.SingleAsync(x => x.Subject == "hub-user")).AccountId);
+        Assert.Single(await db.AccountIdentityLinkAuditRecords.ToListAsync());
     }
 
     [Fact]
@@ -307,6 +367,33 @@ public sealed class AccountIdentityLinkStoreTests
             AccountId = account.Id,
             Organization = organization,
             Role = OrganizationRole.Member
+        });
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+    }
+
+    private static async Task SeedExternalEngineConnectionAsync(CatalogDbContext db, Account account)
+    {
+        var membership = await db.WorkspaceMemberships.AsNoTracking().SingleAsync(x => x.AccountId == account.Id);
+        var organizationId = await db.Workspaces.Where(x => x.Id == membership.WorkspaceId).Select(x => x.OrganizationId).SingleAsync();
+        var now = DateTimeOffset.UtcNow;
+        db.ExternalEngineConnections.Add(new ExternalEngineConnectionEntity
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = organizationId,
+            WorkspaceId = membership.WorkspaceId,
+            DisplayName = "Hub connection",
+            OwnershipMode = ExternalEngineConnection.OwnershipMode,
+            Status = ExternalEngineConnectionStatus.Connected.ToString(),
+            RuntimeHealth = ExternalEngineRuntimeHealth.Unknown.ToString(),
+            ConnectorReachability = ExternalEngineConnectorReachability.Unknown.ToString(),
+            ReleaseEvidenceLevel = ExternalEngineReleaseEvidenceLevel.None.ToString(),
+            ConnectorCompatibilityStatus = ExternalEngineConnectorCompatibilityStatus.Unknown.ToString(),
+            IdempotencyKey = $"hub-connection-{account.Id:N}",
+            CreateRequestDigest = "digest",
+            CreatedAt = now,
+            UpdatedAt = now,
+            Version = 1
         });
         await db.SaveChangesAsync();
         db.ChangeTracker.Clear();
