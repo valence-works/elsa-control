@@ -118,6 +118,8 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     internal DbSet<Models.GovernedReleaseCatalogComponentCapabilityEntity> GovernedReleaseCatalogComponentCapabilities => Set<Models.GovernedReleaseCatalogComponentCapabilityEntity>();
     internal DbSet<Models.GovernedReleaseCatalogEndpointEntity> GovernedReleaseCatalogEndpoints => Set<Models.GovernedReleaseCatalogEndpointEntity>();
     internal DbSet<Models.GovernedReleaseCatalogEvidenceEntity> GovernedReleaseCatalogEvidence => Set<Models.GovernedReleaseCatalogEvidenceEntity>();
+    internal DbSet<Models.ElsaPlacementAssignmentEntity> ElsaPlacementAssignments => Set<Models.ElsaPlacementAssignmentEntity>();
+    internal DbSet<Models.ElsaSharedShardEntity> ElsaSharedShards => Set<Models.ElsaSharedShardEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -216,6 +218,8 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         modelBuilder.ApplyConfiguration(new Models.GovernedReleaseCatalogComponentCapabilityConfiguration());
         modelBuilder.ApplyConfiguration(new Models.GovernedReleaseCatalogEndpointConfiguration());
         modelBuilder.ApplyConfiguration(new Models.GovernedReleaseCatalogEvidenceConfiguration());
+        modelBuilder.ApplyConfiguration(new Models.ElsaPlacementAssignmentConfiguration());
+        modelBuilder.ApplyConfiguration(new Models.ElsaSharedShardConfiguration());
         Models.CatalogTableTriggers.Declare(modelBuilder, Database.ProviderName);
 
         if (Database.ProviderName == "Microsoft.EntityFrameworkCore.SqlServer")

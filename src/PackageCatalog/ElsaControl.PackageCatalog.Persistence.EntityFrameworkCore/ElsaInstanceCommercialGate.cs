@@ -16,11 +16,19 @@ public sealed class EfCoreElsaInstanceCommercialGate(CatalogDbContext db, TimePr
 {
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
 
-    public async Task<ElsaInstanceCommercialGateDecision> EvaluateAsync(
+    public Task<ElsaInstanceCommercialGateDecision> EvaluateAsync(
         Guid organizationId,
         ElsaInstanceOperationAction action,
         int? activeInstanceCount = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        EvaluateAsync(organizationId, action, activeInstanceCount, placement: null, cancellationToken);
+
+    public async Task<ElsaInstanceCommercialGateDecision> EvaluateAsync(
+        Guid organizationId,
+        ElsaInstanceOperationAction action,
+        int? activeInstanceCount,
+        ElsaInstanceCommercialPlacementRequest? placement,
+        CancellationToken cancellationToken)
     {
         if (organizationId == Guid.Empty)
             return Deny(ElsaInstanceCommercialOperation.EntitlementRequired, "The organization entitlement is unavailable.");
@@ -69,22 +77,82 @@ public sealed class EfCoreElsaInstanceCommercialGate(CatalogDbContext db, TimePr
                     "An active Azure subscription bind is required for this organization.");
         }
 
-        // MaxInstances is the Dedicated placement allowance (ADR-0017 F5). The
-        // caller passes the Dedicated managed count, and only when the create
-        // itself consumes that allowance. Shared creates omit it.
-        if (action == ElsaInstanceOperationAction.Create &&
-            activeInstanceCount is { } count && count >= entitlement.MaxInstances)
+        // Updates never change the count and do not check either allowance
+        // (ADR-0017 I1 / Amendment 1 clause 5).
+        if (action is ElsaInstanceOperationAction.UpdateIntent or
+            ElsaInstanceOperationAction.ApproveMinorUpgrade or
+            ElsaInstanceOperationAction.MajorMigration)
+            return ElsaInstanceCommercialGateDecision.Allow();
+
+        // MaxInstances is the Dedicated placement allowance (ADR-0017 F5).
+        // Shared admission uses MaxSharedTenants and the counting assignment.
+        if (ShouldCheckDedicatedAllowance(action, placement) &&
+            DedicatedCount(activeInstanceCount, placement) is { } dedicatedCount &&
+            dedicatedCount >= entitlement.MaxInstances)
             return new ElsaInstanceCommercialGateDecision(
                 false,
                 ElsaInstanceCommercialOperation.InstanceLimitReached,
                 "The organization has reached its managed-instance limit.")
             {
-                CurrentInstanceCount = count,
+                CurrentInstanceCount = dedicatedCount,
                 MaxInstances = entitlement.MaxInstances
             };
 
+        if (ShouldCheckSharedAllowance(action, placement))
+        {
+            var sharedLimit = entitlement.MaxSharedTenants ?? 0;
+            var sharedCount = placement?.ActiveSharedCount ?? 0;
+            if (placement?.IsSameKindSharedMove == true)
+            {
+                // Admit while count <= L. Return move-in-progress only when the
+                // org is at the single transient L+1 because another same-kind
+                // move is in flight. Any other over-L case is exceeded.
+                if (sharedCount > sharedLimit)
+                {
+                    if (placement.SameKindSharedMoveInFlight && sharedCount == sharedLimit + 1)
+                        return Deny(
+                            ElsaInstanceCommercialOperation.SharedAllowanceMoveInProgress,
+                            "A Shared placement move is already using the transient allowance.");
+
+                    return Deny(
+                        ElsaInstanceCommercialOperation.SharedAllowanceExceeded,
+                        "The organization has reached its Shared-tenant allowance.");
+                }
+            }
+            else if (sharedCount >= sharedLimit)
+            {
+                return Deny(
+                    ElsaInstanceCommercialOperation.SharedAllowanceExceeded,
+                    "The organization has reached its Shared-tenant allowance.");
+            }
+        }
+
         return ElsaInstanceCommercialGateDecision.Allow();
     }
+
+    private static bool ShouldCheckDedicatedAllowance(
+        ElsaInstanceOperationAction action,
+        ElsaInstanceCommercialPlacementRequest? placement)
+    {
+        if (placement is null)
+            return action == ElsaInstanceOperationAction.Create;
+        return placement.Selection.ConsumesDedicatedAllowance &&
+               (action == ElsaInstanceOperationAction.Create || placement.CreatesTargetTenant);
+    }
+
+    private static bool ShouldCheckSharedAllowance(
+        ElsaInstanceOperationAction action,
+        ElsaInstanceCommercialPlacementRequest? placement)
+    {
+        if (placement is null || !placement.Selection.ConsumesSharedAllowance)
+            return false;
+        if (placement.IsSameKindSharedMove)
+            return true;
+        return action == ElsaInstanceOperationAction.Create || placement.CreatesTargetTenant;
+    }
+
+    private static int? DedicatedCount(int? activeInstanceCount, ElsaInstanceCommercialPlacementRequest? placement) =>
+        placement?.ActiveDedicatedCount ?? activeInstanceCount;
 
     private static ElsaInstanceCommercialGateDecision Deny(string code, string summary) =>
         new(false, code, summary);

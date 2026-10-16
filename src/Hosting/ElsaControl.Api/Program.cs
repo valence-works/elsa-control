@@ -251,25 +251,13 @@ builder.Services.AddCors(options => options.AddPolicy(PublicBuilderCors.PolicyNa
         .WithMethods(HttpMethods.Get, HttpMethods.Post, HttpMethods.Options)
         .WithHeaders("Content-Type", ApiKeyAuthenticationDefaults.HeaderName);
 }));
+builder.Services.Configure<CloudBootstrapRateLimitOptions>(
+    builder.Configuration.GetSection(CloudBootstrapRateLimitOptions.ConfigurationSection));
+builder.Services.AddHostedService<CloudBootstrapRateLimitConfigurationValidator>();
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-    options.OnRejected = async (context, _) =>
-    {
-        var heartbeat = context.HttpContext.Request.Path.StartsWithSegments("/api/runtime/external-engine-connections")
-                        && context.HttpContext.Request.Path.Value?.EndsWith("/heartbeat", StringComparison.OrdinalIgnoreCase) == true;
-        await Results.Problem(
-                statusCode: StatusCodes.Status429TooManyRequests,
-                title: heartbeat
-                    ? "External engine heartbeat rate limit was exceeded."
-                    : "Managed Elsa identity handoff rate limit was exceeded.",
-                extensions: new Dictionary<string, object?>
-                {
-                    ["code"] = heartbeat ? "external-engine.heartbeat.rate-limited" : "handoff.rate-limited",
-                    ["correlationId"] = context.HttpContext.TraceIdentifier
-                })
-            .ExecuteAsync(context.HttpContext);
-    };
+    options.OnRejected = ApiRateLimitRejection.OnRejectedAsync;
     options.AddPolicy("managed-elsa-handoff", context => RateLimitPartition.GetFixedWindowLimiter(
         context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
         _ => new FixedWindowRateLimiterOptions
@@ -288,6 +276,7 @@ builder.Services.AddRateLimiter(options =>
             QueueLimit = 0,
             AutoReplenishment = true
         }));
+    options.AddPolicy<string, CloudBootstrapRateLimiterPolicy>(CloudBootstrapRateLimitDefaults.PolicyName);
 });
 builder.Services.AddCatalogAuthorization();
 builder.Services.AddBuilderClientAuthorization();

@@ -136,6 +136,13 @@ public sealed class OrganizationEntitlementSnapshot
     public int MaxWorkspaces { get; set; }
     /// <summary>Maximum number of retained managed instances for this organization.</summary>
     public int MaxInstances { get; set; } = int.MaxValue;
+    /// <summary>
+    /// Shared-tenant allowance (ADR-0017 Amendment 1). Null or absent means zero.
+    /// Counted from Control-owned counting assignments whose <c>Kind</c> is
+    /// <c>shared-shard</c> and <c>shardClass</c> is <c>standard</c>. Reserved
+    /// and Active both count, so a move occupies source and target until commit.
+    /// </summary>
+    public int? MaxSharedTenants { get; set; }
     public int? MaxPackagesIndexed { get; set; }
     public int? MaxVersionsPerPackage { get; set; }
     public int? MaxSyncsPerDay { get; set; }

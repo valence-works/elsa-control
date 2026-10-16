@@ -59,11 +59,22 @@ public sealed class ControlIdentityReader(
     }
 
     private TrustedWorkspaceIdentity? MapIdentity(ClaimsPrincipal? user) =>
-        HubAccountTokenSelector.IsValidatedHubAccount(user, _hubAccountOptions)
-            ? ControlClaimsIdentityMapper.ToHubTrustedWorkspaceIdentity(user!)
-            : CloudAccountTokenSelector.IsValidatedCloudAccount(user, _cloudAccountOptions)
-                ? ControlClaimsIdentityMapper.ToCloudTrustedWorkspaceIdentity(user!)
-                : ControlClaimsIdentityMapper.ToTrustedWorkspaceIdentity(user, _options);
+        MapIdentity(user, _options, _cloudAccountOptions, _hubAccountOptions);
+
+    internal static TrustedWorkspaceIdentity? MapIdentity(
+        ClaimsPrincipal? user,
+        ControlIdentityOptions options,
+        CloudAccountIdentityOptions cloudAccountOptions,
+        HubAccountIdentityOptions hubAccountOptions)
+    {
+        if (HubAccountTokenSelector.IsValidatedHubAccount(user, hubAccountOptions))
+            return ControlClaimsIdentityMapper.ToHubTrustedWorkspaceIdentity(user!);
+
+        if (CloudAccountTokenSelector.IsValidatedCloudAccount(user, cloudAccountOptions))
+            return ControlClaimsIdentityMapper.ToCloudTrustedWorkspaceIdentity(user!);
+
+        return ControlClaimsIdentityMapper.ToTrustedWorkspaceIdentity(user, options);
+    }
 
     internal static bool TryReadBearerExpiry(ClaimsPrincipal principal, out DateTimeOffset expiresAt)
     {
@@ -111,8 +122,7 @@ internal static class ControlClaimsIdentityMapper
         if (user?.Identity is not { IsAuthenticated: true })
             return null;
 
-        var subject = ClaimValue(user, options.Claims.Subject)
-            ?? ClaimValue(user, ClaimTypes.NameIdentifier);
+        var subject = Subject(user, options);
         var displayName = FirstClaimValue(user, options.Claims.DisplayName)
             ?? ClaimValue(user, JwtRegisteredClaimNames.Name)
             ?? ClaimValue(user, ClaimTypes.Name);
@@ -122,14 +132,21 @@ internal static class ControlClaimsIdentityMapper
         if (options.IsEntraMultiTenant)
             return EntraMultiTenantIdentity.ToTrustedWorkspaceIdentity(user, options.Entra, subject, displayName, email);
 
-        var issuer = ClaimValue(user, JwtRegisteredClaimNames.Iss)
-            ?? options.Issuer
-            ?? options.Authority;
+        var issuer = Issuer(user, options);
         if (string.IsNullOrWhiteSpace(issuer) || string.IsNullOrWhiteSpace(subject))
             return null;
 
         return new TrustedWorkspaceIdentity(issuer, subject, displayName, email);
     }
+
+    public static string? Issuer(ClaimsPrincipal user, ControlIdentityOptions options) =>
+        ClaimValue(user, JwtRegisteredClaimNames.Iss)
+        ?? options.Issuer
+        ?? options.Authority;
+
+    public static string? Subject(ClaimsPrincipal user, ControlIdentityOptions options) =>
+        ClaimValue(user, options.Claims.Subject)
+        ?? ClaimValue(user, ClaimTypes.NameIdentifier);
 
     private static string? FirstClaimValue(ClaimsPrincipal principal, IEnumerable<string> types)
     {
