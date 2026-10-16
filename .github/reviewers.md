@@ -34,26 +34,31 @@ green CI, or GitHub's `reviewDecision`/`APPROVED` state.
 
 ## Merge gate
 
-Stay consistent with the merge-authority comment on
-[issue #508](https://github.com/valence-works/elsa-control/issues/508#issuecomment-5969355661)
+On 14 Oct 2026 at 04:28 CEST, Sipke confirmed that the gate reviewer is the
+Elsa Control Code Review GitHub App (`elsa-control-code-review[bot]`), and
+that this app also merges. Stay consistent with the merge-authority comment
+on [issue #508](https://github.com/valence-works/elsa-control/issues/508#issuecomment-5969355661)
 (comment `5969355661`) and the standing human authority recorded on
 [issue #508](https://github.com/valence-works/elsa-control/issues/508#issuecomment-5970160426)
 (comment `5970160426`, Sipke, 3 Oct ~16:41 Europe/Amsterdam):
 
-- The gate review is authored by `sfmskywalker` and posted by Elsa Control
-  Code Review. A review by any other author never counts, whatever its
-  first line says. No agent other than Code Review (control room, Codex,
-  Cursor, Claude, advisory bots) may submit a GitHub `APPROVE` review or
-  start a review with `**Verdict:`. If one does, treat it as void and
-  report it.
-- The **latest** Code Review verdict on the exact head SHA must be
-  `**Verdict: APPROVE**`. A later CHANGES REQUESTED or BLOCKER on the same
-  head supersedes it. Post-merge verdicts such as
+- The gate review is authored by `elsa-control-code-review[bot]`. A review
+  by any other author never counts, whatever its first line says. The
+  reviewer must not be the PR's author. No agent other than Code Review
+  (control room, Codex, Cursor, Claude, advisory bots) may submit a GitHub
+  `APPROVE` review or start a review with `**Verdict:`. If one does, treat
+  it as void and report it.
+- The **latest** Code Review verdict on the exact head SHA must start with
+  `**Verdict: APPROVE**` as the first line. Line 2 carries the reviewed
+  head SHA. A later CHANGES REQUESTED or BLOCKER on the same head
+  supersedes it. Post-merge verdicts such as
   `**Verdict: APPROVE (post-merge)**` are not a merge gate. Match the first
   line exactly, not as a prefix. The GitHub review state is irrelevant:
-  these are COMMENT reviews. Nothing else counts. That includes reviews
+  only the first line and the reviewed SHA count, whatever the review
+  state. Nothing else counts. That includes reviews
   starting `## Control-room` / `Control-room`, any advisory-bot review
-  including `APPROVED`, and any review on an earlier head.
+  including `APPROVED`, and any review on an earlier head. Nothing
+  actionable may remain.
 - A new push makes every earlier verdict stale; the new head needs
   re-review.
 - Green CI (required-green) means the `CI` workflow run on the exact head
@@ -61,22 +66,27 @@ Stay consistent with the merge-authority comment on
   `Full .NET restore, build, and test`,
   `Build and smoke-test API provider image` and `Build and Test`. A running,
   cancelled or re-run-pending CI run is not green. Never use auto-merge.
-- Merge one PR at a time. Merge with the head pinned
+- The Code Review app merges. Never merge through a personal account or by
+  the PR author. Merge one PR at a time. Merge with the head pinned
   (`gh pr merge --match-head-commit <sha>`, or the REST merge `sha`
   parameter).
 - If main has moved since the head's CI ran or since the latest Code
-  Review verdict, update the branch first. That creates a new head, which
-  needs fresh green CI and a fresh exact-head review under the normal gate
-  or the availability fallback before merging. This is the #674/#675 failure.
+  Review verdict, update the branch first and re-stamp before merging.
+  That creates a new head, which needs fresh green CI and a fresh
+  exact-head review under the normal gate or the availability fallback
+  before merging. This is the #674/#675 failure.
 - Hand the advisory reviewer's findings to Elsa Control Code Review
   **before** it gives its verdict. They are input. Code Review decides
   which ones matter. A missing, slow or failed advisory review never
   blocks that verdict.
 - Adequately reviewed means the latest Code Review verdict on that exact
-  head is `**Verdict: APPROVE**`, or the control room has completed the
-  explicitly authorized availability fallback below. When that holds and
-  CI is required-green on the same SHA, the Codex control room may merge
-  and deploy staging without per-PR reconfirmation.
+  head is `**Verdict: APPROVE**` with the reviewed SHA on line 2 and
+  nothing actionable remaining, or the control room has completed the
+  explicitly authorized availability fallback below. Under the normal
+  gate (approval on the exact head, nothing actionable left, required CI
+  green), the Code Review app merges. Under the availability fallback,
+  the control room merges. The Codex control room may still deploy
+  staging without per-PR reconfirmation.
 - Production publication, production configuration changes, live payment
   changes, and destructive actions against real customer resources still
   need Sipke's explicit approval.
