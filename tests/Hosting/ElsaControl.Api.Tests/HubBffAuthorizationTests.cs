@@ -29,8 +29,8 @@ public sealed class HubBffAuthorizationTests
     private const string HandoffCodeVerifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 
     // #823's six read endpoints plus #824's fifteen lifecycle endpoints plus
-    // hosted-subscription from #825. The enumeration helper is the contract:
-    // any extra Hub marker fails this test.
+    // hosted-subscription from #825 plus account linking from #826. The
+    // enumeration helper is the contract: any extra Hub marker fails this test.
     private static readonly string[] ExpectedHubBffAllowlist =
     [
         "GET /api/cloud/compatibility",
@@ -48,6 +48,7 @@ public sealed class HubBffAuthorizationTests
         "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/overview",
         "GET /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}/provisioning-progress",
         "PATCH /api/workspaces/{workspaceId:guid}/instances/{instanceId:guid}",
+        "POST /api/cloud/account-links",
         "POST /api/cloud/bootstrap",
         "POST /api/managed-elsa/handoff/issue",
         "POST /api/workspaces/{workspaceId:guid}/instances/",
@@ -66,7 +67,7 @@ public sealed class HubBffAuthorizationTests
         response.EnsureSuccessStatusCode();
 
         Assert.Equal(ExpectedHubBffAllowlist.Order(StringComparer.Ordinal), EnumerateHubBffAllowlist(app));
-        Assert.Equal(22, ExpectedHubBffAllowlist.Length);
+        Assert.Equal(23, ExpectedHubBffAllowlist.Length);
     }
 
     [Fact]

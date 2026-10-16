@@ -40,6 +40,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     public DbSet<OrganizationIdentityBinding> OrganizationIdentityBindings => Set<OrganizationIdentityBinding>();
     public DbSet<OrganizationEntitlementSnapshot> OrganizationEntitlementSnapshots => Set<OrganizationEntitlementSnapshot>();
     public DbSet<OrganizationAuditRecord> OrganizationAuditRecords => Set<OrganizationAuditRecord>();
+    public DbSet<AccountIdentityLinkAuditRecord> AccountIdentityLinkAuditRecords => Set<AccountIdentityLinkAuditRecord>();
     public DbSet<OrganizationSubscription> OrganizationSubscriptions => Set<OrganizationSubscription>();
     public DbSet<BillingProviderEventInboxEntry> BillingProviderEvents => Set<BillingProviderEventInboxEntry>();
     public DbSet<OrganizationBillingLifecycleNotice> OrganizationBillingLifecycleNotices => Set<OrganizationBillingLifecycleNotice>();
@@ -140,6 +141,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         modelBuilder.ApplyConfiguration(new Models.OrganizationMembershipConfiguration());
         modelBuilder.ApplyConfiguration(new Models.OrganizationEntitlementSnapshotConfiguration());
         modelBuilder.ApplyConfiguration(new Models.OrganizationAuditRecordConfiguration());
+        modelBuilder.ApplyConfiguration(new Models.AccountIdentityLinkAuditRecordConfiguration());
         modelBuilder.ApplyConfiguration(new Models.OrganizationSubscriptionConfiguration());
         modelBuilder.ApplyConfiguration(new Models.BillingProviderEventInboxEntryConfiguration());
         modelBuilder.ApplyConfiguration(new Models.OrganizationBillingLifecycleNoticeConfiguration());

@@ -47,6 +47,45 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.ToTable("Accounts");
                 });
 
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.AccountIdentityLinkAuditRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Action")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<Guid?>("ActorAccountId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ActorKind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("OperatorSubject")
+                        .HasMaxLength(512)
+                        .HasColumnType("nvarchar(512)");
+
+                    b.Property<Guid?>("SourceAccountId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "CreatedAt");
+
+                    b.ToTable("AccountIdentityLinkAuditRecords");
+                });
+
             modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.BillingProviderEventInboxEntry", b =>
                 {
                     b.Property<Guid>("Id")
@@ -181,6 +220,11 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("AccountId");
+
+                    b.HasIndex("AccountId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_ExternalIdentities_AccountId_Hub")
+                        .HasFilter("Kind = 'hub'");
 
                     b.HasIndex("Issuer", "Subject")
                         .IsUnique();
