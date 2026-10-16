@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json.Nodes;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Cloud;
 using ElsaControl.Api.Workspace;
@@ -110,7 +111,15 @@ public sealed class WorkspaceMembershipsReadTests : IAsyncLifetime
 
         Assert.Equal(HttpStatusCode.Unauthorized, memberships.StatusCode);
         Assert.Equal(workspaces.StatusCode, memberships.StatusCode);
-        Assert.Equal(await workspaces.Content.ReadAsStringAsync(), await memberships.Content.ReadAsStringAsync());
+        Assert.Equal(await ReadProblemWithoutTraceIdAsync(workspaces), await ReadProblemWithoutTraceIdAsync(memberships));
+    }
+
+    // The trace id differs per request; everything else in the problem body must match.
+    private static async Task<string> ReadProblemWithoutTraceIdAsync(HttpResponseMessage response)
+    {
+        var problem = JsonNode.Parse(await response.Content.ReadAsStringAsync())!.AsObject();
+        problem.Remove("traceId");
+        return problem.ToJsonString();
     }
 
     private HttpClient SessionClient(string issuer, string subject, string email = "buyer@example.test") =>
