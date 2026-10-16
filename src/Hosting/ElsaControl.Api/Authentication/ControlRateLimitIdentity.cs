@@ -5,7 +5,7 @@ namespace ElsaControl.Api.Authentication;
 
 /// <summary>
 /// Rate-limit partition key for a signed-in principal: validated issuer plus subject.
-/// Shared by the cloud-bootstrap limiter and available to later handoff limiting.
+/// Shared by the cloud-bootstrap, handoff, and instance-lifecycle limiters.
 /// </summary>
 internal static class ControlRateLimitIdentity
 {

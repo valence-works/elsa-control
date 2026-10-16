@@ -1,10 +1,7 @@
 using System.Globalization;
-using System.Net;
-using System.Net.Sockets;
-using System.Security.Claims;
 using System.Threading.RateLimiting;
 using ElsaControl.Api.Authentication;
-using Microsoft.AspNetCore.Authentication;
+using ElsaControl.Api.Workspace;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
 
@@ -71,12 +68,7 @@ public sealed class CloudBootstrapRateLimitOptions
         string prefix)
     {
         var value = window ?? new CloudBootstrapFixedWindowRateLimitOptions { PermitLimit = 0, Window = TimeSpan.Zero };
-        if (value.PermitLimit < CloudBootstrapRateLimitDefaults.MinPermitLimit ||
-            value.PermitLimit > CloudBootstrapRateLimitDefaults.MaxPermitLimit)
-            yield return $"{prefix}:PermitLimit must be between {CloudBootstrapRateLimitDefaults.MinPermitLimit} and {CloudBootstrapRateLimitDefaults.MaxPermitLimit}.";
-        if (value.Window < CloudBootstrapRateLimitDefaults.MinWindow ||
-            value.Window > CloudBootstrapRateLimitDefaults.MaxWindow)
-            yield return $"{prefix}:Window must be between {CloudBootstrapRateLimitDefaults.MinWindow} and {CloudBootstrapRateLimitDefaults.MaxWindow}.";
+        return ControlRateLimitWindowRules.Validate(value.PermitLimit, value.Window, prefix);
     }
 }
 
@@ -96,178 +88,32 @@ public sealed class CloudBootstrapRateLimitConfigurationValidator(
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }
 
-public sealed class CloudBootstrapRateLimiterPolicy : IRateLimiterPolicy<string>
+public sealed class CloudBootstrapRateLimiterPolicy : ControlIdentityAndIpRateLimiterPolicy
 {
-    private readonly CloudBootstrapChainedRateLimiter _limiter;
-
     public CloudBootstrapRateLimiterPolicy(
         IOptions<CloudBootstrapRateLimitOptions> options,
         IOptions<ControlIdentityOptions> controlIdentity,
         IOptions<CloudAccountIdentityOptions> cloudAccount,
         IOptions<HubAccountIdentityOptions> hubAccount)
+        : base(
+            CloudBootstrapRateLimitDefaults.PolicyName,
+            new ControlRateLimitWindow(options.Value.PerIp.PermitLimit, options.Value.PerIp.Window),
+            new ControlRateLimitWindow(options.Value.PerIdentity.PermitLimit, options.Value.PerIdentity.Window),
+            controlIdentity.Value,
+            cloudAccount.Value,
+            hubAccount.Value,
+            limitIdentityForNonBff: true)
     {
-        _limiter = new CloudBootstrapChainedRateLimiter(
-            options.Value, controlIdentity.Value, cloudAccount.Value, hubAccount.Value);
-    }
-
-    public Func<OnRejectedContext, CancellationToken, ValueTask>? OnRejected => null;
-
-    public RateLimitPartition<string> GetPartition(HttpContext httpContext)
-    {
-        // Named IRateLimiterPolicy factories cannot take HttpContext on Acquire.
-        // GetPartition runs on the same call stack as AttemptAcquire, so AsyncLocal
-        // carries the context into the shared limiter. IdleDuration = TimeSpan.Zero
-        // keeps this partition from being evicted; the inner chained limiter owns eviction.
-        CloudBootstrapChainedRateLimiter.SetCurrent(httpContext);
-        return RateLimitPartition.Get(CloudBootstrapRateLimitDefaults.PolicyName, _ => _limiter);
     }
 }
 
-internal sealed class CloudBootstrapChainedRateLimiter : RateLimiter
+internal static class CloudBootstrapChainedRateLimiter
 {
-    internal const string UnresolvedIdentityPartitionPrefix = "unresolved";
-    internal const string AnonymousIdentityPartition = "anonymous";
-    private const string CachedPrincipalItemKey = "__cloud-bootstrap.principal";
-
-    private static readonly AsyncLocal<HttpContext?> Current = new();
-
-    private readonly PartitionedRateLimiter<HttpContext> _inner;
-
-    public CloudBootstrapChainedRateLimiter(
-        CloudBootstrapRateLimitOptions options,
-        ControlIdentityOptions controlIdentity,
-        CloudAccountIdentityOptions cloudAccount,
-        HubAccountIdentityOptions hubAccount)
-    {
-        var unresolvedIdentity = new CloudBootstrapFixedWindowRateLimitOptions
-        {
-            PermitLimit = CloudBootstrapRateLimitDefaults.UnresolvedIdentityPermitLimit,
-            Window = options.PerIdentity.Window
-        };
-        _inner = PartitionedRateLimiter.CreateChained(
-            PartitionedRateLimiter.Create<HttpContext, string>(context =>
-                RateLimitPartition.GetFixedWindowLimiter(
-                    GetIpPartitionKey(context),
-                    _ => CreateWindow(options.PerIp))),
-            PartitionedRateLimiter.Create<HttpContext, string>(context =>
-            {
-                var principal = GetAuthenticatedPrincipal(context);
-                var identity = ControlRateLimitIdentity.PartitionKey(
-                    principal, controlIdentity, cloudAccount, hubAccount);
-                if (identity is not null)
-                    return RateLimitPartition.GetFixedWindowLimiter(identity, _ => CreateWindow(options.PerIdentity));
-                if (principal is not null)
-                    return RateLimitPartition.GetFixedWindowLimiter(
-                        UnresolvedIdentityKey(context),
-                        _ => CreateWindow(unresolvedIdentity));
-                return RateLimitPartition.GetNoLimiter<string>(AnonymousIdentityPartition);
-            }));
-    }
-
-    public override TimeSpan? IdleDuration => TimeSpan.Zero;
-
-    public override RateLimiterStatistics? GetStatistics() => null;
-
-    public static void SetCurrent(HttpContext context) => Current.Value = context;
-
-    protected override RateLimitLease AttemptAcquireCore(int permitCount) =>
-        _inner.AttemptAcquire(RequireCurrent(), permitCount);
-
-    protected override ValueTask<RateLimitLease> AcquireAsyncCore(int permitCount, CancellationToken cancellationToken) =>
-        _inner.AcquireAsync(RequireCurrent(), permitCount, cancellationToken);
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing)
-            _inner.Dispose();
-        base.Dispose(disposing);
-    }
-
-    protected override ValueTask DisposeAsyncCore()
-    {
-        _inner.Dispose();
-        return ValueTask.CompletedTask;
-    }
-
-    // Uses Connection.RemoteIpAddress. KnownProxies and KnownNetworks are unchanged.
-    internal static string GetIpPartitionKey(HttpContext context)
-    {
-        var address = context.Connection.RemoteIpAddress;
-        if (address is null)
-            return "unknown";
-
-        if (address.IsIPv4MappedToIPv6)
-            address = address.MapToIPv4();
-
-        if (address.AddressFamily == AddressFamily.InterNetwork)
-            return address.ToString();
-
-        if (address.AddressFamily == AddressFamily.InterNetworkV6)
-        {
-            var bytes = address.GetAddressBytes();
-            Array.Clear(bytes, 8, 8);
-            return new IPAddress(bytes).ToString();
-        }
-
-        return address.ToString();
-    }
-
-    internal static string? GetIdentityPartitionKey(
-        HttpContext context,
-        ControlIdentityOptions controlIdentity,
-        CloudAccountIdentityOptions cloudAccount,
-        HubAccountIdentityOptions hubAccount)
-    {
-        return ControlRateLimitIdentity.PartitionKey(
-            GetAuthenticatedPrincipal(context),
-            controlIdentity,
-            cloudAccount,
-            hubAccount);
-    }
+    internal static string GetIpPartitionKey(HttpContext context) =>
+        ControlIdentityAndIpRateLimiter.GetIpPartitionKey(context);
 
     internal static string UnresolvedIdentityKey(HttpContext context) =>
-        ControlRateLimitIdentity.Format(UnresolvedIdentityPartitionPrefix, GetIpPartitionKey(context));
-
-    private static ClaimsPrincipal? GetAuthenticatedPrincipal(HttpContext context)
-    {
-        if (context.Items.TryGetValue(CachedPrincipalItemKey, out var cached))
-            return cached as ClaimsPrincipal;
-
-        ClaimsPrincipal? principal;
-        if (context.User.Identity is { IsAuthenticated: true })
-            principal = context.User;
-        else if (!context.Request.Cookies.ContainsKey(CustomerAuthenticationDefaults.CookieName))
-            principal = null;
-        else
-        {
-            // CustomerSession is not the default authenticate scheme. The partitioner is
-            // synchronous, so cookie decryption runs inline. That blocks a thread for the
-            // duration of unprotect, which is acceptable for this request rate.
-            var result = context.AuthenticateAsync(CustomerAuthenticationDefaults.CookieScheme)
-                .ConfigureAwait(false)
-                .GetAwaiter()
-                .GetResult();
-            principal = result.Succeeded && result.Principal?.Identity is { IsAuthenticated: true }
-                ? result.Principal
-                : null;
-        }
-
-        context.Items[CachedPrincipalItemKey] = principal;
-        return principal;
-    }
-
-    private static HttpContext RequireCurrent() =>
-        Current.Value ?? throw new InvalidOperationException(
-            "Cloud bootstrap rate limiting requires the current HTTP context.");
-
-    private static FixedWindowRateLimiterOptions CreateWindow(CloudBootstrapFixedWindowRateLimitOptions window) =>
-        new()
-        {
-            PermitLimit = window.PermitLimit,
-            Window = window.Window,
-            QueueLimit = 0,
-            AutoReplenishment = true
-        };
+        ControlIdentityAndIpRateLimiter.UnresolvedIdentityKey(context);
 }
 
 internal static class ApiRateLimitRejection
@@ -283,7 +129,8 @@ internal static class ApiRateLimitRejection
     {
         var policyName = context.HttpContext.GetEndpoint()?.Metadata.GetMetadata<EnableRateLimitingAttribute>()?.PolicyName;
         var (title, code) = CodeFor(policyName);
-        if (string.Equals(policyName, CloudBootstrapRateLimitDefaults.PolicyName, StringComparison.Ordinal))
+        if (string.Equals(policyName, CloudBootstrapRateLimitDefaults.PolicyName, StringComparison.Ordinal) ||
+            string.Equals(policyName, ManagedElsaInstanceLifecycleRateLimitDefaults.PolicyName, StringComparison.Ordinal))
         {
             context.HttpContext.Response.Headers.RetryAfter = RetryAfterSeconds(context.Lease)
                 .ToString(CultureInfo.InvariantCulture);
@@ -307,6 +154,9 @@ internal static class ApiRateLimitRejection
             CloudBootstrapRateLimitDefaults.PolicyName => (
                 CloudBootstrapRateLimitDefaults.ExceededTitle,
                 CloudBootstrapRateLimitDefaults.ExceededCode),
+            ManagedElsaInstanceLifecycleRateLimitDefaults.PolicyName => (
+                ManagedElsaInstanceLifecycleRateLimitDefaults.ExceededTitle,
+                ManagedElsaInstanceLifecycleRateLimitDefaults.ExceededCode),
             ExternalEngineHeartbeatPolicyName => (HeartbeatExceededTitle, HeartbeatExceededCode),
             _ => (HandoffExceededTitle, HandoffExceededCode)
         };

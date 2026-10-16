@@ -267,7 +267,10 @@ public static class ManagedElsaInstanceOverviewEndpoints
             return await ExecuteCustomerMutationAsync(
                 context, workspaceId, instanceId, store, queries, commercialGate, lifecycle,
                 catalog: null, version: null, cancellationToken);
-        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff().AllowHubBff();
+        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource)
+            .AllowCloudBff()
+            .AllowHubBff()
+            .RequireRateLimiting(ManagedElsaInstanceLifecycleRateLimitDefaults.PolicyName);
 
         group.MapPost("/{instanceId:guid}/apply-release", async (
             Guid workspaceId,
@@ -286,7 +289,10 @@ public static class ManagedElsaInstanceOverviewEndpoints
             return await ExecuteCustomerMutationAsync(
                 context, workspaceId, instanceId, store, queries, commercialGate, lifecycle,
                 catalog, body.Version, cancellationToken);
-        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource).AllowCloudBff().AllowHubBff();
+        }).RequireWorkspaceAccess(WorkspaceOperation.MutateWorkspaceResource)
+            .AllowCloudBff()
+            .AllowHubBff()
+            .RequireRateLimiting(ManagedElsaInstanceLifecycleRateLimitDefaults.PolicyName);
 
         return group;
     }

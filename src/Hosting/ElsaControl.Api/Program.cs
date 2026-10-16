@@ -255,19 +255,23 @@ builder.Services.AddCors(options => options.AddPolicy(PublicBuilderCors.PolicyNa
 builder.Services.Configure<CloudBootstrapRateLimitOptions>(
     builder.Configuration.GetSection(CloudBootstrapRateLimitOptions.ConfigurationSection));
 builder.Services.AddHostedService<CloudBootstrapRateLimitConfigurationValidator>();
+builder.Services.Configure<ManagedElsaHandoffRateLimitOptions>(
+    builder.Configuration.GetSection(ManagedElsaHandoffRateLimitOptions.ConfigurationSection));
+builder.Services.AddHostedService<ManagedElsaHandoffRateLimitConfigurationValidator>();
+builder.Services.Configure<ManagedElsaInstanceLifecycleRateLimitOptions>(
+    builder.Configuration.GetSection(ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection));
+builder.Services.AddHostedService<ManagedElsaInstanceLifecycleRateLimitConfigurationValidator>();
+builder.Services.Configure<ControlRateLimitBffEgressOptions>(options =>
+{
+    options.Networks = ControlRateLimitBffEgress.ReadNetworks(builder.Configuration);
+});
+builder.Services.AddHostedService<ControlRateLimitBffEgressConfigurationValidator>();
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
     options.OnRejected = ApiRateLimitRejection.OnRejectedAsync;
-    options.AddPolicy("managed-elsa-handoff", context => RateLimitPartition.GetFixedWindowLimiter(
-        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-        _ => new FixedWindowRateLimiterOptions
-        {
-            PermitLimit = 20,
-            Window = TimeSpan.FromMinutes(1),
-            QueueLimit = 0,
-            AutoReplenishment = true
-        }));
+    options.AddPolicy<string, ManagedElsaHandoffRateLimiterPolicy>(
+        ManagedElsaHandoffRateLimitDefaults.PolicyName);
     options.AddPolicy("external-engine-heartbeat", context => RateLimitPartition.GetFixedWindowLimiter(
         context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
         _ => new FixedWindowRateLimiterOptions
@@ -278,6 +282,8 @@ builder.Services.AddRateLimiter(options =>
             AutoReplenishment = true
         }));
     options.AddPolicy<string, CloudBootstrapRateLimiterPolicy>(CloudBootstrapRateLimitDefaults.PolicyName);
+    options.AddPolicy<string, ManagedElsaInstanceLifecycleRateLimiterPolicy>(
+        ManagedElsaInstanceLifecycleRateLimitDefaults.PolicyName);
 });
 builder.Services.AddCatalogAuthorization();
 builder.Services.AddBuilderClientAuthorization();
