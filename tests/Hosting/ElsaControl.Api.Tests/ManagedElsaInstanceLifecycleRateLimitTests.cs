@@ -312,6 +312,16 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
             perIdentityWindow: TimeSpan.Parse(window)).StartAsync(CancellationToken.None);
     }
 
+    [Fact]
+    public void Default_per_ip_permit_is_ten_times_per_identity()
+    {
+        var options = new ManagedElsaInstanceLifecycleRateLimitOptions();
+
+        Assert.Equal(ManagedElsaInstanceLifecycleRateLimitDefaults.DefaultPerIdentityPermitLimit, options.PerIdentity.PermitLimit);
+        Assert.Equal(ManagedElsaInstanceLifecycleRateLimitDefaults.DefaultPerIpPermitLimit, options.PerIp.PermitLimit);
+        Assert.Equal(options.PerIdentity.PermitLimit * 10, options.PerIp.PermitLimit);
+    }
+
     private static ControlApiTestApplication CreateApplication(
         int perIp,
         int perIdentity,

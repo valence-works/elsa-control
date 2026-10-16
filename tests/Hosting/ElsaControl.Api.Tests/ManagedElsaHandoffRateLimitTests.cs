@@ -288,6 +288,16 @@ public sealed class ManagedElsaHandoffRateLimitTests
             perIdentityWindow: TimeSpan.Parse(window)).StartAsync(CancellationToken.None);
     }
 
+    [Fact]
+    public void Default_per_ip_permit_is_ten_times_per_identity()
+    {
+        var options = new ManagedElsaHandoffRateLimitOptions();
+
+        Assert.Equal(ManagedElsaHandoffRateLimitDefaults.DefaultPerIdentityPermitLimit, options.PerIdentity.PermitLimit);
+        Assert.Equal(ManagedElsaHandoffRateLimitDefaults.DefaultPerIpPermitLimit, options.PerIp.PermitLimit);
+        Assert.Equal(options.PerIdentity.PermitLimit * 10, options.PerIp.PermitLimit);
+    }
+
     private static ControlApiTestApplication CreateApplication(
         int perIp,
         int perIdentity,

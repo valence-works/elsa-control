@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Cloud;
 
 namespace ElsaControl.Api.Tests;
@@ -10,7 +11,13 @@ public sealed class RateLimiterRejectionContractTests
     [Fact]
     public async Task Handoff_middleware_rejection_keeps_the_existing_problem_contract()
     {
-        await using var app = new ControlApiTestApplication();
+        await using var app = new ControlApiTestApplication(new Dictionary<string, string?>
+        {
+            [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIp:PermitLimit"] = "20",
+            [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIp:Window"] = "00:01:00",
+            [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIdentity:PermitLimit"] = "20",
+            [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIdentity:Window"] = "00:01:00"
+        });
         await app.SeedAsync(_ => Task.CompletedTask);
         using var client = app.CreateControlIdentityClient("handoff-rejection-contract");
         using var rejected = await RejectAsync(

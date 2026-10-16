@@ -9,13 +9,14 @@ public static class ManagedElsaInstanceLifecycleRateLimitDefaults
     public const string ConfigurationSection = "RateLimiting:ManagedElsaInstanceLifecycle";
     public const string ExceededCode = "rate-limit.exceeded";
     public const string ExceededTitle = "Managed Elsa instance lifecycle rate limit was exceeded.";
-    public const int DefaultPermitLimit = 10;
+    public const int DefaultPerIdentityPermitLimit = 10;
+    public const int DefaultPerIpPermitLimit = DefaultPerIdentityPermitLimit * 10;
     public static readonly TimeSpan DefaultWindow = TimeSpan.FromMinutes(1);
 }
 
 public sealed class ManagedElsaInstanceLifecycleFixedWindowRateLimitOptions
 {
-    public int PermitLimit { get; init; } = ManagedElsaInstanceLifecycleRateLimitDefaults.DefaultPermitLimit;
+    public int PermitLimit { get; init; } = ManagedElsaInstanceLifecycleRateLimitDefaults.DefaultPerIdentityPermitLimit;
     public TimeSpan Window { get; init; } = ManagedElsaInstanceLifecycleRateLimitDefaults.DefaultWindow;
 }
 
@@ -23,8 +24,28 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitOptions
 {
     public const string ConfigurationSection = ManagedElsaInstanceLifecycleRateLimitDefaults.ConfigurationSection;
 
-    public ManagedElsaInstanceLifecycleFixedWindowRateLimitOptions PerIp { get; init; } = new();
-    public ManagedElsaInstanceLifecycleFixedWindowRateLimitOptions PerIdentity { get; init; } = new();
+    /// <summary>
+    /// Fixed window applied to every request, including validated Cloud/Hub BFF
+    /// sessions, Control JWT callers, and authenticated cookies. The default
+    /// permit is ten times the per-identity default so shared BFF egress has
+    /// aggregate headroom while per-identity remains the binding limit for
+    /// signed-in callers.
+    /// </summary>
+    public ManagedElsaInstanceLifecycleFixedWindowRateLimitOptions PerIp { get; init; } = new()
+    {
+        PermitLimit = ManagedElsaInstanceLifecycleRateLimitDefaults.DefaultPerIpPermitLimit
+    };
+
+    /// <summary>
+    /// Fixed window keyed on validated issuer plus subject. This is the main
+    /// limit for signed-in callers. Authenticated sessions that cannot resolve
+    /// both values use a separate low-permit fallback bucket partitioned by IP.
+    /// Unauthenticated requests use the per-IP window only.
+    /// </summary>
+    public ManagedElsaInstanceLifecycleFixedWindowRateLimitOptions PerIdentity { get; init; } = new()
+    {
+        PermitLimit = ManagedElsaInstanceLifecycleRateLimitDefaults.DefaultPerIdentityPermitLimit
+    };
 
     internal IEnumerable<string> Validate()
     {

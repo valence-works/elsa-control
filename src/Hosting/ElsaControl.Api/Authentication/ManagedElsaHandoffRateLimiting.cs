@@ -6,13 +6,14 @@ public static class ManagedElsaHandoffRateLimitDefaults
 {
     public const string PolicyName = "managed-elsa-handoff";
     public const string ConfigurationSection = "RateLimiting:ManagedElsaHandoff";
-    public const int DefaultPermitLimit = 20;
+    public const int DefaultPerIdentityPermitLimit = 20;
+    public const int DefaultPerIpPermitLimit = DefaultPerIdentityPermitLimit * 10;
     public static readonly TimeSpan DefaultWindow = TimeSpan.FromMinutes(1);
 }
 
 public sealed class ManagedElsaHandoffFixedWindowRateLimitOptions
 {
-    public int PermitLimit { get; init; } = ManagedElsaHandoffRateLimitDefaults.DefaultPermitLimit;
+    public int PermitLimit { get; init; } = ManagedElsaHandoffRateLimitDefaults.DefaultPerIdentityPermitLimit;
     public TimeSpan Window { get; init; } = ManagedElsaHandoffRateLimitDefaults.DefaultWindow;
 }
 
@@ -20,8 +21,29 @@ public sealed class ManagedElsaHandoffRateLimitOptions
 {
     public const string ConfigurationSection = ManagedElsaHandoffRateLimitDefaults.ConfigurationSection;
 
-    public ManagedElsaHandoffFixedWindowRateLimitOptions PerIp { get; init; } = new();
-    public ManagedElsaHandoffFixedWindowRateLimitOptions PerIdentity { get; init; } = new();
+    /// <summary>
+    /// Fixed window applied to every request, including validated Cloud/Hub BFF
+    /// sessions, Control JWT callers, and authenticated cookies. The default
+    /// permit is ten times the per-identity default so shared BFF egress has
+    /// aggregate headroom while per-identity remains the binding limit for
+    /// BFF sessions. Control JWT and cookie callers with a resolvable identity
+    /// stay IP-only at this ceiling.
+    /// </summary>
+    public ManagedElsaHandoffFixedWindowRateLimitOptions PerIp { get; init; } = new()
+    {
+        PermitLimit = ManagedElsaHandoffRateLimitDefaults.DefaultPerIpPermitLimit
+    };
+
+    /// <summary>
+    /// Fixed window keyed on validated issuer plus subject. Applied to Cloud/Hub
+    /// BFF sessions. Authenticated sessions that cannot resolve both values use
+    /// a separate low-permit fallback bucket partitioned by IP. Unauthenticated
+    /// requests and resolved Control JWT / cookie callers use the per-IP window only.
+    /// </summary>
+    public ManagedElsaHandoffFixedWindowRateLimitOptions PerIdentity { get; init; } = new()
+    {
+        PermitLimit = ManagedElsaHandoffRateLimitDefaults.DefaultPerIdentityPermitLimit
+    };
 
     internal IEnumerable<string> Validate()
     {

@@ -70,8 +70,12 @@ internal sealed class ControlApiTestApplication : WebApplicationFactory<Program>
                 [TrustedHeaderWorkspaceIdentityReader.EnabledConfigurationKey] = "true",
                 [TrustedHeaderWorkspaceIdentityReader.AllowedProxyNetworksConfigurationKey] = "127.0.0.1/32,::1/128",
                 [StripeBillingOptions.ExpectedModeConfigurationKey] = StripeBillingOptions.TestMode,
-                // Shared hosts reuse one in-memory limiter. Keep lifecycle windows wide so
-                // existing instance tests are not coupled to the production 10/minute default.
+                // Shared hosts reuse one in-memory limiter. Keep handoff and lifecycle
+                // windows wide so existing tests are not coupled to production defaults.
+                [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIp:PermitLimit"] = "10000",
+                [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIp:Window"] = "00:01:00",
+                [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIdentity:PermitLimit"] = "10000",
+                [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIdentity:Window"] = "00:01:00",
                 [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIp:PermitLimit"] = "10000",
                 [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIp:Window"] = "00:01:00",
                 [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIdentity:PermitLimit"] = "10000",
