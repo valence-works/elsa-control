@@ -21,6 +21,11 @@ public sealed record MeWorkspacesResponse(AccountContextResponse Account, IReadO
     public IReadOnlyList<OrganizationContextResponse> Organizations { get; init; } = [];
 }
 
+public sealed record MeWorkspaceMembershipsResponse(
+    AccountContextResponse? Account,
+    IReadOnlyList<WorkspaceContextResponse> Workspaces,
+    IReadOnlyList<OrganizationContextResponse> Organizations);
+
 public sealed record OrganizationWorkspacesResponse(IReadOnlyList<WorkspaceContextResponse> Workspaces);
 
 public sealed record OrganizationWorkspaceCreateRequest(string Name, IReadOnlyList<OrganizationWorkspaceInitialMemberRequest>? InitialMembers = null);

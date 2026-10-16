@@ -41,6 +41,17 @@ public sealed class AccountWorkspaceService
         }
     }
 
+    /// <summary>
+    /// Read-only lookup of the identity's account context. Unlike <see cref="GetOrCreateAsync"/>
+    /// it never creates an account, organization or workspace and never refreshes last-seen data.
+    /// </summary>
+    public async Task<AccountWorkspaceContext?> FindAsync(TrustedWorkspaceIdentity identity, CancellationToken cancellationToken = default)
+    {
+        var normalized = identity.Normalize();
+        var existing = await _store.FindByExternalIdentityAsync(normalized.Issuer, normalized.Subject, cancellationToken);
+        return existing?.Context;
+    }
+
     private async Task<AccountWorkspaceContext> RefreshAsync(
         ExternalIdentityLookup existing,
         TrustedWorkspaceIdentity identity,

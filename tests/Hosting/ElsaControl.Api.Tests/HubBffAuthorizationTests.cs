@@ -28,12 +28,14 @@ public sealed class HubBffAuthorizationTests
     private const string CloudSubject = "b6f73e84-5b47-4f4d-ad52-e3c4c9a815c6";
     private const string HandoffCodeVerifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 
-    // #823's six read endpoints plus #824's fifteen lifecycle endpoints. The
-    // enumeration helper is the contract: any extra Hub marker fails this test.
+    // #823's six read endpoints, #846's non-provisioning membership read and #824's
+    // fifteen lifecycle endpoints. The enumeration helper is the contract: any extra
+    // Hub marker fails this test.
     private static readonly string[] ExpectedHubBffAllowlist =
     [
         "GET /api/cloud/compatibility",
         "GET /api/me/organizations",
+        "GET /api/me/workspace-memberships",
         "GET /api/me/workspaces",
         "GET /api/workspaces/{workspaceId:guid}/instances/",
         "GET /api/workspaces/{workspaceId:guid}/instances/onboarding-options",
@@ -64,7 +66,7 @@ public sealed class HubBffAuthorizationTests
         response.EnsureSuccessStatusCode();
 
         Assert.Equal(ExpectedHubBffAllowlist.Order(StringComparer.Ordinal), EnumerateHubBffAllowlist(app));
-        Assert.Equal(21, ExpectedHubBffAllowlist.Length);
+        Assert.Equal(22, ExpectedHubBffAllowlist.Length);
     }
 
     [Fact]
@@ -76,7 +78,7 @@ public sealed class HubBffAuthorizationTests
     }
 
     [Fact]
-    public async Task Owned_hub_session_succeeds_on_the_six_allowlisted_read_endpoints()
+    public async Task Owned_hub_session_succeeds_on_the_seven_allowlisted_read_endpoints()
     {
         await using var app = CreateHubApplication();
         await app.SeedAsync(_ => Task.CompletedTask);
@@ -90,6 +92,7 @@ public sealed class HubBffAuthorizationTests
         Assert.NotNull(bootstrap);
         using var organizations = await client.GetAsync("/api/me/organizations");
         using var workspaces = await client.GetAsync("/api/me/workspaces");
+        using var memberships = await client.GetAsync("/api/me/workspace-memberships");
         var instanceId = await SeedOwnedInstanceAsync(app, bootstrap.OrganizationId, bootstrap.WorkspaceId);
         using var instances = await client.GetAsync($"/api/workspaces/{bootstrap.WorkspaceId:D}/instances");
         using var overview = await client.GetAsync(
@@ -99,6 +102,7 @@ public sealed class HubBffAuthorizationTests
         Assert.Equal(HttpStatusCode.OK, bootstrapResponse.StatusCode);
         Assert.Equal(HttpStatusCode.OK, organizations.StatusCode);
         Assert.Equal(HttpStatusCode.OK, workspaces.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, memberships.StatusCode);
         Assert.Equal(HttpStatusCode.OK, instances.StatusCode);
         Assert.Equal(HttpStatusCode.OK, overview.StatusCode);
         var listed = await instances.Content.ReadControlJsonAsync<ManagedElsaInstanceListResponse>();
