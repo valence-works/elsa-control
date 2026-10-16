@@ -11,8 +11,12 @@ This directory is hand-maintained. `dev/regenerate-infra.sh` preserves it.
 | Resource | Purpose |
 | --- | --- |
 | Key Vault (RBAC, soft delete, purge protection) | Secret store. This module never writes secret values. |
-| Key Vault Secrets User on the API identity | Runtime resolution of App Service Key Vault references. |
-| Key Vault Secrets User on the deploy identity | Includes `secrets/getSecret`. Nothing in this repo reads values as that identity; `scripts/check-key-vault-references.sh` uses the ARM `configreferences` endpoint (`Microsoft.Web/sites/config/read`) and prints names and status only. |
+| Key Vault Secrets User on the API identity | Runtime resolution. Secrets User includes `secrets/getSecret` and can read values. |
+
+The GitHub OIDC deploy identity gets no Key Vault data role. Nothing in this
+repo reads vault values. `scripts/check-key-vault-references.sh` uses Reader
+on the App Service (`Microsoft.Web/sites/config/read`) and the ARM
+`configreferences` endpoint, and prints names and status only.
 
 No other identity receives a data-plane role. An operator writes each secret
 value after the vault exists. CI never writes a secret value.
@@ -22,7 +26,9 @@ firewall: default deny, bypass none, the API egress subnet (which must expose
 the `Microsoft.KeyVault` service endpoint), the operator write-path CIDRs,
 and optional API outbound NAT CIDRs. Trusted-services bypass does not cover
 App Service Key Vault reference resolution. The site reaches this vault
-through VNet integration and that subnet service endpoint.
+through VNet integration and that subnet service endpoint. The subnet rule
+does not set `ignoreMissingVnetServiceEndpoint`; a missing service endpoint
+fails the deploy. An empty `AZURE_API_EGRESS_SUBNET_ID` also fails the deploy.
 
 ## Secret names
 
@@ -43,24 +49,25 @@ vault. Switching that identity to a federated credential is #838.
 ## Who applies this module
 
 `infra/control-deploy-identity` grants the GitHub deploy identity Reader,
-Website Contributor on the API site, and AcrPush. That is not enough to
-create the vault or its role assignments. The identity that runs
-`scripts/deploy-azure-elsa-control.sh --vault-only` needs, on the Control
-resource group:
+Website Contributor on the API site, and AcrPush. That identity cannot
+create the vault or `Microsoft.Authorization/roleAssignments`. Phase 1
+(`scripts/deploy-azure-elsa-control.sh --vault-only`) is applied by an
+operator, or by an identity that already has `roleAssignments/write`, on
+the Control resource group:
 
 - permission to create and update `Microsoft.KeyVault/vaults`
 - `Microsoft.Authorization/roleAssignments/write`, scoped as narrowly as
   possible (for example Role Based Access Control Administrator with a
   condition limited to Key Vault Secrets User)
 
-The operator may apply this module with a privileged identity, then leave
-later site deploys to the GitHub deploy identity.
+Later site deploys (phase 2) can use the GitHub deploy identity. It still
+gets no Key Vault data role.
 
 ## Operator write path
 
 1. Apply `infra/control-egress` so `snet-api-egress` has the Key Vault
    service endpoint. Record `AZURE_API_EGRESS_SUBNET_ID`.
-2. Deploy this module with
+2. Phase 1: deploy this module with
    `scripts/deploy-azure-elsa-control.sh --vault-only`. Do not apply the
    site yet.
 3. If your client is not already on `operatorWriteIpCidrs`, add one IPv4 CIDR
@@ -80,9 +87,11 @@ az keyvault secret set \
 ```
 
 6. Remove the temporary write role.
-7. Set `API_KEY_VAULT_SECRETS_WRITTEN=true` in the GitHub environment, then
-   apply the site. Confirm every listed reference reports `Resolved` with
-   `scripts/check-key-vault-references.sh` (names and status only).
+7. Phase 2: set `API_KEY_VAULT_SECRETS_WRITTEN=true` in the GitHub
+   environment, then apply the site so settings are repointed to the
+   versionless references. Confirm every listed reference reports
+   `Resolved` with `scripts/check-key-vault-references.sh` (names and
+   status only).
 
 ## Purge protection
 
@@ -118,7 +127,6 @@ az webapp restart --resource-group "<rg>" --name "<webapp>"
 | Parameter | Purpose |
 | --- | --- |
 | `apiIdentityPrincipalId` | API identity principal. Required. |
-| `deployIdentityPrincipalId` | Deploy identity principal. Required. |
 | `apiEgressSubnetId` | `AZURE_API_EGRESS_SUBNET_ID`. Required. |
 | `operatorWriteIpCidrs` | Operator write-path CIDRs (`KEY_VAULT_OPERATOR_WRITE_IP_CIDRS`). |
 | `apiOutboundIpCidrs` | Optional NAT `/32` CIDRs (`KEY_VAULT_API_OUTBOUND_IP_CIDRS`). |

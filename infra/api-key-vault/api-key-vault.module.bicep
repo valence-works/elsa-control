@@ -8,11 +8,8 @@ targetScope = 'resourceGroup'
 @description('Azure region for the vault. Follows the Control API resource group.')
 param location string = resourceGroup().location
 
-@description('Principal ID of the API user-assigned identity. Receives Key Vault Secrets User on this vault only.')
+@description('Principal ID of the API user-assigned identity. The only identity that receives Key Vault Secrets User on this vault.')
 param apiIdentityPrincipalId string
-
-@description('Principal ID of the deploy identity. Receives Key Vault Secrets User (read only) on this vault only. It never writes secret values.')
-param deployIdentityPrincipalId string
 
 @description('Resource ID of the API egress subnet from infra/control-egress. Required so Key Vault references resolve through the subnet Microsoft.KeyVault service endpoint.')
 @minLength(1)
@@ -33,7 +30,6 @@ var vaultName = take('ecapikv${uniqueString(resourceGroup().id)}', 24)
 var subnetRules = [
   {
     id: apiEgressSubnetId
-    ignoreMissingVnetServiceEndpoint: false
   }
 ]
 
@@ -85,16 +81,6 @@ resource apiSecretsUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: vault
   properties: {
     principalId: apiIdentityPrincipalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', keyVaultSecretsUserRoleId)
-  }
-}
-
-resource deploySecretsUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(vault.id, deployIdentityPrincipalId, keyVaultSecretsUserRoleId, 'deploy')
-  scope: vault
-  properties: {
-    principalId: deployIdentityPrincipalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', keyVaultSecretsUserRoleId)
   }

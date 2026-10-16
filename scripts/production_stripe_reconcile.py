@@ -295,6 +295,36 @@ def _setting_payload(settings: Mapping[str, AzureAppSetting]) -> list[dict[str, 
     ]
 
 
+STRIPE_SECRET_SETTING_NAMES: tuple[str, ...] = (
+    "Billing__Stripe__SecretKey",
+    "Billing__Stripe__WebhookSigningSecret",
+)
+
+
+def require_secret_settings_are_references(azure: Any, listed: Sequence[str]) -> None:
+    """Refuse capture until the operator has set reference strings, never values."""
+
+    present = [name for name in SECRET_APP_SETTING_NAMES if name in listed]
+    billing_enabled_names = [name for name in listed if name == "Billing__Stripe__Enabled"]
+    billing_enabled = False
+    if billing_enabled_names:
+        enabled_records = azure.app_setting_records(["Billing__Stripe__Enabled"])
+        enabled = enabled_records.get("Billing__Stripe__Enabled")
+        billing_enabled = enabled is not None and enabled.value.strip().lower() == "true"
+    if billing_enabled:
+        missing = [name for name in STRIPE_SECRET_SETTING_NAMES if name not in listed]
+        if missing:
+            raise ReconciliationError(
+                "azure-setting: " + ", ".join(missing) + " must be a Key Vault reference"
+            )
+    if not present:
+        return
+    records = azure.app_setting_records(present)
+    for name, setting in records.items():
+        if not is_key_vault_reference(setting.value):
+            raise ReconciliationError(f"azure-setting: {name} must be a Key Vault reference")
+
+
 def validate_preserved_production_mode(settings: Mapping[str, AzureAppSetting]) -> None:
     """Reject an enabled capture that cannot safely start as production."""
 
@@ -380,6 +410,7 @@ class ProductionStripeReconciler:
 
     def capture(self) -> dict[str, AzureAppSetting]:
         listed = self._azure.list_names()
+        require_secret_settings_are_references(self._azure, listed)
         wanted = [
             name
             for name in listed

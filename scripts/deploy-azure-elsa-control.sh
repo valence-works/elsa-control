@@ -23,6 +23,7 @@ EXPECTED_CLOUD_ACCOUNT_ISSUER="${EXPECTED_CLOUD_ACCOUNT_ISSUER:-}"
 AZURE_PROVISIONER_IDENTITY_ID="${AZURE_PROVISIONER_IDENTITY_ID:-}"
 AZURE_API_EGRESS_SUBNET_ID="${AZURE_API_EGRESS_SUBNET_ID:-}"
 API_KEY_VAULT_SECRETS_WRITTEN="${API_KEY_VAULT_SECRETS_WRITTEN:-}"
+API_KEY_VAULT_ROLLBACK_ACTIVE="${API_KEY_VAULT_ROLLBACK_ACTIVE:-}"
 EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS="${EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS:-}"
 STAGING_BILLING_LIFECYCLE_LEVER_ENABLED="${STAGING_BILLING_LIFECYCLE_LEVER_ENABLED:-}"
 STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS="${STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS:-}"
@@ -63,18 +64,21 @@ Required environment variables for a full deployment:
   AZURE_API_EGRESS_SUBNET_ID
   API_KEY_VAULT_SECRETS_WRITTEN=true
 
-Order: vault (--vault-only), operator writes secrets, then the site.
-API_KEY_VAULT_SECRETS_WRITTEN must be true before the site is applied.
+Order: phase 1 vault (--vault-only), operator writes secrets, then phase 2
+repoints the site settings. API_KEY_VAULT_SECRETS_WRITTEN must be true
+before the site is applied. API_KEY_VAULT_ROLLBACK_ACTIVE=true refuses
+phase 2 so a manual rollback is not silently undone.
 
 Secret App Service settings are Key Vault references. This helper never
 writes a secret value to Key Vault or to App Service. An operator writes
-each vault secret before the site can start.
+each vault secret before the site can start. The GitHub OIDC deploy
+identity gets no Key Vault data role.
 
 Optional environment variables:
   AZURE_PRINCIPAL_ID
-  AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID
   KEY_VAULT_OPERATOR_WRITE_IP_CIDRS
   KEY_VAULT_API_OUTBOUND_IP_CIDRS
+  API_KEY_VAULT_ROLLBACK_ACTIVE
   CLOUD_ACCOUNT_ISSUER
   EXPECTED_CLOUD_ACCOUNT_ISSUER
   AZURE_PROVISIONER_IDENTITY_ID
@@ -396,7 +400,6 @@ def cidrs(name):
 print(json.dumps({
     "location": os.environ["LOCATION"],
     "apiIdentityPrincipalId": os.environ["API_IDENTITY_PRINCIPAL_ID"],
-    "deployIdentityPrincipalId": os.environ["AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID"],
     "apiEgressSubnetId": os.environ["AZURE_API_EGRESS_SUBNET_ID"],
     "operatorWriteIpCidrs": cidrs("KEY_VAULT_OPERATOR_WRITE_IP_CIDRS"),
     "apiOutboundIpCidrs": cidrs("KEY_VAULT_API_OUTBOUND_IP_CIDRS"),
@@ -428,8 +431,12 @@ fi
 export API_KEY_VAULT_URI
 
 if [[ "$VAULT_ONLY" == true ]]; then
-  echo "Vault deployment completed. Write the listed secrets, then apply the site with API_KEY_VAULT_SECRETS_WRITTEN=true."
+  echo "Phase 1 completed. Write the listed secrets, then apply the site with API_KEY_VAULT_SECRETS_WRITTEN=true."
   exit 0
+fi
+if [[ "${API_KEY_VAULT_ROLLBACK_ACTIVE,,}" == "true" ]]; then
+  echo "API_KEY_VAULT_ROLLBACK_ACTIVE=true refuses to apply Key Vault references so a manual rollback is not undone." >&2
+  exit 1
 fi
 if [[ "${API_KEY_VAULT_SECRETS_WRITTEN,,}" != "true" ]]; then
   echo "API_KEY_VAULT_SECRETS_WRITTEN=true is required before applying the site. Write the vault secrets first." >&2

@@ -94,10 +94,10 @@ def stripe_objects() -> dict[str, Mapping[str, Any]]:
     }
 
 
-KV_STRIPE_SECRET = "@Microsoft.KeyVault(SecretUri=https://kv.example.vault.azure.net/secrets/Billing-Stripe-SecretKey)"
-KV_STRIPE_WEBHOOK = "@Microsoft.KeyVault(SecretUri=https://kv.example.vault.azure.net/secrets/Billing-Stripe-WebhookSigningSecret)"
-KV_STRIPE_CONTROL = "@Microsoft.KeyVault(SecretUri=https://kv.example.vault.azure.net/secrets/Billing-Stripe-WebhookSources-control-SigningSecret)"
-KV_STRIPE_HUB = "@Microsoft.KeyVault(SecretUri=https://kv.example.vault.azure.net/secrets/Billing-Stripe-WebhookSources-hub-SigningSecret)"
+KV_STRIPE_SECRET = "@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/Billing-Stripe-SecretKey)"
+KV_STRIPE_WEBHOOK = "@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/Billing-Stripe-WebhookSigningSecret)"
+KV_STRIPE_CONTROL = "@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/Billing-Stripe-WebhookSources-control-SigningSecret)"
+KV_STRIPE_HUB = "@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/Billing-Stripe-WebhookSources-hub-SigningSecret)"
 
 
 def azure_settings() -> list[dict[str, str]]:

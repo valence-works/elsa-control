@@ -33,8 +33,8 @@ CLOUD_ORIGIN = "https://cloud.example.com"
 PORTAL_RETURN_URL = "https://control.example.com/billing"
 EXPECTED_SETTINGS = {
     "Billing__Stripe__Enabled": "true",
-    "Billing__Stripe__SecretKey": "@Microsoft.KeyVault(SecretUri=https://kv.example.vault.azure.net/secrets/Billing-Stripe-SecretKey)",
-    "Billing__Stripe__WebhookSigningSecret": "@Microsoft.KeyVault(SecretUri=https://kv.example.vault.azure.net/secrets/Billing-Stripe-WebhookSigningSecret)",
+    "Billing__Stripe__SecretKey": "@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/Billing-Stripe-SecretKey)",
+    "Billing__Stripe__WebhookSigningSecret": "@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/Billing-Stripe-WebhookSigningSecret)",
     "Billing__Stripe__DefaultPriceId": "price_live",
     "Billing__Stripe__CheckoutSuccessUrl": f"{CLOUD_ORIGIN}/checkout/return?session_id={{CHECKOUT_SESSION_ID}}",
     "Billing__Stripe__CheckoutCancelUrl": f"{CLOUD_ORIGIN}/dashboard/billing",
@@ -324,16 +324,23 @@ class ProductionStripeReconcileTests(unittest.TestCase):
         with self.assertRaisesRegex(ReconciliationError, "incomplete"):
             ProductionStripeReconciler(FakeStripe(), FakeAzure(incomplete), config()).capture()
 
-    def test_capture_accepts_plain_secret_values_pre_cutover(self) -> None:
+    def test_capture_rejects_plain_secret_values_before_operator_repoint(self) -> None:
         values = records()
         values["Billing__Stripe__SecretKey"] = AzureAppSetting("sk_live_still_on_the_site", False)
         values["Billing__Stripe__WebhookSigningSecret"] = AzureAppSetting("whsec_still_on_the_site", False)
 
-        captured = ProductionStripeReconciler(FakeStripe(), FakeAzure(values), config()).capture()
+        with self.assertRaisesRegex(ReconciliationError, "must be a Key Vault reference") as raised:
+            ProductionStripeReconciler(FakeStripe(), FakeAzure(values), config()).capture()
 
-        self.assertNotIn("Billing__Stripe__SecretKey", captured)
-        self.assertNotIn("Billing__Stripe__WebhookSigningSecret", captured)
-        self.assertTrue(PRODUCTION_PRESERVED_SETTINGS.issubset(captured))
+        self.assertNotIn("sk_live_still_on_the_site", str(raised.exception))
+        self.assertNotIn("whsec_still_on_the_site", str(raised.exception))
+
+    def test_capture_rejects_malformed_key_vault_reference_strings(self) -> None:
+        values = records()
+        values["Billing__Stripe__SecretKey"] = AzureAppSetting("@Microsoft.KeyVault(foo)", False)
+
+        with self.assertRaisesRegex(ReconciliationError, "must be a Key Vault reference"):
+            ProductionStripeReconciler(FakeStripe(), FakeAzure(values), config()).capture()
 
     def test_reapply_never_writes_a_secret_setting(self) -> None:
         captured = ProductionStripeReconciler(FakeStripe(), FakeAzure(), config()).capture()
