@@ -32,7 +32,7 @@ public sealed class AddHandoffKeyRingSnapshotIds : Migration
             table: "ManagedElsaHandoffAuditEvents",
             column: "KeyRingPreviousSnapshotId",
             unique: true,
-            filter: "KeyRingPreviousSnapshotId IS NOT NULL AND Action LIKE 'key_ring.active:%'");
+            filter: "KeyRingPreviousSnapshotId IS NOT NULL");
     }
 
     protected override void Down(MigrationBuilder migrationBuilder)

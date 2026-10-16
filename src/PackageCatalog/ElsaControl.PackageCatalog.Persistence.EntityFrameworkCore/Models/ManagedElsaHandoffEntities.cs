@@ -68,9 +68,11 @@ internal sealed class ManagedElsaHandoffAuditEventConfiguration : IEntityTypeCon
         builder.HasIndex(x => new { x.Jti, x.OccurredAt });
         builder.HasIndex(x => x.OccurredAt);
         builder.HasIndex(x => x.KeyRingSnapshotId);
+        // Previous-snapshot id is written only on the active row. SQL Server
+        // filtered indexes cannot use LIKE, so uniqueness is the non-null column.
         builder.HasIndex(x => x.KeyRingPreviousSnapshotId)
             .IsUnique()
-            .HasFilter("KeyRingPreviousSnapshotId IS NOT NULL AND Action LIKE 'key_ring.active:%'")
+            .HasFilter("KeyRingPreviousSnapshotId IS NOT NULL")
             .HasDatabaseName("IX_ManagedElsaHandoffAuditEvents_KeyRingPreviousSnapshot");
     }
 }

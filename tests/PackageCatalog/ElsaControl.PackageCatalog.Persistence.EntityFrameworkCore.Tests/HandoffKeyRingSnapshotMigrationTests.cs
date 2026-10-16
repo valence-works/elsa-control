@@ -54,7 +54,8 @@ public sealed class HandoffKeyRingSnapshotMigrationTests : IAsyncDisposable
         Assert.Contains("KeyRingPreviousSnapshotId", script, StringComparison.Ordinal);
         Assert.Contains("IX_ManagedElsaHandoffAuditEvents_KeyRingSnapshotId", script, StringComparison.Ordinal);
         Assert.Contains("IX_ManagedElsaHandoffAuditEvents_KeyRingPreviousSnapshot", script, StringComparison.Ordinal);
-        Assert.Contains("key_ring.active:%", script, StringComparison.Ordinal);
+        Assert.Contains("IS NOT NULL", script, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"\bLIKE\b", script);
         Assert.DoesNotContain("DROP TABLE [ManagedElsaHandoffAuditEvents]", script, StringComparison.Ordinal);
         Assert.DoesNotContain("BEGIN PUBLIC", script, StringComparison.Ordinal);
     }

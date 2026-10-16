@@ -5135,7 +5135,7 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.HasIndex("KeyRingPreviousSnapshotId")
                         .IsUnique()
                         .HasDatabaseName("IX_ManagedElsaHandoffAuditEvents_KeyRingPreviousSnapshot")
-                        .HasFilter("KeyRingPreviousSnapshotId IS NOT NULL AND Action LIKE 'key_ring.active:%'");
+                        .HasFilter("KeyRingPreviousSnapshotId IS NOT NULL");
 
                     b.ToTable("ManagedElsaHandoffAuditEvents", null, t =>
                         {
