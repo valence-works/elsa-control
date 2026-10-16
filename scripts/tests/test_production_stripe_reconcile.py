@@ -69,11 +69,20 @@ class FakeAzure:
         self.settings = copy.deepcopy(initial or records())
         self.applied: list[dict[str, str]] = []
 
-    def app_setting_records(self) -> dict[str, AzureAppSetting]:
-        return copy.deepcopy(self.settings)
+    def list_names(self) -> list[str]:
+        return list(self.settings)
 
-    def app_settings(self) -> dict[str, str]:
-        return {name: setting.value for name, setting in self.settings.items()}
+    def app_setting_records(self, names: list[str] | None = None) -> dict[str, AzureAppSetting]:
+        records = copy.deepcopy(self.settings)
+        if names is None:
+            return records
+        return {name: records[name] for name in names if name in records}
+
+    def app_settings(self, names: list[str] | None = None) -> dict[str, str]:
+        values = {name: setting.value for name, setting in self.settings.items()}
+        if names is None:
+            return values
+        return {name: values[name] for name in names if name in values}
 
     def apply_billing_setting_records(self, values: dict[str, AzureAppSetting]) -> None:
         self.applied.append({name: setting.value for name, setting in values.items()})
@@ -755,8 +764,11 @@ class ProductionStripeAuditReasonTests(unittest.TestCase):
             def __init__(self, *args: object, **kwargs: object) -> None:
                 self._inner = FakeAzure(wrong)
 
-            def app_settings(self) -> dict[str, str]:
-                return self._inner.app_settings()
+            def list_names(self) -> list[str]:
+                return self._inner.list_names()
+
+            def app_settings(self, names: list[str] | None = None) -> dict[str, str]:
+                return self._inner.app_settings(names)
 
         code, stdout, stderr = self._run_main(["--audit"], azure=WrongAzure)
         self.assertEqual(1, code)
@@ -770,8 +782,11 @@ class ProductionStripeAuditReasonTests(unittest.TestCase):
             def __init__(self, *args: object, **kwargs: object) -> None:
                 self._inner = FakeAzure(incomplete)
 
-            def app_setting_records(self) -> dict[str, AzureAppSetting]:
-                return self._inner.app_setting_records()
+            def list_names(self) -> list[str]:
+                return self._inner.list_names()
+
+            def app_setting_records(self, names: list[str] | None = None) -> dict[str, AzureAppSetting]:
+                return self._inner.app_setting_records(names)
 
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary) / "capture.json"

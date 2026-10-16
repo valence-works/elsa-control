@@ -19,7 +19,7 @@ public static class WorkspaceMeEndpoints
 
             var accountContext = await accounts.GetOrCreateAsync(identity, cancellationToken);
             return Results.Ok(ToResponse(accountContext));
-        }).WithTags("Workspace Identity").AllowCloudBff().AllowHubBff();
+        }).WithTags("Workspace Identity").AllowCloudBff().AllowHubBff().PrivateNoStore();
 
         endpoints.MapGet("/api/me/organizations", async (
             HttpContext context,
@@ -33,7 +33,7 @@ public static class WorkspaceMeEndpoints
 
             var accountContext = await accounts.GetOrCreateAsync(identity, cancellationToken);
             return Results.Ok(ToResponse(accountContext));
-        }).WithTags("Workspace Identity").AllowCloudBff().AllowHubBff();
+        }).WithTags("Workspace Identity").AllowCloudBff().AllowHubBff().PrivateNoStore();
 
         // Non-provisioning read: an unknown identity gets an empty context and no rows are written.
         endpoints.MapGet("/api/me/workspace-memberships", async (
