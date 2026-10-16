@@ -1,3 +1,5 @@
+using ElsaControl.PackageCatalog.Core.Accounts;
+
 namespace ElsaControl.Billing.Stripe;
 
 public sealed class StripeBillingOptions
@@ -16,6 +18,7 @@ public sealed class StripeBillingOptions
     public string? ExpectedMode { get; set; }
     public string? SecretKey { get; set; }
     public string? WebhookSigningSecret { get; set; }
+    public List<StripeWebhookSourceOptions> WebhookSources { get; set; } = [];
     public string? DefaultPriceId { get; set; }
     public string? CheckoutSuccessUrl { get; set; }
     public string? CheckoutCancelUrl { get; set; }
@@ -83,7 +86,105 @@ public sealed class StripeBillingOptions
         Uri.TryCreate(CheckoutCancelUrl, UriKind.Absolute, out var cancel) &&
         (cancel.Scheme == Uri.UriSchemeHttp || cancel.Scheme == Uri.UriSchemeHttps);
 
-    public bool IsWebhookConfigured => Enabled && !string.IsNullOrWhiteSpace(WebhookSigningSecret);
+    public bool IsWebhookConfigured =>
+        Enabled && ResolveWebhookSources().Any(source => !string.IsNullOrWhiteSpace(source.SigningSecret));
+
+    public IReadOnlyList<StripeWebhookSourceOptions> ResolveWebhookSources()
+    {
+        var sources = new List<StripeWebhookSourceOptions>();
+        foreach (var source in WebhookSources)
+        {
+            var name = NormalizeSourceName(source.Name);
+            if (name is null || string.IsNullOrWhiteSpace(source.SigningSecret))
+                continue;
+            sources.Add(new StripeWebhookSourceOptions
+            {
+                Name = name,
+                SigningSecret = source.SigningSecret,
+                ExpectedMode = string.IsNullOrWhiteSpace(source.ExpectedMode) ? ExpectedMode : source.ExpectedMode,
+                CloudPriceIds = [.. source.CloudPriceIds]
+            });
+        }
+
+        if (!sources.Any(source => string.Equals(source.Name, BillingWebhookSources.Control, StringComparison.Ordinal)) &&
+            !string.IsNullOrWhiteSpace(WebhookSigningSecret))
+        {
+            sources.Insert(0, new StripeWebhookSourceOptions
+            {
+                Name = BillingWebhookSources.Control,
+                SigningSecret = WebhookSigningSecret,
+                ExpectedMode = ExpectedMode,
+                CloudPriceIds = []
+            });
+        }
+
+        return sources;
+    }
+
+    public IEnumerable<string> ValidateWebhookSources()
+    {
+        if (!Enabled)
+            yield break;
+
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var source in WebhookSources)
+        {
+            if (string.IsNullOrWhiteSpace(source.Name) && string.IsNullOrWhiteSpace(source.SigningSecret) &&
+                source.CloudPriceIds.Count == 0 && string.IsNullOrWhiteSpace(source.ExpectedMode))
+                continue;
+
+            var name = NormalizeSourceName(source.Name);
+            if (name is null)
+            {
+                yield return $"{ConfigurationSection}:WebhookSources names must be '{BillingWebhookSources.Control}' or '{BillingWebhookSources.Hub}'.";
+                yield break;
+            }
+
+            if (!names.Add(name))
+            {
+                yield return $"{ConfigurationSection}:WebhookSources names must be unique.";
+                yield break;
+            }
+
+            if (string.IsNullOrWhiteSpace(source.SigningSecret))
+            {
+                yield return $"{ConfigurationSection}:WebhookSources:{name}:SigningSecret is required.";
+                yield break;
+            }
+
+            var effectiveMode = string.IsNullOrWhiteSpace(source.ExpectedMode) ? ExpectedMode : source.ExpectedMode;
+            if (NormalizeMode(effectiveMode) is null)
+            {
+                yield return $"{ConfigurationSection}:WebhookSources:{name}:ExpectedMode must be 'test' or 'live'.";
+                yield break;
+            }
+        }
+    }
+
+    public static string? NormalizeSourceName(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        BillingWebhookSources.Control => BillingWebhookSources.Control,
+        BillingWebhookSources.Hub => BillingWebhookSources.Hub,
+        _ => null
+    };
+
+    public bool AllowsCloudPrice(StripeWebhookSourceOptions source, string? priceReference)
+    {
+        var allowed = source.CloudPriceIds
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Select(id => id.Trim())
+            .ToHashSet(StringComparer.Ordinal);
+        if (allowed.Count == 0)
+            return !string.Equals(NormalizeSourceName(source.Name), BillingWebhookSources.Hub, StringComparison.Ordinal);
+
+        if (!string.IsNullOrWhiteSpace(priceReference))
+            return allowed.Contains(priceReference);
+
+        // Control events such as checkout.session.completed often have no
+        // price on the payload. Do not drop them when CloudPriceIds is set;
+        // the store correlates by subscription or customer reference.
+        return !string.Equals(NormalizeSourceName(source.Name), BillingWebhookSources.Hub, StringComparison.Ordinal);
+    }
 
     public bool IsPortalConfigured =>
         IsProviderReady &&
@@ -102,6 +203,14 @@ public sealed class StripeBillingOptions
         string.IsNullOrEmpty(uri.Query) &&
         string.IsNullOrEmpty(uri.Fragment) &&
         uri.AbsolutePath.Length > 0;
+}
+
+public sealed class StripeWebhookSourceOptions
+{
+    public string? Name { get; set; }
+    public string? SigningSecret { get; set; }
+    public string? ExpectedMode { get; set; }
+    public List<string> CloudPriceIds { get; set; } = [];
 }
 
 public sealed class BillingProviderUnavailableException : InvalidOperationException

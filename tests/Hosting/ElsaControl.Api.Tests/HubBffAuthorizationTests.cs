@@ -28,15 +28,16 @@ public sealed class HubBffAuthorizationTests
     private const string CloudSubject = "b6f73e84-5b47-4f4d-ad52-e3c4c9a815c6";
     private const string HandoffCodeVerifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 
-    // #823's six read endpoints, #846's non-provisioning membership read and #824's
-    // fifteen lifecycle endpoints. The enumeration helper is the contract: any extra
-    // Hub marker fails this test.
+    // #823's six read endpoints, #846's non-provisioning membership read, #824's
+    // fifteen lifecycle endpoints and hosted-subscription from #825. The enumeration
+    // helper is the contract: any extra Hub marker fails this test.
     private static readonly string[] ExpectedHubBffAllowlist =
     [
         "GET /api/cloud/compatibility",
         "GET /api/me/organizations",
         "GET /api/me/workspace-memberships",
         "GET /api/me/workspaces",
+        "GET /api/organizations/{organizationId:guid}/billing/hosted-subscription",
         "GET /api/workspaces/{workspaceId:guid}/instances/",
         "GET /api/workspaces/{workspaceId:guid}/instances/onboarding-options",
         "GET /api/workspaces/{workspaceId:guid}/instances/operations/by-idempotency-key",
@@ -66,7 +67,7 @@ public sealed class HubBffAuthorizationTests
         response.EnsureSuccessStatusCode();
 
         Assert.Equal(ExpectedHubBffAllowlist.Order(StringComparer.Ordinal), EnumerateHubBffAllowlist(app));
-        Assert.Equal(22, ExpectedHubBffAllowlist.Length);
+        Assert.Equal(23, ExpectedHubBffAllowlist.Length);
     }
 
     [Fact]

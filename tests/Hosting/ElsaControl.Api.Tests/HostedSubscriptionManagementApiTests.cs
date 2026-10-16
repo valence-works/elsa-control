@@ -84,6 +84,7 @@ public sealed class HostedSubscriptionManagementApiTests : IAsyncLifetime
         Assert.True(status.PortalAvailable);
         Assert.True(status.CanManageSubscription);
         Assert.Equal(HostedSubscriptionManagementActions.OpenPortal, status.ManagementAction);
+        Assert.Equal(BillingWebhookSources.Control, status.Source);
         Assert.Equal(HostedBillingCopy.EngineDeletion.Code, status.Copy.EngineDeletion.Code);
         Assert.Contains("does not cancel", status.Copy.EngineDeletion.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("does not immediately delete", status.Copy.SubscriptionCancellation.Message, StringComparison.OrdinalIgnoreCase);

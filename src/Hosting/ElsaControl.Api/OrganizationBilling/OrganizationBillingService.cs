@@ -183,7 +183,8 @@ public sealed class OrganizationBillingApiService(
             billingLinked && portalReady && canManage,
             canManage,
             action,
-            billingLinked ? HostedBillingCopy.ForLinkedCustomer() : HostedBillingCopy.ForMissingLinkage()));
+            billingLinked ? HostedBillingCopy.ForLinkedCustomer() : HostedBillingCopy.ForMissingLinkage(),
+            subscription is null ? null : BillingWebhookSources.Normalize(subscription.WebhookSource)));
     }
 
     public async Task<HostedPortalApiResult> CreateHostedPortalAsync(
@@ -230,6 +231,10 @@ public sealed class OrganizationBillingApiService(
         var access = await accounts.GetOrganizationAccessAsync(identity, organizationId, OrganizationOperation.ManageBilling, cancellationToken);
         if (!access.Succeeded)
             return OrganizationBillingDeletionApiResult.Denied(access.Failure!.Value);
+
+        var subscription = await billing.GetSubscriptionAsync(organizationId, cancellationToken);
+        if (subscription is not null && BillingWebhookSources.IsHub(subscription.WebhookSource))
+            return OrganizationBillingDeletionApiResult.ManagedByHubConflict();
 
         var result = await billing.RequestDeletionAsync(organizationId, cancellationToken);
         return result is null
@@ -295,13 +300,15 @@ public sealed record OrganizationBillingStatusApiResult(
 public sealed record OrganizationBillingDeletionApiResult(
     OrganizationBillingLifecycleAdvance? Advance,
     OrganizationWorkspaceFailure? Failure,
-    bool OrganizationUnavailable)
+    bool OrganizationUnavailable,
+    bool ManagedByHub = false)
 {
-    public bool Succeeded => Advance is not null && Failure is null && !OrganizationUnavailable;
+    public bool Succeeded => Advance is not null && Failure is null && !OrganizationUnavailable && !ManagedByHub;
 
     public static OrganizationBillingDeletionApiResult Accepted(OrganizationBillingLifecycleAdvance advance) => new(advance, null, false);
     public static OrganizationBillingDeletionApiResult Denied(OrganizationWorkspaceFailure failure) => new(null, failure, false);
     public static OrganizationBillingDeletionApiResult NotFound() => new(null, null, true);
+    public static OrganizationBillingDeletionApiResult ManagedByHubConflict() => new(null, null, false, true);
 }
 
 public sealed record HostedSubscriptionManagementApiResult(

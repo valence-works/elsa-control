@@ -63,6 +63,73 @@ public sealed class StripeBillingConfigurationValidatorTests
     }
 
     [Fact]
+    public async Task Webhook_source_inherits_expected_mode_when_omitted()
+    {
+        var validator = CreateValidator(new StripeBillingOptions
+        {
+            Enabled = true,
+            ExpectedMode = StripeBillingOptions.TestMode,
+            SecretKey = "sk_test_test",
+            WebhookSources =
+            [
+                new StripeWebhookSourceOptions { Name = "hub", SigningSecret = "whsec_hub" }
+            ]
+        });
+
+        await validator.StartAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task Webhook_source_with_invalid_expected_mode_fails_closed()
+    {
+        var validator = CreateValidator(new StripeBillingOptions
+        {
+            Enabled = true,
+            ExpectedMode = StripeBillingOptions.TestMode,
+            SecretKey = "sk_test_test",
+            WebhookSources =
+            [
+                new StripeWebhookSourceOptions
+                {
+                    Name = "hub",
+                    SigningSecret = "whsec_hub",
+                    ExpectedMode = "sandbox"
+                }
+            ]
+        });
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => validator.StartAsync(CancellationToken.None));
+
+        Assert.Contains("ExpectedMode", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("whsec_hub", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("sk_test_test", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Duplicate_webhook_source_names_fail_closed()
+    {
+        var validator = CreateValidator(new StripeBillingOptions
+        {
+            Enabled = true,
+            ExpectedMode = StripeBillingOptions.TestMode,
+            SecretKey = "sk_test_test",
+            WebhookSources =
+            [
+                new StripeWebhookSourceOptions { Name = "hub", SigningSecret = "whsec_a" },
+                new StripeWebhookSourceOptions { Name = "HUB", SigningSecret = "whsec_b" }
+            ]
+        });
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => validator.StartAsync(CancellationToken.None));
+
+        Assert.Contains("unique", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("whsec_a", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("whsec_b", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Disabled_billing_does_not_require_a_key_or_mode()
     {
         var validator = CreateValidator(new StripeBillingOptions());
