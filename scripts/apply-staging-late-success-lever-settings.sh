@@ -19,6 +19,10 @@ SMOKE_OWNER_WORKSPACE_ID="${STAGING_SMOKE_OWNER_WORKSPACE_ID:-}"
 RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:?AZURE_RESOURCE_GROUP is required.}"
 WEBAPP_NAME="${AZURE_WEBAPP_NAME:?AZURE_WEBAPP_NAME is required.}"
 DEFAULT_WAIT='00:00:30'
+# shellcheck source=scripts/lib/hosted-appsettings.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/hosted-appsettings.sh"
+HOSTED_APPSETTINGS_RESOURCE_GROUP="$RESOURCE_GROUP"
+HOSTED_APPSETTINGS_WEBAPP_NAME="$WEBAPP_NAME"
 
 # Shared two-signal environment predicate (#655): TARGET_ENVIRONMENT=test or
 # AZURE_ENV_NAME=valence-control-staging. The late-success lever's own flag
@@ -119,24 +123,14 @@ if is_staging_lever_target; then
   fi
 fi
 
-list_lever_settings() {
-  local query="$1"
-  az webapp config appsettings list \
-    --resource-group "$RESOURCE_GROUP" \
-    --name "$WEBAPP_NAME" \
-    --query "$query" \
-    --output tsv \
-    --only-show-errors
-}
-
 if [ -n "${LATE_SUCCESS_LEVER_BEFORE_COUNT:-}" ]; then
   before_count="$LATE_SUCCESS_LEVER_BEFORE_COUNT"
 else
-  before_count="$(list_lever_settings "[?starts_with(name, '${PREFIX}') || name=='${ENABLED_NAME}' || name=='${WAIT_NAME}' || name=='${SMOKE_OWNER_NAME}'] | length(@)")"
+  before_count="$(hosted_appsettings_count --prefix "$PREFIX" --name "$ENABLED_NAME" --name "$WAIT_NAME" --name "$SMOKE_OWNER_NAME")"
   before_count="${before_count:-0}"
 fi
 
-existing_names="$(list_lever_settings "[?starts_with(name, '${PREFIX}') || name=='${ENABLED_NAME}' || name=='${WAIT_NAME}' || name=='${SMOKE_OWNER_NAME}'].name" || true)"
+existing_names="$(hosted_appsettings_list_names --prefix "$PREFIX" --name "$ENABLED_NAME" --name "$WAIT_NAME" --name "$SMOKE_OWNER_NAME" || true)"
 stale_names=()
 while IFS= read -r name; do
   [ -z "$name" ] && continue
@@ -194,7 +188,7 @@ if [ "${#settings[@]}" -gt 0 ]; then
     --only-show-errors
 fi
 
-after_count="$(list_lever_settings "[?starts_with(name, '${PREFIX}') || name=='${ENABLED_NAME}' || name=='${WAIT_NAME}' || name=='${SMOKE_OWNER_NAME}'] | length(@)")"
+after_count="$(hosted_appsettings_count --prefix "$PREFIX" --name "$ENABLED_NAME" --name "$WAIT_NAME" --name "$SMOKE_OWNER_NAME")"
 after_count="${after_count:-0}"
 expected_after=0
 if [ "$enabled" = true ]; then
@@ -217,15 +211,16 @@ if ! is_staging_lever_target && [ "$after_count" != "0" ]; then
 fi
 
 if is_staging_lever_target && [ "$expected_count" -gt 0 ] && [ -n "$SMOKE_OWNER_WORKSPACE_ID" ]; then
-  live_values="$(list_lever_settings "[?starts_with(name, '${PREFIX}')].value" || true)"
+  live_names="$(hosted_appsettings_list_names --prefix "$PREFIX" || true)"
   smoke_normalized="${SMOKE_OWNER_WORKSPACE_ID,,}"
-  while IFS= read -r value; do
-    [ -z "$value" ] && continue
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    value="$(hosted_appsettings_get_value "$name")" || exit 1
     if [ "${value,,}" = "$smoke_normalized" ]; then
       echo "::error::Live staging late-success lever allowlist includes the staging Hosted smoke owner workspace."
       exit 1
     fi
-  done <<< "$live_values"
+  done <<< "$live_names"
 fi
 
 echo "Staging late-success lever app setting count: before=${before_count} after=${after_count}."

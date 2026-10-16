@@ -14,6 +14,10 @@ ALLOWLIST="${STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS:-}"
 SMOKE_OWNER_ORG_ID="${STAGING_SMOKE_OWNER_ORGANIZATION_ID:-}"
 RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:?AZURE_RESOURCE_GROUP is required.}"
 WEBAPP_NAME="${AZURE_WEBAPP_NAME:?AZURE_WEBAPP_NAME is required.}"
+# shellcheck source=scripts/lib/hosted-appsettings.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/hosted-appsettings.sh"
+HOSTED_APPSETTINGS_RESOURCE_GROUP="$RESOURCE_GROUP"
+HOSTED_APPSETTINGS_WEBAPP_NAME="$WEBAPP_NAME"
 
 # Shared two-signal environment predicate (#655): TARGET_ENVIRONMENT=test or
 # AZURE_ENV_NAME=valence-control-staging. The billing lever's own flag never
@@ -57,24 +61,32 @@ if [ -n "$ALLOWLIST" ]; then
 fi
 expected_count=${#expected_ids[@]}
 
-list_lever_settings() {
-  local query="$1"
-  az webapp config appsettings list \
-    --resource-group "$RESOURCE_GROUP" \
-    --name "$WEBAPP_NAME" \
-    --query "$query" \
-    --output tsv \
-    --only-show-errors
-}
+if is_test_deploy_target && [ "$expected_count" -gt 0 ]; then
+  if [ -z "$SMOKE_OWNER_ORG_ID" ]; then
+    echo "::error::STAGING_SMOKE_OWNER_ORGANIZATION_ID must be set so staging billing lifecycle lever settings can be checked against the Hosted smoke owner organization."
+    exit 1
+  fi
+  if [[ ! "$SMOKE_OWNER_ORG_ID" =~ $lever_guid_pattern ]] || [ "$SMOKE_OWNER_ORG_ID" = "00000000-0000-0000-0000-000000000000" ]; then
+    echo "::error::STAGING_SMOKE_OWNER_ORGANIZATION_ID must be a GUID organization id."
+    exit 1
+  fi
+  smoke_normalized="${SMOKE_OWNER_ORG_ID,,}"
+  for organization_id in "${expected_ids[@]}"; do
+    if [ "${organization_id,,}" = "$smoke_normalized" ]; then
+      echo "::error::Staging billing lifecycle lever allowlist includes the staging Hosted smoke owner organization."
+      exit 1
+    fi
+  done
+fi
 
 if [ -n "${LEVER_BEFORE_COUNT:-}" ]; then
   before_count="$LEVER_BEFORE_COUNT"
 else
-  before_count="$(list_lever_settings "[?starts_with(name, '${PREFIX}') || name=='${ENABLED_NAME}'] | length(@)")"
+  before_count="$(hosted_appsettings_count --prefix "$PREFIX" --name "$ENABLED_NAME")"
   before_count="${before_count:-0}"
 fi
 
-existing_names="$(list_lever_settings "[?starts_with(name, '${PREFIX}') || name=='${ENABLED_NAME}'].name" || true)"
+existing_names="$(hosted_appsettings_list_names --prefix "$PREFIX" --name "$ENABLED_NAME" || true)"
 stale_names=()
 while IFS= read -r name; do
   [ -z "$name" ] && continue
@@ -122,7 +134,7 @@ if [ "${#settings[@]}" -gt 0 ]; then
     --only-show-errors
 fi
 
-after_count="$(list_lever_settings "[?starts_with(name, '${PREFIX}') || name=='${ENABLED_NAME}'] | length(@)")"
+after_count="$(hosted_appsettings_count --prefix "$PREFIX" --name "$ENABLED_NAME")"
 after_count="${after_count:-0}"
 expected_after=0
 if [ "$enabled" = true ]; then
@@ -136,26 +148,6 @@ fi
 if ! is_test_deploy_target && [ "$after_count" != "0" ]; then
   echo "::error::Staging billing lifecycle lever app setting count after deploy was ${after_count}; production must stay off."
   exit 1
-fi
-
-if is_test_deploy_target && [ "$expected_count" -gt 0 ]; then
-  if [ -z "$SMOKE_OWNER_ORG_ID" ]; then
-    echo "::error::STAGING_SMOKE_OWNER_ORGANIZATION_ID must be set so live staging billing lifecycle lever settings can be checked against the Hosted smoke owner organization."
-    exit 1
-  fi
-  if [[ ! "$SMOKE_OWNER_ORG_ID" =~ $lever_guid_pattern ]] || [ "$SMOKE_OWNER_ORG_ID" = "00000000-0000-0000-0000-000000000000" ]; then
-    echo "::error::STAGING_SMOKE_OWNER_ORGANIZATION_ID must be a GUID organization id."
-    exit 1
-  fi
-  live_values="$(list_lever_settings "[?starts_with(name, '${PREFIX}')].value" || true)"
-  smoke_normalized="${SMOKE_OWNER_ORG_ID,,}"
-  while IFS= read -r value; do
-    [ -z "$value" ] && continue
-    if [ "${value,,}" = "$smoke_normalized" ]; then
-      echo "::error::Live staging billing lifecycle lever allowlist includes the staging Hosted smoke owner organization."
-      exit 1
-    fi
-  done <<< "$live_values"
 fi
 
 echo "Staging billing lifecycle lever app setting count: before=${before_count} after=${after_count}."

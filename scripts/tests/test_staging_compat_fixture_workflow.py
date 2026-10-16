@@ -341,7 +341,8 @@ class StagingCompatWorkflowTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false\n", self.source)
 
     def test_script_never_prints_setting_values(self) -> None:
-        self.assertIn("query '[].name'", self.script)
+        self.assertIn("hosted_appsettings_list_names", self.script)
+        self.assertIn("hosted_appsettings_count", self.script)
         self.assertIn("--output none", self.script)
         self.assertIn("Never prints setting values", self.script)
         self.assertNotIn("query '[].value'", self.script)

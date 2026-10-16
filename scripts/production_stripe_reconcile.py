@@ -378,7 +378,9 @@ class ProductionStripeReconciler:
         self._expected_secret_key = expected_secret_key
 
     def capture(self) -> dict[str, AzureAppSetting]:
-        records = self._azure.app_setting_records()
+        listed = self._azure.list_names()
+        wanted = [name for name in listed if name.startswith(PRODUCTION_PREFIX)]
+        records = self._azure.app_setting_records(wanted)
         settings = {name: setting for name, setting in records.items() if name.startswith(PRODUCTION_PREFIX)}
         if not PRODUCTION_PRESERVED_SETTINGS.issubset(settings):
             raise ReconciliationError("Production Stripe settings are incomplete; refusing an unprotected deployment")
@@ -391,7 +393,7 @@ class ProductionStripeReconciler:
             raise ReconciliationError("Production Stripe settings are incomplete; refusing a partial replacement")
         validate_preserved_production_mode(settings)
         self._azure.apply_billing_setting_records(settings)
-        current = self._azure.app_setting_records()
+        current = self._azure.app_setting_records(tuple(settings))
         if any(
             name not in current
             or current[name].value != setting.value
@@ -402,7 +404,7 @@ class ProductionStripeReconciler:
         return ("production-billing-settings",)
 
     def audit(self) -> tuple[str, ...]:
-        settings = self._azure.app_settings()
+        settings = self._azure.app_settings(tuple(PRODUCTION_AUDIT_SETTINGS))
         self._check_settings(settings)
         try:
             endpoints = stripe_list_all(self._stripe, WEBHOOK_LIST_PATH)

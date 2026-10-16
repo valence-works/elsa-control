@@ -1049,19 +1049,32 @@ jobs:
             # Skip the ExpectedMode write when Azure already has the target.
             # First-enabled (absent or different) still writes before the
             # new image can start. Secret values are never captured here.
-            if ! billing_restore_records="$(az webapp config appsettings list \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --name "$AZURE_WEBAPP_NAME" \
-              --query "[?name=='Billing__Stripe__ExpectedMode' || name=='Billing__Stripe__Enabled' || name=='Billing__Lifecycle__Enabled']" \
-              --output json \
-              --only-show-errors)"; then
+            # shellcheck source=scripts/lib/hosted-appsettings.sh
+            . scripts/lib/hosted-appsettings.sh
+            read_billing_restore_setting() {
+              local setting_name="$1"
+              local records
+              if ! records="$(hosted_appsettings_get_record "$setting_name")"; then
+                return 1
+              fi
+              if ! printf '%s' "$records" | jq -ce 'if type == "array" then . else error("not an array") end'; then
+                return 1
+              fi
+            }
+            if ! billing_expected_records="$(read_billing_restore_setting "Billing__Stripe__ExpectedMode")" \
+              || ! billing_stripe_records="$(read_billing_restore_setting "Billing__Stripe__Enabled")" \
+              || ! billing_lifecycle_records="$(read_billing_restore_setting "Billing__Lifecycle__Enabled")"; then
               echo "::error::Could not read billing restore settings; refusing to mutate the Web App."
               exit 1
             fi
             # Require a JSON array. Empty stdout, whitespace, null, and
             # non-arrays must fail closed so rollback cannot treat an
             # unreadable prior state as "all three absent".
-            if ! billing_restore_records="$(printf '%s' "$billing_restore_records" | jq -ce 'if type == "array" then . else error("not an array") end')"; then
+            if ! billing_restore_records="$(jq -ce -n \
+              --argjson expected "$billing_expected_records" \
+              --argjson stripe "$billing_stripe_records" \
+              --argjson lifecycle "$billing_lifecycle_records" \
+              '$expected + $stripe + $lifecycle')"; then
               echo "::error::Could not read billing restore settings; refusing to mutate the Web App."
               exit 1
             fi

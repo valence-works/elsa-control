@@ -15,6 +15,10 @@ ALLOWLIST="${STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS:-}"
 SMOKE_OWNER_INSTANCE_ID="${STAGING_SMOKE_OWNER_INSTANCE_ID:-}"
 RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:?AZURE_RESOURCE_GROUP is required.}"
 WEBAPP_NAME="${AZURE_WEBAPP_NAME:?AZURE_WEBAPP_NAME is required.}"
+# shellcheck source=scripts/lib/hosted-appsettings.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/hosted-appsettings.sh"
+HOSTED_APPSETTINGS_RESOURCE_GROUP="$RESOURCE_GROUP"
+HOSTED_APPSETTINGS_WEBAPP_NAME="$WEBAPP_NAME"
 
 # Shared two-signal environment predicate (#655): TARGET_ENVIRONMENT=test or
 # AZURE_ENV_NAME=valence-control-staging. The recovery lever's own flag never
@@ -95,24 +99,14 @@ if is_staging_lever_target; then
   fi
 fi
 
-list_lever_settings() {
-  local query="$1"
-  az webapp config appsettings list \
-    --resource-group "$RESOURCE_GROUP" \
-    --name "$WEBAPP_NAME" \
-    --query "$query" \
-    --output tsv \
-    --only-show-errors
-}
-
 if [ -n "${RECOVERY_LEVER_BEFORE_COUNT:-}" ]; then
   before_count="$RECOVERY_LEVER_BEFORE_COUNT"
 else
-  before_count="$(list_lever_settings "[?starts_with(name, '${PREFIX}') || name=='${ENABLED_NAME}' || name=='${SMOKE_OWNER_NAME}'] | length(@)")"
+  before_count="$(hosted_appsettings_count --prefix "$PREFIX" --name "$ENABLED_NAME" --name "$SMOKE_OWNER_NAME")"
   before_count="${before_count:-0}"
 fi
 
-existing_names="$(list_lever_settings "[?starts_with(name, '${PREFIX}') || name=='${ENABLED_NAME}' || name=='${SMOKE_OWNER_NAME}'].name" || true)"
+existing_names="$(hosted_appsettings_list_names --prefix "$PREFIX" --name "$ENABLED_NAME" --name "$SMOKE_OWNER_NAME" || true)"
 stale_names=()
 while IFS= read -r name; do
   [ -z "$name" ] && continue
@@ -165,7 +159,7 @@ if [ "${#settings[@]}" -gt 0 ]; then
     --only-show-errors
 fi
 
-after_count="$(list_lever_settings "[?starts_with(name, '${PREFIX}') || name=='${ENABLED_NAME}' || name=='${SMOKE_OWNER_NAME}'] | length(@)")"
+after_count="$(hosted_appsettings_count --prefix "$PREFIX" --name "$ENABLED_NAME" --name "$SMOKE_OWNER_NAME")"
 after_count="${after_count:-0}"
 expected_after=0
 if [ "$enabled" = true ]; then
@@ -182,18 +176,6 @@ fi
 if ! is_staging_lever_target && [ "$after_count" != "0" ]; then
   echo "::error::Staging recovery lifecycle lever app setting count after deploy was ${after_count}; production must stay off."
   exit 1
-fi
-
-if is_staging_lever_target && [ "$expected_count" -gt 0 ]; then
-  live_values="$(list_lever_settings "[?starts_with(name, '${PREFIX}')].value" || true)"
-  smoke_normalized="${SMOKE_OWNER_INSTANCE_ID,,}"
-  while IFS= read -r value; do
-    [ -z "$value" ] && continue
-    if [ "${value,,}" = "$smoke_normalized" ]; then
-      echo "::error::Live staging recovery lifecycle lever allowlist includes the staging Hosted smoke owner instance."
-      exit 1
-    fi
-  done <<< "$live_values"
 fi
 
 echo "Staging recovery lifecycle lever app setting count: before=${before_count} after=${after_count}."

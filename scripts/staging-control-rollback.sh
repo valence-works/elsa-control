@@ -45,16 +45,12 @@ rollback_require_inputs() {
 
 rollback_capture_build_setting() {
   local settings count value slot_setting
-  if ! settings="$(az webapp config appsettings list \
-    --resource-group "$AZURE_RESOURCE_GROUP" \
-    --name "$AZURE_WEBAPP_NAME" \
-    --output json \
-    --only-show-errors)"; then
+  if ! settings="$(hosted_appsettings_get_record "Application__BuildNumber")"; then
     fail "Application__BuildNumber could not be read; refusing the rollback proof."
   fi
   printf '%s' "$settings" | jq -e 'type == "array" and all(.[]; type == "object" and (.name | type == "string"))' >/dev/null ||
     fail "Application settings returned an invalid schema; refusing the rollback proof."
-  count="$(printf '%s' "$settings" | jq '[.[] | select(.name == "Application__BuildNumber")] | length')"
+  count="$(printf '%s' "$settings" | jq 'length')"
   [ "$count" -le 1 ] || fail "Application__BuildNumber appeared more than once; refusing the rollback proof."
   if [ "$count" = 0 ]; then
     ROLLBACK_BUILD_PRESENT=false
@@ -62,8 +58,8 @@ rollback_capture_build_setting() {
     ROLLBACK_BUILD_SLOT_SETTING=false
     return 0
   fi
-  value="$(printf '%s' "$settings" | jq -r '[.[] | select(.name == "Application__BuildNumber")][0].value // empty')"
-  slot_setting="$(printf '%s' "$settings" | jq -r '[.[] | select(.name == "Application__BuildNumber")][0].slotSetting // false')"
+  value="$(printf '%s' "$settings" | jq -r '.[0].value // empty')"
+  slot_setting="$(printf '%s' "$settings" | jq -r '.[0].slotSetting // false')"
   [ -n "$value" ] || fail "Application__BuildNumber was present without a value; refusing the rollback proof."
   [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || fail "Application__BuildNumber had an unsafe value; refusing the rollback proof."
   [ "$slot_setting" = true ] || [ "$slot_setting" = false ] || fail "Application__BuildNumber slotSetting was not boolean."
