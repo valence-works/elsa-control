@@ -169,6 +169,42 @@ public sealed class ManagedElsaHandoffRateLimitTests
     }
 
     [Fact]
+    public async Task Control_identity_callers_are_not_limited_by_identity()
+    {
+        await using var app = CreateApplication(perIp: 20, perIdentity: 1);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var first = ControlClient(app, "handoff-id-one", "203.0.113.43");
+        using var second = ControlClient(app, "handoff-id-one", "203.0.113.44");
+        using var other = ControlClient(app, "handoff-id-two", "203.0.113.43");
+
+        using var firstAllowed = await PostIssueAsync(first);
+        using var secondAllowed = await PostIssueAsync(second);
+        using var otherAllowed = await PostIssueAsync(other);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, firstAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, secondAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, otherAllowed.StatusCode);
+    }
+
+    [Fact]
+    public async Task Cookie_sessions_with_identity_are_not_limited_by_identity()
+    {
+        await using var app = CreateApplication(perIp: 20, perIdentity: 1);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var first = CookieClient(app, "cookie-handoff-one", "203.0.113.45");
+        using var second = CookieClient(app, "cookie-handoff-one", "203.0.113.46");
+        using var other = CookieClient(app, "cookie-handoff-two", "203.0.113.45");
+
+        using var firstAllowed = await PostIssueAsync(first);
+        using var secondAllowed = await PostIssueAsync(second);
+        using var otherAllowed = await PostIssueAsync(other);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, firstAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, secondAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, otherAllowed.StatusCode);
+    }
+
+    [Fact]
     public async Task Cookie_session_without_identity_falls_back_to_per_ip()
     {
         await using var app = CreateApplication(perIp: 1, perIdentity: 20);
