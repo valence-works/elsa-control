@@ -303,8 +303,10 @@ def record(value):
 if args[:3] == ["webapp", "config", "appsettings"] and "list" in args:
     query = args[args.index("--query") + 1] if "--query" in args else ""
     record("appsettings-list")
-    if "Billing__Stripe__ExpectedMode" in query:
-        current = os.environ.get("CURRENT_EXPECTED_MODE", "")
+    current = os.environ.get("CURRENT_EXPECTED_MODE", "")
+    if query == "[].name":
+        print("Billing__Stripe__ExpectedMode" if current else "")
+    elif "Billing__Stripe__ExpectedMode" in query:
         if current:
             print(json.dumps([{{
                 "name": "Billing__Stripe__ExpectedMode",
@@ -314,7 +316,7 @@ if args[:3] == ["webapp", "config", "appsettings"] and "list" in args:
         else:
             print("[]")
     else:
-        print("0" if "length(@" in query else "")
+        print("0" if "length(@" in query else "[]")
 elif args[:3] == ["webapp", "config", "appsettings"] and "set" in args:
     record("appsettings-set")
     if any("Billing__Stripe__ExpectedMode=" in argument for argument in args):
@@ -1609,7 +1611,12 @@ fi
         self.assertIn("PREVIOUS_BILLING_LIFECYCLE_ENABLED_PRESENT", self.source)
         self.assertIn('could not restore the previous ${setting_name}.', self.source)
         self.assertIn('could not remove the newly introduced ${setting_name}.', self.source)
-        self.assertIn("name=='Billing__Stripe__ExpectedMode' || name=='Billing__Stripe__Enabled' || name=='Billing__Lifecycle__Enabled'", self.source)
+        self.assertNotIn("name=='Billing__Stripe__ExpectedMode' || name=='Billing__Stripe__Enabled' || name=='Billing__Lifecycle__Enabled'", self.source)
+        self.assertIn('hosted_appsettings_get_record "$setting_name"', self.source)
+        self.assertIn('read_billing_restore_setting "Billing__Stripe__ExpectedMode"', self.source)
+        self.assertIn('read_billing_restore_setting "Billing__Stripe__Enabled"', self.source)
+        self.assertIn('read_billing_restore_setting "Billing__Lifecycle__Enabled"', self.source)
+        self.assertIn(". scripts/lib/hosted-appsettings.sh", self.source)
         self.assertIn("Enablement is restored", self.source)
         self.assertIn("captured billing is enabled without a restorable ExpectedMode", self.source)
         self.assertIn("scripts/production_stripe_reconcile.py (.strip().lower())", self.source)
@@ -1628,10 +1635,12 @@ fi
         self.assertIn("PRODUCTION_STRIPE_OUTCOME", self.source)
         self.assertIn("production Stripe audit", self.source)
         expected_mode_list = self.source[
-            self.source.index('if ! billing_restore_records="$(az webapp config appsettings list') :
-            self.source.index("echo \"::error::Could not read billing restore settings")
+            self.source.index("read_billing_restore_setting()") :
+            self.source.index("billing_mode_pattern=")
         ]
         self.assertNotIn("|| true", expected_mode_list)
+        self.assertIn('hosted_appsettings_get_record "$setting_name"', expected_mode_list)
+        self.assertIn('if type == "array" then . else error("not an array") end', expected_mode_list)
         deploy_start = self.source.index("      - name: Deploy API app")
         deploy_end = self.source.index("\n      - name:", deploy_start + 1)
         deploy_step = self.source[deploy_start:deploy_end]
@@ -1867,7 +1876,9 @@ BILLING_EVENTS = {{
 if args[:3] == ["webapp", "config", "appsettings"] and "list" in args:
     query = args[args.index("--query") + 1] if "--query" in args else ""
     record("appsettings-list")
-    if any(name in query for name in BILLING_RESTORE_NAMES):
+    if query == "[].name":
+        print("\\n".join(state.get("settings", {{}})))
+    elif any(name in query for name in BILLING_RESTORE_NAMES):
         if os.environ.get("FAIL_SETTINGS_LIST") == "1":
             record("appsettings-list-failed")
             raise SystemExit(17)
@@ -1885,13 +1896,15 @@ if args[:3] == ["webapp", "config", "appsettings"] and "list" in args:
             if empty_mode == "object":
                 print("{{}}")
                 raise SystemExit(0)
-        print(json.dumps([
-            current
-            for name in BILLING_RESTORE_NAMES
-            if (current := setting_record(name))
-        ]))
+        requested = None
+        for name in BILLING_RESTORE_NAMES:
+            if f"name=='{{name}}'" in query:
+                requested = name
+                break
+        current = setting_record(requested) if requested else None
+        print(json.dumps([current] if current else []))
     else:
-        print("0" if "length(@" in query else "")
+        print("0" if "length(@" in query else "[]")
 elif args[:3] == ["webapp", "config", "appsettings"] and "set" in args:
     record("appsettings-set")
     collecting = None
@@ -3115,6 +3128,7 @@ esac
                     environment["TARGET_ENVIRONMENT"] = target_environment
                 return subprocess.run(
                     ["bash", "-c", deploy_script],
+                    cwd=ROOT,
                     env=environment,
                     capture_output=True,
                     text=True,
@@ -3211,6 +3225,7 @@ esac
             )
             billed = subprocess.run(
                 ["bash", "-c", deploy_script],
+                cwd=ROOT,
                 env=billed_environment,
                 capture_output=True,
                 text=True,
@@ -3719,9 +3734,10 @@ else:
 
             live_smoke, live_store = run_helper(smoke, {})
             self.assertNotEqual(0, live_smoke.returncode)
-            self.assertIn("Live pairing allowlist includes the staging Hosted smoke owner organization", live_smoke.stdout + live_smoke.stderr)
+            self.assertIn("Pairing allowlist includes the staging Hosted smoke owner organization", live_smoke.stdout + live_smoke.stderr)
             self.assertNotIn(smoke, live_smoke.stdout + live_smoke.stderr)
-            self.assertEqual({f"{prefix}0": smoke}, live_store)
+            self.assertEqual({}, live_store)
+            self.assertEqual("", call_log.read_text())
 
     def test_production_config_output_does_not_apply_lever_settings(self) -> None:
         check_script = self._deployment_config_script()
@@ -4422,11 +4438,24 @@ smoke = "Staging__LateSuccessLever__SmokeOwnerWorkspaceId"
 items = {name: value for name, value in store.items() if name.startswith(prefix) or name in (enabled, wait, smoke)}
 allowlist = {name: value for name, value in store.items() if name.startswith(prefix)}
 if "appsettings list" in joined:
-    if "starts_with(name, '%s')" % prefix in joined and "].value" in joined:
-        print("\\n".join(allowlist.values()))
-    elif "].name" in joined:
-        print("\\n".join(items))
-    elif "].value" in joined:
+    args = sys.argv[1:]
+    query = args[args.index("--query") + 1] if "--query" in args else ""
+    if query == "[].name":
+        print("\\n".join(store))
+    elif query.endswith(".name"):
+        if "||" in query:
+            print("\\n".join(items))
+        elif "starts_with(name, '%s')" % prefix in query:
+            print("\\n".join(allowlist))
+        else:
+            print("\\n".join(items))
+    elif query.startswith("[?name=='") and query.endswith("']"):
+        name = query[len("[?name=='"):-2]
+        if name in store:
+            print(json.dumps([{"name": name, "value": store[name], "slotSetting": False}]))
+        else:
+            print("[]")
+    elif "].value" in query:
         print("\\n".join(allowlist.values()))
     else:
         print(len(items))
@@ -4457,6 +4486,14 @@ else:
         )
         fake_az.chmod(0o755)
         return store, call_log, fake_az
+
+
+from test_appsettings_name_only import (  # noqa: E402
+    AppSettingsNameOnlyAzureWebAppTests,
+    AppSettingsNameOnlyCliTests,
+    AppSettingsNameOnlyHelperSyntaxTests,
+    AppSettingsNameOnlyScanTests,
+)
 
 
 if __name__ == "__main__":
