@@ -54,7 +54,8 @@ on [issue #508](https://github.com/valence-works/elsa-control/issues/508#issueco
   supersedes it. Post-merge verdicts such as
   `**Verdict: APPROVE (post-merge)**` are not a merge gate. Match the first
   line exactly, not as a prefix. The GitHub review state is irrelevant:
-  these are COMMENT reviews. Nothing else counts. That includes reviews
+  only the first line and the reviewed SHA count, whatever the review
+  state. Nothing else counts. That includes reviews
   starting `## Control-room` / `Control-room`, any advisory-bot review
   including `APPROVED`, and any review on an earlier head. Nothing
   actionable may remain.
@@ -81,10 +82,11 @@ on [issue #508](https://github.com/valence-works/elsa-control/issues/508#issueco
 - Adequately reviewed means the latest Code Review verdict on that exact
   head is `**Verdict: APPROVE**` with the reviewed SHA on line 2 and
   nothing actionable remaining, or the control room has completed the
-  explicitly authorized availability fallback below. When that holds and
-  CI is required-green on the same SHA, the Code Review app merges. The
-  Codex control room may still deploy staging without per-PR
-  reconfirmation.
+  explicitly authorized availability fallback below. Under the normal
+  gate (approval on the exact head, nothing actionable left, required CI
+  green), the Code Review app merges. Under the availability fallback,
+  the control room merges. The Codex control room may still deploy
+  staging without per-PR reconfirmation.
 - Production publication, production configuration changes, live payment
   changes, and destructive actions against real customer resources still
   need Sipke's explicit approval.
