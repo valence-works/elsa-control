@@ -190,7 +190,7 @@ public sealed class ElsaInstanceCommercialGateTests
         await connection.OpenAsync();
         await using var db = CreateContext(connection);
         await db.Database.EnsureCreatedAsync();
-        var workspace = await CreateWorkspaceAsync(db, OrganizationSubscriptionState.Active, managedHostingEnabled: true, maxInstances: 1);
+        var workspace = await CreateWorkspaceAsync(db, OrganizationSubscriptionState.Active, managedHostingEnabled: true, maxInstances: 1, maxSharedTenants: 1);
         var service = CreateLifecycleService(db);
 
         await service.CreateAsync(new ElsaInstanceCreateRequest(
@@ -221,7 +221,7 @@ public sealed class ElsaInstanceCommercialGateTests
         await connection.OpenAsync();
         await using var db = CreateContext(connection);
         await db.Database.EnsureCreatedAsync();
-        var workspace = await CreateWorkspaceAsync(db, OrganizationSubscriptionState.Active, managedHostingEnabled: true, maxInstances: 1);
+        var workspace = await CreateWorkspaceAsync(db, OrganizationSubscriptionState.Active, managedHostingEnabled: true, maxInstances: 1, maxSharedTenants: 1);
         var service = CreateLifecycleService(db);
 
         await service.CreateAsync(new ElsaInstanceCreateRequest(
@@ -264,7 +264,7 @@ public sealed class ElsaInstanceCommercialGateTests
         await connection.OpenAsync();
         await using var db = CreateContext(connection);
         await db.Database.EnsureCreatedAsync();
-        var workspace = await CreateWorkspaceAsync(db, OrganizationSubscriptionState.Active, managedHostingEnabled: true, maxInstances: 1);
+        var workspace = await CreateWorkspaceAsync(db, OrganizationSubscriptionState.Active, managedHostingEnabled: true, maxInstances: 1, maxSharedTenants: 1);
         var service = CreateLifecycleService(db);
         var shared = await service.CreateAsync(new ElsaInstanceCreateRequest(
             workspace.OrganizationId,
@@ -296,7 +296,7 @@ public sealed class ElsaInstanceCommercialGateTests
         await connection.OpenAsync();
         await using var db = CreateContext(connection);
         await db.Database.EnsureCreatedAsync();
-        var workspace = await CreateWorkspaceAsync(db, OrganizationSubscriptionState.Active, managedHostingEnabled: true, maxInstances: 1);
+        var workspace = await CreateWorkspaceAsync(db, OrganizationSubscriptionState.Active, managedHostingEnabled: true, maxInstances: 1, maxSharedTenants: 1);
         var service = CreateLifecycleService(db);
         var created = await service.CreateAsync(new ElsaInstanceCreateRequest(
             workspace.OrganizationId,
@@ -354,7 +354,8 @@ public sealed class ElsaInstanceCommercialGateTests
         CatalogDbContext db,
         OrganizationSubscriptionState? state,
         bool managedHostingEnabled,
-        int maxInstances = int.MaxValue)
+        int maxInstances = int.MaxValue,
+        int? maxSharedTenants = null)
     {
         var workspace = new Workspace { Name = "Commercial gate workspace " + Guid.NewGuid().ToString("N") };
         db.Workspaces.Add(workspace);
@@ -367,6 +368,7 @@ public sealed class ElsaInstanceCommercialGateTests
                 ManagedHostingEnabled = managedHostingEnabled,
                 SubscriptionState = state,
                 MaxInstances = maxInstances,
+                MaxSharedTenants = maxSharedTenants,
                 SyncedAt = Now,
                 CreatedAt = Now,
                 UpdatedAt = Now

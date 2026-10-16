@@ -57,9 +57,15 @@ public sealed class OrganizationBillingLifecycleWorker(
                             item.Provider,
                             item.ProviderCustomerReference,
                             item.ProviderSubscriptionReference,
-                            item.AttemptCount),
+                            item.AttemptCount,
+                            item.WebhookSource),
                         cancellationToken);
-                    failureCode = outcome == OrganizationBillingCleanupOutcome.ConfirmedAbsent ? null : "cleanup.provider-unavailable";
+                    failureCode = outcome switch
+                    {
+                        OrganizationBillingCleanupOutcome.ConfirmedAbsent => null,
+                        OrganizationBillingCleanupOutcome.ManagedByHub => BillingDiagnosticCodes.ManagedByHub,
+                        _ => "cleanup.provider-unavailable"
+                    };
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {

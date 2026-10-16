@@ -75,6 +75,8 @@ public sealed class StripeBillingProvider(
     {
         if (!string.Equals(request.Provider, Provider, StringComparison.Ordinal))
             return OrganizationBillingCleanupOutcome.Unknown;
+        if (BillingWebhookSources.IsHub(request.WebhookSource))
+            return OrganizationBillingCleanupOutcome.ManagedByHub;
         if (string.IsNullOrWhiteSpace(request.ProviderSubscriptionReference))
             return OrganizationBillingCleanupOutcome.Unknown;
 
@@ -201,13 +203,12 @@ public sealed class StripeBillingProvider(
         try
         {
             var json = Encoding.UTF8.GetString(rawBody.Span);
-            var stripeEvent = EventUtility.ConstructEvent(
-                json,
-                signature,
-                _options.WebhookSigningSecret,
-                SignatureToleranceSeconds,
-                receivedAt.ToUnixTimeSeconds(),
-                throwOnApiVersionMismatch: true);
+            if (!TryMatchWebhookSource(json, signature, receivedAt, out var matchedSource, out var stripeEvent) ||
+                matchedSource is null ||
+                stripeEvent is null)
+                return BillingWebhookNormalizationResult.Invalid("webhook.signature-or-payload-invalid");
+            if (!ModeMatches(matchedSource, stripeEvent.Livemode))
+                return BillingWebhookNormalizationResult.Invalid("webhook.mode-mismatch");
             if (string.IsNullOrWhiteSpace(stripeEvent.Id) ||
                 string.IsNullOrWhiteSpace(stripeEvent.Type) ||
                 stripeEvent.Created == default)
@@ -215,8 +216,17 @@ public sealed class StripeBillingProvider(
             var hash = Convert.ToHexString(SHA256.HashData(rawBody.Span)).ToLowerInvariant();
             var dataObject = stripeEvent.Data?.Object;
             var correlation = ExtractCorrelation(dataObject);
+            var sourceName = StripeBillingOptions.NormalizeSourceName(matchedSource.Name) ?? BillingWebhookSources.Control;
+            var providerEvent = CreateProviderEvent(correlation, stripeEvent, hash, sourceName);
             if (correlation.OrganizationId == Guid.Empty)
-                return BillingWebhookNormalizationResult.Invalid("webhook.organization-correlation-missing");
+            {
+                return BillingWebhookSources.IsHub(sourceName)
+                    ? BillingWebhookNormalizationResult.Ignored("webhook.organization-correlation-missing", providerEvent)
+                    : BillingWebhookNormalizationResult.Invalid("webhook.organization-correlation-missing");
+            }
+
+            if (!_options.AllowsCloudPrice(matchedSource, correlation.PriceReference))
+                return BillingWebhookNormalizationResult.Ignored("webhook.price-not-cloud", providerEvent);
 
             var state = MapState(stripeEvent.Type, correlation.Status);
             if (state.HasValue)
@@ -226,19 +236,7 @@ public sealed class StripeBillingProvider(
                     string.IsNullOrWhiteSpace(subscription.CustomerId))
                     return BillingWebhookNormalizationResult.Invalid("webhook.payload-invalid");
             }
-            var providerEvent = new BillingProviderEvent(
-                correlation.OrganizationId,
-                Provider,
-                stripeEvent.Id,
-                stripeEvent.Type,
-                state,
-                new DateTimeOffset(DateTime.SpecifyKind(stripeEvent.Created, DateTimeKind.Utc)),
-                $"sha256:{hash}",
-                correlation.CustomerReference,
-                correlation.SubscriptionReference,
-                correlation.ObjectReference,
-                correlation.PriceReference,
-                correlation.AmountMinorUnits);
+            providerEvent = providerEvent with { State = state };
             return state.HasValue
                 ? BillingWebhookNormalizationResult.KnownEvent(providerEvent)
                 : BillingWebhookNormalizationResult.UnknownEvent(providerEvent);
@@ -264,6 +262,75 @@ public sealed class StripeBillingProvider(
             return BillingWebhookNormalizationResult.Invalid("webhook.payload-invalid");
         }
     }
+
+    private bool TryMatchWebhookSource(
+        string json,
+        string signature,
+        DateTimeOffset receivedAt,
+        out StripeWebhookSourceOptions? matchedSource,
+        out Event? stripeEvent)
+    {
+        matchedSource = null;
+        stripeEvent = null;
+        var matchCount = 0;
+        foreach (var source in _options.ResolveWebhookSources())
+        {
+            if (string.IsNullOrWhiteSpace(source.SigningSecret))
+                continue;
+
+            try
+            {
+                var candidate = EventUtility.ConstructEvent(
+                    json,
+                    signature,
+                    source.SigningSecret,
+                    SignatureToleranceSeconds,
+                    receivedAt.ToUnixTimeSeconds(),
+                    throwOnApiVersionMismatch: true);
+                matchCount++;
+                if (matchCount == 1)
+                {
+                    matchedSource = source;
+                    stripeEvent = candidate;
+                }
+            }
+            catch (StripeException)
+            {
+                // This source did not authorize the delivery.
+            }
+        }
+
+        return matchCount == 1;
+    }
+
+    private bool ModeMatches(StripeWebhookSourceOptions source, bool livemode)
+    {
+        var expected = StripeBillingOptions.NormalizeMode(source.ExpectedMode)
+            ?? StripeBillingOptions.NormalizeMode(_options.ExpectedMode);
+        if (expected is null)
+            return false;
+        return expected == StripeBillingOptions.LiveMode ? livemode : !livemode;
+    }
+
+    private BillingProviderEvent CreateProviderEvent(
+        StripeEventCorrelation correlation,
+        Event stripeEvent,
+        string hash,
+        string sourceName) =>
+        new(
+            correlation.OrganizationId,
+            Provider,
+            stripeEvent.Id,
+            stripeEvent.Type,
+            null,
+            new DateTimeOffset(DateTime.SpecifyKind(stripeEvent.Created, DateTimeKind.Utc)),
+            $"sha256:{hash}",
+            correlation.CustomerReference,
+            correlation.SubscriptionReference,
+            correlation.ObjectReference,
+            correlation.PriceReference,
+            correlation.AmountMinorUnits,
+            sourceName);
 
     private void EnsureCheckoutConfigured()
     {
@@ -343,7 +410,17 @@ public sealed class StripeBillingProvider(
     private static string? ReadCheckoutPrice(global::Stripe.Checkout.Session checkoutSession)
     {
         var priceId = checkoutSession.LineItems?.Data?.FirstOrDefault()?.Price?.Id;
-        return string.IsNullOrWhiteSpace(priceId) ? null : priceId;
+        if (!string.IsNullOrWhiteSpace(priceId))
+            return priceId;
+
+        if (checkoutSession.Subscription is Subscription subscription)
+        {
+            var (price, _) = ReadSubscriptionPrice(subscription);
+            if (!string.IsNullOrWhiteSpace(price))
+                return price;
+        }
+
+        return null;
     }
 
     private static Guid ReadOrganizationId(IReadOnlyDictionary<string, string>? metadata) =>

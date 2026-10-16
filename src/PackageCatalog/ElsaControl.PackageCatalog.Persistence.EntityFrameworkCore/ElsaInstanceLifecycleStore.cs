@@ -39,7 +39,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
     IElsaInstanceDeletionStore,
     IElsaInstanceEntitlementHoldStore,
     IElsaInstanceHealthMonitorStore,
-    IStagingRecoveryLifecycleLeverStore
+    IStagingRecoveryLifecycleLeverStore,
+    IElsaInstancePlacementAdmissionStore
 {
     private readonly IElsaInstanceLifecycleResolutionInputSource _resolutionInputSource =
         resolutionInputSource ?? throw new ArgumentNullException(nameof(resolutionInputSource));
@@ -743,20 +744,31 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                         operation = operation.TransitionTo(ElsaInstanceOperationState.WaitingForPriorOperation);
                 }
 
-                // MaxInstances is the Dedicated allowance (ADR-0017 F5). Shared
-                // creates omit the count. Shared has no separate tenant cap on this
-                // path yet.
+                var selection = ElsaPlacementKindResolver.FromIsolation(instance.PlacementIntent.IsolationProfile);
+                var dedicatedCount = await ElsaInstanceAllowanceAccounting.CountDedicatedAsync(
+                    dbContext, instance.OrganizationId, cancellationToken);
+                var sharedCount = await ElsaInstanceAllowanceAccounting.CountSharedStandardAsync(
+                    dbContext, instance.OrganizationId, cancellationToken);
+                var placementRequest = new ElsaInstanceCommercialPlacementRequest(
+                    selection.Kind,
+                    selection.ShardClass,
+                    ActiveSharedCount: sharedCount,
+                    ActiveDedicatedCount: dedicatedCount);
                 var activeInstanceCount = operation.Action == ElsaInstanceOperationAction.Create &&
-                    ElsaInstanceDedicatedLimit.ConsumesDedicatedInstanceLimit(
-                        instance.PlacementIntent.TargetMode,
-                        instance.PlacementIntent.IsolationProfile)
-                    ? await dbContext.ElsaInstances.CountActiveDedicatedManagedAsync(
-                        instance.OrganizationId, cancellationToken)
-                    : (int?)null;
+                    selection.ConsumesDedicatedAllowance
+                    ? dedicatedCount
+                    : operation.Action == ElsaInstanceOperationAction.Create &&
+                      !selection.ConsumesSharedAllowance &&
+                      !selection.IsLab
+                        ? await dbContext.ElsaInstances.CountAsync(
+                            x => x.OrganizationId == instance.OrganizationId && x.TargetMode == "managed" && x.DeletedAt == null,
+                            cancellationToken)
+                        : (int?)null;
                 var commercialDecision = await _commercialGate.EvaluateAsync(
                     instance.OrganizationId,
                     operation.Action,
                     activeInstanceCount,
+                    placementRequest,
                     cancellationToken);
                 if (!commercialDecision.Allowed)
                     throw new ElsaInstanceLifecycleConflictException(
@@ -766,11 +778,39 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                         commercialDecision.CurrentInstanceCount,
                         commercialDecision.MaxInstances);
 
+                Guid? reservedShardId = null;
+                if (operation.Action == ElsaInstanceOperationAction.Create &&
+                    storedInstance is null &&
+                    selection.ConsumesSharedAllowance)
+                {
+                    var reservation = await TryReserveSharedShardAsync(
+                        instance.PlacementIntent.RegionCode,
+                        selection.ShardClass!,
+                        cancellationToken);
+                    if (reservation.ShardsConfigured && reservation.ShardId is null)
+                        throw new ElsaInstanceLifecycleConflictException(
+                            "No eligible Shared shard has remaining capacity.",
+                            ElsaInstanceLifecycleConflictReason.CommercialDenied,
+                            ElsaInstanceCommercialOperation.ShardCapacity);
+                    reservedShardId = reservation.ShardId;
+                }
+
                 var priorObservedLifecycle = storedInstance?.ObservedLifecycle;
                 var instanceEntity = storedInstance ?? ToEntity(instance, outbox.CreatedAt);
                 if (storedInstance is null)
                 {
                     await dbContext.ElsaInstances.AddAsync(instanceEntity, cancellationToken);
+                    if (operation.Action == ElsaInstanceOperationAction.Create)
+                    {
+                        await AddCountingAssignmentAsync(
+                            instanceEntity,
+                            selection,
+                            reservedShardId,
+                            packageSetDigest: null,
+                            supersedesAssignmentId: null,
+                            outbox.CreatedAt,
+                            cancellationToken);
+                    }
                     if (operation.Action == ElsaInstanceOperationAction.Create &&
                         context?.ProvisioningContext is { } provisioning)
                     {
@@ -1801,6 +1841,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
 
                 var priorState = instance.ObservedLifecycle;
                 ApplyAggregate(instance, commit.Instance);
+                await RetireCountingAssignmentsAsync(instance.Id, cancellationToken);
                 instance.UpdatedAt = commit.DeletedAt.ToUniversalTime();
                 operation.State = ElsaInstanceOperationState.Succeeded;
                 operation.CompletedAt = commit.DeletedAt.ToUniversalTime();

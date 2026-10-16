@@ -145,13 +145,44 @@ public static class CloudBffEndpointConventionExtensions
     }
 }
 
+public sealed class HubBffAllowedEndpointMetadata
+{
+    public static HubBffAllowedEndpointMetadata Instance { get; } = new();
+
+    private HubBffAllowedEndpointMetadata()
+    {
+    }
+}
+
+public static class HubBffEndpointConventionExtensions
+{
+    public static RouteHandlerBuilder AllowHubBff(this RouteHandlerBuilder builder)
+    {
+        builder.WithMetadata(HubBffAllowedEndpointMetadata.Instance);
+        return builder;
+    }
+}
+
 public sealed class CloudBffAuthorizationMiddleware(
     RequestDelegate next,
     IOptions<CloudBffOptions> options,
-    IOptions<CloudAccountIdentityOptions> cloudAccountOptions)
+    IOptions<CloudAccountIdentityOptions> cloudAccountOptions,
+    IOptions<HubAccountIdentityOptions> hubAccountOptions)
 {
     public async Task InvokeAsync(HttpContext context)
     {
+        if (HubAccountTokenSelector.IsValidatedHubAccount(context.User, hubAccountOptions.Value))
+        {
+            if (context.GetEndpoint()?.Metadata.GetMetadata<HubBffAllowedEndpointMetadata>() is not null)
+            {
+                await next(context);
+                return;
+            }
+
+            await DenyAsync(context, "The Hub BFF credential is not authorized for this endpoint.", "hub-bff.denied");
+            return;
+        }
+
         var decision = CloudAccountTokenSelector.IsValidatedCloudAccount(context.User, cloudAccountOptions.Value)
             ? CloudBffTokenDecision.Valid
             : CloudBffAuthorization.Classify(context.User, options.Value);
@@ -168,13 +199,18 @@ public sealed class CloudBffAuthorizationMiddleware(
             return;
         }
 
+        await DenyAsync(context, "The Cloud BFF credential is not authorized for this endpoint.", "cloud-bff.denied");
+    }
+
+    private static Task DenyAsync(HttpContext context, string title, string code)
+    {
         context.Response.Headers.CacheControl = "no-store";
-        await Results.Problem(
-                title: "The Cloud BFF credential is not authorized for this endpoint.",
+        return Results.Problem(
+                title: title,
                 statusCode: StatusCodes.Status403Forbidden,
                 extensions: new Dictionary<string, object?>
                 {
-                    ["code"] = "cloud-bff.denied",
+                    ["code"] = code,
                     ["correlationId"] = context.TraceIdentifier
                 })
             .ExecuteAsync(context);

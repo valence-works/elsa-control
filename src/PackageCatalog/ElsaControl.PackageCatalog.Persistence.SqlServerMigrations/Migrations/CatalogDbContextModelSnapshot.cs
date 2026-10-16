@@ -123,12 +123,17 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("nvarchar(32)");
 
+                    b.Property<string>("WebhookSource")
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
                     b.HasKey("Id");
 
                     b.HasIndex("OrganizationId", "OccurredAt");
 
-                    b.HasIndex("Provider", "ProviderEventId")
-                        .IsUnique();
+                    b.HasIndex("Provider", "ProviderEventId", "WebhookSource")
+                        .IsUnique()
+                        .HasFilter("[WebhookSource] IS NOT NULL");
 
                     b.ToTable("BillingProviderEvents");
                 });
@@ -504,6 +509,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<int?>("MaxPackagesIndexed")
                         .HasColumnType("int");
 
+                    b.Property<int?>("MaxSharedTenants")
+                        .HasColumnType("int");
+
                     b.Property<int>("MaxSources")
                         .HasColumnType("int");
 
@@ -684,6 +692,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
 
                     b.Property<long>("UpdatedAt")
                         .HasColumnType("bigint");
+
+                    b.Property<string>("WebhookSource")
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
 
                     b.HasKey("Id");
 
@@ -1536,6 +1548,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("nvarchar(64)");
 
+                    b.Property<long>("ProgressChangedAt")
+                        .HasColumnType("bigint");
+
                     b.Property<Guid?>("ProviderAssignmentId")
                         .HasColumnType("uniqueidentifier");
 
@@ -1608,9 +1623,6 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         .HasColumnType("nvarchar(32)");
 
                     b.Property<long>("StatusChangedAt")
-                        .HasColumnType("bigint");
-
-                    b.Property<long>("ProgressChangedAt")
                         .HasColumnType("bigint");
 
                     b.Property<string>("TargetKey")
@@ -3384,73 +3396,6 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.HasAnnotation("SqlServer:UseSqlOutputClause", false);
                 });
 
-            modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<int>("AttemptNumber")
-                        .HasColumnType("int");
-
-                    b.Property<long>("CreatedAt")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("DedupeIdentity")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("nvarchar(64)");
-
-                    b.Property<int>("DeliveryAttempts")
-                        .HasColumnType("int");
-
-                    b.Property<Guid>("InstanceId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("LeasedBy")
-                        .HasMaxLength(64)
-                        .HasColumnType("nvarchar(64)");
-
-                    b.Property<long?>("LeasedUntil")
-                        .HasColumnType("bigint");
-
-                    b.Property<long?>("NextAttemptAt")
-                        .HasColumnType("bigint");
-
-                    b.Property<Guid>("OperationId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<Guid>("OrganizationId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<Guid?>("RunId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<long?>("SentAt")
-                        .HasColumnType("bigint");
-
-                    b.Property<Guid>("WorkspaceId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("WorkspaceId", "CreatedAt");
-
-                    b.HasIndex("OperationId", "AttemptNumber")
-                        .IsUnique();
-
-                    b.HasIndex("SentAt", "NextAttemptAt");
-
-                    b.HasIndex("OrganizationId", "WorkspaceId", "InstanceId");
-
-                    b.ToTable("ElsaInstanceRecoveryRequiredAlertOutbox", t =>
-                        {
-                            t.HasTrigger("TR_ElsaInstanceRecoveryRequiredAlertOutbox_AppendOnly");
-                        });
-
-                    b.HasAnnotation("SqlServer:UseSqlOutputClause", false);
-                });
-
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceMigrationEntity", b =>
                 {
                     b.Property<Guid>("MigrationId")
@@ -3705,6 +3650,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<Guid>("OrganizationId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<long?>("ReasonEnteredAt")
+                        .HasColumnType("bigint");
+
                     b.Property<long?>("ReconciledAt")
                         .HasColumnType("bigint");
 
@@ -3737,9 +3685,6 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
 
                     b.Property<int>("ReconciliationVersion")
                         .HasColumnType("int");
-
-                    b.Property<long?>("ReasonEnteredAt")
-                        .HasColumnType("bigint");
 
                     b.Property<int?>("RecoveryExpectedVersion")
                         .HasColumnType("int");
@@ -3960,6 +3905,73 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.HasAnnotation("SqlServer:UseSqlOutputClause", false);
                 });
 
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("AttemptNumber")
+                        .HasColumnType("int");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("DedupeIdentity")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<int>("DeliveryAttempts")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("InstanceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("LeasedBy")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<long?>("LeasedUntil")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("NextAttemptAt")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("OperationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("OrganizationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("RunId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long?>("SentAt")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("WorkspaceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OperationId", "AttemptNumber")
+                        .IsUnique();
+
+                    b.HasIndex("SentAt", "NextAttemptAt");
+
+                    b.HasIndex("WorkspaceId", "CreatedAt");
+
+                    b.HasIndex("OrganizationId", "WorkspaceId", "InstanceId");
+
+                    b.ToTable("ElsaInstanceRecoveryRequiredAlertOutbox", null, t =>
+                        {
+                            t.HasTrigger("TR_ElsaInstanceRecoveryRequiredAlertOutbox_AppendOnly");
+                        });
+
+                    b.HasAnnotation("SqlServer:UseSqlOutputClause", false);
+                });
+
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceResolvedPlanEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4016,6 +4028,87 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         });
 
                     b.HasAnnotation("SqlServer:UseSqlOutputClause", false);
+                });
+
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaPlacementAssignmentEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("InstanceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<Guid>("OrganizationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("PackageSetDigest")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<string>("ShardClass")
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<Guid?>("ShardId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<Guid?>("SupersedesAssignmentId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("WorkspaceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ShardId");
+
+                    b.HasIndex("InstanceId", "State")
+                        .IsUnique()
+                        .HasFilter("State = 'Active'");
+
+                    b.HasIndex("OrganizationId", "Kind", "ShardClass", "State");
+
+                    b.ToTable("ElsaPlacementAssignments", (string)null);
+                });
+
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaSharedShardEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("Capacity")
+                        .HasColumnType("int");
+
+                    b.Property<string>("RegionCode")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<string>("ShardClass")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RegionCode", "ShardClass");
+
+                    b.ToTable("ElsaSharedShards", (string)null);
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.EngineCapabilityEntity", b =>
@@ -6701,39 +6794,6 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Navigation("Operation");
                 });
 
-            modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity", b =>
-                {
-                    b.HasOne("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceOperationEntity", "Operation")
-                        .WithMany()
-                        .HasForeignKey("OperationId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Organization", null)
-                        .WithMany()
-                        .HasForeignKey("OrganizationId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Workspace", null)
-                        .WithMany()
-                        .HasForeignKey("OrganizationId", "WorkspaceId")
-                        .HasPrincipalKey("OrganizationId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.HasOne("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceEntity", "Instance")
-                        .WithMany()
-                        .HasForeignKey("OrganizationId", "WorkspaceId", "InstanceId")
-                        .HasPrincipalKey("OrganizationId", "WorkspaceId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("Instance");
-
-                    b.Navigation("Operation");
-                });
-
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceMigrationEntity", b =>
                 {
                     b.HasOne("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceOperationEntity", null)
@@ -6832,6 +6892,39 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Navigation("Operation");
                 });
 
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceRecoveryRequiredAlertOutboxEntity", b =>
+                {
+                    b.HasOne("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceOperationEntity", "Operation")
+                        .WithMany()
+                        .HasForeignKey("OperationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Organization", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Workspace", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId", "WorkspaceId")
+                        .HasPrincipalKey("OrganizationId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceEntity", "Instance")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId", "WorkspaceId", "InstanceId")
+                        .HasPrincipalKey("OrganizationId", "WorkspaceId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Instance");
+
+                    b.Navigation("Operation");
+                });
+
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceResolvedPlanEntity", b =>
                 {
                     b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Organization", null)
@@ -6855,6 +6948,15 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                         .IsRequired();
 
                     b.Navigation("Instance");
+                });
+
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaPlacementAssignmentEntity", b =>
+                {
+                    b.HasOne("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.ElsaInstanceEntity", null)
+                        .WithMany()
+                        .HasForeignKey("InstanceId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models.EngineCapabilityEntity", b =>

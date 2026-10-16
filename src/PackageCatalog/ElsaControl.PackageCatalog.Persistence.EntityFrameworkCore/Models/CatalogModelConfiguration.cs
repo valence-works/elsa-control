@@ -273,6 +273,7 @@ internal sealed class OrganizationSubscriptionConfiguration : IEntityTypeConfigu
         builder.Property(x => x.ProviderSubscriptionReference).HasMaxLength(OrganizationBillingLimits.ProviderReferenceMaxLength);
         builder.Property(x => x.State).HasConversion<string>().HasMaxLength(32);
         builder.Property(x => x.LastProviderEventId).HasMaxLength(256);
+        builder.Property(x => x.WebhookSource).HasMaxLength(32);
         builder.Property(x => x.TrialStartedAt).HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
         builder.Property(x => x.TrialEndsAt).HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
         builder.Property(x => x.ActivatedAt).HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null, value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
@@ -390,10 +391,11 @@ internal sealed class BillingProviderEventInboxEntryConfiguration : IEntityTypeC
         builder.Property(x => x.PriceReference).HasMaxLength(OrganizationBillingLimits.ProviderReferenceMaxLength);
         builder.Property(x => x.ProcessingStatus).HasConversion<string>().HasMaxLength(32);
         builder.Property(x => x.RejectionCode).HasMaxLength(128);
+        builder.Property(x => x.WebhookSource).HasMaxLength(32);
         builder.Property(x => x.OccurredAt).HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
         builder.Property(x => x.ReceivedAt).HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
         builder.Property(x => x.ProcessedAt).HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null, value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
-        builder.HasIndex(x => new { x.Provider, x.ProviderEventId }).IsUnique();
+        builder.HasIndex(x => new { x.Provider, x.ProviderEventId, x.WebhookSource }).IsUnique();
         builder.HasIndex(x => new { x.OrganizationId, x.OccurredAt });
         builder.HasOne(x => x.Organization).WithMany(x => x.BillingProviderEvents).HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Cascade);
     }
