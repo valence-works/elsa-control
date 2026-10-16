@@ -36,12 +36,14 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitOptions
     };
 
     /// <summary>
-    /// Fixed window for validated Cloud/Hub BFF sessions that resolve issuer
-    /// plus subject. Those calls reach Control from the BFF host, so many
-    /// identities share one egress address. The default is the maximum allowed
-    /// permit so this ceiling is not a global cap across BFF users; per-identity
-    /// remains binding. Unresolved BFF sessions still use <see cref="PerIp"/>
-    /// plus the 1-permit unresolved fallback.
+    /// Fixed window for validated Cloud/Hub sessions whose
+    /// <c>Connection.RemoteIpAddress</c> is inside
+    /// <see cref="ControlRateLimitBffEgressOptions.ConfigurationKey"/>. Those
+    /// calls share a BFF egress address, so the default is the maximum allowed
+    /// permit and per-identity remains binding. Every other caller, including
+    /// Cloud/Hub sessions from addresses outside the list and unresolved
+    /// identities, uses <see cref="PerIp"/>. An empty list (the default) means
+    /// everyone uses <see cref="PerIp"/>.
     /// </summary>
     public ManagedElsaInstanceLifecycleFixedWindowRateLimitOptions BffPerIp { get; init; } = new()
     {
@@ -104,7 +106,8 @@ public sealed class ManagedElsaInstanceLifecycleRateLimiterPolicy : ControlIdent
         IOptions<ManagedElsaInstanceLifecycleRateLimitOptions> options,
         IOptions<ControlIdentityOptions> controlIdentity,
         IOptions<CloudAccountIdentityOptions> cloudAccount,
-        IOptions<HubAccountIdentityOptions> hubAccount)
+        IOptions<HubAccountIdentityOptions> hubAccount,
+        IOptions<ControlRateLimitBffEgressOptions> bffEgress)
         : base(
             ManagedElsaInstanceLifecycleRateLimitDefaults.PolicyName,
             new ControlRateLimitWindow(options.Value.PerIp.PermitLimit, options.Value.PerIp.Window),
@@ -113,7 +116,8 @@ public sealed class ManagedElsaInstanceLifecycleRateLimiterPolicy : ControlIdent
             cloudAccount.Value,
             hubAccount.Value,
             limitIdentityForNonBff: true,
-            bffPerIp: new ControlRateLimitWindow(options.Value.BffPerIp.PermitLimit, options.Value.BffPerIp.Window))
+            bffPerIp: new ControlRateLimitWindow(options.Value.BffPerIp.PermitLimit, options.Value.BffPerIp.Window),
+            bffEgressNetworks: ControlRateLimitBffEgress.Parse(bffEgress.Value.Networks))
     {
     }
 }

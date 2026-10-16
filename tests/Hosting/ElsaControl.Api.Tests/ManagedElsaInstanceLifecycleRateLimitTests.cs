@@ -129,7 +129,12 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
         const string hubIssuer = "https://hub-account.test/auth/v1";
         const string sharedIp = "203.0.113.56";
         await using var app = CreateCloudAndHubApplication(
-            perIp: 1, perIdentity: 1, cloudIssuer, hubIssuer, bffPerIp: 20);
+            perIp: 1,
+            perIdentity: 1,
+            cloudIssuer,
+            hubIssuer,
+            bffPerIp: 20,
+            bffEgressNetworks: [$"{sharedIp}/32"]);
         await app.SeedAsync(_ => Task.CompletedTask);
         using var cloud = CloudClient(app, cloudIssuer, "11111111-1111-4111-8111-111111111241", sharedIp);
         using var hub = HubClient(app, hubIssuer, "c0a80101-0000-4000-8000-000000000241", sharedIp);
@@ -142,6 +147,63 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
         Assert.NotEqual(HttpStatusCode.TooManyRequests, cloudAllowed.StatusCode);
         Assert.NotEqual(HttpStatusCode.TooManyRequests, hubAllowed.StatusCode);
         await AssertLifecycleRateLimited(cloudRejected);
+    }
+
+    [Theory]
+    [InlineData("restart")]
+    [InlineData("apply-release")]
+    public async Task Validated_bff_session_without_egress_allowlist_uses_per_ip(string action)
+    {
+        const string issuer = "https://cloud-account.test/auth/v1";
+        const string sharedIp = "203.0.113.57";
+        await using var app = CreateCloudApplication(perIp: 1, perIdentity: 20, issuer, bffPerIp: 20);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var first = CloudClient(app, issuer, "11111111-1111-4111-8111-111111111251", sharedIp);
+        using var second = CloudClient(app, issuer, "22222222-2222-4222-8222-222222222252", sharedIp);
+
+        using var firstAllowed = await PostActionAsync(first, action);
+        using var rejected = await PostActionAsync(second, action);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, firstAllowed.StatusCode);
+        await AssertLifecycleRateLimited(rejected);
+    }
+
+    [Theory]
+    [InlineData("restart", "cloud")]
+    [InlineData("restart", "hub")]
+    [InlineData("apply-release", "cloud")]
+    [InlineData("apply-release", "hub")]
+    public async Task Validated_bff_session_uses_per_ip_outside_egress_list_and_bff_per_ip_inside(
+        string action,
+        string account)
+    {
+        const string cloudIssuer = "https://cloud-account.test/auth/v1";
+        const string hubIssuer = "https://hub-account.test/auth/v1";
+        const string insideIp = "203.0.113.58";
+        const string outsideIp = "203.0.113.59";
+        var issuer = account == "cloud" ? cloudIssuer : hubIssuer;
+        await using var app = CreateCloudAndHubApplication(
+            perIp: 1,
+            perIdentity: 20,
+            cloudIssuer,
+            hubIssuer,
+            bffPerIp: 20,
+            bffEgressNetworks: [$"{insideIp}/32"]);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var outsideFirst = ClientFor(account, app, issuer, "11111111-1111-4111-8111-111111111261", outsideIp);
+        using var outsideSecond = ClientFor(account, app, issuer, "22222222-2222-4222-8222-222222222262", outsideIp);
+        using var insideFirst = ClientFor(account, app, issuer, "33333333-3333-4333-8333-333333333363", insideIp);
+        using var insideSecond = ClientFor(account, app, issuer, "44444444-4444-4444-8444-444444444464", insideIp);
+
+        using var outsideAllowed = await PostActionAsync(outsideFirst, action);
+        using var outsideRejected = await PostActionAsync(outsideSecond, action);
+        using var insideAllowed = await PostActionAsync(insideFirst, action);
+        using var insideAlsoAllowed = await PostActionAsync(insideSecond, action);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, outsideAllowed.StatusCode);
+        await AssertLifecycleRateLimited(outsideRejected);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, insideAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, insideAlsoAllowed.StatusCode);
     }
 
     [Theory]
@@ -310,6 +372,21 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
     }
 
     [Theory]
+    [InlineData(0, "00:01:00", "BffPerIp:PermitLimit")]
+    [InlineData(-1, "00:01:00", "BffPerIp:PermitLimit")]
+    [InlineData(10001, "00:01:00", "BffPerIp:PermitLimit")]
+    [InlineData(1, "00:00:00", "BffPerIp:Window")]
+    [InlineData(1, "01:00:01", "BffPerIp:Window")]
+    public async Task Invalid_bff_per_ip_configuration_is_refused(int permitLimit, string window, string expected)
+    {
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => CreateValidator(bffPerIpLimit: permitLimit, bffPerIpWindow: TimeSpan.Parse(window))
+                .StartAsync(CancellationToken.None));
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData(0, "00:01:00", "PerIdentity:PermitLimit")]
     [InlineData(10001, "00:01:00", "PerIdentity:PermitLimit")]
     [InlineData(1, "00:00:00", "PerIdentity:Window")]
@@ -332,6 +409,8 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
         await CreateValidator(
             perIpLimit: permitLimit,
             perIpWindow: TimeSpan.Parse(window),
+            bffPerIpLimit: permitLimit,
+            bffPerIpWindow: TimeSpan.Parse(window),
             perIdentityLimit: permitLimit,
             perIdentityWindow: TimeSpan.Parse(window)).StartAsync(CancellationToken.None);
     }
@@ -352,7 +431,8 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
         int perIp,
         int perIdentity,
         IReadOnlyDictionary<string, string?>? extra = null,
-        int? bffPerIp = null)
+        int? bffPerIp = null,
+        IReadOnlyList<string>? bffEgressNetworks = null)
     {
         var bffIp = bffPerIp ?? perIp;
         var configuration = new Dictionary<string, string?>
@@ -364,6 +444,12 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
             [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIdentity:PermitLimit"] = perIdentity.ToString(),
             [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIdentity:Window"] = "00:01:00"
         };
+        if (bffEgressNetworks is not null)
+        {
+            for (var i = 0; i < bffEgressNetworks.Count; i++)
+                configuration[$"{ControlRateLimitBffEgressOptions.ConfigurationKey}:{i}"] = bffEgressNetworks[i];
+        }
+
         if (extra is not null)
         {
             foreach (var (key, value) in extra)
@@ -373,10 +459,17 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
         return new ControlApiTestApplication(configuration);
     }
 
-    private static ControlApiTestApplication CreateCloudApplication(int perIp, int perIdentity, string issuer) =>
+    private static ControlApiTestApplication CreateCloudApplication(
+        int perIp,
+        int perIdentity,
+        string issuer,
+        int? bffPerIp = null,
+        IReadOnlyList<string>? bffEgressNetworks = null) =>
         CreateApplication(
             perIp,
             perIdentity,
+            bffPerIp: bffPerIp,
+            bffEgressNetworks: bffEgressNetworks,
             extra: new Dictionary<string, string?>
             {
                 [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
@@ -404,11 +497,13 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
         int perIdentity,
         string cloudIssuer,
         string hubIssuer,
-        int? bffPerIp = null) =>
+        int? bffPerIp = null,
+        IReadOnlyList<string>? bffEgressNetworks = null) =>
         CreateApplication(
             perIp,
             perIdentity,
             bffPerIp: bffPerIp,
+            bffEgressNetworks: bffEgressNetworks,
             extra: new Dictionary<string, string?>
             {
                 [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
@@ -427,13 +522,20 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
         int perIpLimit = 10,
         TimeSpan? perIpWindow = null,
         int perIdentityLimit = 10,
-        TimeSpan? perIdentityWindow = null) =>
+        TimeSpan? perIdentityWindow = null,
+        int bffPerIpLimit = ManagedElsaInstanceLifecycleRateLimitDefaults.DefaultBffPerIpPermitLimit,
+        TimeSpan? bffPerIpWindow = null) =>
         new(Options.Create(new ManagedElsaInstanceLifecycleRateLimitOptions
         {
             PerIp = new ManagedElsaInstanceLifecycleFixedWindowRateLimitOptions
             {
                 PermitLimit = perIpLimit,
                 Window = perIpWindow ?? TimeSpan.FromMinutes(1)
+            },
+            BffPerIp = new ManagedElsaInstanceLifecycleFixedWindowRateLimitOptions
+            {
+                PermitLimit = bffPerIpLimit,
+                Window = bffPerIpWindow ?? TimeSpan.FromMinutes(1)
             },
             PerIdentity = new ManagedElsaInstanceLifecycleFixedWindowRateLimitOptions
             {
@@ -487,6 +589,14 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
 
     private static HttpClient HubClient(ControlApiTestApplication app, string issuer, string subject, string ip) =>
         CloudClient(app, issuer, subject, ip);
+
+    private static HttpClient ClientFor(
+        string account,
+        ControlApiTestApplication app,
+        string issuer,
+        string subject,
+        string ip) =>
+        account == "hub" ? HubClient(app, issuer, subject, ip) : CloudClient(app, issuer, subject, ip);
 
     private static void SetRemoteIp(HttpClient client, string ip)
     {

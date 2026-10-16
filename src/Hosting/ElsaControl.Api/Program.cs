@@ -261,6 +261,11 @@ builder.Services.AddHostedService<ManagedElsaHandoffRateLimitConfigurationValida
 builder.Services.Configure<ManagedElsaInstanceLifecycleRateLimitOptions>(
     builder.Configuration.GetSection(ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection));
 builder.Services.AddHostedService<ManagedElsaInstanceLifecycleRateLimitConfigurationValidator>();
+builder.Services.Configure<ControlRateLimitBffEgressOptions>(options =>
+{
+    options.Networks = ControlRateLimitBffEgress.ReadNetworks(builder.Configuration);
+});
+builder.Services.AddHostedService<ControlRateLimitBffEgressConfigurationValidator>();
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;

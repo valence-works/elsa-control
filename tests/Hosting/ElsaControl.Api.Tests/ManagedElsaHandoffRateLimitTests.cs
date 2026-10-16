@@ -117,7 +117,12 @@ public sealed class ManagedElsaHandoffRateLimitTests
         const string hubIssuer = "https://hub-account.test/auth/v1";
         const string sharedIp = "203.0.113.25";
         await using var app = CreateCloudAndHubApplication(
-            perIp: 1, perIdentity: 1, cloudIssuer, hubIssuer, bffPerIp: 20);
+            perIp: 1,
+            perIdentity: 1,
+            cloudIssuer,
+            hubIssuer,
+            bffPerIp: 20,
+            bffEgressNetworks: [$"{sharedIp}/32"]);
         await app.SeedAsync(_ => Task.CompletedTask);
         using var cloud = CloudClient(app, cloudIssuer, "11111111-1111-4111-8111-111111111141", sharedIp);
         using var hub = HubClient(app, hubIssuer, "c0a80101-0000-4000-8000-000000000141", sharedIp);
@@ -130,6 +135,57 @@ public sealed class ManagedElsaHandoffRateLimitTests
         Assert.NotEqual(HttpStatusCode.TooManyRequests, cloudAllowed.StatusCode);
         Assert.NotEqual(HttpStatusCode.TooManyRequests, hubAllowed.StatusCode);
         await AssertHandoffRateLimited(cloudRejected);
+    }
+
+    [Fact]
+    public async Task Validated_bff_session_without_egress_allowlist_uses_per_ip()
+    {
+        const string issuer = "https://cloud-account.test/auth/v1";
+        const string sharedIp = "203.0.113.27";
+        await using var app = CreateCloudApplication(perIp: 1, perIdentity: 20, issuer, bffPerIp: 20);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var first = CloudClient(app, issuer, "11111111-1111-4111-8111-111111111151", sharedIp);
+        using var second = CloudClient(app, issuer, "22222222-2222-4222-8222-222222222252", sharedIp);
+
+        using var firstAllowed = await PostIssueAsync(first);
+        using var rejected = await PostIssueAsync(second);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, firstAllowed.StatusCode);
+        await AssertHandoffRateLimited(rejected);
+    }
+
+    [Theory]
+    [InlineData("cloud")]
+    [InlineData("hub")]
+    public async Task Validated_bff_session_uses_per_ip_outside_egress_list_and_bff_per_ip_inside(string account)
+    {
+        const string cloudIssuer = "https://cloud-account.test/auth/v1";
+        const string hubIssuer = "https://hub-account.test/auth/v1";
+        const string insideIp = "203.0.113.28";
+        const string outsideIp = "203.0.113.29";
+        var issuer = account == "cloud" ? cloudIssuer : hubIssuer;
+        await using var app = CreateCloudAndHubApplication(
+            perIp: 1,
+            perIdentity: 20,
+            cloudIssuer,
+            hubIssuer,
+            bffPerIp: 20,
+            bffEgressNetworks: [$"{insideIp}/32"]);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var outsideFirst = ClientFor(account, app, issuer, "11111111-1111-4111-8111-111111111161", outsideIp);
+        using var outsideSecond = ClientFor(account, app, issuer, "22222222-2222-4222-8222-222222222262", outsideIp);
+        using var insideFirst = ClientFor(account, app, issuer, "33333333-3333-4333-8333-333333333363", insideIp);
+        using var insideSecond = ClientFor(account, app, issuer, "44444444-4444-4444-8444-444444444464", insideIp);
+
+        using var outsideAllowed = await PostIssueAsync(outsideFirst);
+        using var outsideRejected = await PostIssueAsync(outsideSecond);
+        using var insideAllowed = await PostIssueAsync(insideFirst);
+        using var insideAlsoAllowed = await PostIssueAsync(insideSecond);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, outsideAllowed.StatusCode);
+        await AssertHandoffRateLimited(outsideRejected);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, insideAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, insideAlsoAllowed.StatusCode);
     }
 
     [Fact]
@@ -284,6 +340,21 @@ public sealed class ManagedElsaHandoffRateLimitTests
     }
 
     [Theory]
+    [InlineData(0, "00:01:00", "BffPerIp:PermitLimit")]
+    [InlineData(-1, "00:01:00", "BffPerIp:PermitLimit")]
+    [InlineData(10001, "00:01:00", "BffPerIp:PermitLimit")]
+    [InlineData(1, "00:00:00", "BffPerIp:Window")]
+    [InlineData(1, "01:00:01", "BffPerIp:Window")]
+    public async Task Invalid_bff_per_ip_configuration_is_refused(int permitLimit, string window, string expected)
+    {
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => CreateValidator(bffPerIpLimit: permitLimit, bffPerIpWindow: TimeSpan.Parse(window))
+                .StartAsync(CancellationToken.None));
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData(0, "00:01:00", "PerIdentity:PermitLimit")]
     [InlineData(10001, "00:01:00", "PerIdentity:PermitLimit")]
     [InlineData(1, "00:00:00", "PerIdentity:Window")]
@@ -306,6 +377,8 @@ public sealed class ManagedElsaHandoffRateLimitTests
         await CreateValidator(
             perIpLimit: permitLimit,
             perIpWindow: TimeSpan.Parse(window),
+            bffPerIpLimit: permitLimit,
+            bffPerIpWindow: TimeSpan.Parse(window),
             perIdentityLimit: permitLimit,
             perIdentityWindow: TimeSpan.Parse(window)).StartAsync(CancellationToken.None);
     }
@@ -326,7 +399,8 @@ public sealed class ManagedElsaHandoffRateLimitTests
         int perIp,
         int perIdentity,
         IReadOnlyDictionary<string, string?>? extra = null,
-        int? bffPerIp = null)
+        int? bffPerIp = null,
+        IReadOnlyList<string>? bffEgressNetworks = null)
     {
         var bffIp = bffPerIp ?? perIp;
         var configuration = new Dictionary<string, string?>
@@ -339,6 +413,12 @@ public sealed class ManagedElsaHandoffRateLimitTests
             [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIdentity:PermitLimit"] = perIdentity.ToString(),
             [$"{ManagedElsaHandoffRateLimitOptions.ConfigurationSection}:PerIdentity:Window"] = "00:01:00"
         };
+        if (bffEgressNetworks is not null)
+        {
+            for (var i = 0; i < bffEgressNetworks.Count; i++)
+                configuration[$"{ControlRateLimitBffEgressOptions.ConfigurationKey}:{i}"] = bffEgressNetworks[i];
+        }
+
         if (extra is not null)
         {
             foreach (var (key, value) in extra)
@@ -348,10 +428,17 @@ public sealed class ManagedElsaHandoffRateLimitTests
         return new ControlApiTestApplication(configuration);
     }
 
-    private static ControlApiTestApplication CreateCloudApplication(int perIp, int perIdentity, string issuer) =>
+    private static ControlApiTestApplication CreateCloudApplication(
+        int perIp,
+        int perIdentity,
+        string issuer,
+        int? bffPerIp = null,
+        IReadOnlyList<string>? bffEgressNetworks = null) =>
         CreateApplication(
             perIp,
             perIdentity,
+            bffPerIp: bffPerIp,
+            bffEgressNetworks: bffEgressNetworks,
             extra: new Dictionary<string, string?>
             {
                 [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
@@ -379,11 +466,13 @@ public sealed class ManagedElsaHandoffRateLimitTests
         int perIdentity,
         string cloudIssuer,
         string hubIssuer,
-        int? bffPerIp = null) =>
+        int? bffPerIp = null,
+        IReadOnlyList<string>? bffEgressNetworks = null) =>
         CreateApplication(
             perIp,
             perIdentity,
             bffPerIp: bffPerIp,
+            bffEgressNetworks: bffEgressNetworks,
             extra: new Dictionary<string, string?>
             {
                 [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
@@ -402,13 +491,20 @@ public sealed class ManagedElsaHandoffRateLimitTests
         int perIpLimit = 20,
         TimeSpan? perIpWindow = null,
         int perIdentityLimit = 20,
-        TimeSpan? perIdentityWindow = null) =>
+        TimeSpan? perIdentityWindow = null,
+        int bffPerIpLimit = ManagedElsaHandoffRateLimitDefaults.DefaultBffPerIpPermitLimit,
+        TimeSpan? bffPerIpWindow = null) =>
         new(Options.Create(new ManagedElsaHandoffRateLimitOptions
         {
             PerIp = new ManagedElsaHandoffFixedWindowRateLimitOptions
             {
                 PermitLimit = perIpLimit,
                 Window = perIpWindow ?? TimeSpan.FromMinutes(1)
+            },
+            BffPerIp = new ManagedElsaHandoffFixedWindowRateLimitOptions
+            {
+                PermitLimit = bffPerIpLimit,
+                Window = bffPerIpWindow ?? TimeSpan.FromMinutes(1)
             },
             PerIdentity = new ManagedElsaHandoffFixedWindowRateLimitOptions
             {
@@ -460,6 +556,14 @@ public sealed class ManagedElsaHandoffRateLimitTests
 
     private static HttpClient HubClient(ControlApiTestApplication app, string issuer, string subject, string ip) =>
         CloudClient(app, issuer, subject, ip);
+
+    private static HttpClient ClientFor(
+        string account,
+        ControlApiTestApplication app,
+        string issuer,
+        string subject,
+        string ip) =>
+        account == "hub" ? HubClient(app, issuer, subject, ip) : CloudClient(app, issuer, subject, ip);
 
     private static void SetRemoteIp(HttpClient client, string ip)
     {
