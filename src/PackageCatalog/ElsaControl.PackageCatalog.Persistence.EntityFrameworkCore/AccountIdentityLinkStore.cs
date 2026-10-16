@@ -14,10 +14,11 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
         var cloud = cloudIdentity.Normalize();
         var hub = hubIdentity.Normalize();
         var auditId = Guid.Empty;
+        DateTimeOffset? touchedAt = null;
         return dbContext.ExecuteInTransactionAsync(
             IsolationLevel.Serializable,
-            () => LinkCoreAsync(cloud, hub, id => auditId = id, cancellationToken),
-            (result, token) => VerifyLinkAsync(hub, result, auditId, token),
+            () => LinkCoreAsync(cloud, hub, id => auditId = id, value => touchedAt = value, cancellationToken),
+            (result, token) => VerifyLinkAsync(hub, result, auditId, touchedAt, token),
             cancellationToken);
     }
 
@@ -56,6 +57,7 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
         TrustedWorkspaceIdentity cloud,
         TrustedWorkspaceIdentity hub,
         Action<Guid> auditIdSink,
+        Action<DateTimeOffset> touchedAtSink,
         CancellationToken cancellationToken)
     {
         var cloudLookup = await FindIdentityAsync(cloud.Issuer, cloud.Subject, cancellationToken);
@@ -66,7 +68,7 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
         var hubLookup = await FindIdentityAsync(hub.Issuer, hub.Subject, cancellationToken);
         if (hubLookup is not null && hubLookup.AccountId == cloudAccountId)
         {
-            Touch(hubLookup, hub);
+            touchedAtSink(Touch(hubLookup, hub));
             await dbContext.SaveChangesAsync(cancellationToken);
             return AccountIdentityLinkResult.Success(AccountIdentityLinkOutcome.AlreadyLinked, cloudAccountId);
         }
@@ -144,11 +146,22 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
         TrustedWorkspaceIdentity hub,
         AccountIdentityLinkResult result,
         Guid auditId,
+        DateTimeOffset? touchedAt,
         CancellationToken cancellationToken)
     {
         if (result.Outcome == AccountIdentityLinkOutcome.AlreadyLinked)
             return result.AccountId is { } alreadyLinkedAccountId &&
-                   await HubLinkedToAccountAsync(hub, alreadyLinkedAccountId, cancellationToken);
+                   touchedAt is { } expectedTouchedAt &&
+                   await dbContext.ExternalIdentities.AsNoTracking().AnyAsync(
+                       identity => identity.AccountId == alreadyLinkedAccountId &&
+                                   identity.Kind == ExternalIdentityKinds.Hub &&
+                                   identity.Issuer == hub.Issuer &&
+                                   identity.Subject == hub.Subject &&
+                                   identity.DisplayName == hub.DisplayName &&
+                                   identity.Email == hub.Email &&
+                                   identity.LastSeenAt >= expectedTouchedAt &&
+                                   identity.UpdatedAt >= expectedTouchedAt,
+                       cancellationToken);
 
         if (result.Outcome != AccountIdentityLinkOutcome.Linked || result.AccountId is not { } accountId)
             return true;
@@ -219,12 +232,14 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
             cancellationToken);
     }
 
-    private static void Touch(ExternalIdentity identity, TrustedWorkspaceIdentity hub)
+    private static DateTimeOffset Touch(ExternalIdentity identity, TrustedWorkspaceIdentity hub)
     {
+        var now = DateTimeOffset.UtcNow;
         identity.Kind = ExternalIdentityKinds.Hub;
         identity.DisplayName = hub.DisplayName;
         identity.Email = hub.Email;
-        identity.LastSeenAt = DateTimeOffset.UtcNow;
-        identity.UpdatedAt = identity.LastSeenAt;
+        identity.LastSeenAt = now;
+        identity.UpdatedAt = now;
+        return now;
     }
 }
