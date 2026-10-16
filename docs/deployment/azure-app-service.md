@@ -426,12 +426,102 @@ Required GitHub Actions variables:
   environment: an infrastructure deployment without it renders
   `virtualNetworkSubnetId` as null and detaches the site.
 
-Required GitHub Actions secrets:
+Required GitHub Actions secrets (rollback copies only after Key Vault
+cutover; see [API Key Vault](#api-key-vault)):
 
-- `ADMIN_API_KEY`: strong API key passed to the AppHost `adminApiKey` parameter
-  and surfaced to the API as `Authentication__ApiKey`.
+- `ADMIN_API_KEY`: strong API key. After cutover this is the 14-day rollback
+  copy, not the live App Service value.
 - `BUILDER_CLIENT_API_KEY`: client key used by the public builder endpoint.
-- `CONTROL_ENTRA_CLIENT_SECRET`: secret for the environment's Control operator app.
+  After cutover this is the 14-day rollback copy.
+- `CONTROL_ENTRA_CLIENT_SECRET`: secret for the environment's Control operator
+  app. After cutover this is the 14-day rollback copy. Switching that identity
+  to a federated credential is #838.
+
+## API Key Vault
+
+The Control API site stores secret settings as versionless Key Vault
+references. `keyVaultReferenceIdentity` stays the API user-assigned identity.
+`infra/api-key-vault/` provisions one vault per environment (RBAC, soft
+delete, purge protection). The vault firewall allows the API egress subnet
+and the operator write-path CIDRs. A private endpoint is #839.
+
+Role assignments on that vault are exactly Key Vault Secrets User for the API
+identity and Key Vault Secrets User (read only) for the deploy identity. No
+other identity gets a data-plane role. CI never writes a secret value to Key
+Vault or to App Service. An operator writes each secret after the vault
+exists.
+
+| App setting | Vault secret name |
+| --- | --- |
+| `Authentication__ApiKey` | `Authentication-ApiKey` |
+| `Authentication__ControlIdentity__ClientSecret` | `Authentication-ControlIdentity-ClientSecret` |
+| `Authentication__BuilderClientApiKey` | `Authentication-BuilderClientApiKey` |
+| `Billing__Stripe__SecretKey` | `Billing-Stripe-SecretKey` |
+| `Billing__Stripe__WebhookSigningSecret` | `Billing-Stripe-WebhookSigningSecret` |
+| `Billing__Stripe__WebhookSources__0__SigningSecret` | `Billing-Stripe-WebhookSources-control-SigningSecret` |
+| `Billing__Stripe__WebhookSources__1__SigningSecret` | `Billing-Stripe-WebhookSources-hub-SigningSecret` |
+| `ManagedElsa__Handoff__ActivePrivateKeyPem` | `ManagedElsa-Handoff-ActivePrivateKeyPem` |
+
+Optional deploy inputs:
+
+- `KEY_VAULT_OPERATOR_WRITE_IP_CIDRS`: comma-separated IPv4 CIDRs for the
+  operator write path.
+- `KEY_VAULT_API_OUTBOUND_IP_CIDRS`: optional NAT `/32` CIDRs.
+- `AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID`: deploy identity principal. When empty,
+  the helper resolves it from `AZURE_CLIENT_ID`.
+
+SCM and FTP basic-auth publishing credentials are off
+(`basicPublishingCredentialsPolicies` `scm` and `ftp`, `allow: false`).
+
+### Operator write path
+
+1. Deploy infrastructure so the vault exists.
+2. If needed, add your client CIDR with `az keyvault network-rule add`
+   (management plane).
+3. Grant yourself a temporary Key Vault Secrets Officer assignment on that
+   vault only. Do not grant CI a write role.
+4. Write each secret by name from a private file. Do not print the value.
+5. Remove the temporary write role.
+6. Confirm every listed reference reports `Resolved` with
+   `scripts/check-key-vault-references.sh` (names and status only).
+
+### Rotation
+
+Write a new version of the same secret name, then restart the API App Service
+so the versionless reference refreshes immediately. Without a restart, App
+Service can take up to 24 hours to pick up the new version.
+
+### Rollback
+
+Set the plain App Service value again from the GitHub environment secret.
+Keep those rollback copies in the GitHub environment for 14 days after each
+environment's cutover, then delete them.
+
+Staging:
+
+```bash
+az webapp config appsettings set \
+  --resource-group "$AZURE_RESOURCE_GROUP" \
+  --name "$AZURE_WEBAPP_NAME" \
+  --settings "Authentication__ApiKey=$ADMIN_API_KEY" \
+  --output none
+```
+
+Repeat for `Authentication__ControlIdentity__ClientSecret`,
+`Authentication__BuilderClientApiKey`, `Billing__Stripe__SecretKey`,
+`Billing__Stripe__WebhookSigningSecret`, the per-source signing secrets, and
+`ManagedElsa__Handoff__ActivePrivateKeyPem` using the matching environment
+secret. Then restart the app.
+
+Production uses the same commands against the `production` GitHub
+environment and the production App Service. The Elsa Control Lead applies
+production through the normal deploy path, before
+`Authentication:HubAccount:Enabled` is turned on. After that cutover, the
+same name-and-status checks (`Resolved` references, SCM/FTP basic-auth off)
+must hold on production. No CI job writes a secret value.
+
+The host refuses to start when one of these settings still holds an
+unresolved `@Microsoft.KeyVault(...)` string.
 
 The persistent `test` environment also requires the staging-only Stripe values
 `STRIPE_TEST_SECRET_KEY` and `STRIPE_TEST_WEBHOOK_SIGNING_SECRET`, plus the

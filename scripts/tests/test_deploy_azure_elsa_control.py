@@ -26,11 +26,9 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         environment.pop("AZURE_ENV_NAME", None)
         environment.update(
             {
-                "ADMIN_API_KEY": "test-only-admin-key",
-                "BUILDER_CLIENT_API_KEY": "test-only-builder-key",
                 "CONTROL_ENTRA_TENANT_ID": "00000000-0000-0000-0000-000000000001",
                 "CONTROL_ENTRA_CLIENT_ID": "00000000-0000-0000-0000-000000000002",
-                "CONTROL_ENTRA_CLIENT_SECRET": "test-only-client-secret",
+                "AZURE_CLIENT_ID": "00000000-0000-0000-0000-000000000004",
                 "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
             }
         )
@@ -83,6 +81,11 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         self.assertIn("--template-file infra/main.bicep", self.source)
         self.assertIn("az deployment group create", self.source)
         self.assertIn("--template-file infra/api/api-website.module.bicep", self.source)
+        self.assertIn("--template-file infra/api-key-vault/api-key-vault.module.bicep", self.source)
+        self.assertIn("api_key_vault_uri", self.source)
+        self.assertNotIn("adminapikey_value", self.source)
+        self.assertNotIn("entraclientsecret_value", self.source)
+        self.assertNotIn("builderclientapikey_value", self.source)
         self.assertIn("pairingallowedorganizationids_value", self.source)
         self.assertIn("EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS", self.source)
         self.assertIn("stagingbillingleverenabled_value", self.source)

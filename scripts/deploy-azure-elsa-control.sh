@@ -11,11 +11,12 @@ RESOURCE_GROUP_EXPLICIT=false
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)}"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
 SUBSCRIPTION_ID="${AZURE_SUBSCRIPTION_ID:-}"
-ADMIN_API_KEY="${ADMIN_API_KEY:-}"
-BUILDER_CLIENT_API_KEY="${BUILDER_CLIENT_API_KEY:-}"
 CONTROL_ENTRA_TENANT_ID="${CONTROL_ENTRA_TENANT_ID:-${AZURE_ENTRA_TENANT_ID:-}}"
 CONTROL_ENTRA_CLIENT_ID="${CONTROL_ENTRA_CLIENT_ID:-${AZURE_ENTRA_CLIENT_ID:-}}"
-CONTROL_ENTRA_CLIENT_SECRET="${CONTROL_ENTRA_CLIENT_SECRET:-${AZURE_ENTRA_CLIENT_SECRET:-}}"
+AZURE_CLIENT_ID="${AZURE_CLIENT_ID:-}"
+AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID="${AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID:-}"
+KEY_VAULT_OPERATOR_WRITE_IP_CIDRS="${KEY_VAULT_OPERATOR_WRITE_IP_CIDRS:-}"
+KEY_VAULT_API_OUTBOUND_IP_CIDRS="${KEY_VAULT_API_OUTBOUND_IP_CIDRS:-}"
 AZURE_PRINCIPAL_ID="${AZURE_PRINCIPAL_ID:-}"
 CLOUD_ACCOUNT_ISSUER="${CLOUD_ACCOUNT_ISSUER:-}"
 EXPECTED_CLOUD_ACCOUNT_ISSUER="${EXPECTED_CLOUD_ACCOUNT_ISSUER:-}"
@@ -53,14 +54,19 @@ Options:
   -h, --help                 Show this help.
 
 Required environment variables for a full deployment:
-  ADMIN_API_KEY
-  BUILDER_CLIENT_API_KEY
   CONTROL_ENTRA_TENANT_ID
   CONTROL_ENTRA_CLIENT_ID
-  CONTROL_ENTRA_CLIENT_SECRET
+  AZURE_CLIENT_ID or AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID
+
+Secret App Service settings are Key Vault references. This helper never
+writes a secret value to Key Vault or to App Service. An operator writes
+each vault secret before the site can start.
 
 Optional environment variables:
   AZURE_PRINCIPAL_ID
+  AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID
+  KEY_VAULT_OPERATOR_WRITE_IP_CIDRS
+  KEY_VAULT_API_OUTBOUND_IP_CIDRS
   CLOUD_ACCOUNT_ISSUER
   EXPECTED_CLOUD_ACCOUNT_ISSUER
   AZURE_PROVISIONER_IDENTITY_ID
@@ -216,11 +222,11 @@ if [[ "$WHAT_IF" != true && "$BASE_ONLY" != true ]]; then
 fi
 
 if [[ "$WHAT_IF" != true && "$BASE_ONLY" != true ]]; then
-  require_value ADMIN_API_KEY
-  require_value BUILDER_CLIENT_API_KEY
   require_value CONTROL_ENTRA_TENANT_ID
   require_value CONTROL_ENTRA_CLIENT_ID
-  require_value CONTROL_ENTRA_CLIENT_SECRET
+  if [[ -z "$AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID" ]]; then
+    require_value AZURE_CLIENT_ID
+  fi
 fi
 
 if [[ -n "$SUBSCRIPTION_ID" ]]; then
@@ -233,9 +239,10 @@ BASE_DEPLOYMENT_NAME="elsa-control-$ENVIRONMENT_NAME"
 API_DEPLOYMENT_NAME="$BASE_DEPLOYMENT_NAME-api"
 BASE_PARAMETERS_FILE="$(mktemp)"
 API_PARAMETERS_FILE=""
+VAULT_PARAMETERS_FILE=""
 
 cleanup() {
-  python3 - "$BASE_PARAMETERS_FILE" "$API_PARAMETERS_FILE" <<'PY'
+  python3 - "$BASE_PARAMETERS_FILE" "$API_PARAMETERS_FILE" "$VAULT_PARAMETERS_FILE" <<'PY'
 import os
 import sys
 
@@ -315,8 +322,9 @@ if [[ "$BASE_ONLY" == true ]]; then
   exit 0
 fi
 
-export ADMIN_API_KEY BUILDER_CLIENT_API_KEY
-export CONTROL_ENTRA_TENANT_ID CONTROL_ENTRA_CLIENT_ID CONTROL_ENTRA_CLIENT_SECRET
+export CONTROL_ENTRA_TENANT_ID CONTROL_ENTRA_CLIENT_ID
+export AZURE_CLIENT_ID AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID
+export KEY_VAULT_OPERATOR_WRITE_IP_CIDRS KEY_VAULT_API_OUTBOUND_IP_CIDRS
 export CLOUD_ACCOUNT_ISSUER AZURE_PROVISIONER_IDENTITY_ID AZURE_API_EGRESS_SUBNET_ID
 export EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS
 export STAGING_BILLING_LIFECYCLE_LEVER_ENABLED STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS
@@ -341,6 +349,70 @@ API_IDENTITY_ID="$(output_value API_IDENTITY_ID)"
 API_IDENTITY_CLIENT_ID="$(output_value API_IDENTITY_CLIENTID)"
 export ACR_LOGIN_SERVER ELSA_CONTROL_PLANID ACR_IDENTITY_ID ACR_IDENTITY_CLIENT_ID
 export SQL_SERVER_FQDN API_IDENTITY_ID API_IDENTITY_CLIENT_ID
+
+API_IDENTITY_PRINCIPAL_ID="$(az identity show \
+  --ids "$API_IDENTITY_ID" \
+  --query principalId \
+  --output tsv \
+  --only-show-errors)"
+if [[ ! "$API_IDENTITY_PRINCIPAL_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+  echo "The API identity principal ID could not be resolved." >&2
+  exit 1
+fi
+if [[ -z "$AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID" ]]; then
+  AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID="$(az ad sp show \
+    --id "$AZURE_CLIENT_ID" \
+    --query id \
+    --output tsv \
+    --only-show-errors)"
+fi
+if [[ ! "$AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+  echo "The deploy identity principal ID could not be resolved." >&2
+  exit 1
+fi
+export API_IDENTITY_PRINCIPAL_ID AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID
+
+VAULT_DEPLOYMENT_NAME="$BASE_DEPLOYMENT_NAME-api-key-vault"
+VAULT_PAYLOAD="$(python3 - <<'PY'
+import json
+import os
+
+def cidrs(name):
+    return [item.strip() for item in os.environ.get(name, "").split(",") if item.strip()]
+
+print(json.dumps({
+    "location": os.environ["LOCATION"],
+    "apiIdentityPrincipalId": os.environ["API_IDENTITY_PRINCIPAL_ID"],
+    "deployIdentityPrincipalId": os.environ["AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID"],
+    "apiEgressSubnetId": os.environ.get("AZURE_API_EGRESS_SUBNET_ID", ""),
+    "operatorWriteIpCidrs": cidrs("KEY_VAULT_OPERATOR_WRITE_IP_CIDRS"),
+    "apiOutboundIpCidrs": cidrs("KEY_VAULT_API_OUTBOUND_IP_CIDRS"),
+}))
+PY
+)"
+VAULT_PARAMETERS_FILE="$(mktemp)"
+write_parameters "$VAULT_PARAMETERS_FILE" "$VAULT_PAYLOAD"
+
+echo "Deploying the API Key Vault."
+az deployment group create \
+  --resource-group "$RESOURCE_GROUP" \
+  --name "$VAULT_DEPLOYMENT_NAME" \
+  --template-file infra/api-key-vault/api-key-vault.module.bicep \
+  --parameters "@$VAULT_PARAMETERS_FILE" \
+  --output none
+
+VAULT_OUTPUTS="$(az deployment group show \
+  --resource-group "$RESOURCE_GROUP" \
+  --name "$VAULT_DEPLOYMENT_NAME" \
+  --query properties.outputs \
+  --output json \
+  --only-show-errors)"
+API_KEY_VAULT_URI="$(printf '%s' "$VAULT_OUTPUTS" | python3 scripts/read-arm-deployment-output.py uri)"
+if [[ ! "$API_KEY_VAULT_URI" =~ ^https://[A-Za-z0-9-]+\.vault\.azure\.net/?$ ]]; then
+  echo "The API Key Vault URI was missing or invalid." >&2
+  exit 1
+fi
+export API_KEY_VAULT_URI
 
 ACR_NAME="${ACR_LOGIN_SERVER%%.azurecr.io}"
 IMAGE_REPOSITORY="$ACR_LOGIN_SERVER/elsa-control/api"
@@ -382,13 +454,11 @@ print(json.dumps({
     "elsa_control_outputs_azure_container_registry_managed_identity_client_id": os.environ["ACR_IDENTITY_CLIENT_ID"],
     "api_containerimage": os.environ["IMAGE"],
     "api_containerport": "8080",
-    "adminapikey_value": os.environ["ADMIN_API_KEY"],
+    "api_key_vault_uri": os.environ["API_KEY_VAULT_URI"],
     "control_sql_outputs_sqlserverfqdn": os.environ["SQL_SERVER_FQDN"],
     "entratenantid_value": os.environ["CONTROL_ENTRA_TENANT_ID"],
     "entraclientid_value": os.environ["CONTROL_ENTRA_CLIENT_ID"],
     "cloudaccountissuer_value": os.environ["CLOUD_ACCOUNT_ISSUER"],
-    "entraclientsecret_value": os.environ["CONTROL_ENTRA_CLIENT_SECRET"],
-    "builderclientapikey_value": os.environ["BUILDER_CLIENT_API_KEY"],
     "api_identity_outputs_id": os.environ["API_IDENTITY_ID"],
     "api_identity_outputs_clientid": os.environ["API_IDENTITY_CLIENT_ID"],
     "provisioner_identity_outputs_id": os.environ["AZURE_PROVISIONER_IDENTITY_ID"],

@@ -26,7 +26,7 @@ PATCH_CONTROL_SQL_SKU = ROOT / "dev" / "patch-control-sql-sku.py"
 CONTROL_SQL_SKU_LIB = ROOT / "scripts" / "lib" / "control_sql_sku.py"
 APP_SERVICE_DOC = ROOT / "docs" / "deployment" / "azure-app-service.md"
 # Hand-maintained directories dev/regenerate-infra.sh must carry across a regeneration.
-PRESERVED_INFRA_DIRECTORIES = ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry", "control-deploy-identity", "control-worker-composition", "control-egress")
+PRESERVED_INFRA_DIRECTORIES = ("azure-production", "azure-workload-proof", "azure-customer-subscription", "managed-telemetry", "control-deploy-identity", "control-worker-composition", "control-egress", "api-key-vault")
 
 SUBSCRIPTION = "00000000-0000-0000-0000-000000000000"
 RESOURCE_GROUP = "rg-api-test"
@@ -78,12 +78,10 @@ def parameter_file(
         "elsa_control_outputs_azure_container_registry_managed_identity_client_id": ACR_CLIENT_ID,
         "api_containerimage": "acr.example/api:ci",
         "api_containerport": "8080",
-        "adminapikey_value": "test-only-redacted",
+        "api_key_vault_uri": "https://kv.example.vault.azure.net/",
         "control_sql_outputs_sqlserverfqdn": "sql.example",
         "entratenantid_value": "00000000-0000-0000-0000-000000000002",
         "entraclientid_value": "00000000-0000-0000-0000-000000000003",
-        "entraclientsecret_value": "test-only-redacted",
-        "builderclientapikey_value": "test-only-redacted",
         "api_identity_outputs_id": API_ID,
         "api_identity_outputs_clientid": API_CLIENT_ID,
         "provisioner_identity_outputs_id": provisioner_id,
@@ -127,11 +125,89 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertNotIn("Staging__RecoveryLifecycleLever__SmokeOwnerInstanceId", settings)
         self.assertFalse(any(name.startswith("Staging__LateSuccessLever__") for name in settings))
 
+    def test_secret_app_settings_are_versionless_key_vault_references(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = self.snapshot(Path(temporary), PROVISIONER_ID)
+            webapp = self.webapp(snapshot)
+        settings = {setting["name"]: setting["value"] for setting in webapp["properties"]["siteConfig"]["appSettings"]}
+        expected = {
+            "Authentication__ApiKey": "Authentication-ApiKey",
+            "Authentication__ControlIdentity__ClientSecret": "Authentication-ControlIdentity-ClientSecret",
+            "Authentication__BuilderClientApiKey": "Authentication-BuilderClientApiKey",
+            "Billing__Stripe__SecretKey": "Billing-Stripe-SecretKey",
+            "Billing__Stripe__WebhookSigningSecret": "Billing-Stripe-WebhookSigningSecret",
+            "Billing__Stripe__WebhookSources__0__SigningSecret": "Billing-Stripe-WebhookSources-control-SigningSecret",
+            "Billing__Stripe__WebhookSources__1__SigningSecret": "Billing-Stripe-WebhookSources-hub-SigningSecret",
+            "ManagedElsa__Handoff__ActivePrivateKeyPem": "ManagedElsa-Handoff-ActivePrivateKeyPem",
+        }
+        for name, secret in expected.items():
+            value = settings[name]
+            self.assertTrue(value.startswith("@Microsoft.KeyVault(SecretUri="), name)
+            self.assertIn("https://kv.example.vault.azure.net/secrets/" + secret, value)
+            self.assertNotRegex(value, r"/[0-9a-f]{32}$")
+        module = API_MODULE.read_text()
+        self.assertNotIn("@secure()", module)
+        self.assertNotIn("adminapikey_value", module)
+        self.assertNotIn("entraclientsecret_value", module)
+        self.assertNotIn("builderclientapikey_value", module)
+        policies = [
+            resource
+            for resource in snapshot["predictedResources"]
+            if resource["type"] == "Microsoft.Web/sites/basicPublishingCredentialsPolicies"
+        ]
+        self.assertEqual({"scm", "ftp"}, {policy["name"].rsplit("/", 1)[-1] for policy in policies})
+        self.assertTrue(all(policy["properties"]["allow"] is False for policy in policies))
+
     @staticmethod
     def generated_api_module() -> str:
         """Build the module shape emitted before the regeneration patch runs."""
 
-        module = API_MODULE.read_text().replace(
+        module = API_MODULE.read_text()
+        module = module.replace(
+            "@description('Vault URI from infra/api-key-vault. Secret app settings are versionless Key Vault references only. This module never takes a secret value.')\n"
+            "param api_key_vault_uri string\n\n",
+            "@secure()\nparam adminapikey_value string\n\n",
+            1,
+        )
+        module = module.replace(
+            "param cloudaccountissuer_value string = ''\n\nparam api_identity_outputs_id string\n",
+            "param cloudaccountissuer_value string = ''\n\n@secure()\nparam entraclientsecret_value string\n\n"
+            "@secure()\nparam builderclientapikey_value string\n\nparam api_identity_outputs_id string\n",
+            1,
+        )
+        module = re.sub(
+            r"\nvar vaultUriPrefix = endsWith\(api_key_vault_uri, '/'\) \? api_key_vault_uri : '\$\{api_key_vault_uri\}/'\n"
+            r"var kv = \{.*?\n\}\n",
+            "",
+            module,
+            count=1,
+            flags=re.DOTALL,
+        )
+        module = module.replace("value: kv.authenticationApiKey", "value: adminapikey_value", 1)
+        module = module.replace("value: kv.authenticationControlIdentityClientSecret", "value: entraclientsecret_value", 1)
+        extra_secret_settings = re.compile(
+            r"\n        \{\n          name: 'Authentication__BuilderClientApiKey'\n"
+            r"          value: kv\.authenticationBuilderClientApiKey\n        \}\n"
+            r"        \{\n          name: 'Billing__Stripe__SecretKey'.*?"
+            r"          name: 'ManagedElsa__Handoff__ActivePrivateKeyPem'\n"
+            r"          value: kv\.managedElsaHandoffActivePrivateKeyPem\n        \}\n",
+            re.DOTALL,
+        )
+        module = extra_secret_settings.sub(
+            "\n        {\n          name: 'Authentication__BuilderClientApiKey'\n"
+            "          value: builderclientapikey_value\n        }\n",
+            module,
+            count=1,
+        )
+        module = re.sub(
+            r"\nresource scmBasicAuth 'Microsoft.Web/sites/basicPublishingCredentialsPolicies@2025-03-01' = \{.*?\n\}\n\n"
+            r"resource ftpBasicAuth 'Microsoft.Web/sites/basicPublishingCredentialsPolicies@2025-03-01' = \{.*?\n\}\n",
+            "",
+            module,
+            count=1,
+            flags=re.DOTALL,
+        )
+        module = module.replace(
             'TrustServerCertificate=False;Authentication=Active Directory Managed Identity;User Id=${api_identity_outputs_clientid}',
             'Authentication="Active Directory Default"',
         )
@@ -438,6 +514,9 @@ class ApiInfrastructureTests(unittest.TestCase):
         regeneration = REGENERATE_INFRA.read_text()
 
         self.assertIn("param provisioner_identity_outputs_id string = ''", module)
+        self.assertIn("param api_key_vault_uri string", module)
+        self.assertIn("@Microsoft.KeyVault(SecretUri=", module)
+        self.assertIn("basicPublishingCredentialsPolicies", module)
         self.assertIn("    httpsOnly: true", module)
         self.assertIn("param cloudaccountissuer_value string = ''", module)
         self.assertIn("Authentication__CloudAccount__Enabled", module)
@@ -468,6 +547,11 @@ class ApiInfrastructureTests(unittest.TestCase):
             r"\{\{ else \}\}\s+param provisioner_identity_outputs_id = ''\s+\{\{ end \}\}",
         )
         self.assertIn("param cloudaccountissuer_value = ''", parameters)
+        self.assertIn("param api_key_vault_uri = '{{ .Env.API_KEY_VAULT_URI }}'", parameters)
+        self.assertNotIn("securedParameter", parameters)
+        self.assertNotIn("adminapikey_value", parameters)
+        self.assertNotIn("builderclientapikey_value", parameters)
+        self.assertNotIn("entraclientsecret_value", parameters)
         self.assertIn("param pairingallowedorganizationids_value = ''", parameters)
         self.assertIn("param stagingbillingleverenabled_value = false", parameters)
         self.assertIn("param stagingbillingleverallowedorganizationids_value = ''", parameters)
@@ -528,6 +612,9 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("restarts the app", documentation)
         self.assertIn("AZURE_CLIENT_ID` remains", documentation)
         self.assertIn("keyVaultReferenceIdentity` remains", documentation)
+        self.assertIn("Key Vault", documentation)
+        self.assertIn("14 days", documentation)
+        self.assertIn("basicPublishingCredentialsPolicies", documentation)
         self.assertIn("existing classic `DOCKER` deployment mode", documentation)
         self.assertIn("Do not convert it to `SITECONTAINERS`", documentation)
 
@@ -554,7 +641,22 @@ class ApiInfrastructureTests(unittest.TestCase):
         template = API_PARAMETERS.read_text()
         provisioner_block = re.compile(r'\{\{ if index \.Env "AZURE_PROVISIONER_IDENTITY_ID" \}\}.*?\{\{ end \}\}\n', re.DOTALL)
         egress_block = re.compile(r'\{\{ if index \.Env "AZURE_API_EGRESS_SUBNET_ID" \}\}.*?\{\{ end \}\}\n', re.DOTALL)
-        regenerated = template.replace("param pairingallowedorganizationids_value = ''\n", "", 1)
+        regenerated = template.replace("param api_key_vault_uri = '{{ .Env.API_KEY_VAULT_URI }}'\n", "param adminapikey_value = '{{ securedParameter \"adminApiKey\" }}'\n", 1)
+        if "param builderclientapikey_value" not in regenerated:
+            regenerated = regenerated.replace(
+                "param control_sql_outputs_sqlserverfqdn",
+                "param builderclientapikey_value = '{{ securedParameter \"builderClientApiKey\" }}'\n"
+                "param control_sql_outputs_sqlserverfqdn",
+                1,
+            )
+        if "param entraclientsecret_value" not in regenerated:
+            regenerated = regenerated.replace(
+                "param entratenantid_value = '{{ parameter \"entraTenantId\" }}'\n",
+                "param entraclientsecret_value = '{{ securedParameter \"entraClientSecret\" }}'\n"
+                "param entratenantid_value = '{{ parameter \"entraTenantId\" }}'\n",
+                1,
+            )
+        regenerated = regenerated.replace("param pairingallowedorganizationids_value = ''\n", "", 1)
         regenerated = regenerated.replace("param stagingbillingleverenabled_value = false\n", "", 1)
         regenerated = regenerated.replace("param stagingbillingleverallowedorganizationids_value = ''\n", "", 1)
         regenerated = regenerated.replace("param stagingrecoveryleverenabled_value = false\n", "", 1)
@@ -565,6 +667,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertNotIn("provisioner_identity_outputs_id", regenerated)
         self.assertNotIn("api_egress_subnet_id", regenerated)
         self.assertNotIn("cloudaccountissuer_value", regenerated)
+        self.assertNotIn("api_key_vault_uri", regenerated)
         self.assertNotIn("pairingallowedorganizationids_value", regenerated)
         self.assertNotIn("stagingbillingleverenabled_value", regenerated)
         self.assertNotIn("stagingbillingleverallowedorganizationids_value", regenerated)

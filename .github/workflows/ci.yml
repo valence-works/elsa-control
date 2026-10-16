@@ -48,6 +48,7 @@ jobs:
           python3 scripts/tests/test_control_deploy_identity_infrastructure.py
           python3 scripts/tests/test_control_worker_composition.py
           python3 scripts/tests/test_control_egress_infrastructure.py
+          python3 scripts/tests/test_api_key_vault_infrastructure.py
           python3 scripts/tests/test_api_provider_image.py
           python3 scripts/tests/test_managed_lifecycle_slo_sampler.py
           python3 scripts/tests/test_catalog_rehearsal_harness.py
@@ -70,7 +71,8 @@ jobs:
             scripts/validate-azure-api-candidate.sh \
             scripts/staging-compat-fixture.sh \
             scripts/staging-control-rollback.sh \
-            scripts/lib/azure-api-deploy-rollback.sh
+            scripts/lib/azure-api-deploy-rollback.sh \
+            scripts/check-key-vault-references.sh
           shellcheck \
             scripts/azure-workload-proof.sh \
             scripts/azure-workload-restore-proof.sh \
@@ -80,7 +82,8 @@ jobs:
             scripts/validate-azure-api-candidate.sh \
             scripts/staging-compat-fixture.sh \
             scripts/staging-control-rollback.sh \
-            scripts/lib/azure-api-deploy-rollback.sh
+            scripts/lib/azure-api-deploy-rollback.sh \
+            scripts/check-key-vault-references.sh
 
       - name: Compile Azure workload proof Bicep templates
         run: |
@@ -91,6 +94,8 @@ jobs:
           az bicep build --file infra/azure-lighthouse/v1/main.bicep --stdout >/dev/null
           az bicep build --file infra/main.bicep --stdout >/dev/null
           az bicep build --file infra/control-sql/control-sql.module.bicep --stdout >/dev/null
+          az bicep build --file infra/api-key-vault/api-key-vault.module.bicep --stdout >/dev/null
+          az bicep build --file infra/api/api-website.module.bicep --stdout >/dev/null
 
   api-image:
     name: Build and smoke-test API provider image

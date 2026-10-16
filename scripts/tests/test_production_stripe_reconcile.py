@@ -32,8 +32,8 @@ CLOUD_ORIGIN = "https://cloud.example.com"
 PORTAL_RETURN_URL = "https://control.example.com/billing"
 EXPECTED_SETTINGS = {
     "Billing__Stripe__Enabled": "true",
-    "Billing__Stripe__SecretKey": "rk_live_private",
-    "Billing__Stripe__WebhookSigningSecret": "whsec_private",
+    "Billing__Stripe__SecretKey": "@Microsoft.KeyVault(SecretUri=https://kv.example.vault.azure.net/secrets/Billing-Stripe-SecretKey)",
+    "Billing__Stripe__WebhookSigningSecret": "@Microsoft.KeyVault(SecretUri=https://kv.example.vault.azure.net/secrets/Billing-Stripe-WebhookSigningSecret)",
     "Billing__Stripe__DefaultPriceId": "price_live",
     "Billing__Stripe__CheckoutSuccessUrl": f"{CLOUD_ORIGIN}/checkout/return?session_id={{CHECKOUT_SESSION_ID}}",
     "Billing__Stripe__CheckoutCancelUrl": f"{CLOUD_ORIGIN}/dashboard/billing",
@@ -140,7 +140,7 @@ class ProductionStripeReconcileTests(unittest.TestCase):
             self.assertEqual(0o600, stat.S_IMODE(destination.stat().st_mode))
             restored = read_capture(destination)
             self.assertEqual(set(EXPECTED_SETTINGS), set(restored))
-            self.assertEqual("rk_live_private", restored["Billing__Stripe__SecretKey"].value)
+            self.assertEqual(EXPECTED_SETTINGS["Billing__Stripe__SecretKey"], restored["Billing__Stripe__SecretKey"].value)
 
     def test_capture_preserves_legacy_settings_before_expected_mode_exists(self) -> None:
         legacy = records()
@@ -255,16 +255,14 @@ class ProductionStripeReconcileTests(unittest.TestCase):
 
         self.assertEqual(("production-billing-settings", "production-stripe-webhook"), checks)
 
-    def test_audit_rejects_a_different_live_account_than_the_captured_setting(self) -> None:
-        with self.assertRaisesRegex(ReconciliationError, "does not match") as raised:
-            ProductionStripeReconciler(
-                FakeStripe(),
-                FakeAzure(),
-                config(),
-                expected_secret_key="sk_live_other_account",
-            ).audit()
-
-        self.assertNotIn("sk_live_other_account", str(raised.exception))
+    def test_audit_does_not_compare_a_captured_live_key_to_a_key_vault_reference(self) -> None:
+        checks = ProductionStripeReconciler(
+            FakeStripe(),
+            FakeAzure(),
+            config(),
+            expected_secret_key="sk_live_other_account",
+        ).audit()
+        self.assertEqual(("production-billing-settings", "production-stripe-webhook"), checks)
 
     def test_audit_rejects_wrong_event_set_without_exposing_secret(self) -> None:
         endpoint = {
@@ -544,28 +542,25 @@ class ProductionStripeAuditReasonTests(unittest.TestCase):
         reason = self._reason(lambda: ProductionStripeReconciler(FakeStripe(), FakeAzure(wrong), config()).audit())
         self.assertEqual("azure-setting: Billing__Stripe__CheckoutSuccessUrl does not match", reason)
 
-    def test_secret_key_mismatch_names_the_setting_without_key_values(self) -> None:
-        reason = self._reason(
-            lambda: ProductionStripeReconciler(
-                FakeStripe(),
-                FakeAzure(),
-                config(),
-                expected_secret_key=OTHER_LIVE_KEY,
-            ).audit()
-        )
-        self.assertEqual("azure-setting: Billing__Stripe__SecretKey does not match the audit key", reason)
+    def test_secret_key_mismatch_is_not_compared_when_azure_holds_a_reference(self) -> None:
+        ProductionStripeReconciler(
+            FakeStripe(),
+            FakeAzure(),
+            config(),
+            expected_secret_key=OTHER_LIVE_KEY,
+        ).audit()
 
     def test_non_live_secret_names_the_setting_without_the_value(self) -> None:
         wrong = records()
         wrong["Billing__Stripe__SecretKey"] = AzureAppSetting("sk_test_not_for_production", False)
         reason = self._reason(lambda: ProductionStripeReconciler(FakeStripe(), FakeAzure(wrong), config()).audit())
-        self.assertEqual("azure-setting: Billing__Stripe__SecretKey is not a live-mode credential", reason)
+        self.assertEqual("azure-setting: Billing__Stripe__SecretKey must be a Key Vault reference", reason)
 
     def test_unexpected_webhook_secret_shape_names_the_setting(self) -> None:
         wrong = records()
         wrong["Billing__Stripe__WebhookSigningSecret"] = AzureAppSetting("not-a-webhook-secret", False)
         reason = self._reason(lambda: ProductionStripeReconciler(FakeStripe(), FakeAzure(wrong), config()).audit())
-        self.assertEqual("azure-setting: Billing__Stripe__WebhookSigningSecret has an unexpected shape", reason)
+        self.assertEqual("azure-setting: Billing__Stripe__WebhookSigningSecret must be a Key Vault reference", reason)
 
     def test_billing_disabled_and_mode_name_their_settings(self) -> None:
         disabled = records()

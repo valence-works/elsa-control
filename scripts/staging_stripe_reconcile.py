@@ -52,6 +52,7 @@ _LIB = Path(__file__).resolve().parent / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 from hosted_appsettings import HostedAppSettingsError, require_exact_setting_name, resolve_setting_name
+from key_vault_app_settings import SECRET_APP_SETTING_NAMES, is_key_vault_reference
 
 
 DEFAULT_WEBHOOK_EVENTS = frozenset(
@@ -337,11 +338,20 @@ STAGING_BILLING_SETTING_NAMES = (
     "Billing__Stripe__Enabled",
     "Billing__Stripe__SecretKey",
     "Billing__Stripe__WebhookSigningSecret",
+    "Billing__Stripe__WebhookSources__0__SigningSecret",
+    "Billing__Stripe__WebhookSources__1__SigningSecret",
     "Billing__Stripe__DefaultPriceId",
     "Billing__Stripe__CloudPortalReturnUrl",
     "Billing__Stripe__CheckoutSuccessUrl",
     "Billing__Stripe__CheckoutCancelUrl",
     "Billing__Stripe__PortalReturnUrl",
+)
+
+STAGING_SECRET_SETTING_NAMES = tuple(
+    name for name in STAGING_BILLING_SETTING_NAMES if name in SECRET_APP_SETTING_NAMES
+)
+STAGING_WRITABLE_SETTING_NAMES = tuple(
+    name for name in STAGING_BILLING_SETTING_NAMES if name not in SECRET_APP_SETTING_NAMES
 )
 
 
@@ -547,17 +557,20 @@ class StagingStripeReconciler:
             "Billing__Lifecycle__Enabled": "true",
             "Billing__Lifecycle__PollInterval": "00:00:15",
             "Billing__Stripe__Enabled": "true",
-            "Billing__Stripe__SecretKey": stripe_secret_key,
-            "Billing__Stripe__WebhookSigningSecret": self._config.webhook_secret,
             "Billing__Stripe__DefaultPriceId": self._config.hosted_price_id,
             "Billing__Stripe__CloudPortalReturnUrl": self._config.cloud_portal_return_url,
         }
         if apply_azure_settings:
-            previous_records = self._azure.app_setting_records(tuple(desired_settings))
+            previous_records = self._azure.app_setting_records(
+                tuple(desired_settings) + STAGING_SECRET_SETTING_NAMES
+            )
             previous = {name: setting.value for name, setting in previous_records.items()}
-            previous_secret = previous.get("Billing__Stripe__SecretKey", "")
-            if previous_secret and not previous_secret.startswith(TEST_SECRET_PREFIX):
-                raise ReconciliationError("Azure staging is not configured with a test Stripe account")
+            for name in STAGING_SECRET_SETTING_NAMES:
+                existing = previous.get(name, "")
+                if existing and not is_key_vault_reference(existing):
+                    if existing.startswith(("sk_live_", "rk_live_")):
+                        raise ReconciliationError("Azure staging is not configured with a test Stripe account")
+                    raise ReconciliationError(f"Azure billing setting {name} must be a Key Vault reference")
             if any(
                 previous_records[name].slot_setting
                 for name in desired_settings
@@ -567,12 +580,12 @@ class StagingStripeReconciler:
             previous_billing = {name: previous.get(name) for name in desired_settings}
             try:
                 self._azure.apply_billing_settings(desired_settings)
-                self.check_azure_settings(expected_stripe_secret_key=stripe_secret_key)
+                self.check_azure_settings()
             except Exception:
                 self._restore_azure_settings(previous_billing)
                 raise
         else:
-            self.check_azure_settings(expected_stripe_secret_key=stripe_secret_key)
+            self.check_azure_settings()
         passed.append("azure-billing-settings")
         return tuple(passed)
 
@@ -663,16 +676,16 @@ class StagingStripeReconciler:
             "Billing__Lifecycle__PollInterval": "00:00:15",
             "Billing__Stripe__Enabled": "true",
             "Billing__Stripe__DefaultPriceId": self._config.hosted_price_id,
-            "Billing__Stripe__WebhookSigningSecret": self._config.webhook_secret,
             "Billing__Stripe__CloudPortalReturnUrl": self._config.cloud_portal_return_url,
         }
         for name, value in expected.items():
             if settings.get(name) != value:
                 raise ReconciliationError(f"Azure billing setting {name} does not match")
-        azure_secret = settings.get("Billing__Stripe__SecretKey", "")
-        require_test_secret(azure_secret, name="Azure Stripe secret setting", prefix=TEST_SECRET_PREFIX)
-        if expected_stripe_secret_key is not None and azure_secret != expected_stripe_secret_key:
-            raise ReconciliationError("Azure Stripe secret setting does not match the audited test account")
+        for name in STAGING_SECRET_SETTING_NAMES:
+            if not is_key_vault_reference(settings.get(name, "")):
+                raise ReconciliationError(f"Azure billing setting {name} must be a Key Vault reference")
+        if expected_stripe_secret_key is not None:
+            require_test_secret(expected_stripe_secret_key, name="STRIPE_SECRET_KEY", prefix=TEST_SECRET_PREFIX)
         for name in (
             "Billing__Stripe__CheckoutSuccessUrl",
             "Billing__Stripe__CheckoutCancelUrl",
