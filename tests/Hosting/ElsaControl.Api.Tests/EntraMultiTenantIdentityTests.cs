@@ -84,6 +84,26 @@ public sealed class EntraMultiTenantIdentityTests :
     }
 
     [Fact]
+    public async Task Membership_read_in_a_shared_tenant_never_shows_another_users_account_or_workspaces()
+    {
+        var binder = await MeAsync(EntraClient(CustomerTenantId, "binder-oid"));
+        var member = EntraClient(CustomerTenantId, "member-oid");
+
+        var beforeJoin = await MembershipsAsync(member);
+        Assert.Null(beforeJoin.Account);
+        Assert.Empty(beforeJoin.Workspaces);
+        Assert.Empty(beforeJoin.Organizations);
+        Assert.Equal(1, await QueryAsync(db => db.Accounts.CountAsync()));
+
+        var joined = await MeAsync(member);
+        var afterJoin = await MembershipsAsync(member);
+        Assert.Equal(joined.Account.Id, afterJoin.Account?.Id);
+        Assert.NotEqual(binder.Account.Id, afterJoin.Account?.Id);
+        Assert.Equal(new OrganizationContextResponse(binder.Organizations.Single().Id, binder.Organizations.Single().Name, OrganizationRole.Member), Assert.Single(afterJoin.Organizations));
+        Assert.Empty(afterJoin.Workspaces);
+    }
+
+    [Fact]
     public async Task Customer_account_is_keyed_by_tenant_issuer_and_object_id_never_by_display_claims()
     {
         var first = await MeAsync(EntraClient(CustomerTenantId, "binder-oid", subject: "pairwise-sub"));
@@ -190,6 +210,9 @@ public sealed class EntraMultiTenantIdentityTests :
 
     private static async Task<MeWorkspacesResponse> MeAsync(HttpClient client) =>
         (await client.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/organizations"))!;
+
+    private static async Task<MeWorkspaceMembershipsResponse> MembershipsAsync(HttpClient client) =>
+        (await client.GetControlJsonAsync<MeWorkspaceMembershipsResponse>("/api/me/workspace-memberships"))!;
 
     private async Task<T> QueryAsync<T>(Func<CatalogDbContext, Task<T>> query)
     {

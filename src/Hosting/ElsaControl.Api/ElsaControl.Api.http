@@ -105,6 +105,10 @@ Content-Type: application/json
 GET {{baseUrl}}/api/me/workspaces
 Authorization: Bearer {{controlJwt}}
 
+### Workspace: current memberships without provisioning
+GET {{baseUrl}}/api/me/workspace-memberships
+Authorization: Bearer {{controlJwt}}
+
 ### Workspace: plan runtime builder intent
 POST {{baseUrl}}/api/workspaces/{{workspaceId}}/builder/plan
 Authorization: Bearer {{controlJwt}}

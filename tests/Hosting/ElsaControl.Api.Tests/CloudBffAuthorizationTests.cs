@@ -274,6 +274,7 @@ public sealed class CloudBffAuthorizationTests
         {
             "GET /api/cloud/compatibility",
             "GET /api/me/organizations",
+            "GET /api/me/workspace-memberships",
             "GET /api/me/workspaces",
             "GET /api/organizations/{organizationId:guid}/billing/hosted-subscription",
             "GET /api/organizations/{organizationId:guid}/deployments/audit",

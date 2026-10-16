@@ -89,6 +89,7 @@ GET  /api/cloud/compatibility
 POST /api/cloud/bootstrap
 GET  /api/me/workspaces
 GET  /api/me/organizations
+GET  /api/me/workspace-memberships
 GET  /api/workspaces/{workspaceId}/instances
 GET  /api/workspaces/{workspaceId}/instances/onboarding-options
 GET  /api/workspaces/{workspaceId}/instances/{instanceId}/overview
@@ -116,6 +117,12 @@ POST /api/workspaces/{workspaceId}/external-engine-connections/{connectionId}/di
 POST /api/workspaces/{workspaceId}/external-engine-connections/{connectionId}/repair
 POST /api/workspaces/{workspaceId}/external-engine-connections/{connectionId}/studio-destination/confirm
 ```
+
+`GET /api/me/workspaces` and `GET /api/me/organizations` provision on first read: an unknown
+identity gets an account, organization and workspace. `GET /api/me/workspace-memberships`
+returns the same workspace and organization fields without writing anything; an identity with no
+account gets `account: null` and empty lists. `POST /api/cloud/bootstrap` remains the explicit
+provisioning entry point.
 
 Create and repair pairing are also gated by Control configuration
 `ElsaControl:ExternalEngines:PairingAllowedOrganizationIds` (environment
