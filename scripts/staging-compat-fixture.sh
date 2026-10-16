@@ -11,6 +11,8 @@ SETTING_NAME='CloudCompatibility__StagingFixture'
 IMAGE_REFERENCE_PATTERN='([[:alnum:]][[:alnum:].-]*)(:[[:digit:]]+)?/[[:alnum:]][[:alnum:]._/-]*(:[[:alnum:]][[:alnum:]._+-]*)?(@sha256:[[:xdigit:]]{64})?'
 DIGEST_PATTERN='^sha256:[0-9a-f]{64}$'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/hosted-appsettings.sh"
 EXCLUSIVE_HELPER="${SCRIPT_DIR}/lib/staging_compat_exclusive.py"
 QA_WINDOW_ISSUES=(637 661)
 FREEZE_ISSUE=508
@@ -88,10 +90,7 @@ az_tsv() {
 }
 
 list_setting_names() {
-  az_tsv webapp config appsettings list \
-    --resource-group "$AZURE_RESOURCE_GROUP" \
-    --name "$AZURE_WEBAPP_NAME" \
-    --query '[].name' | LC_ALL=C sort
+  hosted_appsettings_list_names | LC_ALL=C sort
 }
 
 # Three outcomes: prints present|absent, or fail() exits on a read error.
@@ -101,12 +100,7 @@ read_setting_presence() {
   local attempts="${SETTING_READ_ATTEMPTS:-3}"
   local retry="${SETTING_READ_RETRY_SECONDS:-2}"
   for attempt in $(seq 1 "$attempts"); do
-    if count="$(az webapp config appsettings list \
-      --resource-group "$AZURE_RESOURCE_GROUP" \
-      --name "$AZURE_WEBAPP_NAME" \
-      --query "[?name=='${SETTING_NAME}'] | length(@)" \
-      --output tsv \
-      --only-show-errors)"; then
+    if count="$(hosted_appsettings_count --name "$SETTING_NAME")"; then
       if [[ "$count" =~ ^[0-9]+$ ]]; then
         if [ "$count" = "0" ]; then
           printf '%s\n' "absent"

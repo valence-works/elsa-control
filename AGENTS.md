@@ -48,6 +48,14 @@ Worker lanes (local notes):
 - `worker:codex` / `worker:claude`: self-serve pickup after standing prompts. Do not wait for an operator to assign a Task.
 - `worker:cursor`: CEO / Launch Ops dispatches a Cursor cloud agent. Cursor sessions do not self-poll GitHub search and must not start without `ready-for-agent` + `worker:cursor`.
 
+## Hosted application settings (operator sessions)
+
+When listing hosted App Service application settings, use
+`scripts/hosted-appsettings.sh list` (names only). Read a value only with
+`scripts/hosted-appsettings.sh get --setting <exact-name>`. Do not query
+values by prefix, wildcard, or bulk list. Do not run
+`az webapp config appsettings list` without a name-only projection.
+
 ## Workroom model fallback
 
 - Root agent: use Sol 5.6 High. If unavailable, use the closest available Sol/Terra model at high reasoning, then the closest available frontier model; report the exact fallback.
