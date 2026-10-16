@@ -18,6 +18,7 @@ public sealed class AddAccountIdentityLinkAudit : Migration
                 AccountId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
                 SourceAccountId = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
                 ActorAccountId = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
+                ActorKind = table.Column<string>(type: "nvarchar(32)", maxLength: 32, nullable: false),
                 OperatorSubject = table.Column<string>(type: "nvarchar(512)", maxLength: 512, nullable: true),
                 Action = table.Column<string>(type: "nvarchar(32)", maxLength: 32, nullable: false),
                 CreatedAt = table.Column<long>(type: "bigint", nullable: false)

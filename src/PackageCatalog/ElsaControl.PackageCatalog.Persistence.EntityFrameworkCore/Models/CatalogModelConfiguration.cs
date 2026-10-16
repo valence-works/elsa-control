@@ -182,6 +182,7 @@ internal sealed class AccountIdentityLinkAuditRecordConfiguration : IEntityTypeC
         builder.ToTable("AccountIdentityLinkAuditRecords");
         builder.HasKey(x => x.Id);
         builder.Property(x => x.OperatorSubject).HasMaxLength(512);
+        builder.Property(x => x.ActorKind).HasConversion<string>().HasMaxLength(32);
         builder.Property(x => x.Action).HasConversion<string>().HasMaxLength(32);
         builder.Property(x => x.CreatedAt)
             .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));

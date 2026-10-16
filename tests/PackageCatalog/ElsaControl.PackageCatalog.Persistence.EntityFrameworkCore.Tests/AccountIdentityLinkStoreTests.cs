@@ -34,6 +34,7 @@ public sealed class AccountIdentityLinkStoreTests
         Assert.Equal(AccountIdentityLinkAction.Linked, audit.Action);
         Assert.Equal(cloud.Id, audit.AccountId);
         Assert.Equal(cloud.Id, audit.ActorAccountId);
+        Assert.Equal(AccountIdentityLinkActorKind.Account, audit.ActorKind);
         Assert.Null(audit.SourceAccountId);
         Assert.DoesNotContain("example.test", audit.OperatorSubject ?? "", StringComparison.Ordinal);
     }
@@ -103,8 +104,94 @@ public sealed class AccountIdentityLinkStoreTests
         Assert.DoesNotContain(await db.ExternalIdentities.ToListAsync(), identity => identity.Kind == ExternalIdentityKinds.Hub);
         var unlink = Assert.Single(await db.AccountIdentityLinkAuditRecords.Where(x => x.Action == AccountIdentityLinkAction.Unlinked).ToListAsync());
         Assert.Equal(cloud.Id, unlink.AccountId);
+        Assert.Null(unlink.ActorAccountId);
+        Assert.Equal(AccountIdentityLinkActorKind.Operator, unlink.ActorKind);
         Assert.Equal("sha256:operator", unlink.OperatorSubject);
         Assert.DoesNotContain("@", unlink.OperatorSubject, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Hub_account_with_other_org_memberships_is_refused_and_is_not_migrated()
+    {
+        await using var db = await CreateDatabaseAsync();
+        var cloud = await SeedAccountAsync(db, CloudIssuer, "cloud-user");
+        var hub = await SeedAccountAsync(db, HubIssuer, "hub-user", ExternalIdentityKinds.Hub);
+        await SeedExtraOrganizationMembershipAsync(db, hub);
+        var store = new AccountIdentityLinkStore(db);
+
+        var result = await store.LinkAsync(CloudIdentity("cloud-user"), HubIdentity("hub-user"));
+
+        Assert.Equal(AccountIdentityLinkOutcome.HubAccountHasState, result.Outcome);
+        Assert.Empty(await db.AccountIdentityLinkAuditRecords.ToListAsync());
+        Assert.Equal(hub.Id, (await db.ExternalIdentities.SingleAsync(x => x.Subject == "hub-user")).AccountId);
+        Assert.DoesNotContain(await db.ExternalIdentities.ToListAsync(), identity =>
+            identity.AccountId == cloud.Id && identity.Kind == ExternalIdentityKinds.Hub);
+    }
+
+    [Fact]
+    public async Task Hub_account_with_a_hub_sourced_subscription_is_refused_and_is_not_migrated()
+    {
+        await using var db = await CreateDatabaseAsync();
+        var cloud = await SeedAccountAsync(db, CloudIssuer, "cloud-user");
+        var hub = await SeedAccountAsync(db, HubIssuer, "hub-user", ExternalIdentityKinds.Hub);
+        await SeedHubSourcedSubscriptionAsync(db, hub);
+        var store = new AccountIdentityLinkStore(db);
+
+        var result = await store.LinkAsync(CloudIdentity("cloud-user"), HubIdentity("hub-user"));
+
+        Assert.Equal(AccountIdentityLinkOutcome.HubAccountHasState, result.Outcome);
+        Assert.Empty(await db.AccountIdentityLinkAuditRecords.ToListAsync());
+        Assert.Equal(hub.Id, (await db.ExternalIdentities.SingleAsync(x => x.Subject == "hub-user")).AccountId);
+        Assert.DoesNotContain(await db.ExternalIdentities.ToListAsync(), identity =>
+            identity.AccountId == cloud.Id && identity.Kind == ExternalIdentityKinds.Hub);
+    }
+
+    [Fact]
+    public async Task Concurrent_links_do_not_throw_and_leave_one_hub_identity()
+    {
+        await using var shared = await SharedLinkDatabase.CreateAsync();
+        var cloud = await SeedAccountAsync(shared.Anchor, CloudIssuer, "cloud-user");
+        var first = new AccountIdentityLinkStore(shared.Open());
+        var second = new AccountIdentityLinkStore(shared.Open());
+
+        var results = await Task.WhenAll(
+            first.LinkAsync(CloudIdentity("cloud-user"), HubIdentity("hub-user")),
+            second.LinkAsync(CloudIdentity("cloud-user"), HubIdentity("hub-user")));
+
+        Assert.All(results, result => Assert.True(result.Succeeded));
+        Assert.Contains(results, result => result.Outcome is AccountIdentityLinkOutcome.Linked or AccountIdentityLinkOutcome.AlreadyLinked);
+        Assert.All(results, result => Assert.Equal(cloud.Id, result.AccountId));
+        shared.Anchor.ChangeTracker.Clear();
+        Assert.Equal(cloud.Id, (await shared.Anchor.ExternalIdentities.SingleAsync(x => x.Subject == "hub-user")).AccountId);
+        Assert.Single(await shared.Anchor.AccountIdentityLinkAuditRecords.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Unique_violation_remap_returns_already_linked_when_the_same_pair_won()
+    {
+        await using var db = await CreateDatabaseAsync();
+        var cloud = await SeedAccountAsync(db, CloudIssuer, "cloud-user");
+        var store = new AccountIdentityLinkStore(db);
+        await store.LinkAsync(CloudIdentity("cloud-user"), HubIdentity("hub-user"));
+
+        var remapped = await store.MapUniqueViolationAsync(CloudIdentity("cloud-user"), HubIdentity("hub-user"), CancellationToken.None);
+
+        Assert.Equal(AccountIdentityLinkOutcome.AlreadyLinked, remapped.Outcome);
+        Assert.Equal(cloud.Id, remapped.AccountId);
+    }
+
+    [Fact]
+    public async Task Unique_violation_remap_returns_account_already_linked_for_a_different_hub()
+    {
+        await using var db = await CreateDatabaseAsync();
+        var cloud = await SeedAccountAsync(db, CloudIssuer, "cloud-user");
+        var store = new AccountIdentityLinkStore(db);
+        await store.LinkAsync(CloudIdentity("cloud-user"), HubIdentity("hub-user"));
+
+        var remapped = await store.MapUniqueViolationAsync(CloudIdentity("cloud-user"), HubIdentity("other-hub"), CancellationToken.None);
+
+        Assert.Equal(AccountIdentityLinkOutcome.AccountAlreadyLinked, remapped.Outcome);
+        Assert.Single(await db.ExternalIdentities.Where(identity => identity.Kind == ExternalIdentityKinds.Hub).ToListAsync());
     }
 
     [Fact]
@@ -211,9 +298,75 @@ public sealed class AccountIdentityLinkStoreTests
         db.ChangeTracker.Clear();
     }
 
+    private static async Task SeedExtraOrganizationMembershipAsync(CatalogDbContext db, Account account)
+    {
+        var organization = new Organization { Name = "extra-org", CreatedByAccountId = account.Id };
+        db.Organizations.Add(organization);
+        db.OrganizationMemberships.Add(new OrganizationMembership
+        {
+            AccountId = account.Id,
+            Organization = organization,
+            Role = OrganizationRole.Member
+        });
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+    }
+
+    private static async Task SeedHubSourcedSubscriptionAsync(CatalogDbContext db, Account account)
+    {
+        var organizationId = await db.OrganizationMemberships
+            .Where(membership => membership.AccountId == account.Id)
+            .Select(membership => membership.OrganizationId)
+            .SingleAsync();
+        var subscription = OrganizationSubscriptionLifecycle.CreateTrial(
+            organizationId,
+            BillingProviderNames.Stripe,
+            DateTimeOffset.UtcNow);
+        subscription.WebhookSource = BillingWebhookSources.Hub;
+        db.OrganizationSubscriptions.Add(subscription);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+    }
+
     private static TrustedWorkspaceIdentity CloudIdentity(string subject) =>
         new(CloudIssuer, subject, subject, $"{subject}@example.test");
 
     private static TrustedWorkspaceIdentity HubIdentity(string subject) =>
         new(HubIssuer, subject, subject, $"{subject}@example.test") { Kind = ExternalIdentityKinds.Hub };
+
+    private sealed class SharedLinkDatabase : IAsyncDisposable
+    {
+        private readonly string _connectionString =
+            $"Data Source=file:account-link-{Guid.NewGuid():N}?mode=memory&cache=shared";
+        private readonly List<IAsyncDisposable> _resources = [];
+
+        public CatalogDbContext Anchor { get; private set; } = null!;
+
+        public static async Task<SharedLinkDatabase> CreateAsync()
+        {
+            var database = new SharedLinkDatabase();
+            database.Anchor = database.Open();
+            await database.Anchor.Database.EnsureCreatedAsync();
+            return database;
+        }
+
+        public CatalogDbContext Open()
+        {
+            var connection = new SqliteConnection(_connectionString);
+            connection.Open();
+            _resources.Add(connection);
+            var db = new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbContext>()
+                .UseRetryingSqlite(connection)
+                .Options);
+            _resources.Add(db);
+            return db;
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            for (var index = _resources.Count - 1; index >= 0; index--)
+                await _resources[index].DisposeAsync();
+        }
+    }
+
 }

@@ -18,6 +18,7 @@ public sealed class AddAccountIdentityLinkAudit : Migration
                 AccountId = table.Column<Guid>(type: "TEXT", nullable: false),
                 SourceAccountId = table.Column<Guid>(type: "TEXT", nullable: true),
                 ActorAccountId = table.Column<Guid>(type: "TEXT", nullable: true),
+                ActorKind = table.Column<string>(type: "TEXT", maxLength: 32, nullable: false),
                 OperatorSubject = table.Column<string>(type: "TEXT", maxLength: 512, nullable: true),
                 Action = table.Column<string>(type: "TEXT", maxLength: 32, nullable: false),
                 CreatedAt = table.Column<long>(type: "INTEGER", nullable: false)

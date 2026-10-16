@@ -63,7 +63,8 @@ public enum AccountIdentityLinkOutcome
     AlreadyLinked,
     CloudAccountMissing,
     AccountAlreadyLinked,
-    HubAccountHasEngines
+    HubAccountHasEngines,
+    HubAccountHasState
 }
 
 public enum AccountIdentityUnlinkOutcome

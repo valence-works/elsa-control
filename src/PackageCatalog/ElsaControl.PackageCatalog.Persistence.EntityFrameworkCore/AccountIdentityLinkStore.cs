@@ -6,7 +6,7 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 
 public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAccountIdentityLinkStore
 {
-    public Task<AccountIdentityLinkResult> LinkAsync(
+    public async Task<AccountIdentityLinkResult> LinkAsync(
         TrustedWorkspaceIdentity cloudIdentity,
         TrustedWorkspaceIdentity hubIdentity,
         CancellationToken cancellationToken = default)
@@ -15,11 +15,19 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
         var hub = hubIdentity.Normalize();
         var auditId = Guid.Empty;
         DateTimeOffset? touchedAt = null;
-        return dbContext.ExecuteInTransactionAsync(
-            IsolationLevel.Serializable,
-            () => LinkCoreAsync(cloud, hub, id => auditId = id, value => touchedAt = value, cancellationToken),
-            (result, token) => VerifyLinkAsync(hub, result, auditId, touchedAt, token),
-            cancellationToken);
+        try
+        {
+            return await dbContext.ExecuteInTransactionAsync(
+                IsolationLevel.Serializable,
+                () => LinkCoreAsync(cloud, hub, id => auditId = id, value => touchedAt = value, cancellationToken),
+                (result, token) => VerifyLinkAsync(hub, result, auditId, touchedAt, token),
+                cancellationToken);
+        }
+        catch (DbUpdateException exception) when (EfCoreDatabaseExceptionPolicy.IsUniqueViolation(exception))
+        {
+            dbContext.ChangeTracker.Clear();
+            return await MapUniqueViolationAsync(cloud, hub, cancellationToken);
+        }
     }
 
     public Task<AccountIdentityUnlinkResult> UnlinkAsync(
@@ -79,8 +87,9 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
         Guid? sourceAccountId = null;
         if (hubLookup is not null)
         {
-            if (await AccountHasEnginesAsync(hubLookup.AccountId, cancellationToken))
-                return AccountIdentityLinkResult.Denied(AccountIdentityLinkOutcome.HubAccountHasEngines);
+            var blocked = await ClassifyHubAccountBlockAsync(hubLookup.AccountId, cancellationToken);
+            if (blocked is { } outcome)
+                return AccountIdentityLinkResult.Denied(outcome);
 
             sourceAccountId = hubLookup.AccountId;
             hubLookup.AccountId = cloudAccountId;
@@ -108,6 +117,7 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
             AccountId = cloudAccountId,
             SourceAccountId = sourceAccountId,
             ActorAccountId = cloudAccountId,
+            ActorKind = AccountIdentityLinkActorKind.Account,
             Action = AccountIdentityLinkAction.Linked
         };
         dbContext.AccountIdentityLinkAuditRecords.Add(audit);
@@ -132,7 +142,8 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
         var audit = new AccountIdentityLinkAuditRecord
         {
             AccountId = accountId,
-            ActorAccountId = accountId,
+            ActorAccountId = null,
+            ActorKind = AccountIdentityLinkActorKind.Operator,
             OperatorSubject = operatorSubject,
             Action = AccountIdentityLinkAction.Unlinked
         };
@@ -140,6 +151,32 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
         await dbContext.SaveChangesAsync(cancellationToken);
         auditIdSink(audit.Id);
         return AccountIdentityUnlinkResult.Success(accountId);
+    }
+
+    internal async Task<AccountIdentityLinkResult> MapUniqueViolationAsync(
+        TrustedWorkspaceIdentity cloud,
+        TrustedWorkspaceIdentity hub,
+        CancellationToken cancellationToken)
+    {
+        var cloudLookup = await FindIdentityAsync(cloud.Issuer, cloud.Subject, cancellationToken);
+        if (cloudLookup is null)
+            return AccountIdentityLinkResult.Denied(AccountIdentityLinkOutcome.CloudAccountMissing);
+
+        var hubLookup = await FindIdentityAsync(hub.Issuer, hub.Subject, cancellationToken);
+        if (hubLookup is not null && hubLookup.AccountId == cloudLookup.AccountId)
+            return AccountIdentityLinkResult.Success(AccountIdentityLinkOutcome.AlreadyLinked, cloudLookup.AccountId);
+
+        if (await HasDifferentHubIdentityAsync(cloudLookup.AccountId, hub.Issuer, hub.Subject, cancellationToken))
+            return AccountIdentityLinkResult.Denied(AccountIdentityLinkOutcome.AccountAlreadyLinked);
+
+        if (hubLookup is not null)
+        {
+            return AccountIdentityLinkResult.Denied(
+                await ClassifyHubAccountBlockAsync(hubLookup.AccountId, cancellationToken)
+                ?? AccountIdentityLinkOutcome.HubAccountHasState);
+        }
+
+        return AccountIdentityLinkResult.Denied(AccountIdentityLinkOutcome.AccountAlreadyLinked);
     }
 
     private async Task<bool> VerifyLinkAsync(
@@ -188,7 +225,9 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
                await dbContext.AccountIdentityLinkAuditRecords.AsNoTracking().AnyAsync(
                    record => record.Id == auditId &&
                              record.AccountId == accountId &&
-                             record.Action == AccountIdentityLinkAction.Unlinked,
+                             record.Action == AccountIdentityLinkAction.Unlinked &&
+                             record.ActorKind == AccountIdentityLinkActorKind.Operator &&
+                             record.ActorAccountId == null,
                    cancellationToken) &&
                !await dbContext.ExternalIdentities.AsNoTracking().AnyAsync(
                    identity => identity.AccountId == accountId && identity.Kind == ExternalIdentityKinds.Hub,
@@ -222,6 +261,17 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
                         (identity.Issuer != issuer || identity.Subject != subject),
             cancellationToken);
 
+    private async Task<AccountIdentityLinkOutcome?> ClassifyHubAccountBlockAsync(
+        Guid accountId,
+        CancellationToken cancellationToken)
+    {
+        if (await AccountHasEnginesAsync(accountId, cancellationToken))
+            return AccountIdentityLinkOutcome.HubAccountHasEngines;
+        if (await AccountHasBlockingStateAsync(accountId, cancellationToken))
+            return AccountIdentityLinkOutcome.HubAccountHasState;
+        return null;
+    }
+
     private async Task<bool> AccountHasEnginesAsync(Guid accountId, CancellationToken cancellationToken)
     {
         var workspaceIds = dbContext.WorkspaceMemberships
@@ -229,6 +279,19 @@ public sealed class AccountIdentityLinkStore(CatalogDbContext dbContext) : IAcco
             .Select(membership => membership.WorkspaceId);
         return await dbContext.ElsaInstances.AnyAsync(
             instance => instance.DeletedAt == null && workspaceIds.Contains(instance.WorkspaceId),
+            cancellationToken);
+    }
+
+    private async Task<bool> AccountHasBlockingStateAsync(Guid accountId, CancellationToken cancellationToken)
+    {
+        var memberships = dbContext.OrganizationMemberships.Where(membership => membership.AccountId == accountId);
+        if (await memberships.CountAsync(cancellationToken) > 1)
+            return true;
+
+        var organizationIds = memberships.Select(membership => membership.OrganizationId);
+        return await dbContext.OrganizationSubscriptions.AnyAsync(
+            subscription => organizationIds.Contains(subscription.OrganizationId) &&
+                            subscription.WebhookSource == BillingWebhookSources.Hub,
             cancellationToken);
     }
 

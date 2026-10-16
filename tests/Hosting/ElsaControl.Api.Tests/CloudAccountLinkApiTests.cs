@@ -237,11 +237,11 @@ public sealed class CloudAccountLinkApiTests
         var history = await audit.Content.ReadFromJsonAsync<AdminAccountHubLinkAuditResponse>(ControlApiTestApplication.JsonOptions);
         Assert.Equal(accountId, history!.AccountId);
         Assert.Equal(["Linked", "Unlinked"], history.Items.Select(item => item.Action).ToArray());
-        Assert.All(history.Items, item =>
-        {
-            Assert.Equal(accountId, item.ActorAccountId);
-            Assert.Null(item.SourceAccountId);
-        });
+        Assert.Equal("Account", history.Items[0].ActorKind);
+        Assert.Equal(accountId, history.Items[0].ActorAccountId);
+        Assert.Equal("Operator", history.Items[1].ActorKind);
+        Assert.Null(history.Items[1].ActorAccountId);
+        Assert.All(history.Items, item => Assert.Null(item.SourceAccountId));
         var json = await audit.Content.ReadAsStringAsync();
         Assert.DoesNotContain("buyer@example.test", json, StringComparison.Ordinal);
         Assert.DoesNotContain(HubSubject, json, StringComparison.Ordinal);
@@ -250,6 +250,145 @@ public sealed class CloudAccountLinkApiTests
         using var afterUnlink = await hubOnly.GetAsync("/api/me/organizations");
         var hubMe = await afterUnlink.Content.ReadControlJsonAsync<MeWorkspacesResponse>();
         Assert.NotEqual(accountId, hubMe!.Account.Id);
+    }
+
+    [Fact]
+    public async Task Same_token_in_both_slots_is_unauthorized_and_writes_nothing()
+    {
+        await using var app = CreateApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var cloud = CreateCloudClient(app, CloudSubject);
+        await BootstrapAsync(cloud);
+        var token = CreateAccountToken(CloudIssuer, CloudSubject);
+        using var client = app.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        client.DefaultRequestHeaders.TryAddWithoutValidation(
+            CloudAccountLinkDefaults.HubAuthorizationHeader,
+            $"Bearer {token}");
+
+        using var response = await client.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        await AssertProblemAsync(response, CloudAccountLinkEndpoints.SessionsRequiredCode);
+        await AssertNoHubLinkAsync(app);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Cross_scheme_companion_token_is_unauthorized_and_writes_nothing(bool hubPrimary)
+    {
+        await using var app = CreateApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var cloud = CreateCloudClient(app, CloudSubject);
+        await BootstrapAsync(cloud);
+        using var client = hubPrimary
+            ? CreateLinkClient(app, HubIssuer, HubSubject, HubIssuer, OtherHubSubject, CloudAccountLinkDefaults.CloudAuthorizationHeader)
+            : CreateLinkClient(app, CloudIssuer, CloudSubject, CloudIssuer, CloudSubject, CloudAccountLinkDefaults.HubAuthorizationHeader);
+
+        using var response = await client.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        await AssertProblemAsync(response, CloudAccountLinkEndpoints.SessionsRequiredCode);
+        await AssertNoHubLinkAsync(app);
+    }
+
+    [Fact]
+    public async Task Anonymous_companion_token_is_unauthorized_and_writes_nothing()
+    {
+        await using var app = CreateApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var cloud = CreateCloudClient(app, CloudSubject);
+        await BootstrapAsync(cloud);
+        using var client = CreateIssuerClient(app, CloudIssuer, CloudSubject);
+        var anonymousHub = TestWorkspaceIdentity.CreateToken(
+            HubSubject,
+            HubIssuer,
+            "authenticated",
+            claims: new Dictionary<string, string>
+            {
+                ["role"] = "authenticated",
+                ["email"] = "buyer@example.test",
+                ["is_anonymous"] = "true"
+            });
+        client.DefaultRequestHeaders.TryAddWithoutValidation(
+            CloudAccountLinkDefaults.HubAuthorizationHeader,
+            $"Bearer {anonymousHub}");
+
+        using var response = await client.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        await AssertProblemAsync(response, CloudAccountLinkEndpoints.SessionsRequiredCode);
+        await AssertNoHubLinkAsync(app);
+    }
+
+    [Theory]
+    [InlineData("GET", "")]
+    [InlineData("GET", "/audit")]
+    [InlineData("DELETE", "")]
+    public async Task Non_admin_is_forbidden_on_admin_hub_link_routes(string method, string suffix)
+    {
+        await using var app = CreateApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var cloud = CreateCloudClient(app, CloudSubject);
+        await BootstrapAsync(cloud);
+        using var hub = CreateLinkClient(app, HubIssuer, HubSubject, CloudIssuer, CloudSubject);
+        using var linked = await hub.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
+        var accountId = (await linked.Content.ReadFromJsonAsync<CloudAccountLinkResponse>(ControlApiTestApplication.JsonOptions))!.AccountId;
+        using var customer = app.CreateClient();
+        app.AddControlSessionCookie(customer);
+
+        using var request = new HttpRequestMessage(
+            new HttpMethod(method),
+            $"/api/admin/accounts/{accountId:D}/hub-link{suffix}");
+        using var response = await customer.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.True(await db.ExternalIdentities.AnyAsync(identity => identity.Kind == ExternalIdentityKinds.Hub));
+    }
+
+    [Fact]
+    public async Task Hub_account_with_other_org_memberships_returns_has_state()
+    {
+        await using var app = CreateApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var cloud = CreateCloudClient(app, CloudSubject);
+        using var hub = CreateHubClient(app, HubSubject);
+        await BootstrapAsync(cloud);
+        var hubOwned = await BootstrapAsync(hub);
+        await SeedExtraOrganizationMembershipAsync(app, hubOwned);
+        using var linker = CreateLinkClient(app, HubIssuer, HubSubject, CloudIssuer, CloudSubject);
+
+        using var conflict = await linker.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
+
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        await AssertProblemAsync(conflict, CloudAccountLinkEndpoints.HubAccountHasStateCode);
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Empty(await db.AccountIdentityLinkAuditRecords.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Hub_account_with_a_hub_sourced_subscription_returns_has_state()
+    {
+        await using var app = CreateApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var cloud = CreateCloudClient(app, CloudSubject);
+        using var hub = CreateHubClient(app, HubSubject);
+        await BootstrapAsync(cloud);
+        var hubOwned = await BootstrapAsync(hub);
+        await SeedHubSourcedSubscriptionAsync(app, hubOwned.OrganizationId);
+        using var linker = CreateLinkClient(app, HubIssuer, HubSubject, CloudIssuer, CloudSubject);
+
+        using var conflict = await linker.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
+
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        await AssertProblemAsync(conflict, CloudAccountLinkEndpoints.HubAccountHasStateCode);
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Empty(await db.AccountIdentityLinkAuditRecords.ToListAsync());
     }
 
     [Fact]
@@ -330,6 +469,48 @@ public sealed class CloudAccountLinkApiTests
     {
         using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         Assert.Equal(code, body.RootElement.GetProperty("code").GetString());
+    }
+
+    private static async Task AssertNoHubLinkAsync(ControlApiTestApplication app)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.DoesNotContain(await db.ExternalIdentities.ToListAsync(), identity => identity.Kind == ExternalIdentityKinds.Hub);
+        Assert.Empty(await db.AccountIdentityLinkAuditRecords.ToListAsync());
+    }
+
+    private static async Task SeedExtraOrganizationMembershipAsync(
+        ControlApiTestApplication app,
+        CloudBootstrapResponse owned)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var accountId = await db.OrganizationMemberships
+            .Where(membership => membership.OrganizationId == owned.OrganizationId)
+            .Select(membership => membership.AccountId)
+            .SingleAsync();
+        var organization = new Organization { Name = "extra-org", CreatedByAccountId = accountId };
+        db.Organizations.Add(organization);
+        db.OrganizationMemberships.Add(new OrganizationMembership
+        {
+            AccountId = accountId,
+            Organization = organization,
+            Role = OrganizationRole.Member
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private static async Task SeedHubSourcedSubscriptionAsync(ControlApiTestApplication app, Guid organizationId)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var subscription = OrganizationSubscriptionLifecycle.CreateTrial(
+            organizationId,
+            BillingProviderNames.Stripe,
+            DateTimeOffset.UtcNow);
+        subscription.WebhookSource = BillingWebhookSources.Hub;
+        db.OrganizationSubscriptions.Add(subscription);
+        await db.SaveChangesAsync();
     }
 
     private static async Task<Guid> SeedOwnedInstanceAsync(

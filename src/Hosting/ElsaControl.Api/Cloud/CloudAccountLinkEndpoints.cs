@@ -10,6 +10,7 @@ public static class CloudAccountLinkEndpoints
     public const string CloudAccountMissingCode = "cloud.account-link.cloud-account-missing";
     public const string AccountAlreadyLinkedCode = "cloud.account-link.account-already-linked";
     public const string HubAccountHasEnginesCode = "cloud.account-link.hub-account-has-engines";
+    public const string HubAccountHasStateCode = "cloud.account-link.hub-account-has-state";
 
     public static IEndpointRouteBuilder MapCloudAccountLinkEndpoints(this IEndpointRouteBuilder endpoints)
     {
@@ -51,6 +52,11 @@ public static class CloudAccountLinkEndpoints
                     Problem(
                         HubAccountHasEnginesCode,
                         "The Hub identity already belongs to a Control account that has engines.",
+                        StatusCodes.Status409Conflict),
+                AccountIdentityLinkOutcome.HubAccountHasState =>
+                    Problem(
+                        HubAccountHasStateCode,
+                        "The Hub identity already belongs to a Control account that has organization or subscription state.",
                         StatusCodes.Status409Conflict),
                 _ => Problem(
                     AccountAlreadyLinkedCode,

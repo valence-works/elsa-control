@@ -64,6 +64,11 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<Guid?>("ActorAccountId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("ActorKind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
                     b.Property<long>("CreatedAt")
                         .HasColumnType("bigint");
 

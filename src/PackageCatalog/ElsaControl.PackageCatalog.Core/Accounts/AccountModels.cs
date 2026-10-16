@@ -188,6 +188,7 @@ public sealed class AccountIdentityLinkAuditRecord
     public Guid AccountId { get; set; }
     public Guid? SourceAccountId { get; set; }
     public Guid? ActorAccountId { get; set; }
+    public AccountIdentityLinkActorKind ActorKind { get; set; } = AccountIdentityLinkActorKind.Account;
     public string? OperatorSubject { get; set; }
     public AccountIdentityLinkAction Action { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
@@ -197,6 +198,12 @@ public enum AccountIdentityLinkAction
 {
     Linked,
     Unlinked
+}
+
+public enum AccountIdentityLinkActorKind
+{
+    Account,
+    Operator
 }
 
 public enum OrganizationStatus

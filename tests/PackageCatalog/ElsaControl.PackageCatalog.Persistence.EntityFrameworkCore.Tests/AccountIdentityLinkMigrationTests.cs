@@ -49,6 +49,7 @@ public sealed class AccountIdentityLinkMigrationTests : IAsyncDisposable
         var script = db.GetService<IMigrator>().GenerateScript(fromMigration: PreviousSqlServerMigration, toMigration: SqlServerMigration);
 
         Assert.Contains("CREATE TABLE [AccountIdentityLinkAuditRecords]", script, StringComparison.Ordinal);
+        Assert.Contains("ActorKind", script, StringComparison.Ordinal);
         Assert.Contains("IX_ExternalIdentities_AccountId_Hub", script, StringComparison.Ordinal);
         Assert.Contains("Kind = 'hub'", script, StringComparison.Ordinal);
         Assert.DoesNotContain("DROP TABLE [ExternalIdentities]", script, StringComparison.Ordinal);

@@ -71,6 +71,7 @@ public static class AdminAccountHubLinkEndpoints
         audit.Select(record => new AccountIdentityLinkAuditResponse(
             record.Id,
             record.Action.ToString(),
+            record.ActorKind.ToString(),
             record.ActorAccountId,
             record.SourceAccountId,
             record.CreatedAt)).ToList();
@@ -88,6 +89,7 @@ public sealed record AdminAccountHubLinkAuditResponse(
 public sealed record AccountIdentityLinkAuditResponse(
     Guid Id,
     string Action,
+    string ActorKind,
     Guid? ActorAccountId,
     Guid? SourceAccountId,
     DateTimeOffset CreatedAt);
