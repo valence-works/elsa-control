@@ -22,6 +22,7 @@ preserved_infra_paths=(
     control-deploy-identity
     control-worker-composition
     control-egress
+    api-key-vault
 )
 preservation_dir="$(mktemp -d)"
 restore_preserved_infra() {

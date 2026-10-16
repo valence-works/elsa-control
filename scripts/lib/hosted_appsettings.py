@@ -675,6 +675,17 @@ BACKSTOP_EXEMPT_PATHS = frozenset(
         Path("scripts") / "lib" / "hosted_appsettings.py",
     }
 )
+# ARM configreferences returns reference status and metadata, not resolved
+# values. Allow only this GET in the check script. Do not treat other
+# "appsettings" tokens as names-only listings.
+CONFIGREFERENCES_STATUS_READ_PATHS = frozenset(
+    {
+        Path("scripts") / "check-key-vault-references.sh",
+    }
+)
+CONFIGREFERENCES_STATUS_READ = re.compile(
+    r"(?i)\baz\b[\s\S]*\brest\b[\s\S]*--method(?:\s|\\)+get[\s\S]*/config/configreferences/appsettings(?:\?|[\"']|$)"
+)
 BACKSTOP_MESSAGE = "unrecognized appsettings occurrence; not a names-only listing, set, or delete"
 SCAN_SUFFIXES = {".sh", ".py", ".yml", ".yaml", ".ps1"}
 
@@ -780,12 +791,28 @@ def _tokens_recognized_safe(
     return found
 
 
+def is_configreferences_status_read(
+    command: str,
+    *,
+    path: Path | None,
+    root: Path | None,
+) -> bool:
+    """Return True for the allow-listed ARM Key Vault reference-status GET."""
+
+    relative = _repo_relative(path, root)
+    if relative not in CONFIGREFERENCES_STATUS_READ_PATHS:
+        return False
+    return CONFIGREFERENCES_STATUS_READ.search(command) is not None
+
+
 def _shell_command_is_recognized_safe(
     command: str,
     *,
     path: Path | None,
     root: Path | None,
 ) -> bool:
+    if is_configreferences_status_read(command, path=path, root=root):
+        return True
     tokens = _tokenize_shell(command)
     if tokens is None:
         return False

@@ -279,6 +279,166 @@ def patch_module(content: str) -> str:
         + pairing_settings_close,
         "generated appSettings array close for the pairing allowlist",
     )
+
+    vault_parameter = "param api_key_vault_uri string"
+    vault_description = (
+        "@description('Vault URI from infra/api-key-vault. Secret app settings are versionless "
+        "Key Vault references only. This module never takes a secret value.')"
+    )
+    content = replace_once(
+        content,
+        vault_parameter,
+        "@secure()\nparam adminapikey_value string\n",
+        f"{vault_description}\n{vault_parameter}\n",
+        "generated admin API key parameter for the Key Vault URI",
+    )
+    old_secret_parameters = (
+        "@secure()\nparam entraclientsecret_value string\n\n"
+        "@secure()\nparam builderclientapikey_value string\n\n"
+        "param api_identity_outputs_id string\n"
+    )
+    if old_secret_parameters in content:
+        if content.count(old_secret_parameters) != 1:
+            raise SystemExit("generated Entra and builder secret parameters are ambiguous.")
+        content = content.replace(old_secret_parameters, "param api_identity_outputs_id string\n", 1)
+    elif "param entraclientsecret_value" in content or "param builderclientapikey_value" in content:
+        raise SystemExit("Cannot find exactly one generated Entra and builder secret parameters to patch.")
+
+    vault_vars = (
+        "var vaultUriPrefix = endsWith(api_key_vault_uri, '/') ? api_key_vault_uri : '${api_key_vault_uri}/'\n"
+        "var kv = {\n"
+        "  authenticationApiKey: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Authentication-ApiKey)'\n"
+        "  authenticationControlIdentityClientSecret: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Authentication-ControlIdentity-ClientSecret)'\n"
+        "  authenticationBuilderClientApiKey: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Authentication-BuilderClientApiKey)'\n"
+        "  billingStripeSecretKey: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Billing-Stripe-SecretKey)'\n"
+        "  billingStripeWebhookSigningSecret: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Billing-Stripe-WebhookSigningSecret)'\n"
+        "  billingStripeWebhookSourcesControlSigningSecret: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Billing-Stripe-WebhookSources-control-SigningSecret)'\n"
+        "  billingStripeWebhookSourcesHubSigningSecret: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Billing-Stripe-WebhookSources-hub-SigningSecret)'\n"
+        "  managedElsaHandoffActivePrivateKeyPem: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/ManagedElsa-Handoff-ActivePrivateKeyPem)'\n"
+        "}\n"
+    )
+    recovery_settings_anchor = (
+        "var stagingRecoveryLeverSettings = concat(stagingRecoveryLeverEnabledSettings, "
+        "stagingRecoveryLeverSmokeOwnerSettings, stagingRecoveryLeverAllowlistSettings)\n"
+    )
+    content = replace_once(
+        content,
+        "var vaultUriPrefix",
+        recovery_settings_anchor,
+        recovery_settings_anchor + "\n" + vault_vars,
+        "staging recovery lever settings for Key Vault reference locals",
+    )
+    content = replace_once(
+        content,
+        "value: kv.authenticationApiKey",
+        "          value: adminapikey_value\n",
+        "          value: kv.authenticationApiKey\n",
+        "generated Authentication__ApiKey value for a Key Vault reference",
+    )
+    content = replace_once(
+        content,
+        "value: kv.authenticationControlIdentityClientSecret",
+        "          value: entraclientsecret_value\n",
+        "          value: kv.authenticationControlIdentityClientSecret\n",
+        "generated ControlIdentity client secret value for a Key Vault reference",
+    )
+    builder_setting = lines(
+        "        {",
+        "          name: 'Authentication__BuilderClientApiKey'",
+        "          value: kv.authenticationBuilderClientApiKey",
+        "        }",
+    )
+    extra_secret_settings = lines(
+        "        {",
+        "          name: 'Authentication__BuilderClientApiKey'",
+        "          value: kv.authenticationBuilderClientApiKey",
+        "        }",
+        "        {",
+        "          name: 'Billing__Stripe__SecretKey'",
+        "          value: kv.billingStripeSecretKey",
+        "        }",
+        "        {",
+        "          name: 'Billing__Stripe__WebhookSigningSecret'",
+        "          value: kv.billingStripeWebhookSigningSecret",
+        "        }",
+        "        {",
+        "          name: 'Billing__Stripe__WebhookSources__0__Name'",
+        "          value: 'control'",
+        "        }",
+        "        {",
+        "          name: 'Billing__Stripe__WebhookSources__0__SigningSecret'",
+        "          value: kv.billingStripeWebhookSourcesControlSigningSecret",
+        "        }",
+        "        {",
+        "          name: 'Billing__Stripe__WebhookSources__1__Name'",
+        "          value: 'hub'",
+        "        }",
+        "        {",
+        "          name: 'Billing__Stripe__WebhookSources__1__SigningSecret'",
+        "          value: kv.billingStripeWebhookSourcesHubSigningSecret",
+        "        }",
+        "        {",
+        "          name: 'ManagedElsa__Handoff__ActivePrivateKeyPem'",
+        "          value: kv.managedElsaHandoffActivePrivateKeyPem",
+        "        }",
+    )
+    content = replace_once(
+        content,
+        "name: 'Billing__Stripe__SecretKey'",
+        lines(
+            "        {",
+            "          name: 'Authentication__BuilderClientApiKey'",
+            "          value: builderclientapikey_value",
+            "        }",
+        ),
+        extra_secret_settings,
+        "generated builder client API key setting for Key Vault references",
+    )
+    # The previous replacement already rewrites the builder key value; keep the
+    # patched marker so a second run stays idempotent even if Aspire later
+    # emits the builder setting after the extra names.
+    if "value: kv.authenticationBuilderClientApiKey" not in content:
+        content = replace_once(
+            content,
+            "value: kv.authenticationBuilderClientApiKey",
+            "          value: builderclientapikey_value\n",
+            "          value: kv.authenticationBuilderClientApiKey\n",
+            "generated builder client API key value for a Key Vault reference",
+        )
+    _ = builder_setting
+
+    basic_auth_policies = (
+        "\n"
+        "resource scmBasicAuth 'Microsoft.Web/sites/basicPublishingCredentialsPolicies@2025-03-01' = {\n"
+        "  parent: webapp\n"
+        "  name: 'scm'\n"
+        "  properties: {\n"
+        "    allow: false\n"
+        "  }\n"
+        "}\n"
+        "\n"
+        "resource ftpBasicAuth 'Microsoft.Web/sites/basicPublishingCredentialsPolicies@2025-03-01' = {\n"
+        "  parent: webapp\n"
+        "  name: 'ftp'\n"
+        "  properties: {\n"
+        "    allow: false\n"
+        "  }\n"
+        "}\n"
+    )
+    content = replace_once(
+        content,
+        "resource scmBasicAuth",
+        "            '${provisioner_identity_outputs_id}': { }\n"
+        "          })\n"
+        "  }\n"
+        "}\n",
+        "            '${provisioner_identity_outputs_id}': { }\n"
+        "          })\n"
+        "  }\n"
+        "}\n"
+        + basic_auth_policies,
+        "generated Web App identity close for SCM/FTP basic-auth policies",
+    )
     return content
 
 
@@ -338,6 +498,23 @@ def patch_parameter_template(parameters: str) -> str:
         pairing_block + lever_block,
         "pairing allowlist parameter anchor for the staging billing lifecycle lever",
     )
+    parameters = replace_once(
+        parameters,
+        "param api_key_vault_uri",
+        "param adminapikey_value = '{{ securedParameter \"adminApiKey\" }}'\n",
+        "param api_key_vault_uri = '{{ .Env.API_KEY_VAULT_URI }}'\n",
+        "generated admin API key parameter in the parameter template",
+    )
+    entra_secret = "param entraclientsecret_value = '{{ securedParameter \"entraClientSecret\" }}'\n"
+    if entra_secret in parameters:
+        if parameters.count(entra_secret) != 1:
+            raise SystemExit("Cannot find exactly one Entra client secret parameter in the parameter template.")
+        parameters = parameters.replace(entra_secret, "", 1)
+    builder_secret = "param builderclientapikey_value = '{{ securedParameter \"builderClientApiKey\" }}'\n"
+    if builder_secret in parameters:
+        if parameters.count(builder_secret) != 1:
+            raise SystemExit("Cannot find exactly one builder client API key parameter in the parameter template.")
+        parameters = parameters.replace(builder_secret, "", 1)
     return parameters
 
 

@@ -67,7 +67,10 @@ class ControlEgressTests(unittest.TestCase):
         self.assertIn("natGateways", subnet["natGateway"]["id"])
         self.assertIn("parameters('natGatewayName')", subnet["natGateway"]["id"])
         self.assertNotIn("networkSecurityGroup", subnet)
-        self.assertNotIn("serviceEndpoints", subnet)
+        self.assertEqual(
+            [{"service": "Microsoft.KeyVault", "locations": ["[parameters('location')]"]}],
+            subnet["serviceEndpoints"],
+        )
 
     def test_production_address_space_is_private_and_the_subnet_fits(self):
         vnet_prefix = self.production["virtualNetworkAddressPrefix"]["value"]
@@ -91,6 +94,7 @@ class ControlEgressTests(unittest.TestCase):
         for name in ("virtualNetworkName", "subnetName", "natGatewayName"):
             self.assertIn(self.production[name]["value"], readme)
         self.assertIn("AZURE_API_EGRESS_SUBNET_ID", readme)
+        self.assertIn("Microsoft.KeyVault", readme)
         self.assertIn("SqlBootstrapIp", readme)
         self.assertIn("vnet-integration remove", readme)
         self.assertIn("8e23037a-420f-4ad0-9594-9d194de29e84", readme)

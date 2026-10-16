@@ -13,8 +13,8 @@ param api_containerimage string
 
 param api_containerport string
 
-@secure()
-param adminapikey_value string
+@description('Vault URI from infra/api-key-vault. Secret app settings are versionless Key Vault references only. This module never takes a secret value.')
+param api_key_vault_uri string
 
 param control_sql_outputs_sqlserverfqdn string
 
@@ -24,12 +24,6 @@ param entraclientid_value string
 
 @description('Optional Elsa Cloud Supabase OIDC issuer. An empty value keeps Cloud account JWT admission disabled. Set only after confirming this issuer publishes asymmetric signing keys.')
 param cloudaccountissuer_value string = ''
-
-@secure()
-param entraclientsecret_value string
-
-@secure()
-param builderclientapikey_value string
 
 param api_identity_outputs_id string
 
@@ -111,6 +105,18 @@ var stagingRecoveryLeverAllowlistSettings = [for (instanceId, i) in stagingRecov
 
 var stagingRecoveryLeverSettings = concat(stagingRecoveryLeverEnabledSettings, stagingRecoveryLeverSmokeOwnerSettings, stagingRecoveryLeverAllowlistSettings)
 
+var vaultUriPrefix = endsWith(api_key_vault_uri, '/') ? api_key_vault_uri : '${api_key_vault_uri}/'
+var kv = {
+  authenticationApiKey: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Authentication-ApiKey)'
+  authenticationControlIdentityClientSecret: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Authentication-ControlIdentity-ClientSecret)'
+  authenticationBuilderClientApiKey: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Authentication-BuilderClientApiKey)'
+  billingStripeSecretKey: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Billing-Stripe-SecretKey)'
+  billingStripeWebhookSigningSecret: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Billing-Stripe-WebhookSigningSecret)'
+  billingStripeWebhookSourcesControlSigningSecret: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Billing-Stripe-WebhookSources-control-SigningSecret)'
+  billingStripeWebhookSourcesHubSigningSecret: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Billing-Stripe-WebhookSources-hub-SigningSecret)'
+  managedElsaHandoffActivePrivateKeyPem: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/ManagedElsa-Handoff-ActivePrivateKeyPem)'
+}
+
 resource mainContainer 'Microsoft.Web/sites/sitecontainers@2025-03-01' = {
   name: 'main'
   properties: {
@@ -158,7 +164,7 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
         }
         {
           name: 'Authentication__ApiKey'
-          value: adminapikey_value
+          value: kv.authenticationApiKey
         }
         {
           name: 'ConnectionStrings__Catalog'
@@ -218,7 +224,7 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
         }
         {
           name: 'Authentication__ControlIdentity__ClientSecret'
-          value: entraclientsecret_value
+          value: kv.authenticationControlIdentityClientSecret
         }
         {
           name: 'Authentication__ControlIdentity__RedirectUri'
@@ -266,7 +272,35 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
         }
         {
           name: 'Authentication__BuilderClientApiKey'
-          value: builderclientapikey_value
+          value: kv.authenticationBuilderClientApiKey
+        }
+        {
+          name: 'Billing__Stripe__SecretKey'
+          value: kv.billingStripeSecretKey
+        }
+        {
+          name: 'Billing__Stripe__WebhookSigningSecret'
+          value: kv.billingStripeWebhookSigningSecret
+        }
+        {
+          name: 'Billing__Stripe__WebhookSources__0__Name'
+          value: 'control'
+        }
+        {
+          name: 'Billing__Stripe__WebhookSources__0__SigningSecret'
+          value: kv.billingStripeWebhookSourcesControlSigningSecret
+        }
+        {
+          name: 'Billing__Stripe__WebhookSources__1__Name'
+          value: 'hub'
+        }
+        {
+          name: 'Billing__Stripe__WebhookSources__1__SigningSecret'
+          value: kv.billingStripeWebhookSourcesHubSigningSecret
+        }
+        {
+          name: 'ManagedElsa__Handoff__ActivePrivateKeyPem'
+          value: kv.managedElsaHandoffActivePrivateKeyPem
         }
         {
           name: 'Cors__BuilderClientOrigins__0'
@@ -311,5 +345,21 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
         : {
             '${provisioner_identity_outputs_id}': { }
           })
+  }
+}
+
+resource scmBasicAuth 'Microsoft.Web/sites/basicPublishingCredentialsPolicies@2025-03-01' = {
+  parent: webapp
+  name: 'scm'
+  properties: {
+    allow: false
+  }
+}
+
+resource ftpBasicAuth 'Microsoft.Web/sites/basicPublishingCredentialsPolicies@2025-03-01' = {
+  parent: webapp
+  name: 'ftp'
+  properties: {
+    allow: false
   }
 }

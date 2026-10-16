@@ -6,7 +6,9 @@ refuses `0.0.0.0`). The production API on App Service egresses from a shared poo
 non-static addresses, so in-process bootstrap would be intermittent. This template (#310, part of
 #264) gives the API one static egress: a small VNet in the Control resource group, a subnet delegated
 to App Service, and a NAT gateway with a Standard static public IP. The API site joins the subnet
-with regional VNet integration and routes all outbound traffic through it.
+with regional VNet integration and routes all outbound traffic through it. The subnet also exposes
+the `Microsoft.KeyVault` service endpoint so App Service Key Vault references can resolve through
+the vault firewall (`infra/api-key-vault`).
 
 Nothing inbound changes. No customer compute is created and the customer workload subscription is not
 touched. Regional VNet integration is available on Basic and above, and NAT gateway integration has no

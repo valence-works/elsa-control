@@ -94,13 +94,21 @@ def stripe_objects() -> dict[str, Mapping[str, Any]]:
     }
 
 
+KV_STRIPE_SECRET = "@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/Billing-Stripe-SecretKey)"
+KV_STRIPE_WEBHOOK = "@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/Billing-Stripe-WebhookSigningSecret)"
+KV_STRIPE_CONTROL = "@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/Billing-Stripe-WebhookSources-control-SigningSecret)"
+KV_STRIPE_HUB = "@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/Billing-Stripe-WebhookSources-hub-SigningSecret)"
+
+
 def azure_settings() -> list[dict[str, str]]:
     return [
         {"name": "Billing__Lifecycle__Enabled", "value": "true"},
         {"name": "Billing__Lifecycle__PollInterval", "value": "00:00:15"},
         {"name": "Billing__Stripe__Enabled", "value": "true"},
-        {"name": "Billing__Stripe__SecretKey", "value": "sk_test_staging"},
-        {"name": "Billing__Stripe__WebhookSigningSecret", "value": WEBHOOK_SECRET},
+        {"name": "Billing__Stripe__SecretKey", "value": KV_STRIPE_SECRET},
+        {"name": "Billing__Stripe__WebhookSigningSecret", "value": KV_STRIPE_WEBHOOK},
+        {"name": "Billing__Stripe__WebhookSources__0__SigningSecret", "value": KV_STRIPE_CONTROL},
+        {"name": "Billing__Stripe__WebhookSources__1__SigningSecret", "value": KV_STRIPE_HUB},
         {"name": "Billing__Stripe__DefaultPriceId", "value": PRICE_ID},
         {"name": "Billing__Stripe__CloudPortalReturnUrl", "value": CLOUD_RETURN_URL},
         {"name": "Billing__Stripe__CheckoutSuccessUrl", "value": "https://cloud-staging.azurestaticapps.net/checkout/return?session_id={CHECKOUT_SESSION_ID}"},
@@ -229,8 +237,6 @@ class StagingStripeReconciliationTests(unittest.TestCase):
                 "Billing__Lifecycle__Enabled",
                 "Billing__Lifecycle__PollInterval",
                 "Billing__Stripe__Enabled",
-                "Billing__Stripe__SecretKey",
-                "Billing__Stripe__WebhookSigningSecret",
                 "Billing__Stripe__DefaultPriceId",
                 "Billing__Stripe__CloudPortalReturnUrl",
             }]
@@ -244,15 +250,16 @@ class StagingStripeReconciliationTests(unittest.TestCase):
         self.assertEqual("true", azure.applied["Billing__Lifecycle__Enabled"])
         self.assertEqual("00:00:15", azure.applied["Billing__Lifecycle__PollInterval"])
         self.assertEqual("true", azure.applied["Billing__Stripe__Enabled"])
-        self.assertEqual(WEBHOOK_SECRET, azure.applied["Billing__Stripe__WebhookSigningSecret"])
+        self.assertNotIn("Billing__Stripe__SecretKey", azure.applied)
+        self.assertNotIn("Billing__Stripe__WebhookSigningSecret", azure.applied)
         self.assertEqual(PRICE_ID, azure.applied["Billing__Stripe__DefaultPriceId"])
         self.assertEqual(4, len(result))
 
-    def test_audit_rejects_a_different_test_account_key_in_azure(self) -> None:
-        with self.assertRaisesRegex(ReconciliationError, "audited test account"):
-            StagingStripeReconciler(FakeStripe(), FakeAzure(), config()).run(
-                stripe_secret_key="sk_test_different",
-            )
+    def test_audit_accepts_key_vault_references_instead_of_comparing_secret_values(self) -> None:
+        result = StagingStripeReconciler(FakeStripe(), FakeAzure(), config()).run(
+            stripe_secret_key="sk_test_different",
+        )
+        self.assertIn("azure-billing-settings", result)
 
     def test_audit_requires_staging_billing_cleanup_worker(self) -> None:
         azure = FakeAzure([item for item in azure_settings() if item["name"] != "Billing__Lifecycle__Enabled"])
@@ -290,9 +297,9 @@ class StagingStripeReconciliationTests(unittest.TestCase):
         class StickyAzure(FakeAzure):
             def app_setting_records(self, names: list[str] | None = None) -> dict[str, AzureAppSetting]:
                 records = super().app_setting_records(names)
-                if "Billing__Stripe__SecretKey" in records:
-                    records["Billing__Stripe__SecretKey"] = AzureAppSetting(
-                        records["Billing__Stripe__SecretKey"].value,
+                if "Billing__Stripe__Enabled" in records:
+                    records["Billing__Stripe__Enabled"] = AzureAppSetting(
+                        records["Billing__Stripe__Enabled"].value,
                         True,
                     )
                 return records
@@ -309,7 +316,7 @@ class StagingStripeReconciliationTests(unittest.TestCase):
     def test_failed_post_write_verification_restores_prior_azure_settings(self) -> None:
         values = [
             item for item in azure_settings()
-            if item["name"] not in {"Billing__Stripe__WebhookSigningSecret", "Billing__Stripe__CloudPortalReturnUrl"}
+            if item["name"] != "Billing__Stripe__CloudPortalReturnUrl"
         ]
         for item in values:
             if item["name"] == "Billing__Stripe__CheckoutCancelUrl":
@@ -326,7 +333,7 @@ class StagingStripeReconciliationTests(unittest.TestCase):
         self.assertEqual(previous, azure.app_settings())
         self.assertEqual(2, len(azure.applications))
         self.assertCountEqual(
-            ["Billing__Stripe__WebhookSigningSecret", "Billing__Stripe__CloudPortalReturnUrl"],
+            ["Billing__Stripe__CloudPortalReturnUrl"],
             azure.deleted,
         )
 
@@ -501,8 +508,9 @@ class StagingStripeReconciliationTests(unittest.TestCase):
             if item["name"] == "Billing__Stripe__SecretKey":
                 item["value"] = "sk_live_must_fail"
 
-        with self.assertRaisesRegex(ReconciliationError, "test-mode"):
+        with self.assertRaisesRegex(ReconciliationError, "must be a Key Vault reference") as raised:
             StagingStripeReconciler(FakeStripe(), FakeAzure(values), config()).check_azure_settings()
+        self.assertNotIn("sk_live_must_fail", str(raised.exception))
 
     def test_azure_settings_reject_price_or_webhook_secret_drift(self) -> None:
         values = azure_settings()

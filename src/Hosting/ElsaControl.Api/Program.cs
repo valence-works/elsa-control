@@ -76,9 +76,11 @@ using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Logging;
 using Microsoft.IdentityModel.Tokens;
 using ElsaControl.Api;
+using ElsaControl.Api.Hosting;
 using StripeClient = Stripe.StripeClient;
 
 var builder = WebApplication.CreateBuilder(args);
+UnresolvedKeyVaultReferenceGuard.ThrowIfUnresolved(builder.Configuration);
 
 IdentityModelEventSource.ShowPII = builder.Environment.IsDevelopment()
     && builder.Configuration.GetValue<bool>("Diagnostics:IdentityModel:ShowPII");

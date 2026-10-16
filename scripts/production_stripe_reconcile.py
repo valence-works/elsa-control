@@ -49,13 +49,12 @@ else:
         stripe_list_all,
     )
 
+from key_vault_app_settings import SECRET_APP_SETTING_NAMES, is_key_vault_reference
 
 PRODUCTION_PREFIX = "Billing__Stripe__"
 PRODUCTION_PRESERVED_SETTINGS = frozenset(
     {
         "Billing__Stripe__Enabled",
-        "Billing__Stripe__SecretKey",
-        "Billing__Stripe__WebhookSigningSecret",
         "Billing__Stripe__DefaultPriceId",
         "Billing__Stripe__CheckoutSuccessUrl",
         "Billing__Stripe__CheckoutCancelUrl",
@@ -67,6 +66,8 @@ PRODUCTION_AUDIT_SETTINGS = frozenset(
     {
         *PRODUCTION_PRESERVED_SETTINGS,
         "Billing__Stripe__ExpectedMode",
+        "Billing__Stripe__SecretKey",
+        "Billing__Stripe__WebhookSigningSecret",
     }
 )
 PRICE_ID_PATTERN = re.compile(r"^price_[A-Za-z0-9]+$")
@@ -294,6 +295,36 @@ def _setting_payload(settings: Mapping[str, AzureAppSetting]) -> list[dict[str, 
     ]
 
 
+STRIPE_SECRET_SETTING_NAMES: tuple[str, ...] = (
+    "Billing__Stripe__SecretKey",
+    "Billing__Stripe__WebhookSigningSecret",
+)
+
+
+def require_secret_settings_are_references(azure: Any, listed: Sequence[str]) -> None:
+    """Refuse capture until the operator has set reference strings, never values."""
+
+    present = [name for name in SECRET_APP_SETTING_NAMES if name in listed]
+    billing_enabled_names = [name for name in listed if name == "Billing__Stripe__Enabled"]
+    billing_enabled = False
+    if billing_enabled_names:
+        enabled_records = azure.app_setting_records(["Billing__Stripe__Enabled"])
+        enabled = enabled_records.get("Billing__Stripe__Enabled")
+        billing_enabled = enabled is not None and enabled.value.strip().lower() == "true"
+    if billing_enabled:
+        missing = [name for name in STRIPE_SECRET_SETTING_NAMES if name not in listed]
+        if missing:
+            raise ReconciliationError(
+                "azure-setting: " + ", ".join(missing) + " must be a Key Vault reference"
+            )
+    if not present:
+        return
+    records = azure.app_setting_records(present)
+    for name, setting in records.items():
+        if not is_key_vault_reference(setting.value):
+            raise ReconciliationError(f"azure-setting: {name} must be a Key Vault reference")
+
+
 def validate_preserved_production_mode(settings: Mapping[str, AzureAppSetting]) -> None:
     """Reject an enabled capture that cannot safely start as production."""
 
@@ -307,10 +338,6 @@ def validate_preserved_production_mode(settings: Mapping[str, AzureAppSetting]) 
 
     if settings["Billing__Stripe__Enabled"].value.strip().lower() != "true":
         return
-    require_live_secret(
-        settings["Billing__Stripe__SecretKey"].value,
-        name="Production Stripe secret setting",
-    )
     expected_mode = settings.get("Billing__Stripe__ExpectedMode")
     if expected_mode is not None and expected_mode.value.strip().lower() not in {"live", "production"}:
         raise ReconciliationError("Production Stripe capture has an unexpected expected mode")
@@ -321,6 +348,8 @@ def write_capture(settings: Mapping[str, AzureAppSetting], destination: Path) ->
         raise ReconciliationError("Production Stripe capture destination must be a new file")
     if not destination.parent.is_dir():
         raise ReconciliationError("Production Stripe capture destination directory does not exist")
+    if set(settings).intersection(SECRET_APP_SETTING_NAMES):
+        raise ReconciliationError("Production Stripe capture refuses secret App Service settings")
     if not PRODUCTION_PRESERVED_SETTINGS.issubset(settings):
         raise ReconciliationError("Production Stripe settings are incomplete; refusing an unprotected deployment")
     validate_preserved_production_mode(settings)
@@ -358,6 +387,8 @@ def read_capture(source: Path) -> dict[str, AzureAppSetting]:
         if not isinstance(value, str) or not isinstance(slot_setting, bool):
             raise ReconciliationError("Production Stripe capture is invalid")
         settings[name] = AzureAppSetting(value, slot_setting)
+    if set(settings).intersection(SECRET_APP_SETTING_NAMES):
+        raise ReconciliationError("Production Stripe capture refuses secret App Service settings")
     if not PRODUCTION_PRESERVED_SETTINGS.issubset(settings):
         raise ReconciliationError("Production Stripe capture is incomplete")
     validate_preserved_production_mode(settings)
@@ -379,9 +410,16 @@ class ProductionStripeReconciler:
 
     def capture(self) -> dict[str, AzureAppSetting]:
         listed = self._azure.list_names()
-        wanted = [name for name in listed if name.startswith(PRODUCTION_PREFIX)]
+        require_secret_settings_are_references(self._azure, listed)
+        wanted = [
+            name
+            for name in listed
+            if name.startswith(PRODUCTION_PREFIX) and name not in SECRET_APP_SETTING_NAMES
+        ]
         records = self._azure.app_setting_records(wanted)
         settings = {name: setting for name, setting in records.items() if name.startswith(PRODUCTION_PREFIX)}
+        if set(settings).intersection(SECRET_APP_SETTING_NAMES):
+            raise ReconciliationError("Production Stripe capture refuses secret App Service settings")
         if not PRODUCTION_PRESERVED_SETTINGS.issubset(settings):
             raise ReconciliationError("Production Stripe settings are incomplete; refusing an unprotected deployment")
         validate_preserved_production_mode(settings)
@@ -389,6 +427,8 @@ class ProductionStripeReconciler:
 
     def reapply(self, settings: Mapping[str, AzureAppSetting]) -> tuple[str, ...]:
         names = set(settings)
+        if names.intersection(SECRET_APP_SETTING_NAMES):
+            raise ReconciliationError("Production Stripe reapply refuses secret App Service settings")
         if not PRODUCTION_PRESERVED_SETTINGS.issubset(names):
             raise ReconciliationError("Production Stripe settings are incomplete; refusing a partial replacement")
         validate_preserved_production_mode(settings)
@@ -445,17 +485,14 @@ class ProductionStripeReconciler:
             raise ReconciliationError("azure-setting: Billing__Stripe__Enabled is not true")
         if settings["Billing__Stripe__ExpectedMode"].strip().lower() not in {"live", "production"}:
             raise ReconciliationError("azure-setting: Billing__Stripe__ExpectedMode is not live")
-        try:
-            require_live_secret(settings["Billing__Stripe__SecretKey"], name="Production Stripe secret setting")
-        except ReconciliationError:
-            raise ReconciliationError("azure-setting: Billing__Stripe__SecretKey is not a live-mode credential") from None
-        if (
-            self._expected_secret_key is not None
-            and settings["Billing__Stripe__SecretKey"] != self._expected_secret_key
+        for name in (
+            "Billing__Stripe__SecretKey",
+            "Billing__Stripe__WebhookSigningSecret",
         ):
-            raise ReconciliationError("azure-setting: Billing__Stripe__SecretKey does not match the audit key")
-        if not WEBHOOK_SECRET_PATTERN.fullmatch(settings["Billing__Stripe__WebhookSigningSecret"]):
-            raise ReconciliationError("azure-setting: Billing__Stripe__WebhookSigningSecret has an unexpected shape")
+            if not is_key_vault_reference(settings.get(name, "")):
+                raise ReconciliationError(f"azure-setting: {name} must be a Key Vault reference")
+        if self._expected_secret_key is not None and not is_key_vault_reference(self._expected_secret_key):
+            require_live_secret(self._expected_secret_key, name="Production Stripe captured setting")
         if settings["Billing__Stripe__DefaultPriceId"] != self._config.price_id:
             raise ReconciliationError("azure-setting: Billing__Stripe__DefaultPriceId does not match")
         expected = {
@@ -518,8 +555,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.audit_capture:
             captured = read_capture(args.audit_capture)
             captured_secret_key = captured["Billing__Stripe__SecretKey"].value
+            if is_key_vault_reference(captured_secret_key):
+                captured_secret_key = None
         stripe_key = captured_secret_key or os.environ.get("STRIPE_PRODUCTION_SECRET_KEY", "")
-        if not captured_secret_key and not os.environ.get("STRIPE_PRODUCTION_SECRET_KEY", "").strip():
+        if not stripe_key.strip():
             raise ReconciliationError("env: STRIPE_PRODUCTION_SECRET_KEY is missing")
         try:
             require_live_secret(
