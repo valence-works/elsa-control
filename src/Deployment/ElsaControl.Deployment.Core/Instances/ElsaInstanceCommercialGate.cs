@@ -22,6 +22,14 @@ public interface IElsaInstanceCommercialGate
         ElsaInstanceOperationAction action,
         int? activeInstanceCount = null,
         CancellationToken cancellationToken = default);
+
+    Task<ElsaInstanceCommercialGateDecision> EvaluateAsync(
+        Guid organizationId,
+        ElsaInstanceOperationAction action,
+        int? activeInstanceCount,
+        ElsaInstanceCommercialPlacementRequest? placement,
+        CancellationToken cancellationToken) =>
+        EvaluateAsync(organizationId, action, activeInstanceCount, cancellationToken);
 }
 
 public static class ElsaInstanceCommercialOperation
@@ -33,4 +41,7 @@ public static class ElsaInstanceCommercialOperation
     public const string InstanceLimitReached = "instance.instance-limit-reached";
     public const string BindingRequired = "instance.binding-required";
     public const string EntitlementSafeExitSuperseded = "instance.entitlement-safe-exit-superseded";
+    public const string SharedAllowanceExceeded = "placement.shared-allowance.exceeded";
+    public const string SharedAllowanceMoveInProgress = "placement.shared-allowance.move-in-progress";
+    public const string ShardCapacity = "placement.shard.capacity";
 }
