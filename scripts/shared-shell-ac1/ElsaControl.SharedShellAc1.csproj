@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>ElsaControl.SharedShellAc1</RootNamespace>
+    <AssemblyName>ElsaControl.SharedShellAc1</AssemblyName>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <DefaultItemExcludes>$(DefaultItemExcludes);tests/**;verified-package/**;results/**</DefaultItemExcludes>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="ElsaControl.SharedShellAc1.Tests" />
+    <Compile Remove="tests/**/*.cs" />
+    <Compile Remove="verified-package/**/*.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="CShells" Version="0.0.30" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="10.0.10" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
+  </ItemGroup>
+</Project>

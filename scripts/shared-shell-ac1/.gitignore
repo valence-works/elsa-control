@@ -1,0 +1,7 @@
+bin/
+obj/
+results/*.sqlite
+results/ac1-*-density-*.json
+results/ac1-*-cold-start-*.json
+results/ac1-*-unload.json
+*.sqlite
