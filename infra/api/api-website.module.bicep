@@ -155,10 +155,6 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
           value: 'in_memory'
         }
         {
-          name: 'ASPNETCORE_FORWARDEDHEADERS_ENABLED'
-          value: 'true'
-        }
-        {
           name: 'HTTP_PORTS'
           value: api_containerport
         }

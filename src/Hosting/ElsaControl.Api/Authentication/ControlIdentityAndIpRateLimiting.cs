@@ -45,7 +45,8 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
         HubAccountIdentityOptions hubAccount,
         bool limitIdentityForNonBff,
         ControlRateLimitWindow? bffPerIp = null,
-        IReadOnlyList<IPNetwork>? bffEgressNetworks = null)
+        IReadOnlyList<IPNetwork>? bffEgressNetworks = null,
+        ControlRateLimitBffSourceDiagnostic? bffSourceDiagnostic = null)
     {
         var unresolvedIdentity = new ControlRateLimitWindow(
             UnresolvedIdentityPermitLimit,
@@ -61,7 +62,7 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
                 if (bffPerIp is { } bffWindow &&
                     identity is not null &&
                     IsBffSession(principal, cloudAccount, hubAccount) &&
-                    ControlRateLimitBffEgress.Contains(context.Connection.RemoteIpAddress, allowlistedEgress))
+                    MatchesBffEgress(context.Connection.RemoteIpAddress))
                     return RateLimitPartition.GetFixedWindowLimiter(
                         BffIpPartitionPrefix + ipKey,
                         _ => CreateWindow(bffWindow));
@@ -88,6 +89,13 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
 
                 return RateLimitPartition.GetNoLimiter<string>(AnonymousIdentityPartition);
             }));
+
+        bool MatchesBffEgress(IPAddress? remoteIpAddress)
+        {
+            var matched = ControlRateLimitBffEgress.Contains(remoteIpAddress, allowlistedEgress);
+            bffSourceDiagnostic?.Record(remoteIpAddress, matched);
+            return matched;
+        }
     }
 
     public override TimeSpan? IdleDuration => TimeSpan.Zero;
@@ -115,14 +123,12 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
         return ValueTask.CompletedTask;
     }
 
-    // Uses Connection.RemoteIpAddress after any host-level forwarded-headers processing.
-    // This process does not call UseForwardedHeaders or configure KnownProxies /
-    // KnownNetworks. App Service and Container Apps set
-    // ASPNETCORE_FORWARDEDHEADERS_ENABLED=true, so the host forwarded-headers
-    // middleware runs and RemoteIpAddress is the client address taken from
-    // X-Forwarded-For, not the front-end socket. Hosts without that setting see
-    // the TCP peer. IPv6 addresses are grouped on the /64 prefix, matching
-    // cloud-bootstrap. BffEgressNetworks is matched against the same address.
+    // Uses Connection.RemoteIpAddress, which is the rightmost X-Forwarded-For entry:
+    // Program.cs registers explicit ForwardedHeadersOptions with ForwardLimit = 1, so
+    // only the entry the App Service front end appends is read and left entries a caller
+    // writes are ignored. Without X-Forwarded-For it is the connection's peer address.
+    // IPv6 addresses are grouped on the /64 prefix, matching cloud-bootstrap.
+    // BffEgressNetworks is matched against this same address.
     internal static string GetIpPartitionKey(HttpContext context)
     {
         var address = context.Connection.RemoteIpAddress;
@@ -211,7 +217,8 @@ public abstract class ControlIdentityAndIpRateLimiterPolicy : IRateLimiterPolicy
         HubAccountIdentityOptions hubAccount,
         bool limitIdentityForNonBff,
         ControlRateLimitWindow? bffPerIp = null,
-        IReadOnlyList<IPNetwork>? bffEgressNetworks = null)
+        IReadOnlyList<IPNetwork>? bffEgressNetworks = null,
+        ILoggerFactory? bffSourceLoggerFactory = null)
     {
         _policyName = policyName;
         _limiter = new ControlIdentityAndIpRateLimiter(
@@ -222,7 +229,12 @@ public abstract class ControlIdentityAndIpRateLimiterPolicy : IRateLimiterPolicy
             hubAccount,
             limitIdentityForNonBff,
             bffPerIp,
-            bffEgressNetworks);
+            bffEgressNetworks,
+            bffSourceLoggerFactory is null
+                ? null
+                : new ControlRateLimitBffSourceDiagnostic(
+                    bffSourceLoggerFactory.CreateLogger(ControlRateLimitBffSourceDiagnostic.LoggerCategory),
+                    policyName));
     }
 
     public Func<OnRejectedContext, CancellationToken, ValueTask>? OnRejected => null;
