@@ -493,6 +493,28 @@ Convergence clears the earlier failure's current evidence without removing audit
 history. Admin recover refuses missing evidence; the existing auto-resume-exhausted
 exception, provider re-observation, and commercial checks still apply.
 
+## Auto-resume refusals (#860)
+
+The reconciler charges an automatic resume only when the provider resume would
+accept it. Both evaluate the same gate (`AzureProviderResumeEligibility`): the
+executor's eligibility for the observed step, the receipt's authority for the
+current provider attempt, version and checkpoint, and the receipt's binding to the
+reconciled instance version. A Workload confirmation that the resume could not use
+is never charged; the operation parks with `azure.recovery.needs-operator`.
+
+A charged resume can still be refused by what only the resume sees (for example
+a later ARM read). A refusal that another ARM read cannot change (authority,
+identity, plan, assignment or eligibility mismatch, or a rejected request)
+records `azure.recovery.needs-operator` and stops auto-resume for that operation.
+The block lasts for the provider operation's lifetime, even after a successful
+operator Recover, so a later park of the same operation (for example at Health or
+Promotion) also waits for an operator.
+An ARM read that failed or is still in progress keeps the 60/120/240/300 s
+backoff and the three-resume budget. Read `autoResumeBlocked` (the authoritative
+block), `autoResumeCount`, `autoResumeOutcomeCodes` and `reasonCode` from the admin
+`provider-current` route before choosing an operator Recover. The outcome codes and
+reason code are best-effort history; trust `autoResumeBlocked` when they disagree.
+
 ## Controlled-fixture validation
 
 Validate this runbook against controlled persistence/API fixtures for:

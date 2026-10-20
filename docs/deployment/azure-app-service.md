@@ -110,7 +110,10 @@ the values:
 3. Verify on staging with the source-address diagnostic. Set the app setting
    `RateLimiting__SourceDiagnosticLogLevel=Debug`, make one call through the
    BFF, and confirm the `ElsaControl.Api.RateLimiting` Debug event shows the
-   expected `RemoteIpAddress` with `matched=True`. The event carries the
+   expected `RemoteIpAddress` with `matched=True`. Read it in the admin console
+   logs (`GET /api/admin/console-logs/recent`, admin only), or in the OTLP log
+   sink when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. A refused request can log the event twice,
+   because the rate limiter retries the partition lookup. The event carries the
    address, the match flag, the BFF credential source name (see below) and
    the policy name only. Then delete the setting
    (`az webapp config appsettings delete --resource-group <group> --name <site>
@@ -1205,7 +1208,12 @@ AcrPull, SeedSecrets, Sql*, Health, Promotion, Delete and `CommandTimeout`
 stay as they are. The deployment is still submitted with `--no-wait`; the
 runner never cancels or resubmits. When the override applies, the runner
 records one allow-listed diagnostic `staging.late-success-lever.applied`
-with no workspace, instance or subscription identifiers.
+with no workspace, instance or subscription identifiers. Later checkpoints
+replace diagnostics, so the provider operation also keeps a sticky
+`lateSuccessLeverApplied` flag. The admin
+`GET /api/admin/workspaces/{workspaceId}/instances/{instanceId}/operations/provider-current`
+returns it with `autoResumeCount` and `autoResumeOutcomeCodes`, which is the
+QA read path for this lever's runs.
 
 Set the **`test` GitHub environment** variables
 `STAGING_LATE_SUCCESS_LEVER_ENABLED`,
