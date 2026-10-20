@@ -498,6 +498,14 @@ Secrets User assignment. A human operator applies it. That operator holds:
 Re-running phase 1 to change the vault firewall rules uses the same
 operator.
 
+These rights cover the vault module only. `--vault-only` first runs the
+base subscription deployment (`az deployment sub create` with
+`infra/main.bicep`), which also needs the base deployment's rights at
+subscription scope. An operator who holds only the rights above applies the
+module directly with `az deployment group create` and
+`infra/api-key-vault/api-key-vault.module.bicep`, as in "Production apply"
+step 2.
+
 Phase 2 (a run without `--vault-only`) does not deploy the vault or its
 role assignment. It reads the existing vault URI with `az keyvault list` and
 `az keyvault show`, and fails with a pointer to phase 1 when the vault is
@@ -512,7 +520,9 @@ SCM and FTP basic-auth publishing credentials are off
 
 1. Apply `infra/control-egress` so the Key Vault service endpoint exists.
 2. Phase 1 — as the phase 1 operator, create the vault only:
-   `scripts/deploy-azure-elsa-control.sh --vault-only`.
+   `scripts/deploy-azure-elsa-control.sh --vault-only`. This also applies
+   the base deployment. With only the phase 1 rights, deploy the module
+   directly instead (see "Production apply" step 2).
 3. If needed, add your client CIDR with `az keyvault network-rule add`
    (management plane).
 4. Grant yourself a temporary Key Vault Secrets Officer assignment on that
