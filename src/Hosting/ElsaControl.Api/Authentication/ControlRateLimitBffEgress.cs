@@ -13,6 +13,11 @@ public sealed class ControlRateLimitBffEgressOptions
 
 internal static class ControlRateLimitBffEgress
 {
+    // A wider entry would hand the BffPerIp window to callers that merely share a large
+    // provider range with a BFF. IPv4-mapped IPv6 entries are checked as IPv4 after mapping.
+    internal const int MinIPv4PrefixLength = 16;
+    internal const int MinIPv6PrefixLength = 32;
+
     internal static string[] ReadNetworks(IConfiguration configuration)
     {
         var section = configuration.GetSection(ControlRateLimitBffEgressOptions.ConfigurationKey);
@@ -70,6 +75,22 @@ internal static class ControlRateLimitBffEgress
                 continue;
             }
 
+            if (network.BaseAddress.AddressFamily == AddressFamily.InterNetwork &&
+                network.PrefixLength < MinIPv4PrefixLength)
+            {
+                yield return
+                    $"{ControlRateLimitBffEgressOptions.ConfigurationKey} entry '{entry}' is an IPv4 network wider than /{MinIPv4PrefixLength}.";
+                continue;
+            }
+
+            if (network.BaseAddress.AddressFamily == AddressFamily.InterNetworkV6 &&
+                network.PrefixLength < MinIPv6PrefixLength)
+            {
+                yield return
+                    $"{ControlRateLimitBffEgressOptions.ConfigurationKey} entry '{entry}' is an IPv6 network wider than /{MinIPv6PrefixLength}.";
+                continue;
+            }
+
             destination?.Add(network);
         }
     }
@@ -77,7 +98,13 @@ internal static class ControlRateLimitBffEgress
     private static bool TryParseNetwork(string entry, out IPNetwork network)
     {
         if (IPNetwork.TryParse(entry, out network))
+        {
+            // A valid network on an IPv4-mapped base has a prefix of at least /96, because the
+            // ::ffff marker bits must sit inside the prefix. Its IPv4 part is the remainder.
+            if (network.BaseAddress.IsIPv4MappedToIPv6)
+                network = new IPNetwork(network.BaseAddress.MapToIPv4(), network.PrefixLength - 96);
             return true;
+        }
 
         if (!IPAddress.TryParse(entry, out var address))
         {

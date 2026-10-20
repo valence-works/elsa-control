@@ -23,11 +23,13 @@ The deployment must be reproducible without depending on an existing `azd` envir
 The API runs with:
 
 - `ASPNETCORE_ENVIRONMENT=Production`
-- `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` so ASP.NET Core uses App Service forwarded scheme/host headers for HTTPS-aware auth, redirects, and same-origin checks
 - `Database__Provider=SqlServer`
 - `ConnectionStrings__Catalog=<Azure SQL connection string>`
 - `Authentication__ApiKey=<strong deployment secret>`
 - optional `Authentication__BuilderClientApiKey=<strong deployment secret>`
+
+Forwarded headers are configured in `Program.cs`, not by an app setting. See
+[Ingress and forwarded headers](azure-app-service.md#ingress-and-forwarded-headers).
 
 The API applies EF Core SQL Server migrations at startup outside the `Testing` environment.
 

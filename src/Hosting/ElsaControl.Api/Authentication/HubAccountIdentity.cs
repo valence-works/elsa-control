@@ -22,6 +22,14 @@ public sealed class HubAccountIdentityOptions
     // Local test signing only. Production must validate the issuer's published JWKS.
     public string? TestSigningKey { get; init; }
 
+    public static TimeSpan DefaultLinkReauthenticationWindow { get; } = TimeSpan.FromMinutes(10);
+    public static TimeSpan MaxLinkReauthenticationWindow { get; } = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// How recent the interactive sign-in of both the Hub and the Cloud account session must be to link them.
+    /// </summary>
+    public TimeSpan LinkReauthenticationWindow { get; init; } = DefaultLinkReauthenticationWindow;
+
     public bool IsConfigured => Enabled && !string.IsNullOrWhiteSpace(Issuer) &&
                                 !string.IsNullOrWhiteSpace(Audience);
 }
@@ -43,6 +51,11 @@ public sealed class HubAccountIdentityConfigurationValidator(
             string.IsNullOrWhiteSpace(value.Audience) ||
             (!environment.IsEnvironment("Testing") && !string.IsNullOrEmpty(value.TestSigningKey)))
             throw new InvalidOperationException("Hub account JWT validation requires an HTTPS issuer, an audience, and published signing keys.");
+
+        if (value.LinkReauthenticationWindow <= TimeSpan.Zero ||
+            value.LinkReauthenticationWindow > HubAccountIdentityOptions.MaxLinkReauthenticationWindow)
+            throw new InvalidOperationException(
+                $"{HubAccountIdentityDefaults.ConfigurationSection}:LinkReauthenticationWindow must be greater than zero and at most {HubAccountIdentityOptions.MaxLinkReauthenticationWindow:c}.");
 
         var cloud = cloudAccountOptions.Value;
         if (cloud.Enabled && IssuersEqual(value.Issuer, cloud.Issuer))
@@ -100,6 +113,8 @@ public static class HubAccountJwtBearer
             {
                 if (!HubAccountTokenSelector.IsValidatedHubAccount(context.Principal, hub, context.SecurityToken))
                     context.Fail("A signed Elsa Hub user session is required.");
+                else
+                    AccountSignInRecency.KeepValidatedToken(context.Properties, context.SecurityToken);
                 return Task.CompletedTask;
             }
         };
