@@ -378,6 +378,82 @@ public sealed class AzureElsaInstanceProviderTests
         Assert.False(AzureLateSuccessCodes.IsAutoResumeBlocked(fixture.OperationStore.Current));
     }
 
+    /// <summary>
+    /// A duplicate or late auto-resume envelope reaches the provider again while the operation it
+    /// resumed is already Running or Succeeded. A rejected replay is not a refused resume, so it
+    /// must not park the operation for an operator.
+    /// </summary>
+    [Theory]
+    [InlineData(AzureProviderOperationStatus.Running)]
+    [InlineData(AzureProviderOperationStatus.Succeeded)]
+    public async Task Rejected_replay_of_a_claimed_auto_resume_does_not_block_auto_resume(
+        AzureProviderOperationStatus status)
+    {
+        var fixture = await CreateRecoveryFixtureAsync(status, includeReplayObservation: true, wrongReplayObservation: true);
+
+        var result = await fixture.Provider.RecoverAsync(AutoResumeRequest(fixture));
+
+        Assert.Equal(ElsaInstanceProviderRecoveryOutcome.Rejected, result.Outcome);
+        Assert.Empty(fixture.OperationStore.Current!.AutoResumeOutcomes);
+        Assert.False(AzureLateSuccessCodes.IsAutoResumeBlocked(fixture.OperationStore.Current));
+        Assert.NotEqual(AzureLateSuccessCodes.NeedsOperator, fixture.OperationStore.Current.LastObservationReasonCode);
+    }
+
+    [Theory]
+    [InlineData(AzureProviderOperationStatus.Running)]
+    [InlineData(AzureProviderOperationStatus.Succeeded)]
+    public async Task Auto_resume_replay_results_are_not_added_to_the_history(
+        AzureProviderOperationStatus status)
+    {
+        var fixture = await CreateRecoveryFixtureAsync(status, includeReplayObservation: true);
+
+        var result = await fixture.Provider.RecoverAsync(AutoResumeRequest(fixture));
+
+        Assert.NotEqual(ElsaInstanceProviderRecoveryOutcome.Rejected, result.Outcome);
+        Assert.Empty(fixture.OperationStore.Current!.AutoResumeOutcomes);
+    }
+
+    /// <summary>
+    /// A transient failure at a step the resume would refuse (here: Workload without the retained
+    /// AcrPull role assignment) is never charged, and nothing else retries it, so it must park
+    /// for an operator rather than report <c>azure.recovery.retrying</c> forever.
+    /// </summary>
+    [Fact]
+    public async Task Transient_failure_the_resume_would_refuse_needs_an_operator_instead_of_retrying()
+    {
+        var now = DateTimeOffset.Parse("2026-10-05T00:04:00Z");
+        var fixture = await CreateObserveFixtureAsync(
+            FailedObservation(AzureProviderRunnerStep.Workload, AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode),
+            attemptedStep: AzureProviderRunnerStep.Workload,
+            phase: AzureProviderOperationPhase.FoundationReady,
+            lastArmObservedAt: now.AddSeconds(-120),
+            backoffSeconds: AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds,
+            now: now,
+            resources: WorkloadParkResources() with { AcrPullRoleAssignmentId = null });
+        fixture.OperationStore.Current = fixture.OperationStore.Current! with
+        {
+            LastObservationReasonCode = AzureLateSuccessCodes.Retrying
+        };
+
+        var observation = await fixture.Provider.ObserveAsync(fixture.Request);
+
+        Assert.NotNull(observation.RetryEvidence);
+        Assert.False(observation.RetryEvidence.AutoResume);
+        Assert.Equal(AzureLateSuccessCodes.NeedsOperator, observation.ReasonCode);
+        Assert.Equal(AzureLateSuccessCodes.NeedsOperator, fixture.OperationStore.Current!.LastObservationReasonCode);
+        Assert.Equal(0, fixture.OperationStore.AutoResumeIncrements);
+    }
+
+    private static ElsaInstanceProviderRecoveryRequest AutoResumeRequest(RecoveryFixture fixture) =>
+        fixture.Request with
+        {
+            Envelope = fixture.Request.Envelope with
+            {
+                IdempotencyKey = ElsaInstanceProviderReconciliationService.AutoResumeIdempotencyKey(
+                    fixture.Request.Envelope.LifecycleOperationId, 1)
+            }
+        };
+
     [Theory]
     [InlineData(ElsaInstanceProviderRecoveryOutcome.RecoveryRequired, ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInsufficient, true)]
     [InlineData(ElsaInstanceProviderRecoveryOutcome.RecoveryRequired, ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInvalid, true)]

@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.RuntimeBuilder.Abstractions.Plans;
@@ -303,14 +304,18 @@ public sealed class AzureElsaInstanceProvider(
             // Charge only what the provider resume will accept: the same executor gate, then
             // (below) the same receipt authority and instance-version binding.
             var resumable = AzureProviderResumeEligibility.IsEligible(operation, observed);
+            // A confirmed completion, or a transient failure already seen once, would auto-resume.
+            var wouldAutoResume = completesAttemptedStep || (transientFailed && seenFailedBefore);
             var eligibleAutoResume =
                 operation.AutoResumeCount < AzureNamedDeploymentFreshness.MaximumAutoResumes &&
                 !request.OperatorInitiated &&
                 !autoResumeBlocked &&
                 resumable &&
-                (completesAttemptedStep || (transientFailed && seenFailedBefore));
+                wouldAutoResume;
+            // Nothing retries a step the resume would refuse, so it waits for an operator instead
+            // of reporting a retry that never comes.
             var needsOperator = !request.OperatorInitiated &&
-                (autoResumeBlocked || (completesAttemptedStep && !resumable));
+                (autoResumeBlocked || (wouldAutoResume && !resumable));
             var reasonCode = ResolveObservationReason(observed, eligibleAutoResume, operation.AutoResumeCount, needsOperator);
             await RecordArmObservationClockAsync(
                 operation, eligibleAutoResume, isFailedStepRetry, reasonCode, cancellationToken);
@@ -636,8 +641,12 @@ public sealed class AzureElsaInstanceProvider(
         ElsaInstanceProviderRecoveryRequest request,
         CancellationToken cancellationToken = default)
     {
-        var result = await RecoverCoreAsync(request, cancellationToken);
-        if (ElsaInstanceProviderReconciliationService.IsAutoResumeIdempotencyKey(
+        var replay = new StrongBox<bool>();
+        var result = await RecoverCoreAsync(request, replay, cancellationToken);
+        // A replay re-reads a recovery that was already claimed (a duplicate or late envelope):
+        // its result says nothing new about the resume, and a rejected replay is not a refusal.
+        if (!replay.Value &&
+            ElsaInstanceProviderReconciliationService.IsAutoResumeIdempotencyKey(
                 request.Envelope.IdempotencyKey, request.Envelope.LifecycleOperationId))
             await RecordAutoResumeResultAsync(request.Submission, result, cancellationToken);
         return result;
@@ -678,6 +687,7 @@ public sealed class AzureElsaInstanceProvider(
 
     private async Task<ElsaInstanceProviderRecoveryResult> RecoverCoreAsync(
         ElsaInstanceProviderRecoveryRequest request,
+        StrongBox<bool> replay,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -710,6 +720,10 @@ public sealed class AzureElsaInstanceProvider(
             cancellationToken);
         if (operation is null)
             return RecoveryRequired(ManagedElsaReasonCodeCatalog.AzureRecoveryOperationUnavailable);
+        // Post-claim replay is read-only, but still requires proof that this exact
+        // accepted lifecycle recovery authorized the current provider successor.
+        var isReplay = operation.Status is AzureProviderOperationStatus.Running or AzureProviderOperationStatus.Succeeded;
+        replay.Value = isReplay;
         if (operation.WorkspaceId != submission.WorkspaceId ||
             !string.Equals(operation.TargetKey, WorkloadName(submission.InstanceId), StringComparison.OrdinalIgnoreCase) ||
             operation.Action != AzureProviderOperationAction.Reconcile ||
@@ -749,9 +763,6 @@ public sealed class AzureElsaInstanceProvider(
             !string.Equals(translatedRequestedPlan.Plan.Fingerprint, retainedPlan.Fingerprint, StringComparison.Ordinal))
             return RecoveryRejected(ManagedElsaReasonCodeCatalog.AzureRecoveryPlanMismatch);
 
-        // Post-claim replay is read-only, but still requires proof that this exact
-        // accepted lifecycle recovery authorized the current provider successor.
-        var isReplay = operation.Status is AzureProviderOperationStatus.Running or AzureProviderOperationStatus.Succeeded;
         if (!isReplay && operation.Status != AzureProviderOperationStatus.RecoveryRequired)
             return RecoveryRejected(ManagedElsaReasonCodeCatalog.AzureRecoveryStateInvalid);
 
