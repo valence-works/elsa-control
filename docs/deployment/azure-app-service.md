@@ -489,8 +489,10 @@ changes nothing:
 Phase 1 creates or updates the vault, its network rules and the Key Vault
 Secrets User assignment. A human operator applies it. That operator holds:
 
-- Key Vault Contributor (or another role with
-  `Microsoft.KeyVault/vaults/write`) on the Control resource group;
+- Key Vault Contributor on the Control resource group, or a custom role with
+  `Microsoft.KeyVault/vaults/write` and `Microsoft.Resources/deployments/*`
+  (any `az deployment group what-if` or `create` needs the latter; Key Vault
+  Contributor includes it);
 - `Microsoft.Network/virtualNetworks/subnets/joinViaServiceEndpoint/action`
   on `snet-api-egress`;
 - `Microsoft.Authorization/roleAssignments/write` limited to Key Vault
