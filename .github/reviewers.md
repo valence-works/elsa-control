@@ -94,11 +94,46 @@ on [issue #508](https://github.com/valence-works/elsa-control/issues/508#issueco
   per-PR yes for merges **they** perform, until he confirms a standing
   rule for them in the CEO chat. That does not revoke the control room's
   standing merge-and-staging authority.
-- Codex workers, Cursor, Claude, and other non-control-room workers never
-  merge, and never merge on a control-room PASS.
+- Cursor and other non-control-room workers never merge, and never merge on
+  a control-room PASS. Codex and Claude workers merge only under
+  [Standing self-merge](#standing-self-merge-codex-and-claude).
 
 The author or Cursor posts `ready-for-CR` naming the exact head once CI is
 green. The CEO, or a CEO routine, routes that head to Code Review.
+
+## Standing self-merge (Codex and Claude)
+
+On 2026-10-20, Sipke extended the `elsa-workflows` standing self-merge rule
+of 18 Oct 2026 to `valence-works` (decision log, 2026-10-20). The Codex and
+Claude workers may merge their own PRs after a clean self-review loop. The
+Elsa Control Code Review app is welcome but does not block these PRs, and
+the author does not wait for it. The terms are those of
+[Standing self-merge](https://github.com/elsa-workflows/.github/blob/main/AGENTS.md#standing-self-merge-codex-and-claude)
+in the org AGENTS.md:
+
+- Self-review loop: at most 6 rounds, a round comment on the PR after each
+  round (reviewed head, findings fixed and dropped, test results). Fix
+  actionable findings in new commits until a round finds nothing actionable.
+  If blockers remain after round 6, comment `blocked: review loop exhausted`,
+  add `needs:decision` and stop.
+- Required CI (`CI`, every job `success`) is green on the latest head, and
+  that head is the one the final round reviewed. Hand advisory findings
+  (Bugbot) into the loop; they are input, not a gate.
+- No merge over a human hold, a changes-requested review, an open human
+  review thread, or a `blocked` / `needs:decision` label. Never bypass branch
+  protection. Never use auto-merge. Main freshness and head-pinned,
+  one-at-a-time merges still apply.
+- Before merging, add the `self-merged` label and post the audit comment the
+  org rule names (rounds, findings fixed, remaining Low notes, reviewed head
+  SHA). Write `self-merged under standing authorization: <comment url>` in
+  the merge commit.
+- Identity: Codex posts and merges as `valence-works-codex[bot]`. Claude has
+  no app in `valence-works` yet, so it posts and merges through the owner's
+  account with the `[Claude]` role tag, and only in sessions Sipke starts.
+- Unchanged: production publication, production configuration, live payment
+  changes and destructive actions against real customer resources still need
+  Sipke's explicit approval. PRs that change `.github/workflows/` still need a
+  maintainer with workflow rights to merge.
 
 ## Availability fallback
 
