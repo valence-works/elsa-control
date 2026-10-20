@@ -128,11 +128,13 @@ the values:
    naming the key and the entry, for an entry that does not parse, an IPv4
    network wider than /16, an IPv6 network wider than /32, or an IPv4-mapped
    IPv6 network whose IPv4 part is wider than /16. A single address counts as
-   /32 or /128. An empty list means every caller uses `PerIp`.
+   /32 or /128. With an empty list, a caller uses `PerIp` unless it presents a
+   matching BFF credential (below).
 5. Current state: both BFFs (the Cloud `control-bff` and the Hub
    `cloud-control.ts` callers) are Supabase Edge Functions, so the list is
-   empty in staging and production. They are recognised by the BFF credential
-   instead.
+   empty in staging and production. Until each BFF sends its credential header
+   (a separate change in each BFF) and the credential section is enabled,
+   their calls use `PerIp`. After that they are recognised by the credential.
 
 ### BFF credential (`RateLimiting:BffCredentials`)
 
