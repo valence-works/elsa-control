@@ -434,9 +434,11 @@ public sealed class ManagedElsaHandoffRateLimitTests
         await AssertHandoffRateLimited(listedRejected);
     }
 
+    // An unresolved caller is not covered here: its unresolved-identity window (limit 1, keyed by
+    // address) refuses a second call from the same address whatever the per-address layer does.
+    // Unresolved_callers_presenting_one_credential_do_not_share_the_bff_source_window covers it.
     [Theory]
     [InlineData("anonymous")]
-    [InlineData("unresolved")]
     [InlineData("control")]
     public async Task Valid_credential_without_a_validated_bff_session_stays_on_per_ip(string caller)
     {
@@ -461,6 +463,33 @@ public sealed class ManagedElsaHandoffRateLimitTests
 
         Assert.NotEqual(HttpStatusCode.TooManyRequests, firstAllowed.StatusCode);
         await AssertHandoffRateLimited(rejected);
+    }
+
+    [Fact]
+    public async Task Unresolved_callers_presenting_one_credential_do_not_share_the_bff_source_window()
+    {
+        // BffPerIp = 1: if the credential alone selected bff:source:cloud, the second caller would
+        // share the first caller's window and be refused. On PerIp each address has its own window.
+        const string cloudIssuer = "https://cloud-account.test/auth/v1";
+        const string hubIssuer = "https://hub-account.test/auth/v1";
+        await using var app = CreateCloudAndHubApplication(
+            perIp: 20,
+            perIdentity: 20,
+            cloudIssuer,
+            hubIssuer,
+            bffPerIp: 1,
+            bffCredentials: true);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var first = CallerClient(app, "unresolved", "credential-caller-one", "203.0.113.132");
+        using var second = CallerClient(app, "unresolved", "credential-caller-two", "203.0.113.133");
+        TestBffCredentials.Set(first, TestBffCredentials.Cloud);
+        TestBffCredentials.Set(second, TestBffCredentials.Cloud);
+
+        using var firstAllowed = await PostIssueAsync(first);
+        using var secondAllowed = await PostIssueAsync(second);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, firstAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, secondAllowed.StatusCode);
     }
 
     [Fact]
