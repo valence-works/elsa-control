@@ -510,9 +510,10 @@ The block lasts for the provider operation's lifetime, even after a successful
 operator Recover, so a later park of the same operation (for example at Health or
 Promotion) also waits for an operator.
 An ARM read that failed or is still in progress keeps the 60/120/240/300 s
-backoff and the three-resume budget. Read `autoResumeCount`,
-`autoResumeOutcomeCodes` and `reasonCode` from the admin `provider-current` route
-before choosing an operator Recover.
+backoff and the three-resume budget. Read `autoResumeBlocked` (the authoritative
+block), `autoResumeCount`, `autoResumeOutcomeCodes` and `reasonCode` from the admin
+`provider-current` route before choosing an operator Recover. The outcome codes and
+reason code are best-effort history; trust `autoResumeBlocked` when they disagree.
 
 ## Controlled-fixture validation
 

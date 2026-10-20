@@ -233,6 +233,7 @@ public static class AdminManagedElsaRecoveryEndpoints
                     ? providerOperation.LastObservationReasonCode
                     : null,
                 AutoResumeCount = providerOperation.AutoResumeCount,
+                AutoResumeBlocked = providerOperation.AutoResumeBlocked,
                 AutoResumeOutcomeCodes = providerOperation.AutoResumeOutcomes
                     .Where(AzureProviderOperationValidation.IsSafeCode)
                     .ToArray(),
@@ -420,6 +421,13 @@ public sealed record AdminManagedElsaProviderOperationResponse(
 
     /// <summary>Automatic resumes charged for this lifecycle operation (cap 3).</summary>
     public int AutoResumeCount { get; init; }
+
+    /// <summary>
+    /// Whether auto-resume is stopped for this provider operation's lifetime. This is the
+    /// authoritative block; <see cref="AutoResumeOutcomeCodes"/> and <see cref="ReasonCode"/>
+    /// are best-effort history.
+    /// </summary>
+    public bool AutoResumeBlocked { get; init; }
 
     /// <summary>
     /// Safe codes for each charged auto-resume, oldest first: the claim outcome

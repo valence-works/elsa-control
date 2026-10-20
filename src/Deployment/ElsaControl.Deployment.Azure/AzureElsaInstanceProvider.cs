@@ -709,10 +709,12 @@ public sealed class AzureElsaInstanceProvider(
         {
             throw;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
             // A failed correlation or receipt read: nothing was recorded, and the next reconcile
             // still observes the provider operation.
+            _logger.LogWarning(exception,
+                "Could not correlate auto-resume result {ResultCode}; nothing was recorded.", result.Code);
         }
     }
 

@@ -1485,6 +1485,7 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(AzureProviderOperationPhase.FoundationReady, body.Phase);
         Assert.Equal(AzureProviderRunnerStep.Workload, body.AttemptedStep);
         Assert.Equal(1, body.AutoResumeCount);
+        Assert.True(body.AutoResumeBlocked);
         Assert.Equal(ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator, body.ReasonCode);
         Assert.Equal(
             [

@@ -84,7 +84,7 @@ the staging bound stays below the runner's one-hour validation limit. A timed-ou
 does not prove Azure stopped working: inspect provider state and ownership before any recovery.
 The admin-only `GET /api/admin/workspaces/{workspaceId}/instances/{instanceId}/operations/provider-current`
 returns only the correlated provider status, phase, attempted step, checkpoint, and safe diagnostic
-codes, plus the auto-resume count, each auto-resume outcome code (`autoResumeOutcomeCodes`), the
+codes, plus the auto-resume count, whether auto-resume is blocked (`autoResumeBlocked`), each auto-resume outcome code (`autoResumeOutcomeCodes`), the
 last observation reason code, and whether `staging.late-success-lever.applied` was ever recorded
 (`lateSuccessLeverApplied`). Use it with the lifecycle topology and Azure deployment state before calling the guarded
 recovery endpoint. A 409 recovery rejection is a stop signal, not a reason to submit Create again.
