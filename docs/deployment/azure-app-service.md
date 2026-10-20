@@ -108,7 +108,10 @@ Validated Cloud/Hub sessions get the wider `BffPerIp` window on
 3. Verify on staging with the source-address diagnostic. Set the app setting
    `RateLimiting__SourceDiagnosticLogLevel=Debug`, make one call through the
    BFF, and confirm the `ElsaControl.Api.RateLimiting` Debug event shows the
-   expected `RemoteIpAddress` with `matched=True`. The event carries the
+   expected `RemoteIpAddress` with `matched=True`. Read it in the admin console
+   logs (`GET /api/admin/console-logs/recent`, admin only); the API exports no
+   logs to Application Insights. A refused request can log the event twice,
+   because the rate limiter retries the partition lookup. The event carries the
    address, the match flag and the policy name only. Then delete the setting
    (`az webapp config appsettings delete --resource-group <group> --name <site>
    --setting-names RateLimiting__SourceDiagnosticLogLevel`); unset, the
