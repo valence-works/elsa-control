@@ -471,12 +471,12 @@ Required deploy inputs for vault and site apply:
 
 - `AZURE_API_EGRESS_SUBNET_ID`: egress subnet with the Key Vault service
   endpoint. Empty refuses the vault and the site.
-- `AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID`: deploy identity principal. Required.
-  The helper does not resolve it through Microsoft Graph.
 - `API_KEY_VAULT_SECRETS_WRITTEN`: must be `true` before the site is applied
   (phase 2).
 - `API_KEY_VAULT_ROLLBACK_ACTIVE`: when `true`, phase 2 refuses to apply
-  references so a manual rollback is not silently undone.
+  references so a manual rollback is not silently undone. An `infra`
+  dispatch fails in "Check deployment configuration", before any Azure
+  login.
 
 Optional deploy inputs:
 
@@ -484,12 +484,26 @@ Optional deploy inputs:
   operator write path.
 - `KEY_VAULT_API_OUTBOUND_IP_CIDRS`: optional NAT `/32` CIDRs.
 
-The GitHub deploy identity in `infra/control-deploy-identity` cannot create
-the vault or its role assignments, and it has no Key Vault data role. Phase 1
-is applied by an operator or by an identity that already has
-`roleAssignments/write` (scoped as narrowly as possible, for example RBAC
-Administrator conditioned to Key Vault Secrets User). Later site deploys
-(phase 2) can use the GitHub deploy identity.
+Phase 1 creates or updates the vault, its network rules and the Key Vault
+Secrets User assignment. A human operator applies it. That operator holds:
+
+- Key Vault Contributor (or another role with
+  `Microsoft.KeyVault/vaults/write`) on the Control resource group;
+- `Microsoft.Network/virtualNetworks/subnets/joinViaServiceEndpoint/action`
+  on `snet-api-egress`;
+- `Microsoft.Authorization/roleAssignments/write` limited to Key Vault
+  Secrets User, for example Role Based Access Control Administrator with a
+  condition on that role.
+
+Re-running phase 1 to change the vault firewall rules uses the same
+operator.
+
+Phase 2 (a run without `--vault-only`) does not deploy the vault or its
+role assignment. It reads the existing vault URI with `az keyvault list` and
+`az keyvault show`, and fails with a pointer to phase 1 when the vault is
+missing. Phase 2 needs only management-plane read on the vault (Reader on
+the resource group is enough) and no Key Vault data role. The roles of the
+GitHub deploy identity in `infra/control-deploy-identity` do not change.
 
 SCM and FTP basic-auth publishing credentials are off
 (`basicPublishingCredentialsPolicies` `scm` and `ftp`, `allow: false`).
@@ -497,7 +511,7 @@ SCM and FTP basic-auth publishing credentials are off
 ### Operator write path
 
 1. Apply `infra/control-egress` so the Key Vault service endpoint exists.
-2. Phase 1 — create the vault only:
+2. Phase 1 — as the phase 1 operator, create the vault only:
    `scripts/deploy-azure-elsa-control.sh --vault-only`.
 3. If needed, add your client CIDR with `az keyvault network-rule add`
    (management plane).
@@ -507,7 +521,8 @@ SCM and FTP basic-auth publishing credentials are off
 6. Remove the temporary write role.
 7. Phase 2 — set `API_KEY_VAULT_SECRETS_WRITTEN=true` in the GitHub
    environment, then apply the site so settings are repointed to the
-   versionless references. Confirm every listed reference reports
+   versionless references. Phase 2 reads the existing vault and does not
+   redeploy it. Confirm every listed reference reports
    `Resolved` with `scripts/check-key-vault-references.sh` (names and
    status only).
 
@@ -538,8 +553,9 @@ environment's cutover, then delete them.
 Rollback restores the previous App Service settings from the GitHub
 environment copies. After a manual rollback, set
 `API_KEY_VAULT_ROLLBACK_ACTIVE=true` and clear
-`API_KEY_VAULT_SECRETS_WRITTEN` so the next `infra` deploy fails the
-phase-2 gate instead of silently re-applying the references. Pause `infra`
+`API_KEY_VAULT_SECRETS_WRITTEN` so the next `infra` dispatch fails in
+"Check deployment configuration", before any Azure login, instead of
+silently re-applying the references. Pause `infra`
 deploys, or revert this change, until the rollback is resolved.
 
 Staging:
@@ -584,8 +600,23 @@ The Elsa Control Lead applies production as follows, before
 production deploy is allowed to pass Stripe `--capture`:
 
 1. Apply `infra/control-egress` if the Key Vault service endpoint is missing.
-2. Phase 1: apply `infra/api-key-vault` (`--vault-only`) with an operator
-   or an identity that already has `roleAssignments/write`.
+2. Phase 1: as the phase 1 operator listed under "API Key Vault", deploy
+   only the vault module to the production resource group. Do not use
+   `scripts/deploy-azure-elsa-control.sh` here: it applies
+   `infra/main.bicep` first, and that template does not run against
+   production. Preview with `what-if`, then apply:
+
+   ```bash
+   az deployment group what-if --subscription <prod-subscription> --resource-group rg-valence-control-prod \
+     --name api-key-vault --template-file infra/api-key-vault/api-key-vault.module.bicep \
+     --parameters apiIdentityPrincipalId=<API identity principal id> apiEgressSubnetId=<prod snet-api-egress id> \
+     operatorWriteIpCidrs='["<operator /32>"]'
+   az deployment group create --subscription <prod-subscription> --resource-group rg-valence-control-prod \
+     --name api-key-vault --template-file infra/api-key-vault/api-key-vault.module.bicep \
+     --parameters apiIdentityPrincipalId=<API identity principal id> apiEgressSubnetId=<prod snet-api-egress id> \
+     operatorWriteIpCidrs='["<operator /32>"]'
+   ```
+
 3. Write the listed secrets from private files. Do not print values.
 4. Set the listed App Service settings to the versionless
    `@Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/<name>)`
