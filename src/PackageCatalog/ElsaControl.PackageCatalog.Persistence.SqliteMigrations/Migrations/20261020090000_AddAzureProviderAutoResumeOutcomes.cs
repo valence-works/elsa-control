@@ -23,11 +23,19 @@ public sealed class AddAzureProviderAutoResumeOutcomes : Migration
             type: "INTEGER",
             nullable: false,
             defaultValue: false);
+
+        migrationBuilder.AddColumn<bool>(
+            name: "AutoResumeBlocked",
+            table: "AzureProviderOperations",
+            type: "INTEGER",
+            nullable: false,
+            defaultValue: false);
     }
 
     protected override void Down(MigrationBuilder migrationBuilder)
     {
         migrationBuilder.Sql("""ALTER TABLE "AzureProviderOperations" DROP COLUMN "AutoResumeOutcomesJson";""");
         migrationBuilder.Sql("""ALTER TABLE "AzureProviderOperations" DROP COLUMN "LateSuccessLeverApplied";""");
+        migrationBuilder.Sql("""ALTER TABLE "AzureProviderOperations" DROP COLUMN "AutoResumeBlocked";""");
     }
 }

@@ -40,7 +40,7 @@ public static class AzureLateSuccessCodes
     public static bool IsAutoResumeBlocked(AzureProviderOperation operation)
     {
         ArgumentNullException.ThrowIfNull(operation);
-        return operation.AutoResumeOutcomes.Contains(NeedsOperator, StringComparer.Ordinal);
+        return operation.AutoResumeBlocked;
     }
 
     /// <summary>

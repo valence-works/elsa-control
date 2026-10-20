@@ -329,7 +329,8 @@ public sealed class AzureElsaInstanceProviderTests
                 AzureLateSuccessCodes.AutoResumeAccepted,
                 ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInvalid,
                 AzureLateSuccessCodes.NeedsOperator
-            ]);
+            ],
+            autoResumeBlocked: true);
 
         var observation = await fixture.Provider.ObserveAsync(fixture.Request);
 
@@ -1735,7 +1736,8 @@ public sealed class AzureElsaInstanceProviderTests
         int autoResumeCount = 0,
         DateTimeOffset? now = null,
         AzureProviderResourceReferences? resources = null,
-        IReadOnlyList<string>? autoResumeOutcomes = null)
+        IReadOnlyList<string>? autoResumeOutcomes = null,
+        bool autoResumeBlocked = false)
     {
         var workspaceId = Guid.Parse("11111111-1111-1111-1111-111111111111");
         var operationId = Guid.Parse("33333333-3333-3333-3333-333333333333");
@@ -1751,6 +1753,7 @@ public sealed class AzureElsaInstanceProviderTests
                 ? WorkloadParkResources()
                 : new()),
             AutoResumeOutcomes = autoResumeOutcomes ?? [],
+            AutoResumeBlocked = autoResumeBlocked,
             AttemptNumber = 2,
             Version = 2,
             OrganizationId = TestOrganizationId,
@@ -2317,7 +2320,8 @@ public sealed class AzureElsaInstanceProviderTests
                 Current = Current with
                 {
                     LastObservationReasonCode = reasonCode,
-                    AutoResumeOutcomes = [.. Current.AutoResumeOutcomes, reasonCode]
+                    AutoResumeOutcomes = [.. Current.AutoResumeOutcomes, reasonCode],
+                    AutoResumeBlocked = Current.AutoResumeBlocked || reasonCode == AzureLateSuccessCodes.NeedsOperator
                 };
             return Task.CompletedTask;
         }

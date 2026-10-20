@@ -189,9 +189,16 @@ public sealed record AzureProviderOperation(
 {
     /// <summary>
     /// Safe codes for each charged auto-resume, oldest first: the reconciler's claim outcome and
-    /// the provider resume result. Bounded; never carries provider payloads.
+    /// the provider resume result. Bounded; never carries provider payloads. Observability only:
+    /// <see cref="AutoResumeBlocked"/> is the recovery state.
     /// </summary>
     public IReadOnlyList<string> AutoResumeOutcomes { get; init; } = [];
+
+    /// <summary>
+    /// A charged auto-resume was refused with a code another ARM read cannot change, so no
+    /// further auto-resume is charged for this provider operation. Set once, never cleared.
+    /// </summary>
+    public bool AutoResumeBlocked { get; init; }
 
     /// <summary>The staging late-success lever tagged a step result of this operation.</summary>
     public bool LateSuccessLeverApplied { get; init; }

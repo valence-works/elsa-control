@@ -1452,6 +1452,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<long?>("AttemptedStepStartedAt")
                         .HasColumnType("bigint");
 
+                    b.Property<bool>("AutoResumeBlocked")
+                        .HasColumnType("bit");
+
                     b.Property<int>("AutoResumeCount")
                         .HasColumnType("int");
 

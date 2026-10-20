@@ -1433,6 +1433,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<long?>("AttemptedStepStartedAt")
                         .HasColumnType("INTEGER");
 
+                    b.Property<bool>("AutoResumeBlocked")
+                        .HasColumnType("INTEGER");
+
                     b.Property<int>("AutoResumeCount")
                         .HasColumnType("INTEGER");
 

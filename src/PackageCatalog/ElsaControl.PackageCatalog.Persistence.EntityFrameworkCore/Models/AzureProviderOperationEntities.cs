@@ -55,6 +55,7 @@ internal sealed class AzureProviderOperationEntity
     public string? LastObservationReasonCode { get; set; }
     public string? AutoResumeOutcomesJson { get; set; }
     public bool LateSuccessLeverApplied { get; set; }
+    public bool AutoResumeBlocked { get; set; }
     public long CheckpointSequence { get; set; }
     public int AttemptNumber { get; set; }
     public long Version { get; set; }

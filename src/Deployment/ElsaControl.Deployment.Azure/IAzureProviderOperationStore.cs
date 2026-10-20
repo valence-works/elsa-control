@@ -119,9 +119,11 @@ public interface IAzureProviderOperationStore
     /// <summary>
     /// Records an operator-visible auto-resume outcome on
     /// <c>LastObservationReasonCode</c> and appends it to
-    /// <see cref="AzureProviderOperation.AutoResumeOutcomes"/>. Transition rows stay
-    /// coupled to <c>Version</c>; writing an out-of-band sequence would collide with
-    /// the next <see cref="ClaimRecoveryAsync"/>.
+    /// <see cref="AzureProviderOperation.AutoResumeOutcomes"/>. Recording
+    /// <c>azure.recovery.needs-operator</c> also sets
+    /// <see cref="AzureProviderOperation.AutoResumeBlocked"/>, which is never cleared.
+    /// Transition rows stay coupled to <c>Version</c>; writing an out-of-band sequence
+    /// would collide with the next <see cref="ClaimRecoveryAsync"/>.
     /// </summary>
     Task RecordAutoResumeOutcomeAsync(
         Guid workspaceId,

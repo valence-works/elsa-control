@@ -225,6 +225,34 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
             (await fixture.OperationStore.GetAsync(fixture.Workspace.Id, fixture.Operation.Id))!.AutoResumeOutcomes);
     }
 
+    /// <summary>
+    /// The auto-resume block is durable recovery state. The outcome history is observability: it
+    /// reads as empty when corrupt or unsafe, and losing it must not lift the block.
+    /// </summary>
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("""["Not A Safe Code"]""")]
+    [InlineData("[]")]
+    public async Task Auto_resume_block_survives_a_corrupt_or_unsafe_outcome_history(string history)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var fixture = await SeedProviderObservationAsync(db, ElsaInstanceOperationAction.Create);
+
+        await fixture.OperationStore.RecordAutoResumeOutcomeAsync(
+            fixture.Workspace.Id, fixture.Operation.Id, AzureLateSuccessCodes.NeedsOperator);
+        await db.AzureProviderOperations
+            .Where(x => x.Id == fixture.Operation.Id)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.AutoResumeOutcomesJson, history));
+        db.ChangeTracker.Clear();
+
+        var operation = await fixture.OperationStore.GetAsync(fixture.Workspace.Id, fixture.Operation.Id);
+        Assert.Empty(operation!.AutoResumeOutcomes);
+        Assert.True(AzureLateSuccessCodes.IsAutoResumeBlocked(operation));
+    }
+
     private static async Task<List<ElsaInstanceProviderRecoveryResult>> RunHostedTicksAsync(
         ExecutingLateSuccessStack stack,
         ObservationFixture fixture,

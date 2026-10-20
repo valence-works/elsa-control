@@ -1359,6 +1359,12 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
     {
         if (!AzureProviderOperationValidation.IsSafeCode(reasonCode))
             return;
+        // The auto-resume block is recovery state, not history: one atomic, set-only column
+        // update, so neither a lossy history nor another writer of this row can lift it.
+        if (string.Equals(reasonCode, AzureLateSuccessCodes.NeedsOperator, StringComparison.Ordinal))
+            await db.AzureProviderOperations
+                .Where(x => x.WorkspaceId == workspaceId && x.Id == operationId)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.AutoResumeBlocked, true), cancellationToken);
         var entity = await db.AzureProviderOperations.SingleOrDefaultAsync(
             x => x.WorkspaceId == workspaceId && x.Id == operationId, cancellationToken);
         if (entity is null)
@@ -1805,13 +1811,15 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             LastObservationReasonCode: x.LastObservationReasonCode)
         {
             AutoResumeOutcomes = ReadAutoResumeOutcomes(x.AutoResumeOutcomesJson),
+            AutoResumeBlocked = x.AutoResumeBlocked,
             LateSuccessLeverApplied = x.LateSuccessLeverApplied
         };
     }
 
     /// <summary>
     /// Bounded, safe-code-only history. A corrupt value reads as empty rather than failing the
-    /// operation read; the history is observability, not recovery authority.
+    /// operation read; the history is observability, not recovery authority. The auto-resume
+    /// block lives in its own <c>AutoResumeBlocked</c> column.
     /// </summary>
     private static IReadOnlyList<string> ReadAutoResumeOutcomes(string? json)
     {
