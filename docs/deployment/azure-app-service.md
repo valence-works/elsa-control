@@ -254,7 +254,9 @@ az webapp config appsettings set --resource-group <group> --name <site> --output
 `scripts/check-key-vault-references.sh` reports each `Secret` and
 `PreviousSecret` setting: `NotSet` when it has no reference (the feature or
 the rotation is off), and it fails unless a present one is `Resolved`.
-Without these settings BFF calls fall back to `PerIp`; nothing else changes.
+Without these settings, a BFF call whose address matches
+`RateLimiting__BffEgressNetworks` uses `BffPerIp` and any other BFF call falls
+back to `PerIp`; nothing else changes.
 
 **BFF function secrets.** Both BFFs read `ELSA_CONTROL_BFF_CREDENTIAL`.
 
