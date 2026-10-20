@@ -23,6 +23,7 @@ public static class CloudAccountLinkEndpoints
             AccountIdentityLinkService links,
             IOptions<HubAccountIdentityOptions> hubAccountOptions,
             TimeProvider timeProvider,
+            ILoggerFactory loggerFactory,
             CancellationToken cancellationToken) =>
         {
             context.Response.Headers.CacheControl = "private, no-store";
@@ -43,12 +44,16 @@ public static class CloudAccountLinkEndpoints
             var hubStale = !AccountSignInRecency.IsRecent(pair.HubLastSignIn, now, window);
             var cloudStale = !AccountSignInRecency.IsRecent(pair.CloudLastSignIn, now, window);
             if (hubStale || cloudStale)
-                return ReauthenticationRequired(context, window, (hubStale, cloudStale) switch
+            {
+                var staleSession = (hubStale, cloudStale) switch
                 {
                     (true, true) => "both",
                     (true, false) => "hub",
                     _ => "cloud"
-                });
+                };
+                LogReauthenticationRequired(loggerFactory, staleSession, pair.HubLastSignIn, pair.CloudLastSignIn, now);
+                return ReauthenticationRequired(context, window, staleSession);
+            }
 
             var result = await links.LinkAsync(pair.CloudIdentity, pair.HubIdentity, cancellationToken);
             return result.Outcome switch
@@ -101,6 +106,25 @@ public static class CloudAccountLinkEndpoints
                 ["staleSession"] = staleSession
             });
     }
+
+    // Ages only: a missing sign-in (no qualifying amr entry) is told apart from an old one
+    // without logging tokens or subjects.
+    private static void LogReauthenticationRequired(
+        ILoggerFactory loggerFactory,
+        string staleSession,
+        DateTimeOffset? hubLastSignIn,
+        DateTimeOffset? cloudLastSignIn,
+        DateTimeOffset now)
+    {
+        loggerFactory.CreateLogger("ElsaControl.Api.Cloud.AccountLink").LogInformation(
+            "Account link refused: reauthentication required for {StaleSession}. Hub sign-in age {HubSignInAge}, Cloud sign-in age {CloudSignInAge}.",
+            staleSession,
+            SignInAge(hubLastSignIn, now),
+            SignInAge(cloudLastSignIn, now));
+    }
+
+    private static string SignInAge(DateTimeOffset? lastSignIn, DateTimeOffset now) =>
+        lastSignIn is { } signIn ? $"{(long)(now - signIn).TotalSeconds}s" : "no-sign-in-amr";
 
     private static IResult Problem(string code, string title, int statusCode) =>
         Results.Problem(
