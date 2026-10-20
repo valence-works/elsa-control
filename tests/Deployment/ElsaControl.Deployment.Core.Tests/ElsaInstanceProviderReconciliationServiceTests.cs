@@ -179,6 +179,13 @@ public sealed class ElsaInstanceProviderReconciliationServiceTests
         var recovery = Assert.Single(store.RecoveryRequests);
         Assert.Equal(accepted.Operation.Id, recovery.OperationId);
         Assert.Equal($"auto-resume.{accepted.Operation.Id:N}.1", recovery.IdempotencyKey);
+        // The provider attributes the resume result to this charge by the same key (#860).
+        Assert.True(ElsaInstanceProviderReconciliationService.IsAutoResumeIdempotencyKey(
+            recovery.IdempotencyKey, accepted.Operation.Id));
+        Assert.False(ElsaInstanceProviderReconciliationService.IsAutoResumeIdempotencyKey(
+            recovery.IdempotencyKey, Guid.NewGuid()));
+        Assert.False(ElsaInstanceProviderReconciliationService.IsAutoResumeIdempotencyKey(
+            "admin-recover", accepted.Operation.Id));
         Assert.Equal(1, port.AutoResumeCount);
         Assert.Equal(["azure.recovery.auto-resume.accepted"], port.Outcomes);
     }

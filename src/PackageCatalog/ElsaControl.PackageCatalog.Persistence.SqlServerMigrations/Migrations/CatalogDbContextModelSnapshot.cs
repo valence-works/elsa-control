@@ -1452,8 +1452,15 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<long?>("AttemptedStepStartedAt")
                         .HasColumnType("bigint");
 
+                    b.Property<bool>("AutoResumeBlocked")
+                        .HasColumnType("bit");
+
                     b.Property<int>("AutoResumeCount")
                         .HasColumnType("int");
+
+                    b.Property<string>("AutoResumeOutcomesJson")
+                        .HasMaxLength(4096)
+                        .HasColumnType("nvarchar(max)");
 
                     b.Property<int?>("CapacityCpuMillicores")
                         .HasColumnType("int");
@@ -1551,6 +1558,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<string>("LastObservationReasonCode")
                         .HasMaxLength(128)
                         .HasColumnType("nvarchar(128)");
+
+                    b.Property<bool>("LateSuccessLeverApplied")
+                        .HasColumnType("bit");
 
                     b.Property<long?>("LeaseExpiresAt")
                         .HasColumnType("bigint");

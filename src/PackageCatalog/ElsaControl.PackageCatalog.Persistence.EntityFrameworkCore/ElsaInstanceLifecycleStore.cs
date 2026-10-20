@@ -2788,8 +2788,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 existingOperation.ReconciliationRetryEvidenceReference,
                 existingOperation.ReconciliationRetryEvidenceDigest,
                 cancellationToken);
+            // The provider resume binds the receipt with the same rule (#860): a no-op
+            // reconcile keeps the receipt's version, a changing one commits the next.
             if (observation is null || existingOperation.ReconciledInstanceVersion is not { } reconciledInstanceVersion ||
-                (observation.ObservedInstanceVersion != reconciledInstanceVersion - 1 &&
+                (!AzureProviderResumeEligibility.IsBoundToReconciledInstanceVersion(
+                     observation.ObservedInstanceVersion, reconciledInstanceVersion) &&
                  observation.ObservedInstanceVersion != observedInstanceVersion))
                 throw Conflict("Provider reconciliation retry observation is stale.");
 
