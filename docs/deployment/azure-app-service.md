@@ -180,8 +180,11 @@ never the value if: there are no sources; a `Name` is not `cloud` or `hub`, or
 appears twice; a `Secret` is missing, shorter than 32 characters or contains
 whitespace; a `PreviousSecret` is set but shorter than 32 characters, contains
 whitespace or equals `Secret`; a value is shared across sources; or a value is
-still an unresolved `@Microsoft.KeyVault(...)` reference string. The whole API
-then does not start, not only rate limiting. To recover, turn the section off
+still an unresolved `@Microsoft.KeyVault(...)` reference string. The `Sources:N`
+in the error is the position among the configured sources, not the app setting
+index: with only `hub` configured (`Sources__1__*`), its errors read
+`Sources:0`. The whole API then does not start, not only rate limiting. To
+recover, turn the section off
 and restart; BFF calls fall back to `PerIp`:
 
 ```bash
