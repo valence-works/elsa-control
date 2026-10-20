@@ -31,6 +31,18 @@ public sealed class ElsaInstanceProviderReconciliationService(
         string.Equals(code, ManagedElsaReasonCodeCatalog.AzureRecoveryRetrying, StringComparison.Ordinal) ||
         string.Equals(code, ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator, StringComparison.Ordinal);
 
+    /// <summary>
+    /// The lifecycle recovery idempotency key of the reconciler's <paramref name="sequence"/>-th
+    /// automatic resume of <paramref name="operationId"/>. The provider uses it to attribute a
+    /// recovery result to a charged auto-resume.
+    /// </summary>
+    public static string AutoResumeIdempotencyKey(Guid operationId, int sequence) =>
+        $"auto-resume.{operationId:N}.{sequence}";
+
+    public static bool IsAutoResumeIdempotencyKey(string? idempotencyKey, Guid operationId) =>
+        idempotencyKey is not null &&
+        idempotencyKey.StartsWith($"auto-resume.{operationId:N}.", StringComparison.Ordinal);
+
     public static bool IsAutoResumeExhaustedCode(string? code) =>
         string.Equals(code, AutoResumeExhaustedCode, StringComparison.Ordinal);
 
@@ -261,9 +273,8 @@ public sealed class ElsaInstanceProviderReconciliationService(
             claimedCount = claimed.Value;
         }
 
-        var idempotencyKey = claimedCount > 0
-            ? $"auto-resume.{operation.Id:N}.{claimedCount}"
-            : $"auto-resume.{operation.Id:N}.{operation.AttemptNumber}";
+        var idempotencyKey = AutoResumeIdempotencyKey(
+            operation.Id, claimedCount > 0 ? claimedCount : operation.AttemptNumber);
         try
         {
             await lifecycle!.RecoverAsync(

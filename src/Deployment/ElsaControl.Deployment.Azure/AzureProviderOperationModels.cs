@@ -187,6 +187,15 @@ public sealed record AzureProviderOperation(
     int ArmObservationBackoffSeconds = 0,
     string? LastObservationReasonCode = null)
 {
+    /// <summary>
+    /// Safe codes for each charged auto-resume, oldest first: the reconciler's claim outcome and
+    /// the provider resume result. Bounded; never carries provider payloads.
+    /// </summary>
+    public IReadOnlyList<string> AutoResumeOutcomes { get; init; } = [];
+
+    /// <summary>The staging late-success lever tagged a step result of this operation.</summary>
+    public bool LateSuccessLeverApplied { get; init; }
+
     [JsonIgnore]
     public IReadOnlyDictionary<string, string> SafeSecretReferences => SecretReferences ?? EmptySecretReferences;
 

@@ -231,7 +231,14 @@ public static class AdminManagedElsaRecoveryEndpoints
             {
                 ReasonCode = AzureProviderOperationValidation.IsSafeCode(providerOperation.LastObservationReasonCode)
                     ? providerOperation.LastObservationReasonCode
-                    : null
+                    : null,
+                AutoResumeCount = providerOperation.AutoResumeCount,
+                AutoResumeOutcomeCodes = providerOperation.AutoResumeOutcomes
+                    .Where(AzureProviderOperationValidation.IsSafeCode)
+                    .ToArray(),
+                LateSuccessLeverApplied = providerOperation.LateSuccessLeverApplied ||
+                    providerOperation.Diagnostics.Any(diagnostic => string.Equals(
+                        diagnostic.Code, StagingLateSuccessLeverDefaults.AppliedCode, StringComparison.Ordinal))
             });
         });
 
@@ -410,4 +417,18 @@ public sealed record AdminManagedElsaProviderOperationResponse(
     bool EndpointValid = false)
 {
     public string? ReasonCode { get; init; }
+
+    /// <summary>Automatic resumes charged for this lifecycle operation (cap 3).</summary>
+    public int AutoResumeCount { get; init; }
+
+    /// <summary>
+    /// Safe codes for each charged auto-resume, oldest first: the claim outcome
+    /// (for example <c>azure.recovery.auto-resume.accepted</c>), the provider
+    /// resume result, and <c>azure.recovery.needs-operator</c> when a refusal
+    /// stopped further auto-resumes.
+    /// </summary>
+    public IReadOnlyList<string> AutoResumeOutcomeCodes { get; init; } = [];
+
+    /// <summary>Whether a step result carried <c>staging.late-success-lever.applied</c>.</summary>
+    public bool LateSuccessLeverApplied { get; init; }
 }

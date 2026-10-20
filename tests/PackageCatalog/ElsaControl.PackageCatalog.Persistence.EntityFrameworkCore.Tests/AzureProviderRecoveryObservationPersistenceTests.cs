@@ -1603,6 +1603,22 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
         var operation = await db.AzureProviderOperations.SingleAsync(x => x.Id == fixture.Operation.Id);
         operation.AttemptedStep = AzureProviderRunnerStep.Workload;
         operation.Phase = AzureProviderOperationPhase.FoundationReady;
+        // A real Workload park retains foundation, registry and SQL cleanup handles; without
+        // them the provider resume refuses, so the reconciler must not charge an auto-resume.
+        var retained = RegistryResources(fixture.Assignment, fixture.Operation.PlanFingerprint);
+        operation.ResourceGroupName = retained.ResourceGroupName;
+        operation.FoundationDeploymentId = retained.FoundationDeploymentId;
+        operation.WorkloadIdentityResourceId = retained.WorkloadIdentityResourceId;
+        operation.WorkloadIdentityClientId = retained.WorkloadIdentityClientId;
+        operation.WorkloadIdentityPrincipalId = retained.WorkloadIdentityPrincipalId;
+        operation.KeyVaultResourceId = retained.KeyVaultResourceId;
+        operation.KeyVaultUri = retained.KeyVaultUri;
+        operation.SqlServerResourceId = retained.SqlServerResourceId;
+        operation.SqlServerFqdn = retained.SqlServerFqdn;
+        operation.ContainerAppsEnvironmentResourceId = retained.ContainerAppsEnvironmentResourceId;
+        operation.RegistryResourceId = retained.RegistryResourceId;
+        operation.AcrPullDeploymentId = retained.AcrPullDeploymentId;
+        operation.AcrPullRoleAssignmentId = retained.AcrPullRoleAssignmentId;
         operation.LastArmObservedAt = null;
         operation.ArmObservationBackoffSeconds = 0;
         operation.AutoResumeCount = autoResumeCount;

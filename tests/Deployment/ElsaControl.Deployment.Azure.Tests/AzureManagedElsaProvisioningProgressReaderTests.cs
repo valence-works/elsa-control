@@ -429,7 +429,7 @@ public sealed class AzureManagedElsaProvisioningProgressReaderTests
             Snapshot = new AzureManagedElsaProvisioningOperationSnapshot(
                 Provider(AzureProviderOperationPhase.WorkloadReady),
                 [
-                    Transition(1, AzureProviderOperationPhase.HealthVerified),
+                    Transition(1, AzureProviderOperationPhase.TrafficPromoted),
                     Transition(2, AzureProviderOperationPhase.WorkloadReady),
                     Transition(3, (AzureProviderOperationPhase)999)
                 ])

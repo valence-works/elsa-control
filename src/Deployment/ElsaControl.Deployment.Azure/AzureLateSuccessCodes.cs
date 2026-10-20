@@ -32,4 +32,38 @@ public static class AzureLateSuccessCodes
     public static bool IsTerminalDeploymentFailure(string? code) =>
         code is DeploymentFailed or DeploymentCanceled or Retrying or NeedsOperator
             or AutoResumeExhausted;
+
+    /// <summary>
+    /// A charged auto-resume came back with a refusal that another ARM read cannot change, so
+    /// the operation waits for an operator and no further auto-resume is charged.
+    /// </summary>
+    public static bool IsAutoResumeBlocked(AzureProviderOperation operation)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        return operation.AutoResumeOutcomes.Contains(NeedsOperator, StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// Provider resume refusals that a later ARM read cannot change: a rejected request, or a
+    /// pre-claim authority, plan, identity or eligibility mismatch. Anything else (an ARM read
+    /// that failed or is still in progress, a lost claim, or an outcome after the claim) keeps
+    /// the ordinary auto-resume backoff and budget.
+    /// </summary>
+    public static bool IsNonTransientResumeRefusal(ElsaInstanceProviderRecoveryOutcome outcome, string? code) =>
+        outcome == ElsaInstanceProviderRecoveryOutcome.Rejected ||
+        outcome == ElsaInstanceProviderRecoveryOutcome.RecoveryRequired &&
+        code is ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInsufficient
+            or ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInvalid
+            or ManagedElsaReasonCodeCatalog.AzureRecoveryObservationUnavailable
+            or ManagedElsaReasonCodeCatalog.AzureRecoveryStepUnsupported
+            or ManagedElsaReasonCodeCatalog.AzureRecoveryOperationUnavailable
+            or ManagedElsaReasonCodeCatalog.AzureRecoveryUnavailable
+            or ManagedElsaReasonCodeCatalog.AzureRecoveryAssignmentInvalid
+            or ManagedElsaReasonCodeCatalog.AzureRecoveryAssignmentMismatch
+            or ManagedElsaReasonCodeCatalog.AzureRecoveryIdentityMismatch
+            or ManagedElsaReasonCodeCatalog.AzureRecoveryPlanUnavailable
+            or ManagedElsaReasonCodeCatalog.AzureRecoveryPlanMismatch
+            or ManagedElsaReasonCodeCatalog.AzureRecoveryStateInvalid
+            or ManagedElsaReasonCodeCatalog.AzureRecoveryFoundationOutputsInvalid
+            or ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadOutputsInvalid;
 }

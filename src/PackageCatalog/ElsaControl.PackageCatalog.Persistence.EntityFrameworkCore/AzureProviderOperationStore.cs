@@ -435,8 +435,8 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         model.Validate();
         if (!string.Equals(referenceDigest, binding.Digest, StringComparison.Ordinal) ||
             !string.Equals(model.ComputeRecordDigest(recordId), binding.Digest, StringComparison.Ordinal) ||
-            model.ObservedInstanceVersion == int.MaxValue ||
-            binding.ObservedInstanceVersion != model.ObservedInstanceVersion + 1)
+            !AzureProviderResumeEligibility.IsBoundToReconciledInstanceVersion(
+                model.ObservedInstanceVersion, binding.ObservedInstanceVersion))
             return null;
 
         var lifecycleOperation = await db.ElsaInstanceOperations.AsNoTracking()
@@ -1165,6 +1165,9 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         entity.AcrPullRoleAssignmentId = resources.AcrPullRoleAssignmentId;
         entity.Endpoint = endpoint; entity.Health = health;
         entity.DiagnosticsJson = diagnosticsJson;
+        // Later checkpoints replace diagnostics; keep the lever marker observable after a resume.
+        entity.LateSuccessLeverApplied |= safeDiagnostics.Any(diagnostic =>
+            string.Equals(diagnostic.Code, StagingLateSuccessLeverDefaults.AppliedCode, StringComparison.Ordinal));
         if (assignment is not null)
         {
             ApplyAssignmentResources(assignment, resources);
@@ -1360,12 +1363,36 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             x => x.WorkspaceId == workspaceId && x.Id == operationId, cancellationToken);
         if (entity is null)
             return;
-        // Outcome codes stay on LastObservationReasonCode only. Transition
-        // Sequence is coupled to Version via AddTransition; inserting at
-        // max(Sequence)+1 without bumping Version steals the next
-        // ClaimRecoveryAsync slot and rolls the unique (OperationId, Sequence)
-        // index back forever.
+        // Outcome codes stay on LastObservationReasonCode and the bounded
+        // outcome history only. Transition Sequence is coupled to Version via
+        // AddTransition; inserting at max(Sequence)+1 without bumping Version
+        // steals the next ClaimRecoveryAsync slot and rolls the unique
+        // (OperationId, Sequence) index back forever.
         entity.LastObservationReasonCode = reasonCode;
+        AppendAutoResumeOutcome(entity, reasonCode);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            db.ChangeTracker.Clear();
+        }
+    }
+
+    public async Task RecordAutoResumeResultAsync(
+        Guid workspaceId,
+        Guid operationId,
+        string resultCode,
+        CancellationToken cancellationToken = default)
+    {
+        if (!AzureProviderOperationValidation.IsSafeCode(resultCode))
+            return;
+        var entity = await db.AzureProviderOperations.SingleOrDefaultAsync(
+            x => x.WorkspaceId == workspaceId && x.Id == operationId, cancellationToken);
+        if (entity is null)
+            return;
+        AppendAutoResumeOutcome(entity, resultCode);
         try
         {
             await db.SaveChangesAsync(cancellationToken);
@@ -1775,8 +1802,45 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             LastArmObservedAt: x.LastArmObservedAt,
             AutoResumeCount: x.AutoResumeCount,
             ArmObservationBackoffSeconds: x.ArmObservationBackoffSeconds,
-            LastObservationReasonCode: x.LastObservationReasonCode);
+            LastObservationReasonCode: x.LastObservationReasonCode)
+        {
+            AutoResumeOutcomes = ReadAutoResumeOutcomes(x.AutoResumeOutcomesJson),
+            LateSuccessLeverApplied = x.LateSuccessLeverApplied
+        };
     }
+
+    /// <summary>
+    /// Bounded, safe-code-only history. A corrupt value reads as empty rather than failing the
+    /// operation read; the history is observability, not recovery authority.
+    /// </summary>
+    private static IReadOnlyList<string> ReadAutoResumeOutcomes(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return [];
+        try
+        {
+            var codes = JsonSerializer.Deserialize<string[]>(json);
+            return codes is null || !codes.All(AzureProviderOperationValidation.IsSafeCode) ? [] : codes;
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    private static void AppendAutoResumeOutcome(AzureProviderOperationEntity entity, string code)
+    {
+        var codes = ReadAutoResumeOutcomes(entity.AutoResumeOutcomesJson).ToList();
+        if (codes.Count > 0 && string.Equals(codes[^1], code, StringComparison.Ordinal))
+            return;
+        codes.Add(code);
+        if (codes.Count > MaximumAutoResumeOutcomes)
+            codes.RemoveRange(0, codes.Count - MaximumAutoResumeOutcomes);
+        entity.AutoResumeOutcomesJson = JsonSerializer.Serialize(codes);
+    }
+
+    // Three auto-resumes record at most a claim outcome, a resume result and needs-operator each.
+    private const int MaximumAutoResumeOutcomes = 16;
 
     /// <summary>
     /// Capacity columns are written together. A partially populated set is corrupt metadata:

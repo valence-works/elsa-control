@@ -1436,6 +1436,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<int>("AutoResumeCount")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("AutoResumeOutcomesJson")
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
                     b.Property<int?>("CapacityCpuMillicores")
                         .HasColumnType("INTEGER");
 
@@ -1532,6 +1536,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<string>("LastObservationReasonCode")
                         .HasMaxLength(128)
                         .HasColumnType("TEXT");
+
+                    b.Property<bool>("LateSuccessLeverApplied")
+                        .HasColumnType("INTEGER");
 
                     b.Property<long?>("LeaseExpiresAt")
                         .HasColumnType("INTEGER");

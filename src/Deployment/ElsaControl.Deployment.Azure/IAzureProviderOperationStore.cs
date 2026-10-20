@@ -118,14 +118,27 @@ public interface IAzureProviderOperationStore
 
     /// <summary>
     /// Records an operator-visible auto-resume outcome on
-    /// <c>LastObservationReasonCode</c> only. Transition rows stay coupled to
-    /// <c>Version</c>; writing an out-of-band sequence would collide with the
-    /// next <see cref="ClaimRecoveryAsync"/>.
+    /// <c>LastObservationReasonCode</c> and appends it to
+    /// <see cref="AzureProviderOperation.AutoResumeOutcomes"/>. Transition rows stay
+    /// coupled to <c>Version</c>; writing an out-of-band sequence would collide with
+    /// the next <see cref="ClaimRecoveryAsync"/>.
     /// </summary>
     Task RecordAutoResumeOutcomeAsync(
         Guid workspaceId,
         Guid operationId,
         string reasonCode,
+        CancellationToken cancellationToken = default) =>
+        Task.CompletedTask;
+
+    /// <summary>
+    /// Appends a charged auto-resume's provider result to
+    /// <see cref="AzureProviderOperation.AutoResumeOutcomes"/> only. It leaves
+    /// <c>LastObservationReasonCode</c> and <c>Version</c> unchanged.
+    /// </summary>
+    Task RecordAutoResumeResultAsync(
+        Guid workspaceId,
+        Guid operationId,
+        string resultCode,
         CancellationToken cancellationToken = default) =>
         Task.CompletedTask;
 }

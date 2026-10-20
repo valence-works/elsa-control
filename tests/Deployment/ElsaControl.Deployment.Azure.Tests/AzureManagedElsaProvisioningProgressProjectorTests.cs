@@ -35,7 +35,7 @@ public sealed class AzureManagedElsaProvisioningProgressProjectorTests
     [InlineData(AzureProviderOperationPhase.SqlBootstrapReady, "configuration")]
     [InlineData(AzureProviderOperationPhase.FoundationReady, "configuration")]
     [InlineData(AzureProviderOperationPhase.WorkloadSubmitted, "runtime-deployment")]
-    [InlineData(AzureProviderOperationPhase.WorkloadReady, "runtime-deployment")]
+    [InlineData(AzureProviderOperationPhase.WorkloadReady, "health-verification")]
     [InlineData(AzureProviderOperationPhase.HealthVerified, "health-verification")]
     [InlineData(AzureProviderOperationPhase.TrafficPromoted, "traffic-routing")]
     public void Known_provider_phases_map_to_stable_stages(AzureProviderOperationPhase phase, string expectedStage)
