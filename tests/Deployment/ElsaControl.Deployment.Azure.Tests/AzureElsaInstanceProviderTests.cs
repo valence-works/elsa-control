@@ -299,6 +299,227 @@ public sealed class AzureElsaInstanceProviderTests
     }
 
     [Fact]
+    public async Task Confirmed_step_the_resume_would_refuse_is_not_charged_and_needs_an_operator()
+    {
+        var fixture = await CreateObserveFixtureAsync(
+            ConfirmedObservation(AzureProviderRunnerStep.Workload),
+            attemptedStep: AzureProviderRunnerStep.Workload,
+            phase: AzureProviderOperationPhase.FoundationReady,
+            resources: WorkloadParkResources() with { AcrPullRoleAssignmentId = null });
+
+        var observation = await fixture.Provider.ObserveAsync(fixture.Request);
+
+        Assert.NotNull(observation.RetryEvidence);
+        Assert.False(observation.RetryEvidence.AutoResume);
+        Assert.Equal(AzureLateSuccessCodes.NeedsOperator, observation.ReasonCode);
+        Assert.Equal(AzureLateSuccessCodes.NeedsOperator, fixture.OperationStore.Current!.LastObservationReasonCode);
+        Assert.Equal(0, fixture.OperationStore.AutoResumeIncrements);
+    }
+
+    [Fact]
+    public async Task Auto_resume_blocked_by_a_refused_resume_keeps_manual_evidence_only()
+    {
+        var fixture = await CreateObserveFixtureAsync(
+            ConfirmedObservation(AzureProviderRunnerStep.Workload),
+            attemptedStep: AzureProviderRunnerStep.Workload,
+            phase: AzureProviderOperationPhase.FoundationReady,
+            autoResumeCount: 1,
+            autoResumeOutcomes:
+            [
+                AzureLateSuccessCodes.AutoResumeAccepted,
+                ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInvalid,
+                AzureLateSuccessCodes.NeedsOperator
+            ],
+            autoResumeBlocked: true);
+
+        var observation = await fixture.Provider.ObserveAsync(fixture.Request);
+
+        Assert.NotNull(observation.RetryEvidence);
+        Assert.False(observation.RetryEvidence.AutoResume);
+        Assert.Equal(AzureLateSuccessCodes.NeedsOperator, observation.ReasonCode);
+        Assert.Equal(AzureNamedDeploymentFreshness.NextBackoffSeconds(0),
+            fixture.OperationStore.Current!.ArmObservationBackoffSeconds);
+    }
+
+    [Fact]
+    public async Task Charged_auto_resume_refused_by_the_provider_records_needs_operator_once()
+    {
+        var fixture = await CreateRecoveryFixtureAsync(AzureProviderOperationStatus.RecoveryRequired);
+        var request = fixture.Request with
+        {
+            Envelope = fixture.Request.Envelope with
+            {
+                IdempotencyKey = ElsaInstanceProviderReconciliationService.AutoResumeIdempotencyKey(
+                    fixture.Request.Envelope.LifecycleOperationId, 1)
+            }
+        };
+
+        var result = await fixture.Provider.RecoverAsync(request);
+        var replayed = await fixture.Provider.RecoverAsync(request);
+
+        Assert.Equal(ElsaInstanceProviderRecoveryOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInvalid, result.Code);
+        Assert.Equal(result, replayed);
+        Assert.Equal(
+            [ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInvalid, AzureLateSuccessCodes.NeedsOperator],
+            fixture.OperationStore.Current!.AutoResumeOutcomes);
+        Assert.Equal(AzureLateSuccessCodes.NeedsOperator, fixture.OperationStore.Current.LastObservationReasonCode);
+        Assert.True(AzureLateSuccessCodes.IsAutoResumeBlocked(fixture.OperationStore.Current));
+    }
+
+    [Fact]
+    public async Task Failed_history_write_still_blocks_auto_resume_after_a_refused_charged_resume()
+    {
+        var fixture = await CreateRecoveryFixtureAsync(AzureProviderOperationStatus.RecoveryRequired);
+        fixture.OperationStore.FailResultHistoryWrites = true;
+
+        var result = await fixture.Provider.RecoverAsync(AutoResumeRequest(fixture));
+
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInvalid, result.Code);
+        Assert.Equal(AzureLateSuccessCodes.NeedsOperator, fixture.OperationStore.Current!.LastObservationReasonCode);
+        Assert.True(AzureLateSuccessCodes.IsAutoResumeBlocked(fixture.OperationStore.Current));
+    }
+
+    [Fact]
+    public async Task Operator_recovery_refusal_leaves_the_auto_resume_history_alone()
+    {
+        var fixture = await CreateRecoveryFixtureAsync(AzureProviderOperationStatus.RecoveryRequired);
+
+        var result = await fixture.Provider.RecoverAsync(fixture.Request);
+
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInvalid, result.Code);
+        Assert.Empty(fixture.OperationStore.Current!.AutoResumeOutcomes);
+        Assert.False(AzureLateSuccessCodes.IsAutoResumeBlocked(fixture.OperationStore.Current));
+    }
+
+    /// <summary>
+    /// A duplicate or late auto-resume envelope reaches the provider again while the operation it
+    /// resumed is already Running or Succeeded. A rejected replay is not a refused resume, so it
+    /// must not park the operation for an operator.
+    /// </summary>
+    [Theory]
+    [InlineData(AzureProviderOperationStatus.Running)]
+    [InlineData(AzureProviderOperationStatus.Succeeded)]
+    public async Task Rejected_replay_of_a_claimed_auto_resume_does_not_block_auto_resume(
+        AzureProviderOperationStatus status)
+    {
+        var fixture = await CreateRecoveryFixtureAsync(status, includeReplayObservation: true, wrongReplayObservation: true);
+
+        var result = await fixture.Provider.RecoverAsync(AutoResumeRequest(fixture));
+
+        Assert.Equal(ElsaInstanceProviderRecoveryOutcome.Rejected, result.Outcome);
+        Assert.Empty(fixture.OperationStore.Current!.AutoResumeOutcomes);
+        Assert.False(AzureLateSuccessCodes.IsAutoResumeBlocked(fixture.OperationStore.Current));
+        Assert.NotEqual(AzureLateSuccessCodes.NeedsOperator, fixture.OperationStore.Current.LastObservationReasonCode);
+    }
+
+    /// <summary>
+    /// Another worker resumed the operation and it returned to RecoveryRequired at a later
+    /// provider attempt, so a delayed envelope from the earlier charge is not a replay and strict
+    /// validation refuses its receipt. That refusal describes the earlier attempt, not the live
+    /// one: it must not park the operation for an operator or enter the history. A receipt the
+    /// store cannot find proves nothing about the current attempt either. A refusal for the
+    /// current receipt still blocks: see
+    /// <see cref="Charged_auto_resume_refused_by_the_provider_records_needs_operator_once"/>.
+    /// </summary>
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task Refused_auto_resume_for_a_stale_or_missing_receipt_does_not_block_auto_resume(
+        bool advancedPastReceipt,
+        bool receiptMissing)
+    {
+        var fixture = await CreateRecoveryFixtureAsync(
+            AzureProviderOperationStatus.RecoveryRequired,
+            advancedPastReceipt: advancedPastReceipt,
+            receiptMissing: receiptMissing);
+
+        var result = await fixture.Provider.RecoverAsync(AutoResumeRequest(fixture));
+
+        Assert.Equal(ElsaInstanceProviderRecoveryOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInvalid, result.Code);
+        Assert.Empty(fixture.OperationStore.Current!.AutoResumeOutcomes);
+        Assert.False(AzureLateSuccessCodes.IsAutoResumeBlocked(fixture.OperationStore.Current));
+        Assert.NotEqual(AzureLateSuccessCodes.NeedsOperator, fixture.OperationStore.Current.LastObservationReasonCode);
+    }
+
+    [Theory]
+    [InlineData(AzureProviderOperationStatus.Running)]
+    [InlineData(AzureProviderOperationStatus.Succeeded)]
+    public async Task Auto_resume_replay_results_are_not_added_to_the_history(
+        AzureProviderOperationStatus status)
+    {
+        var fixture = await CreateRecoveryFixtureAsync(status, includeReplayObservation: true);
+
+        var result = await fixture.Provider.RecoverAsync(AutoResumeRequest(fixture));
+
+        Assert.NotEqual(ElsaInstanceProviderRecoveryOutcome.Rejected, result.Outcome);
+        Assert.Empty(fixture.OperationStore.Current!.AutoResumeOutcomes);
+    }
+
+    /// <summary>
+    /// A transient failure at a step the resume would refuse (here: Workload without the retained
+    /// AcrPull role assignment) is never charged, and nothing else retries it, so it must park
+    /// for an operator rather than report <c>azure.recovery.retrying</c> forever.
+    /// </summary>
+    [Fact]
+    public async Task Transient_failure_the_resume_would_refuse_needs_an_operator_instead_of_retrying()
+    {
+        var now = DateTimeOffset.Parse("2026-10-05T00:04:00Z");
+        var fixture = await CreateObserveFixtureAsync(
+            FailedObservation(AzureProviderRunnerStep.Workload, AzureTransientArmFailure.ManagedEnvironmentProvisioningErrorCode),
+            attemptedStep: AzureProviderRunnerStep.Workload,
+            phase: AzureProviderOperationPhase.FoundationReady,
+            lastArmObservedAt: now.AddSeconds(-120),
+            backoffSeconds: AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds,
+            now: now,
+            resources: WorkloadParkResources() with { AcrPullRoleAssignmentId = null });
+        fixture.OperationStore.Current = fixture.OperationStore.Current! with
+        {
+            LastObservationReasonCode = AzureLateSuccessCodes.Retrying
+        };
+
+        var observation = await fixture.Provider.ObserveAsync(fixture.Request);
+
+        Assert.NotNull(observation.RetryEvidence);
+        Assert.False(observation.RetryEvidence.AutoResume);
+        Assert.Equal(AzureLateSuccessCodes.NeedsOperator, observation.ReasonCode);
+        Assert.Equal(AzureLateSuccessCodes.NeedsOperator, fixture.OperationStore.Current!.LastObservationReasonCode);
+        Assert.Equal(0, fixture.OperationStore.AutoResumeIncrements);
+    }
+
+    private static ElsaInstanceProviderRecoveryRequest AutoResumeRequest(RecoveryFixture fixture) =>
+        fixture.Request with
+        {
+            Envelope = fixture.Request.Envelope with
+            {
+                IdempotencyKey = ElsaInstanceProviderReconciliationService.AutoResumeIdempotencyKey(
+                    fixture.Request.Envelope.LifecycleOperationId, 1)
+            }
+        };
+
+    [Theory]
+    [InlineData(ElsaInstanceProviderRecoveryOutcome.RecoveryRequired, ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInsufficient, true)]
+    [InlineData(ElsaInstanceProviderRecoveryOutcome.RecoveryRequired, ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInvalid, true)]
+    [InlineData(ElsaInstanceProviderRecoveryOutcome.RecoveryRequired, ManagedElsaReasonCodeCatalog.AzureRecoveryPlanMismatch, true)]
+    [InlineData(ElsaInstanceProviderRecoveryOutcome.RecoveryRequired, ManagedElsaReasonCodeCatalog.AzureRecoveryIdentityMismatch, true)]
+    [InlineData(ElsaInstanceProviderRecoveryOutcome.Rejected, ManagedElsaReasonCodeCatalog.AzureRecoveryAssignmentMismatch, true)]
+    [InlineData(ElsaInstanceProviderRecoveryOutcome.RecoveryRequired, ManagedElsaReasonCodeCatalog.AzureRecoveryObservationFailed, false)]
+    [InlineData(ElsaInstanceProviderRecoveryOutcome.RecoveryRequired, ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadInProgress, false)]
+    [InlineData(ElsaInstanceProviderRecoveryOutcome.RecoveryRequired, ManagedElsaReasonCodeCatalog.AzureRecoveryObservationAmbiguous, false)]
+    [InlineData(ElsaInstanceProviderRecoveryOutcome.RecoveryRequired, "azure.operation.claim-lost", false)]
+    [InlineData(ElsaInstanceProviderRecoveryOutcome.RecoveryRequired, "azure.health.incomplete", false)]
+    [InlineData(ElsaInstanceProviderRecoveryOutcome.InProgress, "azure.operation.in-progress", false)]
+    [InlineData(ElsaInstanceProviderRecoveryOutcome.Succeeded, "azure.operation.no-op", false)]
+    public void Only_refusals_another_arm_read_cannot_change_stop_auto_resume(
+        ElsaInstanceProviderRecoveryOutcome outcome,
+        string code,
+        bool nonTransient)
+    {
+        Assert.Equal(nonTransient, AzureLateSuccessCodes.IsNonTransientResumeRefusal(outcome, code));
+    }
+
+    [Fact]
     public async Task Auto_resume_charge_is_atomic_and_records_the_outcome()
     {
         var fixture = await CreateObserveFixtureAsync(
@@ -604,8 +825,7 @@ public sealed class AzureElsaInstanceProviderTests
             LastArmObservedAt = now.AddSeconds(-120),
             ArmObservationBackoffSeconds = AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds
         };
-        var second = await fixture.Provider.ObserveAsync(
-            fixture.Request with { InstanceVersion = fixture.Request.InstanceVersion + 1 });
+        var second = await fixture.Provider.ObserveAsync(fixture.Request);
 
         Assert.NotNull(second.RetryEvidence);
         Assert.Equal(first.RetryEvidence!.Reference, second.RetryEvidence.Reference);
@@ -614,6 +834,21 @@ public sealed class AzureElsaInstanceProviderTests
         Assert.Equal(2, fixture.Observer.Calls);
         Assert.Equal(1, fixture.ObservationStore.CreateCalls);
         Assert.Equal(2, fixture.OperationStore.ArmClockCalls);
+
+        // #860: a receipt one instance version behind stays bound only if this reconcile is a
+        // no-op, so a read that charges an auto-resume mints one at the current version instead.
+        fixture.OperationStore.Current = fixture.OperationStore.Current! with
+        {
+            LastArmObservedAt = now.AddSeconds(-120),
+            ArmObservationBackoffSeconds = AzureNamedDeploymentFreshness.MinimumArmIntervalSeconds
+        };
+        var third = await fixture.Provider.ObserveAsync(
+            fixture.Request with { InstanceVersion = fixture.Request.InstanceVersion + 1 });
+
+        Assert.NotNull(third.RetryEvidence);
+        Assert.NotEqual(first.RetryEvidence.Reference, third.RetryEvidence.Reference);
+        Assert.True(third.RetryEvidence.AutoResume);
+        Assert.Equal(2, fixture.ObservationStore.CreateCalls);
     }
 
     [Fact]
@@ -1542,7 +1777,10 @@ public sealed class AzureElsaInstanceProviderTests
         DateTimeOffset? lastArmObservedAt = null,
         int backoffSeconds = 0,
         int autoResumeCount = 0,
-        DateTimeOffset? now = null)
+        DateTimeOffset? now = null,
+        AzureProviderResourceReferences? resources = null,
+        IReadOnlyList<string>? autoResumeOutcomes = null,
+        bool autoResumeBlocked = false)
     {
         var workspaceId = Guid.Parse("11111111-1111-1111-1111-111111111111");
         var operationId = Guid.Parse("33333333-3333-3333-3333-333333333333");
@@ -1552,6 +1790,13 @@ public sealed class AzureElsaInstanceProviderTests
         {
             Status = AzureProviderOperationStatus.RecoveryRequired,
             Phase = phase,
+            // A real Workload park retains foundation, registry and SQL cleanup handles.
+            Resources = resources ?? (attemptedStep == AzureProviderRunnerStep.Workload &&
+                                      phase == AzureProviderOperationPhase.FoundationReady
+                ? WorkloadParkResources()
+                : new()),
+            AutoResumeOutcomes = autoResumeOutcomes ?? [],
+            AutoResumeBlocked = autoResumeBlocked,
             AttemptNumber = 2,
             Version = 2,
             OrganizationId = TestOrganizationId,
@@ -1611,11 +1856,33 @@ public sealed class AzureElsaInstanceProviderTests
         return new(provider, request, observationStore, operationStore, observer);
     }
 
+    private static AzureProviderResourceReferences WorkloadParkResources()
+    {
+        const string group = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-park";
+        const string registry = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-reg/providers/Microsoft.ContainerRegistry/registries/reg";
+        return new(
+            ResourceGroupName: "rg-park",
+            FoundationDeploymentId: $"{group}/providers/Microsoft.Resources/deployments/foundation",
+            WorkloadIdentityResourceId: $"{group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/identity",
+            WorkloadIdentityClientId: "22222222-2222-2222-2222-222222222222",
+            WorkloadIdentityPrincipalId: "33333333-3333-3333-3333-333333333333",
+            KeyVaultResourceId: $"{group}/providers/Microsoft.KeyVault/vaults/vault",
+            KeyVaultUri: "https://vault.vault.azure.net/",
+            SqlServerResourceId: $"{group}/providers/Microsoft.Sql/servers/sql",
+            SqlServerFqdn: "sql.database.windows.net",
+            ContainerAppsEnvironmentResourceId: $"{group}/providers/Microsoft.App/managedEnvironments/aca",
+            RegistryResourceId: registry,
+            AcrPullDeploymentId: "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-reg/providers/Microsoft.Resources/deployments/acr-pull",
+            AcrPullRoleAssignmentId: $"{registry}/providers/Microsoft.Authorization/roleAssignments/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    }
+
     private static async Task<RecoveryFixture> CreateRecoveryFixtureAsync(
         AzureProviderOperationStatus status,
         bool includeReplayObservation = false,
         bool wrongReplayObservation = false,
-        bool includeStrictObservation = false)
+        bool includeStrictObservation = false,
+        bool advancedPastReceipt = false,
+        bool receiptMissing = false)
     {
         var workspaceId = Guid.Parse("11111111-1111-1111-1111-111111111111");
         var operationId = Guid.Parse("33333333-3333-3333-3333-333333333333");
@@ -1626,8 +1893,8 @@ public sealed class AzureElsaInstanceProviderTests
         {
             Status = status,
             Phase = AzureProviderOperationPhase.FoundationSubmitted,
-            AttemptNumber = isPostClaim ? 2 : 1,
-            Version = isPostClaim ? 2 : 1,
+            AttemptNumber = isPostClaim || advancedPastReceipt ? 2 : 1,
+            Version = isPostClaim || advancedPastReceipt ? 2 : 1,
             OrganizationId = TestOrganizationId,
             InstanceId = TestInstanceId,
             LifecycleAction = ElsaInstanceOperationAction.Reconcile,
@@ -1656,7 +1923,8 @@ public sealed class AzureElsaInstanceProviderTests
                 : observation
             : null;
         var strictObservation = includeStrictObservation ? observation : null;
-        var observationStore = new CapturingRecoveryObservationStore(strictObservation, replayObservation);
+        var observationStore = new CapturingRecoveryObservationStore(
+            strictObservation, replayObservation, receiptMissing ? null : observation);
         var operationStore = new CapturingOperationStore(operation);
         var observer = new CountingRecoveryObserver();
         var assignmentStore = new InMemoryAssignmentStore
@@ -1925,7 +2193,8 @@ public sealed class AzureElsaInstanceProviderTests
 
     private sealed class CapturingRecoveryObservationStore(
         AzureProviderRecoveryObservationRecord? strictObservation,
-        AzureProviderRecoveryObservationRecord? replayObservation) : IAzureProviderRecoveryObservationStore
+        AzureProviderRecoveryObservationRecord? replayObservation,
+        AzureProviderRecoveryObservationRecord? recordedObservation) : IAzureProviderRecoveryObservationStore
     {
         public int StrictCalls { get; private set; }
         public int ReplayCalls { get; private set; }
@@ -1960,6 +2229,14 @@ public sealed class AzureElsaInstanceProviderTests
             ReplayCalls++;
             return Task.FromResult(replayObservation);
         }
+
+        public Task<AzureProviderRecoveryObservationRecord?> GetRecordedObservationAsync(
+            Guid workspaceId,
+            Guid lifecycleOperationId,
+            string reference,
+            string digest,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(recordedObservation);
     }
 
     private sealed class CountingRecoveryObserver : IAzureProviderRecoveryObserver
@@ -2095,7 +2372,22 @@ public sealed class AzureElsaInstanceProviderTests
         {
             AutoResumeOutcomes.Add(reasonCode);
             if (Current is not null)
-                Current = Current with { LastObservationReasonCode = reasonCode };
+                Current = Current with
+                {
+                    LastObservationReasonCode = reasonCode,
+                    AutoResumeOutcomes = [.. Current.AutoResumeOutcomes, reasonCode],
+                    AutoResumeBlocked = Current.AutoResumeBlocked || reasonCode == AzureLateSuccessCodes.NeedsOperator
+                };
+            return Task.CompletedTask;
+        }
+        public bool FailResultHistoryWrites { get; set; }
+        public Task RecordAutoResumeResultAsync(Guid workspaceId, Guid operationId, string resultCode, CancellationToken cancellationToken = default)
+        {
+            if (FailResultHistoryWrites)
+                throw new InvalidOperationException("Simulated history write failure.");
+            AutoResumeOutcomes.Add(resultCode);
+            if (Current is not null)
+                Current = Current with { AutoResumeOutcomes = [.. Current.AutoResumeOutcomes, resultCode] };
             return Task.CompletedTask;
         }
         public Task<AzureProviderOperation?> MarkUnrestorableAsync(Guid workspaceId, Guid operationId, DateTimeOffset now, long? expectedVersion = null, CancellationToken cancellationToken = default) => Task.FromResult<AzureProviderOperation?>(null);

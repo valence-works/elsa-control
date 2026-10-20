@@ -84,8 +84,8 @@ The projector maps:
 | `entitlement-held` | lifecycle `EntitlementHeld` (distinct from queued; capability-only) |
 | `hosting-foundation` | `FoundationSubmitted`, `FoundationObserved` |
 | `configuration` | `AcrPullObserved`, `SeedSecretsObserved`, `SqlFirewallReady`, `SqlBootstrapReady`, `FoundationReady` |
-| `runtime-deployment` | `WorkloadSubmitted`, `WorkloadReady` |
-| `health-verification` | `HealthVerified` |
+| `runtime-deployment` | `WorkloadSubmitted` |
+| `health-verification` | `WorkloadReady` (Workload passed, health next; #860), `HealthVerified` |
 | `traffic-routing` | `TrafficPromoted` before terminal reconciliation |
 | `ready` | authoritative Create success and Ready observation |
 

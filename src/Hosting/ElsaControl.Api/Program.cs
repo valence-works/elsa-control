@@ -71,6 +71,7 @@ using JetBrains.Annotations;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Logging;
@@ -88,6 +89,28 @@ IdentityModelEventSource.ShowPII = builder.Environment.IsDevelopment()
 builder.AddServiceDefaults();
 builder.AddManagedLifecycleAzureMonitorTelemetry();
 
+// The single trusted hop is the App Service front end. It appends the connecting
+// client's address as the rightmost X-Forwarded-For entry, and ForwardLimit = 1 reads
+// only that entry, so RemoteIpAddress never comes from an entry a caller wrote. The
+// front end publishes no stable inbound proxy range for the worker, so KnownIPNetworks
+// and KnownProxies are cleared instead of pinned. A proxy placed in front of App Service
+// changes the rightmost entry; see "Ingress and forwarded headers" in
+// docs/deployment/azure-app-service.md before changing ingress.
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    options.ForwardLimit = 1;
+    options.KnownIPNetworks.Clear();
+    options.KnownProxies.Clear();
+});
+// The web host adds its own forwarded-headers pass when its ForwardedHeaders_Enabled switch is
+// set (a stale App Service setting survives image-only deploys). Ahead of UseForwardedHeaders
+// below, that second pass would make RemoteIpAddress a caller-written entry, so remove it.
+foreach (var hostForwardedHeaders in builder.Services
+             .Where(descriptor => descriptor.ServiceType == typeof(IStartupFilter) &&
+                                  descriptor.ImplementationType?.Name == "ForwardedHeadersStartupFilter")
+             .ToArray())
+    builder.Services.Remove(hostForwardedHeaders);
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<BadRequestExceptionHandler>();
 builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = true);
@@ -270,6 +293,15 @@ builder.Services.Configure<ControlRateLimitBffEgressOptions>(options =>
     options.Networks = ControlRateLimitBffEgress.ReadNetworks(builder.Configuration);
 });
 builder.Services.AddHostedService<ControlRateLimitBffEgressConfigurationValidator>();
+// Dot-free switch for the BFF source-address diagnostic: App Service on Linux cannot carry the
+// dotted Logging__LogLevel__ElsaControl.Api.RateLimiting app setting name into the container.
+// Same rule builder.Logging.AddFilter adds, read when the logger factory is built so it sees the
+// final configuration; an invalid value refuses startup there.
+builder.Services.Configure<LoggerFilterOptions>(options =>
+{
+    if (ControlRateLimitBffSourceDiagnostic.ReadLogLevel(builder.Configuration) is { } level)
+        options.AddFilter(ControlRateLimitBffSourceDiagnostic.LoggerCategory, level);
+});
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -714,6 +746,7 @@ if (!app.Environment.IsEnvironment("Testing"))
     await dbContext.Database.MigrateAsync();
 }
 
+app.UseForwardedHeaders();
 app.UseExceptionHandler();
 app.UseRouting();
 app.UseCors();

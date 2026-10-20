@@ -351,6 +351,31 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         return model;
     }
 
+    async Task<AzureProviderRecoveryObservationRecord?> IAzureProviderRecoveryObservationStore.GetRecordedObservationAsync(
+        Guid workspaceId,
+        Guid lifecycleOperationId,
+        string reference,
+        string digest,
+        CancellationToken cancellationToken)
+    {
+        if (workspaceId == Guid.Empty || lifecycleOperationId == Guid.Empty ||
+            !ElsaInstanceProviderRecoveryObservationReference.TryParse(reference, out var recordId, out var referenceDigest) ||
+            !string.Equals(referenceDigest, digest, StringComparison.Ordinal))
+            return null;
+
+        var entity = await db.AzureProviderRecoveryObservations.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == recordId &&
+                                       x.WorkspaceId == workspaceId &&
+                                       x.LifecycleOperationId == lifecycleOperationId,
+                cancellationToken);
+        if (entity is null)
+            return null;
+
+        var model = ToRecoveryObservation(entity);
+        model.Validate();
+        return string.Equals(model.ComputeRecordDigest(recordId), digest, StringComparison.Ordinal) ? model : null;
+    }
+
     async Task<AzureProviderRecoveryObservationReceipt?> IAzureProviderRecoveryObservationStore.GetLatestReceiptForAttemptAsync(
         Guid workspaceId,
         Guid lifecycleOperationId,
@@ -435,8 +460,8 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         model.Validate();
         if (!string.Equals(referenceDigest, binding.Digest, StringComparison.Ordinal) ||
             !string.Equals(model.ComputeRecordDigest(recordId), binding.Digest, StringComparison.Ordinal) ||
-            model.ObservedInstanceVersion == int.MaxValue ||
-            binding.ObservedInstanceVersion != model.ObservedInstanceVersion + 1)
+            !AzureProviderResumeEligibility.IsBoundToReconciledInstanceVersion(
+                model.ObservedInstanceVersion, binding.ObservedInstanceVersion))
             return null;
 
         var lifecycleOperation = await db.ElsaInstanceOperations.AsNoTracking()
@@ -1165,6 +1190,9 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         entity.AcrPullRoleAssignmentId = resources.AcrPullRoleAssignmentId;
         entity.Endpoint = endpoint; entity.Health = health;
         entity.DiagnosticsJson = diagnosticsJson;
+        // Later checkpoints replace diagnostics; keep the lever marker observable after a resume.
+        entity.LateSuccessLeverApplied |= safeDiagnostics.Any(diagnostic =>
+            string.Equals(diagnostic.Code, StagingLateSuccessLeverDefaults.AppliedCode, StringComparison.Ordinal));
         if (assignment is not null)
         {
             ApplyAssignmentResources(assignment, resources);
@@ -1356,24 +1384,92 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
     {
         if (!AzureProviderOperationValidation.IsSafeCode(reasonCode))
             return;
-        var entity = await db.AzureProviderOperations.SingleOrDefaultAsync(
-            x => x.WorkspaceId == workspaceId && x.Id == operationId, cancellationToken);
-        if (entity is null)
+        // Outcome codes stay on LastObservationReasonCode, the bounded outcome
+        // history and, for needs-operator, AutoResumeBlocked. None of these
+        // writes bumps Version: transition Sequence is coupled to Version via
+        // AddTransition (inserting at max(Sequence)+1 would steal the next
+        // ClaimRecoveryAsync slot), and a recovery receipt binds the current
+        // Version. Each column is written atomically instead, so a concurrent
+        // writer of this row cannot drop the block or another outcome (#860).
+        var operation = db.AzureProviderOperations
+            .Where(x => x.WorkspaceId == workspaceId && x.Id == operationId);
+        // The auto-resume block is recovery state, not history: set-only, never cleared.
+        var changed = string.Equals(reasonCode, AzureLateSuccessCodes.NeedsOperator, StringComparison.Ordinal)
+            ? await operation.ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(x => x.LastObservationReasonCode, reasonCode)
+                    .SetProperty(x => x.AutoResumeBlocked, true),
+                cancellationToken)
+            : await operation.ExecuteUpdateAsync(
+                setters => setters.SetProperty(x => x.LastObservationReasonCode, reasonCode),
+                cancellationToken);
+        DetachTrackedOperation(operationId);
+        if (changed == 1)
+            await AppendAutoResumeOutcomeAsync(workspaceId, operationId, reasonCode, cancellationToken);
+    }
+
+    public async Task RecordAutoResumeResultAsync(
+        Guid workspaceId,
+        Guid operationId,
+        string resultCode,
+        CancellationToken cancellationToken = default)
+    {
+        if (!AzureProviderOperationValidation.IsSafeCode(resultCode))
             return;
-        // Outcome codes stay on LastObservationReasonCode only. Transition
-        // Sequence is coupled to Version via AddTransition; inserting at
-        // max(Sequence)+1 without bumping Version steals the next
-        // ClaimRecoveryAsync slot and rolls the unique (OperationId, Sequence)
-        // index back forever.
-        entity.LastObservationReasonCode = reasonCode;
-        try
+        await AppendAutoResumeOutcomeAsync(workspaceId, operationId, resultCode, cancellationToken);
+    }
+
+    /// <summary>
+    /// Appends to the outcome history with a compare-and-swap on the stored value, so a
+    /// concurrent append is retried on top of the other writer's history rather than
+    /// overwriting it. The history is observability; after a few lost races the code is dropped.
+    /// </summary>
+    private async Task AppendAutoResumeOutcomeAsync(
+        Guid workspaceId,
+        Guid operationId,
+        string code,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < MaximumAutoResumeOutcomeAppendAttempts; attempt++)
         {
-            await db.SaveChangesAsync(cancellationToken);
+            var stored = await db.AzureProviderOperations.AsNoTracking()
+                .Where(x => x.WorkspaceId == workspaceId && x.Id == operationId)
+                .Select(x => new { x.AutoResumeOutcomesJson })
+                .SingleOrDefaultAsync(cancellationToken);
+            if (stored is null)
+                return;
+            var codes = ReadAutoResumeOutcomes(stored.AutoResumeOutcomesJson).ToList();
+            if (codes.Count > 0 && string.Equals(codes[^1], code, StringComparison.Ordinal))
+                return;
+            codes.Add(code);
+            if (codes.Count > MaximumAutoResumeOutcomes)
+                codes.RemoveRange(0, codes.Count - MaximumAutoResumeOutcomes);
+            var expected = stored.AutoResumeOutcomesJson;
+            var next = JsonSerializer.Serialize(codes);
+            var changed = await db.AzureProviderOperations
+                .Where(x => x.WorkspaceId == workspaceId && x.Id == operationId &&
+                            x.AutoResumeOutcomesJson == expected)
+                .ExecuteUpdateAsync(
+                    setters => setters.SetProperty(x => x.AutoResumeOutcomesJson, next),
+                    cancellationToken);
+            if (changed == 1)
+            {
+                DetachTrackedOperation(operationId);
+                return;
+            }
         }
-        catch (DbUpdateConcurrencyException)
-        {
-            db.ChangeTracker.Clear();
-        }
+    }
+
+    /// <summary>
+    /// A bulk update bypasses the change tracker. Detach a tracked copy of the row so a later
+    /// tracked read in this context reloads it instead of reusing (and diffing against) stale values.
+    /// </summary>
+    private void DetachTrackedOperation(Guid operationId)
+    {
+        foreach (var entry in db.ChangeTracker.Entries<AzureProviderOperationEntity>()
+                     .Where(x => x.Entity.Id == operationId)
+                     .ToList())
+            entry.State = EntityState.Detached;
     }
 
     private async Task<AzureProviderOperation?> FindByKeyAsync(AzureProviderOperationRequest request, CancellationToken cancellationToken) =>
@@ -1775,8 +1871,37 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             LastArmObservedAt: x.LastArmObservedAt,
             AutoResumeCount: x.AutoResumeCount,
             ArmObservationBackoffSeconds: x.ArmObservationBackoffSeconds,
-            LastObservationReasonCode: x.LastObservationReasonCode);
+            LastObservationReasonCode: x.LastObservationReasonCode)
+        {
+            AutoResumeOutcomes = ReadAutoResumeOutcomes(x.AutoResumeOutcomesJson),
+            AutoResumeBlocked = x.AutoResumeBlocked,
+            LateSuccessLeverApplied = x.LateSuccessLeverApplied
+        };
     }
+
+    /// <summary>
+    /// Bounded, safe-code-only history. A corrupt value reads as empty rather than failing the
+    /// operation read; the history is observability, not recovery authority. The auto-resume
+    /// block lives in its own <c>AutoResumeBlocked</c> column.
+    /// </summary>
+    private static IReadOnlyList<string> ReadAutoResumeOutcomes(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return [];
+        try
+        {
+            var codes = JsonSerializer.Deserialize<string[]>(json);
+            return codes is null || !codes.All(AzureProviderOperationValidation.IsSafeCode) ? [] : codes;
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    // Three auto-resumes record at most a claim outcome, a resume result and needs-operator each.
+    private const int MaximumAutoResumeOutcomes = 16;
+    private const int MaximumAutoResumeOutcomeAppendAttempts = 4;
 
     /// <summary>
     /// Capacity columns are written together. A partially populated set is corrupt metadata:

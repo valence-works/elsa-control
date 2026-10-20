@@ -277,51 +277,18 @@ public sealed class AzureProviderExecutor
             return Result(operation, AzureProviderExecutionOutcome.InProgress, "azure.operation.in-progress", "The Azure operation is already owned by another worker.");
         if (operation.Status != AzureProviderOperationStatus.RecoveryRequired)
             return ResultForObservedState(operation, "azure.operation.recovery-invalid", "The Azure operation is not awaiting explicit recovery.");
-        if (observation.Kind == AzureProviderRecoveryObservationKind.Failed)
-            return await RecoverFailedStepAsync(operation, plan, observation, cancellationToken);
-        if (observation.Kind != AzureProviderRecoveryObservationKind.Confirmed)
+        if (observation.Kind is not (AzureProviderRecoveryObservationKind.Confirmed or AzureProviderRecoveryObservationKind.Failed))
             return Result(operation, AzureProviderExecutionOutcome.RecoveryRequired, observation.Code, observation.Message);
-
-        var observedStep = observation.CompletedStep!.Value;
-        // The legacy combined SQL step, and later health/traffic steps, are intentionally not
-        // recoverable from a single observation. A confirmed Workload resumes at Health.
-        if (observedStep is not (AzureProviderRunnerStep.Foundation or AzureProviderRunnerStep.AcrPull or
-            AzureProviderRunnerStep.SeedSecrets or
-            AzureProviderRunnerStep.SqlFirewallCreate or AzureProviderRunnerStep.SqlBootstrapScript or
-            AzureProviderRunnerStep.SqlFirewallCleanup or AzureProviderRunnerStep.Workload))
-            return RecoveryInsufficient(operation);
-        AzureProviderOperationPhase observedPhase;
-        try
-        {
-            observedPhase = AzureProviderRecoveryObservationSupport.RecoveryPhase(observedStep);
-        }
-        catch (ArgumentException)
-        {
-            return RecoveryInsufficient(operation);
-        }
 
         // These are eligibility checks, not post-claim defenses. No provider attempt, version,
         // lease or checkpoint may change when the retained evidence cannot cover the current
-        // uncertain step.
-        if (!AzureProviderRecoveryObservationSupport.IsCompatibleBoundary(
-                operation.AttemptedStep, operation.Phase, observedStep, observedPhase) ||
-            observedStep == AzureProviderRunnerStep.Foundation &&
-            !AzureProviderRecoveryObservationSupport.IsFoundationOnlyEligible(operation) ||
-            observedStep == AzureProviderRunnerStep.AcrPull &&
-            !(AzureProviderRecoveryObservationSupport.IsAcrPullEligible(operation) ||
-              AzureProviderRecoveryObservationSupport.IsSeedSecretsEligible(operation)) ||
-            observedStep == AzureProviderRunnerStep.SeedSecrets &&
-            !AzureProviderRecoveryObservationSupport.IsSeedSecretsEligible(operation) ||
-            observedStep == AzureProviderRunnerStep.SqlFirewallCreate &&
-            !AzureProviderRecoveryObservationSupport.IsSqlFirewallCreateEligible(operation) ||
-            observedStep == AzureProviderRunnerStep.SqlBootstrapScript &&
-            !AzureProviderRecoveryObservationSupport.IsSqlBootstrapScriptEligible(operation) ||
-            observedStep == AzureProviderRunnerStep.SqlFirewallCleanup &&
-            !AzureProviderRecoveryObservationSupport.IsSqlFirewallCleanupEligible(operation) ||
-            observedStep == AzureProviderRunnerStep.Workload &&
-            !AzureProviderRecoveryObservationSupport.IsWorkloadEligible(operation))
+        // uncertain step. The reconciler charges an auto-resume through the same gate.
+        if (!AzureProviderResumeEligibility.IsEligible(operation, observation))
             return RecoveryInsufficient(operation);
+        if (observation.Kind == AzureProviderRecoveryObservationKind.Failed)
+            return await RecoverFailedStepAsync(operation, plan, cancellationToken);
 
+        var observedPhase = AzureProviderRecoveryObservationSupport.RecoveryPhase(observation.CompletedStep!.Value);
         var now = _timeProvider.GetUtcNow();
         var leaseToken = Guid.NewGuid().ToString("N");
         var claimed = await _store.ClaimRecoveryAsync(
@@ -1203,20 +1170,8 @@ public sealed class AzureProviderExecutor
     private async Task<AzureProviderExecutionResult> RecoverFailedStepAsync(
         AzureProviderOperation operation,
         AzureWorkloadPlan plan,
-        AzureProviderRecoveryObservation observation,
         CancellationToken cancellationToken)
     {
-        var failedStep = observation.CompletedStep!.Value;
-        if (!AzureProviderRecoveryObservationSupport.IsFailedStepRetryBoundary(
-                operation.AttemptedStep, operation.Phase, failedStep, operation.Phase) ||
-            failedStep == AzureProviderRunnerStep.Foundation &&
-            !AzureProviderRecoveryObservationSupport.IsFoundationOnlyEligible(operation) ||
-            failedStep == AzureProviderRunnerStep.AcrPull &&
-            !AzureProviderRecoveryObservationSupport.IsAcrPullEligible(operation) ||
-            failedStep == AzureProviderRunnerStep.Workload &&
-            !AzureProviderRecoveryObservationSupport.IsWorkloadEligible(operation))
-            return RecoveryInsufficient(operation);
-
         var now = _timeProvider.GetUtcNow();
         var leaseToken = Guid.NewGuid().ToString("N");
         var claimed = await _store.ClaimRecoveryAsync(

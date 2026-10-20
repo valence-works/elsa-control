@@ -1402,6 +1402,105 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     }
 
     [Fact]
+    public async Task Admin_provider_readout_exposes_auto_resume_history_and_the_late_success_lever()
+    {
+        var app = await PrepareApplicationAsync([]);
+        var customer = app.CreateTrustedWorkspaceClient("auto-resume-readout-owner");
+        var workspaceId = await customer.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+        var created = await CreateCanonicalInstanceAsync(customer, workspaceId, "auto-resume-readout-runtime");
+        var instanceId = created.Instance.InstanceId;
+        Guid providerOperationId;
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            var store = new AzureProviderOperationStore(db);
+            var organizationId = await db.Database.SqlQuery<Guid>($"""
+                SELECT OrganizationId AS Value FROM ElsaInstances WHERE Id = {instanceId}
+                """).SingleAsync();
+            var assignment = await ((IAzureProviderResourceAssignmentStore)store).CreateOrGetAsync(
+                new(workspaceId, organizationId, instanceId, new string('a', 64),
+                    "11111111-1111-1111-1111-111111111111", "rg-correlation",
+                    AzureElsaInstanceProvider.WorkloadName(instanceId), "westeurope"),
+                DateTimeOffset.UtcNow);
+            var operation = await store.CreateOrGetAsync(new AzureProviderOperationRequest(
+                workspaceId,
+                AzureElsaInstanceProvider.WorkloadName(instanceId),
+                AzureProviderOperationAction.Reconcile,
+                AzureProviderOperationValidation.LifecycleIdempotencyKey(created.Operation.Id),
+                new string('a', 64), new string('b', 64), "3.8.0", "3.8", "combined", "Dedicated",
+                "westeurope", "valenceruntimeimages.azurecr.io/runtime-combined",
+                "sha256:" + new string('c', 64),
+                ProviderScopeFingerprint: new string('a', 64),
+                OrganizationId: organizationId,
+                InstanceId: instanceId,
+                LifecycleAction: ElsaInstanceOperationAction.Create,
+                ProviderAssignmentId: assignment.Id), DateTimeOffset.UtcNow);
+            providerOperationId = operation.Id;
+            var now = DateTimeOffset.UtcNow;
+            const string leaseToken = "auto-resume-readout-lease";
+            var claimed = (await store.ClaimAsync(workspaceId, providerOperationId,
+                "auto-resume-readout-worker", leaseToken, TimeSpan.FromMinutes(1), now))!;
+            var checkpointed = (await store.CheckpointAsync(workspaceId, providerOperationId, leaseToken,
+                new AzureProviderCheckpoint(
+                    AzureProviderOperationPhase.FoundationReady,
+                    "azure.step.references",
+                    "Provider resource references were retained for recovery.",
+                    new AzureProviderResourceReferences(),
+                    null,
+                    AzureProviderHealth.Unknown,
+                    [
+                        new AzureProviderDiagnostic(
+                            ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded,
+                            ManagedElsaReasonCodeCatalog.AzureDeploymentWaitExceeded),
+                        new AzureProviderDiagnostic(
+                            StagingLateSuccessLeverDefaults.AppliedCode,
+                            StagingLateSuccessLeverDefaults.AppliedCode)
+                    ],
+                    AttemptedStep: AzureProviderRunnerStep.Workload),
+                now, claimed.Version))!;
+            Assert.NotNull(await store.FinalizeAsync(workspaceId, providerOperationId, leaseToken,
+                AzureProviderOperationStatus.RecoveryRequired, "azure.step.workload.uncertain", now, checkpointed.Version));
+            // A later checkpoint without the marker must not hide that the lever fired.
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE AzureProviderOperations SET DiagnosticsJson = '[]', AutoResumeCount = 1
+                WHERE Id = {providerOperationId}
+                """);
+            await store.RecordAutoResumeOutcomeAsync(
+                workspaceId, providerOperationId, ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeAccepted);
+            await store.RecordAutoResumeResultAsync(
+                workspaceId, providerOperationId, ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInvalid);
+            await store.RecordAutoResumeOutcomeAsync(
+                workspaceId, providerOperationId, ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator);
+        }
+
+        using var admin = app.CreateClient();
+        admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
+        using var response = await admin.GetAsync(
+            $"/api/admin/workspaces/{workspaceId:D}/instances/{instanceId:D}/operations/provider-current");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = (await response.Content.ReadControlJsonAsync<AdminManagedElsaProviderOperationResponse>())!;
+        Assert.Equal(AzureProviderOperationStatus.RecoveryRequired, body.Status);
+        Assert.Equal(AzureProviderOperationPhase.FoundationReady, body.Phase);
+        Assert.Equal(AzureProviderRunnerStep.Workload, body.AttemptedStep);
+        Assert.Equal(1, body.AutoResumeCount);
+        Assert.True(body.AutoResumeBlocked);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator, body.ReasonCode);
+        Assert.Equal(
+            [
+                ManagedElsaReasonCodeCatalog.AzureRecoveryAutoResumeAccepted,
+                ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInvalid,
+                ManagedElsaReasonCodeCatalog.AzureRecoveryNeedsOperator
+            ],
+            body.AutoResumeOutcomeCodes);
+        Assert.True(body.LateSuccessLeverApplied);
+        var json = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(providerOperationId.ToString("D"), json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("/subscriptions/", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Admin_provider_readout_follows_the_correlated_delete_assignment()
     {
         var app = await PrepareApplicationAsync([]);
