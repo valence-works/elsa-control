@@ -52,7 +52,11 @@ Phase 1 deploys this module: the vault, its network rules and the Key Vault
 Secrets User assignment. A human operator applies it, with
 `scripts/deploy-azure-elsa-control.sh --vault-only` or, for production, a
 direct resource-group deployment of this module (see "Production apply" in
-`docs/deployment/azure-app-service.md`). That operator holds:
+`docs/deployment/azure-app-service.md`). These rights cover the vault module
+only: `--vault-only` first runs the base subscription deployment
+(`infra/main.bicep`), which also needs the base deployment's rights. An
+operator with only the rights below deploys the module directly. That
+operator holds:
 
 - Key Vault Contributor (or another role with
   `Microsoft.KeyVault/vaults/write`) on the Control resource group;
@@ -62,7 +66,7 @@ direct resource-group deployment of this module (see "Production apply" in
   Secrets User, for example Role Based Access Control Administrator with a
   condition on that role.
 
-Re-running phase 1 to change the firewall rules uses the same operator.
+Re-running phase 1 to change the firewall rules uses the same operator. A re-run replaces the vault's network rules with the template's values, so pass every CIDR you still need, including any added with `az keyvault network-rule add` and any `apiOutboundIpCidrs`.
 
 Phase 2 (the site apply, a run without `--vault-only`) never deploys this
 module. It reads the existing vault URI and fails with a pointer to phase 1
@@ -76,8 +80,10 @@ The roles of the GitHub deploy identity in `infra/control-deploy-identity`
 1. Apply `infra/control-egress` so `snet-api-egress` has the Key Vault
    service endpoint. Record `AZURE_API_EGRESS_SUBNET_ID`.
 2. Phase 1: as the phase 1 operator, deploy this module with
-   `scripts/deploy-azure-elsa-control.sh --vault-only`. Do not apply the
-   site yet.
+   `scripts/deploy-azure-elsa-control.sh --vault-only`, which also applies the
+   base deployment. With only the phase 1 rights, deploy the module directly
+   instead ("Production apply" in `docs/deployment/azure-app-service.md`). Do
+   not apply the site yet.
 3. If your client is not already on `operatorWriteIpCidrs`, add one IPv4 CIDR
    through the management plane (`az keyvault network-rule add`). That does
    not require data-plane access.
@@ -137,5 +143,5 @@ az webapp restart --resource-group "<rg>" --name "<webapp>"
 | --- | --- |
 | `apiIdentityPrincipalId` | API identity principal. Required. |
 | `apiEgressSubnetId` | `AZURE_API_EGRESS_SUBNET_ID`. Required. |
-| `operatorWriteIpCidrs` | Operator write-path CIDRs (`KEY_VAULT_OPERATOR_WRITE_IP_CIDRS`). |
-| `apiOutboundIpCidrs` | Optional NAT `/32` CIDRs (`KEY_VAULT_API_OUTBOUND_IP_CIDRS`). |
+| `operatorWriteIpCidrs` | Operator write-path CIDRs (`KEY_VAULT_OPERATOR_WRITE_IP_CIDRS`, read only by `--vault-only`). |
+| `apiOutboundIpCidrs` | Optional NAT `/32` CIDRs (`KEY_VAULT_API_OUTBOUND_IP_CIDRS`, read only by `--vault-only`). |

@@ -478,7 +478,9 @@ Required deploy inputs for vault and site apply:
   dispatch fails in "Check deployment configuration", before any Azure
   login.
 
-Optional deploy inputs:
+Optional phase 1 inputs. Only `--vault-only` reads them, from the operator's
+shell. CI never runs phase 1, so setting them in the GitHub environment
+changes nothing:
 
 - `KEY_VAULT_OPERATOR_WRITE_IP_CIDRS`: comma-separated IPv4 CIDRs for the
   operator write path.
@@ -496,7 +498,7 @@ Secrets User assignment. A human operator applies it. That operator holds:
   condition on that role.
 
 Re-running phase 1 to change the vault firewall rules uses the same
-operator.
+operator. A re-run replaces the vault's network rules with the template's values, so pass every CIDR you still need, including any added with `az keyvault network-rule add` and any `apiOutboundIpCidrs`.
 
 These rights cover the vault module only. `--vault-only` first runs the
 base subscription deployment (`az deployment sub create` with
