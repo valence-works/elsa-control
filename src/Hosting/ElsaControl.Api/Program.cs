@@ -294,6 +294,15 @@ builder.Services.AddHostedService<ControlRateLimitBffEgressConfigurationValidato
 builder.Services.Configure<ControlRateLimitBffCredentialOptions>(
     builder.Configuration.GetSection(ControlRateLimitBffCredentialOptions.ConfigurationSection));
 builder.Services.AddHostedService<ControlRateLimitBffCredentialConfigurationValidator>();
+// Dot-free switch for the BFF source-address diagnostic: App Service on Linux cannot carry the
+// dotted Logging__LogLevel__ElsaControl.Api.RateLimiting app setting name into the container.
+// Same rule builder.Logging.AddFilter adds, read when the logger factory is built so it sees the
+// final configuration; an invalid value refuses startup there.
+builder.Services.Configure<LoggerFilterOptions>(options =>
+{
+    if (ControlRateLimitBffSourceDiagnostic.ReadLogLevel(builder.Configuration) is { } level)
+        options.AddFilter(ControlRateLimitBffSourceDiagnostic.LoggerCategory, level);
+});
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
