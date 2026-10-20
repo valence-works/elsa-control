@@ -1,4 +1,3 @@
-using System.Security.Claims;
 using ElsaControl.Api.Authentication;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using Microsoft.AspNetCore.Authentication;
@@ -14,7 +13,9 @@ public static class CloudAccountLinkDefaults
 
 public sealed record CloudAccountLinkSessions(
     TrustedWorkspaceIdentity CloudIdentity,
-    TrustedWorkspaceIdentity HubIdentity);
+    TrustedWorkspaceIdentity HubIdentity,
+    DateTimeOffset? CloudLastSignIn,
+    DateTimeOffset? HubLastSignIn);
 
 public sealed class CloudAccountLinkSessionReader(
     IOptions<CloudAccountIdentityOptions> cloudAccountOptions,
@@ -26,10 +27,9 @@ public sealed class CloudAccountLinkSessionReader(
     public async Task<CloudAccountLinkSessions?> ReadAsync(HttpContext context)
     {
         var primary = await context.AuthenticateAsync(CloudAccountIdentityDefaults.SelectorScheme);
-        var principal = primary.Succeeded ? primary.Principal : null;
 
-        var cloud = MapCloud(principal);
-        var hub = MapHub(principal);
+        var cloud = MapCloud(primary);
+        var hub = MapHub(primary);
 
         cloud ??= await AuthenticateCompanionAsync(
             context,
@@ -44,24 +44,34 @@ public sealed class CloudAccountLinkSessionReader(
 
         return cloud is null || hub is null
             ? null
-            : new CloudAccountLinkSessions(cloud, hub);
+            : new CloudAccountLinkSessions(cloud.Identity, hub.Identity, cloud.LastSignIn, hub.LastSignIn);
     }
 
-    private TrustedWorkspaceIdentity? MapCloud(ClaimsPrincipal? principal) =>
-        CloudAccountTokenSelector.IsValidatedCloudAccount(principal, _cloudAccountOptions)
-            ? ControlClaimsIdentityMapper.ToCloudTrustedWorkspaceIdentity(principal!)
+    private Session? MapCloud(AuthenticateResult result)
+    {
+        var principal = result.Succeeded ? result.Principal : null;
+        return CloudAccountTokenSelector.IsValidatedCloudAccount(principal, _cloudAccountOptions)
+            ? new Session(
+                ControlClaimsIdentityMapper.ToCloudTrustedWorkspaceIdentity(principal!),
+                AccountSignInRecency.ReadLastSignIn(result.Properties))
             : null;
+    }
 
-    private TrustedWorkspaceIdentity? MapHub(ClaimsPrincipal? principal) =>
-        HubAccountTokenSelector.IsValidatedHubAccount(principal, _hubAccountOptions)
-            ? ControlClaimsIdentityMapper.ToHubTrustedWorkspaceIdentity(principal!)
+    private Session? MapHub(AuthenticateResult result)
+    {
+        var principal = result.Succeeded ? result.Principal : null;
+        return HubAccountTokenSelector.IsValidatedHubAccount(principal, _hubAccountOptions)
+            ? new Session(
+                ControlClaimsIdentityMapper.ToHubTrustedWorkspaceIdentity(principal!),
+                AccountSignInRecency.ReadLastSignIn(result.Properties))
             : null;
+    }
 
-    private static async Task<TrustedWorkspaceIdentity?> AuthenticateCompanionAsync(
+    private static async Task<Session?> AuthenticateCompanionAsync(
         HttpContext context,
         string headerName,
         string scheme,
-        Func<ClaimsPrincipal?, TrustedWorkspaceIdentity?> map)
+        Func<AuthenticateResult, Session?> map)
     {
         if (!context.Request.Headers.TryGetValue(headerName, out var values))
             return null;
@@ -74,12 +84,13 @@ public sealed class CloudAccountLinkSessionReader(
         context.Request.Headers.Authorization = authorization;
         try
         {
-            var result = await context.AuthenticateAsync(scheme);
-            return result.Succeeded ? map(result.Principal) : null;
+            return map(await context.AuthenticateAsync(scheme));
         }
         finally
         {
             context.Request.Headers.Authorization = original;
         }
     }
+
+    private sealed record Session(TrustedWorkspaceIdentity Identity, DateTimeOffset? LastSignIn);
 }

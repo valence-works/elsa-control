@@ -1,6 +1,9 @@
+using System.Runtime.CompilerServices;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.RuntimeBuilder.Abstractions.Plans;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ElsaControl.Deployment.Azure;
 
@@ -19,7 +22,8 @@ public sealed class AzureElsaInstanceProvider(
     IAzureProviderRecoveryObserver? recoveryObserver = null,
     IAzureProviderRecoveryObservationStore? recoveryObservationStore = null,
     IAzureRuntimeHealthProbe? runtimeHealthProbe = null,
-    AzureProviderTargetScope? providerScope = null) :
+    AzureProviderTargetScope? providerScope = null,
+    ILogger<AzureElsaInstanceProvider>? logger = null) :
     IElsaInstanceProviderSubmissionPort,
     IElsaInstanceProviderReconciliationPort,
     IElsaInstanceProviderCleanupPort,
@@ -35,6 +39,7 @@ public sealed class AzureElsaInstanceProvider(
     private readonly IAzureProviderRecoveryObservationStore? _recoveryObservationStore = recoveryObservationStore;
     private readonly IAzureRuntimeHealthProbe? _runtimeHealthProbe = runtimeHealthProbe;
     private readonly AzureProviderTargetScope? _providerScope = providerScope;
+    private readonly ILogger _logger = logger ?? NullLogger<AzureElsaInstanceProvider>.Instance;
 
     public async Task<ElsaInstanceProviderSubmissionResult> SubmitAsync(
         ElsaInstanceProviderSubmission request,
@@ -296,14 +301,26 @@ public sealed class AzureElsaInstanceProvider(
             var transientFailed = isFailedStepRetry && AzureTransientArmFailure.IsTransient(
                 AzureTransientArmFailure.Normalize(InnerArmCode(observed)));
             var seenFailedBefore = AzureLateSuccessCodes.IsTerminalDeploymentFailure(operation.LastObservationReasonCode);
+            var completesAttemptedStep = observed.Kind == AzureProviderRecoveryObservationKind.Confirmed &&
+                observed.CompletedStep is { } completed &&
+                AzureNamedDeploymentFreshness.IsConfirmedCompletedResume(operation.AttemptedStep, completed);
+            var autoResumeBlocked = AzureLateSuccessCodes.IsAutoResumeBlocked(operation);
+            // Charge only what the provider resume will accept: the same executor gate, then
+            // (below) the same receipt authority and instance-version binding.
+            var resumable = AzureProviderResumeEligibility.IsEligible(operation, observed);
+            // A confirmed completion, or a transient failure already seen once, would auto-resume.
+            var wouldAutoResume = completesAttemptedStep || (transientFailed && seenFailedBefore);
             var eligibleAutoResume =
                 operation.AutoResumeCount < AzureNamedDeploymentFreshness.MaximumAutoResumes &&
                 !request.OperatorInitiated &&
-                ((observed.Kind == AzureProviderRecoveryObservationKind.Confirmed &&
-                  observed.CompletedStep is { } completed &&
-                  AzureNamedDeploymentFreshness.IsConfirmedCompletedResume(operation.AttemptedStep, completed)) ||
-                 (transientFailed && seenFailedBefore));
-            var reasonCode = ResolveObservationReason(observed, eligibleAutoResume, operation.AutoResumeCount);
+                !autoResumeBlocked &&
+                resumable &&
+                wouldAutoResume;
+            // Nothing retries a step the resume would refuse, so it waits for an operator instead
+            // of reporting a retry that never comes.
+            var needsOperator = !request.OperatorInitiated &&
+                (autoResumeBlocked || (wouldAutoResume && !resumable));
+            var reasonCode = ResolveObservationReason(observed, eligibleAutoResume, operation.AutoResumeCount, needsOperator);
             await RecordArmObservationClockAsync(
                 operation, eligibleAutoResume, isFailedStepRetry, reasonCode, cancellationToken);
             if ((observed.Kind != AzureProviderRecoveryObservationKind.Confirmed && !isFailedStepRetry) ||
@@ -325,17 +342,22 @@ public sealed class AzureElsaInstanceProvider(
                 request.AttemptNumber,
                 operation.Id,
                 cancellationToken);
+            // A reused receipt must carry the same authority a fresh one would; otherwise mint
+            // a fresh receipt at the current tuple rather than charge for one the resume refuses.
             if (latest is not null &&
                 string.Equals(latest.Observation.PostconditionFingerprint, postconditionFingerprint, StringComparison.Ordinal) &&
                 (request.OperatorInitiated
                     ? latest.Observation.ObservedInstanceVersion == request.InstanceVersion
-                    : IsReceiptVersionFresh(latest, request.InstanceVersion)))
+                    : AzureProviderResumeEligibility.IsBoundToReconciledInstanceVersion(
+                        latest.Observation.ObservedInstanceVersion, request.InstanceVersion)) &&
+                (!eligibleAutoResume || AzureProviderResumeEligibility.CanAutoResume(
+                    operation, observed, latest.Observation, request.InstanceVersion)))
             {
                 return new RecoveryObservationResult(
                     new ElsaInstanceProviderRetryEvidence(
                         latest.Reference,
                         latest.Digest,
-                        eligibleAutoResume && !request.OperatorInitiated,
+                        eligibleAutoResume,
                         operation.AutoResumeCount),
                     reasonCode);
             }
@@ -374,7 +396,8 @@ public sealed class AzureElsaInstanceProvider(
                 new ElsaInstanceProviderRetryEvidence(
                     receipt.Reference,
                     receipt.Digest,
-                    eligibleAutoResume,
+                    eligibleAutoResume && AzureProviderResumeEligibility.CanAutoResume(
+                        operation, observed, receipt.Observation, request.InstanceVersion),
                     operation.AutoResumeCount),
                 reasonCode);
         }
@@ -438,7 +461,8 @@ public sealed class AzureElsaInstanceProvider(
             request.AttemptNumber,
             operation.Id,
             cancellationToken);
-        if (currentAttempt is not null && IsReceiptVersionFresh(currentAttempt, request.InstanceVersion))
+        if (currentAttempt is not null && AzureProviderResumeEligibility.IsBoundToReconciledInstanceVersion(
+                currentAttempt.Observation.ObservedInstanceVersion, request.InstanceVersion))
             return ToManualEvidence(currentAttempt, operation, resolvedReason);
 
         var latest = await _recoveryObservationStore.GetLatestReceiptForOperationAsync(
@@ -449,7 +473,8 @@ public sealed class AzureElsaInstanceProvider(
         if (latest is null)
             return new RecoveryObservationResult(null, resolvedReason);
         if (latest.Observation.ObservedLifecycleAttemptNumber == request.AttemptNumber &&
-            IsReceiptVersionFresh(latest, request.InstanceVersion))
+            AzureProviderResumeEligibility.IsBoundToReconciledInstanceVersion(
+                latest.Observation.ObservedInstanceVersion, request.InstanceVersion))
             return ToManualEvidence(latest, operation, resolvedReason);
 
         try
@@ -490,17 +515,14 @@ public sealed class AzureElsaInstanceProvider(
                 operation.AutoResumeCount),
             reasonCode);
 
-    private static bool IsReceiptVersionFresh(
-        AzureProviderRecoveryObservationReceipt receipt,
-        int instanceVersion) =>
-        receipt.Observation.ObservedInstanceVersion == instanceVersion ||
-        receipt.Observation.ObservedInstanceVersion == instanceVersion - 1;
-
     private static string? ResolveObservationReason(
         AzureProviderRecoveryObservation observed,
         bool eligibleAutoResume,
-        int autoResumeCount)
+        int autoResumeCount,
+        bool needsOperator)
     {
+        if (needsOperator)
+            return AzureLateSuccessCodes.NeedsOperator;
         if (observed.Kind == AzureProviderRecoveryObservationKind.Failed)
         {
             if (autoResumeCount >= AzureNamedDeploymentFreshness.MaximumAutoResumes)
@@ -620,6 +642,112 @@ public sealed class AzureElsaInstanceProvider(
         ElsaInstanceProviderRecoveryRequest request,
         CancellationToken cancellationToken = default)
     {
+        var replay = new StrongBox<bool>();
+        var resumedOperation = new StrongBox<AzureProviderOperation?>();
+        var result = await RecoverCoreAsync(request, replay, resumedOperation, cancellationToken);
+        // A replay re-reads a recovery that was already claimed (a duplicate or late envelope):
+        // its result says nothing new about the resume, and a rejected replay is not a refusal.
+        if (!replay.Value &&
+            ElsaInstanceProviderReconciliationService.IsAutoResumeIdempotencyKey(
+                request.Envelope.IdempotencyKey, request.Envelope.LifecycleOperationId))
+            await RecordAutoResumeResultAsync(request, resumedOperation.Value, result, cancellationToken);
+        return result;
+    }
+
+    /// <summary>
+    /// A charged auto-resume reports its provider result back to the operation's outcome
+    /// history. A refusal that a later ARM read cannot change parks the operation for an
+    /// operator (<c>azure.recovery.needs-operator</c>) so the reconciler stops charging.
+    /// Only a result for the receipt of the attempt it resumed is recorded: a delayed envelope
+    /// from an earlier charge, after another worker resumed the operation and it returned to
+    /// RecoveryRequired at a later attempt, says nothing about the live attempt.
+    /// The result is already decided; a failed bookkeeping write must not change it.
+    /// </summary>
+    private async Task RecordAutoResumeResultAsync(
+        ElsaInstanceProviderRecoveryRequest request,
+        AzureProviderOperation? resumedOperation,
+        ElsaInstanceProviderRecoveryResult result,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var submission = request.Submission;
+            var operation = await TryGetCorrelatedReconcileAsync(
+                submission.WorkspaceId, submission.InstanceId, submission.OperationId, cancellationToken);
+            if (operation is null || AzureLateSuccessCodes.IsAutoResumeBlocked(operation) ||
+                !await IsReceiptForAttemptAsync(request.Envelope, resumedOperation ?? operation, cancellationToken))
+                return;
+            try
+            {
+                await operationStore.RecordAutoResumeResultAsync(
+                    operation.WorkspaceId, operation.Id, result.Code, cancellationToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                // The history is best effort; a failed append must not skip the block below.
+                _logger.LogWarning(exception,
+                    "Could not append auto-resume result {ResultCode} to the history of provider operation {OperationId}.",
+                    result.Code, operation.Id);
+            }
+            if (AzureLateSuccessCodes.IsNonTransientResumeRefusal(result.Outcome, result.Code))
+            {
+                try
+                {
+                    await operationStore.RecordAutoResumeOutcomeAsync(
+                        operation.WorkspaceId, operation.Id, AzureLateSuccessCodes.NeedsOperator, cancellationToken);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    // The charge cap bounds any resume charged before a later block lands.
+                    _logger.LogError(exception,
+                        "Could not record {ReasonCode} for provider operation {OperationId}; auto-resume stays chargeable until a block is recorded.",
+                        AzureLateSuccessCodes.NeedsOperator, operation.Id);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            // A failed correlation or receipt read: nothing was recorded, and the next reconcile
+            // still observes the provider operation.
+            _logger.LogWarning(exception,
+                "Could not correlate auto-resume result {ResultCode}; nothing was recorded.", result.Code);
+        }
+    }
+
+    /// <summary>
+    /// Whether the envelope's receipt was minted for <paramref name="operation"/> at its current
+    /// provider attempt and version, read without the strict state validation that refused it.
+    /// <paramref name="operation"/> is the snapshot the resume read before any claim.
+    /// </summary>
+    private async Task<bool> IsReceiptForAttemptAsync(
+        ElsaInstanceProviderRecoveryEnvelope envelope,
+        AzureProviderOperation operation,
+        CancellationToken cancellationToken)
+    {
+        if (_recoveryObservationStore is null)
+            return false;
+        var receipt = await _recoveryObservationStore.GetRecordedObservationAsync(
+            envelope.WorkspaceId,
+            envelope.LifecycleOperationId,
+            envelope.ObservationReference,
+            envelope.ObservationDigest,
+            cancellationToken);
+        return receipt is not null &&
+               receipt.ProviderOperationId == operation.Id &&
+               receipt.ProviderAttemptNumber == operation.AttemptNumber &&
+               receipt.ProviderVersion == operation.Version;
+    }
+
+    private async Task<ElsaInstanceProviderRecoveryResult> RecoverCoreAsync(
+        ElsaInstanceProviderRecoveryRequest request,
+        StrongBox<bool> replay,
+        StrongBox<AzureProviderOperation?> resumedOperation,
+        CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(request);
         request.Validate();
         EnsureEnabled();
@@ -650,6 +778,11 @@ public sealed class AzureElsaInstanceProvider(
             cancellationToken);
         if (operation is null)
             return RecoveryRequired(ManagedElsaReasonCodeCatalog.AzureRecoveryOperationUnavailable);
+        resumedOperation.Value = operation;
+        // Post-claim replay is read-only, but still requires proof that this exact
+        // accepted lifecycle recovery authorized the current provider successor.
+        var isReplay = operation.Status is AzureProviderOperationStatus.Running or AzureProviderOperationStatus.Succeeded;
+        replay.Value = isReplay;
         if (operation.WorkspaceId != submission.WorkspaceId ||
             !string.Equals(operation.TargetKey, WorkloadName(submission.InstanceId), StringComparison.OrdinalIgnoreCase) ||
             operation.Action != AzureProviderOperationAction.Reconcile ||
@@ -689,9 +822,6 @@ public sealed class AzureElsaInstanceProvider(
             !string.Equals(translatedRequestedPlan.Plan.Fingerprint, retainedPlan.Fingerprint, StringComparison.Ordinal))
             return RecoveryRejected(ManagedElsaReasonCodeCatalog.AzureRecoveryPlanMismatch);
 
-        // Post-claim replay is read-only, but still requires proof that this exact
-        // accepted lifecycle recovery authorized the current provider successor.
-        var isReplay = operation.Status is AzureProviderOperationStatus.Running or AzureProviderOperationStatus.Succeeded;
         if (!isReplay && operation.Status != AzureProviderOperationStatus.RecoveryRequired)
             return RecoveryRejected(ManagedElsaReasonCodeCatalog.AzureRecoveryStateInvalid);
 
@@ -804,28 +934,27 @@ public sealed class AzureElsaInstanceProvider(
         // The provider tuple is the pre-Recover snapshot. The recovery ledger, validated by the
         // observation store, owns the lifecycle attempt/version transition; these checks only
         // ensure the record was produced for this exact retained provider operation and not a
-        // stale or cross-scope row.
-        return observation.OrganizationId == submission.OrganizationId &&
-               observation.WorkspaceId == submission.WorkspaceId &&
-               observation.InstanceId == submission.InstanceId &&
-               observation.LifecycleOperationId == submission.OperationId &&
-               observation.LifecycleAction == submission.OperationAction &&
-               observation.ProviderOperationId == operation.Id &&
+        // stale or cross-scope row. Before the claim this is the same authority the reconciler
+        // required when it charged an auto-resume.
+        if (observation.OrganizationId != submission.OrganizationId ||
+            observation.WorkspaceId != submission.WorkspaceId ||
+            observation.InstanceId != submission.InstanceId ||
+            observation.LifecycleOperationId != submission.OperationId ||
+            observation.LifecycleAction != submission.OperationAction ||
+            observation.ProviderAssignmentId != assignmentId)
+            return false;
+        if (!isReplay)
+            return AzureProviderResumeEligibility.IsRecordAuthoritative(observation, operation);
+
+        return observation.ProviderOperationId == operation.Id &&
                string.Equals(observation.ProviderOperationIdentity, operation.OperationIdentity, StringComparison.Ordinal) &&
                string.Equals(observation.ProviderRequestHash, operation.RequestHash, StringComparison.Ordinal) &&
-               (isReplay
-                   ? (long)observation.ProviderAttemptNumber + 1 == operation.AttemptNumber &&
-                     observation.ProviderVersion < operation.Version &&
-                     observation.ProviderCheckpointSequence <= operation.CheckpointSequence
-                   : observation.ProviderAttemptNumber == operation.AttemptNumber &&
-                     observation.ProviderVersion == operation.Version &&
-                     observation.ProviderCheckpointSequence == operation.CheckpointSequence) &&
-               observation.ProviderAssignmentId == assignmentId &&
+               (long)observation.ProviderAttemptNumber + 1 == operation.AttemptNumber &&
+               observation.ProviderVersion < operation.Version &&
+               observation.ProviderCheckpointSequence <= operation.CheckpointSequence &&
                string.Equals(observation.TargetKey, operation.TargetKey, StringComparison.OrdinalIgnoreCase) &&
                string.Equals(observation.ProviderPlanFingerprint, operation.PlanFingerprint, StringComparison.Ordinal) &&
-               string.Equals(observation.ProviderTemplateFingerprint, operation.TemplateFingerprint, StringComparison.Ordinal) &&
-               (isReplay || AzureProviderRecoveryObservationSupport.IsCompatibleBoundary(
-                   operation.AttemptedStep, operation.Phase, observation.CompletedStep, observation.ObservedPhase));
+               string.Equals(observation.ProviderTemplateFingerprint, operation.TemplateFingerprint, StringComparison.Ordinal);
     }
 
     public async Task<ElsaInstanceCleanupObservation> CleanupAsync(

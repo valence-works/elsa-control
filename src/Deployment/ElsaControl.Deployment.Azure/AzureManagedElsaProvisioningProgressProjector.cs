@@ -565,8 +565,11 @@ public static class AzureManagedElsaProvisioningProgressProjector
         AzureProviderOperationPhase.AcrPullObserved or AzureProviderOperationPhase.SeedSecretsObserved or
             AzureProviderOperationPhase.SqlFirewallReady or AzureProviderOperationPhase.SqlBootstrapReady or
             AzureProviderOperationPhase.FoundationReady => ManagedElsaProvisioningProgressStages.Configuration,
-        AzureProviderOperationPhase.WorkloadSubmitted or AzureProviderOperationPhase.WorkloadReady => ManagedElsaProvisioningProgressStages.RuntimeDeployment,
-        AzureProviderOperationPhase.HealthVerified => ManagedElsaProvisioningProgressStages.HealthVerification,
+        AzureProviderOperationPhase.WorkloadSubmitted => ManagedElsaProvisioningProgressStages.RuntimeDeployment,
+        // A ready workload has passed Workload: health verification is the next step, so a
+        // resume that got past Workload is distinguishable from one parked at it (#860).
+        AzureProviderOperationPhase.WorkloadReady or AzureProviderOperationPhase.HealthVerified =>
+            ManagedElsaProvisioningProgressStages.HealthVerification,
         AzureProviderOperationPhase.TrafficPromoted => ManagedElsaProvisioningProgressStages.TrafficRouting,
         _ => null
     };

@@ -1,8 +1,11 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Cloud;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Api.Tests;
@@ -186,6 +189,194 @@ public sealed class ManagedElsaHandoffRateLimitTests
         await AssertHandoffRateLimited(outsideRejected);
         Assert.NotEqual(HttpStatusCode.TooManyRequests, insideAllowed.StatusCode);
         Assert.NotEqual(HttpStatusCode.TooManyRequests, insideAlsoAllowed.StatusCode);
+    }
+
+    [Fact]
+    public async Task Spoofed_left_forwarded_for_entries_share_the_rightmost_entry_partition()
+    {
+        const string issuer = "https://cloud-account.test/auth/v1";
+        await using var app = CreateCloudApplication(perIp: 1, perIdentity: 20, issuer);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var first = CloudClient(app, issuer, "11111111-1111-4111-8111-111111111171", "198.51.100.200");
+        using var spoofed = CloudClient(app, issuer, "22222222-2222-4222-8222-222222222272", "198.51.100.201");
+        using var otherClient = CloudClient(app, issuer, "33333333-3333-4333-8333-333333333373", "198.51.100.200");
+        SetForwardedFor(first, "203.0.113.9, 198.51.100.7");
+        SetForwardedFor(spoofed, "192.0.2.44, 198.51.100.7");
+        SetForwardedFor(otherClient, "203.0.113.9, 198.51.100.8");
+
+        using var firstAllowed = await PostIssueAsync(first);
+        using var spoofedRejected = await PostIssueAsync(spoofed);
+        using var otherClientAllowed = await PostIssueAsync(otherClient);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, firstAllowed.StatusCode);
+        await AssertHandoffRateLimited(spoofedRejected);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, otherClientAllowed.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("cloud")]
+    [InlineData("hub")]
+    public async Task Bff_per_ip_applies_only_when_the_listed_address_is_the_rightmost_forwarded_for_entry(string account)
+    {
+        const string cloudIssuer = "https://cloud-account.test/auth/v1";
+        const string hubIssuer = "https://hub-account.test/auth/v1";
+        const string listedIp = "198.51.100.7";
+        var issuer = account == "cloud" ? cloudIssuer : hubIssuer;
+        await using var app = CreateCloudAndHubApplication(
+            perIp: 1,
+            perIdentity: 20,
+            cloudIssuer,
+            hubIssuer,
+            bffPerIp: 20,
+            bffEgressNetworks: [$"{listedIp}/32"]);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var rightmostFirst = ClientFor(account, app, issuer, "11111111-1111-4111-8111-111111111181", "198.51.100.200");
+        using var rightmostSecond = ClientFor(account, app, issuer, "22222222-2222-4222-8222-222222222282", "198.51.100.200");
+        using var leftFirst = ClientFor(account, app, issuer, "33333333-3333-4333-8333-333333333383", "198.51.100.200");
+        using var leftSecond = ClientFor(account, app, issuer, "44444444-4444-4444-8444-444444444484", "198.51.100.200");
+        SetForwardedFor(rightmostFirst, $"203.0.113.9, {listedIp}");
+        SetForwardedFor(rightmostSecond, $"192.0.2.44, {listedIp}");
+        SetForwardedFor(leftFirst, $"{listedIp}, 203.0.113.31");
+        SetForwardedFor(leftSecond, $"{listedIp}, 203.0.113.31");
+
+        using var rightmostAllowed = await PostIssueAsync(rightmostFirst);
+        using var rightmostAlsoAllowed = await PostIssueAsync(rightmostSecond);
+        using var leftAllowed = await PostIssueAsync(leftFirst);
+        using var leftRejected = await PostIssueAsync(leftSecond);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, rightmostAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, rightmostAlsoAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, leftAllowed.StatusCode);
+        await AssertHandoffRateLimited(leftRejected);
+    }
+
+    [Fact]
+    public async Task Bff_source_diagnostic_logs_address_match_and_policy_at_debug_only()
+    {
+        const string issuer = "https://cloud-account.test/auth/v1";
+        const string listedIp = "198.51.100.7";
+        const string cookieValue = "diagnostic-cookie-value-must-not-be-logged";
+        var debugEntries = new ConcurrentQueue<RecordedLogEntry>();
+        var informationEntries = new ConcurrentQueue<RecordedLogEntry>();
+        await using var debugApp = CreateCloudApplication(
+            perIp: 20,
+            perIdentity: 20,
+            issuer,
+            bffPerIp: 20,
+            bffEgressNetworks: [$"{listedIp}/32"],
+            logLevel: "Debug",
+            configureServices: services => services.AddSingleton<ILoggerProvider>(new RecordingLoggerProvider(debugEntries)));
+        await using var informationApp = CreateCloudApplication(
+            perIp: 20,
+            perIdentity: 20,
+            issuer,
+            bffPerIp: 20,
+            bffEgressNetworks: [$"{listedIp}/32"],
+            configureServices: services => services.AddSingleton<ILoggerProvider>(new RecordingLoggerProvider(informationEntries)));
+        await debugApp.SeedAsync(_ => Task.CompletedTask);
+        await informationApp.SeedAsync(_ => Task.CompletedTask);
+        using var matched = CloudClient(debugApp, issuer, "11111111-1111-4111-8111-111111111191", "198.51.100.200");
+        using var unmatched = CloudClient(debugApp, issuer, "22222222-2222-4222-8222-222222222292", "198.51.100.200");
+        using var silent = CloudClient(informationApp, issuer, "33333333-3333-4333-8333-333333333393", "198.51.100.200");
+        foreach (var client in new[] { matched, unmatched, silent })
+            client.DefaultRequestHeaders.Add("Cookie", $"diagnostic={cookieValue}");
+        SetForwardedFor(matched, $"203.0.113.9, {listedIp}");
+        SetForwardedFor(unmatched, $"{listedIp}, 203.0.113.32");
+        SetForwardedFor(silent, $"203.0.113.9, {listedIp}");
+
+        using var _ = await PostIssueAsync(matched);
+        using var __ = await PostIssueAsync(unmatched);
+        using var ___ = await PostIssueAsync(silent);
+
+        var diagnostics = debugEntries
+            .Where(entry => entry.Category == ControlRateLimitBffSourceDiagnostic.LoggerCategory)
+            .ToArray();
+        Assert.Equal(2, diagnostics.Length);
+        Assert.All(diagnostics, entry =>
+        {
+            Assert.Equal(LogLevel.Debug, entry.Level);
+            Assert.Equal(ManagedElsaHandoffRateLimitDefaults.PolicyName, entry.State["PolicyName"]);
+        });
+        Assert.Equal(listedIp, diagnostics[0].State["RemoteIpAddress"]);
+        Assert.True(Assert.IsType<bool>(diagnostics[0].State["Matched"]));
+        Assert.Equal("203.0.113.32", diagnostics[1].State["RemoteIpAddress"]);
+        Assert.False(Assert.IsType<bool>(diagnostics[1].State["Matched"]));
+        var token = matched.DefaultRequestHeaders.Authorization!.Parameter!;
+        foreach (var entry in diagnostics)
+        {
+            var text = entry.Message + string.Join(" ", entry.State.Values);
+            Assert.DoesNotContain(token, text, StringComparison.Ordinal);
+            Assert.DoesNotContain(cookieValue, text, StringComparison.Ordinal);
+            Assert.DoesNotContain("11111111-1111-4111-8111-111111111191", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("Authorization", text, StringComparison.OrdinalIgnoreCase);
+        }
+
+        Assert.DoesNotContain(
+            informationEntries,
+            entry => entry.Category == ControlRateLimitBffSourceDiagnostic.LoggerCategory);
+    }
+
+    [Fact]
+    public async Task Bff_source_diagnostic_is_enabled_by_the_dot_free_log_level_setting()
+    {
+        // App Service on Linux turns '.' into '_' in app setting names, so operators cannot
+        // reach Logging:LogLevel:ElsaControl.Api.RateLimiting there; this key has no dots.
+        var entries = await RecordBffSourceDiagnosticsAsync(sourceDiagnosticLogLevel: "Debug");
+
+        var diagnostic = Assert.Single(entries);
+        Assert.Equal(LogLevel.Debug, diagnostic.Level);
+        Assert.Equal("198.51.100.8", diagnostic.State["RemoteIpAddress"]);
+        Assert.True(Assert.IsType<bool>(diagnostic.State["Matched"]));
+    }
+
+    [Fact]
+    public async Task Bff_source_diagnostic_stays_off_when_the_dot_free_log_level_setting_is_unset()
+    {
+        var entries = await RecordBffSourceDiagnosticsAsync(sourceDiagnosticLogLevel: null);
+
+        Assert.Empty(entries);
+    }
+
+    [Theory]
+    [InlineData("Verbose")]
+    [InlineData("99")]
+    public async Task Invalid_bff_source_diagnostic_log_level_refuses_startup_naming_the_key(string value)
+    {
+        await using var app = CreateCloudApplication(
+            perIp: 20,
+            perIdentity: 20,
+            "https://cloud-account.test/auth/v1",
+            sourceDiagnosticLogLevel: value);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => app.CreateClient());
+
+        Assert.Contains("RateLimiting:SourceDiagnosticLogLevel", exception.Message, StringComparison.Ordinal);
+    }
+
+    private static async Task<RecordedLogEntry[]> RecordBffSourceDiagnosticsAsync(string? sourceDiagnosticLogLevel)
+    {
+        const string issuer = "https://cloud-account.test/auth/v1";
+        const string listedIp = "198.51.100.8";
+        var entries = new ConcurrentQueue<RecordedLogEntry>();
+        await using (var app = CreateCloudApplication(
+                         perIp: 20,
+                         perIdentity: 20,
+                         issuer,
+                         bffPerIp: 20,
+                         bffEgressNetworks: [$"{listedIp}/32"],
+                         sourceDiagnosticLogLevel: sourceDiagnosticLogLevel,
+                         configureServices: services =>
+                             services.AddSingleton<ILoggerProvider>(new RecordingLoggerProvider(entries))))
+        {
+            await app.SeedAsync(_ => Task.CompletedTask);
+            using var client = CloudClient(app, issuer, "44444444-4444-4444-8444-444444444494", "198.51.100.200");
+            SetForwardedFor(client, $"203.0.113.9, {listedIp}");
+            using var _ = await PostIssueAsync(client);
+        }
+
+        return entries
+            .Where(entry => entry.Category == ControlRateLimitBffSourceDiagnostic.LoggerCategory)
+            .ToArray();
     }
 
     [Fact]
@@ -400,7 +591,8 @@ public sealed class ManagedElsaHandoffRateLimitTests
         int perIdentity,
         IReadOnlyDictionary<string, string?>? extra = null,
         int? bffPerIp = null,
-        IReadOnlyList<string>? bffEgressNetworks = null)
+        IReadOnlyList<string>? bffEgressNetworks = null,
+        Action<IServiceCollection>? configureServices = null)
     {
         var bffIp = bffPerIp ?? perIp;
         var configuration = new Dictionary<string, string?>
@@ -425,7 +617,7 @@ public sealed class ManagedElsaHandoffRateLimitTests
                 configuration[key] = value;
         }
 
-        return new ControlApiTestApplication(configuration);
+        return new ControlApiTestApplication(configuration, configureServices);
     }
 
     private static ControlApiTestApplication CreateCloudApplication(
@@ -433,20 +625,34 @@ public sealed class ManagedElsaHandoffRateLimitTests
         int perIdentity,
         string issuer,
         int? bffPerIp = null,
-        IReadOnlyList<string>? bffEgressNetworks = null) =>
-        CreateApplication(
+        IReadOnlyList<string>? bffEgressNetworks = null,
+        string? logLevel = null,
+        Action<IServiceCollection>? configureServices = null,
+        string? sourceDiagnosticLogLevel = null)
+    {
+        var extra = new Dictionary<string, string?>
+        {
+            // The default category level the Control API ships with, so only the setting under test enables Debug.
+            ["Logging:LogLevel:Default"] = "Information",
+            [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
+            [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Issuer"] = issuer,
+            [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Audience"] = "authenticated",
+            [$"{CloudAccountIdentityDefaults.ConfigurationSection}:TestSigningKey"] =
+                ControlApiTestApplication.TestControlIdentitySigningKey
+        };
+        if (logLevel is not null)
+            extra[$"Logging:LogLevel:{ControlRateLimitBffSourceDiagnostic.LoggerCategory}"] = logLevel;
+        if (sourceDiagnosticLogLevel is not null)
+            extra["RateLimiting:SourceDiagnosticLogLevel"] = sourceDiagnosticLogLevel;
+
+        return CreateApplication(
             perIp,
             perIdentity,
             bffPerIp: bffPerIp,
             bffEgressNetworks: bffEgressNetworks,
-            extra: new Dictionary<string, string?>
-            {
-                [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
-                [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Issuer"] = issuer,
-                [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Audience"] = "authenticated",
-                [$"{CloudAccountIdentityDefaults.ConfigurationSection}:TestSigningKey"] =
-                    ControlApiTestApplication.TestControlIdentitySigningKey
-            });
+            extra: extra,
+            configureServices: configureServices);
+    }
 
     private static ControlApiTestApplication CreateHubApplication(int perIp, int perIdentity, string issuer) =>
         CreateApplication(
@@ -571,6 +777,9 @@ public sealed class ManagedElsaHandoffRateLimitTests
         client.DefaultRequestHeaders.TryAddWithoutValidation(ControlApiTestApplication.TestRemoteIpHeader, ip);
     }
 
+    private static void SetForwardedFor(HttpClient client, string forwardedFor) =>
+        client.DefaultRequestHeaders.TryAddWithoutValidation("X-Forwarded-For", forwardedFor);
+
     private static Task<HttpResponseMessage> PostIssueAsync(HttpClient client) =>
         client.PostAsJsonAsync("/api/managed-elsa/handoff/issue", new { });
 
@@ -584,5 +793,42 @@ public sealed class ManagedElsaHandoffRateLimitTests
         Assert.Equal(ApiRateLimitRejection.HandoffExceededTitle, body.RootElement.GetProperty("title").GetString());
         Assert.Equal(429, body.RootElement.GetProperty("status").GetInt32());
         Assert.False(string.IsNullOrWhiteSpace(body.RootElement.GetProperty("correlationId").GetString()));
+    }
+
+    private sealed record RecordedLogEntry(
+        string Category,
+        LogLevel Level,
+        string Message,
+        IReadOnlyDictionary<string, object?> State);
+
+    private sealed class RecordingLoggerProvider(ConcurrentQueue<RecordedLogEntry> entries) : ILoggerProvider
+    {
+        public ILogger CreateLogger(string categoryName) => new RecordingLogger(categoryName, entries);
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class RecordingLogger(string category, ConcurrentQueue<RecordedLogEntry> entries) : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            var values = state as IEnumerable<KeyValuePair<string, object?>> ?? [];
+            entries.Enqueue(new RecordedLogEntry(
+                category,
+                logLevel,
+                formatter(state, exception),
+                values.ToDictionary(pair => pair.Key, pair => pair.Value)));
+        }
     }
 }

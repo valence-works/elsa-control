@@ -407,6 +407,21 @@ def patch_module(content: str) -> str:
         )
     _ = builder_setting
 
+    # Aspire emits ASPNETCORE_FORWARDEDHEADERS_ENABLED for every project. Program.cs owns the
+    # forwarded-headers configuration (#859) and ignores the host switch, so strip the generated
+    # setting to keep that behaviour in one place.
+    forwarded_headers_setting = lines(
+        "        {",
+        "          name: 'ASPNETCORE_FORWARDEDHEADERS_ENABLED'",
+        "          value: 'true'",
+        "        }",
+    )
+    if content.count(forwarded_headers_setting) > 1:
+        raise SystemExit("Generated ASPNETCORE_FORWARDEDHEADERS_ENABLED setting is ambiguous.")
+    content = content.replace(forwarded_headers_setting, "", 1)
+    if "ASPNETCORE_FORWARDEDHEADERS_ENABLED" in content:
+        raise SystemExit("Cannot strip the generated ASPNETCORE_FORWARDEDHEADERS_ENABLED setting.")
+
     basic_auth_policies = (
         "\n"
         "resource scmBasicAuth 'Microsoft.Web/sites/basicPublishingCredentialsPolicies@2025-03-01' = {\n"

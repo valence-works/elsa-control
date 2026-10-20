@@ -532,6 +532,20 @@ public interface IAzureProviderRecoveryObservationStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Loads the receipt a recovery envelope references, checking only that the reference and
+    /// digest identify an intact record of this lifecycle operation. Unlike the validating reads
+    /// it does not compare the record with the provider operation's current state, so a caller
+    /// can tell a receipt for an earlier provider attempt from a refused current one.
+    /// </summary>
+    Task<AzureProviderRecoveryObservationRecord?> GetRecordedObservationAsync(
+        Guid workspaceId,
+        Guid lifecycleOperationId,
+        string reference,
+        string digest,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<AzureProviderRecoveryObservationRecord?>(null);
+
+    /// <summary>
     /// Returns the latest recorded receipt for this lifecycle attempt so a
     /// rate-limited tick can reuse the same retry-safe evidence.
     /// </summary>

@@ -308,6 +308,44 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
         Assert.Equal(0, await db.AzureProviderRecoveryObservations.CountAsync());
     }
 
+    /// <summary>
+    /// The provider tells a delayed auto-resume envelope from a refused current one by reading
+    /// its receipt after the operation moved on: the strict read refuses the stale receipt, the
+    /// recorded read still returns it, and a wrong digest or lifecycle operation finds nothing.
+    /// </summary>
+    [Fact]
+    public async Task Recorded_recovery_observation_stays_readable_after_the_provider_operation_advances()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var fixture = await SeedProviderObservationAsync(db);
+        var store = (IAzureProviderRecoveryObservationStore)fixture.OperationStore;
+        var receipt = await store.CreateOrGetAsync(fixture.Observation);
+
+        await db.AzureProviderOperations
+            .Where(x => x.Id == fixture.Operation.Id)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(x => x.AttemptNumber, x => x.AttemptNumber + 1)
+                .SetProperty(x => x.Version, x => x.Version + 1));
+        db.ChangeTracker.Clear();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.GetAndValidateRecordedAsync(
+            fixture.Workspace.OrganizationId, fixture.Workspace.Id, fixture.InstanceId,
+            fixture.LifecycleOperationId, fixture.Observation.ObservedLifecycleAttemptNumber,
+            receipt.Reference, receipt.Digest));
+        var recorded = await store.GetRecordedObservationAsync(
+            fixture.Workspace.Id, fixture.LifecycleOperationId, receipt.Reference, receipt.Digest);
+        Assert.NotNull(recorded);
+        Assert.Equal(fixture.Observation.ProviderAttemptNumber, recorded.ProviderAttemptNumber);
+        Assert.Equal(fixture.Observation.ProviderVersion, recorded.ProviderVersion);
+        Assert.Null(await store.GetRecordedObservationAsync(
+            fixture.Workspace.Id, fixture.LifecycleOperationId, receipt.Reference, "sha256:" + new string('0', 64)));
+        Assert.Null(await store.GetRecordedObservationAsync(
+            fixture.Workspace.Id, Guid.NewGuid(), receipt.Reference, receipt.Digest));
+    }
+
     [Theory]
     [InlineData("NaturalKey", false)]
     [InlineData("RecordDigest", false)]
@@ -1603,6 +1641,22 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
         var operation = await db.AzureProviderOperations.SingleAsync(x => x.Id == fixture.Operation.Id);
         operation.AttemptedStep = AzureProviderRunnerStep.Workload;
         operation.Phase = AzureProviderOperationPhase.FoundationReady;
+        // A real Workload park retains foundation, registry and SQL cleanup handles; without
+        // them the provider resume refuses, so the reconciler must not charge an auto-resume.
+        var retained = RegistryResources(fixture.Assignment, fixture.Operation.PlanFingerprint);
+        operation.ResourceGroupName = retained.ResourceGroupName;
+        operation.FoundationDeploymentId = retained.FoundationDeploymentId;
+        operation.WorkloadIdentityResourceId = retained.WorkloadIdentityResourceId;
+        operation.WorkloadIdentityClientId = retained.WorkloadIdentityClientId;
+        operation.WorkloadIdentityPrincipalId = retained.WorkloadIdentityPrincipalId;
+        operation.KeyVaultResourceId = retained.KeyVaultResourceId;
+        operation.KeyVaultUri = retained.KeyVaultUri;
+        operation.SqlServerResourceId = retained.SqlServerResourceId;
+        operation.SqlServerFqdn = retained.SqlServerFqdn;
+        operation.ContainerAppsEnvironmentResourceId = retained.ContainerAppsEnvironmentResourceId;
+        operation.RegistryResourceId = retained.RegistryResourceId;
+        operation.AcrPullDeploymentId = retained.AcrPullDeploymentId;
+        operation.AcrPullRoleAssignmentId = retained.AcrPullRoleAssignmentId;
         operation.LastArmObservedAt = null;
         operation.ArmObservationBackoffSeconds = 0;
         operation.AutoResumeCount = autoResumeCount;
