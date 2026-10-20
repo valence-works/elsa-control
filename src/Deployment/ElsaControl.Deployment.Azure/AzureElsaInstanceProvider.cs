@@ -673,8 +673,15 @@ public sealed class AzureElsaInstanceProvider(
             if (operation is null || AzureLateSuccessCodes.IsAutoResumeBlocked(operation) ||
                 !await IsReceiptForAttemptAsync(request.Envelope, resumedOperation ?? operation, cancellationToken))
                 return;
-            await operationStore.RecordAutoResumeResultAsync(
-                operation.WorkspaceId, operation.Id, result.Code, cancellationToken);
+            try
+            {
+                await operationStore.RecordAutoResumeResultAsync(
+                    operation.WorkspaceId, operation.Id, result.Code, cancellationToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                // The history is best effort; a failed append must not skip the block below.
+            }
             if (AzureLateSuccessCodes.IsNonTransientResumeRefusal(result.Outcome, result.Code))
                 await operationStore.RecordAutoResumeOutcomeAsync(
                     operation.WorkspaceId, operation.Id, AzureLateSuccessCodes.NeedsOperator, cancellationToken);
@@ -685,7 +692,8 @@ public sealed class AzureElsaInstanceProvider(
         }
         catch (Exception)
         {
-            // The next reconcile still observes the provider operation; only the history is lost.
+            // Only a failed store write reaches here. The next reconcile still observes the
+            // provider operation, and the charge cap bounds any resume charged before the block lands.
         }
     }
 

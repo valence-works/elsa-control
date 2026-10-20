@@ -368,6 +368,19 @@ public sealed class AzureElsaInstanceProviderTests
     }
 
     [Fact]
+    public async Task Failed_history_write_still_blocks_auto_resume_after_a_refused_charged_resume()
+    {
+        var fixture = await CreateRecoveryFixtureAsync(AzureProviderOperationStatus.RecoveryRequired);
+        fixture.OperationStore.FailResultHistoryWrites = true;
+
+        var result = await fixture.Provider.RecoverAsync(AutoResumeRequest(fixture));
+
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInvalid, result.Code);
+        Assert.Equal(AzureLateSuccessCodes.NeedsOperator, fixture.OperationStore.Current!.LastObservationReasonCode);
+        Assert.True(AzureLateSuccessCodes.IsAutoResumeBlocked(fixture.OperationStore.Current));
+    }
+
+    [Fact]
     public async Task Operator_recovery_refusal_leaves_the_auto_resume_history_alone()
     {
         var fixture = await CreateRecoveryFixtureAsync(AzureProviderOperationStatus.RecoveryRequired);
@@ -2367,8 +2380,11 @@ public sealed class AzureElsaInstanceProviderTests
                 };
             return Task.CompletedTask;
         }
+        public bool FailResultHistoryWrites { get; set; }
         public Task RecordAutoResumeResultAsync(Guid workspaceId, Guid operationId, string resultCode, CancellationToken cancellationToken = default)
         {
+            if (FailResultHistoryWrites)
+                throw new InvalidOperationException("Simulated history write failure.");
             AutoResumeOutcomes.Add(resultCode);
             if (Current is not null)
                 Current = Current with { AutoResumeOutcomes = [.. Current.AutoResumeOutcomes, resultCode] };
