@@ -154,7 +154,7 @@ class ApiKeyVaultInfrastructureTests(unittest.TestCase):
         validator = (ROOT / "src/Hosting/ElsaControl.Api/Authentication/ControlRateLimitBffCredential.cs").read_text()
         self.assertIn("UnresolvedKeyVaultReferenceGuard.ReferencePrefix", validator)
 
-    def run_check(self, properties: dict) -> subprocess.CompletedProcess[str]:
+    def run_check(self, properties: dict, plain_names: tuple[str, ...] = ()) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary:
             fake_az = Path(temporary) / "az"
             fake_az.write_text(
@@ -163,6 +163,7 @@ class ApiKeyVaultInfrastructureTests(unittest.TestCase):
                 "case \"$1 $2\" in\n"
                 "  'webapp show') printf '%s\\n' \"$FAKE_WEBAPP_ID\" ;;\n"
                 "  'rest --method') printf '%s\\n' \"$FAKE_REFERENCES\" ;;\n"
+                "  'webapp config') printf '%s\\n' \"$FAKE_SETTING_NAMES\" ;;\n"
                 "  'resource show') printf 'false\\n' ;;\n"
                 "  *) exit 41 ;;\n"
                 "esac\n"
@@ -172,6 +173,8 @@ class ApiKeyVaultInfrastructureTests(unittest.TestCase):
             environment["PATH"] = f"{temporary}{os.pathsep}{environment['PATH']}"
             environment["FAKE_WEBAPP_ID"] = WEBAPP_ID
             environment["FAKE_REFERENCES"] = json.dumps({"properties": properties})
+            # The site's setting names: every reference plus any plain-value setting.
+            environment["FAKE_SETTING_NAMES"] = "\n".join([*properties, *plain_names])
             return subprocess.run(
                 [str(CHECK_SCRIPT), "--resource-group", "rg-test", "--name", "api-test"],
                 cwd=ROOT,
@@ -200,6 +203,11 @@ class ApiKeyVaultInfrastructureTests(unittest.TestCase):
         broken = self.run_check(resolved | {cloud_secret: {"status": "SecretNotFound"}})
         self.assertEqual(2, broken.returncode, broken.stdout + broken.stderr)
         self.assertIn(f"{cloud_secret}\tSecretNotFound", broken.stdout)
+
+        # A secret setting stored as a plain value is not a reference and fails.
+        plain = self.run_check(resolved, plain_names=(cloud_secret,))
+        self.assertEqual(2, plain.returncode, plain.stdout + plain.stderr)
+        self.assertIn(f"{cloud_secret}\tNotAReference", plain.stdout)
 
         required_missing = dict(resolved)
         required_missing.pop("Authentication__ApiKey")

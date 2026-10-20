@@ -13,8 +13,9 @@ Usage:
 
 Prints each secret app-setting name and its Key Vault reference status.
 A required setting must be Resolved. An optional setting (an opt-in
-feature such as RateLimiting:BffCredentials) prints NotSet when it has no
-reference and must be Resolved when it has one.
+feature such as RateLimiting:BffCredentials) prints NotSet when the app
+setting does not exist, fails as NotAReference when it exists with a plain
+value, and must be Resolved when it is a reference.
 Also prints SCM and FTP basic-auth publishing allow=true/false.
 Never prints setting values or secret material.
 EOF
@@ -81,11 +82,20 @@ references_json="$(az rest \
   --output json \
   --only-show-errors)"
 
+# Names only: tells an absent optional setting apart from one stored as a plain value.
+present_names="$(az webapp config appsettings list \
+  --resource-group "$resource_group" \
+  --name "$webapp_name" \
+  --query "[].name" \
+  --output tsv \
+  --only-show-errors)"
+
 printf '%s\n' "$SETTING_NAMES" | python3 -c '
 import json
 import sys
 
 wanted = [line.split("\t", 1) for line in sys.stdin.read().splitlines() if line]
+present = {line.strip() for line in sys.argv[2].splitlines() if line.strip()}
 payload = json.loads(sys.argv[1])
 properties = payload.get("properties")
 if not isinstance(properties, dict):
@@ -94,7 +104,11 @@ failed = False
 for kind, name in wanted:
     entry = properties.get(name)
     if entry is None and kind == "optional":
-        print(f"{name}\tNotSet")
+        if name in present:
+            print(f"{name}\tNotAReference")
+            failed = True
+        else:
+            print(f"{name}\tNotSet")
         continue
     status = "Missing"
     if isinstance(entry, dict):
@@ -105,7 +119,7 @@ for kind, name in wanted:
         failed = True
 if failed:
     raise SystemExit(2)
-' "$references_json"
+' "$references_json" "$present_names"
 
 for policy in scm ftp; do
   allow="$(az resource show \

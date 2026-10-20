@@ -184,8 +184,9 @@ still an unresolved `@Microsoft.KeyVault(...)` reference string. The `Sources:N`
 in the error is the position among the configured sources, not the app setting
 index: with only `hub` configured (`Sources__1__*`), its errors read
 `Sources:0`. The whole API then does not start, not only rate limiting. To
-recover, turn the section off
-and restart; BFF calls fall back to `PerIp`:
+recover, turn the section off and restart. Credential matching stops; a BFF
+call whose address matches `RateLimiting__BffEgressNetworks` still gets
+`BffPerIp`, and any other call falls back to `PerIp`:
 
 ```bash
 az webapp config appsettings set --resource-group <group> --name <site> --output none \
