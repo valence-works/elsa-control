@@ -253,6 +253,47 @@ public sealed partial class AzureProviderRecoveryObservationPersistenceTests
         Assert.True(AzureLateSuccessCodes.IsAutoResumeBlocked(operation));
     }
 
+    /// <summary>
+    /// Two replicas record auto-resume outcomes for one provider operation. Replica A still
+    /// tracks the row from its ARM read when replica B records a refused resume and
+    /// needs-operator; A's later write must not drop B's block or B's history entries.
+    /// </summary>
+    [Fact]
+    public async Task Concurrent_auto_resume_outcome_writers_cannot_drop_the_block()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var replicaADb = CreateMigratedContext(connection);
+        await replicaADb.Database.MigrateAsync();
+        var fixture = await SeedProviderObservationAsync(replicaADb, ElsaInstanceOperationAction.Create);
+        var replicaA = fixture.OperationStore;
+        await using var replicaBDb = CreateMigratedContext(connection);
+        var replicaB = new AzureProviderOperationStore(replicaBDb);
+        var workspaceId = fixture.Workspace.Id;
+        var operationId = fixture.Operation.Id;
+
+        await replicaA.RecordArmObservationClockAsync(
+            workspaceId, operationId, DateTimeOffset.Parse("2026-09-05T16:05:00Z"), 60);
+        await replicaB.RecordAutoResumeResultAsync(
+            workspaceId, operationId, ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadOutputsInvalid);
+        await replicaB.RecordAutoResumeOutcomeAsync(
+            workspaceId, operationId, AzureLateSuccessCodes.NeedsOperator);
+        await replicaA.RecordAutoResumeOutcomeAsync(
+            workspaceId, operationId, AzureLateSuccessCodes.AutoResumeAccepted);
+
+        await using var readerDb = CreateMigratedContext(connection);
+        var operation = Assert.IsType<AzureProviderOperation>(
+            await new AzureProviderOperationStore(readerDb).GetAsync(workspaceId, operationId));
+        Assert.True(AzureLateSuccessCodes.IsAutoResumeBlocked(operation));
+        Assert.Equal(
+            [
+                ManagedElsaReasonCodeCatalog.AzureRecoveryWorkloadOutputsInvalid,
+                AzureLateSuccessCodes.NeedsOperator,
+                AzureLateSuccessCodes.AutoResumeAccepted
+            ],
+            operation.AutoResumeOutcomes);
+    }
+
     private static async Task<List<ElsaInstanceProviderRecoveryResult>> RunHostedTicksAsync(
         ExecutingLateSuccessStack stack,
         ObservationFixture fixture,
