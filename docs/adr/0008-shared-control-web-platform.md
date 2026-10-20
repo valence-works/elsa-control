@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. For the managed product mode, [ADR-0018](0018-elsa-hub-is-the-customer-front-door.md) (Proposed, 2026-10-20) supersedes the frontend decision once accepted.
 
 ## Date
 
