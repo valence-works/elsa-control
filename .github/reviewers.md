@@ -18,11 +18,12 @@ green CI, or GitHub's `reviewDecision`/`APPROVED` state.
 2. If only one reviewer is live, use that reviewer.
 3. If more than one is live, rotate across PRs or pick by fit (for example,
    Copilot for a fast first pass, Greptile for whole-repo context, Bugbot for
-   defect hunting).
+   defect hunting). CodeRabbit reviews on its own, so while it is live it is
+   the PR's advisory reviewer; trigger another only when one fits better.
 4. If none is live, say so on the PR and proceed to the Elsa Control Code
    Review gate. Do not invent a substitute reviewer.
 5. Codex, the control room, Cursor/Claude workers and advisory reviewers
-   (Copilot, Greptile, Bugbot) may post QA notes or reviews, but these are
+   (Copilot, Greptile, Bugbot, CodeRabbit) may post QA notes or reviews, but these are
    never a Code Review verdict. The normal gate requires Elsa Control Code
    Review; the control room may use the availability fallback below. No agent
    other than Code Review may submit a GitHub `APPROVE` review or start a
@@ -118,7 +119,7 @@ in the org AGENTS.md:
   add `needs:decision` and stop.
 - Required CI (`CI`, every job `success`) is green on the latest head, and
   that head is the one the final round reviewed. Hand advisory findings
-  (Bugbot) into the loop; they are input, not a gate.
+  (CodeRabbit, or Bugbot when it is live) into the loop; they are input, not a gate.
 - No merge over a human hold, a changes-requested review, an open human
   review thread, or a `blocked` / `needs:decision` label. Never bypass branch
   protection. Never use auto-merge. Main freshness and head-pinned,
@@ -173,13 +174,14 @@ live` and state exactly what Sipke must enable.
 
 ## Reviewers
 
-Checked 2026-10-04.
+Checked 2026-10-04. CodeRabbit and Cursor Bugbot rechecked 2026-10-20.
 
 | Reviewer | Live | How to invoke | Good for | How to tell it ran |
 | --- | --- | --- | --- | --- |
 | Greptile | no — not verified / not live (2026-10-04) | After Sipke installs the Greptile GitHub App and enables this repo in the Greptile dashboard, post a top-level PR comment `@greptileai` ([official trigger docs](https://www.greptile.com/docs/code-review-bot/trigger-code-review)). Optional: `@greptileai review the auth changes`. Do not treat adding a human or the control-room as a Greptile review. | Whole-repo context, summaries, inline comments, and suggested fixes. | A PR review and/or comments from `greptile-apps[bot]` (or the current Greptile GitHub App account) appear on the PR. |
 | GitHub Copilot Code Review | no — not verified / not live (2026-10-04) | Request Copilot as a reviewer: GitHub UI Reviewers → Copilot → Request; `gh pr create --reviewer @copilot` / `gh pr edit <n> --add-reviewer @copilot`; or REST `requested_reviewers: ["copilot-pull-request-reviewer[bot]"]` ([official docs](https://docs.github.com/en/copilot/how-tos/agents/copilot-code-review/using-copilot-code-review)). | Fast first-pass comments with severity labels and suggested patches. Copilot reviews are advisory. No Copilot review satisfies the merge gate, whatever its type (Comment, Approve or Request changes). | A review from `copilot-pull-request-reviewer[bot]` appears, and the Reviewers sidebar shows Copilot completed. |
-| Cursor Bugbot | **yes — live in `valence-works/elsa-control` only (2026-10-04)**. Sipke enabled it at 03:14 Europe/Amsterdam, set to run only when mentioned. Not live in sibling repos (see below). | The PR author posts a **top-level** PR comment `cursor review` ([official docs](https://cursor.com/docs/bugbot)). `bugbot run` is the documented alias. Do not use `@cursor review`. Bugbot does not run on its own. **Every new head needs a fresh `cursor review`**, because a push does not re-run it. See [Cursor Bugbot rules](#cursor-bugbot-rules). | Defect, security, and edge-case findings with inline comments and suggested fixes. **Advisory only:** no Bugbot result, of any conclusion, satisfies the Elsa Control Code Review merge gate, which is unchanged. | A GitHub check named `Cursor Bugbot` (app `cursor`) on the head at trigger time, and/or a `cursor[bot]` review whose footer says "Reviewed by Cursor Bugbot for commit `<sha>`". The 👀 reaction is **not** proof. Neither is a `cursor[bot]` Issue Bus, `ready-for-CR`, or "Fixed in …" reply from a Cursor agent. |
+| Cursor Bugbot | **no — paused since 2026-10-20: Cursor usage limit reached.** Enabled for `valence-works/elsa-control` only on 2026-10-04 (Sipke, 03:14 Europe/Amsterdam, run only when mentioned). Every `cursor review` on 2026-10-20 (#866, #867, #876) got `Bugbot couldn't run - usage limit reached`. Not live in sibling repos (see below). | The PR author posts a **top-level** PR comment `cursor review` ([official docs](https://cursor.com/docs/bugbot)). `bugbot run` is the documented alias. Do not use `@cursor review`. Bugbot does not run on its own. **Every new head needs a fresh `cursor review`**, because a push does not re-run it. See [Cursor Bugbot rules](#cursor-bugbot-rules). | Defect, security, and edge-case findings with inline comments and suggested fixes. **Advisory only:** no Bugbot result, of any conclusion, satisfies the Elsa Control Code Review merge gate, which is unchanged. | A GitHub check named `Cursor Bugbot` (app `cursor`) on the head at trigger time, and/or a `cursor[bot]` review whose footer says "Reviewed by Cursor Bugbot for commit `<sha>`". The 👀 reaction is **not** proof. Neither is a `cursor[bot]` Issue Bus, `ready-for-CR`, or "Fixed in …" reply from a Cursor agent. |
+| CodeRabbit | **yes — live in `valence-works/elsa-control` (2026-10-20)** | Nothing to post: it reviews when the PR opens and again on each push, stacked PRs included. Post a top-level `@coderabbitai review` only if automatic reviews are paused; otherwise it answers that it does not re-review commits it has already reviewed. Reply on its thread to accept or decline a finding; it answers, resolves the thread or withdraws the finding. | Line-level defects, configuration and operations pitfalls, and missed tests. **Advisory only:** no CodeRabbit result, of any type, satisfies the merge gate. | A `coderabbitai[bot]` review whose `commit_id` is the head, or a `coderabbitai[bot]` PR comment `No actionable comments were generated in the recent review` posted after the head was pushed. A clean pass posts only that comment, not a review. |
 
 ### Cursor Bugbot rules
 
@@ -228,6 +230,9 @@ Evidence used; nothing below is assumed live.
 | Cursor Bugbot run (2026-10-04) | Top-level `cursor review` on #710 ([comment](https://github.com/valence-works/elsa-control/pull/710#issuecomment-5975374652)) → a `Cursor Bugbot` check ([check](https://github.com/valence-works/elsa-control/runs/111334807973), neutral) plus a `cursor[bot]` review ([review](https://github.com/valence-works/elsa-control/pull/710#pullrequestreview-5403768479)) with 2 inline findings on head `d8dbbb73` (the head at trigger time; `2694cb43` was pushed mid-run). There was no `Cursor Bugbot` check on `2694cb43`, which is consistent with mention-only mode. The 👀 reaction seen at trigger time had gone by 03:51 CEST (`reactions.total_count = 0`). |
 | Sibling repos (2026-10-04) | `elsa-cloud`, `elsa-production-image` and `elsa-control-connector` are private and readable with the current token. Their latest PR heads (#142, #73, #3) have no `Cursor Bugbot` check. |
 
+| CodeRabbit (2026-10-20) | `coderabbitai[bot]` ran on #866-#878 with no trigger. It left findings as reviews on #867, #868, #876 and #878 (for example [#878 on `02bd644c`](https://github.com/valence-works/elsa-control/pull/878#pullrequestreview-5591346291)) and `No actionable comments` comments on #866, #875 and stacked #877 (base `agent/claude/859-forwarded-headers`). It answered declined findings and withdrew or resolved them. |
+| Cursor Bugbot (2026-10-20) | `cursor review` on #866, #867 and #876 each got a `cursor[bot]` comment `Bugbot couldn't run - usage limit reached`, for example [#866](https://github.com/valence-works/elsa-control/pull/866#issuecomment-6296675982). No `Cursor Bugbot` check ran. |
+
 ## What Sipke must enable
 
 Until the matching evidence exists, keep each row not live.
@@ -240,8 +245,10 @@ Until the matching evidence exists, keep each row not live.
    no-license review setting). Confirm that requesting `@copilot` /
    `copilot-pull-request-reviewer[bot]` is accepted and that bot posts a
    review. Then mark Copilot live in this file.
-3. **Cursor Bugbot.** Done 2026-10-04 (live, run only when mentioned). See the
-   evidence above.
+3. **Cursor Bugbot.** Enabled 2026-10-04 (run only when mentioned), paused
+   2026-10-20 by the Cursor usage limit. To restore it, raise the Cursor usage
+   or spend limit, confirm a `Cursor Bugbot` check on a PR, then mark it live
+   in this file again.
 
 ## Sibling repositories
 
