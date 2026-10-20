@@ -36,7 +36,9 @@ public sealed class ManagedElsaHandoffRateLimitOptions
     /// <summary>
     /// Fixed window for validated Cloud/Hub sessions whose
     /// <c>Connection.RemoteIpAddress</c> is inside
-    /// <see cref="ControlRateLimitBffEgressOptions.ConfigurationKey"/>. Those
+    /// <see cref="ControlRateLimitBffEgressOptions.ConfigurationKey"/>.
+    /// <c>RemoteIpAddress</c> is the rightmost <c>X-Forwarded-For</c> entry, set by the
+    /// explicit <c>ForwardedHeadersOptions</c> with <c>ForwardLimit = 1</c>. Those
     /// calls share a BFF egress address, so the default is the maximum allowed
     /// permit and per-identity remains binding. Every other caller, including
     /// Cloud/Hub sessions from addresses outside the list and unresolved
@@ -101,7 +103,8 @@ public sealed class ManagedElsaHandoffRateLimiterPolicy : ControlIdentityAndIpRa
         IOptions<ControlIdentityOptions> controlIdentity,
         IOptions<CloudAccountIdentityOptions> cloudAccount,
         IOptions<HubAccountIdentityOptions> hubAccount,
-        IOptions<ControlRateLimitBffEgressOptions> bffEgress)
+        IOptions<ControlRateLimitBffEgressOptions> bffEgress,
+        ILoggerFactory loggerFactory)
         : base(
             ManagedElsaHandoffRateLimitDefaults.PolicyName,
             new ControlRateLimitWindow(options.Value.PerIp.PermitLimit, options.Value.PerIp.Window),
@@ -111,7 +114,8 @@ public sealed class ManagedElsaHandoffRateLimiterPolicy : ControlIdentityAndIpRa
             hubAccount.Value,
             limitIdentityForNonBff: false,
             bffPerIp: new ControlRateLimitWindow(options.Value.BffPerIp.PermitLimit, options.Value.BffPerIp.Window),
-            bffEgressNetworks: ControlRateLimitBffEgress.Parse(bffEgress.Value.Networks))
+            bffEgressNetworks: ControlRateLimitBffEgress.Parse(bffEgress.Value.Networks),
+            bffSourceLoggerFactory: loggerFactory)
     {
     }
 }

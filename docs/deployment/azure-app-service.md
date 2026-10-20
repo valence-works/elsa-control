@@ -43,6 +43,84 @@ review the generated diff before committing it. For deployment commands and
 the first-run sequence, see
 [Azure Elsa Control Deployment Plan](azure-elsa-control-deployment-plan.md).
 
+## Ingress and forwarded headers
+
+The Control API is one Linux App Service site (`infra/api/api-website.module.bicep`,
+`httpsOnly: true`). Inbound traffic reaches it only through the App Service
+platform front end on `*.azurewebsites.net`. There is no Front Door,
+Application Gateway, CDN, private endpoint or access restriction in front of it.
+Regional VNet integration is for egress only.
+
+`Program.cs` registers `ForwardedHeadersOptions` explicitly and runs
+`UseForwardedHeaders` before authentication and rate limiting. No app setting
+switches it on or off.
+
+- The single trusted hop is the App Service front end. It appends the
+  connecting client's address as the **rightmost `X-Forwarded-For` entry**.
+- `ForwardLimit = 1` reads only that entry, and it becomes
+  `Connection.RemoteIpAddress`. Entries to its left are written by callers and
+  are ignored. Without `X-Forwarded-For`, `RemoteIpAddress` is the connection's
+  peer address.
+- `X-Forwarded-Proto` sets `Request.Scheme`. `X-Forwarded-Host` is not
+  processed.
+- `KnownIPNetworks` and `KnownProxies` are cleared, not pinned. The front end
+  publishes no stable inbound proxy range for the worker.
+- The per-IP rate-limit partitions and the `RateLimiting:BffEgressNetworks`
+  match both use this `RemoteIpAddress`.
+- `ASPNETCORE_FORWARDEDHEADERS_ENABLED` is no longer set and is ignored.
+  `Program.cs` removes the host's own forwarded-headers pass, because a second
+  pass would read the next entry to the left, which the caller controls.
+  `dev/regenerate-infra.sh` strips the setting that Aspire generates. An
+  image-only deploy (`app` or `promote`) leaves a stale copy on the site; it
+  is harmless, and it can be removed with
+  `az webapp config appsettings delete --setting-names ASPNETCORE_FORWARDEDHEADERS_ENABLED`.
+
+**Ingress changes.** A CDN, Front Door or any other proxy in front of App
+Service makes the edge's address the rightmost `X-Forwarded-For` entry. Every
+caller then shares the edge's per-IP partitions, and `BffEgressNetworks`
+matches the edge instead of the BFF. Update the forwarded-headers
+configuration **before** such a change ships: known proxies or networks for
+that edge, the forward limit, and access restrictions on the site (for Front
+Door, the `AzureFrontDoor.Backend` service tag plus an `X-Azure-FDID` header
+check) so traffic cannot bypass the edge.
+
+### BFF egress networks (`RateLimiting:BffEgressNetworks`)
+
+Validated Cloud/Hub sessions get the wider `BffPerIp` window on
+`managed-elsa-handoff` and the managed-instance lifecycle policies only when
+`RemoteIpAddress` is inside this list. To find the values:
+
+1. List the BFF's public egress address as Control sees it: the rightmost
+   `X-Forwarded-For` entry, which becomes `RemoteIpAddress`. Do not use the
+   BFF's own inbound address or any address the BFF writes into headers.
+2. Use only an authoritative, stable source. For an Azure App Service caller,
+   list every address the site can use:
+
+   ```bash
+   az webapp show --resource-group <group> --name <site> \
+     --query "{out:outboundIpAddresses,possible:possibleOutboundIpAddresses}"
+   ```
+
+   For a static egress proxy, use the addresses the provider assigns.
+   Supabase Edge Functions publish no stable egress addresses
+   ([Supabase](https://supabase.com/docs/guides/troubleshooting/why-supabase-edge-functions-cannot-provide-static-egress-ips-for-whitelisting-3d78b0)),
+   so do not list addresses observed from them.
+3. Verify on staging with the source-address diagnostic. Set
+   `Logging__LogLevel__ElsaControl.Api.RateLimiting=Debug`, make one call
+   through the BFF, and confirm the `ElsaControl.Api.RateLimiting` Debug event
+   shows the expected `RemoteIpAddress` with `matched=True`. The event carries
+   the address, the match flag and the policy name only. Then remove the
+   setting.
+4. Set `RateLimiting__BffEgressNetworks` as a JSON array or a comma- or
+   semicolon-separated value of IP addresses and CIDR networks. Startup fails,
+   naming the key and the entry, for an entry that does not parse, an IPv4
+   network wider than /16, an IPv6 network wider than /32, or an IPv4-mapped
+   IPv6 network whose IPv4 part is wider than /16. A single address counts as
+   /32 or /128. An empty list means every caller uses `PerIp`.
+5. Current state: both BFFs (the Cloud `control-bff` and the Hub
+   `cloud-control.ts` callers) are Supabase Edge Functions, so the list is
+   empty in staging and production.
+
 ## Staging Control compatibility fixture
 
 Manual workflow: `.github/workflows/staging-compat-fixture.yml`.

@@ -163,6 +163,14 @@ class ApiInfrastructureTests(unittest.TestCase):
         """Build the module shape emitted before the regeneration patch runs."""
 
         module = API_MODULE.read_text()
+        otel_setting = (
+            "        {\n          name: 'OTEL_DOTNET_EXPERIMENTAL_OTLP_RETRY'\n          value: 'in_memory'\n        }\n"
+        )
+        module = module.replace(
+            otel_setting,
+            otel_setting + "        {\n          name: 'ASPNETCORE_FORWARDEDHEADERS_ENABLED'\n          value: 'true'\n        }\n",
+            1,
+        )
         module = module.replace(
             "@description('Vault URI from infra/api-key-vault. Secret app settings are versionless Key Vault references only. This module never takes a secret value.')\n"
             "param api_key_vault_uri string\n\n",
@@ -593,6 +601,27 @@ class ApiInfrastructureTests(unittest.TestCase):
             r"name: 'Authentication__Admin__AllowAuthenticatedCustomerSession'\s+value: 'true'",
         )
 
+    def test_forwarded_headers_come_only_from_the_application(self) -> None:
+        # Program.cs owns ForwardedHeadersOptions (#859); neither the module nor the API source
+        # may set the host-level switch.
+        self.assertNotIn("ASPNETCORE_FORWARDEDHEADERS_ENABLED", API_MODULE.read_text())
+        self.assertIn("ASPNETCORE_FORWARDEDHEADERS_ENABLED", self.generated_api_module())
+        api_sources = [
+            path
+            for path in (ROOT / "src").rglob("*")
+            if path.is_file()
+            and path.suffix in {".cs", ".json", ".bicep", ".bicepparam"}
+            and not {"bin", "obj"}.intersection(path.parts)
+        ]
+        self.assertFalse(
+            [str(path) for path in api_sources if "ASPNETCORE_FORWARDEDHEADERS_ENABLED" in path.read_text(errors="ignore")]
+        )
+        program = (ROOT / "src" / "Hosting" / "ElsaControl.Api" / "Program.cs").read_text()
+        self.assertIn("ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto", program)
+        self.assertIn("options.ForwardLimit = 1;", program)
+        self.assertLess(program.index("app.UseForwardedHeaders();"), program.index("app.UseAuthentication();"))
+        self.assertLess(program.index("app.UseForwardedHeaders();"), program.index("app.UseRateLimiter();"))
+
     def test_operator_documentation_preserves_identity_and_deployment_boundaries(self) -> None:
         documentation = APP_SERVICE_DOC.read_text()
 
@@ -623,6 +652,13 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("az keyvault recover", documentation)
         self.assertIn("--settings \"@$HOME/.elsa-control-rollback-settings.json\"", documentation)
         self.assertIn("pass Stripe `--capture`", documentation)
+        self.assertIn("## Ingress and forwarded headers", documentation)
+        self.assertIn("ForwardLimit = 1", documentation)
+        self.assertIn("rightmost `X-Forwarded-For` entry", documentation)
+        self.assertIn("X-Azure-FDID", documentation)
+        self.assertIn("### BFF egress networks (`RateLimiting:BffEgressNetworks`)", documentation)
+        self.assertIn("possibleOutboundIpAddresses", documentation)
+        self.assertIn("Logging__LogLevel__ElsaControl.Api.RateLimiting=Debug", documentation)
 
     def test_regeneration_patch_reconstructs_generated_module_idempotently(self) -> None:
         module = API_MODULE.read_text()
