@@ -317,6 +317,69 @@ public sealed class ManagedElsaHandoffRateLimitTests
     }
 
     [Fact]
+    public async Task Bff_source_diagnostic_is_enabled_by_the_dot_free_log_level_setting()
+    {
+        // App Service on Linux turns '.' into '_' in app setting names, so operators cannot
+        // reach Logging:LogLevel:ElsaControl.Api.RateLimiting there; this key has no dots.
+        var entries = await RecordBffSourceDiagnosticsAsync(sourceDiagnosticLogLevel: "Debug");
+
+        var diagnostic = Assert.Single(entries);
+        Assert.Equal(LogLevel.Debug, diagnostic.Level);
+        Assert.Equal("198.51.100.8", diagnostic.State["RemoteIpAddress"]);
+        Assert.True(Assert.IsType<bool>(diagnostic.State["Matched"]));
+    }
+
+    [Fact]
+    public async Task Bff_source_diagnostic_stays_off_when_the_dot_free_log_level_setting_is_unset()
+    {
+        var entries = await RecordBffSourceDiagnosticsAsync(sourceDiagnosticLogLevel: null);
+
+        Assert.Empty(entries);
+    }
+
+    [Theory]
+    [InlineData("Verbose")]
+    [InlineData("99")]
+    public async Task Invalid_bff_source_diagnostic_log_level_refuses_startup_naming_the_key(string value)
+    {
+        await using var app = CreateCloudApplication(
+            perIp: 20,
+            perIdentity: 20,
+            "https://cloud-account.test/auth/v1",
+            sourceDiagnosticLogLevel: value);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => app.CreateClient());
+
+        Assert.Contains("RateLimiting:SourceDiagnosticLogLevel", exception.Message, StringComparison.Ordinal);
+    }
+
+    private static async Task<RecordedLogEntry[]> RecordBffSourceDiagnosticsAsync(string? sourceDiagnosticLogLevel)
+    {
+        const string issuer = "https://cloud-account.test/auth/v1";
+        const string listedIp = "198.51.100.8";
+        var entries = new ConcurrentQueue<RecordedLogEntry>();
+        await using (var app = CreateCloudApplication(
+                         perIp: 20,
+                         perIdentity: 20,
+                         issuer,
+                         bffPerIp: 20,
+                         bffEgressNetworks: [$"{listedIp}/32"],
+                         sourceDiagnosticLogLevel: sourceDiagnosticLogLevel,
+                         configureServices: services =>
+                             services.AddSingleton<ILoggerProvider>(new RecordingLoggerProvider(entries))))
+        {
+            await app.SeedAsync(_ => Task.CompletedTask);
+            using var client = CloudClient(app, issuer, "44444444-4444-4444-8444-444444444494", "198.51.100.200");
+            SetForwardedFor(client, $"203.0.113.9, {listedIp}");
+            using var _ = await PostIssueAsync(client);
+        }
+
+        return entries
+            .Where(entry => entry.Category == ControlRateLimitBffSourceDiagnostic.LoggerCategory)
+            .ToArray();
+    }
+
+    [Fact]
     public async Task Hub_account_sessions_share_the_per_identity_limit_across_ips()
     {
         const string issuer = "https://hub-account.test/auth/v1";
@@ -564,10 +627,13 @@ public sealed class ManagedElsaHandoffRateLimitTests
         int? bffPerIp = null,
         IReadOnlyList<string>? bffEgressNetworks = null,
         string? logLevel = null,
-        Action<IServiceCollection>? configureServices = null)
+        Action<IServiceCollection>? configureServices = null,
+        string? sourceDiagnosticLogLevel = null)
     {
         var extra = new Dictionary<string, string?>
         {
+            // The default category level the Control API ships with, so only the setting under test enables Debug.
+            ["Logging:LogLevel:Default"] = "Information",
             [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
             [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Issuer"] = issuer,
             [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Audience"] = "authenticated",
@@ -576,6 +642,8 @@ public sealed class ManagedElsaHandoffRateLimitTests
         };
         if (logLevel is not null)
             extra[$"Logging:LogLevel:{ControlRateLimitBffSourceDiagnostic.LoggerCategory}"] = logLevel;
+        if (sourceDiagnosticLogLevel is not null)
+            extra["RateLimiting:SourceDiagnosticLogLevel"] = sourceDiagnosticLogLevel;
 
         return CreateApplication(
             perIp,

@@ -105,12 +105,18 @@ Validated Cloud/Hub sessions get the wider `BffPerIp` window on
    Supabase Edge Functions publish no stable egress addresses
    ([Supabase](https://supabase.com/docs/guides/troubleshooting/why-supabase-edge-functions-cannot-provide-static-egress-ips-for-whitelisting-3d78b0)),
    so do not list addresses observed from them.
-3. Verify on staging with the source-address diagnostic. Set
-   `Logging__LogLevel__ElsaControl.Api.RateLimiting=Debug`, make one call
-   through the BFF, and confirm the `ElsaControl.Api.RateLimiting` Debug event
-   shows the expected `RemoteIpAddress` with `matched=True`. The event carries
-   the address, the match flag and the policy name only. Then remove the
-   setting.
+3. Verify on staging with the source-address diagnostic. Set the app setting
+   `RateLimiting__SourceDiagnosticLogLevel=Debug`, make one call through the
+   BFF, and confirm the `ElsaControl.Api.RateLimiting` Debug event shows the
+   expected `RemoteIpAddress` with `matched=True`. The event carries the
+   address, the match flag and the policy name only. Then delete the setting
+   (`az webapp config appsettings delete --resource-group <group> --name <site>
+   --setting-names RateLimiting__SourceDiagnosticLogLevel`); unset, the
+   category stays at the default `Information` level. Do not use
+   `Logging__LogLevel__ElsaControl.Api.RateLimiting`: App Service on Linux
+   turns periods in app setting names into underscores, so that name never
+   matches the category. Startup fails, naming the key, for a value that is
+   not a log level name.
 4. Set `RateLimiting__BffEgressNetworks` as a JSON array or a comma- or
    semicolon-separated value of IP addresses and CIDR networks. Startup fails,
    naming the key and the entry, for an entry that does not parse, an IPv4
