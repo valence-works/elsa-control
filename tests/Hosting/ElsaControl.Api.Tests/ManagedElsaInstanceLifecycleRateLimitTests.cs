@@ -207,6 +207,61 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
     }
 
     [Theory]
+    [InlineData("cloud", "current", true)]
+    [InlineData("cloud", "previous", true)]
+    [InlineData("cloud", "invalid", false)]
+    [InlineData("cloud", "missing", false)]
+    [InlineData("cloud", "mismatched", false)]
+    [InlineData("hub", "current", true)]
+    [InlineData("hub", "previous", true)]
+    [InlineData("hub", "invalid", false)]
+    [InlineData("hub", "missing", false)]
+    [InlineData("hub", "mismatched", false)]
+    public async Task Bff_credential_selects_one_window_per_source_only_for_its_own_session_type(
+        string account,
+        string credential,
+        bool expectSourceWindow)
+    {
+        // PerIp = 1 and BffPerIp = 2. On bff:source:<name>, two calls from one address pass and a
+        // third from another address is refused, because the window is per BFF, not per address.
+        // On PerIp, the second call from one address is refused and the other address passes.
+        const string cloudIssuer = "https://cloud-account.test/auth/v1";
+        const string hubIssuer = "https://hub-account.test/auth/v1";
+        const string action = "restart";
+        var issuer = account == "cloud" ? cloudIssuer : hubIssuer;
+        await using var app = CreateCloudAndHubApplication(
+            perIp: 1,
+            perIdentity: 20,
+            cloudIssuer,
+            hubIssuer,
+            bffPerIp: 2,
+            bffCredentials: true);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        var header = TestBffCredentials.HeaderValue(account, credential);
+        using var first = ClientFor(account, app, issuer, "11111111-1111-4111-8111-111111111401", "203.0.113.151");
+        using var second = ClientFor(account, app, issuer, "22222222-2222-4222-8222-222222222402", "203.0.113.151");
+        using var third = ClientFor(account, app, issuer, "33333333-3333-4333-8333-333333333403", "203.0.113.152");
+        foreach (var client in new[] { first, second, third })
+            TestBffCredentials.Set(client, header);
+
+        using var firstResponse = await PostActionAsync(first, action);
+        using var secondResponse = await PostActionAsync(second, action);
+        using var thirdResponse = await PostActionAsync(third, action);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, firstResponse.StatusCode);
+        if (expectSourceWindow)
+        {
+            Assert.NotEqual(HttpStatusCode.TooManyRequests, secondResponse.StatusCode);
+            await AssertLifecycleRateLimited(thirdResponse);
+        }
+        else
+        {
+            await AssertLifecycleRateLimited(secondResponse);
+            Assert.NotEqual(HttpStatusCode.TooManyRequests, thirdResponse.StatusCode);
+        }
+    }
+
+    [Theory]
     [InlineData("restart")]
     [InlineData("apply-release")]
     public async Task Hub_account_sessions_share_the_per_identity_limit_across_ips(string action)
@@ -432,7 +487,8 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
         int perIdentity,
         IReadOnlyDictionary<string, string?>? extra = null,
         int? bffPerIp = null,
-        IReadOnlyList<string>? bffEgressNetworks = null)
+        IReadOnlyList<string>? bffEgressNetworks = null,
+        bool bffCredentials = false)
     {
         var bffIp = bffPerIp ?? perIp;
         var configuration = new Dictionary<string, string?>
@@ -448,6 +504,12 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
         {
             for (var i = 0; i < bffEgressNetworks.Count; i++)
                 configuration[$"{ControlRateLimitBffEgressOptions.ConfigurationKey}:{i}"] = bffEgressNetworks[i];
+        }
+
+        if (bffCredentials)
+        {
+            foreach (var (key, value) in TestBffCredentials.Configuration())
+                configuration[key] = value;
         }
 
         if (extra is not null)
@@ -498,12 +560,14 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
         string cloudIssuer,
         string hubIssuer,
         int? bffPerIp = null,
-        IReadOnlyList<string>? bffEgressNetworks = null) =>
+        IReadOnlyList<string>? bffEgressNetworks = null,
+        bool bffCredentials = false) =>
         CreateApplication(
             perIp,
             perIdentity,
             bffPerIp: bffPerIp,
             bffEgressNetworks: bffEgressNetworks,
+            bffCredentials: bffCredentials,
             extra: new Dictionary<string, string?>
             {
                 [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",

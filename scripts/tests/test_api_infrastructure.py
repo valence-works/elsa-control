@@ -659,6 +659,13 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("### BFF egress networks (`RateLimiting:BffEgressNetworks`)", documentation)
         self.assertIn("possibleOutboundIpAddresses", documentation)
         self.assertIn("Logging__LogLevel__ElsaControl.Api.RateLimiting=Debug", documentation)
+        self.assertIn("### BFF credential (`RateLimiting:BffCredentials`)", documentation)
+        self.assertIn("X-Elsa-Bff-Credential: <secret>", documentation)
+        self.assertIn("**only selects a rate-limit partition**", documentation)
+        self.assertIn("RateLimiting__BffCredentials__Sources__0__PreviousSecret", documentation)
+        self.assertIn("ELSA_CONTROL_BFF_CREDENTIAL", documentation)
+        self.assertIn("set through Lovable", documentation)
+        self.assertIn("**Rotation.**", documentation)
 
     def test_regeneration_patch_reconstructs_generated_module_idempotently(self) -> None:
         module = API_MODULE.read_text()

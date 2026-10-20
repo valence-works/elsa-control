@@ -291,6 +291,9 @@ builder.Services.Configure<ControlRateLimitBffEgressOptions>(options =>
     options.Networks = ControlRateLimitBffEgress.ReadNetworks(builder.Configuration);
 });
 builder.Services.AddHostedService<ControlRateLimitBffEgressConfigurationValidator>();
+builder.Services.Configure<ControlRateLimitBffCredentialOptions>(
+    builder.Configuration.GetSection(ControlRateLimitBffCredentialOptions.ConfigurationSection));
+builder.Services.AddHostedService<ControlRateLimitBffCredentialConfigurationValidator>();
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -943,8 +946,10 @@ static void CopyProxyRequestHeaders(HttpRequest source, HttpRequestMessage targe
 {
     foreach (var header in source.Headers)
     {
+        // The BFF credential is Control's own rate-limit input and is never passed downstream.
         if (string.Equals(header.Key, "Host", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(header.Key, "Cookie", StringComparison.OrdinalIgnoreCase))
+            string.Equals(header.Key, "Cookie", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(header.Key, ControlRateLimitBffCredentialOptions.HeaderName, StringComparison.OrdinalIgnoreCase))
         {
             continue;
         }
