@@ -43,6 +43,18 @@ fails the deploy. An empty `AZURE_API_EGRESS_SUBNET_ID` also fails the deploy.
 | `Billing__Stripe__WebhookSources__1__SigningSecret` | `Billing-Stripe-WebhookSources-hub-SigningSecret` |
 | `ManagedElsa__Handoff__ActivePrivateKeyPem` | `ManagedElsa-Handoff-ActivePrivateKeyPem` |
 
+Optional, written only when `RateLimiting:BffCredentials` is used (see
+[BFF credential](../../docs/deployment/azure-app-service.md#bff-credential-ratelimitingbffcredentials)).
+`scripts/check-key-vault-references.sh` reports a missing one as `NotSet` and
+requires a present one to be `Resolved`:
+
+| App setting | Vault secret name |
+| --- | --- |
+| `RateLimiting__BffCredentials__Sources__0__Secret` | `RateLimiting-BffCredentials-cloud-Secret` |
+| `RateLimiting__BffCredentials__Sources__0__PreviousSecret` | `RateLimiting-BffCredentials-cloud-PreviousSecret` |
+| `RateLimiting__BffCredentials__Sources__1__Secret` | `RateLimiting-BffCredentials-hub-Secret` |
+| `RateLimiting__BffCredentials__Sources__1__PreviousSecret` | `RateLimiting-BffCredentials-hub-PreviousSecret` |
+
 `Authentication__ControlIdentity__ClientSecret` stays a client secret in this
 vault. Switching that identity to a federated credential is #838.
 

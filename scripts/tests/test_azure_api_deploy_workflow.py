@@ -650,6 +650,11 @@ fi
         self.assertIn("STAGING_SMOKE_OWNER_ORGANIZATION_ID: ${{ vars.STAGING_SMOKE_OWNER_ORGANIZATION_ID }}", self.source)
         self.assertIn("STAGING_SMOKE_OWNER_INSTANCE_ID: ${{ vars.STAGING_SMOKE_OWNER_INSTANCE_ID }}", self.source)
         self.assertIn("STAGING_SMOKE_OWNER_WORKSPACE_ID: ${{ vars.STAGING_SMOKE_OWNER_WORKSPACE_ID }}", self.source)
+        # Job-level, so the infra deploy helper receives it in every environment (#862).
+        self.assertIn(
+            "RATE_LIMIT_BFF_CREDENTIAL_SOURCES: ${{ vars.RATE_LIMIT_BFF_CREDENTIAL_SOURCES }}",
+            job_env,
+        )
         self.assertIn(
             "STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT: ${{ vars.STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT }}",
             self.source,

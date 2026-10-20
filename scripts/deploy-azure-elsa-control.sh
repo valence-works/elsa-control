@@ -33,6 +33,7 @@ STAGING_LATE_SUCCESS_LEVER_ENABLED="${STAGING_LATE_SUCCESS_LEVER_ENABLED:-}"
 STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS="${STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS:-}"
 STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT="${STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT:-}"
 STAGING_SMOKE_OWNER_INSTANCE_ID="${STAGING_SMOKE_OWNER_INSTANCE_ID:-}"
+RATE_LIMIT_BFF_CREDENTIAL_SOURCES="${RATE_LIMIT_BFF_CREDENTIAL_SOURCES:-}"
 APPLICATION_BUILD_NUMBER="${APPLICATION_BUILD_NUMBER:-}"
 WHAT_IF=false
 BASE_ONLY=false
@@ -92,6 +93,10 @@ Optional environment variables:
   STAGING_LATE_SUCCESS_LEVER_ALLOWED_WORKSPACE_IDS
   STAGING_LATE_SUCCESS_LEVER_WORKLOAD_WAIT
   STAGING_SMOKE_OWNER_INSTANCE_ID
+  RATE_LIMIT_BFF_CREDENTIAL_SOURCES  Comma-separated cloud and/or hub. Each
+                                     listed source gets RateLimiting:BffCredentials
+                                     settings with a Key Vault reference for its
+                                     Secret. Empty leaves the section off.
   APPLICATION_BUILD_NUMBER
   DOCKER_PLATFORM
 
@@ -213,6 +218,35 @@ if [[ -n "$CLOUD_ACCOUNT_ISSUER" ]]; then
     exit 1
   fi
 fi
+
+# Optional BFF credential sources (#862). Normalizes to a lower-case,
+# comma-separated list; refuses an entry other than cloud or hub, or a repeat.
+normalize_bff_credential_sources() {
+  local raw="$1" entry seen=","
+  local -a entries=() normalized=()
+  raw="${raw//$'\n'/,}"
+  IFS=',' read -r -a entries <<<"$raw"
+  for entry in "${entries[@]}"; do
+    entry="${entry//[[:space:]]/}"
+    entry="${entry,,}"
+    if [[ -z "$entry" ]]; then
+      continue
+    fi
+    if [[ "$entry" != "cloud" && "$entry" != "hub" ]]; then
+      echo "RATE_LIMIT_BFF_CREDENTIAL_SOURCES entries must be cloud or hub." >&2
+      return 1
+    fi
+    if [[ "$seen" == *",$entry,"* ]]; then
+      echo "RATE_LIMIT_BFF_CREDENTIAL_SOURCES lists $entry more than once." >&2
+      return 1
+    fi
+    seen+="$entry,"
+    normalized+=("$entry")
+  done
+  local IFS=','
+  printf '%s' "${normalized[*]}"
+}
+RATE_LIMIT_BFF_CREDENTIAL_SOURCES="$(normalize_bff_credential_sources "$RATE_LIMIT_BFF_CREDENTIAL_SOURCES")"
 
 EXPECTED_RESOURCE_GROUP="rg-$ENVIRONMENT_NAME"
 RESOURCE_GROUP="${RESOURCE_GROUP:-$EXPECTED_RESOURCE_GROUP}"
@@ -357,6 +391,7 @@ export CLOUD_ACCOUNT_ISSUER AZURE_PROVISIONER_IDENTITY_ID AZURE_API_EGRESS_SUBNE
 export EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS
 export STAGING_BILLING_LIFECYCLE_LEVER_ENABLED STAGING_BILLING_LIFECYCLE_LEVER_ALLOWED_ORG_IDS
 export STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS STAGING_SMOKE_OWNER_INSTANCE_ID
+export RATE_LIMIT_BFF_CREDENTIAL_SOURCES
 
 OUTPUTS="$(az deployment sub show \
   --name "$BASE_DEPLOYMENT_NAME" \
@@ -498,6 +533,7 @@ print(json.dumps({
     "stagingrecoveryleverenabled_value": os.environ.get("STAGING_RECOVERY_LIFECYCLE_LEVER_ENABLED", "").lower() == "true",
     "stagingrecoveryleverallowedinstanceids_value": os.environ.get("STAGING_RECOVERY_LIFECYCLE_LEVER_ALLOWED_INSTANCE_IDS", ""),
     "stagingsmokeownerinstanceid_value": os.environ.get("STAGING_SMOKE_OWNER_INSTANCE_ID", ""),
+    "ratelimitbffcredentialsources_value": os.environ.get("RATE_LIMIT_BFF_CREDENTIAL_SOURCES", ""),
 }))
 PY
 )"

@@ -115,7 +115,47 @@ var kv = {
   billingStripeWebhookSourcesControlSigningSecret: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Billing-Stripe-WebhookSources-control-SigningSecret)'
   billingStripeWebhookSourcesHubSigningSecret: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Billing-Stripe-WebhookSources-hub-SigningSecret)'
   managedElsaHandoffActivePrivateKeyPem: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/ManagedElsa-Handoff-ActivePrivateKeyPem)'
+  rateLimitingBffCredentialsCloudSecret: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/RateLimiting-BffCredentials-cloud-Secret)'
+  rateLimitingBffCredentialsHubSecret: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/RateLimiting-BffCredentials-hub-Secret)'
 }
+
+@description('Comma-separated BFF credential sources, each cloud or hub. Empty emits no RateLimiting:BffCredentials settings, so the section stays off. Each listed source gets its Name and a versionless Key Vault reference for its Secret. PreviousSecret is a rotation-only setting the operator sets.')
+param ratelimitbffcredentialsources_value string = ''
+
+var rateLimitBffCredentialSources = filter(map(split(ratelimitbffcredentialsources_value, ','), entry => toLower(trim(entry))), entry => !empty(entry))
+
+var rateLimitBffCredentialEnabledSettings = empty(rateLimitBffCredentialSources) ? [] : [
+  {
+    name: 'RateLimiting__BffCredentials__Enabled'
+    value: 'true'
+  }
+]
+
+// Fixed indices (cloud 0, hub 1) keep each source's setting names stable for
+// scripts/lib/key_vault_app_settings.py and scripts/check-key-vault-references.sh.
+var rateLimitBffCredentialCloudSettings = contains(rateLimitBffCredentialSources, 'cloud') ? [
+  {
+    name: 'RateLimiting__BffCredentials__Sources__0__Name'
+    value: 'cloud'
+  }
+  {
+    name: 'RateLimiting__BffCredentials__Sources__0__Secret'
+    value: kv.rateLimitingBffCredentialsCloudSecret
+  }
+] : []
+
+var rateLimitBffCredentialHubSettings = contains(rateLimitBffCredentialSources, 'hub') ? [
+  {
+    name: 'RateLimiting__BffCredentials__Sources__1__Name'
+    value: 'hub'
+  }
+  {
+    name: 'RateLimiting__BffCredentials__Sources__1__Secret'
+    value: kv.rateLimitingBffCredentialsHubSecret
+  }
+] : []
+
+var rateLimitBffCredentialSettings = concat(rateLimitBffCredentialEnabledSettings, rateLimitBffCredentialCloudSettings, rateLimitBffCredentialHubSettings)
 
 resource mainContainer 'Microsoft.Web/sites/sitecontainers@2025-03-01' = {
   name: 'main'
@@ -321,7 +361,8 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
         ],
         pairingAllowlistSettings,
         stagingBillingLeverSettings,
-        stagingRecoveryLeverSettings)
+        stagingRecoveryLeverSettings,
+        rateLimitBffCredentialSettings)
     }
   }
   identity: {

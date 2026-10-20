@@ -12,6 +12,9 @@ Usage:
   scripts/check-key-vault-references.sh --resource-group RG --name APP
 
 Prints each secret app-setting name and its Key Vault reference status.
+A required setting must be Resolved. An optional setting (an opt-in
+feature such as RateLimiting:BffCredentials) prints NotSet when it has no
+reference and must be Resolved when it has one.
 Also prints SCM and FTP basic-auth publishing allow=true/false.
 Never prints setting values or secret material.
 EOF
@@ -48,12 +51,16 @@ if [[ -z "$resource_group" || -z "$webapp_name" ]]; then
   exit 1
 fi
 
+# One "required|optional<TAB>name" line per secret setting.
 SETTING_NAMES="$(python3 - <<'PY'
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path("scripts") / "lib"))
-from key_vault_app_settings import SECRET_APP_SETTING_NAMES
-print("\n".join(SECRET_APP_SETTING_NAMES))
+from key_vault_app_settings import OPTIONAL_SECRET_APP_SETTING_NAMES, REQUIRED_SECRET_APP_SETTING_NAMES
+for name in REQUIRED_SECRET_APP_SETTING_NAMES:
+    print(f"required\t{name}")
+for name in OPTIONAL_SECRET_APP_SETTING_NAMES:
+    print(f"optional\t{name}")
 PY
 )"
 
@@ -78,14 +85,17 @@ printf '%s\n' "$SETTING_NAMES" | python3 -c '
 import json
 import sys
 
-wanted = [line for line in sys.stdin.read().splitlines() if line]
+wanted = [line.split("\t", 1) for line in sys.stdin.read().splitlines() if line]
 payload = json.loads(sys.argv[1])
 properties = payload.get("properties")
 if not isinstance(properties, dict):
     raise SystemExit("check-key-vault-references: reference status payload is invalid")
 failed = False
-for name in wanted:
+for kind, name in wanted:
     entry = properties.get(name)
+    if entry is None and kind == "optional":
+        print(f"{name}\tNotSet")
+        continue
     status = "Missing"
     if isinstance(entry, dict):
         raw = entry.get("status")

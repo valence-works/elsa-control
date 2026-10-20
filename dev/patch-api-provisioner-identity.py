@@ -269,7 +269,8 @@ def patch_module(content: str) -> str:
         "generated appSettings array open for the pairing allowlist",
     )
     pairing_settings_close = (
-        "        ],\n        pairingAllowlistSettings,\n        stagingBillingLeverSettings,\n        stagingRecoveryLeverSettings)"
+        "        ],\n        pairingAllowlistSettings,\n        stagingBillingLeverSettings,\n        stagingRecoveryLeverSettings,\n"
+        "        rateLimitBffCredentialSettings)"
     )
     content = replace_once(
         content,
@@ -315,6 +316,8 @@ def patch_module(content: str) -> str:
         "  billingStripeWebhookSourcesControlSigningSecret: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Billing-Stripe-WebhookSources-control-SigningSecret)'\n"
         "  billingStripeWebhookSourcesHubSigningSecret: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Billing-Stripe-WebhookSources-hub-SigningSecret)'\n"
         "  managedElsaHandoffActivePrivateKeyPem: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/ManagedElsa-Handoff-ActivePrivateKeyPem)'\n"
+        "  rateLimitingBffCredentialsCloudSecret: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/RateLimiting-BffCredentials-cloud-Secret)'\n"
+        "  rateLimitingBffCredentialsHubSecret: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/RateLimiting-BffCredentials-hub-Secret)'\n"
         "}\n"
     )
     recovery_settings_anchor = (
@@ -327,6 +330,60 @@ def patch_module(content: str) -> str:
         recovery_settings_anchor,
         recovery_settings_anchor + "\n" + vault_vars,
         "staging recovery lever settings for Key Vault reference locals",
+    )
+
+    # Optional BFF credential sources (#862). Empty emits no RateLimiting:BffCredentials settings.
+    bff_credential_parameter = "param ratelimitbffcredentialsources_value string = ''"
+    bff_credential_description = (
+        "@description('Comma-separated BFF credential sources, each cloud or hub. Empty emits no "
+        "RateLimiting:BffCredentials settings, so the section stays off. Each listed source gets its "
+        "Name and a versionless Key Vault reference for its Secret. PreviousSecret is a rotation-only "
+        "setting the operator sets.')"
+    )
+    bff_credential_vars = (
+        "var rateLimitBffCredentialSources = filter(map(split(ratelimitbffcredentialsources_value, ','), "
+        "entry => toLower(trim(entry))), entry => !empty(entry))\n"
+        "\n"
+        "var rateLimitBffCredentialEnabledSettings = empty(rateLimitBffCredentialSources) ? [] : [\n"
+        "  {\n"
+        "    name: 'RateLimiting__BffCredentials__Enabled'\n"
+        "    value: 'true'\n"
+        "  }\n"
+        "]\n"
+        "\n"
+        "// Fixed indices (cloud 0, hub 1) keep each source's setting names stable for\n"
+        "// scripts/lib/key_vault_app_settings.py and scripts/check-key-vault-references.sh.\n"
+        "var rateLimitBffCredentialCloudSettings = contains(rateLimitBffCredentialSources, 'cloud') ? [\n"
+        "  {\n"
+        "    name: 'RateLimiting__BffCredentials__Sources__0__Name'\n"
+        "    value: 'cloud'\n"
+        "  }\n"
+        "  {\n"
+        "    name: 'RateLimiting__BffCredentials__Sources__0__Secret'\n"
+        "    value: kv.rateLimitingBffCredentialsCloudSecret\n"
+        "  }\n"
+        "] : []\n"
+        "\n"
+        "var rateLimitBffCredentialHubSettings = contains(rateLimitBffCredentialSources, 'hub') ? [\n"
+        "  {\n"
+        "    name: 'RateLimiting__BffCredentials__Sources__1__Name'\n"
+        "    value: 'hub'\n"
+        "  }\n"
+        "  {\n"
+        "    name: 'RateLimiting__BffCredentials__Sources__1__Secret'\n"
+        "    value: kv.rateLimitingBffCredentialsHubSecret\n"
+        "  }\n"
+        "] : []\n"
+        "\n"
+        "var rateLimitBffCredentialSettings = concat(rateLimitBffCredentialEnabledSettings, "
+        "rateLimitBffCredentialCloudSettings, rateLimitBffCredentialHubSettings)\n"
+    )
+    content = replace_once(
+        content,
+        bff_credential_parameter,
+        vault_vars,
+        f"{vault_vars}\n{bff_credential_description}\n{bff_credential_parameter}\n\n{bff_credential_vars}",
+        "Key Vault reference locals for the BFF credential settings",
     )
     content = replace_once(
         content,
@@ -486,6 +543,7 @@ def patch_parameter_template(parameters: str) -> str:
         "param stagingrecoveryleverallowedinstanceids_value = ''\n"
         "param stagingsmokeownerinstanceid_value = ''\n"
     )
+    bff_credential_block = "param ratelimitbffcredentialsources_value = ''\n"
     parameters = replace_once(
         parameters, "provisioner_identity_outputs_id", anchor, anchor + provisioner_block,
         "generated API identity parameter anchor in the parameter template")
@@ -512,6 +570,13 @@ def patch_parameter_template(parameters: str) -> str:
         pairing_block,
         pairing_block + lever_block,
         "pairing allowlist parameter anchor for the staging billing lifecycle lever",
+    )
+    parameters = replace_once(
+        parameters,
+        "ratelimitbffcredentialsources_value",
+        lever_block,
+        lever_block + bff_credential_block,
+        "staging lever parameter anchor for the BFF credential sources",
     )
     parameters = replace_once(
         parameters,

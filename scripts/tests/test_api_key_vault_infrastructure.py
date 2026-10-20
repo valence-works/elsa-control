@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -17,6 +19,8 @@ if str(LIB) not in sys.path:
     sys.path.insert(0, str(LIB))
 MAIN = ROOT / "infra/api-key-vault/api-key-vault.module.bicep"
 README = ROOT / "infra/api-key-vault/README.md"
+CHECK_SCRIPT = ROOT / "scripts/check-key-vault-references.sh"
+WEBAPP_ID = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-test/providers/Microsoft.Web/sites/api-test"
 SECRETS_USER = "4633458b-17de-408a-b874-0445c86b69e6"
 
 
@@ -120,6 +124,88 @@ class ApiKeyVaultInfrastructureTests(unittest.TestCase):
             if stripped.startswith("Authentication:") or stripped.startswith("Billing:") or stripped.startswith("ManagedElsa:"):
                 found.add(stripped)
         self.assertEqual(expected, found)
+
+
+    def test_optional_bff_credential_settings_are_separate_from_the_guard_keys(self) -> None:
+        from key_vault_app_settings import (
+            OPTIONAL_SECRET_APP_SETTINGS,
+            REQUIRED_SECRET_APP_SETTING_NAMES,
+            SECRET_APP_SETTING_NAMES,
+            SECRET_APP_SETTINGS,
+        )
+
+        self.assertEqual(
+            {
+                "RateLimiting__BffCredentials__Sources__0__Secret": "RateLimiting-BffCredentials-cloud-Secret",
+                "RateLimiting__BffCredentials__Sources__0__PreviousSecret": "RateLimiting-BffCredentials-cloud-PreviousSecret",
+                "RateLimiting__BffCredentials__Sources__1__Secret": "RateLimiting-BffCredentials-hub-Secret",
+                "RateLimiting__BffCredentials__Sources__1__PreviousSecret": "RateLimiting-BffCredentials-hub-PreviousSecret",
+            },
+            OPTIONAL_SECRET_APP_SETTINGS,
+        )
+        self.assertEqual(tuple(SECRET_APP_SETTINGS), REQUIRED_SECRET_APP_SETTING_NAMES)
+        self.assertEqual(set(SECRET_APP_SETTINGS) | set(OPTIONAL_SECRET_APP_SETTINGS), set(SECRET_APP_SETTING_NAMES))
+        self.assertFalse(set(SECRET_APP_SETTINGS) & set(OPTIONAL_SECRET_APP_SETTINGS))
+        for secret in OPTIONAL_SECRET_APP_SETTINGS.values():
+            self.assertIn(f"'{secret}'", self.source)
+        guard = (ROOT / "src/Hosting/ElsaControl.Api/Hosting/UnresolvedKeyVaultReferenceGuard.cs").read_text()
+        self.assertNotIn("RateLimiting:", guard)
+        # The feature validator refuses an unresolved reference while the section is enabled.
+        validator = (ROOT / "src/Hosting/ElsaControl.Api/Authentication/ControlRateLimitBffCredential.cs").read_text()
+        self.assertIn("UnresolvedKeyVaultReferenceGuard.ReferencePrefix", validator)
+
+    def run_check(self, properties: dict) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_az = Path(temporary) / "az"
+            fake_az.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "case \"$1 $2\" in\n"
+                "  'webapp show') printf '%s\\n' \"$FAKE_WEBAPP_ID\" ;;\n"
+                "  'rest --method') printf '%s\\n' \"$FAKE_REFERENCES\" ;;\n"
+                "  'resource show') printf 'false\\n' ;;\n"
+                "  *) exit 41 ;;\n"
+                "esac\n"
+            )
+            fake_az.chmod(0o755)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{temporary}{os.pathsep}{environment['PATH']}"
+            environment["FAKE_WEBAPP_ID"] = WEBAPP_ID
+            environment["FAKE_REFERENCES"] = json.dumps({"properties": properties})
+            return subprocess.run(
+                [str(CHECK_SCRIPT), "--resource-group", "rg-test", "--name", "api-test"],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+
+    def test_check_script_reports_optional_settings_without_requiring_them(self) -> None:
+        from key_vault_app_settings import OPTIONAL_SECRET_APP_SETTINGS, SECRET_APP_SETTINGS
+
+        resolved = {name: {"status": "Resolved"} for name in SECRET_APP_SETTINGS}
+        off = self.run_check(resolved)
+        self.assertEqual(0, off.returncode, off.stdout + off.stderr)
+        for name in OPTIONAL_SECRET_APP_SETTINGS:
+            self.assertIn(f"{name}\tNotSet", off.stdout)
+        self.assertIn("basicPublishingCredentialsPolicies/scm\tallow=false", off.stdout)
+
+        cloud_secret = "RateLimiting__BffCredentials__Sources__0__Secret"
+        on = self.run_check(resolved | {cloud_secret: {"status": "Resolved"}})
+        self.assertEqual(0, on.returncode, on.stdout + on.stderr)
+        self.assertIn(f"{cloud_secret}\tResolved", on.stdout)
+
+        broken = self.run_check(resolved | {cloud_secret: {"status": "SecretNotFound"}})
+        self.assertEqual(2, broken.returncode, broken.stdout + broken.stderr)
+        self.assertIn(f"{cloud_secret}\tSecretNotFound", broken.stdout)
+
+        required_missing = dict(resolved)
+        required_missing.pop("Authentication__ApiKey")
+        missing = self.run_check(required_missing)
+        self.assertEqual(2, missing.returncode, missing.stdout + missing.stderr)
+        self.assertIn("Authentication__ApiKey\tMissing", missing.stdout)
 
 
 if __name__ == "__main__":

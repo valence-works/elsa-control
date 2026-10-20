@@ -127,6 +127,62 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         self.assertNotIn("SQL_ADMINISTRATOR_PASSWORD", self.source)
         self.assertNotIn("containerRegistryLoginServer", self.source)
 
+    def test_passes_normalized_bff_credential_sources_to_the_api_module(self) -> None:
+        self.assertIn('RATE_LIMIT_BFF_CREDENTIAL_SOURCES="${RATE_LIMIT_BFF_CREDENTIAL_SOURCES:-}"', self.source)
+        self.assertIn(
+            'RATE_LIMIT_BFF_CREDENTIAL_SOURCES="$(normalize_bff_credential_sources "$RATE_LIMIT_BFF_CREDENTIAL_SOURCES")"',
+            self.source,
+        )
+        self.assertIn("export RATE_LIMIT_BFF_CREDENTIAL_SOURCES", self.source)
+        self.assertIn(
+            '"ratelimitbffcredentialsources_value": os.environ.get("RATE_LIMIT_BFF_CREDENTIAL_SOURCES", ""),',
+            self.source,
+        )
+        # Validation runs before any Azure call, so a bad value never reaches a deployment.
+        self.assertLess(
+            self.source.index('RATE_LIMIT_BFF_CREDENTIAL_SOURCES="$(normalize_bff_credential_sources'),
+            self.source.index("require_command az"),
+        )
+
+    def test_bff_credential_sources_accept_cloud_and_hub_for_every_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            call_log = temporary_path / "az-calls"
+            self.write_fake_az(temporary_path)
+            for name in ("production", "valence-control-staging"):
+                for raw in ("", "cloud", " Hub , cloud ", "hub,"):
+                    with self.subTest(environment=name, raw=raw):
+                        environment = self.environment()
+                        environment["PATH"] = f"{temporary_path}{os.pathsep}{environment['PATH']}"
+                        environment["AZ_CALL_LOG"] = str(call_log)
+                        environment["RATE_LIMIT_BFF_CREDENTIAL_SOURCES"] = raw
+                        call_log.write_text("")
+                        result = self.run_deploy(environment, "--environment", name, "--what-if")
+                        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                        self.assertIn("deployment sub what-if", call_log.read_text())
+
+    def test_bff_credential_sources_refuse_an_unknown_or_repeated_source_before_any_azure_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            call_log = temporary_path / "az-calls"
+            self.write_fake_az(temporary_path)
+            cases = (
+                ("cloud,partner-bff-xyz", "entries must be cloud or hub"),
+                ("cloud,Cloud", "lists cloud more than once"),
+            )
+            for raw, message in cases:
+                with self.subTest(raw=raw):
+                    environment = self.environment()
+                    environment["PATH"] = f"{temporary_path}{os.pathsep}{environment['PATH']}"
+                    environment["AZ_CALL_LOG"] = str(call_log)
+                    environment["RATE_LIMIT_BFF_CREDENTIAL_SOURCES"] = raw
+                    call_log.write_text("")
+                    result = self.run_deploy(environment, "--environment", "valence-control-staging", "--what-if")
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertIn(message, result.stderr)
+                    self.assertNotIn("partner-bff-xyz", result.stdout + result.stderr)
+                    self.assertEqual("", call_log.read_text())
+
     def test_refuses_a_pairing_allowlist_unless_the_target_is_staging(self) -> None:
         environment = self.environment()
         environment["EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
