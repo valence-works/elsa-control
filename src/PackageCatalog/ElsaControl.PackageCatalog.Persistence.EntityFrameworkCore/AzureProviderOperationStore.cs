@@ -351,6 +351,31 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
         return model;
     }
 
+    async Task<AzureProviderRecoveryObservationRecord?> IAzureProviderRecoveryObservationStore.GetRecordedObservationAsync(
+        Guid workspaceId,
+        Guid lifecycleOperationId,
+        string reference,
+        string digest,
+        CancellationToken cancellationToken)
+    {
+        if (workspaceId == Guid.Empty || lifecycleOperationId == Guid.Empty ||
+            !ElsaInstanceProviderRecoveryObservationReference.TryParse(reference, out var recordId, out var referenceDigest) ||
+            !string.Equals(referenceDigest, digest, StringComparison.Ordinal))
+            return null;
+
+        var entity = await db.AzureProviderRecoveryObservations.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == recordId &&
+                                       x.WorkspaceId == workspaceId &&
+                                       x.LifecycleOperationId == lifecycleOperationId,
+                cancellationToken);
+        if (entity is null)
+            return null;
+
+        var model = ToRecoveryObservation(entity);
+        model.Validate();
+        return string.Equals(model.ComputeRecordDigest(recordId), digest, StringComparison.Ordinal) ? model : null;
+    }
+
     async Task<AzureProviderRecoveryObservationReceipt?> IAzureProviderRecoveryObservationStore.GetLatestReceiptForAttemptAsync(
         Guid workspaceId,
         Guid lifecycleOperationId,

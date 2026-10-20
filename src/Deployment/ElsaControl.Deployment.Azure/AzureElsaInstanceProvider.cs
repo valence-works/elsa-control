@@ -639,13 +639,14 @@ public sealed class AzureElsaInstanceProvider(
         CancellationToken cancellationToken = default)
     {
         var replay = new StrongBox<bool>();
-        var result = await RecoverCoreAsync(request, replay, cancellationToken);
+        var resumedOperation = new StrongBox<AzureProviderOperation?>();
+        var result = await RecoverCoreAsync(request, replay, resumedOperation, cancellationToken);
         // A replay re-reads a recovery that was already claimed (a duplicate or late envelope):
         // its result says nothing new about the resume, and a rejected replay is not a refusal.
         if (!replay.Value &&
             ElsaInstanceProviderReconciliationService.IsAutoResumeIdempotencyKey(
                 request.Envelope.IdempotencyKey, request.Envelope.LifecycleOperationId))
-            await RecordAutoResumeResultAsync(request.Submission, result, cancellationToken);
+            await RecordAutoResumeResultAsync(request, resumedOperation.Value, result, cancellationToken);
         return result;
     }
 
@@ -653,18 +654,24 @@ public sealed class AzureElsaInstanceProvider(
     /// A charged auto-resume reports its provider result back to the operation's outcome
     /// history. A refusal that a later ARM read cannot change parks the operation for an
     /// operator (<c>azure.recovery.needs-operator</c>) so the reconciler stops charging.
+    /// Only a result for the receipt of the attempt it resumed is recorded: a delayed envelope
+    /// from an earlier charge, after another worker resumed the operation and it returned to
+    /// RecoveryRequired at a later attempt, says nothing about the live attempt.
     /// The result is already decided; a failed bookkeeping write must not change it.
     /// </summary>
     private async Task RecordAutoResumeResultAsync(
-        ElsaInstanceProviderSubmission submission,
+        ElsaInstanceProviderRecoveryRequest request,
+        AzureProviderOperation? resumedOperation,
         ElsaInstanceProviderRecoveryResult result,
         CancellationToken cancellationToken)
     {
         try
         {
+            var submission = request.Submission;
             var operation = await TryGetCorrelatedReconcileAsync(
                 submission.WorkspaceId, submission.InstanceId, submission.OperationId, cancellationToken);
-            if (operation is null || AzureLateSuccessCodes.IsAutoResumeBlocked(operation))
+            if (operation is null || AzureLateSuccessCodes.IsAutoResumeBlocked(operation) ||
+                !await IsReceiptForAttemptAsync(request.Envelope, resumedOperation ?? operation, cancellationToken))
                 return;
             await operationStore.RecordAutoResumeResultAsync(
                 operation.WorkspaceId, operation.Id, result.Code, cancellationToken);
@@ -682,9 +689,34 @@ public sealed class AzureElsaInstanceProvider(
         }
     }
 
+    /// <summary>
+    /// Whether the envelope's receipt was minted for <paramref name="operation"/> at its current
+    /// provider attempt and version, read without the strict state validation that refused it.
+    /// <paramref name="operation"/> is the snapshot the resume read before any claim.
+    /// </summary>
+    private async Task<bool> IsReceiptForAttemptAsync(
+        ElsaInstanceProviderRecoveryEnvelope envelope,
+        AzureProviderOperation operation,
+        CancellationToken cancellationToken)
+    {
+        if (_recoveryObservationStore is null)
+            return false;
+        var receipt = await _recoveryObservationStore.GetRecordedObservationAsync(
+            envelope.WorkspaceId,
+            envelope.LifecycleOperationId,
+            envelope.ObservationReference,
+            envelope.ObservationDigest,
+            cancellationToken);
+        return receipt is not null &&
+               receipt.ProviderOperationId == operation.Id &&
+               receipt.ProviderAttemptNumber == operation.AttemptNumber &&
+               receipt.ProviderVersion == operation.Version;
+    }
+
     private async Task<ElsaInstanceProviderRecoveryResult> RecoverCoreAsync(
         ElsaInstanceProviderRecoveryRequest request,
         StrongBox<bool> replay,
+        StrongBox<AzureProviderOperation?> resumedOperation,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -717,6 +749,7 @@ public sealed class AzureElsaInstanceProvider(
             cancellationToken);
         if (operation is null)
             return RecoveryRequired(ManagedElsaReasonCodeCatalog.AzureRecoveryOperationUnavailable);
+        resumedOperation.Value = operation;
         // Post-claim replay is read-only, but still requires proof that this exact
         // accepted lifecycle recovery authorized the current provider successor.
         var isReplay = operation.Status is AzureProviderOperationStatus.Running or AzureProviderOperationStatus.Succeeded;

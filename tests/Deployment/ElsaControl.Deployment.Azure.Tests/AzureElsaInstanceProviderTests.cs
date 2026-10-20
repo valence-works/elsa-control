@@ -400,6 +400,36 @@ public sealed class AzureElsaInstanceProviderTests
         Assert.NotEqual(AzureLateSuccessCodes.NeedsOperator, fixture.OperationStore.Current.LastObservationReasonCode);
     }
 
+    /// <summary>
+    /// Another worker resumed the operation and it returned to RecoveryRequired at a later
+    /// provider attempt, so a delayed envelope from the earlier charge is not a replay and strict
+    /// validation refuses its receipt. That refusal describes the earlier attempt, not the live
+    /// one: it must not park the operation for an operator or enter the history. A receipt the
+    /// store cannot find proves nothing about the current attempt either. A refusal for the
+    /// current receipt still blocks: see
+    /// <see cref="Charged_auto_resume_refused_by_the_provider_records_needs_operator_once"/>.
+    /// </summary>
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task Refused_auto_resume_for_a_stale_or_missing_receipt_does_not_block_auto_resume(
+        bool advancedPastReceipt,
+        bool receiptMissing)
+    {
+        var fixture = await CreateRecoveryFixtureAsync(
+            AzureProviderOperationStatus.RecoveryRequired,
+            advancedPastReceipt: advancedPastReceipt,
+            receiptMissing: receiptMissing);
+
+        var result = await fixture.Provider.RecoverAsync(AutoResumeRequest(fixture));
+
+        Assert.Equal(ElsaInstanceProviderRecoveryOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(ManagedElsaReasonCodeCatalog.AzureRecoveryObservationInvalid, result.Code);
+        Assert.Empty(fixture.OperationStore.Current!.AutoResumeOutcomes);
+        Assert.False(AzureLateSuccessCodes.IsAutoResumeBlocked(fixture.OperationStore.Current));
+        Assert.NotEqual(AzureLateSuccessCodes.NeedsOperator, fixture.OperationStore.Current.LastObservationReasonCode);
+    }
+
     [Theory]
     [InlineData(AzureProviderOperationStatus.Running)]
     [InlineData(AzureProviderOperationStatus.Succeeded)]
@@ -1837,7 +1867,9 @@ public sealed class AzureElsaInstanceProviderTests
         AzureProviderOperationStatus status,
         bool includeReplayObservation = false,
         bool wrongReplayObservation = false,
-        bool includeStrictObservation = false)
+        bool includeStrictObservation = false,
+        bool advancedPastReceipt = false,
+        bool receiptMissing = false)
     {
         var workspaceId = Guid.Parse("11111111-1111-1111-1111-111111111111");
         var operationId = Guid.Parse("33333333-3333-3333-3333-333333333333");
@@ -1848,8 +1880,8 @@ public sealed class AzureElsaInstanceProviderTests
         {
             Status = status,
             Phase = AzureProviderOperationPhase.FoundationSubmitted,
-            AttemptNumber = isPostClaim ? 2 : 1,
-            Version = isPostClaim ? 2 : 1,
+            AttemptNumber = isPostClaim || advancedPastReceipt ? 2 : 1,
+            Version = isPostClaim || advancedPastReceipt ? 2 : 1,
             OrganizationId = TestOrganizationId,
             InstanceId = TestInstanceId,
             LifecycleAction = ElsaInstanceOperationAction.Reconcile,
@@ -1878,7 +1910,8 @@ public sealed class AzureElsaInstanceProviderTests
                 : observation
             : null;
         var strictObservation = includeStrictObservation ? observation : null;
-        var observationStore = new CapturingRecoveryObservationStore(strictObservation, replayObservation);
+        var observationStore = new CapturingRecoveryObservationStore(
+            strictObservation, replayObservation, receiptMissing ? null : observation);
         var operationStore = new CapturingOperationStore(operation);
         var observer = new CountingRecoveryObserver();
         var assignmentStore = new InMemoryAssignmentStore
@@ -2147,7 +2180,8 @@ public sealed class AzureElsaInstanceProviderTests
 
     private sealed class CapturingRecoveryObservationStore(
         AzureProviderRecoveryObservationRecord? strictObservation,
-        AzureProviderRecoveryObservationRecord? replayObservation) : IAzureProviderRecoveryObservationStore
+        AzureProviderRecoveryObservationRecord? replayObservation,
+        AzureProviderRecoveryObservationRecord? recordedObservation) : IAzureProviderRecoveryObservationStore
     {
         public int StrictCalls { get; private set; }
         public int ReplayCalls { get; private set; }
@@ -2182,6 +2216,14 @@ public sealed class AzureElsaInstanceProviderTests
             ReplayCalls++;
             return Task.FromResult(replayObservation);
         }
+
+        public Task<AzureProviderRecoveryObservationRecord?> GetRecordedObservationAsync(
+            Guid workspaceId,
+            Guid lifecycleOperationId,
+            string reference,
+            string digest,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(recordedObservation);
     }
 
     private sealed class CountingRecoveryObserver : IAzureProviderRecoveryObserver
