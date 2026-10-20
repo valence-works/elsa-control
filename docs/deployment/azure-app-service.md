@@ -616,10 +616,13 @@ SCM and FTP basic-auth publishing credentials are off
    directly instead (see "Production apply" step 2).
 3. If needed, add your client CIDR with `az keyvault network-rule add`
    (management plane).
-4. Grant yourself a temporary Key Vault Secrets Officer assignment on that
-   vault only. Do not grant CI a write role.
+4. Get a temporary Key Vault Secrets Officer assignment on that vault only.
+   The phase 1 rights cannot grant it (they cover Key Vault Secrets User
+   only), so a privileged operator with
+   `Microsoft.Authorization/roleAssignments/write` for Key Vault Secrets
+   Officer on this vault grants it. Do not grant CI a write role.
 5. Write each secret by name from a private file. Do not print the value.
-6. Remove the temporary write role.
+6. Have that privileged operator remove the temporary write role.
 7. Phase 2 — set `API_KEY_VAULT_SECRETS_WRITTEN=true` in the GitHub
    environment, then apply the site so settings are repointed to the
    versionless references. Phase 2 reads the existing vault and does not

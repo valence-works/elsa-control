@@ -89,9 +89,12 @@ The roles of the GitHub deploy identity in `infra/control-deploy-identity`
 3. If your client is not already on `operatorWriteIpCidrs`, add one IPv4 CIDR
    through the management plane (`az keyvault network-rule add`). That does
    not require data-plane access.
-4. Grant yourself a temporary Key Vault Secrets Officer assignment scoped to
-   this vault, or use an existing privileged operator identity. Do not grant
-   CI a write role.
+4. Get a temporary Key Vault Secrets Officer assignment scoped to this vault.
+   The phase 1 rights cannot grant it (they cover Key Vault Secrets User
+   only), so a privileged operator with
+   `Microsoft.Authorization/roleAssignments/write` for Key Vault Secrets
+   Officer on this vault grants it, or that operator writes the secrets
+   itself. Do not grant CI a write role.
 5. Write each secret by name. Do not print the value.
 
 ```bash
@@ -102,7 +105,7 @@ az keyvault secret set \
   --output none
 ```
 
-6. Remove the temporary write role.
+6. Have that privileged operator remove the temporary write role.
 7. Phase 2: set `API_KEY_VAULT_SECRETS_WRITTEN=true` in the GitHub
    environment, then apply the site so settings are repointed to the
    versionless references. Phase 2 reads this vault and does not redeploy
