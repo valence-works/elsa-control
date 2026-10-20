@@ -68,7 +68,7 @@ Connection type and runtime distribution are separate dimensions. The connection
 
 | Distribution | Evidence | Permitted description |
 |---|---|---|
-| Valence Runtime | Exact image/component digests matched to a verified, signed producer release manifest and the governed catalog | “Valence Runtime” only for the matched release. External hosting still is not Valence-managed hosting. |
+| Elsa Runtime | Exact image/component digests matched to a verified, signed producer release manifest and the governed catalog | “Elsa Runtime” only for the matched release. External hosting still is not Valence-managed hosting. |
 | Elsa OSS, supported release | Exact version plus a catalog entry explicitly marked Supported for the relevant runtime/capability | “Supported Elsa OSS release” only within that published support boundary. |
 | Other or unverified image | Missing/unknown manifest, unsupported version, or only self-reported metadata | “External image — support and capabilities unverified.” No managed, supported, or security claim. |
 
