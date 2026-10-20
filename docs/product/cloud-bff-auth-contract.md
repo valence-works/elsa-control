@@ -170,6 +170,38 @@ an admin route. A missing, wrong, or malformed client/scope pair also receives
 `403 Forbidden`; failed JWT cryptographic validation remains the normal `401`
 authentication failure.
 
+## Account linking requires a recent sign-in
+
+`POST /api/cloud/account-links` links a Hub identity to a Cloud account. It
+carries both sessions: the Hub access JWT and the Cloud account access JWT. A
+valid token is not enough. Each session must also come from a recent
+interactive sign-in.
+
+Control reads `amr` from each validated token. The last sign-in is the largest
+`timestamp` among entries whose `method` is not `token_refresh` or `anonymous`.
+`iat` is not used, because every token refresh re-issues it. A session is
+recent when the last sign-in is no older than the window, allowing one minute
+of clock skew for a timestamp in the future. Both sessions use the same window:
+
+```text
+Authentication__HubAccount__LinkReauthenticationWindow=00:10:00
+```
+
+The default is ten minutes. The value must be above zero and at most
+`00:15:00`. Control refuses to start with any other value while Hub account
+sign-in is enabled.
+
+Both sessions are checked before any lookup or write. If either is not recent,
+Control writes nothing and returns `401` with `Cache-Control: no-store`, the
+[RFC 9470](https://www.rfc-editor.org/rfc/rfc9470) challenge
+`WWW-Authenticate: Bearer error="insufficient_user_authentication", max_age=<window seconds>`,
+and a problem body with `code = cloud.account-link.reauthentication-required`
+and `staleSession` set to `hub`, `cloud` or `both`. A token whose `amr` is
+missing, is not an array, has a malformed entry, or has no qualifying entry
+counts as stale. The Hub linking flow repeats the named sign-in, Hub first when
+both are stale, and retries the link once. Other endpoints don't check sign-in
+recency.
+
 ## Security notes
 
 - The Entra bridge must use authorization-code + PKCE and keep its delegated

@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using ElsaControl.Api.Authentication;
 using ElsaControl.PackageCatalog.Core.Accounts;
+using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Api.Cloud;
 
@@ -11,6 +12,7 @@ public static class CloudAccountLinkEndpoints
     public const string AccountAlreadyLinkedCode = "cloud.account-link.account-already-linked";
     public const string HubAccountHasEnginesCode = "cloud.account-link.hub-account-has-engines";
     public const string HubAccountHasStateCode = "cloud.account-link.hub-account-has-state";
+    public const string ReauthenticationRequiredCode = "cloud.account-link.reauthentication-required";
 
     public static IEndpointRouteBuilder MapCloudAccountLinkEndpoints(this IEndpointRouteBuilder endpoints)
     {
@@ -19,6 +21,8 @@ public static class CloudAccountLinkEndpoints
             HttpContext context,
             CloudAccountLinkSessionReader sessions,
             AccountIdentityLinkService links,
+            IOptions<HubAccountIdentityOptions> hubAccountOptions,
+            TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
         {
             context.Response.Headers.CacheControl = "private, no-store";
@@ -32,6 +36,19 @@ public static class CloudAccountLinkEndpoints
                     "A Cloud account session and a Hub session are required.",
                     StatusCodes.Status401Unauthorized);
             }
+
+            // Linking needs a recent interactive sign-in on both sessions, checked before any lookup or write.
+            var window = hubAccountOptions.Value.LinkReauthenticationWindow;
+            var now = timeProvider.GetUtcNow();
+            var hubStale = !AccountSignInRecency.IsRecent(pair.HubLastSignIn, now, window);
+            var cloudStale = !AccountSignInRecency.IsRecent(pair.CloudLastSignIn, now, window);
+            if (hubStale || cloudStale)
+                return ReauthenticationRequired(context, window, (hubStale, cloudStale) switch
+                {
+                    (true, true) => "both",
+                    (true, false) => "hub",
+                    _ => "cloud"
+                });
 
             var result = await links.LinkAsync(pair.CloudIdentity, pair.HubIdentity, cancellationToken);
             return result.Outcome switch
@@ -68,6 +85,21 @@ public static class CloudAccountLinkEndpoints
             .AllowHubBff();
 
         return endpoints;
+    }
+
+    // RFC 9470 step-up challenge; staleSession tells the client which sign-in to repeat.
+    private static IResult ReauthenticationRequired(HttpContext context, TimeSpan window, string staleSession)
+    {
+        context.Response.Headers.WWWAuthenticate =
+            $"Bearer error=\"insufficient_user_authentication\", max_age={(long)window.TotalSeconds}";
+        return Results.Problem(
+            title: "A recent sign-in to both the Hub and the Cloud account is required to link them.",
+            statusCode: StatusCodes.Status401Unauthorized,
+            extensions: new Dictionary<string, object?>
+            {
+                ["code"] = ReauthenticationRequiredCode,
+                ["staleSession"] = staleSession
+            });
     }
 
     private static IResult Problem(string code, string title, int statusCode) =>

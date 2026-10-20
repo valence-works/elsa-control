@@ -12,6 +12,8 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting.Internal;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 namespace ElsaControl.Api.Tests;
 
@@ -226,13 +228,78 @@ public sealed class HubAccountIdentityTests
         Assert.True(string.IsNullOrEmpty(options.TokenValidationParameters.ValidAudience));
     }
 
-    private static ControlApiTestApplication CreateHubApplication() => new(new Dictionary<string, string?>
+    [Fact]
+    public async Task Link_reauthentication_window_defaults_to_ten_minutes()
     {
-        [$"{HubAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
-        [$"{HubAccountIdentityDefaults.ConfigurationSection}:Issuer"] = HubIssuer,
-        [$"{HubAccountIdentityDefaults.ConfigurationSection}:Audience"] = "authenticated",
-        [$"{HubAccountIdentityDefaults.ConfigurationSection}:TestSigningKey"] = ControlApiTestApplication.TestControlIdentitySigningKey
-    });
+        await using var app = CreateHubApplication();
+
+        var options = app.Services.GetRequiredService<IOptions<HubAccountIdentityOptions>>().Value;
+
+        Assert.Equal(TimeSpan.FromMinutes(10), options.LinkReauthenticationWindow);
+    }
+
+    [Fact]
+    public async Task Fifteen_minute_link_reauthentication_window_is_accepted()
+    {
+        await using var app = CreateHubApplication(linkReauthenticationWindow: "00:15:00");
+
+        var options = app.Services.GetRequiredService<IOptions<HubAccountIdentityOptions>>().Value;
+
+        Assert.Equal(TimeSpan.FromMinutes(15), options.LinkReauthenticationWindow);
+    }
+
+    [Theory]
+    [InlineData("00:00:00")]
+    [InlineData("-00:01:00")]
+    [InlineData("00:15:01")]
+    [InlineData("01:00:00")]
+    public async Task Out_of_range_link_reauthentication_window_fails_startup(string window)
+    {
+        await using var app = CreateHubApplication(linkReauthenticationWindow: window);
+
+        var startupFailure = Assert.Throws<InvalidOperationException>(() => app.CreateClient());
+
+        Assert.Contains("LinkReauthenticationWindow", startupFailure.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-60)]
+    [InlineData(901)]
+    public async Task Link_reauthentication_window_is_validated_only_while_hub_sign_in_is_enabled(int seconds)
+    {
+        var window = TimeSpan.FromSeconds(seconds);
+
+        await CreateValidator(enabled: false, window).StartAsync(CancellationToken.None);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            CreateValidator(enabled: true, window).StartAsync(CancellationToken.None));
+    }
+
+    private static HubAccountIdentityConfigurationValidator CreateValidator(bool enabled, TimeSpan window) =>
+        new(
+            Options.Create(new HubAccountIdentityOptions
+            {
+                Enabled = enabled,
+                Issuer = HubIssuer,
+                LinkReauthenticationWindow = window
+            }),
+            Options.Create(new CloudAccountIdentityOptions()),
+            new HostingEnvironment { EnvironmentName = "Testing" });
+
+    private static ControlApiTestApplication CreateHubApplication(string? linkReauthenticationWindow = null)
+    {
+        var configuration = new Dictionary<string, string?>
+        {
+            [$"{HubAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
+            [$"{HubAccountIdentityDefaults.ConfigurationSection}:Issuer"] = HubIssuer,
+            [$"{HubAccountIdentityDefaults.ConfigurationSection}:Audience"] = "authenticated",
+            [$"{HubAccountIdentityDefaults.ConfigurationSection}:TestSigningKey"] = ControlApiTestApplication.TestControlIdentitySigningKey
+        };
+        if (linkReauthenticationWindow is not null)
+            configuration[$"{HubAccountIdentityDefaults.ConfigurationSection}:LinkReauthenticationWindow"] = linkReauthenticationWindow;
+
+        return new ControlApiTestApplication(configuration);
+    }
 
     private static ControlApiTestApplication CreateHubAndCloudApplication() => new(new Dictionary<string, string?>
     {

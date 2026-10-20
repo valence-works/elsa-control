@@ -232,6 +232,8 @@ builder.Services.AddOptions<JwtBearerOptions>(CloudAccountIdentityDefaults.Schem
             {
                 if (!CloudAccountTokenSelector.IsValidatedCloudAccount(context.Principal, cloud))
                     context.Fail("A signed Elsa Cloud user session is required.");
+                else
+                    AccountSignInRecency.KeepValidatedToken(context.Properties, context.SecurityToken);
                 return Task.CompletedTask;
             }
         };
