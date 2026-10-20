@@ -2,6 +2,8 @@ using System.Runtime.CompilerServices;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.RuntimeBuilder.Abstractions.Plans;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ElsaControl.Deployment.Azure;
 
@@ -20,7 +22,8 @@ public sealed class AzureElsaInstanceProvider(
     IAzureProviderRecoveryObserver? recoveryObserver = null,
     IAzureProviderRecoveryObservationStore? recoveryObservationStore = null,
     IAzureRuntimeHealthProbe? runtimeHealthProbe = null,
-    AzureProviderTargetScope? providerScope = null) :
+    AzureProviderTargetScope? providerScope = null,
+    ILogger<AzureElsaInstanceProvider>? logger = null) :
     IElsaInstanceProviderSubmissionPort,
     IElsaInstanceProviderReconciliationPort,
     IElsaInstanceProviderCleanupPort,
@@ -36,6 +39,7 @@ public sealed class AzureElsaInstanceProvider(
     private readonly IAzureProviderRecoveryObservationStore? _recoveryObservationStore = recoveryObservationStore;
     private readonly IAzureRuntimeHealthProbe? _runtimeHealthProbe = runtimeHealthProbe;
     private readonly AzureProviderTargetScope? _providerScope = providerScope;
+    private readonly ILogger _logger = logger ?? NullLogger<AzureElsaInstanceProvider>.Instance;
 
     public async Task<ElsaInstanceProviderSubmissionResult> SubmitAsync(
         ElsaInstanceProviderSubmission request,
@@ -681,10 +685,25 @@ public sealed class AzureElsaInstanceProvider(
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 // The history is best effort; a failed append must not skip the block below.
+                _logger.LogWarning(exception,
+                    "Could not append auto-resume result {ResultCode} to the history of provider operation {OperationId}.",
+                    result.Code, operation.Id);
             }
             if (AzureLateSuccessCodes.IsNonTransientResumeRefusal(result.Outcome, result.Code))
-                await operationStore.RecordAutoResumeOutcomeAsync(
-                    operation.WorkspaceId, operation.Id, AzureLateSuccessCodes.NeedsOperator, cancellationToken);
+            {
+                try
+                {
+                    await operationStore.RecordAutoResumeOutcomeAsync(
+                        operation.WorkspaceId, operation.Id, AzureLateSuccessCodes.NeedsOperator, cancellationToken);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    // The charge cap bounds any resume charged before a later block lands.
+                    _logger.LogError(exception,
+                        "Could not record {ReasonCode} for provider operation {OperationId}; auto-resume stays chargeable until a block is recorded.",
+                        AzureLateSuccessCodes.NeedsOperator, operation.Id);
+                }
+            }
         }
         catch (OperationCanceledException)
         {
@@ -692,8 +711,8 @@ public sealed class AzureElsaInstanceProvider(
         }
         catch (Exception)
         {
-            // Only a failed store write reaches here. The next reconcile still observes the
-            // provider operation, and the charge cap bounds any resume charged before the block lands.
+            // A failed correlation or receipt read: nothing was recorded, and the next reconcile
+            // still observes the provider operation.
         }
     }
 
