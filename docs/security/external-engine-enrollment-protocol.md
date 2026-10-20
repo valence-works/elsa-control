@@ -15,7 +15,7 @@ Successful redemption proves two facts only:
 1. the redeemer possessed the one-time challenge; and
 2. the redeemer possessed the private key corresponding to the enrolled public key.
 
-It does not prove that the connector controls Azure, Kubernetes, Docker, the host, the engine's business data, or a governed Valence Runtime image. It grants no deployment or runtime-control capability. #481 may later expose narrow pairing routes, #482 may accept authenticated runtime facts, and #484 must separately authorize each mutation capability.
+It does not prove that the connector controls Azure, Kubernetes, Docker, the host, the engine's business data, or a governed Elsa Runtime image. It grants no deployment or runtime-control capability. #481 may later expose narrow pairing routes, #482 may accept authenticated runtime facts, and #484 must separately authorize each mutation capability.
 
 The identity is scoped to one external engine connection. It is separate from the proposed customer infrastructure agent in ADR-0011 and #103/#316. The two paths may reuse reviewed cryptographic and replay primitives, but never share identity scopes or infer one another's authority.
 
