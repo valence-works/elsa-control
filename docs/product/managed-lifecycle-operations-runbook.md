@@ -506,6 +506,9 @@ A charged resume can still be refused by what only the resume sees (for example
 a later ARM read). A refusal that another ARM read cannot change (authority,
 identity, plan, assignment or eligibility mismatch, or a rejected request)
 records `azure.recovery.needs-operator` and stops auto-resume for that operation.
+The block lasts for the provider operation's lifetime, even after a successful
+operator Recover, so a later park of the same operation (for example at Health or
+Promotion) also waits for an operator.
 An ARM read that failed or is still in progress keeps the 60/120/240/300 s
 backoff and the three-resume budget. Read `autoResumeCount`,
 `autoResumeOutcomeCodes` and `reasonCode` from the admin `provider-current` route

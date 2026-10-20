@@ -344,7 +344,8 @@ public sealed class AzureElsaInstanceProvider(
                 string.Equals(latest.Observation.PostconditionFingerprint, postconditionFingerprint, StringComparison.Ordinal) &&
                 (request.OperatorInitiated
                     ? latest.Observation.ObservedInstanceVersion == request.InstanceVersion
-                    : IsReceiptVersionFresh(latest, request.InstanceVersion)) &&
+                    : AzureProviderResumeEligibility.IsBoundToReconciledInstanceVersion(
+                        latest.Observation.ObservedInstanceVersion, request.InstanceVersion)) &&
                 (!eligibleAutoResume || AzureProviderResumeEligibility.CanAutoResume(
                     operation, observed, latest.Observation, request.InstanceVersion)))
             {
@@ -456,7 +457,8 @@ public sealed class AzureElsaInstanceProvider(
             request.AttemptNumber,
             operation.Id,
             cancellationToken);
-        if (currentAttempt is not null && IsReceiptVersionFresh(currentAttempt, request.InstanceVersion))
+        if (currentAttempt is not null && AzureProviderResumeEligibility.IsBoundToReconciledInstanceVersion(
+                currentAttempt.Observation.ObservedInstanceVersion, request.InstanceVersion))
             return ToManualEvidence(currentAttempt, operation, resolvedReason);
 
         var latest = await _recoveryObservationStore.GetLatestReceiptForOperationAsync(
@@ -467,7 +469,8 @@ public sealed class AzureElsaInstanceProvider(
         if (latest is null)
             return new RecoveryObservationResult(null, resolvedReason);
         if (latest.Observation.ObservedLifecycleAttemptNumber == request.AttemptNumber &&
-            IsReceiptVersionFresh(latest, request.InstanceVersion))
+            AzureProviderResumeEligibility.IsBoundToReconciledInstanceVersion(
+                latest.Observation.ObservedInstanceVersion, request.InstanceVersion))
             return ToManualEvidence(latest, operation, resolvedReason);
 
         try
@@ -507,12 +510,6 @@ public sealed class AzureElsaInstanceProvider(
                 autoResume: false,
                 operation.AutoResumeCount),
             reasonCode);
-
-    private static bool IsReceiptVersionFresh(
-        AzureProviderRecoveryObservationReceipt receipt,
-        int instanceVersion) =>
-        receipt.Observation.ObservedInstanceVersion == instanceVersion ||
-        receipt.Observation.ObservedInstanceVersion == instanceVersion - 1;
 
     private static string? ResolveObservationReason(
         AzureProviderRecoveryObservation observed,

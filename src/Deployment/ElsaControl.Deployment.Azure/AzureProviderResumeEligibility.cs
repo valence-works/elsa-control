@@ -14,7 +14,10 @@ public static class AzureProviderResumeEligibility
     /// Whether a reconcile-time observation may charge an automatic resume: the observation
     /// satisfies the executor gate for the current checkpoint, the receipt is authoritative for
     /// the current provider tuple, and the receipt stays bound to the reconciled instance version
-    /// whether or not the reconcile that hands it out changes the aggregate.
+    /// whether or not the reconcile that hands it out changes the aggregate. A no-op reconcile
+    /// keeps <paramref name="instanceVersion"/> and a changing one commits the next version;
+    /// <see cref="IsBoundToReconciledInstanceVersion"/> holds for both only when the receipt was
+    /// minted at <paramref name="instanceVersion"/> itself.
     /// </summary>
     public static bool CanAutoResume(
         AzureProviderOperation operation,
@@ -25,9 +28,9 @@ public static class AzureProviderResumeEligibility
         ArgumentNullException.ThrowIfNull(receipt);
         return IsEligible(operation, observation) &&
                IsRecordAuthoritative(receipt, operation) &&
-               instanceVersion < int.MaxValue &&
-               IsBoundToReconciledInstanceVersion(receipt.ObservedInstanceVersion, instanceVersion) &&
-               IsBoundToReconciledInstanceVersion(receipt.ObservedInstanceVersion, instanceVersion + 1);
+               receipt.ObservedInstanceVersion >= 1 &&
+               receipt.ObservedInstanceVersion == instanceVersion &&
+               instanceVersion < int.MaxValue;
     }
 
     /// <summary>
