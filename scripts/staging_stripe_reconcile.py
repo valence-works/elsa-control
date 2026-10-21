@@ -67,6 +67,7 @@ from key_vault_app_settings import (
     KeyVaultModeError,
     is_key_vault_reference,
     key_vault_secrets_written,
+    require_secret_settings_are_all_references,
     select_secret_settings_mode,
 )
 
@@ -389,6 +390,27 @@ def decide_secret_settings_mode(azure: Any, *, secrets_written: bool) -> str:
     values = azure.app_settings(present) if present else {}
     try:
         return select_secret_settings_mode(values, secrets_written=False)
+    except KeyVaultModeError as error:
+        raise SecretSettingsModeError(f"key-vault-mode: {error}") from None
+
+
+def require_staging_secret_settings_are_references(azure: Any) -> None:
+    """Key Vault mode on staging: every listed secret setting present must be a reference.
+
+    The staging checks only cover the Stripe names, so a plain non-Stripe secret
+    (for example ``Authentication__ApiKey``) would otherwise pass. Names only.
+    """
+
+    listed = set(azure.list_names())
+    present = [name for name in SECRET_APP_SETTING_NAMES if name in listed]
+    if not present:
+        return
+    values = azure.app_settings(present)
+    if any(not is_key_vault_reference(values.get(name, "")) for name in STAGING_SECRET_SETTING_NAMES if name in values):
+        # The #863 Stripe checks already refuse this case with their own message.
+        return
+    try:
+        require_secret_settings_are_all_references(values)
     except KeyVaultModeError as error:
         raise SecretSettingsModeError(f"key-vault-mode: {error}") from None
 
@@ -1002,6 +1024,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         azure = AzureWebApp(config.azure_resource_group, config.azure_webapp_name)
         mode = decide_secret_settings_mode(azure, secrets_written=key_vault_secrets_written())
         print_pre_cutover_mode(mode)
+        if mode == KEY_VAULT_MODE and args.apply_azure_settings:
+            require_staging_secret_settings_are_references(azure)
         checks = StagingStripeReconciler(stripe, azure, config, mode=mode).run(
             apply_azure_settings=args.apply_azure_settings,
             stripe_secret_key=stripe_secret_key,

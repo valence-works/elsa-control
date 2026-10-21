@@ -600,7 +600,7 @@ value that starts with `@Microsoft.KeyVault(` but is not a versionless
 | unset or not `true` | `reference` | Fails: references are present, so set `API_KEY_VAULT_SECRETS_WRITTEN=true`. |
 | unset or not `true` | `mixed` | Fails, naming the reference settings and the plain settings. |
 | `true` | `reference` | **Key Vault mode** (#863). |
-| `true` | `plain` or `mixed` | Fails as #863 does, naming a setting that is not a reference. |
+| `true` | `plain` or `mixed` | Fails as #863 does: `--audit` names a setting that is not a reference; `--capture`, `--reapply` and staging print the generic `FAIL production-stripe-reconciliation` or `FAIL staging-stripe-reconciliation` line. On staging, a plain non-Stripe listed setting (for example `Authentication__ApiKey`) with every Stripe setting a reference also fails, naming the variable, the reference settings and the plain settings. |
 
 In pre-cutover mode:
 
@@ -613,6 +613,9 @@ In pre-cutover mode:
 - Staging checks the existing plain values: a test-mode key that matches
   `STRIPE_TEST_SECRET_KEY`, and a webhook secret that matches
   `STRIPE_TEST_WEBHOOK_SIGNING_SECRET`. It writes no Stripe secret setting.
+  A site webhook secret that differs from the GitHub secret now fails the
+  deploy instead of being overwritten as before #863; fix the mismatch on the
+  site or in the GitHub secret.
   Non-secret billing settings are written as in Key Vault mode.
 - `infra` is not covered. "Check deployment configuration" still refuses
   `infra` unless `API_KEY_VAULT_SECRETS_WRITTEN=true`, because `infra` would
@@ -626,6 +629,12 @@ Set `API_KEY_VAULT_SECRETS_WRITTEN=true` right after the manual reference
 switch, before the next deploy. Until then every `app` or `promote` deploy
 fails closed (`reference` without the variable) rather than writing plain
 values over the references.
+
+Make the manual switch while no deploy is running for that environment. A
+pre-cutover `--reapply` already past its classification can still write the
+captured plain values back over a switch made seconds earlier, and a switch
+between capture and reapply makes the rollback step's reapply fail closed
+before it restores the image.
 
 ### Operator write path
 
@@ -740,7 +749,9 @@ production deploy is allowed to pass Stripe `--capture` in Key Vault mode:
 7. Separately record operator evidence that the vault Stripe secret is a
    live-mode key for the same Stripe account the audit uses. Scripts never
    read that vault value.
-8. Only then run a production deploy. It runs in Key Vault mode:
+8. Only then run a production deploy, and only once #882 is fixed: until
+   then the Key Vault-mode production audit fails and the deploy rolls back.
+   It runs in Key Vault mode:
    `--capture` fails if a listed secret setting is still a plain value or a
    malformed reference, and `--reapply` never writes a secret setting.
 

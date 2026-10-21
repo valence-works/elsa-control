@@ -94,6 +94,19 @@ def classify_secret_settings(values: Mapping[str, str]) -> str:
     return MIXED if plain else REFERENCE
 
 
+def require_secret_settings_are_all_references(values: Mapping[str, str]) -> None:
+    """Refuse, with names only, unless every listed setting present is a valid reference."""
+
+    references, plain, malformed = _split_secret_settings(values)
+    if plain:
+        raise KeyVaultModeError(
+            f"{SECRETS_WRITTEN_VARIABLE}=true but listed secret settings are not all Key Vault references "
+            f"(references: {', '.join(references) or 'none'}; plain: {', '.join(plain)})"
+        )
+    if malformed:
+        raise KeyVaultModeError(f"malformed Key Vault reference: {', '.join(malformed)}")
+
+
 def select_secret_settings_mode(values: Mapping[str, str], *, secrets_written: bool) -> str:
     """Choose pre-cutover or Key Vault mode, or refuse with a names-only reason.
 

@@ -1146,6 +1146,30 @@ class StagingKeyVaultModeTests(unittest.TestCase):
         )
         self.assertEqual(set(), written_secret_names(azure))
 
+    def test_key_vault_mode_refuses_a_plain_non_stripe_secret_setting(self) -> None:
+        # The Stripe names are references, so the #863 checks pass; a plain
+        # Authentication__ApiKey must still fail the staging apply (#865 AC3).
+        plain_api_key = "plain-staging-api-key-fixture"
+        azure = FakeAzure([*azure_settings(), {"name": "Authentication__ApiKey", "value": plain_api_key}])
+
+        code, stdout, stderr = self._run_main(azure, secrets_written="true")
+
+        self.assertEqual(1, code)
+        self.assertEqual("", stdout)
+        self.assertIn("Authentication__ApiKey", stderr)
+        self.assertIn("API_KEY_VAULT_SECRETS_WRITTEN=true", stderr)
+        self.assertIn("Billing__Stripe__SecretKey", stderr)
+        self.assertNotIn(plain_api_key, stderr)
+        self.assertEqual([], azure.applications)
+
+    def test_key_vault_mode_passes_when_every_listed_setting_is_a_reference(self) -> None:
+        azure = FakeAzure(azure_settings())
+
+        code, stdout, stderr = self._run_main(azure, secrets_written="true")
+
+        self.assertEqual(0, code, stderr)
+        self.assertEqual(set(), written_secret_names(azure))
+
 
 if __name__ == "__main__":
     unittest.main()
