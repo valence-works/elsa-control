@@ -50,34 +50,53 @@ vault. Switching that identity to a federated credential is #838.
 
 ## Who applies this module
 
-`infra/control-deploy-identity` grants the GitHub deploy identity Reader,
-Website Contributor on the API site, and AcrPush. That identity cannot
-create the vault or `Microsoft.Authorization/roleAssignments`. Phase 1
-(`scripts/deploy-azure-elsa-control.sh --vault-only`) is applied by an
-operator, or by an identity that already has `roleAssignments/write`, on
-the Control resource group:
+Phase 1 deploys this module: the vault, its network rules and the Key Vault
+Secrets User assignment. A human operator applies it, with
+`scripts/deploy-azure-elsa-control.sh --vault-only` or, for production, a
+direct resource-group deployment of this module (see "Production apply" in
+`docs/deployment/azure-app-service.md`). These rights cover the vault module
+only: `--vault-only` first runs the base subscription deployment
+(`infra/main.bicep`), which also needs the base deployment's rights. An
+operator with only the rights below deploys the module directly. That
+operator holds:
 
-- permission to create and update `Microsoft.KeyVault/vaults`
-- `Microsoft.Authorization/roleAssignments/write`, scoped as narrowly as
-  possible (for example Role Based Access Control Administrator with a
-  condition limited to Key Vault Secrets User)
+- Key Vault Contributor on the Control resource group, or a custom role with
+  `Microsoft.KeyVault/vaults/write` and `Microsoft.Resources/deployments/*`
+  (any `az deployment group what-if` or `create` needs the latter; Key Vault
+  Contributor includes it);
+- `Microsoft.Network/virtualNetworks/subnets/joinViaServiceEndpoint/action`
+  on `snet-api-egress`;
+- `Microsoft.Authorization/roleAssignments/write` limited to Key Vault
+  Secrets User, for example Role Based Access Control Administrator with a
+  condition on that role.
 
-Later site deploys (phase 2) can use the GitHub deploy identity. It still
-gets no Key Vault data role.
+Re-running phase 1 to change the firewall rules uses the same operator. A re-run replaces the vault's network rules with the template's values, so pass every CIDR you still need, including any added with `az keyvault network-rule add` and any `apiOutboundIpCidrs`.
+
+Phase 2 (the site apply, a run without `--vault-only`) never deploys this
+module. It reads the existing vault URI and fails with a pointer to phase 1
+when the vault is missing. Phase 2 needs only management-plane read on the
+vault (Reader on the resource group is enough) and no Key Vault data role.
+The roles of the GitHub deploy identity in `infra/control-deploy-identity`
+(Reader, Website Contributor on the API site, AcrPush) do not change.
 
 ## Operator write path
 
 1. Apply `infra/control-egress` so `snet-api-egress` has the Key Vault
    service endpoint. Record `AZURE_API_EGRESS_SUBNET_ID`.
-2. Phase 1: deploy this module with
-   `scripts/deploy-azure-elsa-control.sh --vault-only`. Do not apply the
-   site yet.
+2. Phase 1: as the phase 1 operator, deploy this module with
+   `scripts/deploy-azure-elsa-control.sh --vault-only`, which also applies the
+   base deployment. With only the phase 1 rights, deploy the module directly
+   instead ("Production apply" in `docs/deployment/azure-app-service.md`). Do
+   not apply the site yet.
 3. If your client is not already on `operatorWriteIpCidrs`, add one IPv4 CIDR
    through the management plane (`az keyvault network-rule add`). That does
    not require data-plane access.
-4. Grant yourself a temporary Key Vault Secrets Officer assignment scoped to
-   this vault, or use an existing privileged operator identity. Do not grant
-   CI a write role.
+4. Get a temporary Key Vault Secrets Officer assignment scoped to this vault.
+   The phase 1 rights cannot grant it (they cover Key Vault Secrets User
+   only), so a privileged operator with
+   `Microsoft.Authorization/roleAssignments/write` for Key Vault Secrets
+   Officer on this vault grants it, or that operator writes the secrets
+   itself. Do not grant CI a write role.
 5. Write each secret by name. Do not print the value.
 
 ```bash
@@ -88,10 +107,11 @@ az keyvault secret set \
   --output none
 ```
 
-6. Remove the temporary write role.
+6. Have that privileged operator remove the temporary write role.
 7. Phase 2: set `API_KEY_VAULT_SECRETS_WRITTEN=true` in the GitHub
    environment, then apply the site so settings are repointed to the
-   versionless references. Confirm every listed reference reports
+   versionless references. Phase 2 reads this vault and does not redeploy
+   it. Confirm every listed reference reports
    `Resolved` with `scripts/check-key-vault-references.sh` (names and
    status only).
 
@@ -130,5 +150,5 @@ az webapp restart --resource-group "<rg>" --name "<webapp>"
 | --- | --- |
 | `apiIdentityPrincipalId` | API identity principal. Required. |
 | `apiEgressSubnetId` | `AZURE_API_EGRESS_SUBNET_ID`. Required. |
-| `operatorWriteIpCidrs` | Operator write-path CIDRs (`KEY_VAULT_OPERATOR_WRITE_IP_CIDRS`). |
-| `apiOutboundIpCidrs` | Optional NAT `/32` CIDRs (`KEY_VAULT_API_OUTBOUND_IP_CIDRS`). |
+| `operatorWriteIpCidrs` | Operator write-path CIDRs (`KEY_VAULT_OPERATOR_WRITE_IP_CIDRS`, read only by `--vault-only`). |
+| `apiOutboundIpCidrs` | Optional NAT `/32` CIDRs (`KEY_VAULT_API_OUTBOUND_IP_CIDRS`, read only by `--vault-only`). |

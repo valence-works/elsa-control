@@ -635,7 +635,8 @@ fi
         self.assertIn("CONTROL_ENTRA_TENANT_ID", self.source)
         self.assertIn("AZURE_PROVISIONER_IDENTITY_ID: ${{ vars.AZURE_PROVISIONER_IDENTITY_ID }}", self.source)
         self.assertIn("AZURE_API_EGRESS_SUBNET_ID: ${{ vars.AZURE_API_EGRESS_SUBNET_ID }}", self.source)
-        self.assertIn("AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID: ${{ vars.AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID }}", self.source)
+        self.assertNotIn("DEPLOY_IDENTITY_PRINCIPAL", self.source)
+        self.assertIn("API_KEY_VAULT_ROLLBACK_ACTIVE: ${{ vars.API_KEY_VAULT_ROLLBACK_ACTIVE }}", job_env)
         self.assertIn("KEY_VAULT_OPERATOR_WRITE_IP_CIDRS: ${{ vars.KEY_VAULT_OPERATOR_WRITE_IP_CIDRS }}", self.source)
         self.assertIn("KEY_VAULT_API_OUTBOUND_IP_CIDRS: ${{ vars.KEY_VAULT_API_OUTBOUND_IP_CIDRS }}", self.source)
         self.assertIn("API_KEY_VAULT_SECRETS_WRITTEN: ${{ vars.API_KEY_VAULT_SECRETS_WRITTEN }}", self.source)
@@ -1386,7 +1387,6 @@ fi
             "AZURE_RESOURCE_GROUP": "rg-test", "AZURE_WEBAPP_NAME": "test-api",
             "CONTROL_ENTRA_CLIENT_ID": "00000000-0000-0000-0000-000000000004",
             "CONTROL_ENTRA_TENANT_ID": "00000000-0000-0000-0000-000000000005",
-            "AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID": "00000000-0000-0000-0000-000000000006",
             "AZURE_API_EGRESS_SUBNET_ID": "/subscriptions/00000000-0000-0000-0000-000000000003/resourceGroups/rg-test/providers/Microsoft.Network/virtualNetworks/vnet/subnets/snet-api-egress",
             "API_KEY_VAULT_SECRETS_WRITTEN": "true",
             "ELSA_CLOUD_STAGING_ORIGIN": "https://staging.example.test",
@@ -1405,6 +1405,51 @@ fi
                                         capture_output=True, text=True, check=False)
             self.assertEqual(0, configured.returncode, configured.stdout + configured.stderr)
             self.assertNotIn("STAGING_RECOVERY_REQUIRED_ALERT_RECIPIENT", configured.stdout + configured.stderr)
+
+    def test_infra_refuses_an_active_key_vault_rollback_before_azure_login(self) -> None:
+        check_marker = self.source.index("      - name: Check deployment configuration")
+        self.assertLess(check_marker, self.source.index("uses: azure/login@v2"))
+        check_start = self.source.index("        run: |\n", check_marker)
+        check_end = self.source.index("\n      - name:", check_start)
+        check_script = dedent(self.source[check_start + len("        run: |\n") : check_end])
+        check_script = check_script.replace("${{ github.event_name }}", "workflow_dispatch")
+        environment = os.environ.copy() | {
+            "TARGET_ENVIRONMENT": "test", "DEPLOY_MODE": "infra",
+            "AZURE_CLIENT_ID": "00000000-0000-0000-0000-000000000001",
+            "AZURE_TENANT_ID": "00000000-0000-0000-0000-000000000002",
+            "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
+            "AZURE_CONTAINER_REGISTRY_ENDPOINT": "test.azurecr.io",
+            "AZURE_ENV_NAME": "test", "AZURE_LOCATION": "westeurope",
+            "AZURE_RESOURCE_GROUP": "rg-test", "AZURE_WEBAPP_NAME": "test-api",
+            "CONTROL_ENTRA_CLIENT_ID": "00000000-0000-0000-0000-000000000004",
+            "CONTROL_ENTRA_TENANT_ID": "00000000-0000-0000-0000-000000000005",
+            "AZURE_API_EGRESS_SUBNET_ID": "/subscriptions/00000000-0000-0000-0000-000000000003/resourceGroups/rg-test/providers/Microsoft.Network/virtualNetworks/vnet/subnets/snet-api-egress",
+            "API_KEY_VAULT_SECRETS_WRITTEN": "true",
+            "AZURE_PROVISIONER_IDENTITY_ID": "staging-identity",
+            "ELSA_CLOUD_STAGING_ORIGIN": "https://staging.example.test",
+            "STRIPE_HOSTED_PRICE_ID": "price_test", "STRIPE_TEST_SECRET_KEY": "sk_test_fixture",
+            "STRIPE_TEST_WEBHOOK_SIGNING_SECRET": "whsec_fixture",
+        }
+        environment.pop("API_KEY_VAULT_ROLLBACK_ACTIVE", None)
+        with tempfile.NamedTemporaryFile() as output, tempfile.NamedTemporaryFile() as github_env:
+            environment["GITHUB_OUTPUT"] = output.name
+            environment["GITHUB_ENV"] = github_env.name
+            for rollback_active in ("true", "TRUE"):
+                with self.subTest(rollback_active=rollback_active):
+                    environment["API_KEY_VAULT_ROLLBACK_ACTIVE"] = rollback_active
+                    refused = subprocess.run(["bash", "-c", check_script], env=environment,
+                                             capture_output=True, text=True, check=False)
+                    self.assertNotEqual(0, refused.returncode)
+                    self.assertIn("::error::API_KEY_VAULT_ROLLBACK_ACTIVE", refused.stdout + refused.stderr)
+                    self.assertNotIn("deploy_configured=true", Path(output.name).read_text())
+
+            for rollback_active in ("", "false"):
+                with self.subTest(rollback_active=rollback_active):
+                    environment["API_KEY_VAULT_ROLLBACK_ACTIVE"] = rollback_active
+                    configured = subprocess.run(["bash", "-c", check_script], env=environment,
+                                                capture_output=True, text=True, check=False)
+                    self.assertEqual(0, configured.returncode, configured.stdout + configured.stderr)
+                    self.assertNotIn("API_KEY_VAULT_ROLLBACK_ACTIVE", configured.stdout + configured.stderr)
 
     def test_infra_still_requires_key_vault_secrets_written_but_app_does_not(self) -> None:
         # #865: pre-cutover mode covers app and promote only. Infra keeps the
@@ -1425,7 +1470,6 @@ fi
             "AZURE_RESOURCE_GROUP": "rg-test", "AZURE_WEBAPP_NAME": "test-api",
             "CONTROL_ENTRA_CLIENT_ID": "00000000-0000-0000-0000-000000000004",
             "CONTROL_ENTRA_TENANT_ID": "00000000-0000-0000-0000-000000000005",
-            "AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID": "00000000-0000-0000-0000-000000000006",
             "AZURE_API_EGRESS_SUBNET_ID": "/subscriptions/00000000-0000-0000-0000-000000000003/resourceGroups/rg-test/providers/Microsoft.Network/virtualNetworks/vnet/subnets/snet-api-egress",
             "AZURE_PROVISIONER_IDENTITY_ID": "staging-identity",
             "ELSA_CLOUD_STAGING_ORIGIN": "https://staging.example.test",

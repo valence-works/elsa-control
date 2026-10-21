@@ -74,10 +74,10 @@ jobs:
       CONTROL_ENTRA_TENANT_ID: ${{ vars.CONTROL_ENTRA_TENANT_ID }}
       AZURE_PROVISIONER_IDENTITY_ID: ${{ vars.AZURE_PROVISIONER_IDENTITY_ID }}
       AZURE_API_EGRESS_SUBNET_ID: ${{ vars.AZURE_API_EGRESS_SUBNET_ID }}
-      AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID: ${{ vars.AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID }}
       KEY_VAULT_OPERATOR_WRITE_IP_CIDRS: ${{ vars.KEY_VAULT_OPERATOR_WRITE_IP_CIDRS }}
       KEY_VAULT_API_OUTBOUND_IP_CIDRS: ${{ vars.KEY_VAULT_API_OUTBOUND_IP_CIDRS }}
       API_KEY_VAULT_SECRETS_WRITTEN: ${{ vars.API_KEY_VAULT_SECRETS_WRITTEN }}
+      API_KEY_VAULT_ROLLBACK_ACTIVE: ${{ vars.API_KEY_VAULT_ROLLBACK_ACTIVE }}
       # Staging (`test`) only. Production must leave this unset. Org ids are not
       # secret; do not echo the list. The Hosted smoke owner org is minted with
       # Guid.NewGuid() on first Cloud sign-in, so its id is recorded on `test`
@@ -523,10 +523,14 @@ jobs:
             required+=(
               CONTROL_ENTRA_CLIENT_ID
               CONTROL_ENTRA_TENANT_ID
-              AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID
               AZURE_API_EGRESS_SUBNET_ID
               API_KEY_VAULT_SECRETS_WRITTEN
             )
+            rollback_active="${API_KEY_VAULT_ROLLBACK_ACTIVE:-}"
+            if [ "${rollback_active,,}" = "true" ]; then
+              echo "::error::API_KEY_VAULT_ROLLBACK_ACTIVE is true. Resolve the Key Vault rollback before the site is applied."
+              exit 1
+            fi
             if [ "${API_KEY_VAULT_SECRETS_WRITTEN:-}" != "true" ]; then
               echo "::error::API_KEY_VAULT_SECRETS_WRITTEN must be true before the site is applied."
               exit 1
