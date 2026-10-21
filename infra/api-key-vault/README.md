@@ -14,9 +14,12 @@ This directory is hand-maintained. `dev/regenerate-infra.sh` preserves it.
 | Key Vault Secrets User on the API identity | Runtime resolution. Secrets User includes `secrets/getSecret` and can read values. |
 
 The GitHub OIDC deploy identity gets no Key Vault data role. Nothing in this
-repo reads vault values. `scripts/check-key-vault-references.sh` uses Reader
-on the App Service (`Microsoft.Web/sites/config/read`) and the ARM
-`configreferences` endpoint, and prints names and status only.
+repo reads vault values. `scripts/check-key-vault-references.sh` needs
+`Microsoft.Web/sites/config/read` (the ARM `configreferences` endpoint) and
+`Microsoft.Web/sites/config/list/action` on the App Service (Website
+Contributor has both; Reader lacks the list action). It lists the app setting
+names to find plain values; the CLI fetches the values but the script keeps
+only the names, and it prints names and status only.
 
 No other identity receives a data-plane role. An operator writes each secret
 value after the vault exists. CI never writes a secret value to the vault.

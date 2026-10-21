@@ -252,8 +252,9 @@ az webapp config appsettings set --resource-group <group> --name <site> --output
 ```
 
 `scripts/check-key-vault-references.sh` reports each `Secret` and
-`PreviousSecret` setting: `NotSet` when it has no reference (the feature or
-the rotation is off), and it fails unless a present one is `Resolved`.
+`PreviousSecret` setting: `NotSet` when it is absent (the feature or the
+rotation is off). It fails unless a present one is `Resolved`; a plain value
+fails as `NotAReference`.
 Without these settings, a BFF call whose address matches
 `RateLimiting__BffEgressNetworks` uses `BffPerIp` and any other BFF call falls
 back to `PerIp`; nothing else changes.
@@ -709,8 +710,10 @@ write-path CIDRs are optional extras. A private endpoint is #839.
 The only Key Vault data role is Key Vault Secrets User on the API
 user-assigned identity. Secrets User includes `secrets/getSecret` and can
 read values. The GitHub OIDC deploy identity gets no Key Vault data role.
-`scripts/check-key-vault-references.sh` uses Reader on the App Service and
-the ARM `configreferences` endpoint (names and status only). No other
+`scripts/check-key-vault-references.sh` needs `config/read` and
+`config/list/action` on the App Service (Website Contributor; Reader lacks
+the list action). It reads the ARM `configreferences` endpoint and the app
+setting names, and prints names and status only. No other
 identity gets a data-plane role. CI never writes a secret value to Key Vault.
 In Key Vault mode it never writes one to App Service either; before the
 reference switch, see [Pre-cutover and Key Vault modes](#pre-cutover-and-key-vault-modes).
@@ -730,7 +733,8 @@ An operator writes each secret after the vault exists.
 Optional, written only when `RateLimiting:BffCredentials` is used (see
 [BFF credential](#bff-credential-ratelimitingbffcredentials)).
 `scripts/check-key-vault-references.sh` reports a missing one as `NotSet` and
-requires a present one to be `Resolved`:
+requires a present one to be `Resolved` (a plain value fails as
+`NotAReference`):
 
 | App setting | Vault secret name |
 | --- | --- |
