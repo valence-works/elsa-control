@@ -27,6 +27,13 @@ present, then writes the one-time returned signing secret to a new file with
 mode ``0600``.  The secret is never printed.  The normal audit does not create
 or update Stripe objects. ``--bootstrap-portal`` idempotently creates the test
 Customer Portal policy only when no active configuration exists.
+
+``--apply-azure-settings`` never writes the listed Key Vault secret settings.
+Until the operator sets ``API_KEY_VAULT_SECRETS_WRITTEN=true`` after the
+manual reference switch, an all-plain site runs in pre-cutover mode: the
+existing plain Stripe values get the checks used before #863. References
+without that variable, or a mix of references and plain values, fail before
+any write and name the settings only.
 """
 
 from __future__ import annotations
@@ -52,7 +59,16 @@ _LIB = Path(__file__).resolve().parent / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 from hosted_appsettings import HostedAppSettingsError, require_exact_setting_name, resolve_setting_name
-from key_vault_app_settings import SECRET_APP_SETTING_NAMES, is_key_vault_reference
+from key_vault_app_settings import (
+    KEY_VAULT_MODE,
+    PLAIN,
+    PRE_CUTOVER_MODE,
+    SECRET_APP_SETTING_NAMES,
+    KeyVaultModeError,
+    is_key_vault_reference,
+    key_vault_secrets_written,
+    select_secret_settings_mode,
+)
 
 
 DEFAULT_WEBHOOK_EVENTS = frozenset(
@@ -76,6 +92,10 @@ CLOUD_STAGING_HOST_SUFFIX = ".azurestaticapps.net"
 
 class ReconciliationError(RuntimeError):
     """A safe, non-provider-specific reconciliation failure."""
+
+
+class SecretSettingsModeError(ReconciliationError):
+    """A Key Vault mode refusal that names settings only and is safe to print."""
 
 
 def require_secret_prefix(value: str, *, name: str, prefixes: Sequence[str], mode: str) -> None:
@@ -355,6 +375,29 @@ STAGING_WRITABLE_SETTING_NAMES = tuple(
 )
 
 
+def decide_secret_settings_mode(azure: Any, *, secrets_written: bool) -> str:
+    """Choose ``pre-cutover`` or ``key-vault`` mode before any Azure write.
+
+    Values are read only to classify them. With ``secrets_written`` nothing is
+    read and the Key Vault reference checks run unchanged.
+    """
+
+    if secrets_written:
+        return KEY_VAULT_MODE
+    listed = set(azure.list_names())
+    present = [name for name in SECRET_APP_SETTING_NAMES if name in listed]
+    values = azure.app_settings(present) if present else {}
+    try:
+        return select_secret_settings_mode(values, secrets_written=False)
+    except KeyVaultModeError as error:
+        raise SecretSettingsModeError(f"key-vault-mode: {error}") from None
+
+
+def print_pre_cutover_mode(mode: str) -> None:
+    if mode == PRE_CUTOVER_MODE:
+        print(f"INFO key-vault-mode: {PRE_CUTOVER_MODE} (classification: {PLAIN})")
+
+
 class AzureWebApp:
     """Read and reconcile app settings without exposing secret values."""
 
@@ -542,10 +585,22 @@ class AzureWebApp:
 
 
 class StagingStripeReconciler:
-    def __init__(self, stripe: StripeApi, azure: AzureWebApp, config: ReconciliationConfig) -> None:
+    def __init__(
+        self,
+        stripe: StripeApi,
+        azure: AzureWebApp,
+        config: ReconciliationConfig,
+        *,
+        mode: str = KEY_VAULT_MODE,
+    ) -> None:
+        # ``mode`` comes from decide_secret_settings_mode. Pre-cutover checks
+        # the existing plain secret values; neither mode writes them.
+        if mode not in {KEY_VAULT_MODE, PRE_CUTOVER_MODE}:
+            raise ReconciliationError("Key Vault mode is invalid")
         self._stripe = stripe
         self._azure = azure
         self._config = config
+        self._mode = mode
 
     def run(self, *, apply_azure_settings: bool = False, stripe_secret_key: str) -> tuple[str, ...]:
         require_test_secret(stripe_secret_key, name="STRIPE_SECRET_KEY", prefix=TEST_SECRET_PREFIX)
@@ -565,12 +620,17 @@ class StagingStripeReconciler:
                 tuple(desired_settings) + STAGING_SECRET_SETTING_NAMES
             )
             previous = {name: setting.value for name, setting in previous_records.items()}
-            for name in STAGING_SECRET_SETTING_NAMES:
-                existing = previous.get(name, "")
-                if existing and not is_key_vault_reference(existing):
-                    if existing.startswith(("sk_live_", "rk_live_")):
-                        raise ReconciliationError("Azure staging is not configured with a test Stripe account")
-                    raise ReconciliationError(f"Azure billing setting {name} must be a Key Vault reference")
+            if self._mode == PRE_CUTOVER_MODE:
+                previous_secret = previous.get("Billing__Stripe__SecretKey", "")
+                if previous_secret and not previous_secret.startswith(TEST_SECRET_PREFIX):
+                    raise ReconciliationError("Azure staging is not configured with a test Stripe account")
+            else:
+                for name in STAGING_SECRET_SETTING_NAMES:
+                    existing = previous.get(name, "")
+                    if existing and not is_key_vault_reference(existing):
+                        if existing.startswith(("sk_live_", "rk_live_")):
+                            raise ReconciliationError("Azure staging is not configured with a test Stripe account")
+                        raise ReconciliationError(f"Azure billing setting {name} must be a Key Vault reference")
             if any(
                 previous_records[name].slot_setting
                 for name in desired_settings
@@ -580,14 +640,20 @@ class StagingStripeReconciler:
             previous_billing = {name: previous.get(name) for name in desired_settings}
             try:
                 self._azure.apply_billing_settings(desired_settings)
-                self.check_azure_settings()
+                self._check_azure_settings_for_mode(stripe_secret_key)
             except Exception:
                 self._restore_azure_settings(previous_billing)
                 raise
         else:
-            self.check_azure_settings()
+            self._check_azure_settings_for_mode(stripe_secret_key)
         passed.append("azure-billing-settings")
         return tuple(passed)
+
+    def _check_azure_settings_for_mode(self, stripe_secret_key: str) -> None:
+        if self._mode == PRE_CUTOVER_MODE:
+            self.check_azure_settings(expected_stripe_secret_key=stripe_secret_key)
+        else:
+            self.check_azure_settings()
 
     def audit_stripe(self) -> tuple[str, ...]:
         checks = (
@@ -678,14 +744,23 @@ class StagingStripeReconciler:
             "Billing__Stripe__DefaultPriceId": self._config.hosted_price_id,
             "Billing__Stripe__CloudPortalReturnUrl": self._config.cloud_portal_return_url,
         }
+        if self._mode == PRE_CUTOVER_MODE:
+            # The plain values already on the site; checked as before #863.
+            expected["Billing__Stripe__WebhookSigningSecret"] = self._config.webhook_secret
         for name, value in expected.items():
             if settings.get(name) != value:
                 raise ReconciliationError(f"Azure billing setting {name} does not match")
-        for name in STAGING_SECRET_SETTING_NAMES:
-            if not is_key_vault_reference(settings.get(name, "")):
-                raise ReconciliationError(f"Azure billing setting {name} must be a Key Vault reference")
-        if expected_stripe_secret_key is not None:
-            require_test_secret(expected_stripe_secret_key, name="STRIPE_SECRET_KEY", prefix=TEST_SECRET_PREFIX)
+        if self._mode == PRE_CUTOVER_MODE:
+            azure_secret = settings.get("Billing__Stripe__SecretKey", "")
+            require_test_secret(azure_secret, name="Azure Stripe secret setting", prefix=TEST_SECRET_PREFIX)
+            if expected_stripe_secret_key is not None and azure_secret != expected_stripe_secret_key:
+                raise ReconciliationError("Azure Stripe secret setting does not match the audited test account")
+        else:
+            for name in STAGING_SECRET_SETTING_NAMES:
+                if not is_key_vault_reference(settings.get(name, "")):
+                    raise ReconciliationError(f"Azure billing setting {name} must be a Key Vault reference")
+            if expected_stripe_secret_key is not None:
+                require_test_secret(expected_stripe_secret_key, name="STRIPE_SECRET_KEY", prefix=TEST_SECRET_PREFIX)
         for name in (
             "Billing__Stripe__CheckoutSuccessUrl",
             "Billing__Stripe__CheckoutCancelUrl",
@@ -924,17 +999,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("PASS customer-portal-bootstrap")
         if args.bootstrap_webhook_secret or args.bootstrap_portal:
             return 0
-        checks = StagingStripeReconciler(
-            stripe,
-            AzureWebApp(config.azure_resource_group, config.azure_webapp_name),
-            config,
-        ).run(
+        azure = AzureWebApp(config.azure_resource_group, config.azure_webapp_name)
+        mode = decide_secret_settings_mode(azure, secrets_written=key_vault_secrets_written())
+        print_pre_cutover_mode(mode)
+        checks = StagingStripeReconciler(stripe, azure, config, mode=mode).run(
             apply_azure_settings=args.apply_azure_settings,
             stripe_secret_key=stripe_secret_key,
         )
         for check in checks:
             print(f"PASS {check}")
         return 0
+    except SecretSettingsModeError as error:
+        # Names, the classification and the variable only; never a value.
+        print(f"FAIL {error}", file=sys.stderr)
+        return 1
     except (KeyError, ReconciliationError):
         # Keep CI output useful without leaking a provider response or secret.
         print("FAIL staging-stripe-reconciliation", file=sys.stderr)
