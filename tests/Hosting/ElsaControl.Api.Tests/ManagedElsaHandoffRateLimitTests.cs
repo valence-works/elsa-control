@@ -106,6 +106,31 @@ public sealed class ManagedElsaHandoffRateLimitTests
     }
 
     [Fact]
+    public async Task Bff_source_diagnostic_records_a_refused_request_once()
+    {
+        const string issuer = "https://cloud-account.test/auth/v1";
+        const string listedIp = "198.51.100.8";
+        var entries = new ConcurrentQueue<RecordedLogEntry>();
+        await using var app = CreateCloudApplication(
+            perIp: 20,
+            perIdentity: 1,
+            issuer,
+            bffPerIp: 20,
+            bffEgressNetworks: [$"{listedIp}/32"],
+            logLevel: "Debug",
+            configureServices: services => services.AddSingleton<ILoggerProvider>(new RecordingLoggerProvider(entries)));
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CloudClient(app, issuer, "11111111-1111-4111-8111-111111111421", listedIp);
+
+        using var allowed = await PostIssueAsync(client);
+        using var refused = await PostIssueAsync(client);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, allowed.StatusCode);
+        await AssertHandoffRateLimited(refused);
+        Assert.Equal(2, entries.Count(entry => entry.Category == ControlRateLimitBffSourceDiagnostic.LoggerCategory));
+    }
+
+    [Fact]
     public async Task Cloud_account_sessions_share_the_per_identity_limit_across_ips()
     {
         const string issuer = "https://cloud-account.test/auth/v1";

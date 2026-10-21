@@ -112,8 +112,8 @@ the values:
    BFF, and confirm the `ElsaControl.Api.RateLimiting` Debug event shows the
    expected `RemoteIpAddress` with `matched=True`. Read it in the admin console
    logs (`GET /api/admin/console-logs/recent`, admin only), or in the OTLP log
-   sink when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. A refused request can log the event twice,
-   because the rate limiter retries the partition lookup. The event carries the
+   sink when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Each request logs the event
+   once, refused or not. The event carries the
    address, the match flag, the BFF credential source name (see below) and
    the policy name only. Then delete the setting
    (`az webapp config appsettings delete --resource-group <group> --name <site>
