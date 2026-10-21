@@ -107,6 +107,48 @@ public sealed class CloudBootstrapRateLimitTests
     }
 
     [Fact]
+    public async Task Identity_at_its_limit_does_not_spend_the_shared_per_ip_window()
+    {
+        // #883: the identity's refused retries used to spend the shared PerIp window.
+        await using var app = CreateApplication(perIp: 3, perIdentity: 1);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var exhausted = Client(app, "retrying-identity", "203.0.113.161");
+        using var other = Client(app, "fresh-identity", "203.0.113.161");
+
+        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(exhausted)).StatusCode);
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            using var refused = await PostBootstrapAsync(exhausted);
+            await AssertRateLimitExceeded(refused);
+        }
+
+        using var otherAllowed = await PostBootstrapAsync(other);
+        Assert.Equal(HttpStatusCode.OK, otherAllowed.StatusCode);
+    }
+
+    [Fact]
+    public async Task Refusal_by_an_exhausted_per_ip_window_does_not_spend_the_identity_window()
+    {
+        await using var app = CreateApplication(perIp: 1, perIdentity: 2);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var other = Client(app, "ip-owner", "203.0.113.163");
+        using var sameIp = Client(app, "kept-identity", "203.0.113.163");
+        using var firstElsewhere = Client(app, "kept-identity", "203.0.113.164");
+        using var secondElsewhere = Client(app, "kept-identity", "203.0.113.165");
+
+        Assert.Equal(HttpStatusCode.OK, (await PostBootstrapAsync(other)).StatusCode);
+        using var firstRefused = await PostBootstrapAsync(sameIp);
+        using var secondRefused = await PostBootstrapAsync(sameIp);
+        using var firstAllowed = await PostBootstrapAsync(firstElsewhere);
+        using var secondAllowed = await PostBootstrapAsync(secondElsewhere);
+
+        await AssertRateLimitExceeded(firstRefused);
+        await AssertRateLimitExceeded(secondRefused);
+        Assert.Equal(HttpStatusCode.OK, firstAllowed.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, secondAllowed.StatusCode);
+    }
+
+    [Fact]
     public async Task Forwarded_client_ips_are_limited_separately()
     {
         await using var app = CreateApplication(perIp: 1, perIdentity: 20);

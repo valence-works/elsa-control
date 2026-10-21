@@ -57,6 +57,59 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitTests
     [Theory]
     [InlineData("restart")]
     [InlineData("apply-release")]
+    public async Task Identity_at_its_limit_does_not_spend_the_shared_per_ip_window(string action)
+    {
+        // #883: the identity's refused retries used to spend the shared PerIp window.
+        const string issuer = "https://cloud-account.test/auth/v1";
+        const string sharedIp = "203.0.113.151";
+        await using var app = CreateCloudApplication(perIp: 3, perIdentity: 1, issuer);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var exhausted = CloudClient(app, issuer, "11111111-1111-4111-8111-111111111511", sharedIp);
+        using var other = CloudClient(app, issuer, "22222222-2222-4222-8222-222222222512", sharedIp);
+
+        using var allowed = await PostActionAsync(exhausted, action);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, allowed.StatusCode);
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            using var refused = await PostActionAsync(exhausted, action);
+            await AssertLifecycleRateLimited(refused);
+        }
+
+        using var otherAllowed = await PostActionAsync(other, action);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, otherAllowed.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("restart")]
+    [InlineData("apply-release")]
+    public async Task Refusal_by_an_exhausted_per_ip_window_does_not_spend_the_identity_window(string action)
+    {
+        const string issuer = "https://cloud-account.test/auth/v1";
+        const string sharedIp = "203.0.113.153";
+        const string subject = "11111111-1111-4111-8111-111111111513";
+        await using var app = CreateCloudApplication(perIp: 1, perIdentity: 2, issuer);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var other = CloudClient(app, issuer, "22222222-2222-4222-8222-222222222514", sharedIp);
+        using var sameIp = CloudClient(app, issuer, subject, sharedIp);
+        using var firstElsewhere = CloudClient(app, issuer, subject, "203.0.113.154");
+        using var secondElsewhere = CloudClient(app, issuer, subject, "203.0.113.155");
+
+        using var otherAllowed = await PostActionAsync(other, action);
+        using var firstRefused = await PostActionAsync(sameIp, action);
+        using var secondRefused = await PostActionAsync(sameIp, action);
+        using var firstAllowed = await PostActionAsync(firstElsewhere, action);
+        using var secondAllowed = await PostActionAsync(secondElsewhere, action);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, otherAllowed.StatusCode);
+        await AssertLifecycleRateLimited(firstRefused);
+        await AssertLifecycleRateLimited(secondRefused);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, firstAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, secondAllowed.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("restart")]
+    [InlineData("apply-release")]
     public async Task Over_the_per_identity_limit_from_different_ips_rejects_that_identity_only(string action)
     {
         const string issuer = "https://cloud-account.test/auth/v1";

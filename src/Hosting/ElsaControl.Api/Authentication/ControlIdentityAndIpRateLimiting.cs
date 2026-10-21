@@ -37,7 +37,13 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
 
     private static readonly AsyncLocal<HttpContext?> Current = new();
 
-    private readonly PartitionedRateLimiter<HttpContext> _inner;
+    // The shared window (PerIp, bff:<ip> or bff:source:<name>) and the per-identity window.
+    // They are acquired in the order that keeps a rejection from spending the other window (#883).
+    private readonly PartitionedRateLimiter<HttpContext> _shared;
+    private readonly PartitionedRateLimiter<HttpContext> _identity;
+
+    // Per instance: each policy has its own windows, so a cached partition must not cross policies.
+    private readonly object _sharedPartitionItemKey = new();
 
     public ControlIdentityAndIpRateLimiter(
         ControlRateLimitWindow perIp,
@@ -56,8 +62,8 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
             perIdentity.Window);
         var allowlistedEgress = bffEgressNetworks ?? [];
         var credentialMatcher = new ControlRateLimitBffCredentialMatcher(bffCredentials);
-        _inner = PartitionedRateLimiter.CreateChained(
-            PartitionedRateLimiter.Create<HttpContext, string>(context =>
+        _shared = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+            CachedSharedPartition(context, () =>
             {
                 var ipKey = GetIpPartitionKey(context);
                 var principal = GetAuthenticatedPrincipal(context);
@@ -87,8 +93,8 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
                 }
 
                 return RateLimitPartition.GetFixedWindowLimiter(ipKey, _ => CreateWindow(perIp));
-            }),
-            PartitionedRateLimiter.Create<HttpContext, string>(context =>
+            }));
+        _identity = PartitionedRateLimiter.Create<HttpContext, string>(context =>
             {
                 var principal = GetAuthenticatedPrincipal(context);
                 var identity = ControlRateLimitIdentity.PartitionKey(
@@ -107,7 +113,7 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
                         _ => CreateWindow(unresolvedIdentity));
 
                 return RateLimitPartition.GetNoLimiter<string>(AnonymousIdentityPartition);
-            }));
+            });
     }
 
     public override TimeSpan? IdleDuration => TimeSpan.Zero;
@@ -116,23 +122,103 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
 
     public static void SetCurrent(HttpContext context) => Current.Value = context;
 
-    protected override RateLimitLease AttemptAcquireCore(int permitCount) =>
-        _inner.AttemptAcquire(RequireCurrent(), permitCount);
+    protected override RateLimitLease AttemptAcquireCore(int permitCount)
+    {
+        var context = RequireCurrent();
+        var (first, second) = AcquireOrder(context, permitCount);
+        var firstLease = first.AttemptAcquire(context, permitCount);
+        if (!firstLease.IsAcquired)
+            return firstLease;
 
-    protected override ValueTask<RateLimitLease> AcquireAsyncCore(int permitCount, CancellationToken cancellationToken) =>
-        _inner.AcquireAsync(RequireCurrent(), permitCount, cancellationToken);
+        return Combine(firstLease, second.AttemptAcquire(context, permitCount));
+    }
+
+    protected override async ValueTask<RateLimitLease> AcquireAsyncCore(int permitCount, CancellationToken cancellationToken)
+    {
+        var context = RequireCurrent();
+        var (first, second) = AcquireOrder(context, permitCount);
+        var firstLease = await first.AcquireAsync(context, permitCount, cancellationToken).ConfigureAwait(false);
+        if (!firstLease.IsAcquired)
+            return firstLease;
+
+        return Combine(firstLease, await second.AcquireAsync(context, permitCount, cancellationToken).ConfigureAwait(false));
+    }
 
     protected override void Dispose(bool disposing)
     {
         if (disposing)
-            _inner.Dispose();
+        {
+            _shared.Dispose();
+            _identity.Dispose();
+        }
+
         base.Dispose(disposing);
     }
 
     protected override ValueTask DisposeAsyncCore()
     {
-        _inner.Dispose();
+        _shared.Dispose();
+        _identity.Dispose();
         return ValueTask.CompletedTask;
+    }
+
+    // A fixed-window permit is not returned when a later limiter rejects, so the first
+    // limiter's permit is spent either way. While the shared window has room, the identity
+    // window goes first: a caller already at its own limit is refused without spending the
+    // shared window that other callers on the same address or BFF depend on. Once the shared
+    // window is exhausted it goes first, so its refusal does not spend the caller's identity
+    // permits. Only a race at the boundary can still spend one permit.
+    private (PartitionedRateLimiter<HttpContext> First, PartitionedRateLimiter<HttpContext> Second) AcquireOrder(
+        HttpContext context,
+        int permitCount) =>
+        _shared.GetStatistics(context)?.CurrentAvailablePermits >= permitCount
+            ? (_identity, _shared)
+            : (_shared, _identity);
+
+    private static RateLimitLease Combine(RateLimitLease first, RateLimitLease second)
+    {
+        if (second.IsAcquired)
+            return new CombinedLease(first, second);
+
+        first.Dispose();
+        return second;
+    }
+
+    // The shared partition is chosen once per request: the statistics read and the acquire
+    // both resolve it, and the BFF source diagnostic must record a request only once.
+    private RateLimitPartition<string> CachedSharedPartition(
+        HttpContext context,
+        Func<RateLimitPartition<string>> select)
+    {
+        if (context.Items.TryGetValue(_sharedPartitionItemKey, out var cached) &&
+            cached is RateLimitPartition<string> partition)
+            return partition;
+
+        partition = select();
+        context.Items[_sharedPartitionItemKey] = partition;
+        return partition;
+    }
+
+    private sealed class CombinedLease(RateLimitLease first, RateLimitLease second) : RateLimitLease
+    {
+        public override bool IsAcquired => true;
+
+        public override IEnumerable<string> MetadataNames =>
+            first.MetadataNames.Concat(second.MetadataNames).Distinct(StringComparer.Ordinal);
+
+        public override bool TryGetMetadata(string metadataName, out object? metadata) =>
+            first.TryGetMetadata(metadataName, out metadata) || second.TryGetMetadata(metadataName, out metadata);
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                first.Dispose();
+                second.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
     }
 
     // Uses Connection.RemoteIpAddress, which is the rightmost X-Forwarded-For entry:
