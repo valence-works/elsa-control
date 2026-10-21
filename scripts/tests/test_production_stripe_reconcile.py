@@ -14,14 +14,19 @@ from pathlib import Path
 from unittest import mock
 
 from scripts.production_stripe_reconcile import (
+    KEY_VAULT_MODE,
+    PRE_CUTOVER_MODE,
     PRODUCTION_PRESERVED_SETTINGS,
+    SECRET_APP_SETTING_NAMES,
     ProductionAuditConfig,
     ProductionStripeReconciler,
     ReconciliationError,
+    decide_secret_settings_mode,
     format_stripe_api_failure,
     main,
     read_capture,
     redact_secrets,
+    require_secret_settings_are_references,
     stripe_request_label,
     write_capture,
 )
@@ -719,7 +724,15 @@ class ProductionStripeAuditReasonTests(unittest.TestCase):
         checks = ProductionStripeReconciler(FakeStripe(), FakeAzure(), config()).audit()
         self.assertEqual(("production-billing-settings", "production-stripe-webhook"), checks)
 
-    def _run_main(self, argv: list[str], *, stripe: object | None = None, azure: object | None = None, env: dict[str, str] | None = None) -> tuple[int, str, str]:
+    def _run_main(
+        self,
+        argv: list[str],
+        *,
+        stripe: object | None = None,
+        azure: object | None = None,
+        env: dict[str, str] | None = None,
+        secrets_written: bool = True,
+    ) -> tuple[int, str, str]:
         stdout = io.StringIO()
         stderr = io.StringIO()
 
@@ -730,8 +743,15 @@ class ProductionStripeAuditReasonTests(unittest.TestCase):
             def get(self, path: str) -> dict[str, object]:
                 return self._inner.get(path)
 
-        merged = {key: value for key, value in os.environ.items() if key not in AUDIT_ENV_KEYS}
+        merged = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in AUDIT_ENV_KEYS and key != "API_KEY_VAULT_SECRETS_WRITTEN"
+        }
         merged.update(env if env is not None else audit_environment())
+        # The #863 cases run with the variable set; the pre-cutover cases clear it.
+        if secrets_written:
+            merged["API_KEY_VAULT_SECRETS_WRITTEN"] = "true"
         with (
             mock.patch("scripts.production_stripe_reconcile.StripeApi", stripe if stripe is not None else SuccessStripe),
             mock.patch("scripts.production_stripe_reconcile.AzureWebApp", azure if azure is not None else (lambda *args, **kwargs: FakeAzure())),
@@ -844,6 +864,354 @@ class ProductionStripeAuditReasonTests(unittest.TestCase):
             code, stdout, stderr = self._run_main(["--capture", str(destination)], azure=IncompleteAzure)
         self.assertEqual(1, code)
         self.assertEqual("FAIL production-stripe-reconciliation\n", stderr)
+
+
+PRE_CUTOVER_LIVE_KEY = "rk_live_preCutoverFixture"
+PRE_CUTOVER_WEBHOOK_SECRET = "whsec_preCutoverFixture"
+PRE_CUTOVER_SECRET_VALUES = {
+    "Authentication__ApiKey": "plain-production-admin-key-fixture",
+    "Authentication__ControlIdentity__ClientSecret": "plain-production-entra-secret-fixture",
+    "Authentication__BuilderClientApiKey": "plain-production-builder-key-fixture",
+    "Billing__Stripe__SecretKey": PRE_CUTOVER_LIVE_KEY,
+    "Billing__Stripe__WebhookSigningSecret": PRE_CUTOVER_WEBHOOK_SECRET,
+    "Billing__Stripe__WebhookSources__0__SigningSecret": "whsec_preCutoverSourceZeroFixture",
+    "Billing__Stripe__WebhookSources__1__SigningSecret": "whsec_preCutoverSourceOneFixture",
+    "ManagedElsa__Handoff__ActivePrivateKeyPem": "-----BEGIN PRIVATE KEY-----plainHandoffFixture",
+}
+PRE_CUTOVER_TEST_KEY = "sk_test_preCutoverFixture"
+PRE_CUTOVER_FIXTURE_SECRETS = (
+    *PRE_CUTOVER_SECRET_VALUES.values(),
+    PRE_CUTOVER_TEST_KEY,
+    LIVE_KEY,
+    OTHER_LIVE_KEY,
+    EXPECTED_SETTINGS["Billing__Stripe__SecretKey"],
+    EXPECTED_SETTINGS["Billing__Stripe__WebhookSigningSecret"],
+)
+PRE_CUTOVER_INFO = "INFO key-vault-mode: pre-cutover (classification: plain)\n"
+
+
+def plain_records(**overrides: str) -> dict[str, AzureAppSetting]:
+    """The production site before the manual reference switch."""
+
+    values = records()
+    for name, value in {**PRE_CUTOVER_SECRET_VALUES, **overrides}.items():
+        values[name] = AzureAppSetting(value, False)
+    return values
+
+
+def mixed_records() -> dict[str, AzureAppSetting]:
+    return plain_records(Billing__Stripe__SecretKey=EXPECTED_SETTINGS["Billing__Stripe__SecretKey"])
+
+
+def stripe_values(azure: FakeAzure) -> dict[str, str]:
+    return {name: value for name, value in azure.app_settings().items() if name.startswith("Billing__Stripe__")}
+
+
+class UnreadableAzure:
+    """Fails the test if the mode decision reads any setting."""
+
+    def list_names(self) -> list[str]:
+        raise AssertionError("the Key Vault mode must not read settings when the variable is true")
+
+    def app_settings(self, names: list[str] | None = None) -> dict[str, str]:
+        raise AssertionError("the Key Vault mode must not read settings when the variable is true")
+
+
+class ProductionKeyVaultModeTests(unittest.TestCase):
+    """Pre-cutover (plain-to-plain) and Key Vault modes for production (#865)."""
+
+    def assert_fixture_secret_free(self, text: str) -> None:
+        assert_secret_free(self, text)
+        for value in PRE_CUTOVER_FIXTURE_SECRETS:
+            self.assertNotIn(value, text)
+        self.assertNotIn("SecretUri", text)
+
+    def _main(self, argv: list[str], azure: FakeAzure, **kwargs: object) -> tuple[int, str, str]:
+        # Same main harness as the #863 cases: patched Stripe/Azure, isolated env.
+        code, stdout, stderr = ProductionStripeAuditReasonTests._run_main(
+            self, argv, azure=lambda *args, **inner: azure, **kwargs
+        )
+        self.assert_fixture_secret_free(stdout + stderr)
+        return code, stdout, stderr
+
+    def _refusal(self, run) -> str:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            with self.assertRaises(ReconciliationError) as raised:
+                run()
+        reason = str(raised.exception)
+        self.assert_fixture_secret_free(reason + stdout.getvalue() + stderr.getvalue())
+        return reason
+
+    def _private_capture(self, directory: str, settings: dict[str, AzureAppSetting], *, mode: str) -> Path:
+        destination = Path(directory) / "elsa-control-production-billing.json"
+        write_capture(settings, destination, mode=mode)
+        return destination
+
+    # AC1: pre-cutover capture, reapply and audit, as before #863.
+
+    def test_pre_cutover_capture_reapply_and_audit_round_trip_plain_values(self) -> None:
+        azure = FakePublishingAzure(plain_records())
+        audit_keys: list[str] = []
+
+        class RecordingStripe:
+            def __init__(self, secret_key: str, *args: object, **kwargs: object) -> None:
+                audit_keys.append(secret_key)
+                self._inner = FakeStripe()
+
+            def get(self, path: str) -> dict[str, object]:
+                return self._inner.get(path)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "elsa-control-production-billing.json"
+            code, stdout, stderr = self._main(["--capture", str(destination)], azure, secrets_written=False)
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(PRE_CUTOVER_INFO + "PASS production-billing-capture\n", stdout)
+            self.assertEqual("", stderr)
+            self.assertEqual(0o600, stat.S_IMODE(destination.stat().st_mode))
+            captured = {item["name"]: item["value"] for item in json.loads(destination.read_text())}
+            self.assertEqual(PRE_CUTOVER_LIVE_KEY, captured["Billing__Stripe__SecretKey"])
+            self.assertEqual(PRE_CUTOVER_WEBHOOK_SECRET, captured["Billing__Stripe__WebhookSigningSecret"])
+            expected = stripe_values(azure)
+
+            azure.replace_for("app")
+            azure.settings["Billing__Stripe__DefaultPriceId"] = AzureAppSetting("price_drifted", False)
+            code, stdout, stderr = self._main(["--reapply", str(destination)], azure, secrets_written=False)
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(PRE_CUTOVER_INFO + "PASS production-billing-reapply\n", stdout)
+            self.assertEqual(PRE_CUTOVER_LIVE_KEY, azure.applied[-1]["Billing__Stripe__SecretKey"])
+            self.assertEqual(expected, stripe_values(azure))
+
+            code, stdout, stderr = self._main(
+                ["--audit", "--audit-capture", str(destination)],
+                azure,
+                stripe=RecordingStripe,
+                secrets_written=False,
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual(
+                PRE_CUTOVER_INFO + "PASS production-billing-settings\nPASS production-stripe-webhook\n",
+                stdout,
+            )
+            self.assertEqual([PRE_CUTOVER_LIVE_KEY], audit_keys)
+
+    def test_pre_cutover_publishing_modes_preserve_plain_billing_around_replacement(self) -> None:
+        for publishing_mode in ("app", "promote"):
+            with self.subTest(publishing_mode=publishing_mode), tempfile.TemporaryDirectory() as temporary:
+                azure = FakePublishingAzure(plain_records())
+                expected = stripe_values(azure)
+                reconciler = ProductionStripeReconciler(FakeStripe(), azure, config(), mode=PRE_CUTOVER_MODE)
+                destination = self._private_capture(temporary, reconciler.capture(), mode=PRE_CUTOVER_MODE)
+
+                azure.replace_for(publishing_mode)
+                azure.set_expected_mode("live")
+                reconciler.reapply(read_capture(destination, mode=PRE_CUTOVER_MODE))
+
+                self.assertEqual(expected, stripe_values(azure))
+                self.assertEqual([f"replace:{publishing_mode}", "set-mode:live", "reapply"], azure.events)
+                self.assertTrue(azure.app_setting_records()["Billing__Stripe__ExpectedMode"].slot_setting)
+
+    def test_pre_cutover_capture_file_keeps_secret_values_private(self) -> None:
+        settings = ProductionStripeReconciler(FakeStripe(), FakeAzure(plain_records()), config(), mode=PRE_CUTOVER_MODE).capture()
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = self._private_capture(temporary, settings, mode=PRE_CUTOVER_MODE)
+
+            self.assertEqual(0o600, stat.S_IMODE(destination.stat().st_mode))
+            restored = read_capture(destination, mode=PRE_CUTOVER_MODE)
+            self.assertEqual(settings, restored)
+            self.assertEqual(PRE_CUTOVER_LIVE_KEY, restored["Billing__Stripe__SecretKey"].value)
+            with self.assertRaisesRegex(ReconciliationError, "must be a new file"):
+                write_capture(settings, destination, mode=PRE_CUTOVER_MODE)
+            # Key Vault mode never reads a plain capture back for reapply.
+            reason = self._refusal(lambda: read_capture(destination))
+            self.assertEqual("Production Stripe capture refuses secret App Service settings", reason)
+
+    def test_pre_cutover_capture_requires_a_live_key(self) -> None:
+        values = plain_records(Billing__Stripe__SecretKey=PRE_CUTOVER_TEST_KEY)
+        reason = self._refusal(
+            lambda: ProductionStripeReconciler(FakeStripe(), FakeAzure(values), config(), mode=PRE_CUTOVER_MODE).capture()
+        )
+        self.assertEqual("Production Stripe secret setting is not a live-mode credential", reason)
+
+    def test_pre_cutover_capture_requires_the_stripe_secret_settings(self) -> None:
+        values = plain_records()
+        values.pop("Billing__Stripe__WebhookSigningSecret")
+        reason = self._refusal(
+            lambda: ProductionStripeReconciler(FakeStripe(), FakeAzure(values), config(), mode=PRE_CUTOVER_MODE).capture()
+        )
+        self.assertEqual("Production Stripe settings are incomplete; refusing an unprotected deployment", reason)
+
+    def test_pre_cutover_audit_rejects_a_different_live_account_than_the_captured_setting(self) -> None:
+        reason = self._refusal(
+            lambda: ProductionStripeReconciler(
+                FakeStripe(),
+                FakeAzure(plain_records()),
+                config(),
+                expected_secret_key=OTHER_LIVE_KEY,
+                mode=PRE_CUTOVER_MODE,
+            ).audit()
+        )
+        self.assertEqual("azure-setting: Billing__Stripe__SecretKey does not match the audit key", reason)
+
+    def test_pre_cutover_audit_rejects_a_non_live_site_key(self) -> None:
+        values = plain_records(Billing__Stripe__SecretKey=PRE_CUTOVER_TEST_KEY)
+        reason = self._refusal(
+            lambda: ProductionStripeReconciler(FakeStripe(), FakeAzure(values), config(), mode=PRE_CUTOVER_MODE).audit()
+        )
+        self.assertEqual("azure-setting: Billing__Stripe__SecretKey is not a live-mode credential", reason)
+
+    def test_pre_cutover_audit_rejects_an_unexpected_webhook_secret_shape(self) -> None:
+        values = plain_records(Billing__Stripe__WebhookSigningSecret="plain-but-not-a-webhook-secret")
+        reason = self._refusal(
+            lambda: ProductionStripeReconciler(FakeStripe(), FakeAzure(values), config(), mode=PRE_CUTOVER_MODE).audit()
+        )
+        self.assertEqual("azure-setting: Billing__Stripe__WebhookSigningSecret has an unexpected shape", reason)
+
+    def test_pre_cutover_audit_accepts_the_captured_live_key(self) -> None:
+        checks = ProductionStripeReconciler(
+            FakeStripe(),
+            FakeAzure(plain_records()),
+            config(),
+            expected_secret_key=PRE_CUTOVER_LIVE_KEY,
+            mode=PRE_CUTOVER_MODE,
+        ).audit()
+        self.assertEqual(("production-billing-settings", "production-stripe-webhook"), checks)
+
+    # Mode decision.
+
+    def test_mode_decision_reads_nothing_when_the_variable_is_true(self) -> None:
+        self.assertEqual(KEY_VAULT_MODE, decide_secret_settings_mode(UnreadableAzure(), secrets_written=True))
+        self.assertEqual(PRE_CUTOVER_MODE, decide_secret_settings_mode(FakeAzure(plain_records()), secrets_written=False))
+        self.assertEqual(PRE_CUTOVER_MODE, decide_secret_settings_mode(FakeAzure(preserved_records()), secrets_written=False))
+
+    # AC3: a mixed site fails in capture, reapply and audit, whatever the variable is.
+
+    def test_mixed_state_without_the_variable_fails_before_any_write_naming_both_lists(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = self._private_capture(temporary, plain_records(), mode=PRE_CUTOVER_MODE)
+            destination = Path(temporary) / "capture.json"
+            for argv in (
+                ["--capture", str(destination)],
+                ["--reapply", str(capture)],
+                ["--audit", "--audit-capture", str(capture)],
+            ):
+                with self.subTest(argv=argv[0]):
+                    azure = FakeAzure(mixed_records())
+                    code, stdout, stderr = self._main(argv, azure, secrets_written=False)
+                    self.assertEqual(1, code)
+                    self.assertEqual("", stdout)
+                    self.assertTrue(stderr.startswith("FAIL key-vault-mode: listed secret settings are mixed"), stderr)
+                    self.assertIn("references: Billing__Stripe__SecretKey;", stderr)
+                    self.assertIn(
+                        "plain: Authentication__ApiKey, Authentication__ControlIdentity__ClientSecret, "
+                        "Authentication__BuilderClientApiKey, Billing__Stripe__WebhookSigningSecret, "
+                        "Billing__Stripe__WebhookSources__0__SigningSecret, "
+                        "Billing__Stripe__WebhookSources__1__SigningSecret, ManagedElsa__Handoff__ActivePrivateKeyPem",
+                        stderr,
+                    )
+                    self.assertIn("API_KEY_VAULT_SECRETS_WRITTEN=true", stderr)
+                    self.assertEqual([], azure.applied)
+                    self.assertFalse(destination.exists())
+
+    def test_mixed_state_with_the_variable_fails_as_863_does(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "capture.json"
+            azure = FakeAzure(mixed_records())
+            code, stdout, stderr = self._main(["--capture", str(destination)], azure)
+            self.assertEqual(1, code)
+            self.assertEqual("FAIL production-stripe-reconciliation\n", stderr)
+            self.assertFalse(destination.exists())
+
+        expected = self._refusal(lambda: require_secret_settings_are_references(FakeAzure(mixed_records()), list(mixed_records())))
+        reason = self._refusal(lambda: ProductionStripeReconciler(FakeStripe(), FakeAzure(mixed_records()), config()).capture())
+        self.assertEqual(expected, reason)
+        self.assertEqual("azure-setting: Authentication__ApiKey must be a Key Vault reference", reason)
+
+        code, stdout, stderr = self._main(["--audit"], FakeAzure(mixed_records()))
+        self.assertEqual(1, code)
+        self.assertEqual("FAIL azure-setting: Billing__Stripe__WebhookSigningSecret must be a Key Vault reference\n", stderr)
+
+    # AC4: references without the variable fail before any write and name it.
+
+    def test_references_without_the_variable_fail_before_any_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = self._private_capture(temporary, preserved_records(), mode=KEY_VAULT_MODE)
+            destination = Path(temporary) / "capture.json"
+            for argv in (
+                ["--capture", str(destination)],
+                ["--reapply", str(capture)],
+                ["--audit", "--audit-capture", str(capture)],
+            ):
+                with self.subTest(argv=argv[0]):
+                    azure = FakeAzure()
+                    code, stdout, stderr = self._main(argv, azure, secrets_written=False)
+                    self.assertEqual(1, code)
+                    self.assertEqual("", stdout)
+                    self.assertEqual(
+                        "FAIL key-vault-mode: Key Vault references are present on Billing__Stripe__SecretKey, "
+                        "Billing__Stripe__WebhookSigningSecret (classification: reference); "
+                        "set API_KEY_VAULT_SECRETS_WRITTEN=true\n",
+                        stderr,
+                    )
+                    self.assertEqual([], azure.applied)
+                    self.assertFalse(destination.exists())
+
+    def test_a_malformed_reference_without_the_variable_is_named_as_malformed(self) -> None:
+        azure = FakeAzure(plain_records(Billing__Stripe__SecretKey="@Microsoft.KeyVault(foo)"))
+        with tempfile.TemporaryDirectory() as temporary:
+            code, stdout, stderr = self._main(["--capture", str(Path(temporary) / "capture.json")], azure, secrets_written=False)
+        self.assertEqual(1, code)
+        self.assertIn("references: Billing__Stripe__SecretKey;", stderr)
+        self.assertIn("malformed Key Vault reference: Billing__Stripe__SecretKey", stderr)
+        self.assertIn("API_KEY_VAULT_SECRETS_WRITTEN=true", stderr)
+        self.assertNotIn("@Microsoft.KeyVault(foo)", stderr)
+
+    # AC5: the variable with plain values fails exactly as #863 does.
+
+    def test_plain_values_with_the_variable_fail_as_863_does(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "capture.json"
+            azure = FakeAzure(plain_records())
+            code, stdout, stderr = self._main(["--capture", str(destination)], azure)
+            self.assertEqual(1, code)
+            self.assertEqual("", stdout)
+            self.assertEqual("FAIL production-stripe-reconciliation\n", stderr)
+            self.assertFalse(destination.exists())
+
+            capture = self._private_capture(temporary, plain_records(), mode=PRE_CUTOVER_MODE)
+            code, stdout, stderr = self._main(["--reapply", str(capture)], azure)
+            self.assertEqual(1, code)
+            self.assertEqual("FAIL production-stripe-reconciliation\n", stderr)
+            self.assertEqual([], azure.applied)
+
+        expected = self._refusal(lambda: require_secret_settings_are_references(FakeAzure(plain_records()), list(plain_records())))
+        reason = self._refusal(lambda: ProductionStripeReconciler(FakeStripe(), FakeAzure(plain_records()), config()).capture())
+        self.assertEqual(expected, reason)
+
+        reason = self._refusal(
+            lambda: ProductionStripeReconciler(FakeStripe(), FakeAzure(), config()).reapply(plain_records())
+        )
+        self.assertEqual("Production Stripe reapply refuses secret App Service settings", reason)
+
+        code, stdout, stderr = self._main(["--audit"], FakeAzure(plain_records()))
+        self.assertEqual(1, code)
+        self.assertEqual("FAIL azure-setting: Billing__Stripe__SecretKey must be a Key Vault reference\n", stderr)
+
+    def test_references_with_the_variable_take_the_863_path(self) -> None:
+        azure = FakeAzure()
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "capture.json"
+            code, stdout, stderr = self._main(["--capture", str(destination)], azure)
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("PASS production-billing-capture\n", stdout)
+            captured = {item["name"] for item in json.loads(destination.read_text())}
+            self.assertEqual(set(), captured.intersection(SECRET_APP_SETTING_NAMES))
+
+            code, stdout, stderr = self._main(["--reapply", str(destination)], azure)
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("PASS production-billing-reapply\n", stdout)
+            self.assertEqual(set(), set(azure.applied[-1]).intersection(SECRET_APP_SETTING_NAMES))
 
 
 if __name__ == "__main__":
