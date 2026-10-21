@@ -99,9 +99,11 @@ def require_secret_settings_are_all_references(values: Mapping[str, str]) -> Non
 
     references, plain, malformed = _split_secret_settings(values)
     if plain:
+        valid = [name for name in references if name not in malformed]
+        malformed_names = f"; malformed: {', '.join(malformed)}" if malformed else ""
         raise KeyVaultModeError(
             f"{SECRETS_WRITTEN_VARIABLE}=true but listed secret settings are not all Key Vault references "
-            f"(references: {', '.join(references) or 'none'}; plain: {', '.join(plain)})"
+            f"(references: {', '.join(valid) or 'none'}; plain: {', '.join(plain)}{malformed_names})"
         )
     if malformed:
         raise KeyVaultModeError(f"malformed Key Vault reference: {', '.join(malformed)}")

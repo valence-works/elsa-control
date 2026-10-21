@@ -589,7 +589,8 @@ Production `scripts/production_stripe_reconcile.py` (`--capture`,
 `--reapply`, `--audit`) and the staging
 `scripts/staging_stripe_reconcile.py` (`--apply-azure-settings` and the
 read-only check) choose a mode before any write. `W` is `API_KEY_VAULT_SECRETS_WRITTEN` (case-insensitive
-`true`). The site state classifies the listed settings that are present:
+`true` in these scripts). Set it to lowercase `true`: the `infra` gate in the
+deploy workflow compares it exactly and refuses `TRUE` or `True`. The site state classifies the listed settings that are present:
 `plain` (none is a reference), `reference` (every one is), or `mixed`. A
 value that starts with `@Microsoft.KeyVault(` but is not a versionless
 `SecretUri` reference counts as a reference, and then fails as malformed.

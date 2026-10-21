@@ -1191,6 +1191,24 @@ class StagingKeyVaultModeTests(unittest.TestCase):
         self.assertIn("malformed Key Vault reference: Authentication__ApiKey", stderr)
         self.assertEqual([], azure.applications)
 
+    def test_key_vault_mode_names_a_malformed_reference_apart_from_plain_settings(self) -> None:
+        versioned = "@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/Authentication-ApiKey/0123456789abcdef)"
+        azure = FakeAzure(
+            [
+                *azure_settings(),
+                {"name": "Authentication__ApiKey", "value": versioned},
+                {"name": "Authentication__BuilderClientApiKey", "value": "plain-builder-key-fixture"},
+            ]
+        )
+
+        code, _, stderr = self._run_main(azure, secrets_written="true")
+
+        self.assertEqual(1, code)
+        self.assertIn("plain: Authentication__BuilderClientApiKey; malformed: Authentication__ApiKey)", stderr)
+        self.assertNotIn("references: Authentication__ApiKey", stderr)
+        self.assertNotIn("plain-builder-key-fixture", stderr)
+        self.assertEqual([], azure.applications)
+
     def test_key_vault_mode_passes_when_every_listed_setting_is_a_reference(self) -> None:
         api_key_reference = "@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/Authentication-ApiKey)"
         azure = FakeAzure([*azure_settings(), {"name": "Authentication__ApiKey", "value": api_key_reference}])
