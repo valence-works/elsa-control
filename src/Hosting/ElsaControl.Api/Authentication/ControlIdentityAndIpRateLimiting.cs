@@ -130,7 +130,18 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
         if (!firstLease.IsAcquired)
             return firstLease;
 
-        return Combine(firstLease, second.AttemptAcquire(context, permitCount));
+        RateLimitLease secondLease;
+        try
+        {
+            secondLease = second.AttemptAcquire(context, permitCount);
+        }
+        catch
+        {
+            firstLease.Dispose();
+            throw;
+        }
+
+        return Combine(firstLease, secondLease);
     }
 
     protected override async ValueTask<RateLimitLease> AcquireAsyncCore(int permitCount, CancellationToken cancellationToken)
@@ -141,7 +152,18 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
         if (!firstLease.IsAcquired)
             return firstLease;
 
-        return Combine(firstLease, await second.AcquireAsync(context, permitCount, cancellationToken).ConfigureAwait(false));
+        RateLimitLease secondLease;
+        try
+        {
+            secondLease = await second.AcquireAsync(context, permitCount, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            firstLease.Dispose();
+            throw;
+        }
+
+        return Combine(firstLease, secondLease);
     }
 
     protected override void Dispose(bool disposing)
@@ -167,7 +189,8 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
     // window goes first: a caller already at its own limit is refused without spending the
     // shared window that other callers on the same address or BFF depend on. Once the shared
     // window is exhausted it goes first, so its refusal does not spend the caller's identity
-    // permits. Only a race at the boundary can still spend one permit.
+    // permits. The statistics read and the acquire are not atomic: each request that races
+    // the moment the shared window runs out can still spend one identity permit.
     private (PartitionedRateLimiter<HttpContext> First, PartitionedRateLimiter<HttpContext> Second) AcquireOrder(
         HttpContext context,
         int permitCount) =>
