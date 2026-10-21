@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from unittest import mock
 
 from scripts.staging_stripe_reconcile import (
@@ -940,7 +940,14 @@ class StagingKeyVaultModeTests(unittest.TestCase):
             self.assertNotIn(value, text)
         self.assertNotIn("SecretUri", text)
 
-    def _run_main(self, azure: FakeAzure, *, secrets_written: str | None, **env: str) -> tuple[int, str, str]:
+    def _run_main(
+        self,
+        azure: FakeAzure,
+        *,
+        secrets_written: str | None,
+        argv: Sequence[str] = ("--apply-azure-settings",),
+        **env: str,
+    ) -> tuple[int, str, str]:
         environment = {
             name: value
             for name, value in os.environ.items()
@@ -958,7 +965,7 @@ class StagingKeyVaultModeTests(unittest.TestCase):
             redirect_stdout(stdout),
             redirect_stderr(stderr),
         ):
-            code = main(["--apply-azure-settings"])
+            code = main(list(argv))
         self.assert_secret_free(stdout.getvalue() + stderr.getvalue())
         return code, stdout.getvalue(), stderr.getvalue()
 
@@ -1161,6 +1168,17 @@ class StagingKeyVaultModeTests(unittest.TestCase):
         self.assertIn("Billing__Stripe__SecretKey", stderr)
         self.assertNotIn(plain_api_key, stderr)
         self.assertEqual([], azure.applications)
+
+    def test_key_vault_mode_read_only_check_refuses_a_plain_non_stripe_secret_setting(self) -> None:
+        plain_api_key = "plain-staging-api-key-fixture"
+        azure = FakeAzure([*azure_settings(), {"name": "Authentication__ApiKey", "value": plain_api_key}])
+
+        code, stdout, stderr = self._run_main(azure, secrets_written="true", argv=())
+
+        self.assertEqual(1, code)
+        self.assertEqual("", stdout)
+        self.assertIn("Authentication__ApiKey", stderr)
+        self.assertNotIn(plain_api_key, stderr)
 
     def test_key_vault_mode_passes_when_every_listed_setting_is_a_reference(self) -> None:
         azure = FakeAzure(azure_settings())

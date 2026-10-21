@@ -1024,7 +1024,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         azure = AzureWebApp(config.azure_resource_group, config.azure_webapp_name)
         mode = decide_secret_settings_mode(azure, secrets_written=key_vault_secrets_written())
         print_pre_cutover_mode(mode)
-        if mode == KEY_VAULT_MODE and args.apply_azure_settings:
+        if mode == KEY_VAULT_MODE:
             require_staging_secret_settings_are_references(azure)
         checks = StagingStripeReconciler(stripe, azure, config, mode=mode).run(
             apply_azure_settings=args.apply_azure_settings,
