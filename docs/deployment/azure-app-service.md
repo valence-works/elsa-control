@@ -540,8 +540,10 @@ user-assigned identity. Secrets User includes `secrets/getSecret` and can
 read values. The GitHub OIDC deploy identity gets no Key Vault data role.
 `scripts/check-key-vault-references.sh` uses Reader on the App Service and
 the ARM `configreferences` endpoint (names and status only). No other
-identity gets a data-plane role. CI never writes a secret value to Key Vault
-or to App Service. An operator writes each secret after the vault exists.
+identity gets a data-plane role. CI never writes a secret value to Key Vault.
+In Key Vault mode it never writes one to App Service either; before the
+reference switch, see [Pre-cutover and Key Vault modes](#pre-cutover-and-key-vault-modes).
+An operator writes each secret after the vault exists.
 
 | App setting | Vault secret name |
 | --- | --- |
@@ -561,7 +563,7 @@ Required deploy inputs for vault and site apply:
 - `AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID`: deploy identity principal. Required.
   The helper does not resolve it through Microsoft Graph.
 - `API_KEY_VAULT_SECRETS_WRITTEN`: must be `true` before the site is applied
-  (phase 2).
+  (phase 2). It also selects the Stripe reconcile mode below.
 - `API_KEY_VAULT_ROLLBACK_ACTIVE`: when `true`, phase 2 refuses to apply
   references so a manual rollback is not silently undone.
 
@@ -580,6 +582,50 @@ Administrator conditioned to Key Vault Secrets User). Later site deploys
 
 SCM and FTP basic-auth publishing credentials are off
 (`basicPublishingCredentialsPolicies` `scm` and `ftp`, `allow: false`).
+
+### Pre-cutover and Key Vault modes
+
+Production `scripts/production_stripe_reconcile.py` (`--capture`,
+`--reapply`, `--audit`) and the staging
+`scripts/staging_stripe_reconcile.py --apply-azure-settings` choose a mode
+before any write. `W` is `API_KEY_VAULT_SECRETS_WRITTEN` (case-insensitive
+`true`). The site state classifies the listed settings that are present:
+`plain` (none is a reference), `reference` (every one is), or `mixed`. A
+value that starts with `@Microsoft.KeyVault(` but is not a versionless
+`SecretUri` reference counts as a reference, and then fails as malformed.
+
+| `W` | Site state | Result |
+| --- | --- | --- |
+| unset or not `true` | `plain` (or none present) | **Pre-cutover mode**: plain to plain, as before #863. |
+| unset or not `true` | `reference` | Fails: references are present, so set `API_KEY_VAULT_SECRETS_WRITTEN=true`. |
+| unset or not `true` | `mixed` | Fails, naming the reference settings and the plain settings. |
+| `true` | `reference` | **Key Vault mode** (#863). |
+| `true` | `plain` or `mixed` | Fails as #863 does, naming a setting that is not a reference. |
+
+In pre-cutover mode:
+
+- Production `--capture` keeps the plain `Billing__Stripe__SecretKey` and
+  `Billing__Stripe__WebhookSigningSecret` values in the private capture file
+  (mode `0600`, a new file under `runner.temp`, deleted with the runner).
+  `--reapply` writes the same values back. `--audit` checks that the key is a
+  live-mode key that matches the audit key, and that the webhook secret has
+  the `whsec_` shape.
+- Staging checks the existing plain values: a test-mode key that matches
+  `STRIPE_TEST_SECRET_KEY`, and a webhook secret that matches
+  `STRIPE_TEST_WEBHOOK_SIGNING_SECRET`. It writes no Stripe secret setting.
+  Non-secret billing settings are written as in Key Vault mode.
+- `infra` is not covered. "Check deployment configuration" still refuses
+  `infra` unless `API_KEY_VAULT_SECRETS_WRITTEN=true`, because `infra` would
+  write the references.
+
+Output names settings, the classification and the mode
+(`INFO key-vault-mode: pre-cutover ...` or `FAIL key-vault-mode: ...`), never
+a value.
+
+Set `API_KEY_VAULT_SECRETS_WRITTEN=true` right after the manual reference
+switch, before the next deploy. Until then every `app` or `promote` deploy
+fails closed (`reference` without the variable) rather than writing plain
+values over the references.
 
 ### Operator write path
 
@@ -666,9 +712,15 @@ versionless reference strings, `keyVaultReferenceIdentity`, and the SCM/FTP
 operator patch on the existing classic `DOCKER` site. The template does not
 run against production in this issue.
 
+Until the switch below, production `app` and `promote` deploys run in
+pre-cutover mode (see
+[Pre-cutover and Key Vault modes](#pre-cutover-and-key-vault-modes)): with
+`API_KEY_VAULT_SECRETS_WRITTEN` unset and every listed setting plain, Stripe
+`--capture`, `--reapply` and `--audit` carry the plain values as before #863.
+
 The Elsa Control Lead applies production as follows, before
 `Authentication:HubAccount:Enabled` is turned on, and **before** any
-production deploy is allowed to pass Stripe `--capture`:
+production deploy is allowed to pass Stripe `--capture` in Key Vault mode:
 
 1. Apply `infra/control-egress` if the Key Vault service endpoint is missing.
 2. Phase 1: apply `infra/api-key-vault` (`--vault-only`) with an operator
@@ -679,17 +731,23 @@ production deploy is allowed to pass Stripe `--capture`:
    reference strings copied from `infra/api/api-website.module.bicep`. Never
    write secret values. Turn off SCM/FTP basic-auth publishing without
    changing `linuxFxVersion`.
-5. Confirm names and status only with
+5. Right after step 4, set `API_KEY_VAULT_SECRETS_WRITTEN=true` in the
+   `production` GitHub environment, before the next deploy. A deploy in
+   between fails closed: the references are present and the variable is not
+   set.
+6. Confirm names and status only with
    `scripts/check-key-vault-references.sh`.
-6. Separately record operator evidence that the vault Stripe secret is a
+7. Separately record operator evidence that the vault Stripe secret is a
    live-mode key for the same Stripe account the audit uses. Scripts never
    read that vault value.
-7. Only then run a production deploy. `--capture` now fails if a listed
-   secret setting is still a plain value or a malformed reference.
-   `--reapply` never writes a secret setting.
+8. Only then run a production deploy. It runs in Key Vault mode:
+   `--capture` fails if a listed secret setting is still a plain value or a
+   malformed reference, and `--reapply` never writes a secret setting.
 
-Production Stripe `--capture` / `--reapply` exclude secret settings. The
-operator patch above owns those names. No CI job writes a secret value.
+In Key Vault mode, production Stripe `--capture` / `--reapply` exclude
+secret settings. The operator patch above owns those names, and no CI job
+writes a secret value. In pre-cutover mode they carry the plain Stripe key
+and webhook secret, as before #863.
 
 The host refuses to start when one of these settings still holds an
 unresolved `@Microsoft.KeyVault(...)` string.
