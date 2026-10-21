@@ -19,7 +19,9 @@ on the App Service (`Microsoft.Web/sites/config/read`) and the ARM
 `configreferences` endpoint, and prints names and status only.
 
 No other identity receives a data-plane role. An operator writes each secret
-value after the vault exists. CI never writes a secret value.
+value after the vault exists. CI never writes a secret value to the vault.
+Before the reference switch (pre-cutover mode, #865), a production `--reapply`
+puts back the plain App Service values it captured, as it did before #863.
 
 A private endpoint is out of scope (#839). Network access is the vault
 firewall: default deny, bypass none, the API egress subnet (which must expose
