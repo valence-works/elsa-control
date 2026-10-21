@@ -4,16 +4,20 @@
 from __future__ import annotations
 
 import copy
+import io
 import os
 import stat
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from unittest import mock
 
 from scripts.staging_stripe_reconcile import (
     DEFAULT_WEBHOOK_EVENTS,
+    PRE_CUTOVER_MODE,
+    SECRET_APP_SETTING_NAMES,
     AzureAppSetting,
     AzureWebApp,
     ReconciliationConfig,
@@ -23,6 +27,7 @@ from scripts.staging_stripe_reconcile import (
     bootstrap_webhook_secret,
     bootstrap_portal,
     idempotency_key,
+    main,
     require_test_secret,
     stripe_list_all,
 )
@@ -872,6 +877,346 @@ class AzureWebAppTests(unittest.TestCase):
         self.assertIn("delete", observed)
         self.assertIn("Billing__Stripe__SecretKey", observed)
         self.assertNotIn("sk_test_private", " ".join(observed))
+
+
+PLAIN_STAGING_KEY = "sk_test_plainStagingFixture"
+PLAIN_STAGING_WEBHOOK = "whsec_plainStagingFixture"
+PLAIN_STAGING_SECRETS = {
+    "Billing__Stripe__SecretKey": PLAIN_STAGING_KEY,
+    "Billing__Stripe__WebhookSigningSecret": PLAIN_STAGING_WEBHOOK,
+    "Billing__Stripe__WebhookSources__0__SigningSecret": "whsec_plainSourceZeroFixture",
+    "Billing__Stripe__WebhookSources__1__SigningSecret": "whsec_plainSourceOneFixture",
+    "Authentication__ApiKey": "plain-staging-admin-key-fixture",
+}
+OTHER_PLAIN_STAGING_KEY = "sk_test_otherStagingFixture"
+LIVE_PLAIN_STAGING_KEY = "sk_live_plainStagingFixture"
+OTHER_PLAIN_STAGING_WEBHOOK = "whsec_otherStagingFixture"
+STAGING_FIXTURE_SECRETS = (
+    *PLAIN_STAGING_SECRETS.values(),
+    OTHER_PLAIN_STAGING_KEY,
+    LIVE_PLAIN_STAGING_KEY,
+    OTHER_PLAIN_STAGING_WEBHOOK,
+    KV_STRIPE_SECRET,
+    KV_STRIPE_WEBHOOK,
+)
+
+
+def plain_azure_settings(**overrides: str) -> list[dict[str, str]]:
+    """The staging site before the manual reference switch."""
+
+    values = {item["name"]: item["value"] for item in azure_settings()}
+    values.update(PLAIN_STAGING_SECRETS)
+    values.update(overrides)
+    return [{"name": name, "value": value} for name, value in values.items()]
+
+
+def mixed_azure_settings() -> list[dict[str, str]]:
+    return plain_azure_settings(Billing__Stripe__SecretKey=KV_STRIPE_SECRET)
+
+
+def staging_environment(**overrides: str) -> dict[str, str]:
+    values = {
+        "STRIPE_SECRET_KEY": PLAIN_STAGING_KEY,
+        "STRIPE_WEBHOOK_SECRET": PLAIN_STAGING_WEBHOOK,
+        "STRIPE_HOSTED_PRICE_ID": PRICE_ID,
+        "CONTROL_STAGING_WEBHOOK_URL": WEBHOOK_URL,
+        "CLOUD_PORTAL_RETURN_URL": CLOUD_RETURN_URL,
+        "AZURE_RESOURCE_GROUP": "control-staging-rg",
+        "AZURE_WEBAPP_NAME": "control-staging-api",
+    }
+    values.update(overrides)
+    return values
+
+
+def written_secret_names(azure: FakeAzure) -> set[str]:
+    return {name for payload in azure.applications for name in payload if name in SECRET_APP_SETTING_NAMES}
+
+
+class StagingKeyVaultModeTests(unittest.TestCase):
+    """Pre-cutover and Key Vault modes for the staging reconcile (#865)."""
+
+    def assert_secret_free(self, text: str) -> None:
+        for value in STAGING_FIXTURE_SECRETS:
+            self.assertNotIn(value, text)
+        self.assertNotIn("SecretUri", text)
+
+    def _run_main(
+        self,
+        azure: FakeAzure,
+        *,
+        secrets_written: str | None,
+        argv: Sequence[str] = ("--apply-azure-settings",),
+        **env: str,
+    ) -> tuple[int, str, str]:
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if name != "API_KEY_VAULT_SECRETS_WRITTEN" and not name.startswith(("STRIPE_", "AZURE_", "CONTROL_STAGING_"))
+        }
+        environment.update(staging_environment(**env))
+        if secrets_written is not None:
+            environment["API_KEY_VAULT_SECRETS_WRITTEN"] = secrets_written
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch("scripts.staging_stripe_reconcile.StripeApi", lambda *args, **kwargs: FakeStripe()),
+            mock.patch("scripts.staging_stripe_reconcile.AzureWebApp", lambda *args, **kwargs: azure),
+            mock.patch.dict(os.environ, environment, clear=True),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            code = main(list(argv))
+        self.assert_secret_free(stdout.getvalue() + stderr.getvalue())
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def _refusal(self, run) -> str:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            with self.assertRaises(ReconciliationError) as raised:
+                run()
+        reason = str(raised.exception)
+        self.assert_secret_free(reason + stdout.getvalue() + stderr.getvalue())
+        return reason
+
+    def test_pre_cutover_apply_passes_the_pre_863_checks_and_writes_no_secret_setting(self) -> None:
+        azure = FakeAzure([
+            item for item in plain_azure_settings()
+            if item["name"] not in {"Billing__Lifecycle__Enabled", "Billing__Stripe__DefaultPriceId"}
+        ])
+
+        code, stdout, stderr = self._run_main(azure, secrets_written=None)
+
+        self.assertEqual(0, code, stderr)
+        self.assertEqual(
+            "INFO key-vault-mode: pre-cutover (classification: plain)\n"
+            "PASS stripe-price\nPASS control-webhook\nPASS customer-portal\nPASS azure-billing-settings\n",
+            stdout,
+        )
+        self.assertEqual("", stderr)
+        self.assertEqual(1, len(azure.applications))
+        self.assertEqual(set(), written_secret_names(azure))
+        self.assertEqual(PRICE_ID, azure.applied["Billing__Stripe__DefaultPriceId"])
+        for name, value in PLAIN_STAGING_SECRETS.items():
+            self.assertEqual(value, azure.values[name])
+
+    def test_pre_cutover_read_only_audit_checks_the_plain_values(self) -> None:
+        result = StagingStripeReconciler(
+            FakeStripe(),
+            FakeAzure(plain_azure_settings()),
+            config(webhook_secret=PLAIN_STAGING_WEBHOOK),
+            mode=PRE_CUTOVER_MODE,
+        ).run(stripe_secret_key=PLAIN_STAGING_KEY)
+
+        self.assertIn("azure-billing-settings", result)
+
+    def test_pre_cutover_rejects_a_site_key_that_is_not_the_audited_test_key(self) -> None:
+        azure = FakeAzure([
+            item for item in plain_azure_settings()
+            if item["name"] != "Billing__Stripe__DefaultPriceId"
+        ])
+
+        reason = self._refusal(
+            lambda: StagingStripeReconciler(
+                FakeStripe(),
+                azure,
+                config(webhook_secret=PLAIN_STAGING_WEBHOOK),
+                mode=PRE_CUTOVER_MODE,
+            ).run(apply_azure_settings=True, stripe_secret_key=OTHER_PLAIN_STAGING_KEY)
+        )
+
+        self.assertEqual("Azure Stripe secret setting does not match the audited test account", reason)
+        self.assertEqual(set(), written_secret_names(azure))
+        self.assertNotIn("Billing__Stripe__DefaultPriceId", azure.values)
+        self.assertEqual(PLAIN_STAGING_KEY, azure.values["Billing__Stripe__SecretKey"])
+
+    def test_pre_cutover_rejects_a_live_site_key_before_any_write(self) -> None:
+        azure = FakeAzure(plain_azure_settings(Billing__Stripe__SecretKey=LIVE_PLAIN_STAGING_KEY))
+
+        reason = self._refusal(
+            lambda: StagingStripeReconciler(
+                FakeStripe(),
+                azure,
+                config(webhook_secret=PLAIN_STAGING_WEBHOOK),
+                mode=PRE_CUTOVER_MODE,
+            ).run(apply_azure_settings=True, stripe_secret_key=PLAIN_STAGING_KEY)
+        )
+
+        self.assertEqual("Azure staging is not configured with a test Stripe account", reason)
+        self.assertEqual([], azure.applications)
+
+    def test_pre_cutover_requires_the_site_webhook_secret_to_match(self) -> None:
+        azure = FakeAzure(plain_azure_settings(Billing__Stripe__WebhookSigningSecret=OTHER_PLAIN_STAGING_WEBHOOK))
+
+        reason = self._refusal(
+            lambda: StagingStripeReconciler(
+                FakeStripe(),
+                azure,
+                config(webhook_secret=PLAIN_STAGING_WEBHOOK),
+                mode=PRE_CUTOVER_MODE,
+            ).run(apply_azure_settings=True, stripe_secret_key=PLAIN_STAGING_KEY)
+        )
+
+        self.assertEqual("Azure billing setting Billing__Stripe__WebhookSigningSecret does not match", reason)
+        self.assertEqual(set(), written_secret_names(azure))
+        self.assertEqual(OTHER_PLAIN_STAGING_WEBHOOK, azure.values["Billing__Stripe__WebhookSigningSecret"])
+
+    def test_references_without_the_variable_fail_before_any_write_and_name_it(self) -> None:
+        azure = FakeAzure()
+
+        code, stdout, stderr = self._run_main(azure, secrets_written=None)
+
+        self.assertEqual(1, code)
+        self.assertEqual("", stdout)
+        self.assertIn("FAIL key-vault-mode: Key Vault references are present on", stderr)
+        self.assertIn("classification: reference", stderr)
+        self.assertIn("API_KEY_VAULT_SECRETS_WRITTEN=true", stderr)
+        self.assertEqual([], azure.applications)
+
+    def test_a_value_other_than_true_is_not_the_variable(self) -> None:
+        azure = FakeAzure()
+
+        code, _, stderr = self._run_main(azure, secrets_written="yes")
+
+        self.assertEqual(1, code)
+        self.assertIn("API_KEY_VAULT_SECRETS_WRITTEN=true", stderr)
+        self.assertEqual([], azure.applications)
+
+    def test_mixed_state_fails_without_the_variable_naming_references_and_plain_settings(self) -> None:
+        azure = FakeAzure(mixed_azure_settings())
+
+        code, stdout, stderr = self._run_main(azure, secrets_written=None)
+
+        self.assertEqual(1, code)
+        self.assertEqual("", stdout)
+        self.assertIn("mixed", stderr)
+        self.assertIn("references: Billing__Stripe__SecretKey;", stderr)
+        self.assertIn(
+            "plain: Authentication__ApiKey, Billing__Stripe__WebhookSigningSecret, "
+            "Billing__Stripe__WebhookSources__0__SigningSecret, Billing__Stripe__WebhookSources__1__SigningSecret",
+            stderr,
+        )
+        self.assertIn("API_KEY_VAULT_SECRETS_WRITTEN=true", stderr)
+        self.assertEqual([], azure.applications)
+
+    def test_mixed_state_with_the_variable_fails_as_863_does(self) -> None:
+        azure = FakeAzure(mixed_azure_settings())
+
+        code, stdout, stderr = self._run_main(azure, secrets_written="true")
+        self.assertEqual(1, code)
+        self.assertEqual("FAIL staging-stripe-reconciliation\n", stderr)
+        self.assertEqual([], azure.applications)
+
+        reason = self._refusal(
+            lambda: StagingStripeReconciler(FakeStripe(), azure, config()).run(
+                apply_azure_settings=True,
+                stripe_secret_key=PLAIN_STAGING_KEY,
+            )
+        )
+        self.assertEqual("Azure billing setting Billing__Stripe__WebhookSigningSecret must be a Key Vault reference", reason)
+        self.assertEqual([], azure.applications)
+
+    def test_plain_values_with_the_variable_fail_as_863_does(self) -> None:
+        azure = FakeAzure(plain_azure_settings())
+
+        code, stdout, stderr = self._run_main(azure, secrets_written="true")
+        self.assertEqual(1, code)
+        self.assertEqual("", stdout)
+        self.assertEqual("FAIL staging-stripe-reconciliation\n", stderr)
+        self.assertEqual([], azure.applications)
+
+        reason = self._refusal(
+            lambda: StagingStripeReconciler(FakeStripe(), azure, config()).run(
+                apply_azure_settings=True,
+                stripe_secret_key=PLAIN_STAGING_KEY,
+            )
+        )
+        self.assertEqual("Azure billing setting Billing__Stripe__SecretKey must be a Key Vault reference", reason)
+        reason = self._refusal(
+            lambda: StagingStripeReconciler(FakeStripe(), azure, config()).check_azure_settings()
+        )
+        self.assertEqual("Azure billing setting Billing__Stripe__SecretKey must be a Key Vault reference", reason)
+
+    def test_references_with_the_variable_in_any_case_take_the_863_path(self) -> None:
+        azure = FakeAzure([
+            item for item in azure_settings()
+            if item["name"] != "Billing__Stripe__DefaultPriceId"
+        ])
+
+        code, stdout, stderr = self._run_main(azure, secrets_written="TRUE")
+
+        self.assertEqual(0, code, stderr)
+        self.assertNotIn("pre-cutover", stdout)
+        self.assertEqual(
+            "PASS stripe-price\nPASS control-webhook\nPASS customer-portal\nPASS azure-billing-settings\n",
+            stdout,
+        )
+        self.assertEqual(set(), written_secret_names(azure))
+
+    def test_key_vault_mode_refuses_a_plain_non_stripe_secret_setting(self) -> None:
+        # The Stripe names are references, so the #863 checks pass; a plain
+        # Authentication__ApiKey must still fail the staging apply (#865 AC3).
+        plain_api_key = "plain-staging-api-key-fixture"
+        azure = FakeAzure([*azure_settings(), {"name": "Authentication__ApiKey", "value": plain_api_key}])
+
+        code, stdout, stderr = self._run_main(azure, secrets_written="true")
+
+        self.assertEqual(1, code)
+        self.assertEqual("", stdout)
+        self.assertIn("Authentication__ApiKey", stderr)
+        self.assertIn("API_KEY_VAULT_SECRETS_WRITTEN=true", stderr)
+        self.assertIn("Billing__Stripe__SecretKey", stderr)
+        self.assertNotIn(plain_api_key, stderr)
+        self.assertEqual([], azure.applications)
+
+    def test_key_vault_mode_read_only_check_refuses_a_plain_non_stripe_secret_setting(self) -> None:
+        plain_api_key = "plain-staging-api-key-fixture"
+        azure = FakeAzure([*azure_settings(), {"name": "Authentication__ApiKey", "value": plain_api_key}])
+
+        code, stdout, stderr = self._run_main(azure, secrets_written="true", argv=())
+
+        self.assertEqual(1, code)
+        self.assertEqual("", stdout)
+        self.assertIn("Authentication__ApiKey", stderr)
+        self.assertNotIn(plain_api_key, stderr)
+
+    def test_key_vault_mode_refuses_a_malformed_non_stripe_reference(self) -> None:
+        versioned = "@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/Authentication-ApiKey/0123456789abcdef)"
+        azure = FakeAzure([*azure_settings(), {"name": "Authentication__ApiKey", "value": versioned}])
+
+        code, stdout, stderr = self._run_main(azure, secrets_written="true")
+
+        self.assertEqual(1, code)
+        self.assertEqual("", stdout)
+        self.assertIn("malformed Key Vault reference: Authentication__ApiKey", stderr)
+        self.assertEqual([], azure.applications)
+
+    def test_key_vault_mode_names_a_malformed_reference_apart_from_plain_settings(self) -> None:
+        versioned = "@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/Authentication-ApiKey/0123456789abcdef)"
+        azure = FakeAzure(
+            [
+                *azure_settings(),
+                {"name": "Authentication__ApiKey", "value": versioned},
+                {"name": "Authentication__BuilderClientApiKey", "value": "plain-builder-key-fixture"},
+            ]
+        )
+
+        code, _, stderr = self._run_main(azure, secrets_written="true")
+
+        self.assertEqual(1, code)
+        self.assertIn("plain: Authentication__BuilderClientApiKey; malformed: Authentication__ApiKey)", stderr)
+        self.assertNotIn("references: Authentication__ApiKey", stderr)
+        self.assertNotIn("plain-builder-key-fixture", stderr)
+        self.assertEqual([], azure.applications)
+
+    def test_key_vault_mode_passes_when_every_listed_setting_is_a_reference(self) -> None:
+        api_key_reference = "@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/Authentication-ApiKey)"
+        azure = FakeAzure([*azure_settings(), {"name": "Authentication__ApiKey", "value": api_key_reference}])
+
+        code, stdout, stderr = self._run_main(azure, secrets_written="true")
+
+        self.assertEqual(0, code, stderr)
+        self.assertEqual(set(), written_secret_names(azure))
 
 
 if __name__ == "__main__":

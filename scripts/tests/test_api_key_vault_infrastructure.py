@@ -216,5 +216,117 @@ class ApiKeyVaultInfrastructureTests(unittest.TestCase):
         self.assertIn("Authentication__ApiKey\tMissing", missing.stdout)
 
 
+PLAIN_SECRET_VALUES = {
+    "Authentication__ApiKey": "plain-admin-api-key-fixture",
+    "Billing__Stripe__SecretKey": "rk_live_plainModeFixture",
+    "Billing__Stripe__WebhookSigningSecret": "whsec_plainModeFixture",
+}
+
+
+def reference(name: str) -> str:
+    return f"@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/{name.replace('__', '-')})"
+
+
+class KeyVaultModeDecisionTests(unittest.TestCase):
+    """The shared plain/reference/mixed classifier and the mode table (#865)."""
+
+    def _refusal(self, values: dict[str, str], *, secrets_written: bool = False) -> str:
+        from key_vault_app_settings import KeyVaultModeError, select_secret_settings_mode
+
+        with self.assertRaises(KeyVaultModeError) as raised:
+            select_secret_settings_mode(values, secrets_written=secrets_written)
+        reason = str(raised.exception)
+        for value in PLAIN_SECRET_VALUES.values():
+            self.assertNotIn(value, reason)
+        self.assertNotIn("SecretUri", reason)
+        return reason
+
+    def test_classifier_returns_plain_reference_or_mixed_for_present_listed_names(self) -> None:
+        from key_vault_app_settings import MIXED, PLAIN, REFERENCE, classify_secret_settings
+
+        references = {name: reference(name) for name in PLAIN_SECRET_VALUES}
+        mixed = dict(PLAIN_SECRET_VALUES, Billing__Stripe__SecretKey=reference("Billing__Stripe__SecretKey"))
+
+        self.assertEqual(PLAIN, classify_secret_settings({}))
+        self.assertEqual(PLAIN, classify_secret_settings({"Billing__Stripe__Enabled": "true"}))
+        self.assertEqual(PLAIN, classify_secret_settings(PLAIN_SECRET_VALUES))
+        self.assertEqual(REFERENCE, classify_secret_settings(references))
+        self.assertEqual(MIXED, classify_secret_settings(mixed))
+        # Unlisted names never change the classification.
+        self.assertEqual(REFERENCE, classify_secret_settings(references | {"Unlisted__Secret": "plain"}))
+
+    def test_malformed_reference_counts_as_a_reference_and_is_named_as_malformed(self) -> None:
+        from key_vault_app_settings import REFERENCE, classify_secret_settings
+
+        values = {"Billing__Stripe__SecretKey": "@Microsoft.KeyVault(foo)"}
+        self.assertEqual(REFERENCE, classify_secret_settings(values))
+
+        reason = self._refusal(values)
+        self.assertIn("malformed Key Vault reference: Billing__Stripe__SecretKey", reason)
+        self.assertIn("API_KEY_VAULT_SECRETS_WRITTEN=true", reason)
+        self.assertNotIn("@Microsoft.KeyVault(foo)", reason)
+
+    def test_mode_table(self) -> None:
+        from key_vault_app_settings import KEY_VAULT_MODE, PRE_CUTOVER_MODE, select_secret_settings_mode
+
+        references = {name: reference(name) for name in PLAIN_SECRET_VALUES}
+        mixed = dict(PLAIN_SECRET_VALUES, Billing__Stripe__SecretKey=reference("Billing__Stripe__SecretKey"))
+
+        self.assertEqual(PRE_CUTOVER_MODE, select_secret_settings_mode(PLAIN_SECRET_VALUES, secrets_written=False))
+        self.assertEqual(PRE_CUTOVER_MODE, select_secret_settings_mode({}, secrets_written=False))
+
+        reason = self._refusal(references)
+        self.assertIn("classification: reference", reason)
+        self.assertIn("Billing__Stripe__SecretKey", reason)
+        self.assertIn("API_KEY_VAULT_SECRETS_WRITTEN=true", reason)
+
+        reason = self._refusal(mixed)
+        self.assertIn("mixed", reason)
+        self.assertIn("references: Billing__Stripe__SecretKey;", reason)
+        self.assertIn("plain: Authentication__ApiKey, Billing__Stripe__WebhookSigningSecret", reason)
+        self.assertIn("API_KEY_VAULT_SECRETS_WRITTEN=true", reason)
+
+        # With the variable set the strict #863 checks decide; values are not read.
+        for values in (references, mixed, PLAIN_SECRET_VALUES):
+            self.assertEqual(KEY_VAULT_MODE, select_secret_settings_mode(values, secrets_written=True))
+
+    def test_secrets_written_is_a_case_insensitive_true(self) -> None:
+        from key_vault_app_settings import key_vault_secrets_written
+
+        self.assertTrue(key_vault_secrets_written({"API_KEY_VAULT_SECRETS_WRITTEN": "true"}))
+        self.assertTrue(key_vault_secrets_written({"API_KEY_VAULT_SECRETS_WRITTEN": "TRUE"}))
+        self.assertTrue(key_vault_secrets_written({"API_KEY_VAULT_SECRETS_WRITTEN": "True"}))
+        self.assertFalse(key_vault_secrets_written({}))
+        self.assertFalse(key_vault_secrets_written({"API_KEY_VAULT_SECRETS_WRITTEN": ""}))
+        self.assertFalse(key_vault_secrets_written({"API_KEY_VAULT_SECRETS_WRITTEN": "false"}))
+        self.assertFalse(key_vault_secrets_written({"API_KEY_VAULT_SECRETS_WRITTEN": "1"}))
+
+    def test_optional_bff_credential_settings_do_not_change_the_mode(self) -> None:
+        # #862 x #865: an opt-in BFF credential written as a reference must not
+        # turn a plain pre-cutover site mixed. Key Vault mode still requires it
+        # to be a reference.
+        from key_vault_app_settings import (
+            KeyVaultModeError,
+            PLAIN,
+            PRE_CUTOVER_MODE,
+            classify_secret_settings,
+            require_secret_settings_are_all_references,
+            select_secret_settings_mode,
+        )
+
+        bff_secret = "RateLimiting__BffCredentials__Sources__1__Secret"
+        for bff_value in (reference(bff_secret), "plain-bff-credential-fixture"):
+            values = PLAIN_SECRET_VALUES | {bff_secret: bff_value}
+            self.assertEqual(PLAIN, classify_secret_settings(values))
+            self.assertEqual(PRE_CUTOVER_MODE, select_secret_settings_mode(values, secrets_written=False))
+
+        references = {name: reference(name) for name in PLAIN_SECRET_VALUES}
+        require_secret_settings_are_all_references(references | {bff_secret: reference(bff_secret)})
+        with self.assertRaises(KeyVaultModeError) as raised:
+            require_secret_settings_are_all_references(references | {bff_secret: "plain-bff-credential-fixture"})
+        self.assertIn(f"plain: {bff_secret}", str(raised.exception))
+        self.assertNotIn("plain-bff-credential-fixture", str(raised.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,9 @@
+using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Claims;
+using System.Text;
 using System.Text.Json;
 using ElsaControl.Api.Admin.Accounts;
 using ElsaControl.Api.Authentication;
@@ -12,6 +15,8 @@ using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.IdentityModel.Tokens;
 
 namespace ElsaControl.Api.Tests;
 
@@ -508,17 +513,169 @@ public sealed class CloudAccountLinkApiTests
         Assert.Contains(me!.Organizations, organization => organization.Id == owned.OrganizationId);
     }
 
-    private static ControlApiTestApplication CreateApplication() => new(new Dictionary<string, string?>
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(600, 0)]
+    [InlineData(0, 600)]
+    [InlineData(600, 600)]
+    [InlineData(-60, -60)]
+    public async Task Recent_hub_and_cloud_sign_ins_link(int hubAgeSeconds, int cloudAgeSeconds)
     {
-        [$"{HubAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
-        [$"{HubAccountIdentityDefaults.ConfigurationSection}:Issuer"] = HubIssuer,
-        [$"{HubAccountIdentityDefaults.ConfigurationSection}:Audience"] = "authenticated",
-        [$"{HubAccountIdentityDefaults.ConfigurationSection}:TestSigningKey"] = ControlApiTestApplication.TestControlIdentitySigningKey,
-        [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
-        [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Issuer"] = CloudIssuer,
-        [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Audience"] = "authenticated",
-        [$"{CloudAccountIdentityDefaults.ConfigurationSection}:TestSigningKey"] = ControlApiTestApplication.TestControlIdentitySigningKey
-    });
+        var clock = new FixedTimeProvider(TestNow());
+        await using var app = CreateApplication(clock);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var cloud = CreateCloudClient(app, CloudSubject);
+        var owned = await BootstrapAsync(cloud);
+        using var linker = CreateSignInLinkClient(
+            app,
+            SignInAmr(clock.Now.AddSeconds(-hubAgeSeconds)),
+            SignInAmr(clock.Now.AddSeconds(-cloudAgeSeconds)));
+
+        using var linked = await linker.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
+        using var hubOnly = CreateHubClient(app, HubSubject);
+        using var organizations = await hubOnly.GetAsync("/api/me/organizations");
+
+        Assert.Equal(HttpStatusCode.OK, linked.StatusCode);
+        var me = await organizations.Content.ReadControlJsonAsync<MeWorkspacesResponse>();
+        Assert.Contains(me!.Organizations, organization => organization.Id == owned.OrganizationId);
+    }
+
+    [Theory]
+    [InlineData(601, 0, "hub")]
+    [InlineData(0, 601, "cloud")]
+    [InlineData(601, 601, "both")]
+    [InlineData(-61, 0, "hub")]
+    [InlineData(0, -61, "cloud")]
+    public async Task Stale_sign_in_is_refused_and_changes_nothing(int hubAgeSeconds, int cloudAgeSeconds, string staleSession)
+    {
+        var clock = new FixedTimeProvider(TestNow());
+        await using var app = CreateApplication(clock);
+        var before = await SeedMovableHubAccountAsync(app);
+        using var linker = CreateSignInLinkClient(
+            app,
+            SignInAmr(clock.Now.AddSeconds(-hubAgeSeconds)),
+            SignInAmr(clock.Now.AddSeconds(-cloudAgeSeconds)));
+
+        using var response = await linker.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
+
+        await AssertReauthenticationRequiredAsync(response, staleSession, maxAgeSeconds: 600);
+        await AssertLinkStateUnchangedAsync(app, before);
+    }
+
+    [Theory]
+    [InlineData("missing", true)]
+    [InlineData("missing", false)]
+    [InlineData("empty", true)]
+    [InlineData("empty", false)]
+    [InlineData("token-refresh-only", true)]
+    [InlineData("token-refresh-only", false)]
+    [InlineData("anonymous-only", true)]
+    [InlineData("anonymous-only", false)]
+    [InlineData("token-refresh-and-anonymous", true)]
+    [InlineData("token-refresh-and-anonymous", false)]
+    [InlineData("object", true)]
+    [InlineData("object", false)]
+    [InlineData("string", true)]
+    [InlineData("string", false)]
+    [InlineData("string-timestamp", true)]
+    [InlineData("string-timestamp", false)]
+    public async Task Missing_or_non_sign_in_amr_counts_as_stale(string amr, bool hubSide)
+    {
+        var clock = new FixedTimeProvider(TestNow());
+        await using var app = CreateApplication(clock);
+        var before = await SeedMovableHubAccountAsync(app);
+        var now = clock.Now.ToUnixTimeSeconds();
+        var amrJson = amr switch
+        {
+            "missing" => null,
+            "empty" => "[]",
+            "token-refresh-only" => $$"""[{"method":"token_refresh","timestamp":{{now}}}]""",
+            "anonymous-only" => $$"""[{"method":"anonymous","timestamp":{{now}}}]""",
+            "token-refresh-and-anonymous" =>
+                $$"""[{"method":"anonymous","timestamp":{{now}}},{"method":"token_refresh","timestamp":{{now}}}]""",
+            "object" => $$"""{"method":"password","timestamp":{{now}}}""",
+            "string" => "\"pwd\"",
+            "string-timestamp" => $$"""[{"method":"password","timestamp":"{{now}}"}]""",
+            _ => throw new ArgumentOutOfRangeException(nameof(amr))
+        };
+        var fresh = SignInAmr(clock.Now);
+        using var linker = hubSide
+            ? CreateSignInLinkClient(app, amrJson, fresh)
+            : CreateSignInLinkClient(app, fresh, amrJson);
+
+        using var response = await linker.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
+
+        await AssertReauthenticationRequiredAsync(response, hubSide ? "hub" : "cloud", maxAgeSeconds: 600);
+        await AssertLinkStateUnchangedAsync(app, before);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Refreshed_token_with_recent_iat_but_stale_sign_in_is_refused(bool hubSide)
+    {
+        var clock = new FixedTimeProvider(TestNow());
+        await using var app = CreateApplication(clock);
+        var before = await SeedMovableHubAccountAsync(app);
+        // The token is issued now (recent iat) by a refresh; the interactive sign-in was an hour ago.
+        var refreshed =
+            $$"""[{"method":"password","timestamp":{{clock.Now.AddHours(-1).ToUnixTimeSeconds()}}},{"method":"token_refresh","timestamp":{{clock.Now.ToUnixTimeSeconds()}}}]""";
+        var fresh = SignInAmr(clock.Now);
+        using var linker = hubSide
+            ? CreateSignInLinkClient(app, refreshed, fresh)
+            : CreateSignInLinkClient(app, fresh, refreshed);
+
+        using var response = await linker.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
+
+        await AssertReauthenticationRequiredAsync(response, hubSide ? "hub" : "cloud", maxAgeSeconds: 600);
+        await AssertLinkStateUnchangedAsync(app, before);
+    }
+
+    [Theory]
+    [InlineData(301, 299, "hub")]
+    [InlineData(299, 301, "cloud")]
+    public async Task Configured_window_applies_to_both_sessions(int hubAgeSeconds, int cloudAgeSeconds, string staleSession)
+    {
+        var clock = new FixedTimeProvider(TestNow());
+        await using var app = CreateApplication(clock, linkReauthenticationWindow: "00:05:00");
+        var before = await SeedMovableHubAccountAsync(app);
+        using var linker = CreateSignInLinkClient(
+            app,
+            SignInAmr(clock.Now.AddSeconds(-hubAgeSeconds)),
+            SignInAmr(clock.Now.AddSeconds(-cloudAgeSeconds)));
+
+        using var response = await linker.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
+
+        await AssertReauthenticationRequiredAsync(response, staleSession, maxAgeSeconds: 300);
+        await AssertLinkStateUnchangedAsync(app, before);
+    }
+
+    private static ControlApiTestApplication CreateApplication(
+        TimeProvider? clock = null,
+        string? linkReauthenticationWindow = null)
+    {
+        var configuration = new Dictionary<string, string?>
+        {
+            [$"{HubAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
+            [$"{HubAccountIdentityDefaults.ConfigurationSection}:Issuer"] = HubIssuer,
+            [$"{HubAccountIdentityDefaults.ConfigurationSection}:Audience"] = "authenticated",
+            [$"{HubAccountIdentityDefaults.ConfigurationSection}:TestSigningKey"] = ControlApiTestApplication.TestControlIdentitySigningKey,
+            [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
+            [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Issuer"] = CloudIssuer,
+            [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Audience"] = "authenticated",
+            [$"{CloudAccountIdentityDefaults.ConfigurationSection}:TestSigningKey"] = ControlApiTestApplication.TestControlIdentitySigningKey
+        };
+        if (linkReauthenticationWindow is not null)
+            configuration[$"{HubAccountIdentityDefaults.ConfigurationSection}:LinkReauthenticationWindow"] = linkReauthenticationWindow;
+
+        return new ControlApiTestApplication(configuration, clock is null
+            ? null
+            : services =>
+            {
+                services.RemoveAll<TimeProvider>();
+                services.AddSingleton(clock);
+            });
+    }
 
     private static HttpClient CreateHubClient(ControlApiTestApplication app, string subject) =>
         CreateIssuerClient(app, HubIssuer, subject);
@@ -548,12 +705,107 @@ public sealed class CloudAccountLinkApiTests
         return client;
     }
 
+    private static HttpClient CreateSignInLinkClient(ControlApiTestApplication app, string? hubAmr, string? cloudAmr)
+    {
+        var client = app.CreateClient();
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", CreateAccountToken(HubIssuer, HubSubject, hubAmr));
+        client.DefaultRequestHeaders.TryAddWithoutValidation(
+            CloudAccountLinkDefaults.CloudAuthorizationHeader,
+            $"Bearer {CreateAccountToken(CloudIssuer, CloudSubject, cloudAmr)}");
+        return client;
+    }
+
     private static string CreateAccountToken(string issuer, string subject) =>
-        TestWorkspaceIdentity.CreateToken(
-            subject,
+        CreateAccountToken(issuer, subject, SignInAmr(DateTimeOffset.UtcNow));
+
+    // Supabase-shaped access token: `amr` carries the session's sign-in methods and Unix timestamps.
+    private static string CreateAccountToken(string issuer, string subject, string? amrJson)
+    {
+        var now = DateTime.UtcNow;
+        var payload = new JwtPayload(
             issuer,
             "authenticated",
-            claims: new Dictionary<string, string> { ["role"] = "authenticated", ["email"] = "buyer@example.test" });
+            [
+                new Claim(JwtRegisteredClaimNames.Sub, subject),
+                new Claim("role", "authenticated"),
+                new Claim("email", "buyer@example.test")
+            ],
+            now.AddMinutes(-1),
+            now.AddMinutes(15),
+            now);
+        if (amrJson is not null)
+        {
+            using var amr = JsonDocument.Parse(amrJson);
+            payload["amr"] = amr.RootElement.Clone();
+        }
+
+        var token = new JwtSecurityToken(
+            new JwtHeader(new SigningCredentials(
+                new SymmetricSecurityKey(Encoding.UTF8.GetBytes(ControlApiTestApplication.TestControlIdentitySigningKey)),
+                SecurityAlgorithms.HmacSha256)),
+            payload);
+        return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    private static string SignInAmr(DateTimeOffset signedInAt) =>
+        $$"""[{"method":"password","timestamp":{{signedInAt.ToUnixTimeSeconds()}}}]""";
+
+    private static DateTimeOffset TestNow()
+    {
+        var now = DateTimeOffset.UtcNow;
+        return new DateTimeOffset(now.Year, now.Month, now.Day, now.Hour, now.Minute, now.Second, TimeSpan.Zero);
+    }
+
+    private static async Task<LinkState> SeedMovableHubAccountAsync(ControlApiTestApplication app)
+    {
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var cloud = CreateCloudClient(app, CloudSubject);
+        using var hub = CreateHubClient(app, HubSubject);
+        await BootstrapAsync(cloud);
+        await BootstrapAsync(hub);
+        return await ReadLinkStateAsync(app);
+    }
+
+    private static async Task<LinkState> ReadLinkStateAsync(ControlApiTestApplication app)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var hubIdentity = await db.ExternalIdentities.SingleAsync(identity =>
+            identity.Kind == ExternalIdentityKinds.Hub && identity.Subject == HubSubject);
+        return new LinkState(
+            await db.Accounts.CountAsync(),
+            await db.ExternalIdentities.CountAsync(),
+            await db.AccountIdentityLinkAuditRecords.CountAsync(),
+            hubIdentity.AccountId);
+    }
+
+    private static async Task AssertLinkStateUnchangedAsync(ControlApiTestApplication app, LinkState before)
+    {
+        var after = await ReadLinkStateAsync(app);
+        Assert.Equal(before, after);
+        Assert.Equal(2, after.Accounts);
+        Assert.Equal(2, after.Identities);
+        Assert.Equal(0, after.AuditRecords);
+    }
+
+    private static async Task AssertReauthenticationRequiredAsync(
+        HttpResponseMessage response,
+        string staleSession,
+        int maxAgeSeconds)
+    {
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        var challenge = Assert.Single(response.Headers.WwwAuthenticate);
+        Assert.Equal(
+            $"Bearer error=\"insufficient_user_authentication\", max_age={maxAgeSeconds}",
+            challenge.ToString());
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal(
+            CloudAccountLinkEndpoints.ReauthenticationRequiredCode,
+            body.RootElement.GetProperty("code").GetString());
+        Assert.Equal(staleSession, body.RootElement.GetProperty("staleSession").GetString());
+    }
 
     private static async Task<CloudBootstrapResponse> BootstrapAsync(HttpClient client)
     {
@@ -678,5 +930,14 @@ public sealed class CloudAccountLinkApiTests
         });
         await db.SaveChangesAsync();
         return instanceId;
+    }
+
+    private sealed record LinkState(int Accounts, int Identities, int AuditRecords, Guid HubIdentityAccountId);
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public DateTimeOffset Now { get; } = now;
+
+        public override DateTimeOffset GetUtcNow() => Now;
     }
 }
