@@ -729,6 +729,22 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertNotIn("does not\nemit these settings yet", documentation)
         self.assertIn("refuses a `PreviousSecret` that equals `Secret`", documentation)
         self.assertIn("`RateLimiting-BffCredentials-hub-PreviousSecret` |", documentation)
+        self.assertNotIn("DEPLOY_IDENTITY_PRINCIPAL", documentation)
+        self.assertNotIn("can use the GitHub deploy identity", documentation)
+        self.assertIn("Key Vault Contributor", documentation)
+        self.assertIn("subnets/joinViaServiceEndpoint/action", documentation)
+        self.assertIn("Re-running phase 1", documentation)
+        self.assertIn("only management-plane read on the vault", documentation)
+
+        production_start = documentation.index("### Production apply")
+        production_apply = documentation[production_start : documentation.index("\n### ", production_start + 1)]
+        self.assertNotIn("--vault-only", production_apply)
+        self.assertIn("az deployment group what-if", production_apply)
+        self.assertIn("--template-file infra/api-key-vault/api-key-vault.module.bicep", production_apply)
+        self.assertLess(
+            production_apply.index("az deployment group what-if"),
+            production_apply.index("az deployment group create"),
+        )
 
     def test_regeneration_patch_reconstructs_generated_module_idempotently(self) -> None:
         module = API_MODULE.read_text()

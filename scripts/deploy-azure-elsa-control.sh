@@ -13,8 +13,6 @@ DOCKER_PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
 SUBSCRIPTION_ID="${AZURE_SUBSCRIPTION_ID:-}"
 CONTROL_ENTRA_TENANT_ID="${CONTROL_ENTRA_TENANT_ID:-${AZURE_ENTRA_TENANT_ID:-}}"
 CONTROL_ENTRA_CLIENT_ID="${CONTROL_ENTRA_CLIENT_ID:-${AZURE_ENTRA_CLIENT_ID:-}}"
-AZURE_CLIENT_ID="${AZURE_CLIENT_ID:-}"
-AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID="${AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID:-}"
 KEY_VAULT_OPERATOR_WRITE_IP_CIDRS="${KEY_VAULT_OPERATOR_WRITE_IP_CIDRS:-}"
 KEY_VAULT_API_OUTBOUND_IP_CIDRS="${KEY_VAULT_API_OUTBOUND_IP_CIDRS:-}"
 AZURE_PRINCIPAL_ID="${AZURE_PRINCIPAL_ID:-}"
@@ -55,20 +53,21 @@ Options:
   --docker-platform <value>  Docker target platform. Default: linux/amd64.
   --what-if                  Preview the base infrastructure deployment only.
   --base-only                Apply only the base infrastructure, then stop before image deployment.
-  --vault-only               Apply base infrastructure and the API Key Vault, then stop.
+  --vault-only               Apply base infrastructure and the API Key Vault (phase 1), then stop.
   -h, --help                 Show this help.
 
 Required environment variables for a full deployment:
   CONTROL_ENTRA_TENANT_ID
   CONTROL_ENTRA_CLIENT_ID
-  AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID
   AZURE_API_EGRESS_SUBNET_ID
   API_KEY_VAULT_SECRETS_WRITTEN=true
 
 Order: phase 1 vault (--vault-only), operator writes secrets, then phase 2
-repoints the site settings. API_KEY_VAULT_SECRETS_WRITTEN must be true
-before the site is applied. API_KEY_VAULT_ROLLBACK_ACTIVE=true refuses
-phase 2 so a manual rollback is not silently undone.
+repoints the site settings. Only --vault-only deploys the vault module.
+Phase 2 reads the existing vault URI and fails when the vault is missing.
+API_KEY_VAULT_SECRETS_WRITTEN must be true before the site is applied.
+API_KEY_VAULT_ROLLBACK_ACTIVE=true refuses phase 2 so a manual rollback is
+not silently undone.
 
 Secret App Service settings are Key Vault references. This helper never
 writes a secret value to Key Vault or to App Service. An operator writes
@@ -278,9 +277,6 @@ fi
 if [[ "$WHAT_IF" != true && "$BASE_ONLY" != true ]]; then
   require_value CONTROL_ENTRA_TENANT_ID
   require_value CONTROL_ENTRA_CLIENT_ID
-  if [[ -z "$AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID" ]]; then
-    require_value AZURE_CLIENT_ID
-  fi
 fi
 
 if [[ -n "$SUBSCRIPTION_ID" ]]; then
@@ -375,17 +371,12 @@ if [[ "$BASE_ONLY" == true ]]; then
   echo "Base deployment completed. Bootstrap the API identity in Catalog before deploying the Web App."
   exit 0
 fi
-if [[ ! "$AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
-  echo "AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID is required." >&2
-  exit 1
-fi
 if [[ -z "$AZURE_API_EGRESS_SUBNET_ID" ]]; then
   echo "AZURE_API_EGRESS_SUBNET_ID is required so Key Vault references resolve through the egress subnet." >&2
   exit 1
 fi
 
 export CONTROL_ENTRA_TENANT_ID CONTROL_ENTRA_CLIENT_ID
-export AZURE_CLIENT_ID AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID
 export KEY_VAULT_OPERATOR_WRITE_IP_CIDRS KEY_VAULT_API_OUTBOUND_IP_CIDRS
 export CLOUD_ACCOUNT_ISSUER AZURE_PROVISIONER_IDENTITY_ID AZURE_API_EGRESS_SUBNET_ID
 export EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS
@@ -413,19 +404,27 @@ API_IDENTITY_CLIENT_ID="$(output_value API_IDENTITY_CLIENTID)"
 export ACR_LOGIN_SERVER ELSA_CONTROL_PLANID ACR_IDENTITY_ID ACR_IDENTITY_CLIENT_ID
 export SQL_SERVER_FQDN API_IDENTITY_ID API_IDENTITY_CLIENT_ID
 
-API_IDENTITY_PRINCIPAL_ID="$(az identity show \
-  --ids "$API_IDENTITY_ID" \
-  --query principalId \
-  --output tsv \
-  --only-show-errors)"
-if [[ ! "$API_IDENTITY_PRINCIPAL_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
-  echo "The API identity principal ID could not be resolved." >&2
-  exit 1
-fi
-export API_IDENTITY_PRINCIPAL_ID AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID
+require_api_key_vault_uri() {
+  if [[ ! "$API_KEY_VAULT_URI" =~ ^https://[A-Za-z0-9-]+\.vault\.azure\.net/?$ ]]; then
+    echo "The API Key Vault URI was missing or invalid." >&2
+    exit 1
+  fi
+}
 
-VAULT_DEPLOYMENT_NAME="$BASE_DEPLOYMENT_NAME-api-key-vault"
-VAULT_PAYLOAD="$(python3 - <<'PY'
+if [[ "$VAULT_ONLY" == true ]]; then
+  API_IDENTITY_PRINCIPAL_ID="$(az identity show \
+    --ids "$API_IDENTITY_ID" \
+    --query principalId \
+    --output tsv \
+    --only-show-errors)"
+  if [[ ! "$API_IDENTITY_PRINCIPAL_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+    echo "The API identity principal ID could not be resolved." >&2
+    exit 1
+  fi
+  export API_IDENTITY_PRINCIPAL_ID
+
+  VAULT_DEPLOYMENT_NAME="$BASE_DEPLOYMENT_NAME-api-key-vault"
+  VAULT_PAYLOAD="$(python3 - <<'PY'
 import json
 import os
 
@@ -441,31 +440,25 @@ print(json.dumps({
 }))
 PY
 )"
-VAULT_PARAMETERS_FILE="$(mktemp)"
-write_parameters "$VAULT_PARAMETERS_FILE" "$VAULT_PAYLOAD"
+  VAULT_PARAMETERS_FILE="$(mktemp)"
+  write_parameters "$VAULT_PARAMETERS_FILE" "$VAULT_PAYLOAD"
 
-echo "Deploying the API Key Vault."
-az deployment group create \
-  --resource-group "$RESOURCE_GROUP" \
-  --name "$VAULT_DEPLOYMENT_NAME" \
-  --template-file infra/api-key-vault/api-key-vault.module.bicep \
-  --parameters "@$VAULT_PARAMETERS_FILE" \
-  --output none
+  echo "Deploying the API Key Vault."
+  az deployment group create \
+    --resource-group "$RESOURCE_GROUP" \
+    --name "$VAULT_DEPLOYMENT_NAME" \
+    --template-file infra/api-key-vault/api-key-vault.module.bicep \
+    --parameters "@$VAULT_PARAMETERS_FILE" \
+    --output none
 
-VAULT_OUTPUTS="$(az deployment group show \
-  --resource-group "$RESOURCE_GROUP" \
-  --name "$VAULT_DEPLOYMENT_NAME" \
-  --query properties.outputs \
-  --output json \
-  --only-show-errors)"
-API_KEY_VAULT_URI="$(printf '%s' "$VAULT_OUTPUTS" | python3 scripts/read-arm-deployment-output.py uri)"
-if [[ ! "$API_KEY_VAULT_URI" =~ ^https://[A-Za-z0-9-]+\.vault\.azure\.net/?$ ]]; then
-  echo "The API Key Vault URI was missing or invalid." >&2
-  exit 1
-fi
-export API_KEY_VAULT_URI
-
-if [[ "$VAULT_ONLY" == true ]]; then
+  VAULT_OUTPUTS="$(az deployment group show \
+    --resource-group "$RESOURCE_GROUP" \
+    --name "$VAULT_DEPLOYMENT_NAME" \
+    --query properties.outputs \
+    --output json \
+    --only-show-errors)"
+  API_KEY_VAULT_URI="$(printf '%s' "$VAULT_OUTPUTS" | python3 scripts/read-arm-deployment-output.py uri)"
+  require_api_key_vault_uri
   echo "Phase 1 completed. Write the listed secrets, then apply the site with API_KEY_VAULT_SECRETS_WRITTEN=true."
   exit 0
 fi
@@ -477,6 +470,29 @@ if [[ "${API_KEY_VAULT_SECRETS_WRITTEN,,}" != "true" ]]; then
   echo "API_KEY_VAULT_SECRETS_WRITTEN=true is required before applying the site. Write the vault secrets first." >&2
   exit 1
 fi
+
+# Phase 2 reads the vault that phase 1 created. It never deploys the vault or
+# its role assignment, so management-plane read on the vault is enough. The
+# module names the vault ecapikv plus uniqueString(resourceGroup().id).
+echo "Reading the existing API Key Vault."
+API_KEY_VAULT_NAME="$(az keyvault list \
+  --resource-group "$RESOURCE_GROUP" \
+  --resource-type vault \
+  --query "[?starts_with(name, 'ecapikv')].name" \
+  --output tsv \
+  --only-show-errors)"
+if [[ -z "$API_KEY_VAULT_NAME" || "$API_KEY_VAULT_NAME" == *$'\n'* ]]; then
+  echo "Expected exactly one API Key Vault in $RESOURCE_GROUP. Apply phase 1 (--vault-only) first." >&2
+  exit 1
+fi
+API_KEY_VAULT_URI="$(az keyvault show \
+  --resource-group "$RESOURCE_GROUP" \
+  --name "$API_KEY_VAULT_NAME" \
+  --query properties.vaultUri \
+  --output tsv \
+  --only-show-errors)"
+require_api_key_vault_uri
+export API_KEY_VAULT_URI
 
 ACR_NAME="${ACR_LOGIN_SERVER%%.azurecr.io}"
 IMAGE_REPOSITORY="$ACR_LOGIN_SERVER/elsa-control/api"

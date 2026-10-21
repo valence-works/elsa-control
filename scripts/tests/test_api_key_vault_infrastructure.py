@@ -93,6 +93,10 @@ class ApiKeyVaultInfrastructureTests(unittest.TestCase):
         self.assertIn("secrets/getSecret", readme)
         self.assertIn("no Key Vault data role", readme)
         self.assertIn("configreferences", readme)
+        self.assertNotIn("can use the GitHub deploy identity", readme)
+        self.assertIn("Key Vault Contributor", readme)
+        self.assertIn("subnets/joinViaServiceEndpoint/action", readme)
+        self.assertIn("only management-plane read on the", readme)
 
     def test_is_key_vault_reference_accepts_only_versionless_secret_uri(self) -> None:
         from key_vault_app_settings import is_key_vault_reference

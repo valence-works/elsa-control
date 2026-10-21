@@ -28,9 +28,7 @@ class DeployAzureElsaControlTests(unittest.TestCase):
             {
                 "CONTROL_ENTRA_TENANT_ID": "00000000-0000-0000-0000-000000000001",
                 "CONTROL_ENTRA_CLIENT_ID": "00000000-0000-0000-0000-000000000002",
-                "AZURE_CLIENT_ID": "00000000-0000-0000-0000-000000000004",
                 "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
-                "AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID": "00000000-0000-0000-0000-000000000006",
                 "AZURE_API_EGRESS_SUBNET_ID": (
                     "/subscriptions/00000000-0000-0000-0000-000000000003/resourceGroups/rg-test/"
                     "providers/Microsoft.Network/virtualNetworks/vnet/subnets/snet-api-egress"
@@ -85,7 +83,8 @@ class DeployAzureElsaControlTests(unittest.TestCase):
         self.assertIn("--base-only", self.source)
         self.assertIn("--vault-only", self.source)
         self.assertIn('if [[ "$BASE_ONLY" == true ]]', self.source)
-        self.assertIn("AZURE_DEPLOY_IDENTITY_PRINCIPAL_ID is required", self.source)
+        self.assertNotIn("DEPLOY_IDENTITY_PRINCIPAL", self.source)
+        self.assertNotIn("AZURE_CLIENT_ID", self.source)
         self.assertIn("AZURE_API_EGRESS_SUBNET_ID is required", self.source)
         self.assertIn("API_KEY_VAULT_SECRETS_WRITTEN", self.source)
         self.assertIn("API_KEY_VAULT_ROLLBACK_ACTIVE", self.source)
@@ -680,6 +679,113 @@ class DeployAzureElsaControlTests(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn("deployment sub create", call_log.read_text())
             self.assertIn("Base deployment completed", result.stdout)
+
+    @staticmethod
+    def write_vault_phase_fakes(temporary_path: Path, *, vault_present: bool) -> None:
+        base_outputs = (
+            '{"AZURE_CONTAINER_REGISTRY_ENDPOINT": {"value": "acrtest.azurecr.io"},'
+            ' "ELSA_CONTROL_PLANID": {"value": "plan-id"},'
+            ' "ELSA_CONTROL_AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_ID": {"value": "acr-identity-id"},'
+            ' "ELSA_CONTROL_AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_CLIENT_ID": {"value": "acr-identity-client-id"},'
+            ' "CONTROL_SQL_SQLSERVERFQDN": {"value": "sql.example.test"},'
+            ' "API_IDENTITY_ID": {"value": "api-identity-id"},'
+            ' "API_IDENTITY_CLIENTID": {"value": "api-identity-client-id"}}'
+        )
+        vault_list = "ecapikvtest\\n" if vault_present else ""
+        fake_az = temporary_path / "az"
+        fake_az.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "printf '%s\\n' \"$*\" >> \"${AZ_CALL_LOG:?}\"\n"
+            "case \"$*\" in\n"
+            "  'account set --subscription '*) exit 0 ;;\n"
+            "  'deployment sub create '*) exit 0 ;;\n"
+            f"  'deployment sub show '*) printf '%s\\n' '{base_outputs}'; exit 0 ;;\n"
+            "  'identity show '*) printf '00000000-0000-0000-0000-000000000007\\n'; exit 0 ;;\n"
+            "  'deployment group create '*) exit 0 ;;\n"
+            "  'deployment group show '*) printf '%s\\n' '{\"uri\": {\"value\": \"https://ecapikvtest.vault.azure.net/\"}}'; exit 0 ;;\n"
+            f"  'keyvault list '*) printf '{vault_list}'; exit 0 ;;\n"
+            "  'keyvault show '*) printf 'https://ecapikvtest.vault.azure.net/\\n'; exit 0 ;;\n"
+            "  'acr login '*) exit 42 ;;\n"
+            "  *) exit 41 ;;\n"
+            "esac\n"
+        )
+        fake_az.chmod(0o755)
+        fake_docker = temporary_path / "docker"
+        fake_docker.write_text("#!/usr/bin/env bash\nexit 43\n")
+        fake_docker.chmod(0o755)
+
+    def run_vault_phase(
+        self, *args: str, vault_present: bool = True, **overrides: str
+    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            call_log = temporary_path / "az-calls"
+            self.write_vault_phase_fakes(temporary_path, vault_present=vault_present)
+            environment = self.environment()
+            environment["PATH"] = f"{temporary_path}{os.pathsep}{environment['PATH']}"
+            environment["AZ_CALL_LOG"] = str(call_log)
+            environment.pop("API_KEY_VAULT_ROLLBACK_ACTIVE", None)
+            environment.update(overrides)
+            result = self.run_deploy(environment, "--environment", "test", *args)
+            calls = call_log.read_text().splitlines() if call_log.exists() else []
+            return result, calls
+
+    def test_site_apply_reads_the_existing_vault_without_deploying_it(self) -> None:
+        self.assertIn("starts_with(name, 'ecapikv')", self.source)
+        module = (ROOT / "infra" / "api-key-vault" / "api-key-vault.module.bicep").read_text()
+        self.assertIn("take('ecapikv${uniqueString(resourceGroup().id)}', 24)", module)
+
+        result, calls = self.run_vault_phase()
+
+        # The fake `az acr login` exits 42: the run passed the vault URI check
+        # and reached the image build.
+        self.assertEqual(42, result.returncode, result.stdout + result.stderr)
+        self.assertFalse(
+            [call for call in calls if call.startswith("deployment group create")],
+            "phase 2 must not deploy the vault module",
+        )
+        self.assertFalse([call for call in calls if call.startswith("identity show")])
+        self.assertTrue([call for call in calls if call.startswith("keyvault list --resource-group rg-test")])
+        self.assertIn(
+            "keyvault show --resource-group rg-test --name ecapikvtest --query properties.vaultUri"
+            " --output tsv --only-show-errors",
+            calls,
+        )
+        self.assertTrue([call for call in calls if call.startswith("acr login")])
+
+    def test_site_apply_fails_with_a_phase_1_message_when_the_vault_is_absent(self) -> None:
+        result, calls = self.run_vault_phase(vault_present=False)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("Apply phase 1 (--vault-only) first", result.stderr)
+        self.assertFalse([call for call in calls if call.startswith("deployment group create")])
+        self.assertFalse([call for call in calls if call.startswith("keyvault show")])
+        self.assertFalse([call for call in calls if call.startswith("acr login")])
+
+    def test_site_apply_refuses_an_active_rollback_before_reading_the_vault(self) -> None:
+        result, calls = self.run_vault_phase(API_KEY_VAULT_ROLLBACK_ACTIVE="TRUE")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("API_KEY_VAULT_ROLLBACK_ACTIVE=true refuses", result.stderr)
+        self.assertFalse([call for call in calls if call.startswith("keyvault ")])
+        self.assertFalse([call for call in calls if call.startswith("deployment group create")])
+
+    def test_vault_only_deploys_the_vault_module_and_stops(self) -> None:
+        result, calls = self.run_vault_phase("--vault-only", vault_present=False)
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("Phase 1 completed", result.stdout)
+        vault_deployments = [
+            call
+            for call in calls
+            if call.startswith("deployment group create")
+            and "--template-file infra/api-key-vault/api-key-vault.module.bicep" in call
+        ]
+        self.assertEqual(1, len(vault_deployments), calls)
+        self.assertIn("--name elsa-control-test-api-key-vault", vault_deployments[0])
+        self.assertFalse([call for call in calls if call.startswith("keyvault ")])
+        self.assertFalse([call for call in calls if call.startswith("acr login")])
 
 
 if __name__ == "__main__":
