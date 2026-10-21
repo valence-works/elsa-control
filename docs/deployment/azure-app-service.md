@@ -717,6 +717,11 @@ environment copies. After a manual rollback, set
 "Check deployment configuration", before any Azure login, instead of
 silently re-applying the references. Pause `infra`
 deploys, or revert this change, until the rollback is resolved.
+With `API_KEY_VAULT_SECRETS_WRITTEN` cleared, `app` and `promote` deploys
+run in pre-cutover mode only once every listed setting is plain again. A
+partial rollback leaves the site `mixed`, so those deploys fail closed until
+the remaining listed settings are rolled back too (see
+[Pre-cutover and Key Vault modes](#pre-cutover-and-key-vault-modes)).
 
 Staging:
 
