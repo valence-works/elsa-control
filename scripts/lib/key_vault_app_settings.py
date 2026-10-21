@@ -6,7 +6,9 @@ a reference without printing or comparing secret values.
 
 from __future__ import annotations
 
+import os
 import re
+from typing import Mapping
 
 KEY_VAULT_REFERENCE_PREFIX = "@Microsoft.KeyVault("
 # Versionless SecretUri only. A trailing secret version, VaultName= form, or
@@ -39,3 +41,85 @@ def is_key_vault_reference(value: str | None) -> bool:
     if not isinstance(value, str):
         return False
     return KEY_VAULT_REFERENCE.fullmatch(value.strip()) is not None
+
+
+# Set by the operator right after the manual reference switch. Until then the
+# deploy scripts keep the plain values (pre-cutover mode).
+SECRETS_WRITTEN_VARIABLE = "API_KEY_VAULT_SECRETS_WRITTEN"
+
+PLAIN = "plain"
+REFERENCE = "reference"
+MIXED = "mixed"
+
+PRE_CUTOVER_MODE = "pre-cutover"
+KEY_VAULT_MODE = "key-vault"
+
+
+class KeyVaultModeError(ValueError):
+    """A mode refusal. The message carries setting names only, never a value."""
+
+
+def key_vault_secrets_written(environment: Mapping[str, str] | None = None) -> bool:
+    """Return True when API_KEY_VAULT_SECRETS_WRITTEN is ``true`` (any case)."""
+
+    env = os.environ if environment is None else environment
+    return env.get(SECRETS_WRITTEN_VARIABLE, "").lower() == "true"
+
+
+def looks_like_key_vault_reference(value: str | None) -> bool:
+    """Return True for any value that starts like a reference, malformed or not."""
+
+    return isinstance(value, str) and value.strip().startswith(KEY_VAULT_REFERENCE_PREFIX)
+
+
+def _split_secret_settings(values: Mapping[str, str]) -> tuple[list[str], list[str], list[str]]:
+    present = [name for name in SECRET_APP_SETTING_NAMES if name in values]
+    references = [name for name in present if looks_like_key_vault_reference(values[name])]
+    plain = [name for name in present if name not in references]
+    malformed = [name for name in references if not is_key_vault_reference(values[name])]
+    return references, plain, malformed
+
+
+def classify_secret_settings(values: Mapping[str, str]) -> str:
+    """Classify the listed secret settings present in ``values``.
+
+    ``values`` maps setting names to the site's values. Names that are not
+    listed are ignored. A value that starts with ``@Microsoft.KeyVault(`` but
+    fails the strict pattern counts as a reference here.
+    """
+
+    references, plain, _ = _split_secret_settings(values)
+    if not references:
+        return PLAIN
+    return MIXED if plain else REFERENCE
+
+
+def select_secret_settings_mode(values: Mapping[str, str], *, secrets_written: bool) -> str:
+    """Choose pre-cutover or Key Vault mode, or refuse with a names-only reason.
+
+    With ``secrets_written`` the Key Vault mode is returned without looking at
+    the values: the strict reference checks then fail on any plain or
+    malformed value exactly as before. Without it, only an all-plain site may
+    run in pre-cutover mode.
+    """
+
+    if secrets_written:
+        return KEY_VAULT_MODE
+    classification = classify_secret_settings(values)
+    if classification == PLAIN:
+        return PRE_CUTOVER_MODE
+    references, plain, malformed = _split_secret_settings(values)
+    if classification == REFERENCE:
+        reason = (
+            f"Key Vault references are present on {', '.join(references)} "
+            f"(classification: {REFERENCE}); set {SECRETS_WRITTEN_VARIABLE}=true"
+        )
+    else:
+        reason = (
+            f"listed secret settings are {MIXED} "
+            f"(references: {', '.join(references)}; plain: {', '.join(plain)}); "
+            f"switch every listed setting to a Key Vault reference, then set {SECRETS_WRITTEN_VARIABLE}=true"
+        )
+    if malformed:
+        reason += f"; malformed Key Vault reference: {', '.join(malformed)}"
+    raise KeyVaultModeError(reason)
