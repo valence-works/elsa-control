@@ -205,9 +205,12 @@ public sealed class ProofHostOptionsTests
     {
         using var fixture = new ProofHostFixture();
         fixture.Environment["DISPOSABLE_PROOF_APPLY"] = "YES";
-        fixture.Environment["DISPOSABLE_PROOF_AZURE_CLI_PATH"] = "/usr/bin/false";
-        fixture.Environment["DISPOSABLE_PROOF_SQLCMD_PATH"] = "/usr/bin/false";
-        fixture.Environment["DISPOSABLE_PROOF_CURL_PATH"] = "/usr/bin/false";
+        // A regular file, not /usr/bin/false: some runner images ship it as a symlink, and the
+        // host refuses a symlinked tool path.
+        var failingTool = fixture.CreateFailingExecutable();
+        fixture.Environment["DISPOSABLE_PROOF_AZURE_CLI_PATH"] = failingTool;
+        fixture.Environment["DISPOSABLE_PROOF_SQLCMD_PATH"] = failingTool;
+        fixture.Environment["DISPOSABLE_PROOF_CURL_PATH"] = failingTool;
         await using var output = new StringWriter();
         await using var error = new StringWriter();
 
@@ -333,6 +336,15 @@ public sealed class ProofHostOptionsTests
         }
 
         public Dictionary<string, string?> Environment { get; }
+
+        public string CreateFailingExecutable()
+        {
+            var path = Path.Combine(root, "failing-tool");
+            File.WriteAllText(path, "#!/bin/sh\nexit 1\n");
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            return path;
+        }
 
         public void Dispose()
         {
