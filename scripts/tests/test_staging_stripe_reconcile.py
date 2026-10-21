@@ -1180,8 +1180,20 @@ class StagingKeyVaultModeTests(unittest.TestCase):
         self.assertIn("Authentication__ApiKey", stderr)
         self.assertNotIn(plain_api_key, stderr)
 
+    def test_key_vault_mode_refuses_a_malformed_non_stripe_reference(self) -> None:
+        versioned = "@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/Authentication-ApiKey/0123456789abcdef)"
+        azure = FakeAzure([*azure_settings(), {"name": "Authentication__ApiKey", "value": versioned}])
+
+        code, stdout, stderr = self._run_main(azure, secrets_written="true")
+
+        self.assertEqual(1, code)
+        self.assertEqual("", stdout)
+        self.assertIn("malformed Key Vault reference: Authentication__ApiKey", stderr)
+        self.assertEqual([], azure.applications)
+
     def test_key_vault_mode_passes_when_every_listed_setting_is_a_reference(self) -> None:
-        azure = FakeAzure(azure_settings())
+        api_key_reference = "@Microsoft.KeyVault(SecretUri=https://ecapikvtest.vault.azure.net/secrets/Authentication-ApiKey)"
+        azure = FakeAzure([*azure_settings(), {"name": "Authentication__ApiKey", "value": api_key_reference}])
 
         code, stdout, stderr = self._run_main(azure, secrets_written="true")
 

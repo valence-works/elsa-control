@@ -587,8 +587,8 @@ SCM and FTP basic-auth publishing credentials are off
 
 Production `scripts/production_stripe_reconcile.py` (`--capture`,
 `--reapply`, `--audit`) and the staging
-`scripts/staging_stripe_reconcile.py --apply-azure-settings` choose a mode
-before any write. `W` is `API_KEY_VAULT_SECRETS_WRITTEN` (case-insensitive
+`scripts/staging_stripe_reconcile.py` (`--apply-azure-settings` and the
+read-only check) choose a mode before any write. `W` is `API_KEY_VAULT_SECRETS_WRITTEN` (case-insensitive
 `true`). The site state classifies the listed settings that are present:
 `plain` (none is a reference), `reference` (every one is), or `mixed`. A
 value that starts with `@Microsoft.KeyVault(` but is not a versionless
@@ -600,7 +600,7 @@ value that starts with `@Microsoft.KeyVault(` but is not a versionless
 | unset or not `true` | `reference` | Fails: references are present, so set `API_KEY_VAULT_SECRETS_WRITTEN=true`. |
 | unset or not `true` | `mixed` | Fails, naming the reference settings and the plain settings. |
 | `true` | `reference` | **Key Vault mode** (#863). |
-| `true` | `plain` or `mixed` | Fails as #863 does: `--audit` names a setting that is not a reference; `--capture`, `--reapply` and staging print the generic `FAIL production-stripe-reconciliation` or `FAIL staging-stripe-reconciliation` line. On staging, a plain non-Stripe listed setting (for example `Authentication__ApiKey`) with every Stripe setting a reference also fails, naming the variable, the reference settings and the plain settings. |
+| `true` | `plain` or `mixed` | Fails as #863 does: `--audit` names a setting that is not a reference; `--capture`, `--reapply` and staging print the generic `FAIL production-stripe-reconciliation` or `FAIL staging-stripe-reconciliation` line. On staging, a plain non-Stripe listed setting (for example `Authentication__ApiKey`) with every Stripe setting a reference also fails, naming the variable, the reference settings and the plain settings; a malformed non-Stripe reference fails as `malformed Key Vault reference: <name>`. |
 
 In pre-cutover mode:
 
@@ -729,7 +729,10 @@ pre-cutover mode (see
 
 The Elsa Control Lead applies production as follows, before
 `Authentication:HubAccount:Enabled` is turned on, and **before** any
-production deploy is allowed to pass Stripe `--capture` in Key Vault mode:
+production deploy is allowed to pass Stripe `--capture` in Key Vault mode.
+Start at step 4 only once #882 is fixed: from step 4 on, every production
+`app` or `promote` deploy fails (closed without the variable, or the Key
+Vault-mode audit rolls it back) until #882 lands.
 
 1. Apply `infra/control-egress` if the Key Vault service endpoint is missing.
 2. Phase 1: apply `infra/api-key-vault` (`--vault-only`) with an operator
@@ -749,9 +752,7 @@ production deploy is allowed to pass Stripe `--capture` in Key Vault mode:
 7. Separately record operator evidence that the vault Stripe secret is a
    live-mode key for the same Stripe account the audit uses. Scripts never
    read that vault value.
-8. Only then run a production deploy, and only once #882 is fixed: until
-   then the Key Vault-mode production audit fails and the deploy rolls back.
-   It runs in Key Vault mode:
+8. Only then run a production deploy. It runs in Key Vault mode:
    `--capture` fails if a listed secret setting is still a plain value or a
    malformed reference, and `--reapply` never writes a secret setting.
 
