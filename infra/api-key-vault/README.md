@@ -14,9 +14,12 @@ This directory is hand-maintained. `dev/regenerate-infra.sh` preserves it.
 | Key Vault Secrets User on the API identity | Runtime resolution. Secrets User includes `secrets/getSecret` and can read values. |
 
 The GitHub OIDC deploy identity gets no Key Vault data role. Nothing in this
-repo reads vault values. `scripts/check-key-vault-references.sh` uses Reader
-on the App Service (`Microsoft.Web/sites/config/read`) and the ARM
-`configreferences` endpoint, and prints names and status only.
+repo reads vault values. `scripts/check-key-vault-references.sh` needs
+`Microsoft.Web/sites/config/read` (the ARM `configreferences` endpoint) and
+`Microsoft.Web/sites/config/list/action` on the App Service (Website
+Contributor has both; Reader lacks the list action). It lists the app setting
+names to find plain values; the CLI fetches the values but the script keeps
+only the names, and it prints names and status only.
 
 No other identity receives a data-plane role. An operator writes each secret
 value after the vault exists. CI never writes a secret value to the vault.
@@ -44,6 +47,18 @@ fails the deploy. An empty `AZURE_API_EGRESS_SUBNET_ID` also fails the deploy.
 | `Billing__Stripe__WebhookSources__0__SigningSecret` | `Billing-Stripe-WebhookSources-control-SigningSecret` |
 | `Billing__Stripe__WebhookSources__1__SigningSecret` | `Billing-Stripe-WebhookSources-hub-SigningSecret` |
 | `ManagedElsa__Handoff__ActivePrivateKeyPem` | `ManagedElsa-Handoff-ActivePrivateKeyPem` |
+
+Optional, written only when `RateLimiting:BffCredentials` is used (see
+[BFF credential](../../docs/deployment/azure-app-service.md#bff-credential-ratelimitingbffcredentials)).
+`scripts/check-key-vault-references.sh` reports a missing one as `NotSet` and
+requires a present one to be `Resolved`:
+
+| App setting | Vault secret name |
+| --- | --- |
+| `RateLimiting__BffCredentials__Sources__0__Secret` | `RateLimiting-BffCredentials-cloud-Secret` |
+| `RateLimiting__BffCredentials__Sources__0__PreviousSecret` | `RateLimiting-BffCredentials-cloud-PreviousSecret` |
+| `RateLimiting__BffCredentials__Sources__1__Secret` | `RateLimiting-BffCredentials-hub-Secret` |
+| `RateLimiting__BffCredentials__Sources__1__PreviousSecret` | `RateLimiting-BffCredentials-hub-PreviousSecret` |
 
 `Authentication__ControlIdentity__ClientSecret` stays a client secret in this
 vault. Switching that identity to a federated credential is #838.

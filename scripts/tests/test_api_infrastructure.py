@@ -63,6 +63,7 @@ def parameter_file(
     staging_recovery_lever_enabled: bool = False,
     staging_recovery_lever_allowed_instance_ids: str = "",
     staging_smoke_owner_instance_id: str = "",
+    rate_limit_bff_credential_sources: str = "",
 ) -> str:
     """Return a synthetic, non-secret parameter file for Bicep snapshot evaluation."""
 
@@ -90,6 +91,7 @@ def parameter_file(
         "stagingbillingleverallowedorganizationids_value": staging_billing_lever_allowed_organization_ids,
         "stagingrecoveryleverallowedinstanceids_value": staging_recovery_lever_allowed_instance_ids,
         "stagingsmokeownerinstanceid_value": staging_smoke_owner_instance_id,
+        "ratelimitbffcredentialsources_value": rate_limit_bff_credential_sources,
     }
     lines = [f"using '{using_path}'", ""]
     lines.extend(f"param {name} = '{value}'" for name, value in values.items())
@@ -124,6 +126,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertFalse(any(name.startswith("Staging__RecoveryLifecycleLever__AllowedInstanceIds__") for name in settings))
         self.assertNotIn("Staging__RecoveryLifecycleLever__SmokeOwnerInstanceId", settings)
         self.assertFalse(any(name.startswith("Staging__LateSuccessLever__") for name in settings))
+        self.assertFalse(any(name.startswith("RateLimiting__BffCredentials__") for name in settings))
 
     def test_secret_app_settings_are_versionless_key_vault_references(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -182,6 +185,14 @@ class ApiInfrastructureTests(unittest.TestCase):
             "param cloudaccountissuer_value string = ''\n\n@secure()\nparam entraclientsecret_value string\n\n"
             "@secure()\nparam builderclientapikey_value string\n\nparam api_identity_outputs_id string\n",
             1,
+        )
+        module = re.sub(
+            r"\n@description\('Comma-separated BFF credential sources.*?"
+            r"\nvar rateLimitBffCredentialSettings = concat\([^\n]*\)\n",
+            "",
+            module,
+            count=1,
+            flags=re.DOTALL,
         )
         module = re.sub(
             r"\nvar vaultUriPrefix = endsWith\(api_key_vault_uri, '/'\) \? api_key_vault_uri : '\$\{api_key_vault_uri\}/'\n"
@@ -267,7 +278,8 @@ class ApiInfrastructureTests(unittest.TestCase):
         generated = recovery_parameter.sub("", generated, count=1)
         generated = generated.replace("      appSettings: concat(\n        [", "      appSettings: [", 1)
         generated = generated.replace(
-            "        ],\n        pairingAllowlistSettings,\n        stagingBillingLeverSettings,\n        stagingRecoveryLeverSettings)",
+            "        ],\n        pairingAllowlistSettings,\n        stagingBillingLeverSettings,\n        stagingRecoveryLeverSettings,\n"
+            "        rateLimitBffCredentialSettings)",
             "      ]",
             1,
         )
@@ -314,6 +326,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         staging_recovery_lever_enabled: bool = False,
         staging_recovery_lever_allowed_instance_ids: str = "",
         staging_smoke_owner_instance_id: str = "",
+        rate_limit_bff_credential_sources: str = "",
     ) -> dict:
         """Evaluate the actual module with Bicep's offline deployment snapshot."""
 
@@ -333,6 +346,7 @@ class ApiInfrastructureTests(unittest.TestCase):
                 staging_recovery_lever_enabled,
                 staging_recovery_lever_allowed_instance_ids,
                 staging_smoke_owner_instance_id,
+                rate_limit_bff_credential_sources,
             )
         )
         result = subprocess.run(
@@ -466,6 +480,38 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertFalse(any(name.startswith("Staging__LateSuccessLever__") for name in on_settings))
         self.assertFalse(any(name.startswith("Staging__LateSuccessLever__") for name in billing_settings))
 
+    def test_bicep_module_emits_bff_credential_settings_only_for_listed_sources(self) -> None:
+        prefix = "RateLimiting__BffCredentials__"
+        vault = "@Microsoft.KeyVault(SecretUri=https://kv.example.vault.azure.net/secrets/"
+        cloud = {
+            f"{prefix}Sources__0__Name": "cloud",
+            f"{prefix}Sources__0__Secret": vault + "RateLimiting-BffCredentials-cloud-Secret)",
+        }
+        hub = {
+            f"{prefix}Sources__1__Name": "hub",
+            f"{prefix}Sources__1__Secret": vault + "RateLimiting-BffCredentials-hub-Secret)",
+        }
+        enabled = {f"{prefix}Enabled": "true"}
+        cases = (
+            ("", {}),
+            (" , ", {}),
+            ("cloud", enabled | cloud),
+            ("hub", enabled | hub),
+            (" Hub , cloud ", enabled | cloud | hub),
+        )
+        for raw, wanted in cases:
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as temporary:
+                webapp = self.webapp(
+                    self.snapshot(Path(temporary), "", rate_limit_bff_credential_sources=raw)
+                )
+                settings = {
+                    setting["name"]: setting["value"]
+                    for setting in webapp["properties"]["siteConfig"]["appSettings"]
+                    if setting["name"].startswith(prefix)
+                }
+                self.assertEqual(settings, wanted)
+                self.assertFalse(any(name.endswith("__PreviousSecret") for name in settings))
+
     def test_bicep_module_drops_empty_pairing_allowlist_entries(self) -> None:
         first = "11111111-1111-1111-1111-111111111111"
         second = "22222222-2222-2222-2222-222222222222"
@@ -563,6 +609,10 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("param pairingallowedorganizationids_value = ''", parameters)
         self.assertIn("param stagingbillingleverenabled_value = false", parameters)
         self.assertIn("param stagingbillingleverallowedorganizationids_value = ''", parameters)
+        self.assertIn("param ratelimitbffcredentialsources_value string = ''", module)
+        self.assertIn("rateLimitBffCredentialSettings", module)
+        self.assertIn("param ratelimitbffcredentialsources_value = ''", parameters)
+        self.assertNotIn(".Env.RATE_LIMIT_BFF_CREDENTIAL_SOURCES", parameters)
         self.assertNotIn(".Env.CLOUD_ACCOUNT_ISSUER", parameters)
         self.assertNotIn(".Env.EXTERNAL_ENGINE_PAIRING_ALLOWED_ORG_IDS", parameters)
         self.assertNotIn(".Env.STAGING_BILLING_LIFECYCLE_LEVER_ENABLED", parameters)
@@ -662,6 +712,23 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertIn("--setting-names RateLimiting__SourceDiagnosticLogLevel", documentation)
         self.assertIn("turns periods in app setting names into underscores", documentation)
         self.assertNotIn("Logging__LogLevel__ElsaControl.Api.RateLimiting=Debug", documentation)
+        self.assertIn("### BFF credential (`RateLimiting:BffCredentials`)", documentation)
+        self.assertIn("X-Elsa-Bff-Credential: <secret>", documentation)
+        self.assertIn("**only selects a rate-limit partition**", documentation)
+        self.assertIn("RateLimiting__BffCredentials__Sources__0__PreviousSecret", documentation)
+        self.assertIn("ELSA_CONTROL_BFF_CREDENTIAL", documentation)
+        self.assertIn("set through Lovable", documentation)
+        self.assertIn("**Rotation.**", documentation)
+        self.assertIn("or when the BFF credential matches", documentation)
+        self.assertIn("**Size `BffPerIp` for the BFF's aggregate traffic.**", documentation)
+        self.assertIn("tr -d '=\\n'", documentation)
+        self.assertNotIn("tr -d '='`", documentation)
+        self.assertIn("**The value must have no trailing newline.**", documentation)
+        self.assertIn("--settings RateLimiting__BffCredentials__Enabled=false", documentation)
+        self.assertIn("RATE_LIMIT_BFF_CREDENTIAL_SOURCES", documentation)
+        self.assertNotIn("does not\nemit these settings yet", documentation)
+        self.assertIn("refuses a `PreviousSecret` that equals `Secret`", documentation)
+        self.assertIn("`RateLimiting-BffCredentials-hub-PreviousSecret` |", documentation)
         self.assertNotIn("DEPLOY_IDENTITY_PRINCIPAL", documentation)
         self.assertNotIn("can use the GitHub deploy identity", documentation)
         self.assertIn("Key Vault Contributor", documentation)
@@ -724,6 +791,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         regenerated = regenerated.replace("param stagingrecoveryleverallowedinstanceids_value = ''\n", "", 1)
         regenerated = regenerated.replace("param stagingsmokeownerinstanceid_value = ''\n", "", 1)
         regenerated = regenerated.replace("param cloudaccountissuer_value = ''\n", "", 1)
+        regenerated = regenerated.replace("param ratelimitbffcredentialsources_value = ''\n", "", 1)
         regenerated = egress_block.sub("", provisioner_block.sub("", regenerated, count=1), count=1)
         self.assertNotIn("provisioner_identity_outputs_id", regenerated)
         self.assertNotIn("api_egress_subnet_id", regenerated)
@@ -735,6 +803,7 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertNotIn("stagingrecoveryleverenabled_value", regenerated)
         self.assertNotIn("stagingrecoveryleverallowedinstanceids_value", regenerated)
         self.assertNotIn("stagingsmokeownerinstanceid_value", regenerated)
+        self.assertNotIn("ratelimitbffcredentialsources_value", regenerated)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             module_fixture = root / "infra" / "api" / "api-website.module.bicep"

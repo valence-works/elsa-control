@@ -103,6 +103,10 @@ jobs:
       STAGING_SMOKE_OWNER_ORGANIZATION_ID: ${{ vars.STAGING_SMOKE_OWNER_ORGANIZATION_ID }}
       STAGING_SMOKE_OWNER_INSTANCE_ID: ${{ vars.STAGING_SMOKE_OWNER_INSTANCE_ID }}
       STAGING_SMOKE_OWNER_WORKSPACE_ID: ${{ vars.STAGING_SMOKE_OWNER_WORKSPACE_ID }}
+      # Optional, any environment: comma-separated cloud and/or hub. An infra
+      # deploy emits RateLimiting:BffCredentials with a Key Vault reference for
+      # each listed source's Secret. Empty leaves the section off (#862).
+      RATE_LIMIT_BFF_CREDENTIAL_SOURCES: ${{ vars.RATE_LIMIT_BFF_CREDENTIAL_SOURCES }}
       CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
       EXPECTED_CANDIDATE_DIGEST: ${{ inputs.candidate_digest }}
       TELEMETRY_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.telemetry_action || 'what-if' }}

@@ -87,8 +87,10 @@ check) so traffic cannot bypass the edge.
 ### BFF egress networks (`RateLimiting:BffEgressNetworks`)
 
 Validated Cloud/Hub sessions get the wider `BffPerIp` window on
-`managed-elsa-handoff` and the managed-instance lifecycle policies only when
-`RemoteIpAddress` is inside this list. To find the values:
+`managed-elsa-handoff` and the managed-instance lifecycle policies when
+`RemoteIpAddress` is inside this list, or when the BFF credential matches
+(see [BFF credential](#bff-credential-ratelimitingbffcredentials)). To find
+the values:
 
 1. List the BFF's public egress address as Control sees it: the rightmost
    `X-Forwarded-For` entry, which becomes `RemoteIpAddress`. Do not use the
@@ -112,7 +114,8 @@ Validated Cloud/Hub sessions get the wider `BffPerIp` window on
    logs (`GET /api/admin/console-logs/recent`, admin only), or in the OTLP log
    sink when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. A refused request can log the event twice,
    because the rate limiter retries the partition lookup. The event carries the
-   address, the match flag and the policy name only. Then delete the setting
+   address, the match flag, the BFF credential source name (see below) and
+   the policy name only. Then delete the setting
    (`az webapp config appsettings delete --resource-group <group> --name <site>
    --setting-names RateLimiting__SourceDiagnosticLogLevel`); unset, the
    category stays at the default `Information` level. Do not use
@@ -125,10 +128,179 @@ Validated Cloud/Hub sessions get the wider `BffPerIp` window on
    naming the key and the entry, for an entry that does not parse, an IPv4
    network wider than /16, an IPv6 network wider than /32, or an IPv4-mapped
    IPv6 network whose IPv4 part is wider than /16. A single address counts as
-   /32 or /128. An empty list means every caller uses `PerIp`.
+   /32 or /128. With an empty list, a caller uses `PerIp` unless it presents a
+   matching BFF credential (below).
 5. Current state: both BFFs (the Cloud `control-bff` and the Hub
    `cloud-control.ts` callers) are Supabase Edge Functions, so the list is
-   empty in staging and production.
+   empty in staging and production. Until each BFF sends its credential header
+   (a separate change in each BFF) and the credential section is enabled,
+   their calls use `PerIp`. After that they are recognised by the credential.
+
+### BFF credential (`RateLimiting:BffCredentials`)
+
+Each BFF sends its own credential on every call to Control, so Control can
+recognise it without a stable egress address:
+
+```text
+X-Elsa-Bff-Credential: <secret>
+```
+
+The credential **only selects a rate-limit partition**:
+
+- On `managed-elsa-handoff` and the managed-instance lifecycle policies, a
+  validated Cloud account session that presents the `cloud` value, or a
+  validated Hub account session that presents the `hub` value, gets the
+  `BffPerIp` window under the key `bff:source:<name>`. That is one window per
+  BFF, whatever address the call leaves from. The per-identity window still
+  applies to each identity.
+- **Size `BffPerIp` for the BFF's aggregate traffic.** Every user of a BFF
+  shares its one `bff:source:<name>` window, so `BffPerIp` is in effect a
+  global cap per BFF, not a per-address one. When it is used up, every Cloud
+  (or every Hub) user gets 429 on that policy until the window resets. Set
+  each policy's `BffPerIp` above that BFF's peak call rate across all its
+  users.
+- Every other caller gets `PerIp`, as before: a wrong value, no header, the
+  other BFF's value (a `cloud` value with a Hub session), and an anonymous or
+  unresolved caller. The header never causes a 401 or 403.
+- It grants no access, adds no claims and changes no endpoint result. Session
+  and token checks (`.AllowCloudBff()`, `.AllowHubBff()`) are unchanged.
+- When both the credential and `BffEgressNetworks` match, the
+  `bff:source:<name>` key wins. `BffEgressNetworks` stays supported unchanged.
+- Control hashes the presented value and every configured value with SHA-256
+  and compares them in fixed time. The value is never logged, and the
+  development admin-console proxy does not pass the header on.
+
+| App setting | Value |
+| --- | --- |
+| `RateLimiting__BffCredentials__Enabled` | `true`. Plain setting. The default, `false`, ignores the section and the header. |
+| `RateLimiting__BffCredentials__Sources__0__Name` | `cloud`. Plain setting. |
+| `RateLimiting__BffCredentials__Sources__0__Secret` | Key Vault reference to `RateLimiting-BffCredentials-cloud-Secret`. |
+| `RateLimiting__BffCredentials__Sources__0__PreviousSecret` | Rotation only. Key Vault reference to `RateLimiting-BffCredentials-cloud-PreviousSecret`. |
+| `RateLimiting__BffCredentials__Sources__1__Name` | `hub`. Plain setting. |
+| `RateLimiting__BffCredentials__Sources__1__Secret` | Key Vault reference to `RateLimiting-BffCredentials-hub-Secret`. |
+| `RateLimiting__BffCredentials__Sources__1__PreviousSecret` | Rotation only. Key Vault reference to `RateLimiting-BffCredentials-hub-PreviousSecret`. |
+
+When `Enabled` is `true`, startup fails with an error that names the key and
+never the value if: there are no sources; a `Name` is not `cloud` or `hub`, or
+appears twice; a `Secret` is missing, shorter than 32 characters or contains
+whitespace; a `PreviousSecret` is set but shorter than 32 characters, contains
+whitespace or equals `Secret`; a value is shared across sources; or a value is
+still an unresolved `@Microsoft.KeyVault(...)` reference string. The `Sources:N`
+in the error is the position among the configured sources, not the app setting
+index: with only `hub` configured (`Sources__1__*`), its errors read
+`Sources:0`. The whole API then does not start, not only rate limiting. To
+recover, turn the section off and restart. Credential matching stops; a BFF
+call whose address matches `RateLimiting__BffEgressNetworks` still gets
+`BffPerIp`, and any other call falls back to `PerIp`:
+
+```bash
+az webapp config appsettings set --resource-group <group> --name <site> --output none \
+  --settings RateLimiting__BffCredentials__Enabled=false
+```
+
+Fix the value or the reference, then set `Enabled=true` again. An `infra`
+deploy with `RATE_LIMIT_BFF_CREDENTIAL_SOURCES` set writes `Enabled=true`
+again, so clear that variable too until the fix is in.
+
+**Secrets.** The operator generates each value (32 or more random bytes,
+base64url) and writes it only through the operator paths: the vault through
+the [operator write path](#operator-write-path), and each BFF function secret
+as below. No CI job writes a value to Key Vault, App Service settings or
+Supabase function secrets. **The value must have no trailing newline.** A
+newline counts as whitespace, so a value stored with one fails startup.
+`openssl` ends its output with a newline, and `az keyvault secret set --file`
+stores a file's bytes as they are, so strip it when generating:
+
+```bash
+umask 077
+openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n' > "$HOME/.elsa-bff-cloud-secret"
+```
+
+Use the same file for the vault secret and the BFF function secret, then
+delete it.
+
+**Key Vault references.** In staging and production `Secret` and
+`PreviousSecret` are versionless Key Vault references (see
+[API Key Vault](#api-key-vault)). The feature is opt-in and off by default.
+Write the vault secrets first: a reference that does not resolve fails
+startup while `Enabled` is `true`.
+
+- **`infra` deploys (staging).** Set the GitHub environment variable
+  `RATE_LIMIT_BFF_CREDENTIAL_SOURCES` to the sources to turn on: `cloud`,
+  `hub` or `cloud,hub`. `scripts/deploy-azure-elsa-control.sh` refuses any
+  other entry or a repeat, and `infra/api/api-website.module.bicep` emits
+  `Enabled=true` and, for each listed source, its `Name` and a reference for
+  its `Secret` (`cloud` at index 0, `hub` at index 1). Unset or empty, the
+  module emits none of these settings and the section stays off. An `infra`
+  deploy replaces the site's app settings, so it keeps exactly what the
+  variable lists and drops anything set by hand, including a `PreviousSecret`
+  mid-rotation (see **Rotation** below).
+- **`app` and `promote` deploys** change only the image and leave these
+  settings as they are.
+- **Production** is patched by the operator (see
+  [Production apply](#production-apply)). Set the same reference strings on
+  the site; the reference string is not a secret:
+
+```bash
+vault_uri="https://<vault-name>.vault.azure.net"
+az webapp config appsettings set --resource-group <group> --name <site> --output none --settings \
+  RateLimiting__BffCredentials__Enabled=true \
+  RateLimiting__BffCredentials__Sources__0__Name=cloud \
+  "RateLimiting__BffCredentials__Sources__0__Secret=@Microsoft.KeyVault(SecretUri=${vault_uri}/secrets/RateLimiting-BffCredentials-cloud-Secret)" \
+  RateLimiting__BffCredentials__Sources__1__Name=hub \
+  "RateLimiting__BffCredentials__Sources__1__Secret=@Microsoft.KeyVault(SecretUri=${vault_uri}/secrets/RateLimiting-BffCredentials-hub-Secret)"
+```
+
+`scripts/check-key-vault-references.sh` reports each `Secret` and
+`PreviousSecret` setting: `NotSet` when it is absent (the feature or the
+rotation is off). It fails unless a present one is `Resolved`; a plain value
+fails as `NotAReference`.
+Without these settings, a BFF call whose address matches
+`RateLimiting__BffEgressNetworks` uses `BffPerIp` and any other BFF call falls
+back to `PerIp`; nothing else changes.
+
+**BFF function secrets.** Both BFFs read `ELSA_CONTROL_BFF_CREDENTIAL`.
+
+- Hub BFF (the Supabase project for `elsa-workflows/elsa-hub`): the operator
+  sets it for staging and production through the normal operator path.
+- Cloud BFF (`control-bff`): the operator sets the staging secret. The
+  production project `jhrcnclyydzngnyvhdht` is in Lovable's Supabase
+  organisation, so the production secret is set through Lovable.
+
+**Order.** Write the vault secrets, then turn the section on in Control: an
+`infra` deploy with `RATE_LIMIT_BFF_CREDENTIAL_SOURCES=cloud,hub` in staging,
+or the operator patch above in production. The BFFs are not sending yet, so
+nothing changes. Then set each BFF's function secret.
+
+**Verify on staging.** Set the app setting
+`RateLimiting__SourceDiagnosticLogLevel=Debug` (not the dotted
+`Logging__LogLevel__` name, which App Service on Linux cannot deliver; see
+step 3 above), make one call through each BFF and one without the header, and
+confirm the `ElsaControl.Api.RateLimiting` Debug events show
+`BffCredential source=hub`, `source=cloud` and `source=none`. The event records
+the source name only, never the value. Then delete the setting with
+`az webapp config appsettings delete --resource-group <group> --name <site>
+--setting-names RateLimiting__SourceDiagnosticLogLevel`.
+
+**Rotation.** Do not run an `infra` deploy during a rotation: it drops the
+hand-set `PreviousSecret` setting. If one runs, set it again.
+
+1. Write the **old** value to the source's `PreviousSecret` vault secret. No
+   setting references it yet, so nothing changes.
+2. Write the **new** value as a new version of the source's `Secret` vault
+   secret, and straight after it set the `PreviousSecret` reference setting
+   (`RateLimiting__BffCredentials__Sources__<n>__PreviousSecret`). Setting it
+   restarts the API, which refreshes both references: `Secret` is now the new
+   value and `PreviousSecret` the old one.
+   - Do not set the `PreviousSecret` reference before the new `Secret`
+     version exists. Both would then resolve to the old value, and startup
+     refuses a `PreviousSecret` that equals `Secret`.
+   - Keep the gap between the two writes short. A refresh inside it loads the
+     new `Secret` without a `PreviousSecret`, so the BFF's calls, still on the
+     old value, use `PerIp` until the setting lands. Nothing fails.
+3. Update the BFF function secret to the new value.
+4. Confirm with the Debug event that the BFF's calls still log its source.
+5. Delete the `PreviousSecret` setting (this restarts the API).
 
 ## Staging Control compatibility fixture
 
@@ -538,8 +710,10 @@ write-path CIDRs are optional extras. A private endpoint is #839.
 The only Key Vault data role is Key Vault Secrets User on the API
 user-assigned identity. Secrets User includes `secrets/getSecret` and can
 read values. The GitHub OIDC deploy identity gets no Key Vault data role.
-`scripts/check-key-vault-references.sh` uses Reader on the App Service and
-the ARM `configreferences` endpoint (names and status only). No other
+`scripts/check-key-vault-references.sh` needs `config/read` and
+`config/list/action` on the App Service (Website Contributor; Reader lacks
+the list action). It reads the ARM `configreferences` endpoint and the app
+setting names, and prints names and status only. No other
 identity gets a data-plane role. CI never writes a secret value to Key Vault.
 In Key Vault mode it never writes one to App Service either; before the
 reference switch, see [Pre-cutover and Key Vault modes](#pre-cutover-and-key-vault-modes).
@@ -555,6 +729,19 @@ An operator writes each secret after the vault exists.
 | `Billing__Stripe__WebhookSources__0__SigningSecret` | `Billing-Stripe-WebhookSources-control-SigningSecret` |
 | `Billing__Stripe__WebhookSources__1__SigningSecret` | `Billing-Stripe-WebhookSources-hub-SigningSecret` |
 | `ManagedElsa__Handoff__ActivePrivateKeyPem` | `ManagedElsa-Handoff-ActivePrivateKeyPem` |
+
+Optional, written only when `RateLimiting:BffCredentials` is used (see
+[BFF credential](#bff-credential-ratelimitingbffcredentials)).
+`scripts/check-key-vault-references.sh` reports a missing one as `NotSet` and
+requires a present one to be `Resolved` (a plain value fails as
+`NotAReference`):
+
+| App setting | Vault secret name |
+| --- | --- |
+| `RateLimiting__BffCredentials__Sources__0__Secret` | `RateLimiting-BffCredentials-cloud-Secret` |
+| `RateLimiting__BffCredentials__Sources__0__PreviousSecret` | `RateLimiting-BffCredentials-cloud-PreviousSecret` |
+| `RateLimiting__BffCredentials__Sources__1__Secret` | `RateLimiting-BffCredentials-hub-Secret` |
+| `RateLimiting__BffCredentials__Sources__1__PreviousSecret` | `RateLimiting-BffCredentials-hub-PreviousSecret` |
 
 Required deploy inputs for vault and site apply:
 
@@ -616,10 +803,16 @@ Production `scripts/production_stripe_reconcile.py` (`--capture`,
 `scripts/staging_stripe_reconcile.py` (`--apply-azure-settings` and the
 read-only check) choose a mode before any write. `W` is `API_KEY_VAULT_SECRETS_WRITTEN` (case-insensitive
 `true` in these scripts). Set it to lowercase `true`: the `infra` gate in the
-deploy workflow compares it exactly and refuses `TRUE` or `True`. The site state classifies the listed settings that are present:
+deploy workflow compares it exactly and refuses `TRUE` or `True`.
+
+The site state classifies the required listed settings that are present:
 `plain` (none is a reference), `reference` (every one is), or `mixed`. A
 value that starts with `@Microsoft.KeyVault(` but is not a versionless
 `SecretUri` reference counts as a reference, and then fails as malformed.
+The optional `RateLimiting__BffCredentials__Sources__*` settings do not
+count, so a BFF credential reference added before the switch leaves the
+site `plain`. In Key Vault mode, staging still refuses one that is present
+as a plain value.
 
 | `W` | Site state | Result |
 | --- | --- | --- |
@@ -815,8 +1008,10 @@ secret settings. The operator patch above owns those names, and no CI job
 writes a secret value. In pre-cutover mode they carry the plain Stripe key
 and webhook secret, as before #863.
 
-The host refuses to start when one of these settings still holds an
-unresolved `@Microsoft.KeyVault(...)` string.
+The host refuses to start when one of the required settings above still
+holds an unresolved `@Microsoft.KeyVault(...)` string. The optional
+`RateLimiting__BffCredentials__*` references are refused only while
+`RateLimiting__BffCredentials__Enabled` is `true`.
 
 The persistent `test` environment also requires the staging-only Stripe values
 `STRIPE_TEST_SECRET_KEY` and `STRIPE_TEST_WEBHOOK_SIGNING_SECRET`, plus the

@@ -293,6 +293,9 @@ builder.Services.Configure<ControlRateLimitBffEgressOptions>(options =>
     options.Networks = ControlRateLimitBffEgress.ReadNetworks(builder.Configuration);
 });
 builder.Services.AddHostedService<ControlRateLimitBffEgressConfigurationValidator>();
+builder.Services.Configure<ControlRateLimitBffCredentialOptions>(
+    builder.Configuration.GetSection(ControlRateLimitBffCredentialOptions.ConfigurationSection));
+builder.Services.AddHostedService<ControlRateLimitBffCredentialConfigurationValidator>();
 // Dot-free switch for the BFF source-address diagnostic: App Service on Linux cannot carry the
 // dotted Logging__LogLevel__ElsaControl.Api.RateLimiting app setting name into the container.
 // Same rule builder.Logging.AddFilter adds, read when the logger factory is built so it sees the
@@ -954,8 +957,10 @@ static void CopyProxyRequestHeaders(HttpRequest source, HttpRequestMessage targe
 {
     foreach (var header in source.Headers)
     {
+        // The BFF credential is Control's own rate-limit input and is never passed downstream.
         if (string.Equals(header.Key, "Host", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(header.Key, "Cookie", StringComparison.OrdinalIgnoreCase))
+            string.Equals(header.Key, "Cookie", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(header.Key, ControlRateLimitBffCredentialOptions.HeaderName, StringComparison.OrdinalIgnoreCase))
         {
             continue;
         }

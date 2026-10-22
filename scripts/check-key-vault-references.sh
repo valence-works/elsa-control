@@ -12,6 +12,10 @@ Usage:
   scripts/check-key-vault-references.sh --resource-group RG --name APP
 
 Prints each secret app-setting name and its Key Vault reference status.
+A required setting must be Resolved. An optional setting (an opt-in
+feature such as RateLimiting:BffCredentials) prints NotSet when the app
+setting does not exist, fails as NotAReference when it exists with a plain
+value, and must be Resolved when it is a reference.
 Also prints SCM and FTP basic-auth publishing allow=true/false.
 Never prints setting values or secret material.
 EOF
@@ -48,12 +52,16 @@ if [[ -z "$resource_group" || -z "$webapp_name" ]]; then
   exit 1
 fi
 
+# One "required|optional<TAB>name" line per secret setting.
 SETTING_NAMES="$(python3 - <<'PY'
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path("scripts") / "lib"))
-from key_vault_app_settings import SECRET_APP_SETTING_NAMES
-print("\n".join(SECRET_APP_SETTING_NAMES))
+from key_vault_app_settings import OPTIONAL_SECRET_APP_SETTING_NAMES, REQUIRED_SECRET_APP_SETTING_NAMES
+for name in REQUIRED_SECRET_APP_SETTING_NAMES:
+    print(f"required\t{name}")
+for name in OPTIONAL_SECRET_APP_SETTING_NAMES:
+    print(f"optional\t{name}")
 PY
 )"
 
@@ -74,18 +82,34 @@ references_json="$(az rest \
   --output json \
   --only-show-errors)"
 
+# Names only: tells an absent optional setting apart from one stored as a plain value.
+present_names="$(az webapp config appsettings list \
+  --resource-group "$resource_group" \
+  --name "$webapp_name" \
+  --query "[].name" \
+  --output tsv \
+  --only-show-errors)"
+
 printf '%s\n' "$SETTING_NAMES" | python3 -c '
 import json
 import sys
 
-wanted = [line for line in sys.stdin.read().splitlines() if line]
+wanted = [line.split("\t", 1) for line in sys.stdin.read().splitlines() if line]
+present = {line.strip() for line in sys.argv[2].splitlines() if line.strip()}
 payload = json.loads(sys.argv[1])
 properties = payload.get("properties")
 if not isinstance(properties, dict):
     raise SystemExit("check-key-vault-references: reference status payload is invalid")
 failed = False
-for name in wanted:
+for kind, name in wanted:
     entry = properties.get(name)
+    if entry is None and kind == "optional":
+        if name in present:
+            print(f"{name}\tNotAReference")
+            failed = True
+        else:
+            print(f"{name}\tNotSet")
+        continue
     status = "Missing"
     if isinstance(entry, dict):
         raw = entry.get("status")
@@ -95,7 +119,7 @@ for name in wanted:
         failed = True
 if failed:
     raise SystemExit(2)
-' "$references_json"
+' "$references_json" "$present_names"
 
 for policy in scm ftp; do
   allow="$(az resource show \

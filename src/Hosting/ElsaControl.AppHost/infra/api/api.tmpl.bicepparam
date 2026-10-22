@@ -28,4 +28,5 @@ param stagingbillingleverallowedorganizationids_value = ''
 param stagingrecoveryleverenabled_value = false
 param stagingrecoveryleverallowedinstanceids_value = ''
 param stagingsmokeownerinstanceid_value = ''
+param ratelimitbffcredentialsources_value = ''
 param entratenantid_value = '{{ parameter "entraTenantId" }}'

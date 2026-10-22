@@ -18,8 +18,8 @@ KEY_VAULT_REFERENCE = re.compile(
     r"\.vault\.azure\.net/secrets/[A-Za-z0-9-]{1,127}\)$"
 )
 
-# App setting name -> vault secret name. Keep in sync with
-# infra/api-key-vault/api-key-vault.module.bicep and
+# App setting name -> vault secret name for the required secret settings. Keep
+# in sync with infra/api-key-vault/api-key-vault.module.bicep and
 # UnresolvedKeyVaultReferenceGuard.
 SECRET_APP_SETTINGS: dict[str, str] = {
     "Authentication__ApiKey": "Authentication-ApiKey",
@@ -32,7 +32,24 @@ SECRET_APP_SETTINGS: dict[str, str] = {
     "ManagedElsa__Handoff__ActivePrivateKeyPem": "ManagedElsa-Handoff-ActivePrivateKeyPem",
 }
 
-SECRET_APP_SETTING_NAMES: tuple[str, ...] = tuple(SECRET_APP_SETTINGS)
+# Opt-in secret settings: present only when their feature is configured, so a
+# missing one is not a failure. When present each must be a versionless
+# reference that resolves. UnresolvedKeyVaultReferenceGuard does not list them;
+# the feature's own startup validator refuses an unresolved reference while the
+# feature is enabled, so RateLimiting__BffCredentials__Enabled=false stays a
+# complete off switch.
+OPTIONAL_SECRET_APP_SETTINGS: dict[str, str] = {
+    "RateLimiting__BffCredentials__Sources__0__Secret": "RateLimiting-BffCredentials-cloud-Secret",
+    "RateLimiting__BffCredentials__Sources__0__PreviousSecret": "RateLimiting-BffCredentials-cloud-PreviousSecret",
+    "RateLimiting__BffCredentials__Sources__1__Secret": "RateLimiting-BffCredentials-hub-Secret",
+    "RateLimiting__BffCredentials__Sources__1__PreviousSecret": "RateLimiting-BffCredentials-hub-PreviousSecret",
+}
+
+REQUIRED_SECRET_APP_SETTING_NAMES: tuple[str, ...] = tuple(SECRET_APP_SETTINGS)
+OPTIONAL_SECRET_APP_SETTING_NAMES: tuple[str, ...] = tuple(OPTIONAL_SECRET_APP_SETTINGS)
+# Every secret setting name, required or optional. Scripts that must never
+# capture, compare or write a secret setting use this.
+SECRET_APP_SETTING_NAMES: tuple[str, ...] = REQUIRED_SECRET_APP_SETTING_NAMES + OPTIONAL_SECRET_APP_SETTING_NAMES
 
 
 def is_key_vault_reference(value: str | None) -> bool:
@@ -72,8 +89,10 @@ def looks_like_key_vault_reference(value: str | None) -> bool:
     return isinstance(value, str) and value.strip().startswith(KEY_VAULT_REFERENCE_PREFIX)
 
 
-def _split_secret_settings(values: Mapping[str, str]) -> tuple[list[str], list[str], list[str]]:
-    present = [name for name in SECRET_APP_SETTING_NAMES if name in values]
+def _split_secret_settings(
+    values: Mapping[str, str], names: tuple[str, ...] = SECRET_APP_SETTING_NAMES
+) -> tuple[list[str], list[str], list[str]]:
+    present = [name for name in names if name in values]
     references = [name for name in present if looks_like_key_vault_reference(values[name])]
     plain = [name for name in present if name not in references]
     malformed = [name for name in references if not is_key_vault_reference(values[name])]
@@ -84,11 +103,13 @@ def classify_secret_settings(values: Mapping[str, str]) -> str:
     """Classify the listed secret settings present in ``values``.
 
     ``values`` maps setting names to the site's values. Names that are not
-    listed are ignored. A value that starts with ``@Microsoft.KeyVault(`` but
-    fails the strict pattern counts as a reference here.
+    listed are ignored, and so are the optional settings: an opt-in feature's
+    reference must not turn an otherwise plain site ``mixed``. A value that
+    starts with ``@Microsoft.KeyVault(`` but fails the strict pattern counts as
+    a reference here.
     """
 
-    references, plain, _ = _split_secret_settings(values)
+    references, plain, _ = _split_secret_settings(values, REQUIRED_SECRET_APP_SETTING_NAMES)
     if not references:
         return PLAIN
     return MIXED if plain else REFERENCE
@@ -123,7 +144,7 @@ def select_secret_settings_mode(values: Mapping[str, str], *, secrets_written: b
     classification = classify_secret_settings(values)
     if classification == PLAIN:
         return PRE_CUTOVER_MODE
-    references, plain, malformed = _split_secret_settings(values)
+    references, plain, malformed = _split_secret_settings(values, REQUIRED_SECRET_APP_SETTING_NAMES)
     if classification == REFERENCE:
         reason = (
             f"Key Vault references are present on {', '.join(references)} "

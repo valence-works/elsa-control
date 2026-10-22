@@ -316,6 +316,245 @@ public sealed class ManagedElsaHandoffRateLimitTests
             entry => entry.Category == ControlRateLimitBffSourceDiagnostic.LoggerCategory);
     }
 
+    [Theory]
+    [InlineData("cloud", "current", true)]
+    [InlineData("cloud", "previous", true)]
+    [InlineData("cloud", "invalid", false)]
+    [InlineData("cloud", "missing", false)]
+    [InlineData("cloud", "mismatched", false)]
+    [InlineData("hub", "current", true)]
+    [InlineData("hub", "previous", true)]
+    [InlineData("hub", "invalid", false)]
+    [InlineData("hub", "missing", false)]
+    [InlineData("hub", "mismatched", false)]
+    public async Task Bff_credential_selects_one_window_per_source_only_for_its_own_session_type(
+        string account,
+        string credential,
+        bool expectSourceWindow)
+    {
+        // PerIp = 1 and BffPerIp = 2. On bff:source:<name>, two calls from one address pass and a
+        // third from another address is refused, because the window is per BFF, not per address.
+        // On PerIp, the second call from one address is refused and the other address passes.
+        const string cloudIssuer = "https://cloud-account.test/auth/v1";
+        const string hubIssuer = "https://hub-account.test/auth/v1";
+        var issuer = account == "cloud" ? cloudIssuer : hubIssuer;
+        await using var app = CreateCloudAndHubApplication(
+            perIp: 1,
+            perIdentity: 20,
+            cloudIssuer,
+            hubIssuer,
+            bffPerIp: 2,
+            bffCredentials: true);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        var header = TestBffCredentials.HeaderValue(account, credential);
+        using var first = ClientFor(account, app, issuer, "11111111-1111-4111-8111-111111111301", "203.0.113.101");
+        using var second = ClientFor(account, app, issuer, "22222222-2222-4222-8222-222222222302", "203.0.113.101");
+        using var third = ClientFor(account, app, issuer, "33333333-3333-4333-8333-333333333303", "203.0.113.102");
+        foreach (var client in new[] { first, second, third })
+            TestBffCredentials.Set(client, header);
+
+        using var firstResponse = await PostIssueAsync(first);
+        using var secondResponse = await PostIssueAsync(second);
+        using var thirdResponse = await PostIssueAsync(third);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, firstResponse.StatusCode);
+        if (expectSourceWindow)
+        {
+            Assert.NotEqual(HttpStatusCode.TooManyRequests, secondResponse.StatusCode);
+            await AssertHandoffRateLimited(thirdResponse);
+        }
+        else
+        {
+            await AssertHandoffRateLimited(secondResponse);
+            Assert.NotEqual(HttpStatusCode.TooManyRequests, thirdResponse.StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task Cloud_credential_shares_one_bff_window_across_addresses_while_per_identity_still_applies()
+    {
+        const string issuer = "https://cloud-account.test/auth/v1";
+        await using var sharedWindowApp = CreateCloudApplication(
+            perIp: 1, perIdentity: 20, issuer, bffPerIp: 2, bffCredentials: true);
+        await using var perIdentityApp = CreateCloudApplication(
+            perIp: 1, perIdentity: 1, issuer, bffPerIp: 20, bffCredentials: true);
+        await sharedWindowApp.SeedAsync(_ => Task.CompletedTask);
+        await perIdentityApp.SeedAsync(_ => Task.CompletedTask);
+        using var first = CloudClient(sharedWindowApp, issuer, "11111111-1111-4111-8111-111111111311", "203.0.113.111");
+        using var second = CloudClient(sharedWindowApp, issuer, "22222222-2222-4222-8222-222222222312", "203.0.113.112");
+        using var third = CloudClient(sharedWindowApp, issuer, "33333333-3333-4333-8333-333333333313", "203.0.113.113");
+        using var identity = CloudClient(perIdentityApp, issuer, "44444444-4444-4444-8444-444444444314", "203.0.113.114");
+        using var identityElsewhere = CloudClient(perIdentityApp, issuer, "44444444-4444-4444-8444-444444444314", "203.0.113.115");
+        using var otherIdentitySameAddress = CloudClient(perIdentityApp, issuer, "55555555-5555-4555-8555-555555555315", "203.0.113.114");
+        foreach (var client in new[] { first, second, third, identity, identityElsewhere, otherIdentitySameAddress })
+            TestBffCredentials.Set(client, TestBffCredentials.Cloud);
+
+        using var firstAllowed = await PostIssueAsync(first);
+        using var secondAllowed = await PostIssueAsync(second);
+        using var thirdRejected = await PostIssueAsync(third);
+        using var identityAllowed = await PostIssueAsync(identity);
+        using var identityRejected = await PostIssueAsync(identityElsewhere);
+        using var otherIdentityAllowed = await PostIssueAsync(otherIdentitySameAddress);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, firstAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, secondAllowed.StatusCode);
+        await AssertHandoffRateLimited(thirdRejected);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, identityAllowed.StatusCode);
+        await AssertHandoffRateLimited(identityRejected);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, otherIdentityAllowed.StatusCode);
+    }
+
+    [Fact]
+    public async Task Credential_window_wins_when_the_egress_list_also_matches()
+    {
+        // With BffPerIp = 2: if the egress key won, the two calls from the listed address would use
+        // bff:<address> and the unlisted one bff:source:cloud, so all three would pass.
+        const string issuer = "https://cloud-account.test/auth/v1";
+        const string listedIp = "203.0.113.121";
+        await using var app = CreateCloudApplication(
+            perIp: 1,
+            perIdentity: 20,
+            issuer,
+            bffPerIp: 2,
+            bffEgressNetworks: [$"{listedIp}/32"],
+            bffCredentials: true);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var listed = CloudClient(app, issuer, "11111111-1111-4111-8111-111111111321", listedIp);
+        using var unlisted = CloudClient(app, issuer, "22222222-2222-4222-8222-222222222322", "203.0.113.122");
+        using var listedAgain = CloudClient(app, issuer, "33333333-3333-4333-8333-333333333323", listedIp);
+        foreach (var client in new[] { listed, unlisted, listedAgain })
+            TestBffCredentials.Set(client, TestBffCredentials.Cloud);
+
+        using var listedAllowed = await PostIssueAsync(listed);
+        using var unlistedAllowed = await PostIssueAsync(unlisted);
+        using var listedRejected = await PostIssueAsync(listedAgain);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, listedAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, unlistedAllowed.StatusCode);
+        await AssertHandoffRateLimited(listedRejected);
+    }
+
+    // An unresolved caller is not covered here: its unresolved-identity window (limit 1, keyed by
+    // address) refuses a second call from the same address whatever the per-address layer does.
+    // Unresolved_callers_presenting_one_credential_do_not_share_the_bff_source_window covers it.
+    [Theory]
+    [InlineData("anonymous")]
+    [InlineData("control")]
+    public async Task Valid_credential_without_a_validated_bff_session_stays_on_per_ip(string caller)
+    {
+        const string cloudIssuer = "https://cloud-account.test/auth/v1";
+        const string hubIssuer = "https://hub-account.test/auth/v1";
+        const string sharedIp = "203.0.113.131";
+        await using var app = CreateCloudAndHubApplication(
+            perIp: 1,
+            perIdentity: 20,
+            cloudIssuer,
+            hubIssuer,
+            bffPerIp: 20,
+            bffCredentials: true);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var first = CallerClient(app, caller, "credential-caller-one", sharedIp);
+        using var second = CallerClient(app, caller, "credential-caller-two", sharedIp);
+        TestBffCredentials.Set(first, TestBffCredentials.Cloud);
+        TestBffCredentials.Set(second, TestBffCredentials.Hub);
+
+        using var firstAllowed = await PostIssueAsync(first);
+        using var rejected = await PostIssueAsync(second);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, firstAllowed.StatusCode);
+        await AssertHandoffRateLimited(rejected);
+    }
+
+    [Fact]
+    public async Task Unresolved_callers_presenting_one_credential_do_not_share_the_bff_source_window()
+    {
+        // BffPerIp = 1: if the credential alone selected bff:source:cloud, the second caller would
+        // share the first caller's window and be refused. On PerIp each address has its own window.
+        const string cloudIssuer = "https://cloud-account.test/auth/v1";
+        const string hubIssuer = "https://hub-account.test/auth/v1";
+        await using var app = CreateCloudAndHubApplication(
+            perIp: 20,
+            perIdentity: 20,
+            cloudIssuer,
+            hubIssuer,
+            bffPerIp: 1,
+            bffCredentials: true);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var first = CallerClient(app, "unresolved", "credential-caller-one", "203.0.113.132");
+        using var second = CallerClient(app, "unresolved", "credential-caller-two", "203.0.113.133");
+        TestBffCredentials.Set(first, TestBffCredentials.Cloud);
+        TestBffCredentials.Set(second, TestBffCredentials.Cloud);
+
+        using var firstAllowed = await PostIssueAsync(first);
+        using var secondAllowed = await PostIssueAsync(second);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, firstAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, secondAllowed.StatusCode);
+    }
+
+    [Fact]
+    public async Task Bff_source_diagnostic_records_the_credential_source_name_and_no_value_is_logged_at_trace()
+    {
+        const string issuer = "https://cloud-account.test/auth/v1";
+        var entries = new ConcurrentQueue<RecordedLogEntry>();
+        await using var app = CreateCloudApplication(
+            perIp: 20,
+            perIdentity: 20,
+            issuer,
+            bffPerIp: 20,
+            bffCredentials: true,
+            logLevel: "Trace",
+            configureServices: services => AddTraceRecording(services, entries));
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var valid = CloudClient(app, issuer, "11111111-1111-4111-8111-111111111341", "203.0.113.141");
+        using var invalid = CloudClient(app, issuer, "22222222-2222-4222-8222-222222222342", "203.0.113.142");
+        using var missing = CloudClient(app, issuer, "33333333-3333-4333-8333-333333333343", "203.0.113.143");
+        TestBffCredentials.Set(valid, TestBffCredentials.Cloud);
+        TestBffCredentials.Set(invalid, TestBffCredentials.Invalid);
+
+        using var _ = await PostIssueAsync(valid);
+        using var __ = await PostIssueAsync(invalid);
+        using var ___ = await PostIssueAsync(missing);
+
+        var diagnostics = entries
+            .Where(entry => entry.Category == ControlRateLimitBffSourceDiagnostic.LoggerCategory)
+            .ToArray();
+        Assert.Equal(3, diagnostics.Length);
+        Assert.Equal(ControlRateLimitBffCredentialSources.Cloud, diagnostics[0].State["BffCredentialSource"]);
+        Assert.Equal(ControlRateLimitBffSourceDiagnostic.NoCredentialSource, diagnostics[1].State["BffCredentialSource"]);
+        Assert.Equal(ControlRateLimitBffSourceDiagnostic.NoCredentialSource, diagnostics[2].State["BffCredentialSource"]);
+        Assert.Contains(entries, entry => entry.Level == LogLevel.Trace);
+        Assert.Contains(entries, entry => entry.Category.StartsWith("Microsoft.AspNetCore", StringComparison.Ordinal));
+        AssertNoCredentialValueLogged(entries);
+    }
+
+    [Fact]
+    public async Task Startup_validation_failure_logs_and_throws_without_the_credential_value()
+    {
+        const string sharedValue = "shared-bff-credential-value-must-not-leak-0001";
+        var entries = new ConcurrentQueue<RecordedLogEntry>();
+        await using var app = CreateApplication(
+            perIp: 20,
+            perIdentity: 20,
+            extra: new Dictionary<string, string?>
+            {
+                [$"{ControlRateLimitBffCredentialOptions.ConfigurationSection}:Enabled"] = "true",
+                [$"{ControlRateLimitBffCredentialOptions.ConfigurationSection}:Sources:0:Name"] = "cloud",
+                [$"{ControlRateLimitBffCredentialOptions.ConfigurationSection}:Sources:0:Secret"] = sharedValue,
+                [$"{ControlRateLimitBffCredentialOptions.ConfigurationSection}:Sources:1:Name"] = "hub",
+                [$"{ControlRateLimitBffCredentialOptions.ConfigurationSection}:Sources:1:Secret"] = sharedValue
+            },
+            configureServices: services => AddTraceRecording(services, entries));
+
+        var exception = Assert.Throws<InvalidOperationException>(() => app.CreateClient());
+
+        var text = exception.ToString();
+        Assert.Contains($"{ControlRateLimitBffCredentialOptions.ConfigurationSection}:Sources:1:Secret", text, StringComparison.Ordinal);
+        Assert.DoesNotContain(sharedValue, text, StringComparison.Ordinal);
+        Assert.Contains(entries, entry => entry.Exception?.Contains("Rate limiting BFF credential configuration is invalid", StringComparison.Ordinal) == true);
+        Assert.DoesNotContain(entries, entry => EntryText(entry).Contains(sharedValue, StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task Bff_source_diagnostic_is_enabled_by_the_dot_free_log_level_setting()
     {
@@ -592,7 +831,8 @@ public sealed class ManagedElsaHandoffRateLimitTests
         IReadOnlyDictionary<string, string?>? extra = null,
         int? bffPerIp = null,
         IReadOnlyList<string>? bffEgressNetworks = null,
-        Action<IServiceCollection>? configureServices = null)
+        Action<IServiceCollection>? configureServices = null,
+        bool bffCredentials = false)
     {
         var bffIp = bffPerIp ?? perIp;
         var configuration = new Dictionary<string, string?>
@@ -609,6 +849,12 @@ public sealed class ManagedElsaHandoffRateLimitTests
         {
             for (var i = 0; i < bffEgressNetworks.Count; i++)
                 configuration[$"{ControlRateLimitBffEgressOptions.ConfigurationKey}:{i}"] = bffEgressNetworks[i];
+        }
+
+        if (bffCredentials)
+        {
+            foreach (var (key, value) in TestBffCredentials.Configuration())
+                configuration[key] = value;
         }
 
         if (extra is not null)
@@ -628,6 +874,7 @@ public sealed class ManagedElsaHandoffRateLimitTests
         IReadOnlyList<string>? bffEgressNetworks = null,
         string? logLevel = null,
         Action<IServiceCollection>? configureServices = null,
+        bool bffCredentials = false,
         string? sourceDiagnosticLogLevel = null)
     {
         var extra = new Dictionary<string, string?>
@@ -651,7 +898,8 @@ public sealed class ManagedElsaHandoffRateLimitTests
             bffPerIp: bffPerIp,
             bffEgressNetworks: bffEgressNetworks,
             extra: extra,
-            configureServices: configureServices);
+            configureServices: configureServices,
+            bffCredentials: bffCredentials);
     }
 
     private static ControlApiTestApplication CreateHubApplication(int perIp, int perIdentity, string issuer) =>
@@ -673,12 +921,14 @@ public sealed class ManagedElsaHandoffRateLimitTests
         string cloudIssuer,
         string hubIssuer,
         int? bffPerIp = null,
-        IReadOnlyList<string>? bffEgressNetworks = null) =>
+        IReadOnlyList<string>? bffEgressNetworks = null,
+        bool bffCredentials = false) =>
         CreateApplication(
             perIp,
             perIdentity,
             bffPerIp: bffPerIp,
             bffEgressNetworks: bffEgressNetworks,
+            bffCredentials: bffCredentials,
             extra: new Dictionary<string, string?>
             {
                 [$"{CloudAccountIdentityDefaults.ConfigurationSection}:Enabled"] = "true",
@@ -771,6 +1021,44 @@ public sealed class ManagedElsaHandoffRateLimitTests
         string ip) =>
         account == "hub" ? HubClient(app, issuer, subject, ip) : CloudClient(app, issuer, subject, ip);
 
+    private static HttpClient CallerClient(ControlApiTestApplication app, string caller, string subject, string ip)
+    {
+        switch (caller)
+        {
+            case "anonymous":
+                var anonymous = app.CreateClient();
+                SetRemoteIp(anonymous, ip);
+                return anonymous;
+            case "unresolved":
+                return IncompleteCookieClient(app, ip);
+            case "control":
+                return ControlClient(app, subject, ip);
+            default:
+                throw new ArgumentOutOfRangeException(nameof(caller), caller, null);
+        }
+    }
+
+    // A provider-specific rule outranks the appsettings category rules, so the recorder sees every
+    // category at Trace.
+    private static void AddTraceRecording(IServiceCollection services, ConcurrentQueue<RecordedLogEntry> entries)
+    {
+        services.AddSingleton<ILoggerProvider>(new RecordingLoggerProvider(entries));
+        services.AddLogging(logging => logging.AddFilter<RecordingLoggerProvider>(null, LogLevel.Trace));
+    }
+
+    private static void AssertNoCredentialValueLogged(IEnumerable<RecordedLogEntry> entries)
+    {
+        foreach (var entry in entries)
+        {
+            var text = EntryText(entry);
+            foreach (var value in TestBffCredentials.AllValues)
+                Assert.DoesNotContain(value, text, StringComparison.Ordinal);
+        }
+    }
+
+    private static string EntryText(RecordedLogEntry entry) =>
+        entry.Message + " " + string.Join(" ", entry.State.Values) + " " + entry.Exception;
+
     private static void SetRemoteIp(HttpClient client, string ip)
     {
         client.DefaultRequestHeaders.Remove(ControlApiTestApplication.TestRemoteIpHeader);
@@ -799,7 +1087,8 @@ public sealed class ManagedElsaHandoffRateLimitTests
         string Category,
         LogLevel Level,
         string Message,
-        IReadOnlyDictionary<string, object?> State);
+        IReadOnlyDictionary<string, object?> State,
+        string? Exception = null);
 
     private sealed class RecordingLoggerProvider(ConcurrentQueue<RecordedLogEntry> entries) : ILoggerProvider
     {
@@ -828,7 +1117,8 @@ public sealed class ManagedElsaHandoffRateLimitTests
                 category,
                 logLevel,
                 formatter(state, exception),
-                values.ToDictionary(pair => pair.Key, pair => pair.Value)));
+                values.ToDictionary(pair => pair.Key, pair => pair.Value),
+                exception?.ToString()));
         }
     }
 }

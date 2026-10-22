@@ -36,16 +36,19 @@ public sealed class ManagedElsaInstanceLifecycleRateLimitOptions
     };
 
     /// <summary>
-    /// Fixed window for validated Cloud/Hub sessions whose
+    /// Fixed window for validated Cloud/Hub sessions that present their own BFF's
+    /// credential (<see cref="ControlRateLimitBffCredentialOptions.HeaderName"/>, keyed
+    /// <c>bff:source:&lt;name&gt;</c>, one window per BFF), or whose
     /// <c>Connection.RemoteIpAddress</c> is inside
-    /// <see cref="ControlRateLimitBffEgressOptions.ConfigurationKey"/>.
+    /// <see cref="ControlRateLimitBffEgressOptions.ConfigurationKey"/> (keyed by address).
+    /// When both match, the credential key wins.
     /// <c>RemoteIpAddress</c> is the rightmost <c>X-Forwarded-For</c> entry, set by the
     /// explicit <c>ForwardedHeadersOptions</c> with <c>ForwardLimit = 1</c>. Those
-    /// calls share a BFF egress address, so the default is the maximum allowed
+    /// calls share a BFF, so the default is the maximum allowed
     /// permit and per-identity remains binding. Every other caller, including
-    /// Cloud/Hub sessions from addresses outside the list and unresolved
-    /// identities, uses <see cref="PerIp"/>. An empty list (the default) means
-    /// everyone uses <see cref="PerIp"/>.
+    /// Cloud/Hub sessions with no matching credential from addresses outside the list
+    /// and unresolved identities, uses <see cref="PerIp"/>. With credentials disabled and
+    /// an empty list (the defaults), everyone uses <see cref="PerIp"/>.
     /// </summary>
     public ManagedElsaInstanceLifecycleFixedWindowRateLimitOptions BffPerIp { get; init; } = new()
     {
@@ -110,6 +113,7 @@ public sealed class ManagedElsaInstanceLifecycleRateLimiterPolicy : ControlIdent
         IOptions<CloudAccountIdentityOptions> cloudAccount,
         IOptions<HubAccountIdentityOptions> hubAccount,
         IOptions<ControlRateLimitBffEgressOptions> bffEgress,
+        IOptions<ControlRateLimitBffCredentialOptions> bffCredentials,
         ILoggerFactory loggerFactory)
         : base(
             ManagedElsaInstanceLifecycleRateLimitDefaults.PolicyName,
@@ -121,7 +125,8 @@ public sealed class ManagedElsaInstanceLifecycleRateLimiterPolicy : ControlIdent
             limitIdentityForNonBff: true,
             bffPerIp: new ControlRateLimitWindow(options.Value.BffPerIp.PermitLimit, options.Value.BffPerIp.Window),
             bffEgressNetworks: ControlRateLimitBffEgress.Parse(bffEgress.Value.Networks),
-            bffSourceLoggerFactory: loggerFactory)
+            bffSourceLoggerFactory: loggerFactory,
+            bffCredentials: bffCredentials.Value)
     {
     }
 }

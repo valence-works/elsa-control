@@ -30,8 +30,10 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
     internal const string AnonymousIdentityPartition = "anonymous";
     internal const string UnresolvedIdentityPartitionPrefix = "unresolved";
     internal const string BffIpPartitionPrefix = "bff:";
+    internal const string BffCredentialPartitionPrefix = "bff:source:";
     internal const int UnresolvedIdentityPermitLimit = 1;
     private const string CachedPrincipalItemKey = "__control.rate-limit.principal";
+    private const string CachedBffCredentialSourceItemKey = "__control.rate-limit.bff-credential-source";
 
     private static readonly AsyncLocal<HttpContext?> Current = new();
 
@@ -46,12 +48,14 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
         bool limitIdentityForNonBff,
         ControlRateLimitWindow? bffPerIp = null,
         IReadOnlyList<IPNetwork>? bffEgressNetworks = null,
-        ControlRateLimitBffSourceDiagnostic? bffSourceDiagnostic = null)
+        ControlRateLimitBffSourceDiagnostic? bffSourceDiagnostic = null,
+        ControlRateLimitBffCredentialOptions? bffCredentials = null)
     {
         var unresolvedIdentity = new ControlRateLimitWindow(
             UnresolvedIdentityPermitLimit,
             perIdentity.Window);
         var allowlistedEgress = bffEgressNetworks ?? [];
+        var credentialMatcher = new ControlRateLimitBffCredentialMatcher(bffCredentials);
         _inner = PartitionedRateLimiter.CreateChained(
             PartitionedRateLimiter.Create<HttpContext, string>(context =>
             {
@@ -61,11 +65,26 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
                     principal, controlIdentity, cloudAccount, hubAccount);
                 if (bffPerIp is { } bffWindow &&
                     identity is not null &&
-                    IsBffSession(principal, cloudAccount, hubAccount) &&
-                    MatchesBffEgress(context.Connection.RemoteIpAddress))
-                    return RateLimitPartition.GetFixedWindowLimiter(
-                        BffIpPartitionPrefix + ipKey,
-                        _ => CreateWindow(bffWindow));
+                    IsBffSession(principal, cloudAccount, hubAccount))
+                {
+                    var remoteIpAddress = context.Connection.RemoteIpAddress;
+                    var credentialSource = GetBffCredentialSource(context, credentialMatcher);
+                    var egressMatched = ControlRateLimitBffEgress.Contains(remoteIpAddress, allowlistedEgress);
+                    bffSourceDiagnostic?.Record(remoteIpAddress, egressMatched, credentialSource);
+
+                    // A matched credential wins over the egress match, so each BFF has one window
+                    // whatever address it leaves from. It selects that window only for a session
+                    // of its own type: a cloud credential with a Hub session stays on PerIp.
+                    if (CredentialMatchesSession(credentialSource, principal, cloudAccount, hubAccount))
+                        return RateLimitPartition.GetFixedWindowLimiter(
+                            BffCredentialPartitionPrefix + credentialSource,
+                            _ => CreateWindow(bffWindow));
+
+                    if (egressMatched)
+                        return RateLimitPartition.GetFixedWindowLimiter(
+                            BffIpPartitionPrefix + ipKey,
+                            _ => CreateWindow(bffWindow));
+                }
 
                 return RateLimitPartition.GetFixedWindowLimiter(ipKey, _ => CreateWindow(perIp));
             }),
@@ -89,13 +108,6 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
 
                 return RateLimitPartition.GetNoLimiter<string>(AnonymousIdentityPartition);
             }));
-
-        bool MatchesBffEgress(IPAddress? remoteIpAddress)
-        {
-            var matched = ControlRateLimitBffEgress.Contains(remoteIpAddress, allowlistedEgress);
-            bffSourceDiagnostic?.Record(remoteIpAddress, matched);
-            return matched;
-        }
     }
 
     public override TimeSpan? IdleDuration => TimeSpan.Zero;
@@ -161,6 +173,31 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
         HubAccountTokenSelector.IsValidatedHubAccount(principal, hubAccount) ||
         CloudAccountTokenSelector.IsValidatedCloudAccount(principal, cloudAccount);
 
+    private static bool CredentialMatchesSession(
+        string? credentialSource,
+        ClaimsPrincipal? principal,
+        CloudAccountIdentityOptions cloudAccount,
+        HubAccountIdentityOptions hubAccount) =>
+        credentialSource switch
+        {
+            ControlRateLimitBffCredentialSources.Cloud =>
+                CloudAccountTokenSelector.IsValidatedCloudAccount(principal, cloudAccount),
+            ControlRateLimitBffCredentialSources.Hub =>
+                HubAccountTokenSelector.IsValidatedHubAccount(principal, hubAccount),
+            _ => false
+        };
+
+    // Matching runs once per request; the result (a source name or null) is cached like the principal.
+    private static string? GetBffCredentialSource(HttpContext context, ControlRateLimitBffCredentialMatcher matcher)
+    {
+        if (context.Items.TryGetValue(CachedBffCredentialSourceItemKey, out var cached))
+            return cached as string;
+
+        var source = matcher.Match(context.Request.Headers[ControlRateLimitBffCredentialOptions.HeaderName]);
+        context.Items[CachedBffCredentialSourceItemKey] = source;
+        return source;
+    }
+
     private static ClaimsPrincipal? GetAuthenticatedPrincipal(HttpContext context)
     {
         if (context.Items.TryGetValue(CachedPrincipalItemKey, out var cached))
@@ -218,7 +255,8 @@ public abstract class ControlIdentityAndIpRateLimiterPolicy : IRateLimiterPolicy
         bool limitIdentityForNonBff,
         ControlRateLimitWindow? bffPerIp = null,
         IReadOnlyList<IPNetwork>? bffEgressNetworks = null,
-        ILoggerFactory? bffSourceLoggerFactory = null)
+        ILoggerFactory? bffSourceLoggerFactory = null,
+        ControlRateLimitBffCredentialOptions? bffCredentials = null)
     {
         _policyName = policyName;
         _limiter = new ControlIdentityAndIpRateLimiter(
@@ -234,7 +272,8 @@ public abstract class ControlIdentityAndIpRateLimiterPolicy : IRateLimiterPolicy
                 ? null
                 : new ControlRateLimitBffSourceDiagnostic(
                     bffSourceLoggerFactory.CreateLogger(ControlRateLimitBffSourceDiagnostic.LoggerCategory),
-                    policyName));
+                    policyName),
+            bffCredentials);
     }
 
     public Func<OnRejectedContext, CancellationToken, ValueTask>? OnRejected => null;

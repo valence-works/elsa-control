@@ -47,6 +47,11 @@ var secretNames = {
   billingStripeWebhookSourcesControlSigningSecret: 'Billing-Stripe-WebhookSources-control-SigningSecret'
   billingStripeWebhookSourcesHubSigningSecret: 'Billing-Stripe-WebhookSources-hub-SigningSecret'
   managedElsaHandoffActivePrivateKeyPem: 'ManagedElsa-Handoff-ActivePrivateKeyPem'
+  // Optional: written only when RateLimiting:BffCredentials is used (#862).
+  rateLimitingBffCredentialsCloudSecret: 'RateLimiting-BffCredentials-cloud-Secret'
+  rateLimitingBffCredentialsCloudPreviousSecret: 'RateLimiting-BffCredentials-cloud-PreviousSecret'
+  rateLimitingBffCredentialsHubSecret: 'RateLimiting-BffCredentials-hub-Secret'
+  rateLimitingBffCredentialsHubPreviousSecret: 'RateLimiting-BffCredentials-hub-PreviousSecret'
 }
 
 resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
