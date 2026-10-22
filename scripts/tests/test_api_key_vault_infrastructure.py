@@ -158,7 +158,12 @@ class ApiKeyVaultInfrastructureTests(unittest.TestCase):
         validator = (ROOT / "src/Hosting/ElsaControl.Api/Authentication/ControlRateLimitBffCredential.cs").read_text()
         self.assertIn("UnresolvedKeyVaultReferenceGuard.ReferencePrefix", validator)
 
-    def run_check(self, properties: dict, plain_names: tuple[str, ...] = ()) -> subprocess.CompletedProcess[str]:
+    def run_check(
+        self,
+        properties: dict,
+        plain_names: tuple[str, ...] = (),
+        payload: dict | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary:
             fake_az = Path(temporary) / "az"
             fake_az.write_text(
@@ -176,7 +181,18 @@ class ApiKeyVaultInfrastructureTests(unittest.TestCase):
             environment = os.environ.copy()
             environment["PATH"] = f"{temporary}{os.pathsep}{environment['PATH']}"
             environment["FAKE_WEBAPP_ID"] = WEBAPP_ID
-            environment["FAKE_REFERENCES"] = json.dumps({"properties": properties})
+            # The ApiKVReferenceCollection shape that api-version 2022-03-01 returns.
+            environment["FAKE_REFERENCES"] = json.dumps(payload if payload is not None else {
+                "value": [
+                    {
+                        "id": f"{WEBAPP_ID}/config/configreferences/appsettings/{name}",
+                        "name": name,
+                        "type": "Microsoft.Web/sites/config/configreferences",
+                        "properties": entry,
+                    }
+                    for name, entry in properties.items()
+                ]
+            })
             # The site's setting names: every reference plus any plain-value setting.
             environment["FAKE_SETTING_NAMES"] = "\n".join([*properties, *plain_names])
             return subprocess.run(
@@ -218,6 +234,15 @@ class ApiKeyVaultInfrastructureTests(unittest.TestCase):
         missing = self.run_check(required_missing)
         self.assertEqual(2, missing.returncode, missing.stdout + missing.stderr)
         self.assertIn("Authentication__ApiKey\tMissing", missing.stdout)
+
+        # The pre-fix parser read a top-level "properties" map, which the API never returns.
+        legacy = self.run_check(resolved, payload={"properties": resolved})
+        self.assertNotEqual(0, legacy.returncode, legacy.stdout + legacy.stderr)
+        self.assertIn("reference status payload is invalid", legacy.stderr)
+
+        paged = self.run_check(resolved, payload={"value": [], "nextLink": "https://example.test/next"})
+        self.assertNotEqual(0, paged.returncode, paged.stdout + paged.stderr)
+        self.assertIn("reference status payload is paged", paged.stderr)
 
 
 PLAIN_SECRET_VALUES = {
