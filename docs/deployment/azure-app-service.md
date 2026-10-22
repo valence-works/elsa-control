@@ -159,9 +159,12 @@ The credential **only selects a rate-limit partition**:
   (or every Hub) user gets 429 on that policy until the window resets. Set
   each policy's `BffPerIp` above that BFF's peak call rate across all its
   users.
-- Every other caller gets `PerIp`, as before: a wrong value, no header, the
+- Every other caller falls back as before: a wrong value, no header, the
   other BFF's value (a `cloud` value with a Hub session), and an anonymous or
-  unresolved caller. The header never causes a 401 or 403.
+  unresolved caller. A validated session whose address matches
+  `BffEgressNetworks` still gets `BffPerIp` under `bff:<ip>`; every other
+  caller gets `PerIp`. Count egress-matched traffic when sizing `BffPerIp`.
+  The header never causes a 401 or 403.
 - It grants no access, adds no claims and changes no endpoint result. Session
   and token checks (`.AllowCloudBff()`, `.AllowHubBff()`) are unchanged.
 - When both the credential and `BffEgressNetworks` match, the
