@@ -54,6 +54,83 @@ public sealed class ManagedElsaHandoffRateLimitTests
     }
 
     [Fact]
+    public async Task Identity_at_its_limit_does_not_spend_the_shared_bff_source_window()
+    {
+        // #883: with BffPerIp = 3 and PerIdentity = 1, the identity's three refused retries
+        // used to spend the shared window, so the next identity on the same BFF was refused.
+        const string issuer = "https://cloud-account.test/auth/v1";
+        await using var app = CreateCloudApplication(
+            perIp: 1, perIdentity: 1, issuer, bffPerIp: 3, bffCredentials: true);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var exhausted = CloudClient(app, issuer, "11111111-1111-4111-8111-111111111411", "203.0.113.141");
+        using var other = CloudClient(app, issuer, "22222222-2222-4222-8222-222222222412", "203.0.113.142");
+        TestBffCredentials.Set(exhausted, TestBffCredentials.Cloud);
+        TestBffCredentials.Set(other, TestBffCredentials.Cloud);
+
+        using var allowed = await PostIssueAsync(exhausted);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, allowed.StatusCode);
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            using var refused = await PostIssueAsync(exhausted);
+            await AssertHandoffRateLimited(refused);
+        }
+
+        using var otherAllowed = await PostIssueAsync(other);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, otherAllowed.StatusCode);
+    }
+
+    [Fact]
+    public async Task Refusal_by_an_exhausted_shared_window_does_not_spend_the_identity_window()
+    {
+        const string issuer = "https://cloud-account.test/auth/v1";
+        const string sharedIp = "203.0.113.143";
+        const string subject = "11111111-1111-4111-8111-111111111413";
+        await using var app = CreateCloudApplication(perIp: 1, perIdentity: 2, issuer);
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var other = CloudClient(app, issuer, "22222222-2222-4222-8222-222222222414", sharedIp);
+        using var sameIp = CloudClient(app, issuer, subject, sharedIp);
+        using var firstElsewhere = CloudClient(app, issuer, subject, "203.0.113.144");
+        using var secondElsewhere = CloudClient(app, issuer, subject, "203.0.113.145");
+
+        using var otherAllowed = await PostIssueAsync(other);
+        using var firstRefused = await PostIssueAsync(sameIp);
+        using var secondRefused = await PostIssueAsync(sameIp);
+        using var firstAllowed = await PostIssueAsync(firstElsewhere);
+        using var secondAllowed = await PostIssueAsync(secondElsewhere);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, otherAllowed.StatusCode);
+        await AssertHandoffRateLimited(firstRefused);
+        await AssertHandoffRateLimited(secondRefused);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, firstAllowed.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, secondAllowed.StatusCode);
+    }
+
+    [Fact]
+    public async Task Bff_source_diagnostic_records_a_refused_request_once()
+    {
+        const string issuer = "https://cloud-account.test/auth/v1";
+        const string listedIp = "198.51.100.8";
+        var entries = new ConcurrentQueue<RecordedLogEntry>();
+        await using var app = CreateCloudApplication(
+            perIp: 20,
+            perIdentity: 1,
+            issuer,
+            bffPerIp: 20,
+            bffEgressNetworks: [$"{listedIp}/32"],
+            logLevel: "Debug",
+            configureServices: services => services.AddSingleton<ILoggerProvider>(new RecordingLoggerProvider(entries)));
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CloudClient(app, issuer, "11111111-1111-4111-8111-111111111421", listedIp);
+
+        using var allowed = await PostIssueAsync(client);
+        using var refused = await PostIssueAsync(client);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, allowed.StatusCode);
+        await AssertHandoffRateLimited(refused);
+        Assert.Equal(2, entries.Count(entry => entry.Category == ControlRateLimitBffSourceDiagnostic.LoggerCategory));
+    }
+
+    [Fact]
     public async Task Cloud_account_sessions_share_the_per_identity_limit_across_ips()
     {
         const string issuer = "https://cloud-account.test/auth/v1";
