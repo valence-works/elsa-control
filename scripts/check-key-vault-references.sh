@@ -97,9 +97,22 @@ import sys
 wanted = [line.split("\t", 1) for line in sys.stdin.read().splitlines() if line]
 present = {line.strip() for line in sys.argv[2].splitlines() if line.strip()}
 payload = json.loads(sys.argv[1])
-properties = payload.get("properties")
-if not isinstance(properties, dict):
+# ApiKVReferenceCollection: a "value" array of ApiKVReference resources. The last segment
+# of each id is the setting name, two segments after configreferences; the status is
+# properties.status.
+items = payload.get("value") if isinstance(payload, dict) else None
+if not isinstance(items, list):
     raise SystemExit("check-key-vault-references: reference status payload is invalid")
+if payload.get("nextLink"):
+    raise SystemExit("check-key-vault-references: reference status payload is paged; not supported")
+properties = {}
+for item in items:
+    resource_id = item.get("id") if isinstance(item, dict) else None
+    segments = resource_id.split("/") if isinstance(resource_id, str) else []
+    if len(segments) < 3 or segments[-3] != "configreferences" or not segments[-1]:
+        raise SystemExit("check-key-vault-references: reference status payload is invalid")
+    entry = item.get("properties")
+    properties[segments[-1]] = entry if isinstance(entry, dict) else {}
 failed = False
 for kind, name in wanted:
     entry = properties.get(name)

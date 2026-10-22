@@ -80,7 +80,8 @@ internal sealed class ControlIdentityAndIpRateLimiter : RateLimiter
 
                     // A matched credential wins over the egress match, so each BFF has one window
                     // whatever address it leaves from. It selects that window only for a session
-                    // of its own type: a cloud credential with a Hub session stays on PerIp.
+                    // of its own type: a cloud credential with a Hub session falls through to the
+                    // egress match, then PerIp.
                     if (CredentialMatchesSession(credentialSource, principal, cloudAccount, hubAccount))
                         return RateLimitPartition.GetFixedWindowLimiter(
                             BffCredentialPartitionPrefix + credentialSource,
