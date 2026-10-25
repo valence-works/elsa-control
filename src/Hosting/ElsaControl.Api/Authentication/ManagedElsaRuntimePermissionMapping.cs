@@ -6,8 +6,9 @@ namespace ElsaControl.Api.Authentication;
 
 /// <summary>
 /// Maps authenticated Control roles to exact Elsa Studio permissions for the runtime's grant contract.
-/// The workspace role sets the ceiling; the runtime release line selects v1 or v2 (see
-/// <see cref="ManagedElsaRuntimePermissions.UsesStudioGrantsV2"/>):
+/// The workspace role sets the ceiling; the provider-confirmed deployment release selects v1 or v2
+/// (see <see cref="ManagedElsaRuntimePermissions.UsesStudioGrantsV2"/>). A missing confirmed release
+/// keeps v1:
 /// <list type="table">
 /// <listheader><term>Workspace role</term><description>Runtime grants (with <c>instances.open</c>)</description></listheader>
 /// <item><term>Owner</term><description>The Studio grant set on an image that supports it, otherwise Structured Logs read</description></item>

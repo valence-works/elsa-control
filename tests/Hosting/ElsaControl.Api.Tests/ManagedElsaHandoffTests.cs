@@ -326,7 +326,7 @@ public sealed class ManagedElsaHandoffTests
             const string endpointUri = "https://managed.example.test";
             var studioGrantsDeploymentId = studioGrantsSupported ? deploymentId : null;
             await db.Database.ExecuteSqlInterpolatedAsync(
-                $"UPDATE ElsaInstances SET CurrentDeploymentId = {deploymentId}, CurrentDeploymentEndpointUri = {endpointUri}, CurrentDeploymentManagedHandoff = {true}, CurrentDeploymentStudioGrants = {studioGrantsSupported}, CurrentDeploymentStudioGrantsDeploymentId = {studioGrantsDeploymentId}, DesiredLifecycle = {ElsaDesiredLifecycle.Running.ToString()}, ObservedLifecycle = {ElsaObservedLifecycle.Ready.ToString()}, Health = {ElsaInstanceHealth.Healthy.ToString()} WHERE Id = {instanceId}");
+                $"UPDATE ElsaInstances SET CurrentDeploymentId = {deploymentId}, CurrentDeploymentEndpointUri = {endpointUri}, CurrentDeploymentManagedHandoff = {true}, CurrentDeploymentStudioGrants = {studioGrantsSupported}, CurrentDeploymentStudioGrantsDeploymentId = {studioGrantsDeploymentId}, CurrentDeploymentReleaseLine = {releaseLine}, CurrentDeploymentReleaseVersion = {releaseVersion}, CurrentDeploymentReleaseDeploymentId = {deploymentId}, DesiredLifecycle = {ElsaDesiredLifecycle.Running.ToString()}, ObservedLifecycle = {ElsaObservedLifecycle.Ready.ToString()}, Health = {ElsaInstanceHealth.Healthy.ToString()} WHERE Id = {instanceId}");
             db.ChangeTracker.Clear();
         }
 
@@ -462,7 +462,7 @@ public sealed class ManagedElsaHandoffTests
             // Exercise the strongest deployed Studio capability set; a workspace Reader must still receive none of
             // its dashboard or designer grants, whatever their organization role.
             await db.Database.ExecuteSqlInterpolatedAsync(
-                $"UPDATE ElsaInstances SET CurrentDeploymentId = {"deployment-managed"}, CurrentDeploymentStudioGrants = {true}, CurrentDeploymentStudioGrantsDeploymentId = {"deployment-managed"} WHERE Id = {setup.InstanceId}");
+                $"UPDATE ElsaInstances SET CurrentDeploymentId = {"deployment-managed"}, CurrentDeploymentStudioGrants = {true}, CurrentDeploymentStudioGrantsDeploymentId = {"deployment-managed"}, CurrentDeploymentReleaseLine = {"3.10"}, CurrentDeploymentReleaseVersion = {"3.10.4"}, CurrentDeploymentReleaseDeploymentId = {"deployment-managed"} WHERE Id = {setup.InstanceId}");
         }
 
         using var reader = app.CreateControlIdentityClient(readerSubject);
@@ -543,6 +543,80 @@ public sealed class ManagedElsaHandoffTests
         Assert.Equal(HttpStatusCode.Forbidden, deniedIssue.StatusCode);
     }
 
+    public enum DeployedReleaseScenario
+    {
+        UpgradeInFlight,
+        UpgradeFailedOrHeld,
+        Confirmed39,
+        RollbackConfirmedTo38,
+        MissingDeployedRelease
+    }
+
+    [Theory]
+    [InlineData(DeployedReleaseScenario.UpgradeInFlight)]
+    [InlineData(DeployedReleaseScenario.UpgradeFailedOrHeld)]
+    [InlineData(DeployedReleaseScenario.Confirmed39)]
+    [InlineData(DeployedReleaseScenario.RollbackConfirmedTo38)]
+    [InlineData(DeployedReleaseScenario.MissingDeployedRelease)]
+    public async Task Studio_grants_follow_the_confirmed_deployment_release_not_the_resolved_plan(
+        DeployedReleaseScenario scenario)
+    {
+        var setup = await SeedManagedInstanceAsync(
+            ElsaDesiredLifecycle.Running,
+            ElsaObservedLifecycle.Ready,
+            ElsaInstanceHealth.Healthy,
+            bind: true);
+        await using var app = setup.App;
+
+        // CurrentReleaseLine is the resolved plan and can move before confirmation, including
+        // held or failed operations. Grants follow CurrentDeploymentRelease* only.
+        var (plannedLine, plannedVersion, deployedLine, deployedVersion, expectV2) = scenario switch
+        {
+            DeployedReleaseScenario.UpgradeInFlight => ("3.9", "3.9.0", "3.8", "3.8.1", false),
+            DeployedReleaseScenario.UpgradeFailedOrHeld => ("3.9", "3.9.0", "3.8", "3.8.1", false),
+            DeployedReleaseScenario.Confirmed39 => ("3.9", "3.9.0", "3.9", "3.9.0", true),
+            DeployedReleaseScenario.RollbackConfirmedTo38 => ("3.8", "3.8.1", "3.8", "3.8.1", false),
+            DeployedReleaseScenario.MissingDeployedRelease => ("3.9", "3.9.0", null, null, false),
+            _ => throw new ArgumentOutOfRangeException(nameof(scenario), scenario, null)
+        };
+
+        await ExecuteSqlAsync(app, db => db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstances
+            SET CurrentReleaseLine = {plannedLine},
+                CurrentReleaseVersion = {plannedVersion},
+                CurrentDeploymentId = {"deployment-managed"},
+                CurrentDeploymentEndpointUri = {"https://managed.example.test"},
+                CurrentDeploymentManagedHandoff = {true},
+                CurrentDeploymentStudioGrants = {true},
+                CurrentDeploymentStudioGrantsDeploymentId = {"deployment-managed"},
+                CurrentDeploymentReleaseLine = {deployedLine},
+                CurrentDeploymentReleaseVersion = {deployedVersion},
+                CurrentDeploymentReleaseDeploymentId = {(deployedLine is null ? null : "deployment-managed")}
+            WHERE Id = {setup.InstanceId}
+            """));
+
+        var request = new ManagedElsaHandoffIssueRequest(
+            setup.OrganizationId,
+            setup.InstanceId,
+            setup.Audience,
+            setup.RedirectUri,
+            ManagedElsaHandoffIssuer.CreateCodeChallenge(CodeVerifier));
+        var issue = await setup.Client.PostControlJsonAsync("/api/managed-elsa/handoff/issue", request);
+        Assert.Equal(HttpStatusCode.OK, issue.StatusCode);
+        var grants = new JwtSecurityTokenHandler()
+            .ReadJwtToken((await issue.Content.ReadControlJsonAsync<ManagedElsaHandoffIssueResponse>())!.Token)
+            .Claims
+            .Where(claim => claim.Type == ManagedElsaHandoffDefaults.RuntimePermissionClaim)
+            .Select(claim => claim.Value)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(
+            (expectV2 ? ManagedElsaRuntimePermissions.StudioGrantsV2 : ManagedElsaRuntimePermissions.StudioGrantsV1)
+                .Order(StringComparer.Ordinal),
+            grants);
+    }
+
     public enum RedemptionChange { OwnerDemotedToReader, EngineBackOnLegacyImage }
 
     [Theory]
@@ -557,7 +631,7 @@ public sealed class ManagedElsaHandoffTests
             bind: true);
         await using var app = setup.App;
         await ExecuteSqlAsync(app, db => db.Database.ExecuteSqlInterpolatedAsync(
-            $"UPDATE ElsaInstances SET CurrentDeploymentId = {"deployment-managed"}, CurrentDeploymentStudioGrants = {true}, CurrentDeploymentStudioGrantsDeploymentId = {"deployment-managed"} WHERE Id = {setup.InstanceId}"));
+            $"UPDATE ElsaInstances SET CurrentDeploymentId = {"deployment-managed"}, CurrentDeploymentStudioGrants = {true}, CurrentDeploymentStudioGrantsDeploymentId = {"deployment-managed"}, CurrentDeploymentReleaseLine = {"3.10"}, CurrentDeploymentReleaseVersion = {"3.10.4"}, CurrentDeploymentReleaseDeploymentId = {"deployment-managed"} WHERE Id = {setup.InstanceId}"));
         var request = new ManagedElsaHandoffIssueRequest(
             setup.OrganizationId,
             setup.InstanceId,

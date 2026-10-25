@@ -2990,6 +2990,18 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<bool>("CurrentDeploymentManagedHandoff")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("CurrentDeploymentReleaseDeploymentId")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CurrentDeploymentReleaseLine")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CurrentDeploymentReleaseVersion")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("CurrentDeploymentRevisionId")
                         .HasMaxLength(128)
                         .HasColumnType("TEXT");

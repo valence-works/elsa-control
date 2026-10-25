@@ -3011,6 +3011,18 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<bool>("CurrentDeploymentManagedHandoff")
                         .HasColumnType("bit");
 
+                    b.Property<string>("CurrentDeploymentReleaseDeploymentId")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<string>("CurrentDeploymentReleaseLine")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<string>("CurrentDeploymentReleaseVersion")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
                     b.Property<string>("CurrentDeploymentRevisionId")
                         .HasMaxLength(128)
                         .HasColumnType("nvarchar(128)");

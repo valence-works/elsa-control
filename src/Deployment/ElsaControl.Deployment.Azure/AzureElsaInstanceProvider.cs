@@ -1379,7 +1379,8 @@ public sealed class AzureElsaInstanceProvider(
     /// </summary>
     private static ElsaCurrentDeploymentReference? CurrentDeployment(AzureProviderOperation operation) =>
         new(operation.OperationIdentity, $"attempt-{operation.AttemptNumber}", operation.Endpoint,
-            operation.ManagedHandoff, operation.ManagedHandoffStudioGrants);
+            operation.ManagedHandoff, operation.ManagedHandoffStudioGrants,
+            operation.ReleaseLine, operation.ElsaVersion);
 
     public static string WorkloadName(Guid instanceId) => $"e{instanceId:N}"[..16];
 

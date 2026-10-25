@@ -322,11 +322,8 @@ public sealed class EfCoreManagedElsaInstanceIdentityStore(CatalogDbContext dbCo
             binding.BindingVersion,
             binding.ChangedAt,
             entity.CurrentDeploymentHonorsStudioGrants(),
-            FirstNonEmpty(entity.CurrentReleaseLine, entity.ReleaseLine),
-            FirstNonEmpty(entity.CurrentReleaseVersion, entity.RequestedVersion));
-
-    private static string? FirstNonEmpty(string? preferred, string? fallback) =>
-        !string.IsNullOrWhiteSpace(preferred) ? preferred : string.IsNullOrWhiteSpace(fallback) ? null : fallback;
+            entity.CurrentDeploymentHonorsDeployedRelease() ? entity.CurrentDeploymentReleaseLine : null,
+            entity.CurrentDeploymentHonorsDeployedRelease() ? entity.CurrentDeploymentReleaseVersion : null);
 
     private static bool IsUnavailable(ElsaInstanceEntity entity) =>
         entity.DeletedAt is not null ||

@@ -111,6 +111,11 @@ internal sealed class ElsaInstanceEntity
     // The deployment id this Studio-grants flag was written with. An older Control build can
     // change or clear CurrentDeploymentId without touching the new columns; a mismatch is ignored.
     public string? CurrentDeploymentStudioGrantsDeploymentId { get; set; }
+    // Release of the provider-confirmed current deployment. CurrentReleaseLine is the resolved
+    // plan and can move before confirmation, including held or failed operations.
+    public string? CurrentDeploymentReleaseLine { get; set; }
+    public string? CurrentDeploymentReleaseVersion { get; set; }
+    public string? CurrentDeploymentReleaseDeploymentId { get; set; }
     public string? PlacementAssignmentId { get; set; }
     public string? ElsaTenantId { get; set; }
     public string? ElsaTenantAudience { get; set; }
@@ -138,6 +143,16 @@ internal sealed class ElsaInstanceEntity
         && CurrentDeploymentManagedHandoff
         && CurrentDeploymentId is not null
         && string.Equals(CurrentDeploymentStudioGrantsDeploymentId, CurrentDeploymentId, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Honour the confirmed deployment's release only when it still names
+    /// <see cref="CurrentDeploymentId"/>. A missing or mismatched value keeps the v1 contract.
+    /// </summary>
+    internal bool CurrentDeploymentHonorsDeployedRelease() =>
+        CurrentDeploymentId is not null
+        && string.Equals(CurrentDeploymentReleaseDeploymentId, CurrentDeploymentId, StringComparison.Ordinal)
+        && (!string.IsNullOrWhiteSpace(CurrentDeploymentReleaseLine) ||
+            !string.IsNullOrWhiteSpace(CurrentDeploymentReleaseVersion));
 }
 
 /// <summary>

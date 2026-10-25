@@ -13,8 +13,10 @@ equals a constant pinned in both repositories, so neither side can change the co
 
 ## Version selection
 
-Control and the image pick a contract from the runtime's **release line**, falling back to the catalog or manifest
-version when the line is missing. This is per release, not a global switch.
+The image picks a contract from its own **release line**, falling back to the catalog or manifest version when the
+line is missing. Control issue and redeem use the provider-confirmed deployment's release (the same identity the
+image was deployed with), not the next resolved plan. A missing confirmed release keeps v1. This is per runtime,
+not a global switch.
 
 | Runtime release line (or catalog / manifest version) | Capability the image must declare | Grant set Control issues and the image allowlists |
 | --- | --- | --- |

@@ -73,7 +73,8 @@
     },
     "managedHandoffAllowedRuntimePermissions": {
       "value": [
-        "read:diagnostics:structured-logs"
+        "read:diagnostics:structured-logs",
+        "diagnostics/structured-logs:view"
       ]
     }
   }

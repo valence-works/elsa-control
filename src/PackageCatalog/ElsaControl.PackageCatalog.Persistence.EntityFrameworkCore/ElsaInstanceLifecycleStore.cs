@@ -3834,6 +3834,15 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         entity.CurrentDeploymentStudioGrantsDeploymentId = studioGrants
             ? instance.CurrentDeploymentReference!.DeploymentId
             : null;
+        var deployedRelease = instance.CurrentDeploymentReference;
+        entity.CurrentDeploymentReleaseLine = deployedRelease?.ReleaseLine;
+        entity.CurrentDeploymentReleaseVersion = deployedRelease?.ReleaseVersion;
+        entity.CurrentDeploymentReleaseDeploymentId =
+            deployedRelease is not null &&
+            (!string.IsNullOrWhiteSpace(deployedRelease.ReleaseLine) ||
+             !string.IsNullOrWhiteSpace(deployedRelease.ReleaseVersion))
+                ? deployedRelease.DeploymentId
+                : null;
         entity.PlacementAssignmentId = instance.PlacementAssignmentReference?.AssignmentId;
         entity.ElsaTenantId = instance.ElsaTenantReference?.TenantId;
         entity.ElsaTenantAudience = instance.ElsaTenantReference?.Audience;
@@ -4547,9 +4556,12 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         // therefore drops it rather than failing to load the instance. Studio grants that no longer
         // belong to this deployment (or that lack a handoff) degrade to diagnostics-only.
         var managedHandoff = entity.CurrentDeploymentManagedHandoff && endpoint is not null;
+        var honorsDeployedRelease = entity.CurrentDeploymentHonorsDeployedRelease();
         return new ElsaCurrentDeploymentReference(entity.CurrentDeploymentId, entity.CurrentDeploymentRevisionId, endpoint,
             managedHandoff,
-            managedHandoff && entity.CurrentDeploymentHonorsStudioGrants());
+            managedHandoff && entity.CurrentDeploymentHonorsStudioGrants(),
+            honorsDeployedRelease ? entity.CurrentDeploymentReleaseLine : null,
+            honorsDeployedRelease ? entity.CurrentDeploymentReleaseVersion : null);
     }
 
     private static ElsaTenantReference? MapTenant(ElsaInstanceEntity entity)
