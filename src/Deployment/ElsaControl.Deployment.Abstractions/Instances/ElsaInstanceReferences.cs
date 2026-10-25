@@ -191,7 +191,9 @@ public sealed record ElsaCurrentDeploymentReference
         string? revisionId = null,
         string? endpointUri = null,
         bool managedHandoff = false,
-        bool studioGrantsSupported = false)
+        bool studioGrantsSupported = false,
+        string? releaseLine = null,
+        string? releaseVersion = null)
     {
         DeploymentId = ElsaInstanceReferenceValue.RequireToken(deploymentId, nameof(deploymentId));
         RevisionId = ElsaInstanceReferenceValue.OptionalToken(revisionId, nameof(revisionId));
@@ -202,6 +204,12 @@ public sealed record ElsaCurrentDeploymentReference
             throw new ArgumentException("Studio grants require a managed handoff on the deployed image.", nameof(studioGrantsSupported));
         ManagedHandoff = managedHandoff;
         StudioGrantsSupported = studioGrantsSupported;
+        ReleaseLine = ElsaInstanceValue.CatalogOptional(releaseLine);
+        ReleaseVersion = ElsaInstanceValue.CatalogOptional(releaseVersion);
+        if (ReleaseLine is not null &&
+            ReleaseVersion is not null &&
+            !ElsaReleaseVersions.BelongsToLine(ReleaseLine, ReleaseVersion))
+            throw new ArgumentException("Version must belong to the selected release line.", nameof(releaseVersion));
     }
 
     public string DeploymentId { get; }
@@ -217,6 +225,15 @@ public sealed record ElsaCurrentDeploymentReference
 
     /// <summary>True only after the current deployment's signed image supports exact Studio grants.</summary>
     public bool StudioGrantsSupported { get; }
+
+    /// <summary>
+    /// Release line of the provider-confirmed deployment, not the next resolved plan.
+    /// Missing on rows written before this field existed; handoff then keeps the v1 contract.
+    /// </summary>
+    public string? ReleaseLine { get; }
+
+    /// <summary>Release version of the provider-confirmed deployment, when the image recorded one.</summary>
+    public string? ReleaseVersion { get; }
 
     public string DeploymentReference => DeploymentId;
 

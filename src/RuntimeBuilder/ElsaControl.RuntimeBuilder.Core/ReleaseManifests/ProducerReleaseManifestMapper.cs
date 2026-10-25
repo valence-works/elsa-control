@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.RuntimeBuilder.Abstractions.Plans;
 using ElsaControl.RuntimeBuilder.Abstractions.ReleaseManifests;
 
@@ -941,16 +942,33 @@ internal static class ProducerReleaseManifestMapper
         var hasManagedHandoff = capabilities.Contains(
             ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaHandoffV2,
             StringComparer.Ordinal);
-        var hasStudioGrants = capabilities.Contains(
+        var hasStudioGrantsV1 = capabilities.Contains(
             ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV1,
             StringComparer.Ordinal);
+        var hasStudioGrantsV2 = capabilities.Contains(
+            ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV2,
+            StringComparer.Ordinal);
+        var hasStudioGrants = hasStudioGrantsV1 || hasStudioGrantsV2;
         var hasServerRuntime = runtimeKinds.Contains("elsa.server", StringComparer.OrdinalIgnoreCase);
         var hasIntegrations = image.TryGetProperty("integrations", out var integrations);
 
+        if (hasStudioGrantsV1 && hasStudioGrantsV2)
+            Add(findings, "integration.studioGrants.duplicate", "An image may declare only one Studio grants capability.", "image.capabilities");
         if (hasStudioGrants && !hasManagedHandoff)
             Add(findings, "integration.studioGrants.handoffRequired", "Studio grants require the managed handoff capability.", "image.capabilities");
         if (hasStudioGrants && !hasServerRuntime)
             Add(findings, "integration.studioGrants.runtimeKindRequired", "Studio grants require an Elsa server runtime kind.", "image.capabilities");
+        if (hasStudioGrants)
+        {
+            var requiredCapability = ManagedElsaRuntimePermissions.RequiredCapability(releaseLine);
+            if (!string.Equals(
+                    hasStudioGrantsV2
+                        ? ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV2
+                        : ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV1,
+                    requiredCapability,
+                    StringComparison.Ordinal))
+                Add(findings, "integration.studioGrants.contract.releaseLine.mismatch", "The Studio grants capability must match the runtime release line.", "image.capabilities");
+        }
 
         if (!hasIntegrations)
         {

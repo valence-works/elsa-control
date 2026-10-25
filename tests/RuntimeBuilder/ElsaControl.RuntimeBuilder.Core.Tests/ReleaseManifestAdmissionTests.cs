@@ -155,6 +155,65 @@ public sealed class ReleaseManifestAdmissionTests
     }
 
     [Fact]
+    public async Task Studio_grant_v2_capability_is_projected_for_a_3_9_release_line()
+    {
+        var producer = JsonNode.Parse(ProducerFixture())!;
+        AddManagedHandoffCapability(producer, "3.9", "combined");
+        var combined = producer["distributions"]!.AsArray()
+            .Single(distribution => distribution!["topology"]!.GetValue<string>() == "combined")!;
+        combined["capabilities"]!.AsArray().Add(ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV2);
+        RefreshProducerCanonicalDigest(producer);
+        var artifact = ProducerArtifact(producer.ToJsonString());
+
+        var admission = await new ReleaseManifestAdmissionService(
+                new StubSignatureVerifier(ProducerVerification(artifact)))
+            .AdmitAsync(artifact, new(ProducerSigner, "paid", "combined"));
+
+        Assert.True(admission.Accepted, string.Join("; ", admission.Findings.Select(x => x.Code)));
+        var component = Assert.Single(ReleaseManifestPlanProjector.Project(admission, CreatePlan()).Topology.Components);
+        Assert.Contains(ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV2, component.Capabilities);
+    }
+
+    [Fact]
+    public async Task Studio_grant_capability_must_match_the_release_line()
+    {
+        var producer = JsonNode.Parse(ProducerFixture())!;
+        AddManagedHandoffCapability(producer, "3.9", "combined");
+        var combined = producer["distributions"]!.AsArray()
+            .Single(distribution => distribution!["topology"]!.GetValue<string>() == "combined")!;
+        combined["capabilities"]!.AsArray().Add(ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV1);
+        RefreshProducerCanonicalDigest(producer);
+        var artifact = ProducerArtifact(producer.ToJsonString());
+
+        var admission = await new ReleaseManifestAdmissionService(
+                new StubSignatureVerifier(ProducerVerification(artifact)))
+            .AdmitAsync(artifact, new(ProducerSigner, "paid", "combined"));
+
+        Assert.False(admission.Accepted);
+        Assert.Contains(admission.Findings, finding => finding.Code == "integration.studioGrants.contract.releaseLine.mismatch");
+    }
+
+    [Fact]
+    public async Task Studio_grant_v1_and_v2_cannot_be_declared_together()
+    {
+        var producer = JsonNode.Parse(ProducerFixture())!;
+        AddManagedHandoffCapability(producer, "3.8", "combined");
+        var combined = producer["distributions"]!.AsArray()
+            .Single(distribution => distribution!["topology"]!.GetValue<string>() == "combined")!;
+        combined["capabilities"]!.AsArray().Add(ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV1);
+        combined["capabilities"]!.AsArray().Add(ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV2);
+        RefreshProducerCanonicalDigest(producer);
+        var artifact = ProducerArtifact(producer.ToJsonString());
+
+        var admission = await new ReleaseManifestAdmissionService(
+                new StubSignatureVerifier(ProducerVerification(artifact)))
+            .AdmitAsync(artifact, new(ProducerSigner, "paid", "combined"));
+
+        Assert.False(admission.Accepted);
+        Assert.Contains(admission.Findings, finding => finding.Code == "integration.studioGrants.duplicate");
+    }
+
+    [Fact]
     public async Task Managed_handoff_claim_on_studio_only_image_is_rejected_before_admission()
     {
         var producer = JsonNode.Parse(ProducerFixture())!;

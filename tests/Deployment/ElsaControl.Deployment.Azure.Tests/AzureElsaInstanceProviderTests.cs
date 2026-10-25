@@ -88,6 +88,8 @@ public sealed class AzureElsaInstanceProviderTests
         Assert.Equal("attempt-2", observation.CurrentDeploymentReference?.RevisionId);
         Assert.Equal("https://runtime.example.test", observation.CurrentDeploymentReference?.EndpointUri);
         Assert.Equal(managedHandoff, observation.CurrentDeploymentReference?.ManagedHandoff);
+        Assert.Equal(operation.ReleaseLine, observation.CurrentDeploymentReference?.ReleaseLine);
+        Assert.Equal(operation.ElsaVersion, observation.CurrentDeploymentReference?.ReleaseVersion);
     }
 
     [Fact]

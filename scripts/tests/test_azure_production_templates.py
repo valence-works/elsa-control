@@ -161,7 +161,10 @@ class AzureProductionTemplateTests(unittest.TestCase):
         control = parameters["managedHandoffControlBaseUrl"]["value"]
         self.assertEqual(f"{control}/admin/runtimes", parameters["managedHandoffControlContinuationUrl"]["value"])
         self.assertEqual("08:00:00", parameters["managedHandoffRuntimeMaximumLifetime"]["value"])
-        self.assertEqual(["read:diagnostics:structured-logs"], parameters["managedHandoffAllowedRuntimePermissions"]["value"])
+        self.assertEqual(
+            ["diagnostics/structured-logs:view"],
+            parameters["managedHandoffAllowedRuntimePermissions"]["value"],
+        )
         self.assertNotIn("managedHandoffCallbackUri", parameters)
 
     def test_runtime_admin_identity_is_required_and_secret_safe(self) -> None:

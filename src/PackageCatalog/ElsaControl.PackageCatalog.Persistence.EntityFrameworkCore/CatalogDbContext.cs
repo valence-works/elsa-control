@@ -1059,6 +1059,16 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
                 instance.CurrentDeploymentStudioGrantsDeploymentId,
                 nameof(instance.CurrentDeploymentStudioGrantsDeploymentId),
                 128);
+            instance.CurrentDeploymentReleaseLine = OptionalCatalogValue(
+                instance.CurrentDeploymentReleaseLine,
+                nameof(instance.CurrentDeploymentReleaseLine));
+            instance.CurrentDeploymentReleaseVersion = OptionalCatalogValue(
+                instance.CurrentDeploymentReleaseVersion,
+                nameof(instance.CurrentDeploymentReleaseVersion));
+            instance.CurrentDeploymentReleaseDeploymentId = OptionalSafeReference(
+                instance.CurrentDeploymentReleaseDeploymentId,
+                nameof(instance.CurrentDeploymentReleaseDeploymentId),
+                128);
             var endpointProperty = entry.Property(x => x.CurrentDeploymentEndpointUri);
             var allowLegacyEndpoint = entry.State == EntityState.Modified && !endpointProperty.IsModified;
             var persistedEndpoint = instance.CurrentDeploymentEndpointUri;
@@ -1079,6 +1089,8 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
                         instance.CurrentDeploymentStudioGrants = false;
                         instance.CurrentDeploymentStudioGrantsDeploymentId = null;
                     }
+                    if (!entry.Property(x => x.CurrentDeploymentReleaseDeploymentId).IsModified)
+                        ClearCurrentDeploymentRelease(instance);
                 }
                 else
                     throw new InvalidOperationException("A managed handoff must belong to a current deployment with an endpoint.");
@@ -1092,6 +1104,17 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
                     instance.CurrentDeploymentStudioGrants = false;
                     instance.CurrentDeploymentStudioGrantsDeploymentId = null;
                 }
+            }
+            if (instance.CurrentDeploymentReleaseLine is not null ||
+                instance.CurrentDeploymentReleaseVersion is not null ||
+                instance.CurrentDeploymentReleaseDeploymentId is not null)
+            {
+                if (!instance.CurrentDeploymentHonorsDeployedRelease())
+                    ClearCurrentDeploymentRelease(instance);
+                else if (instance.CurrentDeploymentReleaseLine is not null &&
+                         instance.CurrentDeploymentReleaseVersion is not null &&
+                         !BelongsToReleaseLine(instance.CurrentDeploymentReleaseLine, instance.CurrentDeploymentReleaseVersion))
+                    throw new InvalidOperationException("Current deployment release version must belong to the selected release line.");
             }
             instance.PlacementAssignmentId = OptionalSafeReference(instance.PlacementAssignmentId, nameof(instance.PlacementAssignmentId), 128);
             instance.ElsaTenantId = OptionalSafeReference(instance.ElsaTenantId, nameof(instance.ElsaTenantId), 128);
@@ -1788,6 +1811,13 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
 
     private static string? OptionalSafeReference(string? value, string name, int maxLength) =>
         string.IsNullOrWhiteSpace(value) ? null : RequireSafeReference(value, name, maxLength);
+
+    private static void ClearCurrentDeploymentRelease(Models.ElsaInstanceEntity instance)
+    {
+        instance.CurrentDeploymentReleaseLine = null;
+        instance.CurrentDeploymentReleaseVersion = null;
+        instance.CurrentDeploymentReleaseDeploymentId = null;
+    }
 
     private static string RequireSafeToken(string? value, string name, int maxLength)
     {

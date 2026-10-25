@@ -1,0 +1,13 @@
+{
+  "capability": "managed-elsa-studio-grants-v2",
+  "permissions": [
+    "diagnostics/structured-logs:view",
+    "dashboard:view",
+    "workflows/definitions:view",
+    "workflows/definitions/versions:view",
+    "workflows/definitions:write",
+    "workflows/definitions:publish",
+    "workflows/definitions/versions:revert",
+    "workflows/descriptors/activities:view"
+  ]
+}

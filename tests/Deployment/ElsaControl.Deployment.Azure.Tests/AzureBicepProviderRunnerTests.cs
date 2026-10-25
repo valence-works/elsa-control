@@ -479,7 +479,7 @@ public sealed partial class AzureBicepProviderRunnerTests : IDisposable
         {
             ManagedHandoff = ControlHandoff with
             {
-                AllowedRuntimePermissions = ManagedElsaRuntimePermissions.StudioGrantsV1
+                AllowedRuntimePermissions = ManagedElsaRuntimePermissions.AllSupported
             }
         };
         var context = ContextFor(options);
@@ -499,11 +499,45 @@ public sealed partial class AzureBicepProviderRunnerTests : IDisposable
             "managedHandoffControlBaseUrl=https://control.example.test",
             "managedHandoffControlContinuationUrl=https://control.example.test/admin/runtimes",
             "managedHandoffRuntimeMaximumLifetime=08:00:00",
-            $"managedHandoffAllowedRuntimePermissions={JsonSerializer.Serialize(supportsStudioGrants
-                ? ManagedElsaRuntimePermissions.StudioGrantsV1
-                : ManagedElsaRuntimePermissions.DiagnosticsOnly)}"
+            $"managedHandoffAllowedRuntimePermissions={JsonSerializer.Serialize(ManagedElsaRuntimePermissions.SelectedFor(
+                supportsStudioGrants,
+                _fixture.Plan.ReleaseLine,
+                _fixture.Plan.ElsaVersion))}"
         ], deployment.Where(IsHandoffArgument));
         Assert.DoesNotContain(deployment, argument => argument.StartsWith("managedHandoffCallbackUri=", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(AzureProviderRunnerStep.Foundation, false)]
+    [InlineData(AzureProviderRunnerStep.Workload, false)]
+    [InlineData(AzureProviderRunnerStep.Foundation, true)]
+    [InlineData(AzureProviderRunnerStep.Workload, true)]
+    public async Task Production_deployment_selects_v2_grants_for_a_3_9_release_line(AzureProviderRunnerStep step, bool supportsStudioGrants)
+    {
+        var options = _fixture.Options with
+        {
+            ManagedHandoff = ControlHandoff with
+            {
+                AllowedRuntimePermissions = ManagedElsaRuntimePermissions.AllSupported
+            }
+        };
+        var context = ContextFor(options);
+        var plan = _fixture.Plan with
+        {
+            ElsaVersion = "3.9.0",
+            ReleaseLine = "3.9",
+            ManagedHandoff = true,
+            ManagedHandoffStudioGrants = supportsStudioGrants
+        };
+
+        var deployment = await ProductionDeploymentAsync(step, plan, options, context);
+
+        Assert.Contains(
+            $"managedHandoffAllowedRuntimePermissions={JsonSerializer.Serialize(ManagedElsaRuntimePermissions.SelectedFor(
+                supportsStudioGrants,
+                plan.ReleaseLine,
+                plan.ElsaVersion))}",
+            deployment.Where(IsHandoffArgument));
     }
 
     [Theory]

@@ -34,8 +34,16 @@ public static class ReleaseManifestRuntimeIntegrationCapabilities
     /// <summary>
     /// The image accepts Control's exact owner/admin Studio grants during managed handoff.
     /// Older handoff-v2 images support only structured-log read and must not receive these grants.
+    /// Elsa 3.8 and older declare this capability; 3.9 and newer declare
+    /// <see cref="ManagedElsaStudioGrantsV2"/>.
     /// </summary>
     public const string ManagedElsaStudioGrantsV1 = "managed-elsa-studio-grants-v1";
+
+    /// <summary>
+    /// Elsa 3.9 <c>resource:verb</c> Studio grants. See
+    /// <c>contracts/managed-elsa-studio-grants-v2.json</c>.
+    /// </summary>
+    public const string ManagedElsaStudioGrantsV2 = "managed-elsa-studio-grants-v2";
 }
 
 public sealed record CommercialReleaseManifest(

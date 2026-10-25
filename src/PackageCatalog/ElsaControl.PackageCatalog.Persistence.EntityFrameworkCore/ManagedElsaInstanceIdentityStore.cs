@@ -321,7 +321,9 @@ public sealed class EfCoreManagedElsaInstanceIdentityStore(CatalogDbContext dbCo
             callbackUri ?? new Uri(binding.CanonicalCallbackUri, UriKind.Absolute),
             binding.BindingVersion,
             binding.ChangedAt,
-            entity.CurrentDeploymentHonorsStudioGrants());
+            entity.CurrentDeploymentHonorsStudioGrants(),
+            entity.CurrentDeploymentHonorsDeployedRelease() ? entity.CurrentDeploymentReleaseLine : null,
+            entity.CurrentDeploymentHonorsDeployedRelease() ? entity.CurrentDeploymentReleaseVersion : null);
 
     private static bool IsUnavailable(ElsaInstanceEntity entity) =>
         entity.DeletedAt is not null ||

@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Collections.ObjectModel;
+using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.RuntimeBuilder.Abstractions.Plans;
 using ElsaControl.RuntimeBuilder.Abstractions.ReleaseManifests;
 using NuGet.Versioning;
@@ -86,8 +87,11 @@ public static class AzureWorkloadPlanTranslator
         if (findings.Count > 0)
             return Rejected(findings);
         var managedHandoff = ConfiguresManagedHandoff(component, capacity!);
+        var requiredStudioGrantsCapability = ManagedElsaRuntimePermissions.RequiredCapability(
+            normalized.Release.ReleaseLine,
+            normalized.Release.Version);
         var managedHandoffStudioGrants = managedHandoff && component.Capabilities.Contains(
-            ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV1,
+            requiredStudioGrantsCapability,
             StringComparer.Ordinal);
         var evidence = normalized.Evidence.Single(x =>
             string.Equals(x.Kind, ReleaseManifestEvidenceKinds.Manifest, StringComparison.OrdinalIgnoreCase));

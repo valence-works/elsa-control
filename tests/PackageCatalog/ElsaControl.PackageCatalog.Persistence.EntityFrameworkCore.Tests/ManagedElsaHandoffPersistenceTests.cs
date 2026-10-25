@@ -476,6 +476,59 @@ public sealed class ManagedElsaHandoffPersistenceTests
             Assert.Single(await catalog.ListAsync(instance.WorkspaceId)).CallbackUri?.AbsoluteUri);
     }
 
+    [Fact]
+    public async Task Confirmed_deployment_release_is_bound_to_the_current_deployment_id()
+    {
+        await using var connection = NewConnection();
+        await connection.OpenAsync();
+        await using var db = CreateContext(connection);
+        await db.Database.MigrateAsync();
+        var instance = await SeedInstanceAsync(db);
+        instance.ObservedLifecycle = ElsaObservedLifecycle.Ready;
+        instance.Health = ElsaInstanceHealth.Healthy;
+        instance.CurrentDeploymentManagedHandoff = true;
+        instance.CurrentDeploymentStudioGrants = true;
+        instance.CurrentDeploymentStudioGrantsDeploymentId = instance.CurrentDeploymentId;
+        instance.CurrentDeploymentReleaseLine = "3.8";
+        instance.CurrentDeploymentReleaseVersion = "3.8.1";
+        instance.CurrentDeploymentReleaseDeploymentId = instance.CurrentDeploymentId;
+        await db.SaveChangesAsync();
+        var identities = new EfCoreManagedElsaInstanceIdentityStore(db);
+        Assert.True((await identities.BindAsync(instance.OrganizationId, instance.WorkspaceId, instance.Id,
+            "https://managed.example.test", expectedBindingVersion: null, DateTimeOffset.UtcNow)).Succeeded);
+
+        var confirmed = await identities.FindOpenableAsync(instance.OrganizationId, instance.Id);
+        Assert.Equal("3.8", confirmed!.ReleaseLine);
+        Assert.Equal("3.8.1", confirmed.ReleaseVersion);
+
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstances
+            SET CurrentDeploymentReleaseLine = NULL,
+                CurrentDeploymentReleaseVersion = NULL,
+                CurrentDeploymentReleaseDeploymentId = NULL
+            WHERE Id = {instance.Id}
+            """);
+        db.ChangeTracker.Clear();
+        var missing = await identities.FindOpenableAsync(instance.OrganizationId, instance.Id);
+        Assert.Null(missing!.ReleaseLine);
+        Assert.Null(missing.ReleaseVersion);
+
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE ElsaInstances
+            SET CurrentDeploymentReleaseLine = {"3.9"},
+                CurrentDeploymentReleaseVersion = {"3.9.0"},
+                CurrentDeploymentReleaseDeploymentId = {"deployment-older"}
+            WHERE Id = {instance.Id}
+            """);
+        db.ChangeTracker.Clear();
+        var mismatched = await identities.FindOpenableAsync(instance.OrganizationId, instance.Id);
+        Assert.Null(mismatched!.ReleaseLine);
+        Assert.Null(mismatched.ReleaseVersion);
+        var mapped = EfCoreElsaInstanceLifecycleStore.MapInstance(
+            await db.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == instance.Id));
+        Assert.Null(mapped.CurrentDeploymentReference?.ReleaseLine);
+    }
+
     public enum OlderBuildDeploymentWrite { ClearCurrentDeployment, ChangeCurrentDeployment }
 
     [Theory]

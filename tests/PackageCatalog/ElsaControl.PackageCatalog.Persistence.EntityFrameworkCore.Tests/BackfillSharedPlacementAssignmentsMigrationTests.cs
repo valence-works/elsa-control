@@ -141,6 +141,7 @@ public sealed class BackfillSharedPlacementAssignmentsMigrationTests
         await InsertInstanceAsync(db, instanceId, workspace, "shared", deleted: false, Now.UtcTicks);
 
         await db.Database.MigrateAsync(SqliteMigration);
+        await db.Database.MigrateAsync();
         db.ChangeTracker.Clear();
         Assert.Equal(1, await ElsaInstanceAllowanceAccounting.CountSharedStandardAsync(db, organization.Id));
 

@@ -267,6 +267,20 @@ public sealed class AzureProviderRunnerOptionsTests : IDisposable
         };
 
         options.Validate();
+        (ValidOptions() with
+        {
+            ManagedHandoff = ValidHandoff() with
+            {
+                AllowedRuntimePermissions = ManagedElsaRuntimePermissions.StudioGrantsV2
+            }
+        }).Validate();
+        (ValidOptions() with
+        {
+            ManagedHandoff = ValidHandoff() with
+            {
+                AllowedRuntimePermissions = ManagedElsaRuntimePermissions.AllSupported
+            }
+        }).Validate();
     }
 
     [Fact]

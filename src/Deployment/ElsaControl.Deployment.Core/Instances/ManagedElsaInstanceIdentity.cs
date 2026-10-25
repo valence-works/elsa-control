@@ -1,5 +1,9 @@
 namespace ElsaControl.Deployment.Core.Instances;
 
+/// <summary>
+/// <see cref="ReleaseLine"/> and <see cref="ReleaseVersion"/> are the provider-confirmed
+/// deployment's release. A missing value keeps the v1 grant contract.
+/// </summary>
 public sealed record ManagedElsaInstanceIdentity(
     Guid OrganizationId,
     Guid WorkspaceId,
@@ -8,7 +12,9 @@ public sealed record ManagedElsaInstanceIdentity(
     Uri CallbackUri,
     int BindingVersion,
     DateTimeOffset ChangedAt,
-    bool StudioGrantsSupported = false);
+    bool StudioGrantsSupported = false,
+    string? ReleaseLine = null,
+    string? ReleaseVersion = null);
 
 public sealed record ManagedElsaInstanceScope(Guid OrganizationId, Guid WorkspaceId, Guid InstanceId);
 

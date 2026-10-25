@@ -835,6 +835,26 @@ public sealed class ElsaInstanceContractTests
         Assert.False(new ElsaCurrentDeploymentReference("deployment_01", endpointUri: "https://runtime.example.test", managedHandoff: true).StudioGrantsSupported);
         Assert.True(new ElsaCurrentDeploymentReference("deployment_01", endpointUri: "https://runtime.example.test", managedHandoff: true, studioGrantsSupported: true).StudioGrantsSupported);
         Assert.Throws<ArgumentException>(() => new ElsaCurrentDeploymentReference("deployment_01", endpointUri: "https://runtime.example.test", studioGrantsSupported: true));
+        var confirmed = new ElsaCurrentDeploymentReference(
+            "deployment_01",
+            endpointUri: "https://runtime.example.test",
+            managedHandoff: true,
+            studioGrantsSupported: true,
+            releaseLine: "3.9",
+            releaseVersion: "3.9.0");
+        Assert.Equal("3.9", confirmed.ReleaseLine);
+        Assert.Equal("3.9.0", confirmed.ReleaseVersion);
+        Assert.Equal(
+            "3.8.0-preview.5413+build.1",
+            new ElsaCurrentDeploymentReference(
+                "deployment_01",
+                releaseLine: "3.8",
+                releaseVersion: "3.8.0-preview.5413+build.1").ReleaseVersion);
+        Assert.Throws<ArgumentException>(() => new ElsaCurrentDeploymentReference(
+            "deployment_01",
+            releaseLine: "3.9",
+            releaseVersion: "3.8.1"));
+        Assert.Null(new ElsaCurrentDeploymentReference("deployment_01").ReleaseLine);
     }
 
     [Fact]
