@@ -260,7 +260,12 @@ def patch_module(content: str) -> str:
     if content.count(new_catalog) != 1 or old_catalog in content:
         raise SystemExit("Generated Catalog authentication setting is ambiguous.")
 
-    pairing_settings = "      appSettings: concat(\n        ["
+    pairing_settings = "      appSettings: concat(\n        filter(["
+    # Upgrade an already-patched module as well as fresh Aspire output.
+    legacy_settings_open = "      appSettings: concat(\n        ["
+    if legacy_settings_open in content:
+        content = replace_once(content, pairing_settings, legacy_settings_open, pairing_settings,
+                               "legacy appSettings array open for the staging inventory")
     content = replace_once(
         content,
         pairing_settings,
@@ -269,9 +274,17 @@ def patch_module(content: str) -> str:
         "generated appSettings array open for the pairing allowlist",
     )
     pairing_settings_close = (
+        "        ], setting => !useStagingSecretInventory || !startsWith(setting.name, 'Billing__Stripe__WebhookSources__')),\n"
+        "        pairingAllowlistSettings,\n        stagingBillingLeverSettings,\n        stagingRecoveryLeverSettings,\n"
+        "        rateLimitBffCredentialSettings)"
+    )
+    legacy_settings_close = (
         "        ],\n        pairingAllowlistSettings,\n        stagingBillingLeverSettings,\n        stagingRecoveryLeverSettings,\n"
         "        rateLimitBffCredentialSettings)"
     )
+    if legacy_settings_close in content:
+        content = replace_once(content, pairing_settings_close, legacy_settings_close, pairing_settings_close,
+                               "legacy appSettings array close for the staging inventory")
     content = replace_once(
         content,
         pairing_settings_close,
@@ -331,6 +344,14 @@ def patch_module(content: str) -> str:
         recovery_settings_anchor + "\n" + vault_vars,
         "staging recovery lever settings for Key Vault reference locals",
     )
+    staging_inventory = (
+        "// The approved staging inventory uses the root Stripe webhook secret only.\n"
+        "// Every other scope, including production, retains the per-source settings.\n"
+        "var useStagingSecretInventory = toLower(resourceGroup().id) == "
+        "'/subscriptions/8e23037a-420f-4ad0-9594-9d194de29e84/resourcegroups/rg-valence-control-staging'\n\n"
+    )
+    content = replace_once(content, "var useStagingSecretInventory", "var vaultUriPrefix",
+                           staging_inventory + "var vaultUriPrefix", "Key Vault locals for the staging inventory")
 
     # Optional BFF credential sources (#862). Empty emits no RateLimiting:BffCredentials settings.
     bff_credential_parameter = "param ratelimitbffcredentialsources_value string = ''"

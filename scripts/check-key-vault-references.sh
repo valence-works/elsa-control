@@ -12,8 +12,11 @@ Usage:
   scripts/check-key-vault-references.sh --resource-group RG --name APP
 
 Prints each secret app-setting name and its Key Vault reference status.
-A required setting must be Resolved. An optional setting (an opt-in
-feature such as RateLimiting:BffCredentials) prints NotSet when the app
+The approved staging resource group requires six secrets and leaves both
+per-source Stripe webhook secrets absent. Every other scope, including
+production, still requires all eight. A required setting must be Resolved.
+An optional setting (an opt-in feature such as RateLimiting:BffCredentials)
+prints NotSet when the app
 setting does not exist, fails as NotAReference when it exists with a plain
 value, and must be Resolved when it is a reference.
 Also prints SCM and FTP basic-auth publishing allow=true/false.
@@ -52,19 +55,6 @@ if [[ -z "$resource_group" || -z "$webapp_name" ]]; then
   exit 1
 fi
 
-# One "required|optional<TAB>name" line per secret setting.
-SETTING_NAMES="$(python3 - <<'PY'
-from pathlib import Path
-import sys
-sys.path.insert(0, str(Path("scripts") / "lib"))
-from key_vault_app_settings import OPTIONAL_SECRET_APP_SETTING_NAMES, REQUIRED_SECRET_APP_SETTING_NAMES
-for name in REQUIRED_SECRET_APP_SETTING_NAMES:
-    print(f"required\t{name}")
-for name in OPTIONAL_SECRET_APP_SETTING_NAMES:
-    print(f"optional\t{name}")
-PY
-)"
-
 id="$(az webapp show \
   --resource-group "$resource_group" \
   --name "$webapp_name" \
@@ -75,6 +65,18 @@ if [[ ! "$id" =~ ^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft.
   echo "check-key-vault-references: the web app id is missing or invalid." >&2
   exit 1
 fi
+
+# Select from the verified ARM resource scope, not the caller's group argument.
+# One "required|optional|absent<TAB>name" line per secret setting.
+SETTING_NAMES="$(python3 - "$id" <<'PY'
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path("scripts") / "lib"))
+from key_vault_app_settings import secret_app_setting_requirements
+for kind, name in secret_app_setting_requirements(sys.argv[1]):
+    print(f"{kind}\t{name}")
+PY
+)"
 
 references_json="$(az rest \
   --method get \
@@ -96,6 +98,7 @@ import sys
 
 wanted = [line.split("\t", 1) for line in sys.stdin.read().splitlines() if line]
 present = {line.strip() for line in sys.argv[2].splitlines() if line.strip()}
+present_folded = {name.casefold() for name in present}
 payload = json.loads(sys.argv[1])
 # ApiKVReferenceCollection: a "value" array of ApiKVReference resources. The last segment
 # of each id is the setting name, two segments after configreferences; the status is
@@ -116,6 +119,11 @@ for item in items:
 failed = False
 for kind, name in wanted:
     entry = properties.get(name)
+    if kind == "absent":
+        exists = name.casefold() in present_folded or entry is not None
+        print(f"{name}\tUnexpectedSetting" if exists else f"{name}\tNotSet")
+        failed = failed or exists
+        continue
     if entry is None and kind == "optional":
         if name in present:
             print(f"{name}\tNotAReference")

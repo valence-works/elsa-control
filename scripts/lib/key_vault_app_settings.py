@@ -18,8 +18,8 @@ KEY_VAULT_REFERENCE = re.compile(
     r"\.vault\.azure\.net/secrets/[A-Za-z0-9-]{1,127}\)$"
 )
 
-# App setting name -> vault secret name for the required secret settings. Keep
-# in sync with infra/api-key-vault/api-key-vault.module.bicep and
+# Full inventory, including production. Keep the names in sync with
+# infra/api-key-vault/api-key-vault.module.bicep and
 # UnresolvedKeyVaultReferenceGuard.
 SECRET_APP_SETTINGS: dict[str, str] = {
     "Authentication__ApiKey": "Authentication-ApiKey",
@@ -47,9 +47,34 @@ OPTIONAL_SECRET_APP_SETTINGS: dict[str, str] = {
 
 REQUIRED_SECRET_APP_SETTING_NAMES: tuple[str, ...] = tuple(SECRET_APP_SETTINGS)
 OPTIONAL_SECRET_APP_SETTING_NAMES: tuple[str, ...] = tuple(OPTIONAL_SECRET_APP_SETTINGS)
+
+# Owner-approved staging cutover uses the root Stripe webhook signing secret.
+# Bind the exception to the actual ARM scope, never to caller flags or absence.
+STAGING_SECRET_RESOURCE_GROUP_ID = (
+    "/subscriptions/8e23037a-420f-4ad0-9594-9d194de29e84/"
+    "resourceGroups/rg-valence-control-staging"
+)
+STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES = (
+    "Billing__Stripe__WebhookSources__0__SigningSecret",
+    "Billing__Stripe__WebhookSources__1__SigningSecret",
+)
 # Every secret setting name, required or optional. Scripts that must never
 # capture, compare or write a secret setting use this.
 SECRET_APP_SETTING_NAMES: tuple[str, ...] = REQUIRED_SECRET_APP_SETTING_NAMES + OPTIONAL_SECRET_APP_SETTING_NAMES
+
+
+def secret_app_setting_requirements(site_resource_id: str) -> tuple[tuple[str, str], ...]:
+    """Select six staging requirements; every other scope retains all eight.
+
+    Excluded staging settings must stay absent, even if a reference resolves.
+    The full secret maps remain unchanged for guards and reconciliation.
+    """
+    group_id = site_resource_id.lower().split("/providers/", 1)[0]
+    staging = group_id == STAGING_SECRET_RESOURCE_GROUP_ID.lower()
+    return tuple(
+        ("absent" if staging and name in STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES else "required", name)
+        for name in REQUIRED_SECRET_APP_SETTING_NAMES
+    ) + tuple(("optional", name) for name in OPTIONAL_SECRET_APP_SETTING_NAMES)
 
 
 def is_key_vault_reference(value: str | None) -> bool:

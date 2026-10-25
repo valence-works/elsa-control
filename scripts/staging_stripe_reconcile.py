@@ -68,6 +68,7 @@ from key_vault_app_settings import (
     is_key_vault_reference,
     key_vault_secrets_written,
     require_secret_settings_are_all_references,
+    secret_app_setting_requirements,
     select_secret_settings_mode,
 )
 
@@ -427,6 +428,24 @@ class AzureWebApp:
         self._resource_group = resource_group
         self._webapp_name = webapp_name
         self._runner = runner or subprocess.run
+        self._resource_id: str | None = None
+
+    def resource_id(self) -> str:
+        """Resolve and cache the actual site scope for inventory selection."""
+        if self._resource_id is None:
+            result = self._run_az([
+                "az", "webapp", "show", "--resource-group", self._resource_group,
+                "--name", self._webapp_name, "--query", "id", "--output", "tsv", "--only-show-errors",
+            ])
+            resource_id = result.stdout.strip()
+            expected = (
+                r"/subscriptions/[^/]+/resourceGroups/" + re.escape(self._resource_group)
+                + r"/providers/Microsoft.Web/sites/" + re.escape(self._webapp_name)
+            )
+            if re.fullmatch(expected, resource_id, re.IGNORECASE) is None:
+                raise ReconciliationError("Azure site resource ID does not match the requested target")
+            self._resource_id = resource_id
+        return self._resource_id
 
     def _run_az(self, command: Sequence[str]) -> subprocess.CompletedProcess[str]:
         try:
@@ -623,9 +642,24 @@ class StagingStripeReconciler:
         self._azure = azure
         self._config = config
         self._mode = mode
+        self._stripe_requirements: tuple[tuple[str, str], ...] | None = None
+
+    def _stripe_secret_requirements(self) -> tuple[tuple[str, str], ...]:
+        if self._stripe_requirements is None:
+            self._stripe_requirements = tuple(
+                (kind, name) for kind, name in secret_app_setting_requirements(self._azure.resource_id())
+                if name in STAGING_SECRET_SETTING_NAMES
+            )
+        return self._stripe_requirements
 
     def run(self, *, apply_azure_settings: bool = False, stripe_secret_key: str) -> tuple[str, ...]:
         require_test_secret(stripe_secret_key, name="STRIPE_SECRET_KEY", prefix=TEST_SECRET_PREFIX)
+        excluded = [name for kind, name in self._stripe_secret_requirements() if kind == "absent"]
+        if excluded:
+            present = {name.casefold() for name in self._azure.list_names()}
+            for name in excluded:
+                if name.casefold() in present:
+                    raise ReconciliationError(f"Azure billing setting {name} must be absent")
         passed = list(self.audit_stripe())
 
         # Provider resources are validated before the only Azure mutation. A
@@ -759,6 +793,9 @@ class StagingStripeReconciler:
 
     def check_azure_settings(self, *, expected_stripe_secret_key: str | None = None) -> None:
         settings = self._azure.app_settings(STAGING_BILLING_SETTING_NAMES)
+        for kind, name in self._stripe_secret_requirements():
+            if kind == "absent" and name in settings:
+                raise ReconciliationError(f"Azure billing setting {name} must be absent")
         expected = {
             "Billing__Lifecycle__Enabled": "true",
             "Billing__Lifecycle__PollInterval": "00:00:15",
@@ -778,7 +815,11 @@ class StagingStripeReconciler:
             if expected_stripe_secret_key is not None and azure_secret != expected_stripe_secret_key:
                 raise ReconciliationError("Azure Stripe secret setting does not match the audited test account")
         else:
-            for name in STAGING_SECRET_SETTING_NAMES:
+            for kind, name in self._stripe_secret_requirements():
+                if kind == "absent":
+                    if name in settings:
+                        raise ReconciliationError(f"Azure billing setting {name} must be absent")
+                    continue
                 if not is_key_vault_reference(settings.get(name, "")):
                     raise ReconciliationError(f"Azure billing setting {name} must be a Key Vault reference")
             if expected_stripe_secret_key is not None:

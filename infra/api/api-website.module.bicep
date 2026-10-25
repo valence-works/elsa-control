@@ -105,6 +105,10 @@ var stagingRecoveryLeverAllowlistSettings = [for (instanceId, i) in stagingRecov
 
 var stagingRecoveryLeverSettings = concat(stagingRecoveryLeverEnabledSettings, stagingRecoveryLeverSmokeOwnerSettings, stagingRecoveryLeverAllowlistSettings)
 
+// The approved staging inventory uses the root Stripe webhook secret only.
+// Every other scope, including production, retains the per-source settings.
+var useStagingSecretInventory = toLower(resourceGroup().id) == '/subscriptions/8e23037a-420f-4ad0-9594-9d194de29e84/resourcegroups/rg-valence-control-staging'
+
 var vaultUriPrefix = endsWith(api_key_vault_uri, '/') ? api_key_vault_uri : '${api_key_vault_uri}/'
 var kv = {
   authenticationApiKey: '@Microsoft.KeyVault(SecretUri=${vaultUriPrefix}secrets/Authentication-ApiKey)'
@@ -185,7 +189,7 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
       acrUseManagedIdentityCreds: true
       acrUserManagedIdentityID: elsa_control_outputs_azure_container_registry_managed_identity_client_id
       appSettings: concat(
-        [
+        filter([
         {
           name: 'WEBSITES_PORT'
           value: api_containerport
@@ -358,7 +362,7 @@ resource webapp 'Microsoft.Web/sites@2025-03-01' = {
           name: 'ASPIRE_ENVIRONMENT_NAME'
           value: 'elsa-control'
         }
-        ],
+        ], setting => !useStagingSecretInventory || !startsWith(setting.name, 'Billing__Stripe__WebhookSources__')),
         pairingAllowlistSettings,
         stagingBillingLeverSettings,
         stagingRecoveryLeverSettings,

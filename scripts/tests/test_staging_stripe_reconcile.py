@@ -16,6 +16,7 @@ from unittest import mock
 
 from scripts.staging_stripe_reconcile import (
     DEFAULT_WEBHOOK_EVENTS,
+    KEY_VAULT_MODE,
     PRE_CUTOVER_MODE,
     SECRET_APP_SETTING_NAMES,
     AzureAppSetting,
@@ -179,12 +180,16 @@ class FakeStripe:
 
 
 class FakeAzure:
-    def __init__(self, values: list[dict[str, str]] | None = None) -> None:
+    def __init__(self, values: list[dict[str, str]] | None = None, *, resource_id: str = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/control-staging-rg/providers/Microsoft.Web/sites/control-staging-api") -> None:
         initial = azure_settings() if values is None else values
         self.values = {item["name"]: item["value"] for item in initial}
         self.applied: dict[str, str] | None = None
         self.applications: list[dict[str, str]] = []
         self.deleted: list[str] = []
+        self._resource_id = resource_id
+
+    def resource_id(self) -> str:
+        return self._resource_id
 
     def list_names(self) -> list[str]:
         return list(self.values)
@@ -265,6 +270,65 @@ class StagingStripeReconciliationTests(unittest.TestCase):
             stripe_secret_key="sk_test_different",
         )
         self.assertIn("azure-billing-settings", result)
+
+    def test_approved_six_secret_inventory_passes_audit_and_apply(self) -> None:
+        from key_vault_app_settings import STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES, STAGING_SECRET_RESOURCE_GROUP_ID
+
+        values = [item for item in azure_settings() if item["name"] not in STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES]
+        target = STAGING_SECRET_RESOURCE_GROUP_ID + "/providers/Microsoft.Web/sites/api-tud53zotij43k"
+        for apply in (False, True):
+            with self.subTest(apply=apply):
+                azure = FakeAzure(values, resource_id=target)
+                result = StagingStripeReconciler(FakeStripe(), azure, config()).run(
+                    stripe_secret_key="sk_test_staging", apply_azure_settings=apply,
+                )
+                self.assertIn("azure-billing-settings", result)
+                self.assertFalse(set(STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES) & azure.values.keys())
+                self.assertEqual(set(), written_secret_names(azure))
+
+    def test_approved_inventory_refuses_excluded_secret_before_any_write(self) -> None:
+        from key_vault_app_settings import STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES, STAGING_SECRET_RESOURCE_GROUP_ID
+
+        values = [item for item in azure_settings() if item["name"] not in STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES]
+        target = STAGING_SECRET_RESOURCE_GROUP_ID + "/providers/Microsoft.Web/sites/api-tud53zotij43k"
+        for mode in (KEY_VAULT_MODE, PRE_CUTOVER_MODE):
+            for name in STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES:
+                for value in (KV_STRIPE_CONTROL, "whsec_plainExcludedFixture"):
+                    with self.subTest(mode=mode, name=name, value_kind="reference" if value.startswith("@") else "plain"):
+                        azure = FakeAzure(values + [{"name": name, "value": value}], resource_id=target)
+                        reconciler = StagingStripeReconciler(FakeStripe(), azure, config(), mode=mode)
+                        with self.assertRaisesRegex(ReconciliationError, name + " must be absent"):
+                            reconciler.run(stripe_secret_key="sk_test_staging", apply_azure_settings=True)
+                        self.assertEqual([], azure.applications)
+                        with self.assertRaisesRegex(ReconciliationError, name + " must be absent"):
+                            reconciler.check_azure_settings()
+
+    def test_approved_six_secret_inventory_passes_pre_cutover_audit_and_apply(self) -> None:
+        from key_vault_app_settings import STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES, STAGING_SECRET_RESOURCE_GROUP_ID
+
+        values = [item for item in plain_azure_settings() if item["name"] not in STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES]
+        target = STAGING_SECRET_RESOURCE_GROUP_ID + "/providers/Microsoft.Web/sites/api-tud53zotij43k"
+        for apply in (False, True):
+            with self.subTest(apply=apply):
+                azure = FakeAzure(values, resource_id=target)
+                reconciler = StagingStripeReconciler(FakeStripe(), azure, config(webhook_secret=PLAIN_STAGING_WEBHOOK), mode=PRE_CUTOVER_MODE)
+                result = reconciler.run(stripe_secret_key=PLAIN_STAGING_KEY, apply_azure_settings=apply)
+                self.assertIn("azure-billing-settings", result)
+                self.assertFalse(set(STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES) & azure.values.keys())
+                self.assertEqual(set(), written_secret_names(azure))
+
+    def test_six_secret_inventory_remains_rejected_outside_approved_scope(self) -> None:
+        from key_vault_app_settings import STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES, STAGING_SECRET_RESOURCE_GROUP_ID
+
+        values = [item for item in azure_settings() if item["name"] not in STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES]
+        for group in (
+            STAGING_SECRET_RESOURCE_GROUP_ID.replace("staging", "prod"),
+            STAGING_SECRET_RESOURCE_GROUP_ID.replace("8e23037a-420f-4ad0-9594-9d194de29e84", "00000000-0000-0000-0000-000000000000"),
+        ):
+            with self.subTest(group=group):
+                azure = FakeAzure(values, resource_id=group + "/providers/Microsoft.Web/sites/api-fixture")
+                with self.assertRaisesRegex(ReconciliationError, "must be a Key Vault reference"):
+                    StagingStripeReconciler(FakeStripe(), azure, config()).run(stripe_secret_key="sk_test_staging")
 
     def test_audit_requires_staging_billing_cleanup_worker(self) -> None:
         azure = FakeAzure([item for item in azure_settings() if item["name"] != "Billing__Lifecycle__Enabled"])
@@ -773,6 +837,29 @@ class StagingStripeReconciliationTests(unittest.TestCase):
 
 
 class AzureWebAppTests(unittest.TestCase):
+    def test_inventory_scope_uses_verified_site_id_and_caches_metadata_read(self) -> None:
+        target = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/resource-group/providers/Microsoft.Web/sites/webapp"
+        runner = mock.Mock(return_value=mock.Mock(returncode=0, stdout=target + "\n"))
+        azure = AzureWebApp("resource-group", "webapp", runner=runner)
+        self.assertEqual(target, azure.resource_id())
+        self.assertEqual(target, azure.resource_id())
+        runner.assert_called_once()
+        command = runner.call_args.args[0]
+        self.assertEqual(["az", "webapp", "show"], command[:3])
+        self.assertEqual("id", command[command.index("--query") + 1])
+
+    def test_inventory_scope_refuses_mismatched_or_malformed_site_id(self) -> None:
+        targets = (
+            "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/other-group/providers/Microsoft.Web/sites/webapp",
+            "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/resource-group/providers/Microsoft.Web/sites/other-app",
+            "invalid-site-id",
+        )
+        for target in targets:
+            with self.subTest(target=target):
+                runner = mock.Mock(return_value=mock.Mock(returncode=0, stdout=target))
+                with self.assertRaisesRegex(ReconciliationError, "does not match the requested target"):
+                    AzureWebApp("resource-group", "webapp", runner=runner).resource_id()
+
     def test_azure_cli_failure_is_sanitized(self) -> None:
         def runner(*args: Any, **kwargs: Any):
             class Result:

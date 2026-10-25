@@ -48,6 +48,17 @@ fails the deploy. An empty `AZURE_API_EGRESS_SUBNET_ID` also fails the deploy.
 | `Billing__Stripe__WebhookSources__1__SigningSecret` | `Billing-Stripe-WebhookSources-hub-SigningSecret` |
 | `ManagedElsa__Handoff__ActivePrivateKeyPem` | `ManagedElsa-Handoff-ActivePrivateKeyPem` |
 
+The approved inventory for `rg-valence-control-staging` in subscription
+`8e23037a-420f-4ad0-9594-9d194de29e84` requires six secrets: the table above
+except both `Billing__Stripe__WebhookSources__*__SigningSecret` settings.
+Staging uses `Billing__Stripe__WebhookSigningSecret` and leaves both per-source
+settings absent. The API site template omits the per-source names as well as
+their secret references in that scope, including after infra regeneration.
+The checker selects this inventory from the site's ARM resource ID: excluded
+settings report `NotSet` when absent and fail as `UnexpectedSetting` when
+present, even if resolved. Every other scope, including production, retains
+the eight-secret requirement. The four optional BFF settings below are unchanged.
+
 Optional, written only when `RateLimiting:BffCredentials` is used (see
 [BFF credential](../../docs/deployment/azure-app-service.md#bff-credential-ratelimitingbffcredentials)).
 `scripts/check-key-vault-references.sh` reports a missing one as `NotSet` and
