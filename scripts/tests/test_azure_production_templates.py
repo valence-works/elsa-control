@@ -162,7 +162,7 @@ class AzureProductionTemplateTests(unittest.TestCase):
         self.assertEqual(f"{control}/admin/runtimes", parameters["managedHandoffControlContinuationUrl"]["value"])
         self.assertEqual("08:00:00", parameters["managedHandoffRuntimeMaximumLifetime"]["value"])
         self.assertEqual(
-            ["read:diagnostics:structured-logs", "diagnostics/structured-logs:view"],
+            ["diagnostics/structured-logs:view"],
             parameters["managedHandoffAllowedRuntimePermissions"]["value"],
         )
         self.assertNotIn("managedHandoffCallbackUri", parameters)

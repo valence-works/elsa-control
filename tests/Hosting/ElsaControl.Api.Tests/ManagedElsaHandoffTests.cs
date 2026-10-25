@@ -548,6 +548,7 @@ public sealed class ManagedElsaHandoffTests
         UpgradeInFlight,
         UpgradeFailedOrHeld,
         Confirmed39,
+        Confirmed39WithPlanned38,
         RollbackConfirmedTo38,
         MissingDeployedRelease
     }
@@ -556,6 +557,7 @@ public sealed class ManagedElsaHandoffTests
     [InlineData(DeployedReleaseScenario.UpgradeInFlight)]
     [InlineData(DeployedReleaseScenario.UpgradeFailedOrHeld)]
     [InlineData(DeployedReleaseScenario.Confirmed39)]
+    [InlineData(DeployedReleaseScenario.Confirmed39WithPlanned38)]
     [InlineData(DeployedReleaseScenario.RollbackConfirmedTo38)]
     [InlineData(DeployedReleaseScenario.MissingDeployedRelease)]
     public async Task Studio_grants_follow_the_confirmed_deployment_release_not_the_resolved_plan(
@@ -575,6 +577,7 @@ public sealed class ManagedElsaHandoffTests
             DeployedReleaseScenario.UpgradeInFlight => ("3.9", "3.9.0", "3.8", "3.8.1", false),
             DeployedReleaseScenario.UpgradeFailedOrHeld => ("3.9", "3.9.0", "3.8", "3.8.1", false),
             DeployedReleaseScenario.Confirmed39 => ("3.9", "3.9.0", "3.9", "3.9.0", true),
+            DeployedReleaseScenario.Confirmed39WithPlanned38 => ("3.8", "3.8.1", "3.9", "3.9.0", true),
             DeployedReleaseScenario.RollbackConfirmedTo38 => ("3.8", "3.8.1", "3.8", "3.8.1", false),
             DeployedReleaseScenario.MissingDeployedRelease => ("3.9", "3.9.0", null, null, false),
             _ => throw new ArgumentOutOfRangeException(nameof(scenario), scenario, null)
