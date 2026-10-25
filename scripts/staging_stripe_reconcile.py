@@ -654,13 +654,12 @@ class StagingStripeReconciler:
 
     def run(self, *, apply_azure_settings: bool = False, stripe_secret_key: str) -> tuple[str, ...]:
         require_test_secret(stripe_secret_key, name="STRIPE_SECRET_KEY", prefix=TEST_SECRET_PREFIX)
-        if self._mode == KEY_VAULT_MODE:
-            excluded = [name for kind, name in self._stripe_secret_requirements() if kind == "absent"]
-            if excluded:
-                present = {name.casefold() for name in self._azure.list_names()}
-                for name in excluded:
-                    if name.casefold() in present:
-                        raise ReconciliationError(f"Azure billing setting {name} must be absent")
+        excluded = [name for kind, name in self._stripe_secret_requirements() if kind == "absent"]
+        if excluded:
+            present = {name.casefold() for name in self._azure.list_names()}
+            for name in excluded:
+                if name.casefold() in present:
+                    raise ReconciliationError(f"Azure billing setting {name} must be absent")
         passed = list(self.audit_stripe())
 
         # Provider resources are validated before the only Azure mutation. A
@@ -794,6 +793,9 @@ class StagingStripeReconciler:
 
     def check_azure_settings(self, *, expected_stripe_secret_key: str | None = None) -> None:
         settings = self._azure.app_settings(STAGING_BILLING_SETTING_NAMES)
+        for kind, name in self._stripe_secret_requirements():
+            if kind == "absent" and name in settings:
+                raise ReconciliationError(f"Azure billing setting {name} must be absent")
         expected = {
             "Billing__Lifecycle__Enabled": "true",
             "Billing__Lifecycle__PollInterval": "00:00:15",

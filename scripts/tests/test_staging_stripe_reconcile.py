@@ -16,6 +16,7 @@ from unittest import mock
 
 from scripts.staging_stripe_reconcile import (
     DEFAULT_WEBHOOK_EVENTS,
+    KEY_VAULT_MODE,
     PRE_CUTOVER_MODE,
     SECRET_APP_SETTING_NAMES,
     AzureAppSetting,
@@ -290,15 +291,31 @@ class StagingStripeReconciliationTests(unittest.TestCase):
 
         values = [item for item in azure_settings() if item["name"] not in STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES]
         target = STAGING_SECRET_RESOURCE_GROUP_ID + "/providers/Microsoft.Web/sites/api-tud53zotij43k"
-        for name in STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES:
-            for value in (KV_STRIPE_CONTROL, "whsec_plainExcludedFixture"):
-                with self.subTest(name=name, value_kind="reference" if value.startswith("@") else "plain"):
-                    azure = FakeAzure(values + [{"name": name, "value": value}], resource_id=target)
-                    with self.assertRaisesRegex(ReconciliationError, name + " must be absent"):
-                        StagingStripeReconciler(FakeStripe(), azure, config()).run(
-                            stripe_secret_key="sk_test_staging", apply_azure_settings=True,
-                        )
-                    self.assertEqual([], azure.applications)
+        for mode in (KEY_VAULT_MODE, PRE_CUTOVER_MODE):
+            for name in STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES:
+                for value in (KV_STRIPE_CONTROL, "whsec_plainExcludedFixture"):
+                    with self.subTest(mode=mode, name=name, value_kind="reference" if value.startswith("@") else "plain"):
+                        azure = FakeAzure(values + [{"name": name, "value": value}], resource_id=target)
+                        reconciler = StagingStripeReconciler(FakeStripe(), azure, config(), mode=mode)
+                        with self.assertRaisesRegex(ReconciliationError, name + " must be absent"):
+                            reconciler.run(stripe_secret_key="sk_test_staging", apply_azure_settings=True)
+                        self.assertEqual([], azure.applications)
+                        with self.assertRaisesRegex(ReconciliationError, name + " must be absent"):
+                            reconciler.check_azure_settings()
+
+    def test_approved_six_secret_inventory_passes_pre_cutover_audit_and_apply(self) -> None:
+        from key_vault_app_settings import STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES, STAGING_SECRET_RESOURCE_GROUP_ID
+
+        values = [item for item in plain_azure_settings() if item["name"] not in STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES]
+        target = STAGING_SECRET_RESOURCE_GROUP_ID + "/providers/Microsoft.Web/sites/api-tud53zotij43k"
+        for apply in (False, True):
+            with self.subTest(apply=apply):
+                azure = FakeAzure(values, resource_id=target)
+                reconciler = StagingStripeReconciler(FakeStripe(), azure, config(webhook_secret=PLAIN_STAGING_WEBHOOK), mode=PRE_CUTOVER_MODE)
+                result = reconciler.run(stripe_secret_key=PLAIN_STAGING_KEY, apply_azure_settings=apply)
+                self.assertIn("azure-billing-settings", result)
+                self.assertFalse(set(STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES) & azure.values.keys())
+                self.assertEqual(set(), written_secret_names(azure))
 
     def test_six_secret_inventory_remains_rejected_outside_approved_scope(self) -> None:
         from key_vault_app_settings import STAGING_EXCLUDED_SECRET_APP_SETTING_NAMES, STAGING_SECRET_RESOURCE_GROUP_ID

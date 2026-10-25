@@ -748,7 +748,8 @@ the optional BFF credential rules below are unchanged.
 The staging Stripe reconciler uses the same verified site scope for its
 Key Vault checks, accepts the root-only webhook configuration during audit
 and `--apply-azure-settings`, and refuses an excluded secret before any
-settings write. Production Stripe reconciliation is unchanged.
+settings write in both pre-cutover and Key Vault modes. Production Stripe
+reconciliation is unchanged.
 
 Optional, written only when `RateLimiting:BffCredentials` is used (see
 [BFF credential](#bff-credential-ratelimitingbffcredentials)).
