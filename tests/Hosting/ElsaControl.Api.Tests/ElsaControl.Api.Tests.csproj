@@ -30,5 +30,8 @@
     <None Include="..\..\..\contracts\managed-elsa-studio-grants-v1.json"
           Link="Fixtures\managed-elsa-studio-grants-v1.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\..\contracts\managed-elsa-studio-grants-v2.json"
+          Link="Fixtures\managed-elsa-studio-grants-v2.json"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

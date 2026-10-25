@@ -3587,9 +3587,10 @@ public sealed class AzureBicepProviderRunner : IAzureProviderRunner, IAzureProvi
     }
 
     private static IReadOnlyList<string> SelectedHandoffPermissions(AzureProviderRunnerCommand command) =>
-        command.Plan.ManagedHandoffStudioGrants
-            ? ManagedElsaRuntimePermissions.StudioGrantsV1
-            : ManagedElsaRuntimePermissions.DiagnosticsOnly;
+        ManagedElsaRuntimePermissions.SelectedFor(
+            command.Plan.ManagedHandoffStudioGrants,
+            command.Plan.ReleaseLine,
+            command.Plan.ElsaVersion);
 
     /// <summary>
     /// Control binds the instance's handoff callback to the verified endpoint origin. The runtime is only

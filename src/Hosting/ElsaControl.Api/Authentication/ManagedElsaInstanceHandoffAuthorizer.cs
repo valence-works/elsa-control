@@ -41,7 +41,11 @@ public sealed class ManagedElsaInstanceHandoffAuthorizer(
             request.CodeChallenge,
             new HashSet<string>([ManagedElsaHandoffDefaults.RuntimeSessionScope], StringComparer.Ordinal),
             target.BindingVersion,
-            ManagedElsaRuntimePermissionMapping.For(access, target.StudioGrantsSupported))
+            ManagedElsaRuntimePermissionMapping.For(
+                access,
+                target.StudioGrantsSupported,
+                target.ReleaseLine,
+                target.ReleaseVersion))
         {
             StudioAccess = ManagedElsaRuntimePermissionMapping.StudioAccessFor(access.Role, target.StudioGrantsSupported),
             WorkspaceName = access.WorkspaceName
@@ -64,7 +68,11 @@ public sealed class ManagedElsaInstanceHandoffAuthorizer(
             return false;
 
         var effective = await permissions.GetEffectivePermissionsAsync(target.WorkspaceId, access.AccountId, cancellationToken);
-        var currentRuntimePermissions = ManagedElsaRuntimePermissionMapping.For(access, target.StudioGrantsSupported);
+        var currentRuntimePermissions = ManagedElsaRuntimePermissionMapping.For(
+            access,
+            target.StudioGrantsSupported,
+            target.ReleaseLine,
+            target.ReleaseVersion);
         return effective.Has(ManagedElsaInstancePermissions.Open) &&
                claims.RuntimePermissions.All(currentRuntimePermissions.Contains);
     }

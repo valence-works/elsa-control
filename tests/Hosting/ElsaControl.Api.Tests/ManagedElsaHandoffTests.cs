@@ -126,6 +126,7 @@ public sealed class ManagedElsaHandoffTests
         var access = new WorkspaceAccess(Guid.NewGuid(), Guid.NewGuid(), workspaceRole, Guid.NewGuid(), organizationRole);
         var onLegacyImage = onStudioImage == Grants.Studio ? Grants.StructuredLogs : onStudioImage;
 
+        foreach (var (releaseLine, releaseVersion) in new[] { ("3.8", "3.8.1"), ("3.9", "3.9.0"), ("3.10", "3.10.4") })
         foreach (var studioGrantsSupported in new[] { false, true })
         {
             var expectedGrants = studioGrantsSupported ? onStudioImage : onLegacyImage;
@@ -133,15 +134,17 @@ public sealed class ManagedElsaHandoffTests
                 ? ManagedElsaRuntimePermissionMapping.StudioAccessDeploymentLimited
                 : expectedStudioAccess;
 
-            Assert.Equal(Permissions(expectedGrants), ManagedElsaRuntimePermissionMapping.For(access, studioGrantsSupported).Order());
+            Assert.Equal(
+                Permissions(expectedGrants, releaseLine, releaseVersion),
+                ManagedElsaRuntimePermissionMapping.For(access, studioGrantsSupported, releaseLine, releaseVersion).Order());
             Assert.Equal(expectedAccess, ManagedElsaRuntimePermissionMapping.StudioAccessFor(workspaceRole, studioGrantsSupported));
         }
     }
 
-    private static IEnumerable<string> Permissions(Grants grants) => (grants switch
+    private static IEnumerable<string> Permissions(Grants grants, string? releaseLine = null, string? releaseVersion = null) => (grants switch
     {
-        Grants.Studio => ManagedElsaRuntimePermissions.StudioGrantsV1,
-        Grants.StructuredLogs => [ManagedElsaRuntimePermissionMapping.StructuredLogsRead],
+        Grants.Studio => ManagedElsaRuntimePermissions.StudioGrantsFor(releaseLine, releaseVersion),
+        Grants.StructuredLogs => ManagedElsaRuntimePermissions.DiagnosticsOnlyFor(releaseLine, releaseVersion),
         _ => []
     }).Order();
 
@@ -269,9 +272,14 @@ public sealed class ManagedElsaHandoffTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Production_wiring_issues_only_grants_supported_by_current_deployment(bool studioGrantsSupported)
+    [InlineData(false, "3.8", "3.8.1")]
+    [InlineData(true, "3.8", "3.8.1")]
+    [InlineData(false, "3.10", "3.10.4")]
+    [InlineData(true, "3.10", "3.10.4")]
+    public async Task Production_wiring_issues_only_grants_supported_by_current_deployment(
+        bool studioGrantsSupported,
+        string releaseLine,
+        string releaseVersion)
     {
         await using var app = new ControlApiTestApplication(new Dictionary<string, string?>
         {
@@ -308,7 +316,7 @@ public sealed class ManagedElsaHandoffTests
                 "Managed Elsa",
                 "managed-elsa",
                 new ElsaInstanceIntent(
-                    new ElsaReleaseIntent("server-studio", "3.10", "3.10.4"),
+                    new ElsaReleaseIntent("server-studio", releaseLine, releaseVersion),
                     new ElsaApplicationIntent("combined"),
                     new ElsaPlacementIntent(
                         "managed", "westeurope", "dedicated", "standard-small", "public", "managed")),
@@ -369,13 +377,11 @@ public sealed class ManagedElsaHandoffTests
             .Where(claim => claim.Type == ManagedElsaHandoffDefaults.RuntimePermissionClaim)
             .Select(claim => claim.Value)
             .ToHashSet(StringComparer.Ordinal);
-        if (studioGrantsSupported)
-        {
-            Assert.Equal(ManagedElsaRuntimePermissionMapping.AllowedPermissions.Count, grants.Count);
-            Assert.All(ManagedElsaRuntimePermissionMapping.AllowedPermissions, permission => Assert.Contains(permission, grants));
-        }
-        else
-            Assert.Equal([ManagedElsaRuntimePermissionMapping.StructuredLogsRead], grants);
+        var expectedPermissions = ManagedElsaRuntimePermissions.SelectedFor(
+            studioGrantsSupported,
+            releaseLine,
+            releaseVersion);
+        Assert.Equal(expectedPermissions.ToHashSet(StringComparer.Ordinal), grants);
 
         var redeemedResponse = await app.CreateClient().PostControlJsonAsync(
             "/api/managed-elsa/handoff/redeem",
@@ -506,7 +512,7 @@ public sealed class ManagedElsaHandoffTests
         // Organization owners and administrators keep the Structured Logs read they have always had, and nothing more.
         Assert.Equal(
             organizationRole is OrganizationRole.Administrator or OrganizationRole.Owner
-                ? [ManagedElsaRuntimePermissionMapping.StructuredLogsRead]
+                ? [ManagedElsaRuntimePermissionMapping.StructuredLogsReadV2]
                 : [],
             session.RuntimePermissions);
 
@@ -562,7 +568,7 @@ public sealed class ManagedElsaHandoffTests
         Assert.Equal(HttpStatusCode.OK, issue.StatusCode);
         var token = (await issue.Content.ReadControlJsonAsync<ManagedElsaHandoffIssueResponse>())!.Token;
         Assert.Equal(
-            ManagedElsaRuntimePermissions.StudioGrantsV1.Count,
+            ManagedElsaRuntimePermissions.StudioGrantsV2.Count,
             new JwtSecurityTokenHandler().ReadJwtToken(token).Claims
                 .Count(claim => claim.Type == ManagedElsaHandoffDefaults.RuntimePermissionClaim));
 

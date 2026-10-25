@@ -1,3 +1,4 @@
+using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
 using ElsaControl.RuntimeBuilder.Abstractions.Plans;
 using ElsaControl.RuntimeBuilder.Abstractions.ReleaseManifests;
@@ -352,6 +353,19 @@ public sealed class AzureWorkloadPlanTranslatorTests
         // The capability is not a fingerprint input: a Control build that predates it must recompute the same
         // fingerprint for a plan this build writes.
         Assert.Equal(legacy.Fingerprint, capable.Fingerprint);
+    }
+
+    [Fact]
+    public void Studio_grants_for_3_9_require_the_v2_capability()
+    {
+        var plan = WithManagedHandoffCapability(true, CreatePlan("3.9", "3.9.0"));
+        var v1 = Translate(WithStudioGrantsCapability(plan, ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV1)).Plan!;
+        var v2 = Translate(WithStudioGrantsCapability(plan, ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV2)).Plan!;
+
+        Assert.True(v1.ManagedHandoff);
+        Assert.False(v1.ManagedHandoffStudioGrants);
+        Assert.True(v2.ManagedHandoff);
+        Assert.True(v2.ManagedHandoffStudioGrants);
     }
 
     [Fact]
@@ -879,9 +893,14 @@ public sealed class AzureWorkloadPlanTranslatorTests
         };
     }
 
-    private static ResolvedElsaApplicationPlan WithStudioGrantsCapability(ResolvedElsaApplicationPlan plan)
+    private static ResolvedElsaApplicationPlan WithStudioGrantsCapability(
+        ResolvedElsaApplicationPlan plan,
+        string? capability = null)
     {
         var component = plan.Topology.Components[0];
+        var declared = capability ?? ManagedElsaRuntimePermissions.RequiredCapability(
+            plan.Release.ReleaseLine,
+            plan.Release.Version);
         return plan with
         {
             Topology = plan.Topology with
@@ -890,7 +909,7 @@ public sealed class AzureWorkloadPlanTranslatorTests
                 [
                     component with
                     {
-                        Capabilities = [.. component.Capabilities, ReleaseManifestRuntimeIntegrationCapabilities.ManagedElsaStudioGrantsV1]
+                        Capabilities = [.. component.Capabilities, declared]
                     }
                 ]
             }

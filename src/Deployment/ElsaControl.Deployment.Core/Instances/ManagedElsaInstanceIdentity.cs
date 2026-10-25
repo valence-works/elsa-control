@@ -8,7 +8,9 @@ public sealed record ManagedElsaInstanceIdentity(
     Uri CallbackUri,
     int BindingVersion,
     DateTimeOffset ChangedAt,
-    bool StudioGrantsSupported = false);
+    bool StudioGrantsSupported = false,
+    string? ReleaseLine = null,
+    string? ReleaseVersion = null);
 
 public sealed record ManagedElsaInstanceScope(Guid OrganizationId, Guid WorkspaceId, Guid InstanceId);
 
