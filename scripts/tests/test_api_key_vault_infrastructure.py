@@ -21,6 +21,11 @@ MAIN = ROOT / "infra/api-key-vault/api-key-vault.module.bicep"
 README = ROOT / "infra/api-key-vault/README.md"
 CHECK_SCRIPT = ROOT / "scripts/check-key-vault-references.sh"
 WEBAPP_ID = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-test/providers/Microsoft.Web/sites/api-test"
+STAGING_WEBAPP_ID = "/subscriptions/8e23037a-420f-4ad0-9594-9d194de29e84/resourceGroups/rg-valence-control-staging/providers/Microsoft.Web/sites/api-tud53zotij43k"
+STAGING_EXCLUDED = (
+    "Billing__Stripe__WebhookSources__0__SigningSecret",
+    "Billing__Stripe__WebhookSources__1__SigningSecret",
+)
 SECRETS_USER = "4633458b-17de-408a-b874-0445c86b69e6"
 
 
@@ -163,6 +168,7 @@ class ApiKeyVaultInfrastructureTests(unittest.TestCase):
         properties: dict,
         plain_names: tuple[str, ...] = (),
         payload: dict | None = None,
+        webapp_id: str = WEBAPP_ID,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary:
             fake_az = Path(temporary) / "az"
@@ -180,12 +186,12 @@ class ApiKeyVaultInfrastructureTests(unittest.TestCase):
             fake_az.chmod(0o755)
             environment = os.environ.copy()
             environment["PATH"] = f"{temporary}{os.pathsep}{environment['PATH']}"
-            environment["FAKE_WEBAPP_ID"] = WEBAPP_ID
+            environment["FAKE_WEBAPP_ID"] = webapp_id
             # The ApiKVReferenceCollection shape that api-version 2022-03-01 returns.
             environment["FAKE_REFERENCES"] = json.dumps(payload if payload is not None else {
                 "value": [
                     {
-                        "id": f"{WEBAPP_ID}/config/configreferences/appsettings/{name}",
+                        "id": f"{webapp_id}/config/configreferences/appsettings/{name}",
                         "name": name,
                         "type": "Microsoft.Web/sites/config/configreferences",
                         "properties": entry,
@@ -196,7 +202,7 @@ class ApiKeyVaultInfrastructureTests(unittest.TestCase):
             # The site's setting names: every reference plus any plain-value setting.
             environment["FAKE_SETTING_NAMES"] = "\n".join([*properties, *plain_names])
             return subprocess.run(
-                [str(CHECK_SCRIPT), "--resource-group", "rg-test", "--name", "api-test"],
+                [str(CHECK_SCRIPT), "--resource-group", webapp_id.split("/")[4], "--name", webapp_id.rsplit("/", 1)[-1]],
                 cwd=ROOT,
                 env=environment,
                 capture_output=True,
@@ -204,6 +210,48 @@ class ApiKeyVaultInfrastructureTests(unittest.TestCase):
                 check=False,
                 timeout=60,
             )
+
+    def test_staging_checker_requires_six_and_refuses_per_source_secrets(self) -> None:
+        from key_vault_app_settings import SECRET_APP_SETTINGS
+
+        resolved = {name: {"status": "Resolved"} for name in SECRET_APP_SETTINGS if name not in STAGING_EXCLUDED}
+        result = self.run_check(resolved, webapp_id=STAGING_WEBAPP_ID)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        for name in STAGING_EXCLUDED:
+            self.assertIn(f"{name}\tNotSet", result.stdout)
+        self.assertIn("basicPublishingCredentialsPolicies/ftp\tallow=false", result.stdout)
+
+        for name in STAGING_EXCLUDED:
+            with self.subTest(name=name, state="reference"):
+                result = self.run_check(resolved | {name: {"status": "Resolved"}}, webapp_id=STAGING_WEBAPP_ID)
+                self.assertEqual(2, result.returncode)
+                self.assertIn(f"{name}\tUnexpectedSetting", result.stdout)
+            with self.subTest(name=name, state="plain"):
+                result = self.run_check(resolved, plain_names=(name,), webapp_id=STAGING_WEBAPP_ID)
+                self.assertEqual(2, result.returncode)
+                self.assertIn(f"{name}\tUnexpectedSetting", result.stdout)
+
+        resolved.pop("Authentication__ApiKey")
+        result = self.run_check(resolved, webapp_id=STAGING_WEBAPP_ID)
+        self.assertEqual(2, result.returncode)
+        self.assertIn("Authentication__ApiKey\tMissing", result.stdout)
+
+    def test_six_secret_exception_does_not_apply_to_production_or_other_subscriptions(self) -> None:
+        from key_vault_app_settings import SECRET_APP_SETTINGS
+
+        resolved = {name: {"status": "Resolved"} for name in SECRET_APP_SETTINGS if name not in STAGING_EXCLUDED}
+        targets = (
+            STAGING_WEBAPP_ID.replace("rg-valence-control-staging", "rg-valence-control-prod").replace("api-tud53zotij43k", "api-m5uymkuaf222o"),
+            STAGING_WEBAPP_ID.replace("8e23037a-420f-4ad0-9594-9d194de29e84", "00000000-0000-0000-0000-000000000000"),
+        )
+        for target in targets:
+            with self.subTest(target=target):
+                missing = self.run_check(resolved, webapp_id=target)
+                self.assertEqual(2, missing.returncode)
+                for name in STAGING_EXCLUDED:
+                    self.assertIn(f"{name}\tMissing", missing.stdout)
+                full = self.run_check(resolved | {name: {"status": "Resolved"} for name in STAGING_EXCLUDED}, webapp_id=target)
+                self.assertEqual(0, full.returncode, full.stdout + full.stderr)
 
     def test_check_script_reports_optional_settings_without_requiring_them(self) -> None:
         from key_vault_app_settings import OPTIONAL_SECRET_APP_SETTINGS, SECRET_APP_SETTINGS

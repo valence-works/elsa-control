@@ -733,6 +733,19 @@ An operator writes each secret after the vault exists.
 | `Billing__Stripe__WebhookSources__1__SigningSecret` | `Billing-Stripe-WebhookSources-hub-SigningSecret` |
 | `ManagedElsa__Handoff__ActivePrivateKeyPem` | `ManagedElsa-Handoff-ActivePrivateKeyPem` |
 
+The approved staging inventory is six secrets. In subscription
+`8e23037a-420f-4ad0-9594-9d194de29e84`, `rg-valence-control-staging` uses the
+root `Billing__Stripe__WebhookSigningSecret` and leaves both per-source
+`Billing__Stripe__WebhookSources__0__SigningSecret` and
+`Billing__Stripe__WebhookSources__1__SigningSecret` absent. Its infra applies
+omit the per-source names and secret references; the regeneration patch keeps
+that rule. `scripts/check-key-vault-references.sh` identifies this scope from
+the site's actual ARM ID, requires the other six settings to be `Resolved`,
+and reports the two exclusions as `NotSet`. Reintroducing either excluded
+setting fails as `UnexpectedSetting`, including a resolved reference.
+Production and every other scope still require all eight entries above;
+the optional BFF credential rules below are unchanged.
+
 Optional, written only when `RateLimiting:BffCredentials` is used (see
 [BFF credential](#bff-credential-ratelimitingbffcredentials)).
 `scripts/check-key-vault-references.sh` reports a missing one as `NotSet` and

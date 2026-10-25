@@ -161,6 +161,31 @@ class ApiInfrastructureTests(unittest.TestCase):
         self.assertEqual({"scm", "ftp"}, {policy["name"].rsplit("/", 1)[-1] for policy in policies})
         self.assertTrue(all(policy["properties"]["allow"] is False for policy in policies))
 
+    def test_staging_inventory_omits_webhook_sources_without_changing_production(self) -> None:
+        subscription = "8e23037a-420f-4ad0-9594-9d194de29e84"
+        excluded = {
+            "Billing__Stripe__WebhookSources__0__Name",
+            "Billing__Stripe__WebhookSources__0__SigningSecret",
+            "Billing__Stripe__WebhookSources__1__Name",
+            "Billing__Stripe__WebhookSources__1__SigningSecret",
+        }
+        cases = (
+            (subscription, "rg-valence-control-staging", 6),
+            (subscription, "rg-valence-control-prod", 8),
+            (SUBSCRIPTION, "rg-valence-control-staging", 8),
+        )
+        for target_subscription, group, expected_count in cases:
+            with self.subTest(subscription=target_subscription, group=group), tempfile.TemporaryDirectory() as temporary:
+                webapp = self.webapp(self.snapshot(Path(temporary), "", resource_group=group, subscription=target_subscription))
+                settings = {item["name"]: item["value"] for item in webapp["properties"]["siteConfig"]["appSettings"]}
+                references = {name: value for name, value in settings.items() if value.startswith("@Microsoft.KeyVault(")}
+                self.assertEqual(expected_count, len(references))
+                self.assertIn("Billing__Stripe__WebhookSigningSecret", references)
+                if expected_count == 6:
+                    self.assertFalse(excluded & settings.keys())
+                else:
+                    self.assertTrue(excluded <= settings.keys())
+
     @staticmethod
     def generated_api_module() -> str:
         """Build the module shape emitted before the regeneration patch runs."""
@@ -189,6 +214,13 @@ class ApiInfrastructureTests(unittest.TestCase):
         module = re.sub(
             r"\n@description\('Comma-separated BFF credential sources.*?"
             r"\nvar rateLimitBffCredentialSettings = concat\([^\n]*\)\n",
+            "",
+            module,
+            count=1,
+            flags=re.DOTALL,
+        )
+        module = re.sub(
+            r"// The approved staging inventory.*?\nvar useStagingSecretInventory = [^\n]*\n\n",
             "",
             module,
             count=1,
@@ -276,9 +308,10 @@ class ApiInfrastructureTests(unittest.TestCase):
             re.DOTALL,
         )
         generated = recovery_parameter.sub("", generated, count=1)
-        generated = generated.replace("      appSettings: concat(\n        [", "      appSettings: [", 1)
+        generated = generated.replace("      appSettings: concat(\n        filter([", "      appSettings: [", 1)
         generated = generated.replace(
-            "        ],\n        pairingAllowlistSettings,\n        stagingBillingLeverSettings,\n        stagingRecoveryLeverSettings,\n"
+            "        ], setting => !useStagingSecretInventory || !startsWith(setting.name, 'Billing__Stripe__WebhookSources__')),\n"
+            "        pairingAllowlistSettings,\n        stagingBillingLeverSettings,\n        stagingRecoveryLeverSettings,\n"
             "        rateLimitBffCredentialSettings)",
             "      ]",
             1,
@@ -327,6 +360,8 @@ class ApiInfrastructureTests(unittest.TestCase):
         staging_recovery_lever_allowed_instance_ids: str = "",
         staging_smoke_owner_instance_id: str = "",
         rate_limit_bff_credential_sources: str = "",
+        resource_group: str = RESOURCE_GROUP,
+        subscription: str = SUBSCRIPTION,
     ) -> dict:
         """Evaluate the actual module with Bicep's offline deployment snapshot."""
 
@@ -359,11 +394,11 @@ class ApiInfrastructureTests(unittest.TestCase):
                 "--mode",
                 "Overwrite",
                 "--resource-group",
-                RESOURCE_GROUP,
+                resource_group,
                 "--location",
                 "westeurope",
                 "--subscription-id",
-                SUBSCRIPTION,
+                subscription,
                 "--only-show-errors",
             ],
             capture_output=True,
@@ -764,6 +799,29 @@ class ApiInfrastructureTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, "identity patch helper should be idempotent")
             self.assertEqual(fixture.read_text(), module)
+
+    def test_regeneration_upgrades_existing_eight_secret_module_without_partial_writes(self) -> None:
+        module = API_MODULE.read_text()
+        legacy = re.sub(
+            r"// The approved staging inventory.*?\nvar useStagingSecretInventory = [^\n]*\n\n",
+            "", module, count=1, flags=re.DOTALL,
+        ).replace("      appSettings: concat(\n        filter([", "      appSettings: concat(\n        [", 1).replace(
+            "        ], setting => !useStagingSecretInventory || !startsWith(setting.name, 'Billing__Stripe__WebhookSources__')),",
+            "        ],", 1,
+        )
+        for ambiguous in (False, True):
+            with self.subTest(ambiguous=ambiguous), tempfile.TemporaryDirectory() as temporary:
+                fixture = Path(temporary) / "infra/api/api-website.module.bicep"
+                fixture.parent.mkdir(parents=True)
+                source = legacy + ("\n      appSettings: concat(\n        [\n" if ambiguous else "")
+                fixture.write_text(source)
+                result = subprocess.run([sys.executable, str(PATCH_API_IDENTITY)], cwd=temporary, capture_output=True)
+                if ambiguous:
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertEqual(source, fixture.read_text())
+                else:
+                    self.assertEqual(0, result.returncode)
+                    self.assertEqual(module, fixture.read_text())
 
     def test_regeneration_patch_restores_the_provisioner_parameter_block_idempotently(self) -> None:
         template = API_PARAMETERS.read_text()
