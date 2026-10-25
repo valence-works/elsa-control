@@ -745,6 +745,10 @@ and reports the two exclusions as `NotSet`. Reintroducing either excluded
 setting fails as `UnexpectedSetting`, including a resolved reference.
 Production and every other scope still require all eight entries above;
 the optional BFF credential rules below are unchanged.
+The staging Stripe reconciler uses the same verified site scope for its
+Key Vault checks, accepts the root-only webhook configuration during audit
+and `--apply-azure-settings`, and refuses an excluded secret before any
+settings write. Production Stripe reconciliation is unchanged.
 
 Optional, written only when `RateLimiting:BffCredentials` is used (see
 [BFF credential](#bff-credential-ratelimitingbffcredentials)).
