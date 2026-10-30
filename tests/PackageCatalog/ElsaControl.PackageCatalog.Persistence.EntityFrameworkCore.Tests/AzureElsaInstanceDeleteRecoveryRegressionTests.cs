@@ -276,7 +276,8 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         operationStore,
         new AzureBicepProviderRunner(runnerOptions, scope),
         new FixedTimeProvider(now),
-        leaseDuration: TimeSpan.FromMinutes(5),
+        leaseDuration: TimeSpan.FromHours(1),
+        heartbeatInterval: TimeSpan.FromMinutes(50),
         workerId: "delete-recovery-provider-worker",
         assignmentStore: operationStore);
 
@@ -359,10 +360,7 @@ if [ "$#" -eq 8 ] && [ "$1" = "rest" ] && [ "$2" = "--method" ] && [ "$3" = "get
 fi
 exit 97
 """;
-            await File.WriteAllTextAsync(executable, script);
-            if (!OperatingSystem.IsWindows())
-                File.SetUnixFileMode(executable,
-                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            await WriteClosedExecutableAsync(executable, script);
 
             var options = new AzureProviderRunnerOptions
             {
@@ -378,7 +376,9 @@ exit 97
                 RuntimeAdminUsername = "runtime-admin",
                 ObservationAttempts = 1,
                 ObservationDelay = TimeSpan.Zero,
-                CommandTimeout = TimeSpan.FromSeconds(30)
+                // Wall-clock timeout must not decide this seed. Production
+                // AzureCommandProcess still uses its own default outside tests.
+                CommandTimeout = TimeSpan.FromMinutes(10)
             };
             options.ValidateRegistryAuthority(scope);
             return new CleanupTools(root, options, log);
@@ -389,6 +389,30 @@ exit 97
                 Directory.Delete(root, recursive: true);
             throw;
         }
+    }
+
+    private static async Task WriteClosedExecutableAsync(string path, string script)
+    {
+        var staging = path + ".tmp";
+        await using (var stream = new FileStream(
+                         staging,
+                         FileMode.CreateNew,
+                         FileAccess.Write,
+                         FileShare.None,
+                         4096,
+                         FileOptions.WriteThrough))
+        await using (var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
+        {
+            await writer.WriteAsync(script);
+            await writer.FlushAsync();
+            await stream.FlushAsync();
+            stream.Flush(flushToDisk: true);
+        }
+
+        File.Move(staging, path, overwrite: false);
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(path,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
     }
 
     private static string ShellQuote(string value) => $"'{value.Replace("'", "'\\''", StringComparison.Ordinal)}'";
