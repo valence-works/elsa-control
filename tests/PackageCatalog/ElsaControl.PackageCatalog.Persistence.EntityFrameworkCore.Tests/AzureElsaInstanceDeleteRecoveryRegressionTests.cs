@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Instances;
@@ -275,7 +274,10 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         AzureProviderTargetScope scope,
         DateTimeOffset now) => new(
         operationStore,
-        new AzureBicepProviderRunner(runnerOptions, scope),
+        new AzureBicepProviderRunner(
+            runnerOptions,
+            scope,
+            new EtxtbsyRetryAzureCommandProcess(runnerOptions.CommandTimeout, runnerOptions.MaximumOutputCharacters)),
         new FixedTimeProvider(now),
         leaseDuration: TimeSpan.FromHours(1),
         heartbeatInterval: TimeSpan.FromMinutes(50),
@@ -307,61 +309,13 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             foreach (var name in new[] { "main.bicep", "acr-pull-role.bicep", "sql-bootstrap.sql" })
                 await File.WriteAllTextAsync(Path.Combine(templates, name), "targetScope = 'resourceGroup'\n");
 
-            var deleteRequested = Path.Combine(root, "delete-requested");
-            var absenceObserved = Path.Combine(root, "absence-observed");
-            var log = Path.Combine(root, "commands.log");
-            var executable = Path.Combine(root, "azure-command");
             var workloadName = $"e{instanceId:N}"[..16];
             var expectedGroup = AzureProviderResourceAssignmentNaming.ResourceGroupName(scope.ResourceGroupName, instanceId);
-            var script = $$"""
-#!/bin/sh
-set -eu
-delete_requested={{ShellQuote(deleteRequested)}}
-absence_observed={{ShellQuote(absenceObserved)}}
-log={{ShellQuote(log)}}
-workload={{ShellQuote(workloadName)}}
-subscription={{ShellQuote(scope.SubscriptionId)}}
-resource_group={{ShellQuote(expectedGroup)}}
-
-printf '%s\n' "$*" >> "$log"
-if [ "$#" -eq 9 ] && [ "$*" = "group exists --subscription $subscription --name $resource_group --output tsv --only-show-errors" ]; then
-    if [ -f "$delete_requested" ] && [ ! -f "$absence_observed" ]; then
-        : > "$absence_observed"
-        printf '%s' 'true'
-    elif [ -f "$delete_requested" ]; then
-        printf '%s' 'false'
-    else
-        printf '%s' 'true'
-    fi
-    exit 0
-fi
-if [ "$#" -eq 11 ] && [ "$*" = "group show --subscription $subscription --name $resource_group --query tags --output json --only-show-errors" ]; then
-    printf '%s' "{\"managed-by\":\"elsa-control\",\"owner\":\"elsa-control\",\"workload-name\":\"$workload\",\"sqlBootstrapObjectId\":\"11111111-1111-1111-1111-111111111111\"}"
-    exit 0
-fi
-if [ "$#" -eq 9 ] && [ "$*" = "resource list --subscription $subscription --resource-group $resource_group --output json --only-show-errors" ]; then
-    printf '%s' '[]'
-    exit 0
-fi
-if [ "$1" = "monitor" ] && [ "$2" = "log-analytics" ] && [ "$3" = "workspace" ] && [ "$4" = "show" ]; then
-    exit 3
-fi
-if [ "$#" -eq 11 ] && [ "$*" = "group delete --subscription $subscription --name $resource_group --yes --no-wait --output none --only-show-errors" ]; then
-    : > "$delete_requested"
-    exit 0
-fi
-if [ "$#" -eq 9 ] && [ "$*" = "keyvault list-deleted --subscription $subscription --resource-type vault --output json --only-show-errors" ]; then
-    printf '%s' '[]'
-    exit 0
-fi
-if [ "$#" -eq 8 ] && [ "$1" = "rest" ] && [ "$2" = "--method" ] && [ "$3" = "get" ] && [ "$4" = "--url" ] &&
-    printf '%s' "$5" | grep -q 'deletedWorkspaces' && [ "$6" = "--output" ] && [ "$7" = "json" ] && [ "$8" = "--only-show-errors" ]; then
-    printf '%s' '{"value":[]}'
-    exit 0
-fi
-exit 97
-""";
-            await WriteClosedExecutableAsync(executable, script);
+            await File.WriteAllTextAsync(Path.Combine(templates, "workload-name"), workloadName);
+            await File.WriteAllTextAsync(Path.Combine(templates, "expected-subscription"), scope.SubscriptionId);
+            await File.WriteAllTextAsync(Path.Combine(templates, "expected-resource-group"), expectedGroup);
+            var executable = DeleteRecoveryFakeAzureCli.ExecutablePath;
+            var log = Path.Combine(templates, "commands.log");
 
             var options = new AzureProviderRunnerOptions
             {
@@ -377,8 +331,8 @@ exit 97
                 RuntimeAdminUsername = "runtime-admin",
                 ObservationAttempts = 1,
                 ObservationDelay = TimeSpan.Zero,
-                // Wall-clock timeout must not decide this seed. Production
-                // AzureCommandProcess still uses its own default outside tests.
+                // Defence only: a wall clock must not decide this seed. The
+                // ETXTBSY fix is the prebuilt executable plus start retry.
                 CommandTimeout = TimeSpan.FromMinutes(10)
             };
             options.ValidateRegistryAuthority(scope);
@@ -391,64 +345,6 @@ exit 97
             throw;
         }
     }
-
-    private static async Task WriteClosedExecutableAsync(string path, string script)
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            await File.WriteAllTextAsync(path, script);
-            return;
-        }
-
-        // Write through a short-lived child so this test process never holds a
-        // writable descriptor on the executable inode. A sibling thread's
-        // fork/exec therefore cannot inherit a write handle that would make
-        // later execve fail with ETXTBSY. File.WriteAllText / FileStream +
-        // File.Move do not remove that race: rename keeps the same inode.
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "/bin/sh",
-            UseShellExecute = false,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true
-        };
-        startInfo.ArgumentList.Add("-c");
-        startInfo.ArgumentList.Add("umask 077; cat > \"$1\" && chmod 755 \"$1\"");
-        startInfo.ArgumentList.Add("write-closed-executable");
-        startInfo.ArgumentList.Add(path);
-
-        using var writer = Process.Start(startInfo)
-            ?? throw new InvalidOperationException("The closed executable writer did not start.");
-        await writer.StandardInput.WriteAsync(script);
-        writer.StandardInput.Close();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        try
-        {
-            await writer.WaitForExitAsync(timeout.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            try
-            {
-                writer.Kill(entireProcessTree: true);
-            }
-            catch (Exception)
-            {
-                // Best-effort stop of a stuck writer.
-            }
-
-            throw new TimeoutException("The closed executable writer did not exit.");
-        }
-
-        if (writer.ExitCode != 0)
-            throw new InvalidOperationException($"The closed executable writer exited {writer.ExitCode}.");
-        if (!File.Exists(path))
-            throw new InvalidOperationException("The closed executable writer did not create the file.");
-    }
-
-    private static string ShellQuote(string value) => $"'{value.Replace("'", "'\\''", StringComparison.Ordinal)}'";
 
     private sealed class PosixFactAttribute : FactAttribute
     {
