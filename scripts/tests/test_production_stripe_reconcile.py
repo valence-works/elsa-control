@@ -21,6 +21,7 @@ from scripts.production_stripe_reconcile import (
     ProductionAuditConfig,
     ProductionStripeReconciler,
     ReconciliationError,
+    captured_audit_secret_key,
     decide_secret_settings_mode,
     format_stripe_api_failure,
     main,
@@ -1212,6 +1213,62 @@ class ProductionKeyVaultModeTests(unittest.TestCase):
             self.assertEqual(0, code, stderr)
             self.assertEqual("PASS production-billing-reapply\n", stdout)
             self.assertEqual(set(), set(azure.applied[-1]).intersection(SECRET_APP_SETTING_NAMES))
+
+    def test_secret_free_capture_does_not_raise_keyerror_for_the_audit_key(self) -> None:
+        # Reproduces the #882 KeyError: Key Vault-mode captures omit secret names.
+        self.assertIsNone(captured_audit_secret_key(preserved_records(), mode=KEY_VAULT_MODE))
+        self.assertIsNone(
+            captured_audit_secret_key(
+                {
+                    **preserved_records(),
+                    "Billing__Stripe__SecretKey": AzureAppSetting(
+                        EXPECTED_SETTINGS["Billing__Stripe__SecretKey"], False
+                    ),
+                },
+                mode=KEY_VAULT_MODE,
+            )
+        )
+        self.assertEqual(
+            PRE_CUTOVER_LIVE_KEY,
+            captured_audit_secret_key(plain_records(), mode=PRE_CUTOVER_MODE),
+        )
+
+    def test_key_vault_audit_capture_uses_env_secret_and_names_it_when_missing(self) -> None:
+        azure = FakeAzure()
+        audit_keys: list[str] = []
+
+        class RecordingStripe:
+            def __init__(self, secret_key: str, *args: object, **kwargs: object) -> None:
+                audit_keys.append(secret_key)
+                self._inner = FakeStripe()
+
+            def get(self, path: str) -> dict[str, object]:
+                return self._inner.get(path)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = self._private_capture(temporary, preserved_records(), mode=KEY_VAULT_MODE)
+            self.assertNotIn("Billing__Stripe__SecretKey", {item["name"] for item in json.loads(destination.read_text())})
+
+            code, stdout, stderr = self._main(
+                ["--audit", "--audit-capture", str(destination)],
+                azure,
+                stripe=RecordingStripe,
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("PASS production-billing-settings\nPASS production-stripe-webhook\n", stdout)
+            self.assertEqual([LIVE_KEY], audit_keys)
+
+            env = audit_environment()
+            env.pop("STRIPE_PRODUCTION_SECRET_KEY")
+            code, stdout, stderr = self._main(
+                ["--audit", "--audit-capture", str(destination)],
+                azure,
+                env=env,
+            )
+            self.assertEqual(1, code)
+            self.assertEqual("", stdout)
+            self.assertEqual("FAIL env: STRIPE_PRODUCTION_SECRET_KEY is missing\n", stderr)
+            self.assert_fixture_secret_free(stdout + stderr)
 
 
 if __name__ == "__main__":
