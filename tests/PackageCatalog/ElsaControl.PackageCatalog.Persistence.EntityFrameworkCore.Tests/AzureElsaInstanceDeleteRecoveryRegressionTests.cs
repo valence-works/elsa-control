@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using ElsaControl.Deployment.Abstractions.Instances;
 using ElsaControl.Deployment.Azure;
 using ElsaControl.Deployment.Core.Instances;
@@ -393,26 +394,58 @@ exit 97
 
     private static async Task WriteClosedExecutableAsync(string path, string script)
     {
-        var staging = path + ".tmp";
-        await using (var stream = new FileStream(
-                         staging,
-                         FileMode.CreateNew,
-                         FileAccess.Write,
-                         FileShare.None,
-                         4096,
-                         FileOptions.WriteThrough))
-        await using (var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
+        if (OperatingSystem.IsWindows())
         {
-            await writer.WriteAsync(script);
-            await writer.FlushAsync();
-            await stream.FlushAsync();
-            stream.Flush(flushToDisk: true);
+            await File.WriteAllTextAsync(path, script);
+            return;
         }
 
-        File.Move(staging, path, overwrite: false);
-        if (!OperatingSystem.IsWindows())
-            File.SetUnixFileMode(path,
-                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        // Write through a short-lived child so this test process never holds a
+        // writable descriptor on the executable inode. A sibling thread's
+        // fork/exec therefore cannot inherit a write handle that would make
+        // later execve fail with ETXTBSY. File.WriteAllText / FileStream +
+        // File.Move do not remove that race: rename keeps the same inode.
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "/bin/sh",
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        startInfo.ArgumentList.Add("-c");
+        startInfo.ArgumentList.Add("umask 077; cat > \"$1\" && chmod 755 \"$1\"");
+        startInfo.ArgumentList.Add("write-closed-executable");
+        startInfo.ArgumentList.Add(path);
+
+        using var writer = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("The closed executable writer did not start.");
+        await writer.StandardInput.WriteAsync(script);
+        writer.StandardInput.Close();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
+        {
+            await writer.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            try
+            {
+                writer.Kill(entireProcessTree: true);
+            }
+            catch (Exception)
+            {
+                // Best-effort stop of a stuck writer.
+            }
+
+            throw new TimeoutException("The closed executable writer did not exit.");
+        }
+
+        if (writer.ExitCode != 0)
+            throw new InvalidOperationException($"The closed executable writer exited {writer.ExitCode}.");
+        if (!File.Exists(path))
+            throw new InvalidOperationException("The closed executable writer did not create the file.");
     }
 
     private static string ShellQuote(string value) => $"'{value.Replace("'", "'\\''", StringComparison.Ordinal)}'";
