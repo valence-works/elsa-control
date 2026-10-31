@@ -19,7 +19,7 @@ using Microsoft.EntityFrameworkCore.Migrations.Operations;
 
 namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Tests;
 
-public sealed partial class ElsaInstanceLifecycleStoreTests
+public sealed partial class ElsaInstanceLifecycleStoreTests : IClassFixture<DeleteRecoveryFakeAzureCliFixture>
 {
     [Theory]
     [InlineData(1205)]

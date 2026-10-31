@@ -214,7 +214,8 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
 
     private static async Task<DeleteClaimFixture> SeedDeleteRecoveryClaimAsync(CatalogDbContext db)
     {
-        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Delete claim authority workspace");
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(
+            db, $"Delete claim authority workspace {Guid.NewGuid():N}");
         await CompleteManagedRunAsync(db, accepted.Operation.Id, accepted.Instance.Id);
         var scope = new AzureProviderTargetScope(
             "11111111-1111-1111-1111-111111111111",
@@ -283,15 +284,17 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             .SingleAsync(x => x.Action == AzureProviderOperationAction.Delete &&
                 x.WorkspaceId == workspace.Id && x.InstanceId == accepted.Instance.Id);
 
+        db.ChangeTracker.Clear();
         Assert.Equal(1, await CreateProviderWorker(operationStore, runnerOptions, scope, Now.AddMinutes(4))
             .ProcessOnceAsync());
+        await AssertSeededProviderDeleteIsTerminalAsync(db, deleteOperation.Id);
         var lifecycleWorker = new ElsaInstanceDeletionWorker(
             new EfCoreElsaInstanceLifecycleStore(db, EmptyResolutionInputSource.Instance,
                 new FixedTimeProvider(Now.AddMinutes(5))),
             CreateProvider(operationStore, providerOptions, Now.AddMinutes(5)),
             new FixedTimeProvider(Now.AddMinutes(5)));
         var failed = await lifecycleWorker.ProcessAvailableAsync("delete-claim-worker");
-        Assert.Single(failed.Results);
+        AssertSeededDeletionWorkerRecordedOneResult(failed, await DescribeProviderDeleteAsync(db, deleteOperation.Id));
         var service = new ElsaInstanceLifecycleService(CreateStore(db), new FixedTimeProvider(Now.AddMinutes(6)));
         current = Assert.IsType<ElsaInstance>(await CreateStore(db).GetInstanceAsync(workspace.Id, accepted.Instance.Id));
         var recovered = await service.RecoverAsync(new(
@@ -313,6 +316,39 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             workspace.Id, accepted.Instance.Id, deleteOperation.Id, request, authority.ProviderVersion,
             authority.ProviderAttemptNumber, operationStore, (IAzureProviderDeleteRecoveryStore)operationStore,
             Now.AddMinutes(7), tools);
+    }
+
+    private static async Task AssertSeededProviderDeleteIsTerminalAsync(CatalogDbContext db, Guid operationId)
+    {
+        var detail = await DescribeProviderDeleteAsync(db, operationId);
+        var operation = await db.AzureProviderOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == operationId);
+        Assert.True(
+            operation.Status is AzureProviderOperationStatus.Failed
+                or AzureProviderOperationStatus.RecoveryRequired,
+            $"The seeded provider delete must be terminal before the lifecycle worker runs ({detail}).");
+        Assert.Equal(AzureProviderOperationPhase.CleanupSubmitted, operation.Phase);
+    }
+
+    private static void AssertSeededDeletionWorkerRecordedOneResult(
+        ElsaInstanceLifecycleWorkerBatchResult failed,
+        string detail)
+    {
+        if (failed.Results.Count == 1)
+            return;
+        Assert.Fail($"The seeded deletion worker must record one result ({detail}).");
+    }
+
+    private static async Task<string> DescribeProviderDeleteAsync(CatalogDbContext db, Guid operationId)
+    {
+        var operation = await db.AzureProviderOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == operationId);
+        var lastTransition = await db.AzureProviderOperationTransitions.AsNoTracking()
+            .Where(x => x.OperationId == operationId)
+            .OrderByDescending(x => x.Sequence)
+            .Select(x => x.Code)
+            .FirstOrDefaultAsync();
+        return $"status={operation.Status}; phase={operation.Phase}; last-transition={lastTransition ?? "none"}";
     }
 
     private static AzureProviderDeleteRecoveryAuthority ParseAuthority(string? serialized)
