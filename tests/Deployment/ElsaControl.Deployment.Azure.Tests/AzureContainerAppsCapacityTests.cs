@@ -43,7 +43,7 @@ public sealed class AzureContainerAppsCapacityTests
     {
         Assert.All(AzureContainerAppsCapacity.ConsumptionSizes, size =>
             Assert.Same(size, AzureContainerAppsCapacity.Map(new(1, 1, size.CpuMillicores, size.MemoryMiB))));
-        Assert.Equal(1, AzureContainerAppsCapacity.ConsumptionSizes.Select(size => size.MemoryMiB * 1000 / size.CpuMillicores).Distinct().Count());
+        Assert.Single(AzureContainerAppsCapacity.ConsumptionSizes.Select(size => size.MemoryMiB * 1000 / size.CpuMillicores).Distinct());
     }
 
     [Theory]
