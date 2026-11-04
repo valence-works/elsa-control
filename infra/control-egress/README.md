@@ -28,28 +28,52 @@ route-all only affects application traffic, not the platform's own configuration
 
 `egressDeploymentMode` defaults to `full`, which keeps the existing three-resource provisioning path and both outputs unchanged. For an already-provisioned VNet, `keyVaultEndpointOnly` uses the same VNet and subnet definition but conditionally omits the NAT gateway and Public IP resources. It retains the NAT attachment through `natGatewayName`, adds `Microsoft.KeyVault` to the service endpoints, and explicitly writes the production-read-back VNet setting `privateEndpointVNetPolicies: Disabled`. The subnet's App Service delegation, address prefixes, NAT association, and existing subnet network-policy settings stay in the shared definition. `egressIpAddress` continues to read the existing Public IP value; this mode does not deploy or modify that resource.
 
-Before previewing this mode, perform a read-only check of the existing network:
+### Bind and inspect the current target
+
+Set the approved production `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, and current `AZURE_API_EGRESS_SUBNET_ID` first. Resolve the VNet and subnet names from the production parameter file, capture the complete VNet response in a private local file, and verify that the returned VNet ID is the parent of the bound subnet ID:
 
 ```sh
-az network vnet show --subscription 8e23037a-420f-4ad0-9594-9d194de29e84 \
-  --resource-group rg-valence-control-prod \
-  --name vnet-valence-control-prod-bec \
-  --query '{location:location,tags:tags,addressPrefixes:addressSpace.addressPrefixes,privateEndpointVNetPolicies:privateEndpointVNetPolicies,subnets:subnets[].{name:name,addressPrefix:addressPrefix,natGatewayId:natGateway.id,delegations:delegations,serviceEndpoints:serviceEndpoints,privateEndpointNetworkPolicies:privateEndpointNetworkPolicies,privateLinkServiceNetworkPolicies:privateLinkServiceNetworkPolicies,networkSecurityGroupId:networkSecurityGroup.id,routeTableId:routeTable.id}}' \
-  --output json
+set -eu
+: "${AZURE_SUBSCRIPTION_ID:?Set the approved production subscription}"
+: "${AZURE_RESOURCE_GROUP:?Set the approved production resource group}"
+: "${AZURE_API_EGRESS_SUBNET_ID:?Set the current egress subnet resource ID}"
+
+parameters_file=infra/control-egress/main.parameters.production.json
+vnet_name="$(jq -er '.parameters.virtualNetworkName.value' "$parameters_file")"
+subnet_name="$(jq -er '.parameters.subnetName.value' "$parameters_file")"
+vnet_id="${AZURE_API_EGRESS_SUBNET_ID%/subnets/*}"
+expected_subnet_id="${vnet_id}/subnets/${subnet_name}"
+actual_subnet_id="$(printf '%s' "$AZURE_API_EGRESS_SUBNET_ID" | tr '[:upper:]' '[:lower:]')"
+expected_subnet_id_lower="$(printf '%s' "$expected_subnet_id" | tr '[:upper:]' '[:lower:]')"
+test "$actual_subnet_id" = "$expected_subnet_id_lower"
+
+umask 077
+vnet_readback="$(mktemp "${TMPDIR:-/tmp}/control-egress-vnet.XXXXXX")"
+az network vnet show --subscription "$AZURE_SUBSCRIPTION_ID" \
+  --resource-group "$AZURE_RESOURCE_GROUP" \
+  --name "$vnet_name" \
+  --output json > "$vnet_readback"
+jq -e --arg id "$vnet_id" '(.id | ascii_downcase) == ($id | ascii_downcase)' \
+  "$vnet_readback" > /dev/null
+printf 'Full VNet readback saved privately to %s\n' "$vnet_readback"
 ```
 
-The expected production shape is Belgium Central, the tags and address prefixes in `main.parameters.production.json`, exactly one `snet-api-egress` subnet with the configured prefix and existing NAT gateway, the App Service delegation, no service endpoints yet, `privateEndpointVNetPolicies` set to `Disabled`, and no subnet NSG or route table. Stop if any additional subnet, service endpoint, delegation, NAT target, NSG, route table, or unrepresented writable property is present. Do not guess that an incremental VNet update will preserve it.
+Inspect the complete readback privately against the parameter file and Bicep model. Check all writable VNet and subnet properties, including VNet DHCP, DDoS, encryption and flow-timeout settings, plus subnet policy, delegation, endpoint, NSG, route-table and NAT settings. Ignore only read-only provider metadata. Stop if the target ID, region, tags, address prefixes, subnet set, or any writable property is unrepresented or differs from the current source. Keep the full response and raw resource IDs in the private local evidence file; do not paste them into issues, PRs or logs.
 
-Then run the read-only preview with the explicit narrow mode:
+The modeled production subnet has one App Service delegation, the existing NAT attachment, and currently no service endpoints. If readback shows exactly the `Microsoft.KeyVault` endpoint at the configured region and every other writable value matches the model, skip the network update: the endpoint is already ready. Stop if any other endpoint or configuration is present; this template does not preserve additional endpoints or unmodeled properties.
+
+If the Key Vault endpoint is absent and the complete readback matches the model, run the read-only preview with the explicit narrow mode:
 
 ```sh
-az deployment group what-if --subscription 8e23037a-420f-4ad0-9594-9d194de29e84 \
-  --resource-group rg-valence-control-prod --name control-egress-keyvault-endpoint-preview \
+az deployment group what-if \
+  --subscription "$AZURE_SUBSCRIPTION_ID" \
+  --resource-group "$AZURE_RESOURCE_GROUP" \
+  --name control-egress-keyvault-endpoint-preview \
   --template-file infra/control-egress/main.bicep \
-  --parameters @infra/control-egress/main.parameters.production.json egressDeploymentMode=keyVaultEndpointOnly
+  --parameters "@$parameters_file" egressDeploymentMode=keyVaultEndpointOnly
 ```
 
-For the production cutover, accept only one VNet `Modify` that adds the Key Vault service endpoint; provider normalization of the endpoint `locations` is `NoEffect`. NAT, Public IP, and unrelated resources must be `Ignore`. Stop on another action or any VNet property change beyond the endpoint and that `NoEffect` metadata. A what-if is not approval to apply: production still needs the separate #911 approval and a fresh reviewed preview. This issue authorizes no production apply.
+For the first production cutover, accept only one VNet `Modify` that adds the Key Vault service endpoint; provider normalization of the endpoint `locations` is `NoEffect`. NAT, Public IP, and unrelated resources must be `Ignore`. Stop on another action or any writable VNet property change beyond the endpoint and that `NoEffect` metadata. This full readback plus the fresh what-if is the refusal gate for unmodeled state. A what-if is not approval to apply: production still needs the separate #911 approval. This issue authorizes no production apply. Remove the private readback file after review.
 
 The site attachment is not in this template. `dev/patch-api-provisioner-identity.py` adds the optional
 `api_egress_subnet_id` parameter to the Aspire-generated API module (`virtualNetworkSubnetId` and

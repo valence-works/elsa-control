@@ -48,6 +48,10 @@ class ControlEgressTests(unittest.TestCase):
         self.assertEqual("full", mode["defaultValue"])
         self.assertEqual(["full", "keyVaultEndpointOnly"], mode["allowedValues"])
 
+        self.assertEqual(
+            "[equals(parameters('egressDeploymentMode'), 'full')]",
+            self.template["variables"]["deploySupportingEgressResources"],
+        )
         full_mode_condition = "[variables('deploySupportingEgressResources')]"
         for resource_type in (
             "Microsoft.Network/publicIPAddresses",
