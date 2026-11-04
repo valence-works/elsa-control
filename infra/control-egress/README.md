@@ -65,15 +65,18 @@ The modeled production subnet has one App Service delegation, the existing NAT a
 If the Key Vault endpoint is absent and the complete readback matches the model, run the read-only preview with the explicit narrow mode:
 
 ```sh
+whatif_readback="$(mktemp "${TMPDIR:-/tmp}/control-egress-whatif.XXXXXX")"
 az deployment group what-if \
   --subscription "$AZURE_SUBSCRIPTION_ID" \
   --resource-group "$AZURE_RESOURCE_GROUP" \
   --name control-egress-keyvault-endpoint-preview \
   --template-file infra/control-egress/main.bicep \
-  --parameters "@$parameters_file" egressDeploymentMode=keyVaultEndpointOnly
+  --parameters "@$parameters_file" egressDeploymentMode=keyVaultEndpointOnly \
+  --no-pretty-print --output json > "$whatif_readback"
+printf 'Full preview saved privately to %s\n' "$whatif_readback"
 ```
 
-For the first production cutover, accept only one VNet `Modify` that adds the Key Vault service endpoint; provider normalization of the endpoint `locations` is `NoEffect`. NAT, Public IP, and unrelated resources must be `Ignore`. Stop on another action or any writable VNet property change beyond the endpoint and that `NoEffect` metadata. This full readback plus the fresh what-if is the refusal gate for unmodeled state. A what-if is not approval to apply: production still needs the separate #911 approval. This issue authorizes no production apply. Remove the private readback file after review.
+For the first production cutover, accept only one VNet `Modify` that adds the Key Vault service endpoint; provider normalization of the endpoint `locations` is `NoEffect`. NAT, Public IP, and unrelated resources must be `Ignore`. Stop on another action or any writable VNet property change beyond the endpoint and that `NoEffect` metadata. This full readback plus the fresh what-if is the refusal gate for unmodeled state. A what-if is not approval to apply: production still needs the separate #911 approval. This issue authorizes no production apply. Keep both private records through the approved change, post-change verification and any rollback. Once those are complete and sanitized evidence is recorded, remove the private files; publish only sanitized change counts, outcomes and revision bindings.
 
 The site attachment is not in this template. `dev/patch-api-provisioner-identity.py` adds the optional
 `api_egress_subnet_id` parameter to the Aspire-generated API module (`virtualNetworkSubnetId` and
