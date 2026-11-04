@@ -109,7 +109,7 @@ public sealed class ManagedRuntimeConfigurationAdapterTests
         Assert.Equal(sourceId, package.SourceId);
         Assert.Equal("Elsa.Email", package.PackageId);
         Assert.Equal("2.0.0", package.Version);
-        Assert.Equal("email", Assert.Single(package.SelectedFeatures));
+        Assert.Equal("email", Assert.Single(package.SelectedFeatures ?? []));
         Assert.Equal("https://mail.example.test", package.Settings!["email"]["Endpoint"].GetString());
         Assert.Equal("secret://vault/email", package.Settings["email"]["ApiSecret"].GetString());
         var infrastructure = Assert.Single(result.BuilderIntent.Infrastructure);
