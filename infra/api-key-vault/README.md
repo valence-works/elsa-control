@@ -107,8 +107,13 @@ The roles of the GitHub deploy identity in `infra/control-deploy-identity`
 
 ## Operator write path
 
-1. Apply `infra/control-egress` so `snet-api-egress` has the Key Vault
-   service endpoint. Record `AZURE_API_EGRESS_SUBNET_ID`.
+1. For an existing production VNet, preview `infra/control-egress` in
+   `keyVaultEndpointOnly` mode and follow the exact commands and refusal
+   checks in the [egress runbook](../control-egress/README.md#key-vault-endpoint-only-mode).
+   Production apply still requires separate #911 approval. Use the default
+   `full` mode only to provision a new environment. Record the existing
+   `integrationSubnetResourceId` as `AZURE_API_EGRESS_SUBNET_ID` after the
+   approved network update.
 2. Phase 1: as the phase 1 operator, deploy this module with
    `scripts/deploy-azure-elsa-control.sh --vault-only`, which also applies the
    base deployment. With only the phase 1 rights, deploy the module directly
