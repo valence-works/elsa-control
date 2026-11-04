@@ -3,6 +3,11 @@
 **Scope:** managed Elsa instance health, lifecycle work, reconciliation, and
 operator response. This is the operational baseline for [#222](https://github.com/valence-works/elsa-control/issues/222).
 
+Customer intake and response policy are in the [Elsa Cloud support model](../operations/support-model.md);
+the incident coordination steps are in [Elsa Cloud incident response](../operations/incident-response.md).
+This runbook remains authoritative for the detailed lifecycle and provider
+procedures below.
+
 **Important:** the controlled fixtures and tests behind this runbook are not
 production availability evidence. They do not establish a 99.9% SLO or a
 provider-specific production support commitment. RecoveryRequired now has a

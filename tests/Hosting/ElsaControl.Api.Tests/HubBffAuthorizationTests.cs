@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json;
 using ElsaControl.Api.Authentication;
 using ElsaControl.Api.Cloud;
 using ElsaControl.Api.Workspace;
@@ -28,16 +29,14 @@ public sealed class HubBffAuthorizationTests
     private const string CloudSubject = "b6f73e84-5b47-4f4d-ad52-e3c4c9a815c6";
     private const string HandoffCodeVerifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 
-    // #823's six read endpoints, #846's non-provisioning membership read, #824's
-    // fifteen lifecycle endpoints, hosted-subscription from #825, and account
-    // linking from #826. The enumeration helper is the contract: any extra Hub
-    // marker fails this test.
+    // Read endpoints from #823 and #846, lifecycle endpoints from #824,
+    // hosted-subscription from #825, and account linking from #826.
+    // The enumeration helper is the contract: any extra Hub marker fails
+    // this test.
     private static readonly string[] ExpectedHubBffAllowlist =
     [
         "GET /api/cloud/compatibility",
-        "GET /api/me/organizations",
         "GET /api/me/workspace-memberships",
-        "GET /api/me/workspaces",
         "GET /api/organizations/{organizationId:guid}/billing/hosted-subscription",
         "GET /api/workspaces/{workspaceId:guid}/instances/",
         "GET /api/workspaces/{workspaceId:guid}/instances/onboarding-options",
@@ -69,7 +68,7 @@ public sealed class HubBffAuthorizationTests
         response.EnsureSuccessStatusCode();
 
         Assert.Equal(ExpectedHubBffAllowlist.Order(StringComparer.Ordinal), EnumerateHubBffAllowlist(app));
-        Assert.Equal(24, ExpectedHubBffAllowlist.Length);
+        Assert.Equal(22, ExpectedHubBffAllowlist.Length);
     }
 
     [Fact]
@@ -81,7 +80,7 @@ public sealed class HubBffAuthorizationTests
     }
 
     [Fact]
-    public async Task Owned_hub_session_succeeds_on_the_seven_allowlisted_read_endpoints()
+    public async Task Owned_hub_session_succeeds_on_the_allowlisted_read_endpoints()
     {
         await using var app = CreateHubApplication();
         await app.SeedAsync(_ => Task.CompletedTask);
@@ -93,8 +92,6 @@ public sealed class HubBffAuthorizationTests
         var bootstrap = await bootstrapResponse.Content.ReadFromJsonAsync<CloudBootstrapResponse>(
             ControlApiTestApplication.JsonOptions);
         Assert.NotNull(bootstrap);
-        using var organizations = await client.GetAsync("/api/me/organizations");
-        using var workspaces = await client.GetAsync("/api/me/workspaces");
         using var memberships = await client.GetAsync("/api/me/workspace-memberships");
         var instanceId = await SeedOwnedInstanceAsync(app, bootstrap.OrganizationId, bootstrap.WorkspaceId);
         using var instances = await client.GetAsync($"/api/workspaces/{bootstrap.WorkspaceId:D}/instances");
@@ -103,8 +100,6 @@ public sealed class HubBffAuthorizationTests
 
         Assert.Equal(HttpStatusCode.OK, compatibility.StatusCode);
         Assert.Equal(HttpStatusCode.OK, bootstrapResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, organizations.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, workspaces.StatusCode);
         Assert.Equal(HttpStatusCode.OK, memberships.StatusCode);
         Assert.Equal(HttpStatusCode.OK, instances.StatusCode);
         Assert.Equal(HttpStatusCode.OK, overview.StatusCode);
@@ -113,6 +108,26 @@ public sealed class HubBffAuthorizationTests
         Assert.Contains(listed.Items, item => item.InstanceId == instanceId);
         var overviewBody = await overview.Content.ReadControlJsonAsync<ManagedElsaInstanceOverviewResponse>();
         Assert.Equal(instanceId, overviewBody!.Summary.InstanceId);
+    }
+
+    [Fact]
+    public async Task Hub_session_cannot_use_provisioning_me_reads_or_create_catalog_rows()
+    {
+        await using var app = CreateHubApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateHubClient(app, HubSubject);
+
+        using var organizations = await client.GetAsync("/api/me/organizations");
+        using var workspaces = await client.GetAsync("/api/me/workspaces");
+
+        await AssertHubBffDeniedAsync(organizations);
+        await AssertHubBffDeniedAsync(workspaces);
+
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        Assert.Equal(0, await db.Accounts.CountAsync());
+        Assert.Equal(0, await db.Organizations.CountAsync());
+        Assert.Equal(0, await db.Workspaces.CountAsync());
     }
 
     [Fact]
@@ -533,9 +548,14 @@ public sealed class HubBffAuthorizationTests
         using var client = app.CreateControlIdentityClient(subject: "ordinary-bearer");
 
         using var workspaces = await client.GetAsync("/api/me/workspaces");
+        using var organizations = await client.GetAsync("/api/me/organizations");
         var context = await workspaces.Content.ReadControlJsonAsync<MeWorkspacesResponse>();
+        var organizationContext = await organizations.Content.ReadControlJsonAsync<MeWorkspacesResponse>();
         Assert.Equal(HttpStatusCode.OK, workspaces.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, organizations.StatusCode);
         Assert.NotNull(context);
+        Assert.NotNull(organizationContext);
+        Assert.Single(organizationContext.Organizations);
         var workspaceId = context.Workspaces.Single().Id;
 
         using var unmarked = await client.GetAsync($"/api/workspaces/{workspaceId:D}/sources");
@@ -561,8 +581,12 @@ public sealed class HubBffAuthorizationTests
 
         using var cloudOnly = await cloud.GetAsync(
             $"/api/workspaces/{owned.WorkspaceId:D}/external-engine-connections");
+        using var organizations = await cloud.GetAsync("/api/me/organizations");
+        using var workspaces = await cloud.GetAsync("/api/me/workspaces");
 
         Assert.Equal(HttpStatusCode.OK, cloudOnly.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, organizations.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, workspaces.StatusCode);
     }
 
     internal static string[] EnumerateHubBffAllowlist(ControlApiTestApplication app) =>
@@ -639,7 +663,8 @@ public sealed class HubBffAuthorizationTests
     {
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         Assert.True(response.Headers.CacheControl?.NoStore);
-        Assert.Contains("hub-bff.denied", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal("hub-bff.denied", problem.RootElement.GetProperty("code").GetString());
     }
 
     private static async Task<Guid> BootstrapWorkspaceAsync(HttpClient client)
