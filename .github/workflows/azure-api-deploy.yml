@@ -535,7 +535,8 @@ jobs:
               echo "::error::API_KEY_VAULT_ROLLBACK_ACTIVE is true. Resolve the Key Vault rollback before the site is applied."
               exit 1
             fi
-            if [ "${API_KEY_VAULT_SECRETS_WRITTEN:-}" != "true" ]; then
+            secrets_written="${API_KEY_VAULT_SECRETS_WRITTEN:-}"
+            if [ "${secrets_written,,}" != "true" ]; then
               echo "::error::API_KEY_VAULT_SECRETS_WRITTEN must be true before the site is applied."
               exit 1
             fi
@@ -1524,6 +1525,7 @@ jobs:
         if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' && env.TARGET_ENVIRONMENT == 'production' && env.DEPLOY_MODE != 'build' && env.DEPLOY_MODE != 'telemetry' }}
         env:
           STRIPE_PRODUCTION_PRICE_ID: ${{ vars.STRIPE_PRODUCTION_PRICE_ID }}
+          STRIPE_PRODUCTION_SECRET_KEY: ${{ secrets.STRIPE_PRODUCTION_SECRET_KEY }}
           CONTROL_PRODUCTION_WEBHOOK_URL: ${{ vars.CONTROL_PRODUCTION_WEBHOOK_URL }}
           AZURE_EXPECTED_PRODUCTION_PORTAL_RETURN_URL: ${{ vars.AZURE_EXPECTED_PRODUCTION_PORTAL_RETURN_URL }}
           AZURE_EXPECTED_PRODUCTION_CHECKOUT_SUCCESS_URL: ${{ vars.AZURE_EXPECTED_PRODUCTION_CHECKOUT_SUCCESS_URL }}

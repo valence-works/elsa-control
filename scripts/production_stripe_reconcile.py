@@ -589,6 +589,28 @@ class ProductionStripeReconciler:
             raise ReconciliationError("azure-setting: Billing__Stripe__WebhookSigningSecret has an unexpected shape")
 
 
+def captured_audit_secret_key(
+    captured: Mapping[str, AzureAppSetting],
+    *,
+    mode: str,
+) -> str | None:
+    """Return a captured live key for --audit, or None in Key Vault mode.
+
+    Key Vault-mode captures never store secret settings. Indexing the capture
+    would raise KeyError and print the generic FAIL line. A missing key falls
+    through to ``STRIPE_PRODUCTION_SECRET_KEY``; CI supplies that GitHub
+    environment secret and does not need a Key Vault data-plane role.
+    """
+
+    setting = captured.get("Billing__Stripe__SecretKey")
+    if setting is None:
+        return None
+    value = setting.value
+    if mode == KEY_VAULT_MODE and is_key_vault_reference(value):
+        return None
+    return value
+
+
 def _required_azure() -> AzureWebApp:
     missing = [
         name
@@ -640,9 +662,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         captured_secret_key = None
         if args.audit_capture:
             captured = read_capture(args.audit_capture, mode=mode)
-            captured_secret_key = captured["Billing__Stripe__SecretKey"].value
-            if mode == KEY_VAULT_MODE and is_key_vault_reference(captured_secret_key):
-                captured_secret_key = None
+            captured_secret_key = captured_audit_secret_key(captured, mode=mode)
         stripe_key = captured_secret_key or os.environ.get("STRIPE_PRODUCTION_SECRET_KEY", "")
         if not stripe_key.strip():
             raise ReconciliationError("env: STRIPE_PRODUCTION_SECRET_KEY is missing")

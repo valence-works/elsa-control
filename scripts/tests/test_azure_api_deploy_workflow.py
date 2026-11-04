@@ -248,6 +248,12 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         self.assertIn('python3 scripts/production_stripe_reconcile.py --reapply "$PRODUCTION_BILLING_CAPTURE_PATH"', rollback)
         self.assertIn("--audit-capture", self.source)
         self.assertIn('rm -f -- "$PRODUCTION_BILLING_CAPTURE_PATH"', self.source)
+        audit_start = self.source.index("      - name: Audit production Stripe billing")
+        audit_end = self.source.index("\n      - name:", audit_start + 1)
+        audit = self.source[audit_start:audit_end]
+        self.assertIn("STRIPE_PRODUCTION_SECRET_KEY: ${{ secrets.STRIPE_PRODUCTION_SECRET_KEY }}", audit)
+        self.assertNotIn("echo \"$STRIPE_PRODUCTION_SECRET_KEY\"", audit)
+        self.assertNotIn("echo \"$STRIPE_PRODUCTION_SECRET_KEY\"", self.source)
 
     def test_deploy_blocks_preserve_billing_with_fake_provider_for_each_mutating_mode(self) -> None:
         """Execute the workflow shell blocks with safe fake providers."""
@@ -1458,7 +1464,8 @@ fi
 
     def test_infra_still_requires_key_vault_secrets_written_but_app_does_not(self) -> None:
         # #865: pre-cutover mode covers app and promote only. Infra keeps the
-        # #863 gate in "Check deployment configuration", unchanged.
+        # #863 gate in "Check deployment configuration". #882 lowercases the
+        # comparison so TRUE/True match the Python helper.
         check_start = self.source.index("        run: |\n", self.source.index("      - name: Check deployment configuration"))
         check_end = self.source.index("\n      - name:", check_start)
         check_script = dedent(self.source[check_start + len("        run: |\n") : check_end])
@@ -1495,7 +1502,18 @@ fi
                     self.assertIn("API_KEY_VAULT_SECRETS_WRITTEN must be true", refused.stdout + refused.stderr)
                     self.assertNotIn("deploy_configured=true", Path(output.name).read_text())
 
+            for written in ("true", "TRUE", "True"):
+                with self.subTest(accepted=written):
+                    Path(output.name).write_text("")
+                    accepted = dict(environment)
+                    accepted["API_KEY_VAULT_SECRETS_WRITTEN"] = written
+                    configured = subprocess.run(["bash", "-c", check_script], env=accepted,
+                                               capture_output=True, text=True, check=False)
+                    self.assertEqual(0, configured.returncode, configured.stdout + configured.stderr)
+                    self.assertIn("deploy_configured=true", Path(output.name).read_text())
+
             app = environment | {"DEPLOY_MODE": "app"}
+            Path(output.name).write_text("")
             configured = subprocess.run(["bash", "-c", check_script], env=app,
                                         capture_output=True, text=True, check=False)
             self.assertEqual(0, configured.returncode, configured.stdout + configured.stderr)
