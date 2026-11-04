@@ -51,9 +51,9 @@ incident; do not substitute a mutable latest revision.
 
 Follow the agent acknowledgement target and needs-Sipke queue rule in the
 [support model](support-model.md). State what was observed and when. If no
-operational evidence confirms a notification was delivered, do not tell the
-customer they “have been alerted.” The actual RecoveryRequired email receipt
-remains unverified under [#657](https://github.com/valence-works/elsa-control/issues/657)
+actual receipt is available, do not claim that Valence Works or an operator
+sent or delivered an incident notification. The actual RecoveryRequired email
+receipt remains unverified under [#657](https://github.com/valence-works/elsa-control/issues/657)
 and [#659](https://github.com/valence-works/elsa-control/issues/659).
 
 ### 3. Contain without duplicating work
@@ -122,15 +122,20 @@ the staging recipient was verified and a notification-only sample arrived at
 2026-10-13 10:14 UTC. The two original transition-linked RecoveryRequired
 receipts remain unverified; the sample does not prove those transitions or
 duplicate suppression. [#659](https://github.com/valence-works/elsa-control/issues/659#issuecomment-6143395891)
-preserves the same distinction. Do not repeat the earlier personal-mailbox
-search or backfill the missing transition receipts from the sample.
+preserves the same distinction. To verify a transition alert, inspect the
+configured alert mailbox, first establish that the mailbox is the configured
+recipient or has verified alias/shared-mailbox access, then correlate an actual
+receipt with the specific transition. Searching a different mailbox alone
+cannot prove delivery or nondelivery. A sample notification cannot replace a
+transition-linked receipt.
 
-The currently accepted gap is proof, not a reason to infer ownership: #657
-still has an open acceptance gap for the staging ops-mailbox reader and a fresh
-authorized transition-linked rehearsal. No person is assigned here. The
-support-inbox reader and timed intake proofs remain with #815. The timed
-staging incident drill is the last #815 acceptance step. Until those items are
-evidenced, do not claim that incidents are being automatically alerted, that a
-named person monitors either inbox, or that the staging drill passed. This
-documentation closes only its own documentation scope; it does not close #815,
-#657, #659, or #508.
+Both live delivery proof and acceptance of a named staging ops-mailbox reader
+remain open under #657. The #657 evidence records that the configured staging
+recipient is an alias of the signed-in work mailbox, but it does not identify
+an accepted reader or prove receipts for the original transitions. No person
+is assigned here. The support-inbox reader and timed intake proofs remain with
+#815. The timed staging incident drill is the last #815 acceptance step. Until
+those items are evidenced, do not claim that incidents are being automatically
+alerted, that a named person monitors either inbox, or that the staging drill
+passed. This documentation closes only its own documentation scope; it does
+not close #815, #657, #659, or #508.

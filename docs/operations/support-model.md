@@ -41,6 +41,18 @@ The 15-minute target is the agent acknowledgement. It does not create a
 one-hour human response promise, an on-call rota, or a 24/7 human service.
 There is no support credit commitment here.
 
+### Proposed acknowledgement copy
+
+> Thanks for contacting Elsa Cloud. An agent's policy target is to acknowledge
+> your report within 15 minutes, at any hour. If your case needs a reply or
+> decision from Sipke, the human follow-up target is the next business day
+> (Monday–Friday, Europe/Amsterdam). This policy does not promise a one-hour
+> human reply or 24/7 human coverage, and it includes no support credits.
+
+This is proposed wording, not deployed or measured copy. Do not send it until
+#815 verifies inbox and agent access and timed acknowledgement handling. It
+does not set a holiday calendar or a time-of-day deadline.
+
 ## Next-business-day examples
 
 Apply the local Europe/Amsterdam date, not the weekday in the sender's time
