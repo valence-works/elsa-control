@@ -651,7 +651,7 @@ public sealed class ManagedElsaHandoffTests
 
         await ExecuteSqlAsync(app, db => change == RedemptionChange.OwnerDemotedToReader
             ? db.WorkspaceMemberships
-                .Where(x => x.WorkspaceId == setup.WorkspaceId && x.Account.ExternalIdentities.Any(identity => identity.Subject == setup.Subject))
+                .Where(x => x.WorkspaceId == setup.WorkspaceId && x.Account != null && x.Account.ExternalIdentities.Any(identity => identity.Subject == setup.Subject))
                 .ExecuteUpdateAsync(x => x.SetProperty(membership => membership.Role, WorkspaceRole.Reader))
             : db.Database.ExecuteSqlInterpolatedAsync(
                 $"UPDATE ElsaInstances SET CurrentDeploymentStudioGrants = {false} WHERE Id = {setup.InstanceId}"));
