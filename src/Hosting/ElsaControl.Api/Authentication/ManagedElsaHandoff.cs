@@ -522,8 +522,7 @@ public interface IManagedElsaHandoffAuditSink
         string activeKeyId,
         IReadOnlyList<string> previousKeyIds,
         DateTimeOffset occurredAt,
-        CancellationToken cancellationToken = default) =>
-        ValueTask.CompletedTask;
+        CancellationToken cancellationToken = default);
 
     ValueTask<ManagedElsaHandoffTrustedKeySnapshot> GetLastTrustedSnapshotAsync(
         CancellationToken cancellationToken = default) =>

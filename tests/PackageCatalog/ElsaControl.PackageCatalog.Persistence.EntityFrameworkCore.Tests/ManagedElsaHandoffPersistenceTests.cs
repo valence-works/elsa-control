@@ -5,6 +5,7 @@ using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 
@@ -231,6 +232,82 @@ public sealed class ManagedElsaHandoffPersistenceTests
     }
 
     [Fact]
+    public async Task Key_ring_snapshot_recording_retries_after_a_unique_previous_snapshot_conflict()
+    {
+        await using var connection = NewConnection();
+        await connection.OpenAsync();
+        await using var setup = CreateContext(connection);
+        await setup.Database.MigrateAsync();
+
+        var conflict = new UniquePreviousSnapshotConflictInterceptor();
+        await using (var db = new CatalogDbContext(new DbContextOptionsBuilder<CatalogDbContext>()
+            .UseRetryingSqlite(connection,
+                sqlite => sqlite.MigrationsAssembly(CatalogDatabaseServiceCollectionExtensions.SqliteMigrationsAssembly))
+            .AddInterceptors(conflict)
+            .Options))
+        {
+            await new EfCoreManagedElsaHandoffStore(db).RecordKeyRingSnapshotAsync(KeyRingSnapshot(
+                "active-2026-10", ["previous-2026-09"], DateTimeOffset.UtcNow));
+        }
+
+        Assert.Equal(2, conflict.SaveAttempts);
+        var persisted = await setup.ManagedElsaHandoffAuditEvents.AsNoTracking().ToListAsync();
+        Assert.Equal(2, persisted.Count);
+        Assert.Single(persisted, row => row.KeyRingPreviousSnapshotId is not null);
+        Assert.Equal(["key_ring.active:active-2026-10", "key_ring.previous:previous-2026-09"],
+            persisted.Select(row => row.Action).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task Generic_handoff_audit_records_cannot_write_key_ring_snapshot_ids()
+    {
+        await using var connection = NewConnection();
+        await connection.OpenAsync();
+        await using var db = CreateContext(connection);
+        await db.Database.MigrateAsync();
+
+        await new EfCoreManagedElsaHandoffStore(db).RecordAsync(new ManagedElsaHandoffAuditRecord(
+            "redeem.invalid", "", null, null, null, null, null, null, DateTimeOffset.UtcNow,
+            Guid.NewGuid(), Guid.NewGuid()));
+
+        var persisted = await db.ManagedElsaHandoffAuditEvents.SingleAsync();
+        Assert.Null(persisted.KeyRingSnapshotId);
+        Assert.Null(persisted.KeyRingPreviousSnapshotId);
+    }
+
+    [Fact]
+    public async Task Invalid_legacy_key_ring_ids_are_not_trusted_or_retired()
+    {
+        await using var connection = NewConnection();
+        await connection.OpenAsync();
+        await using var db = CreateContext(connection);
+        await db.Database.MigrateAsync();
+        var occurredAt = new DateTimeOffset(2026, 10, 16, 3, 0, 0, TimeSpan.Zero);
+        db.ManagedElsaHandoffAuditEvents.AddRange(
+            new ManagedElsaHandoffAuditEventEntity
+            {
+                Id = Guid.NewGuid(),
+                Action = "key_ring.active:valid-active",
+                Jti = "",
+                OccurredAt = occurredAt
+            },
+            new ManagedElsaHandoffAuditEventEntity
+            {
+                Id = Guid.NewGuid(),
+                Action = "key_ring.previous:invalid__legacy",
+                Jti = "",
+                OccurredAt = occurredAt
+            });
+        await db.SaveChangesAsync();
+
+        await new EfCoreManagedElsaHandoffStore(db).RecordKeyRingSnapshotAsync(KeyRingSnapshot(
+            "next-active", [], occurredAt.AddMinutes(1)));
+
+        Assert.Equal(["key_ring.retired:valid-active:revoked"],
+            await new EfCoreManagedElsaHandoffStore(db).ListActionsStartingWithAsync("key_ring.retired:"));
+    }
+
+    [Fact]
     public async Task Concurrent_key_ring_transitions_persist_exactly_one_retired_row()
     {
         var databaseName = "handoff-key-ring-concurrent-" + Guid.NewGuid().ToString("N");
@@ -277,6 +354,37 @@ public sealed class ManagedElsaHandoffPersistenceTests
         DateTimeOffset occurredAt) =>
         new(activeKeyId, previousKeyIds, occurredAt,
             "key_ring.active:", "key_ring.previous:", "key_ring.retired:", ":revoked");
+
+    private sealed class UniquePreviousSnapshotConflictInterceptor : SaveChangesInterceptor
+    {
+        public int SaveAttempts { get; private set; }
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            SaveAttempts++;
+            if (SaveAttempts == 1)
+            {
+                var db = (CatalogDbContext)eventData.Context!;
+                var activeSnapshot = db.ChangeTracker.Entries<ManagedElsaHandoffAuditEventEntity>()
+                    .Select(entry => entry.Entity)
+                    .Single(entity => entity.KeyRingPreviousSnapshotId is not null);
+                db.ManagedElsaHandoffAuditEvents.Add(new ManagedElsaHandoffAuditEventEntity
+                {
+                    Id = Guid.NewGuid(),
+                    Action = "key_ring.conflict:injected",
+                    Jti = "",
+                    KeyRingSnapshotId = Guid.NewGuid(),
+                    KeyRingPreviousSnapshotId = activeSnapshot.KeyRingPreviousSnapshotId,
+                    OccurredAt = activeSnapshot.OccurredAt
+                });
+            }
+
+            return ValueTask.FromResult(result);
+        }
+    }
 
     [Fact]
     public async Task Handoff_audit_rows_are_append_only_and_reject_unsafe_correlation()

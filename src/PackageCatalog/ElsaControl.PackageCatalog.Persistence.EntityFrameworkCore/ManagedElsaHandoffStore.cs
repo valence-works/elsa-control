@@ -1,4 +1,5 @@
 using System.Data;
+using ElsaControl.PackageCatalog.Core.Security;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore.Models;
 using Microsoft.Data.SqlClient;
 using Microsoft.Data.Sqlite;
@@ -175,7 +176,8 @@ public sealed class EfCoreManagedElsaHandoffStore(
     {
         var latest = await ReadLatestKeyRingSnapshotAsync(
             snapshot.ActivePrefix, snapshot.PreviousPrefix, cancellationToken);
-        var previous = ParseTrustedSnapshot(latest.Actions, snapshot.ActivePrefix, snapshot.PreviousPrefix);
+        var previous = ManagedElsaHandoffKeyRingAuditSnapshotParser.Parse(
+            latest.Actions, snapshot.ActivePrefix, snapshot.PreviousPrefix);
         var previousKeyIds = snapshot.PreviousKeyIds
             .Where(keyId => !string.IsNullOrWhiteSpace(keyId))
             .Distinct(StringComparer.Ordinal)
@@ -292,36 +294,6 @@ public sealed class EfCoreManagedElsaHandoffStore(
         return (null, legacyActions);
     }
 
-    private static (string? ActiveKeyId, IReadOnlyList<string> TrustedKeyIds) ParseTrustedSnapshot(
-        IReadOnlyList<string> actions,
-        string activePrefix,
-        string previousPrefix)
-    {
-        string? activeKeyId = null;
-        var trusted = new List<string>();
-        foreach (var action in actions)
-        {
-            if (action.StartsWith(activePrefix, StringComparison.Ordinal))
-            {
-                var keyId = action[activePrefix.Length..];
-                if (keyId.Length == 0)
-                    continue;
-                activeKeyId = keyId;
-                if (!trusted.Contains(keyId, StringComparer.Ordinal))
-                    trusted.Add(keyId);
-            }
-            else if (action.StartsWith(previousPrefix, StringComparison.Ordinal))
-            {
-                var keyId = action[previousPrefix.Length..];
-                if (keyId.Length == 0 || trusted.Contains(keyId, StringComparer.Ordinal))
-                    continue;
-                trusted.Add(keyId);
-            }
-        }
-
-        return (activeKeyId, trusted);
-    }
-
     private static ManagedElsaHandoffAuditEventEntity ToEntity(ManagedElsaHandoffAuditRecord audit) =>
         new()
         {
@@ -334,8 +306,6 @@ public sealed class EfCoreManagedElsaHandoffStore(
             Audience = audit.Audience,
             BindingVersion = audit.BindingVersion,
             CorrelationId = audit.CorrelationId,
-            KeyRingSnapshotId = audit.KeyRingSnapshotId,
-            KeyRingPreviousSnapshotId = audit.KeyRingPreviousSnapshotId,
             OccurredAt = audit.OccurredAt.ToUniversalTime()
         };
 

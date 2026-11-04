@@ -352,6 +352,26 @@ public sealed class ManagedElsaHandoffKeyRingTests
     }
 
     [Fact]
+    public async Task Generic_audit_sink_does_not_persist_key_ring_snapshot_ids()
+    {
+        await using var connection = new SqliteConnection(
+            $"Data Source=file:handoff-generic-audit-{Guid.NewGuid():N};Mode=Memory;Cache=Shared");
+        await connection.OpenAsync();
+        await using var db = CreateCatalogContext(connection);
+        await db.Database.MigrateAsync();
+        var sink = new EfCoreManagedElsaHandoffAuditSink(new EfCoreManagedElsaHandoffStore(db));
+
+        await sink.RecordAsync(new ManagedElsaHandoffAuditEvent(
+            "redeem.invalid", "", null, null, null, null, DateTimeOffset.UtcNow,
+            KeyRingSnapshotId: Guid.NewGuid(),
+            KeyRingPreviousSnapshotId: Guid.NewGuid()));
+
+        var persisted = await db.ManagedElsaHandoffAuditEvents.SingleAsync();
+        Assert.Null(persisted.KeyRingSnapshotId);
+        Assert.Null(persisted.KeyRingPreviousSnapshotId);
+    }
+
+    [Fact]
     public async Task Concurrent_replica_startups_persist_exactly_one_retired_row_per_removed_key()
     {
         using var previous = RSA.Create(2048);

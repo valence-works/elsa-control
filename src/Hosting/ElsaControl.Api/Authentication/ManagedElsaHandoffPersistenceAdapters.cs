@@ -30,9 +30,7 @@ public sealed class EfCoreManagedElsaHandoffAuditSink(EfCoreManagedElsaHandoffSt
                 auditEvent.Audience,
                 auditEvent.BindingVersion,
                 auditEvent.CorrelationId,
-                auditEvent.OccurredAt,
-                auditEvent.KeyRingSnapshotId,
-                auditEvent.KeyRingPreviousSnapshotId),
+                auditEvent.OccurredAt),
             cancellationToken);
 
     public ValueTask RecordKeyRingTransitionAsync(
