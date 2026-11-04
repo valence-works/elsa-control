@@ -22,6 +22,7 @@ namespace ElsaControl.Api.Tests;
 
 public sealed class CloudAccountLinkApiTests
 {
+    private const string MembershipsPath = "/api/me/workspace-memberships";
     private const string HubIssuer = "https://hub-account.test/auth/v1";
     private const string CloudIssuer = "https://cloud-account.test/auth/v1";
     private const string HubSubject = "c0a80101-0000-4000-8000-000000000001";
@@ -41,19 +42,17 @@ public sealed class CloudAccountLinkApiTests
 
         using var linked = await hub.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
         using var hubOnly = CreateHubClient(app, HubSubject);
-        using var organizations = await hubOnly.GetAsync("/api/me/organizations");
-        using var workspaces = await hubOnly.GetAsync("/api/me/workspaces");
+        using var memberships = await hubOnly.GetAsync(MembershipsPath);
         using var instances = await hubOnly.GetAsync($"/api/workspaces/{owned.WorkspaceId:D}/instances");
 
         Assert.Equal(HttpStatusCode.OK, linked.StatusCode);
         var body = await linked.Content.ReadFromJsonAsync<CloudAccountLinkResponse>(ControlApiTestApplication.JsonOptions);
         Assert.False(body!.AlreadyLinked);
-        Assert.Equal(HttpStatusCode.OK, organizations.StatusCode);
-        var me = await organizations.Content.ReadControlJsonAsync<MeWorkspacesResponse>();
+        Assert.Equal(HttpStatusCode.OK, memberships.StatusCode);
+        var me = await memberships.Content.ReadControlJsonAsync<MeWorkspaceMembershipsResponse>();
         Assert.Contains(me!.Organizations, organization => organization.Id == owned.OrganizationId);
-        Assert.Equal(body.AccountId, me.Account.Id);
-        var workspaceList = await workspaces.Content.ReadControlJsonAsync<MeWorkspacesResponse>();
-        Assert.Contains(workspaceList!.Workspaces, workspace => workspace.Id == owned.WorkspaceId);
+        Assert.Equal(body.AccountId, me.Account!.Id);
+        Assert.Contains(me.Workspaces, workspace => workspace.Id == owned.WorkspaceId);
         var listed = await instances.Content.ReadControlJsonAsync<ManagedElsaInstanceListResponse>();
         Assert.Contains(listed!.Items, item => item.InstanceId == instanceId);
     }
@@ -195,8 +194,8 @@ public sealed class CloudAccountLinkApiTests
 
         Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
         await AssertProblemAsync(conflict, CloudAccountLinkEndpoints.HubAccountHasEnginesCode);
-        using var hubOrgs = await hub.GetAsync("/api/me/organizations");
-        var hubMe = await hubOrgs.Content.ReadControlJsonAsync<MeWorkspacesResponse>();
+        using var hubMemberships = await hub.GetAsync(MembershipsPath);
+        var hubMe = await hubMemberships.Content.ReadControlJsonAsync<MeWorkspaceMembershipsResponse>();
         Assert.Contains(hubMe!.Organizations, organization => organization.Id == hubOwned.OrganizationId);
         Assert.DoesNotContain(hubMe.Organizations, organization => organization.Id == cloudOwned.OrganizationId);
         await using var scope = app.Services.CreateAsyncScope();
@@ -252,10 +251,25 @@ public sealed class CloudAccountLinkApiTests
         Assert.DoesNotContain("buyer@example.test", json, StringComparison.Ordinal);
         Assert.DoesNotContain(HubSubject, json, StringComparison.Ordinal);
         Assert.DoesNotContain(CloudSubject, json, StringComparison.Ordinal);
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var rowsBeforeMembershipRead = (
+            Accounts: await db.Accounts.CountAsync(),
+            Organizations: await db.Organizations.CountAsync(),
+            Workspaces: await db.Workspaces.CountAsync());
         using var hubOnly = CreateHubClient(app, HubSubject);
-        using var afterUnlink = await hubOnly.GetAsync("/api/me/organizations");
-        var hubMe = await afterUnlink.Content.ReadControlJsonAsync<MeWorkspacesResponse>();
-        Assert.NotEqual(accountId, hubMe!.Account.Id);
+        using var afterUnlink = await hubOnly.GetAsync(MembershipsPath);
+        var hubMe = await afterUnlink.Content.ReadControlJsonAsync<MeWorkspaceMembershipsResponse>();
+
+        Assert.Equal(HttpStatusCode.OK, afterUnlink.StatusCode);
+        Assert.NotNull(hubMe);
+        Assert.Null(hubMe.Account);
+        Assert.Empty(hubMe.Organizations);
+        Assert.Empty(hubMe.Workspaces);
+        Assert.Equal(rowsBeforeMembershipRead, (
+            Accounts: await db.Accounts.CountAsync(),
+            Organizations: await db.Organizations.CountAsync(),
+            Workspaces: await db.Workspaces.CountAsync()));
     }
 
     [Fact]
@@ -374,8 +388,8 @@ public sealed class CloudAccountLinkApiTests
         Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
         await AssertProblemAsync(conflict, CloudAccountLinkEndpoints.AccountAlreadyLinkedCode);
         using var hubOnly = CreateHubClient(app, HubSubject);
-        using var organizations = await hubOnly.GetAsync("/api/me/organizations");
-        var hubMe = await organizations.Content.ReadControlJsonAsync<MeWorkspacesResponse>();
+        using var memberships = await hubOnly.GetAsync(MembershipsPath);
+        var hubMe = await memberships.Content.ReadControlJsonAsync<MeWorkspaceMembershipsResponse>();
         Assert.Contains(hubMe!.Organizations, organization => organization.Id == firstOwned.OrganizationId);
         Assert.DoesNotContain(hubMe.Organizations, organization => organization.Id == secondOwned.OrganizationId);
         await using var scope = app.Services.CreateAsyncScope();
@@ -396,8 +410,8 @@ public sealed class CloudAccountLinkApiTests
         using var hub = CreateHubClient(app, HubSubject);
         var cloudOwned = await BootstrapAsync(cloud);
         await BootstrapAsync(hub);
-        using var hubMeBefore = await hub.GetAsync("/api/me/organizations");
-        var hubAccountId = (await hubMeBefore.Content.ReadControlJsonAsync<MeWorkspacesResponse>())!.Account.Id;
+        using var hubMeBefore = await hub.GetAsync(MembershipsPath);
+        var hubAccountId = (await hubMeBefore.Content.ReadControlJsonAsync<MeWorkspaceMembershipsResponse>())!.Account!.Id;
         using var linker = CreateLinkClient(app, HubIssuer, HubSubject, CloudIssuer, CloudSubject);
 
         using var linked = await linker.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
@@ -405,7 +419,7 @@ public sealed class CloudAccountLinkApiTests
         using var admin = app.CreateClient();
         admin.DefaultRequestHeaders.Add(ApiKeyAuthenticationDefaults.HeaderName, "local-dev-key");
         using var audit = await admin.GetAsync($"/api/admin/accounts/{body!.AccountId:D}/hub-link/audit");
-        using var organizations = await hub.GetAsync("/api/me/organizations");
+        using var memberships = await hub.GetAsync(MembershipsPath);
 
         Assert.Equal(HttpStatusCode.OK, linked.StatusCode);
         Assert.False(body.AlreadyLinked);
@@ -416,8 +430,8 @@ public sealed class CloudAccountLinkApiTests
         Assert.Equal("Account", item.ActorKind);
         Assert.Equal(cloudAccountId, item.ActorAccountId);
         Assert.Equal(hubAccountId, item.SourceAccountId);
-        var hubMe = await organizations.Content.ReadControlJsonAsync<MeWorkspacesResponse>();
-        Assert.Equal(cloudAccountId, hubMe!.Account.Id);
+        var hubMe = await memberships.Content.ReadControlJsonAsync<MeWorkspaceMembershipsResponse>();
+        Assert.Equal(cloudAccountId, hubMe!.Account!.Id);
         Assert.Contains(hubMe.Organizations, organization => organization.Id == cloudOwned.OrganizationId);
         await using var scope = app.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
@@ -506,10 +520,10 @@ public sealed class CloudAccountLinkApiTests
 
         using var linked = await linker.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
         using var hubOnly = CreateHubClient(app, HubSubject);
-        using var organizations = await hubOnly.GetAsync("/api/me/organizations");
+        using var memberships = await hubOnly.GetAsync(MembershipsPath);
 
         Assert.Equal(HttpStatusCode.OK, linked.StatusCode);
-        var me = await organizations.Content.ReadControlJsonAsync<MeWorkspacesResponse>();
+        var me = await memberships.Content.ReadControlJsonAsync<MeWorkspaceMembershipsResponse>();
         Assert.Contains(me!.Organizations, organization => organization.Id == owned.OrganizationId);
     }
 
@@ -533,10 +547,10 @@ public sealed class CloudAccountLinkApiTests
 
         using var linked = await linker.PostAsJsonAsync("/api/cloud/account-links", new CloudAccountLinkRequest());
         using var hubOnly = CreateHubClient(app, HubSubject);
-        using var organizations = await hubOnly.GetAsync("/api/me/organizations");
+        using var memberships = await hubOnly.GetAsync(MembershipsPath);
 
         Assert.Equal(HttpStatusCode.OK, linked.StatusCode);
-        var me = await organizations.Content.ReadControlJsonAsync<MeWorkspacesResponse>();
+        var me = await memberships.Content.ReadControlJsonAsync<MeWorkspaceMembershipsResponse>();
         Assert.Contains(me!.Organizations, organization => organization.Id == owned.OrganizationId);
     }
 
