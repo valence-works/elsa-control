@@ -46,8 +46,8 @@ incident; do not substitute a mutable latest revision.
 
 Follow the agent acknowledgement target and needs-Sipke queue rule in the
 [support model](support-model.md). State what was observed and when. If no
-actual receipt is available, do not claim that Valence Works or an operator
-sent or delivered an incident notification. The actual RecoveryRequired email
+actual delivery receipt is available, do not claim that Valence Works or an
+operator has been notified of the incident. The actual RecoveryRequired email
 receipt remains unverified under [#657](https://github.com/valence-works/elsa-control/issues/657)
 and [#659](https://github.com/valence-works/elsa-control/issues/659).
 
