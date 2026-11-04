@@ -1951,6 +1951,13 @@ public sealed class ManagedElsaHandoffTests
             Events.Enqueue(auditEvent);
             return ValueTask.CompletedTask;
         }
+
+        public ValueTask RecordKeyRingTransitionAsync(
+            string activeKeyId,
+            IReadOnlyList<string> previousKeyIds,
+            DateTimeOffset occurredAt,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.CompletedTask;
     }
 
     private sealed class TestTimeProvider(DateTimeOffset current) : TimeProvider
