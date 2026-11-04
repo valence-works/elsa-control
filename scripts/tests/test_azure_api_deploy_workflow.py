@@ -4597,6 +4597,7 @@ from test_appsettings_name_only import (  # noqa: E402
     AppSettingsNameOnlyCliTests,
     AppSettingsNameOnlyHelperSyntaxTests,
     AppSettingsNameOnlyScanTests,
+    ConnectionStringNameOnlyCliTests,
 )
 
 

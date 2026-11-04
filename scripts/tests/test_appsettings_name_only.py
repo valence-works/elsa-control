@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Name-only projection for hosted application-setting listings."""
+"""Name-only output contracts for hosted App Service configuration listings."""
 
 from __future__ import annotations
 
@@ -36,7 +36,12 @@ CLI = ROOT / "scripts" / "hosted-appsettings.sh"
 HELPER = ROOT / "scripts" / "lib" / "hosted-appsettings.sh"
 
 
-def write_fake_az(temporary: Path, settings: dict[str, str]) -> Path:
+def write_fake_az(
+    temporary: Path,
+    settings: dict[str, str],
+    *,
+    resource_kind: str = "appsettings",
+) -> Path:
     store = temporary / "settings.json"
     store.write_text(json.dumps(settings))
     call_log = temporary / "az-calls"
@@ -48,7 +53,7 @@ open({str(call_log)!r}, "a", encoding="utf-8").write(" ".join(sys.argv[1:]) + "\
 store = json.loads(open({str(store)!r}, encoding="utf-8").read())
 args = sys.argv[1:]
 joined = " ".join(args)
-if args[:4] != ["webapp", "config", "appsettings", "list"]:
+if args[:4] != ["webapp", "config", {resource_kind!r}, "list"]:
     sys.exit(1)
 query = args[args.index("--query") + 1] if "--query" in args else ""
 
@@ -61,7 +66,15 @@ def lookup(requested):
 if query == "[].name":
     print("\\n".join(store))
 elif query.endswith(".name"):
-    print("\\n".join(store))
+    if "starts_with(name, '" in query:
+        prefix = query.split("starts_with(name, '", 1)[1].split("')", 1)[0]
+        print("\\n".join(name for name in store if name.startswith(prefix)))
+    elif query.startswith("[?name=='"):
+        requested = query[len("[?name=='"):-len("'].name")]
+        canonical, _ = lookup(requested)
+        print("" if canonical is None else canonical)
+    else:
+        print("\\n".join(store))
 elif query.endswith("| length(@)") or query == "length(@)":
     print(len(store))
 elif query.startswith("[?name=='") and query.endswith("']"):
@@ -83,7 +96,7 @@ else:
     return call_log
 
 
-class AppSettingsNameOnlyCliTests(unittest.TestCase):
+class HostedConfigCliTestMixin:
     def run_cli(self, temporary: Path, *args: str) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment["PATH"] = f"{temporary}{os.pathsep}{environment['PATH']}"
@@ -96,6 +109,9 @@ class AppSettingsNameOnlyCliTests(unittest.TestCase):
             check=False,
             timeout=10,
         )
+
+
+class AppSettingsNameOnlyCliTests(HostedConfigCliTestMixin, unittest.TestCase):
 
     def test_list_returns_names_and_never_values(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -249,7 +265,327 @@ class AppSettingsNameOnlyCliTests(unittest.TestCase):
             self.assertEqual("\n", result.stdout)
 
 
+class ConnectionStringNameOnlyCliTests(HostedConfigCliTestMixin, unittest.TestCase):
+    def test_list_projects_connection_string_names_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temporary = Path(temp_dir)
+            secrets = {
+                "PrimaryStore": "Server=primary;Password=primary-secret",
+                "AuditStore": "Server=audit;Password=audit-secret",
+            }
+            call_log = write_fake_az(temporary, secrets, resource_kind="connection-string")
+
+            result = self.run_cli(
+                temporary,
+                "list",
+                "--kind",
+                "connection-string",
+                "--resource-group",
+                "rg-test",
+                "--name",
+                "api-test",
+            )
+
+            output = result.stdout + result.stderr
+            self.assertEqual(0, result.returncode, output)
+            self.assertEqual("PrimaryStore\nAuditStore\n", result.stdout)
+            for value in secrets.values():
+                self.assertNotIn(value, output)
+            calls = call_log.read_text().splitlines()
+            self.assertEqual(1, len(calls))
+            self.assertIn("webapp config connection-string list", calls[0])
+            self.assertIn("[].name", calls[0])
+            self.assertNotIn("[].value", calls[0])
+            self.assertNotIn("--debug", calls[0])
+
+    def test_get_reads_only_one_exact_connection_string(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temporary = Path(temp_dir)
+            secrets = {
+                "PrimaryStore": "Server=primary;Password=primary-secret",
+                "AuditStore": "Server=audit;Password=audit-secret",
+            }
+            call_log = write_fake_az(temporary, secrets, resource_kind="connection-string")
+
+            result = self.run_cli(
+                temporary,
+                "get",
+                "--kind",
+                "connection-string",
+                "--resource-group",
+                "rg-test",
+                "--name",
+                "api-test",
+                "--setting",
+                "primarystore",
+            )
+
+            output = result.stdout + result.stderr
+            self.assertEqual(0, result.returncode, output)
+            self.assertEqual(secrets["PrimaryStore"] + "\n", result.stdout)
+            self.assertNotIn(secrets["AuditStore"], output)
+            calls = call_log.read_text().splitlines()
+            self.assertEqual(2, len(calls))
+            self.assertIn("[].name", calls[0])
+            self.assertIn("[?name=='PrimaryStore']", calls[1])
+            self.assertNotIn("[?starts_with(name", calls[1])
+            self.assertNotIn("--debug", "\n".join(calls))
+
+    def test_list_prefix_still_projects_names_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temporary = Path(temp_dir)
+            secrets = {
+                "PrimaryStore": "Server=primary;Password=primary-secret",
+                "AuditStore": "Server=audit;Password=audit-secret",
+            }
+            call_log = write_fake_az(temporary, secrets, resource_kind="connection-string")
+
+            result = self.run_cli(
+                temporary,
+                "list",
+                "--kind",
+                "connection-string",
+                "--resource-group",
+                "rg-test",
+                "--name",
+                "api-test",
+                "--prefix",
+                "Primary",
+            )
+
+            output = result.stdout + result.stderr
+            self.assertEqual(0, result.returncode, output)
+            self.assertEqual("PrimaryStore\n", result.stdout)
+            for value in secrets.values():
+                self.assertNotIn(value, output)
+            self.assertIn("[?starts_with(name, 'Primary')].name", call_log.read_text())
+
+    def test_get_rejects_wildcard_prefix_bulk_and_duplicate_selectors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temporary = Path(temp_dir)
+            call_log = write_fake_az(
+                temporary,
+                {"PrimaryStore": "Server=primary;Password=primary-secret"},
+                resource_kind="connection-string",
+            )
+            common = (
+                "get",
+                "--kind",
+                "connection-string",
+                "--resource-group",
+                "rg-test",
+                "--name",
+                "api-test",
+            )
+            invalid = (
+                (),
+                ("--setting", "Primary*"),
+                ("--setting", "PrimaryStore", "--prefix", "Primary"),
+                ("--setting", "PrimaryStore,AuditStore"),
+                ("--setting", "PrimaryStore", "--setting", "AuditStore"),
+                ("--setting", "Primary Store"),
+                ("--setting", "PrimaryStore", "--query", "[].value"),
+                ("--setting", "PrimaryStore", "--filter", "name=='PrimaryStore'"),
+                ("--setting", "PrimaryStore", "--debug"),
+                ("--setting", "PrimaryStore", "--debug=true"),
+            )
+            for extra in invalid:
+                with self.subTest(extra=extra):
+                    result = self.run_cli(temporary, *common, *extra)
+                    output = result.stdout + result.stderr
+                    self.assertNotEqual(0, result.returncode, output)
+                    self.assertNotIn("primary-secret", output)
+            self.assertFalse(call_log.exists())
+
+    def test_missing_and_duplicate_case_insensitive_names_fail_before_value_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temporary = Path(temp_dir)
+            call_log = write_fake_az(
+                temporary,
+                {"PrimaryStore": "primary-secret", "primarystore": "duplicate-secret"},
+                resource_kind="connection-string",
+            )
+            common = (
+                "get",
+                "--kind",
+                "connection-string",
+                "--resource-group",
+                "rg-test",
+                "--name",
+                "api-test",
+                "--setting",
+            )
+
+            duplicate = self.run_cli(temporary, *common, "PrimaryStore")
+            duplicate_output = duplicate.stdout + duplicate.stderr
+            self.assertNotEqual(0, duplicate.returncode, duplicate_output)
+            self.assertEqual("", duplicate.stdout)
+            self.assertNotIn("primary-secret", duplicate_output)
+            self.assertNotIn("duplicate-secret", duplicate_output)
+            self.assertEqual(1, len(call_log.read_text().splitlines()))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temporary = Path(temp_dir)
+            call_log = write_fake_az(
+                temporary,
+                {"PrimaryStore": "primary-secret"},
+                resource_kind="connection-string",
+            )
+            missing = self.run_cli(
+                temporary,
+                "get",
+                "--kind",
+                "connection-string",
+                "--resource-group",
+                "rg-test",
+                "--name",
+                "api-test",
+                "--setting",
+                "MissingStore",
+            )
+            missing_output = missing.stdout + missing.stderr
+            self.assertNotEqual(0, missing.returncode, missing_output)
+            self.assertEqual("", missing.stdout)
+            self.assertIn("not found", missing.stderr)
+            self.assertNotIn("primary-secret", missing_output)
+            self.assertEqual(1, len(call_log.read_text().splitlines()))
+
+    def test_empty_connection_string_value_is_successful(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temporary = Path(temp_dir)
+            call_log = write_fake_az(temporary, {"EmptyStore": ""}, resource_kind="connection-string")
+
+            result = self.run_cli(
+                temporary,
+                "get",
+                "--kind",
+                "connection-string",
+                "--resource-group",
+                "rg-test",
+                "--name",
+                "api-test",
+                "--setting",
+                "EmptyStore",
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual("\n", result.stdout)
+            self.assertEqual(2, len(call_log.read_text().splitlines()))
+
+    def test_unknown_kind_is_rejected_before_azure_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temporary = Path(temp_dir)
+            call_log = write_fake_az(
+                temporary,
+                {"PrimaryStore": "primary-secret"},
+                resource_kind="connection-string",
+            )
+            result = self.run_cli(
+                temporary,
+                "list",
+                "--kind",
+                "other",
+                "--resource-group",
+                "rg-test",
+                "--name",
+                "api-test",
+            )
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("kind must be", result.stderr)
+            self.assertFalse(call_log.exists())
+
+
 class AppSettingsNameOnlyScanTests(unittest.TestCase):
+    def test_connection_string_listings_are_classified_and_debug_is_unsafe(self) -> None:
+        for command, expected in (
+            ("az webapp config connection-string list --query '[].name'", "names"),
+            (
+                "az webapp config connection-string list --query \"[?name=='PrimaryStore'] | [0].value\"",
+                "exact-value",
+            ),
+            ("az webapp config connection-string list --query '[].value'", "unsafe"),
+            ("az webapp config connection-string list --query \"[?starts_with(name, 'Db')].value\"", "unsafe"),
+            (
+                "az webapp config connection-string list --query \"[?name=='PrimaryStore' || name=='AuditStore'] | [0].value\"",
+                "unsafe",
+            ),
+        ):
+            with self.subTest(command=command):
+                queries = list(iter_shell_listing_queries(command))
+                self.assertEqual(1, len(queries))
+                self.assertEqual(expected, classify_appsettings_list_query(queries[0]))
+
+        for family in ("appsettings", "connection-string"):
+            for debug in ("--debug", "--debug=true"):
+                source = f"az webapp config {family} list --query '[].name' {debug}"
+                with self.subTest(source=source):
+                    queries = list(iter_shell_listing_queries(source))
+                    self.assertEqual([None], queries)
+                    findings = list(iter_backstop_findings(Path("snippet.sh"), source, ROOT))
+                    self.assertTrue(findings)
+            python_source = (
+                'subprocess.run(["az", "webapp", "config", '
+                f'"{family}", "list", "--query", "[].name", "--debug=true"])\n'
+            )
+            with self.subTest(source=python_source):
+                self.assertTrue(
+                    list(iter_backstop_findings(Path("snippet.py"), python_source, ROOT))
+                )
+
+    def test_connection_string_python_and_dynamic_shapes_fail_closed(self) -> None:
+        direct = (
+            'subprocess.run(["az", "webapp", "config", "connection-string", "list", '
+            '"--query", "[].name"])\n'
+        )
+        self.assertEqual(["[].name"], list(iter_python_listing_queries(direct)))
+
+        dynamic_shell = (
+            'subprocess.run("az webapp config connection-string list --query " + query, '
+            'shell=True)\n'
+        )
+        self.assertEqual([None], list(iter_python_listing_queries(dynamic_shell)))
+
+        dynamic_argv = (
+            'subprocess.run(["az", "webapp", "config", "connection-string", "list", *args])\n'
+        )
+        self.assertEqual([None], list(iter_python_listing_queries(dynamic_argv)))
+
+        for source, is_python in (
+            ('subprocess.run(command_for("connection-string", "list"))\n', True),
+            ('alias lsconn="az webapp config connection-string list"\n', False),
+            ('eval "az webapp config connection-string list --query \'[].name\'"\n', False),
+        ):
+            with self.subTest(source=source):
+                queries = list(iter_python_listing_queries(source)) if is_python else list(iter_shell_listing_queries(source))
+                self.assertTrue(queries, source)
+                self.assertTrue(all(classify_appsettings_list_query(query) == "unsafe" for query in queries))
+
+        dynamic_python = (
+            'cmd = "az webapp config connection-string list -o json"\n'
+            "subprocess.run(cmd.split())\n"
+        )
+        self.assertTrue(
+            list(iter_backstop_findings(Path("snippet.py"), dynamic_python)),
+            dynamic_python,
+        )
+
+    def test_dynamic_connection_string_kind_and_verb_fail_closed(self) -> None:
+        shell = (
+            "kind=connection-string\n"
+            "verb=list\n"
+            'az webapp config "$kind" "$verb" --query "[].value"\n'
+        )
+        python = (
+            'kind = "connection-string"\n'
+            'verb = "list"\n'
+            'subprocess.run(["az", "webapp", "config", kind, verb, "--query", "[].value"])\n'
+        )
+        for filename, source in (("snippet.sh", shell), ("snippet.py", python)):
+            with self.subTest(filename=filename):
+                findings = list(iter_backstop_findings(Path(filename), source, ROOT))
+                self.assertTrue(findings, source)
+
     def test_repo_listings_never_project_values_in_bulk(self) -> None:
         findings = scan_operator_listings(ROOT)
         self.assertTrue(findings, "expected hosted app-settings listings to scan")
