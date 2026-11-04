@@ -879,7 +879,12 @@ before it restores the image.
 
 ### Operator write path
 
-1. Apply `infra/control-egress` so the Key Vault service endpoint exists.
+1. For the existing production VNet, preview `infra/control-egress` with
+   `egressDeploymentMode=keyVaultEndpointOnly` and follow the refusal checks
+   in the [egress runbook](../../infra/control-egress/README.md#key-vault-endpoint-only-mode).
+   Apply only after the separate #911 production approval; this issue grants
+   no production apply authority. Use the default `full` mode only when
+   provisioning a new environment.
 2. Phase 1 — as the phase 1 operator, create the vault only:
    `scripts/deploy-azure-elsa-control.sh --vault-only`. This also applies
    the base deployment. With only the phase 1 rights, deploy the module
@@ -987,7 +992,12 @@ Start at step 4 only once #882 is fixed: from step 4 on, every production
 `app` or `promote` deploy fails (closed without the variable, or the Key
 Vault-mode audit rolls it back) until #882 lands.
 
-1. Apply `infra/control-egress` if the Key Vault service endpoint is missing.
+1. If the production Key Vault service endpoint is missing, preview
+   `infra/control-egress` with `egressDeploymentMode=keyVaultEndpointOnly`.
+   Use the [egress runbook](../../infra/control-egress/README.md#key-vault-endpoint-only-mode)
+   for the exact read-only commands and stop conditions. A production apply
+   remains gated by separate #911 approval; do not use default `full` mode
+   for this cutover.
 2. Phase 1: as the phase 1 operator listed under "API Key Vault", deploy
    only the vault module to the production resource group. Do not use
    `scripts/deploy-azure-elsa-control.sh` here: it applies
