@@ -1,8 +1,23 @@
-# Name-only projection for hosted App Service application settings.
-# Listings never request or print values. A value is read only when the
-# caller names exactly one setting.
+# Name-only output and exact-name reads for hosted App Service configuration.
+# Azure CLI applies --query as a client-side projection; only the selected
+# name or exact value is returned by this helper.
 
 HOSTED_APPSETTINGS_LIB_LOADED=1
+HOSTED_CONFIG_KINDS=(appsettings connection-string)
+
+hosted_config_default_kind() {
+  printf '%s' "${HOSTED_CONFIG_KINDS[0]}"
+}
+
+hosted_config_require_kind() {
+  local kind="${1:-}"
+  local allowed
+  for allowed in "${HOSTED_CONFIG_KINDS[@]}"; do
+    [ "$kind" = "$allowed" ] && return 0
+  done
+  echo "hosted-appsettings: kind must be one of: ${HOSTED_CONFIG_KINDS[*]}." >&2
+  return 1
+}
 
 hosted_appsettings_resource_group() {
   printf '%s' "${HOSTED_APPSETTINGS_RESOURCE_GROUP:-${AZURE_RESOURCE_GROUP:-}}"
@@ -62,19 +77,34 @@ hosted_appsettings_require_safe_prefix() {
   fi
 }
 
-hosted_appsettings_az_list() {
-  local query="$1"
-  local output="${2:-tsv}"
+hosted_config_az_list() {
+  local kind="${1:-}"
+  local query="${2:-}"
+  local output="${3:-tsv}"
   local resource_group webapp_name
+  local -a target_arguments=()
+  hosted_config_require_kind "$kind" || return 1
   hosted_appsettings_require_target || return 1
   resource_group="$(hosted_appsettings_resource_group)"
   webapp_name="$(hosted_appsettings_webapp_name)"
-  az webapp config appsettings list \
-    --resource-group "$resource_group" \
-    --name "$webapp_name" \
-    --query "$query" \
-    --output "$output" \
-    --only-show-errors
+  target_arguments=(
+    --resource-group "$resource_group"
+    --name "$webapp_name"
+  )
+  case "$kind" in
+    appsettings)
+      az webapp config appsettings list "${target_arguments[@]}" \
+        --query "$query" --output "$output" --only-show-errors
+      ;;
+    connection-string)
+      az webapp config connection-string list "${target_arguments[@]}" \
+        --query "$query" --output "$output" --only-show-errors
+      ;;
+  esac
+}
+
+hosted_appsettings_az_list() {
+  hosted_config_az_list appsettings "$@"
 }
 
 hosted_appsettings_name_filter() {
@@ -120,14 +150,20 @@ hosted_appsettings_name_filter() {
 }
 
 # List setting names only. Optional --prefix / --name filters still project names.
-hosted_appsettings_list_names() {
+hosted_config_list_names() {
+  local kind="${1:-}"
+  shift
   local filter
   filter="$(hosted_appsettings_name_filter "$@")" || return 1
   if [ -z "$filter" ]; then
-    hosted_appsettings_az_list '[].name' tsv
+    hosted_config_az_list "$kind" '[].name' tsv
   else
-    hosted_appsettings_az_list "[?${filter}].name" tsv
+    hosted_config_az_list "$kind" "[?${filter}].name" tsv
   fi
+}
+
+hosted_appsettings_list_names() {
+  hosted_config_list_names appsettings "$@"
 }
 
 # Count matching settings without requesting values.
@@ -144,11 +180,13 @@ hosted_appsettings_count() {
 # Resolve one setting name the way App Service does: case-insensitive,
 # names-only listing first, then the hosted spelling for an exact read.
 # Returns 2 when the name is absent.
-hosted_appsettings_resolve_name() {
+hosted_config_resolve_name() {
+  local kind="${1:-}"
+  shift
   local requested="${1:-}"
   hosted_appsettings_require_exact_name "$requested" || return 1
   local names
-  names="$(hosted_appsettings_az_list '[].name' tsv)" || return 1
+  names="$(hosted_config_az_list "$kind" '[].name' tsv)" || return 1
   local match=""
   local name
   local requested_folded="${requested,,}"
@@ -168,22 +206,31 @@ hosted_appsettings_resolve_name() {
   printf '%s' "$match"
 }
 
+hosted_appsettings_resolve_name() {
+  hosted_config_resolve_name appsettings "$@"
+}
+
 # Read one value by exact setting name. Rejects wildcard, prefix, and bulk reads.
 # A missing setting fails with a not-found error. An empty value is still found.
-hosted_appsettings_get_value() {
-  local setting="${1:-}"
+hosted_config_get_value() {
+  local kind="${1:-}"
+  local setting="${2:-}"
   hosted_appsettings_require_exact_name "$setting" || return 1
-  if [ "$#" -ne 1 ]; then
+  if [ "$#" -ne 2 ]; then
     echo "hosted-appsettings: reading a value requires one exact setting name." >&2
     return 1
   fi
   local records
-  records="$(hosted_appsettings_get_record "$setting")" || return 1
+  records="$(hosted_config_get_record "$kind" "$setting")" || return 1
   if ! printf '%s' "$records" | jq -e 'type == "array" and length == 1' >/dev/null; then
     echo "hosted-appsettings: setting not found: ${setting}" >&2
     return 1
   fi
   printf '%s' "$records" | jq -r '.[0].value // empty'
+}
+
+hosted_appsettings_get_value() {
+  hosted_config_get_value appsettings "$@"
 }
 
 hosted_appsettings_get_slot_setting() {
@@ -204,12 +251,17 @@ hosted_appsettings_get_slot_setting() {
 
 # One exact setting as a JSON array of zero or one objects.
 # A missing setting is an empty array so callers can treat absence as valid.
-hosted_appsettings_get_record() {
-  local setting="${1:-}"
+hosted_config_get_record() {
+  local kind="${1:-}"
+  local setting="${2:-}"
   hosted_appsettings_require_exact_name "$setting" || return 1
+  if [ "$#" -ne 2 ]; then
+    echo "hosted-appsettings: reading a value requires one exact setting name." >&2
+    return 1
+  fi
   local canonical
   local status=0
-  canonical="$(hosted_appsettings_resolve_name "$setting")" && status=0 || status=$?
+  canonical="$(hosted_config_resolve_name "$kind" "$setting")" && status=0 || status=$?
   if [ "$status" -eq 2 ]; then
     printf '%s\n' "[]"
     return 0
@@ -217,5 +269,9 @@ hosted_appsettings_get_record() {
   if [ "$status" -ne 0 ]; then
     return "$status"
   fi
-  hosted_appsettings_az_list "[?name=='${canonical}']" json
+  hosted_config_az_list "$kind" "[?name=='${canonical}']" json
+}
+
+hosted_appsettings_get_record() {
+  hosted_config_get_record appsettings "$@"
 }

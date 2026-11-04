@@ -16,22 +16,29 @@ proof is still open under [#657](https://github.com/valence-works/elsa-control/i
 (#508 GO row 26). Keep the business-day RecoveryRequired check until that proof
 passes. Customer copy must not say "has been alerted" until then.
 
-## Hosted application settings listings
+<a id="hosted-application-settings-listings"></a>
+## Hosted application settings and connection string listings
 
-Operator tooling lists hosted App Service application settings by **name
-only**. A value is read only by naming exactly one setting. Wildcard,
-prefix, and bulk value reads are rejected.
+Operator tooling lists hosted App Service application settings and connection
+strings by **name only**. A value is read only by naming exactly one setting.
+Wildcard, prefix, and bulk value reads are rejected.
 
 Use `scripts/hosted-appsettings.sh`:
 
 ```bash
 scripts/hosted-appsettings.sh list --resource-group "$AZURE_RESOURCE_GROUP" --name "$AZURE_WEBAPP_NAME"
 scripts/hosted-appsettings.sh get --resource-group "$AZURE_RESOURCE_GROUP" --name "$AZURE_WEBAPP_NAME" --setting ExactSettingName
+scripts/hosted-appsettings.sh list --kind connection-string --resource-group "$AZURE_RESOURCE_GROUP" --name "$AZURE_WEBAPP_NAME"
+scripts/hosted-appsettings.sh get --kind connection-string --resource-group "$AZURE_RESOURCE_GROUP" --name "$AZURE_WEBAPP_NAME" --setting ExactConnectionName
 ```
 
-Do not run `az webapp config appsettings list` without a name-only
-projection. Never pass `--debug` to `az webapp config appsettings`
-commands. Agent operator sessions follow the same rule; see `AGENTS.md`.
+Use the helper instead of raw App Service list commands for operator
+inspection. Never pass `--debug` to either `az webapp config appsettings`
+or `az webapp config connection-string` commands. The CLI applies JMESPath
+queries to its response locally, so the helper guarantees only names (or one
+exact value requested with `get`) in its terminal output; it does not make a
+server-side field-selection request. Agent operator sessions follow the same
+rule; see `AGENTS.md`.
 
 ## Operator contract
 

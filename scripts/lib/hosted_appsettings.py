@@ -1,4 +1,4 @@
-"""Name-only projection helpers for hosted application-setting listings."""
+"""Safe query classification for hosted App Service configuration listings."""
 
 from __future__ import annotations
 
@@ -10,9 +10,10 @@ from typing import Iterable, Iterator
 
 EXACT_SETTING_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:-]*$")
 UNSAFE_NAME_TOKENS = ("*", "?", "[", "]", ",", " ")
-LISTING_WORDS = ("webapp", "config", "appsettings", "list")
+LISTING_PREFIX_WORDS = ("webapp", "config")
+LISTING_KINDS = ("appsettings", "connection-string")
 LISTING_COMMAND = re.compile(
-    r"""(?<![A-Za-z0-9_])["']?webapp["']?\s+["']?config["']?\s+["']?appsettings["']?\s+["']?list["']?(?![A-Za-z0-9_])"""
+    r"""(?<![A-Za-z0-9_])["']?webapp["']?\s+["']?config["']?\s+["']?(?:appsettings|connection-string)["']?\s+["']?list["']?(?![A-Za-z0-9_])"""
 )
 SHELL_VARIABLE = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]*$|^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 INDIRECT_COMMAND_WORDS = frozenset({"eval", "alias", "source"})
@@ -389,15 +390,19 @@ def _tokenize_shell(command: str) -> list[str] | None:
 def _source_mentions_listing(text: str) -> bool:
     if LISTING_COMMAND.search(text):
         return True
-    return bool(re.search(r"""['"]appsettings['"]""", text) and re.search(r"""['"]list['"]""", text))
+    return bool(
+        re.search(r"""['"](?:appsettings|connection-string)['"]""", text)
+        and re.search(r"""['"]list['"]""", text)
+    )
 
 
-def _window_status(window: list[str | None], *, variables: bool) -> str:
+def _window_status(window: list[str | None], kind: str, *, variables: bool) -> str:
     """Return ``listing``, ``variable``, or ``no`` for one four-word window."""
 
     exact = 0
     unknown = 0
-    for expected, actual in zip(LISTING_WORDS, window):
+    expected_words = (*LISTING_PREFIX_WORDS, kind, "list")
+    for expected, actual in zip(expected_words, window):
         if actual == expected:
             exact += 1
             continue
@@ -405,9 +410,9 @@ def _window_status(window: list[str | None], *, variables: bool) -> str:
             unknown += 1
             continue
         return "no"
-    if exact == 4:
+    if exact == len(expected_words):
         return "listing"
-    if exact == 3 and unknown == 1:
+    if exact == len(expected_words) - 1 and unknown == 1:
         return "variable"
     return "no"
 
@@ -416,9 +421,11 @@ def _listing_status(tokens: list[str]) -> str:
     """Return ``listing``, ``variable``, or ``no`` for a tokenized command."""
 
     for index in range(len(tokens) - 3):
-        status = _window_status(list(tokens[index : index + 4]), variables=True)
-        if status != "no":
-            return status
+        window = list(tokens[index : index + 4])
+        for kind in LISTING_KINDS:
+            status = _window_status(window, kind, variables=True)
+            if status != "no":
+                return status
     return "no"
 
 
@@ -463,6 +470,9 @@ def iter_shell_listing_queries(text: str) -> Iterator[str | None]:
             continue
         if status == "listing":
             if "`" in command:
+                yield None
+                continue
+            if any(token == "--debug" or token.startswith("--debug=") for token in tokens):
                 yield None
                 continue
             yield _query_arguments(tokens)
@@ -521,12 +531,14 @@ def _sequence_listing(node: ast.List | ast.Tuple) -> tuple[bool, str | None]:
     found = False
     unparseable = False
     for index in range(len(words) - 3):
-        status = _window_status(words[index : index + 4], variables=True)
-        if status == "listing":
-            found = True
-        elif status == "variable":
-            found = True
-            unparseable = True
+        window = words[index : index + 4]
+        for kind in LISTING_KINDS:
+            status = _window_status(window, kind, variables=True)
+            if status == "listing":
+                found = True
+            elif status == "variable":
+                found = True
+                unparseable = True
     if not found:
         return False, None
     if unparseable:
@@ -600,7 +612,11 @@ def _call_mentions_listing(node: ast.Call) -> bool:
     if any(LISTING_COMMAND.search(value) for value in strings):
         return True
     name = _call_name(node)
-    return name in SUBPROCESS_FUNCS and "appsettings" in strings and "list" in strings
+    return (
+        name in SUBPROCESS_FUNCS
+        and any(kind in strings for kind in LISTING_KINDS)
+        and "list" in strings
+    )
 
 
 def iter_python_listing_queries(text: str) -> Iterator[str | None]:
@@ -664,8 +680,10 @@ def iter_listing_queries(path: Path, text: str | None = None) -> Iterator[tuple[
         yield path, query
 
 
-APPSETTINGS_TOKEN = re.compile(r"(?i)(?<![A-Za-z0-9_-])appsettings(?![A-Za-z0-9_-])")
-SAFE_APPSETTINGS_VERBS = frozenset({"list", "set", "delete"})
+CONFIG_KIND_TOKEN = re.compile(
+    r"(?i)(?<![A-Za-z0-9_-])(?:appsettings|connection-string)(?![A-Za-z0-9_-])"
+)
+SAFE_CONFIG_VERBS = frozenset({"list", "set", "delete"})
 SAFE_LIST_CLASSES = frozenset({"names", "exact-value", "helper"})
 INDIRECT_BACKSTOP_WORDS = INDIRECT_COMMAND_WORDS | {"xargs"}
 CONTROL_TOKENS = frozenset({";", "&", "&&", "|", "||", "|&", ";;", "(", ")"})
@@ -686,7 +704,7 @@ CONFIGREFERENCES_STATUS_READ_PATHS = frozenset(
 CONFIGREFERENCES_STATUS_READ = re.compile(
     r"(?i)\baz\b[\s\S]*\brest\b[\s\S]*--method(?:\s|\\)+get[\s\S]*/config/configreferences/appsettings(?:\?|[\"']|$)"
 )
-BACKSTOP_MESSAGE = "unrecognized appsettings occurrence; not a names-only listing, set, or delete"
+BACKSTOP_MESSAGE = "unrecognized appsettings or connection-string occurrence; not a names-only listing, set, or delete"
 SCAN_SUFFIXES = {".sh", ".py", ".yml", ".yaml", ".ps1"}
 
 
@@ -769,7 +787,7 @@ def _tokens_recognized_safe(
         return False
     found = False
     for index, token in enumerate(tokens):
-        if token.casefold() != "appsettings":
+        if token.casefold() not in LISTING_KINDS:
             continue
         found = True
         if (
@@ -781,7 +799,9 @@ def _tokens_recognized_safe(
         if index + 1 >= len(tokens):
             return False
         verb = tokens[index + 1].casefold()
-        if verb not in SAFE_APPSETTINGS_VERBS:
+        if verb not in SAFE_CONFIG_VERBS:
+            return False
+        if any(token == "--debug" or token.startswith("--debug=") for token in tokens):
             return False
         if verb != "list":
             continue
@@ -819,7 +839,7 @@ def _shell_command_is_recognized_safe(
     relevant = [
         group
         for group in _split_token_commands(tokens)
-        if any(token.casefold() == "appsettings" for token in group)
+        if any(token.casefold() in LISTING_KINDS for token in group)
     ]
     return bool(relevant) and all(
         _tokens_recognized_safe(group, path=path, root=root) for group in relevant
@@ -876,13 +896,13 @@ def _az_clause_at(text: str, index: int) -> str:
     return text[start:end].replace("\\\n", " ").strip().strip("`")
 
 
-def _all_appsettings_in_text_are_safe(
+def _all_config_kinds_in_text_are_safe(
     text: str,
     *,
     path: Path | None,
     root: Path | None,
 ) -> bool:
-    matches = list(APPSETTINGS_TOKEN.finditer(text))
+    matches = list(CONFIG_KIND_TOKEN.finditer(text))
     if not matches:
         return True
     return all(
@@ -958,7 +978,7 @@ def _iter_shell_backstop(
     root: Path | None,
 ) -> Iterator[tuple[int, str]]:
     masked = _mask_hash_comments(text)
-    for match in APPSETTINGS_TOKEN.finditer(masked):
+    for match in CONFIG_KIND_TOKEN.finditer(masked):
         command = _az_clause_at(masked, match.start())
         if _shell_command_is_recognized_safe(command, path=path, root=root):
             continue
@@ -973,7 +993,7 @@ def _iter_python_backstop(
     try:
         tree = ast.parse(text)
     except SyntaxError:
-        for match in APPSETTINGS_TOKEN.finditer(_mask_hash_comments(text)):
+        for match in CONFIG_KIND_TOKEN.finditer(_mask_hash_comments(text)):
             yield _line_number(text, match.start()), BACKSTOP_MESSAGE
         return
 
@@ -991,7 +1011,7 @@ def _iter_python_backstop(
             continue
         sequence = _fold_python_sequence(node)
         if sequence is not None and any(
-            isinstance(word, str) and APPSETTINGS_TOKEN.search(word) for word in sequence
+            isinstance(word, str) and CONFIG_KIND_TOKEN.search(word) for word in sequence
         ):
             cover(node)
             if not _argv_is_recognized_safe(sequence, path=path, root=root):
@@ -1001,16 +1021,16 @@ def _iter_python_backstop(
                     yield line, BACKSTOP_MESSAGE
             continue
         folded = _fold_python_string(node)
-        if folded is not None and APPSETTINGS_TOKEN.search(folded):
+        if folded is not None and CONFIG_KIND_TOKEN.search(folded):
             cover(node)
-            if not _all_appsettings_in_text_are_safe(folded, path=path, root=root):
+            if not _all_config_kinds_in_text_are_safe(folded, path=path, root=root):
                 line = getattr(node, "lineno", 1)
                 if line not in reported:
                     reported.add(line)
                     yield line, BACKSTOP_MESSAGE
 
     masked = _mask_hash_comments(text)
-    for match in APPSETTINGS_TOKEN.finditer(masked):
+    for match in CONFIG_KIND_TOKEN.finditer(masked):
         line = _line_number(text, match.start())
         if line in covered_lines or line in reported:
             continue
