@@ -274,9 +274,13 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
         AzureProviderTargetScope scope,
         DateTimeOffset now) => new(
         operationStore,
-        new AzureBicepProviderRunner(runnerOptions, scope),
+        new AzureBicepProviderRunner(
+            runnerOptions,
+            scope,
+            new EtxtbsyRetryAzureCommandProcess(runnerOptions.CommandTimeout, runnerOptions.MaximumOutputCharacters)),
         new FixedTimeProvider(now),
-        leaseDuration: TimeSpan.FromMinutes(5),
+        leaseDuration: TimeSpan.FromHours(1),
+        heartbeatInterval: TimeSpan.FromMinutes(50),
         workerId: "delete-recovery-provider-worker",
         assignmentStore: operationStore);
 
@@ -305,64 +309,13 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             foreach (var name in new[] { "main.bicep", "acr-pull-role.bicep", "sql-bootstrap.sql" })
                 await File.WriteAllTextAsync(Path.Combine(templates, name), "targetScope = 'resourceGroup'\n");
 
-            var deleteRequested = Path.Combine(root, "delete-requested");
-            var absenceObserved = Path.Combine(root, "absence-observed");
-            var log = Path.Combine(root, "commands.log");
-            var executable = Path.Combine(root, "azure-command");
             var workloadName = $"e{instanceId:N}"[..16];
             var expectedGroup = AzureProviderResourceAssignmentNaming.ResourceGroupName(scope.ResourceGroupName, instanceId);
-            var script = $$"""
-#!/bin/sh
-set -eu
-delete_requested={{ShellQuote(deleteRequested)}}
-absence_observed={{ShellQuote(absenceObserved)}}
-log={{ShellQuote(log)}}
-workload={{ShellQuote(workloadName)}}
-subscription={{ShellQuote(scope.SubscriptionId)}}
-resource_group={{ShellQuote(expectedGroup)}}
-
-printf '%s\n' "$*" >> "$log"
-if [ "$#" -eq 9 ] && [ "$*" = "group exists --subscription $subscription --name $resource_group --output tsv --only-show-errors" ]; then
-    if [ -f "$delete_requested" ] && [ ! -f "$absence_observed" ]; then
-        : > "$absence_observed"
-        printf '%s' 'true'
-    elif [ -f "$delete_requested" ]; then
-        printf '%s' 'false'
-    else
-        printf '%s' 'true'
-    fi
-    exit 0
-fi
-if [ "$#" -eq 11 ] && [ "$*" = "group show --subscription $subscription --name $resource_group --query tags --output json --only-show-errors" ]; then
-    printf '%s' "{\"managed-by\":\"elsa-control\",\"owner\":\"elsa-control\",\"workload-name\":\"$workload\",\"sqlBootstrapObjectId\":\"11111111-1111-1111-1111-111111111111\"}"
-    exit 0
-fi
-if [ "$#" -eq 9 ] && [ "$*" = "resource list --subscription $subscription --resource-group $resource_group --output json --only-show-errors" ]; then
-    printf '%s' '[]'
-    exit 0
-fi
-if [ "$1" = "monitor" ] && [ "$2" = "log-analytics" ] && [ "$3" = "workspace" ] && [ "$4" = "show" ]; then
-    exit 3
-fi
-if [ "$#" -eq 11 ] && [ "$*" = "group delete --subscription $subscription --name $resource_group --yes --no-wait --output none --only-show-errors" ]; then
-    : > "$delete_requested"
-    exit 0
-fi
-if [ "$#" -eq 9 ] && [ "$*" = "keyvault list-deleted --subscription $subscription --resource-type vault --output json --only-show-errors" ]; then
-    printf '%s' '[]'
-    exit 0
-fi
-if [ "$#" -eq 8 ] && [ "$1" = "rest" ] && [ "$2" = "--method" ] && [ "$3" = "get" ] && [ "$4" = "--url" ] &&
-    printf '%s' "$5" | grep -q 'deletedWorkspaces' && [ "$6" = "--output" ] && [ "$7" = "json" ] && [ "$8" = "--only-show-errors" ]; then
-    printf '%s' '{"value":[]}'
-    exit 0
-fi
-exit 97
-""";
-            await File.WriteAllTextAsync(executable, script);
-            if (!OperatingSystem.IsWindows())
-                File.SetUnixFileMode(executable,
-                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            await File.WriteAllTextAsync(Path.Combine(templates, "workload-name"), workloadName);
+            await File.WriteAllTextAsync(Path.Combine(templates, "expected-subscription"), scope.SubscriptionId);
+            await File.WriteAllTextAsync(Path.Combine(templates, "expected-resource-group"), expectedGroup);
+            var executable = DeleteRecoveryFakeAzureCli.ExecutablePath;
+            var log = Path.Combine(templates, "commands.log");
 
             var options = new AzureProviderRunnerOptions
             {
@@ -378,7 +331,9 @@ exit 97
                 RuntimeAdminUsername = "runtime-admin",
                 ObservationAttempts = 1,
                 ObservationDelay = TimeSpan.Zero,
-                CommandTimeout = TimeSpan.FromSeconds(30)
+                // Defence only: a wall clock must not decide this seed. The
+                // ETXTBSY fix is the prebuilt executable plus start retry.
+                CommandTimeout = TimeSpan.FromMinutes(10)
             };
             options.ValidateRegistryAuthority(scope);
             return new CleanupTools(root, options, log);
@@ -390,8 +345,6 @@ exit 97
             throw;
         }
     }
-
-    private static string ShellQuote(string value) => $"'{value.Replace("'", "'\\''", StringComparison.Ordinal)}'";
 
     private sealed class PosixFactAttribute : FactAttribute
     {
