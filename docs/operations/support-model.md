@@ -36,23 +36,29 @@ There is no support credit commitment here.
 
 ## Severity matrix
 
-For managed-instance reports, use the health projection and stable alert code
-to classify the reported condition. The severity labels below are the existing
-runbook values; this matrix does not add a customer-response promise.
+Give each report a support classification. For managed-instance incidents, use
+the health projection and stable alert code. The runtime Warning and Critical
+values below are the existing runbook values; Routine is a support-triage
+classification only.
 
-| Health or alert signal | Severity | Handling |
+| Health or report signal | Classification | Handling |
 | --- | --- | --- |
 | `managed.lifecycle.recovery-required`, `managed.lifecycle.operation-failed`, `managed.lifecycle.run-failed`, or `managed.lifecycle.retry-exhausted` | Critical | Route to [incident response](incident-response.md) and follow the matching [runbook response path](../product/managed-lifecycle-operations-runbook.md#response-paths). |
 | `managed.lifecycle.stale-work`, `managed.lifecycle.reconciliation-stale`, or `managed.lifecycle.reconciliation-unknown` | Warning | Route to [incident response](incident-response.md) and inspect the exact operation and provider correlation. A stale or unknown observation is not permission to retry or cancel. |
 | `managed.lifecycle.unhealthy-endpoint` | Warning when degraded; Critical when unreachable or failed | Route to [incident response](incident-response.md) and follow the [unhealthy endpoint path](../product/managed-lifecycle-operations-runbook.md#unhealthy-endpoint). |
+| General product question, documentation request, or bug confirmed to have no active incident | Routine (support triage only) | Use the agent-answer or product-issue route below. This is a documented support classification, not an API-emitted health severity or a new response/SLA promise. |
 
-Do not infer a new severity from a missing alert email or from a customer's
-description alone. The health evaluator reports healthy only when desired
-lifecycle is `Running`, observed lifecycle is `Ready`, health is `Healthy`, and
-no active work remains. See [Status and stable codes](../product/managed-lifecycle-operations-runbook.md#status-and-stable-codes).
+Use Routine only after confirming there is no active managed-instance incident.
+If impact is uncertain, gather facts and follow incident response as needed;
+never classify it as Routine just because an alert email is missing. Do not
+infer a new runtime severity from a customer's description alone. The health
+evaluator reports healthy only when desired lifecycle is `Running`, observed
+lifecycle is `Ready`, health is `Healthy`, and no active work remains. See
+[Status and stable codes](../product/managed-lifecycle-operations-runbook.md#status-and-stable-codes).
 For other result diagnostic codes without a corresponding alert severity,
 record the returned code and follow the existing runbook; this matrix assigns
-no additional severity.
+no additional runtime severity. The runtime alert mapping remains Warning or
+Critical as shown above; Routine applies only to support triage.
 
 ## Routing outcomes
 
@@ -70,15 +76,15 @@ filing the issue does not remove the human follow-up due date.
 
 ### Proposed acknowledgement copy
 
-> Thanks for contacting Elsa Cloud. An agent's policy target is to acknowledge
-> your report within 15 minutes, at any hour. If your case needs a reply or
-> decision from Sipke, the human follow-up target is the next business day
-> (Monday–Friday, Europe/Amsterdam). This policy does not promise a one-hour
-> human reply or 24/7 human coverage, and it includes no support credits.
+> Thanks, we have received your Elsa Cloud support request. An agent will triage
+> it. If it needs Sipke, you will receive a reply by [next business date], the
+> next business day in Europe/Amsterdam.
 
-This is proposed wording, not deployed or measured copy. Do not send it until
-#815 verifies inbox and agent access and timed acknowledgement handling. It
-does not set a holiday calendar or a time-of-day deadline.
+This is proposed wording, not deployed or measured copy. It may be exercised
+only within an explicitly authorized staging drill after inbox and agent access
+are verified. This document does not authorize a customer-facing send, and the
+template does not prove timed acknowledgement. No time-of-day deadline or
+holiday calendar is defined.
 
 ## Next-business-day examples
 
