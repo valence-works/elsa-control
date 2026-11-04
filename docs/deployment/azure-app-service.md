@@ -11,12 +11,15 @@ App Service module.
 The previous manually provisioned Web App can be deleted once anything important
 has been backed up.
 
-## Hosted application settings listings
+## Hosted application settings and connection string listings
 
-Operator listings of App Service application settings print **names
-only**. Read a value only with one exact setting name. Use
-`scripts/hosted-appsettings.sh list` and `get`. Wildcard, prefix, and
-bulk value reads are rejected. The same rule is in the
+Operator listings of App Service application settings and connection
+strings print **names only**. Read a value only with one exact setting name.
+Use `scripts/hosted-appsettings.sh list` and `get`; add
+`--kind connection-string` for connection strings. Wildcard, prefix, and
+bulk value reads are rejected. Never pass `--debug` to either
+`az webapp config appsettings` or `az webapp config connection-string` command.
+The same rule is in the
 [managed lifecycle operations runbook](../product/managed-lifecycle-operations-runbook.md#hosted-application-settings-listings)
 and in `AGENTS.md` for agent operator sessions.
 

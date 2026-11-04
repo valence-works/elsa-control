@@ -48,13 +48,16 @@ Worker lanes (local notes):
 - `worker:codex` / `worker:claude`: self-serve pickup after standing prompts. Do not wait for an operator to assign a Task.
 - `worker:cursor`: CEO / Launch Ops dispatches a Cursor cloud agent. Cursor sessions do not self-poll GitHub search and must not start without `ready-for-agent` + `worker:cursor`.
 
-## Hosted application settings (operator sessions)
+## Hosted application settings and connection strings (operator sessions)
 
-When listing hosted App Service application settings, use
-`scripts/hosted-appsettings.sh list` (names only). Read a value only with
-`scripts/hosted-appsettings.sh get --setting <exact-name>`. Do not query
-values by prefix, wildcard, or bulk list. Do not run
-`az webapp config appsettings list` without a name-only projection.
+Use `scripts/hosted-appsettings.sh list` for application-setting names and
+`scripts/hosted-appsettings.sh list --kind connection-string` for connection
+string names. Read one value only with `get --setting <exact-name>`; add
+`--kind connection-string` for a connection string. Prefix is a names-only
+list filter. Wildcard, prefix, and bulk value reads are rejected. Never pass
+`--debug` to an `az webapp config appsettings` or
+`az webapp config connection-string` command; use the helper for operator
+listings.
 
 ## Workroom model fallback
 
