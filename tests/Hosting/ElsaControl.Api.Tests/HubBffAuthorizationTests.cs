@@ -29,10 +29,10 @@ public sealed class HubBffAuthorizationTests
     private const string CloudSubject = "b6f73e84-5b47-4f4d-ad52-e3c4c9a815c6";
     private const string HandoffCodeVerifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 
-    // #823's six read endpoints, #846's non-provisioning membership read, #824's
-    // fifteen lifecycle endpoints, hosted-subscription from #825, and account
-    // linking from #826. The enumeration helper is the contract: any extra Hub
-    // marker fails this test.
+    // Read endpoints from #823 and #846, lifecycle endpoints from #824,
+    // hosted-subscription from #825, and account linking from #826.
+    // The enumeration helper is the contract: any extra Hub marker fails
+    // this test.
     private static readonly string[] ExpectedHubBffAllowlist =
     [
         "GET /api/cloud/compatibility",
