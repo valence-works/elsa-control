@@ -24,22 +24,49 @@ and [#326](https://github.com/valence-works/elsa-control/issues/326).
 2. An agent must acknowledge each report within 15 minutes, at any hour. This
    is the accepted policy target; timed operating evidence for email and GitHub
    intake remains open under [#815](https://github.com/valence-works/elsa-control/issues/815).
-3. Route reports about a managed instance's failed, degraded, stale, or
-   uncertain state through the [incident response procedure](incident-response.md).
-   Use the stable health and alert codes in the [managed lifecycle runbook](../product/managed-lifecycle-operations-runbook.md#status-and-stable-codes)
-   to describe what is known.
-4. Route a general product question or public-safe bug to the appropriate
-   support channel above. Do not put credentials, customer-only details, raw
-   logs, or provider identifiers in a public issue.
-5. If a response or decision needs Sipke, place it in the needs-Sipke queue
-   with a visible **due date** on the next business day, Monday through Friday
-   in Europe/Amsterdam. Keep the queue and its reader as readiness gaps until
-   the live workflow is demonstrated; this document does not name a queue
-   system or assign a person to read it.
+3. Use the severity matrix below for managed-instance reports. Its stable codes
+   and severity values come from the [managed lifecycle runbook](../product/managed-lifecycle-operations-runbook.md#status-and-stable-codes).
+4. Choose the next action from the three [routing outcomes](#routing-outcomes).
+   Keep customer-only details out of public issues. Do not put credentials,
+   raw logs, or provider identifiers in a public issue.
 
 The 15-minute target is the agent acknowledgement. It does not create a
 one-hour human response promise, an on-call rota, or a 24/7 human service.
 There is no support credit commitment here.
+
+## Severity matrix
+
+For managed-instance reports, use the health projection and stable alert code
+to classify the reported condition. The severity labels below are the existing
+runbook values; this matrix does not add a customer-response promise.
+
+| Health or alert signal | Severity | Handling |
+| --- | --- | --- |
+| `managed.lifecycle.recovery-required`, `managed.lifecycle.operation-failed`, `managed.lifecycle.run-failed`, or `managed.lifecycle.retry-exhausted` | Critical | Route to [incident response](incident-response.md) and follow the matching [runbook response path](../product/managed-lifecycle-operations-runbook.md#response-paths). |
+| `managed.lifecycle.stale-work`, `managed.lifecycle.reconciliation-stale`, or `managed.lifecycle.reconciliation-unknown` | Warning | Route to [incident response](incident-response.md) and inspect the exact operation and provider correlation. A stale or unknown observation is not permission to retry or cancel. |
+| `managed.lifecycle.unhealthy-endpoint` | Warning when degraded; Critical when unreachable or failed | Route to [incident response](incident-response.md) and follow the [unhealthy endpoint path](../product/managed-lifecycle-operations-runbook.md#unhealthy-endpoint). |
+
+Do not infer a new severity from a missing alert email or from a customer's
+description alone. The health evaluator reports healthy only when desired
+lifecycle is `Running`, observed lifecycle is `Ready`, health is `Healthy`, and
+no active work remains. See [Status and stable codes](../product/managed-lifecycle-operations-runbook.md#status-and-stable-codes).
+For other result diagnostic codes without a corresponding alert severity,
+record the returned code and follow the existing runbook; this matrix assigns
+no additional severity.
+
+## Routing outcomes
+
+Choose the route that owns the next action. The support record must capture the
+route, next action, and reply status from the [minimal safe audit trail](#minimal-safe-audit-trail).
+
+| Outcome | Use when | Next action and audit | Due date |
+| --- | --- | --- | --- |
+| **Agent answers** | The question can be answered from current, source-grounded product information and needs no owner decision or product change. | After #815 verifies the private route, send the answer there; for a public-safe question, reply on GitHub. Do not assume the support mailbox is monitored before verification. Record the reply time and brief outcome. | No separate answer deadline is defined here. The agent acknowledgement target still applies. |
+| **Product issue filed** | A product defect or change is needed. | File a public-safe issue in [`valence-works/elsa-control`](https://github.com/valence-works/elsa-control/issues); record its URL and current next action. Keep customer-only details in an already approved private record, not in the public issue. | No product-fix deadline is defined here. |
+| **Needs Sipke** | A reply or decision requires Sipke. | Required next action: add the item to the needs-Sipke queue and record its reference, next action, and visible due date. The actual queue system and reader are not verified here. | Next business day, Monday–Friday in Europe/Amsterdam. No time-of-day deadline or holiday calendar is defined. |
+
+A product issue may be linked from a needs-Sipke item when both routes apply;
+filing the issue does not remove the human follow-up due date.
 
 ### Proposed acknowledgement copy
 

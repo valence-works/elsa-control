@@ -19,16 +19,11 @@ support, or credits. Valence Runtime terms are unchanged.
 
 ## Classify and route
 
-| Observed signal | Classification | Route |
-| --- | --- | --- |
-| `managed.lifecycle.recovery-required`, `managed.lifecycle.operation-failed`, `managed.lifecycle.run-failed`, or `managed.lifecycle.retry-exhausted` | Critical | Start this incident procedure and follow the matching [runbook response path](../product/managed-lifecycle-operations-runbook.md#response-paths). |
-| `managed.lifecycle.stale-work`, `managed.lifecycle.reconciliation-stale`, or `managed.lifecycle.reconciliation-unknown` | Warning | Inspect the exact operation and provider correlation. Staleness or an unknown observation is not permission to retry or cancel. |
-| `managed.lifecycle.unhealthy-endpoint` | Warning or Critical, according to the health projection | Check the endpoint and active work using the [unhealthy endpoint path](../product/managed-lifecycle-operations-runbook.md#unhealthy-endpoint). |
-| A product question or bug without an active managed-instance incident | Support request | Follow the [support model](support-model.md); use GitHub only for public-safe details. |
-
-Use the runbook's stable codes and severity definitions in
-[Status and stable codes](../product/managed-lifecycle-operations-runbook.md#status-and-stable-codes).
-Do not invent a new severity or customer impact from a missing alert email.
+Use the [support model's severity matrix](support-model.md#severity-matrix) and
+[routing outcomes](support-model.md#routing-outcomes) as the canonical intake
+classification. Their health codes and severity values come from the existing
+[runbook status and stable codes](../product/managed-lifecycle-operations-runbook.md#status-and-stable-codes).
+Do not derive severity or customer impact from a missing alert email.
 
 ## Procedure
 
