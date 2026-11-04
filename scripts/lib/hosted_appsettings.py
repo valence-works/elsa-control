@@ -19,9 +19,6 @@ SHELL_VARIABLE = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]*$|^\$\{[A-Za-z_][A-Za-z0-
 INDIRECT_COMMAND_WORDS = frozenset({"eval", "alias", "source"})
 HELPER_QUERY_VALUES = {"$query", '"$query"', "'$query'"}
 HELPER_REPO_PATH = Path("scripts") / "lib" / "hosted-appsettings.sh"
-# The command-line parser names the allowed kinds; command invocations in it
-# are still checked by the listing parser and backstop.
-OPERATOR_CLI_PATH = Path("scripts") / "hosted-appsettings.sh"
 PLACEHOLDER_QUERY_PATHS = frozenset(
     {
         HELPER_REPO_PATH,
@@ -804,10 +801,10 @@ def _tokens_recognized_safe(
         verb = tokens[index + 1].casefold()
         if verb not in SAFE_CONFIG_VERBS:
             return False
-        if verb != "list":
-            continue
         if any(token == "--debug" or token.startswith("--debug=") for token in tokens):
             return False
+        if verb != "list":
+            continue
         query = _query_arguments(tokens)
         if classify_appsettings_list_query(query, path=path, root=root) not in SAFE_LIST_CLASSES:
             return False
@@ -983,12 +980,6 @@ def _iter_shell_backstop(
     masked = _mask_hash_comments(text)
     for match in CONFIG_KIND_TOKEN.finditer(masked):
         command = _az_clause_at(masked, match.start())
-        # Kind literals in this CLI's parser/help are not az invocations.
-        if (
-            _repo_relative(path, root) == OPERATOR_CLI_PATH
-            and not _source_mentions_listing(command)
-        ):
-            continue
         if _shell_command_is_recognized_safe(command, path=path, root=root):
             continue
         yield _line_number(text, match.start()), BACKSTOP_MESSAGE

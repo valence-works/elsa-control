@@ -9,16 +9,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib/hosted-appsettings.sh"
 
 usage() {
+  local kinds="${HOSTED_CONFIG_KINDS[*]}"
   cat <<'EOF'
 Usage:
   hosted-appsettings.sh list --resource-group RG --name APP [--kind KIND] [--prefix PREFIX]
   hosted-appsettings.sh get --resource-group RG --name APP --setting EXACT_NAME [--kind KIND]
-
-KIND is appsettings or connection-string and defaults to appsettings. List
-output contains names only. A value is returned only for one exact setting
-name. Wildcard, prefix, and bulk value reads are rejected. Azure CLI applies
-its query locally to the CLI response.
 EOF
+  printf 'KIND is one of %s and defaults to %s. List output contains names only.\n' "$kinds" "$(hosted_config_default_kind)"
+  printf '%s\n' "A value is returned only for one exact setting name. Wildcard, prefix, and bulk value reads are rejected. Azure CLI applies its query locally to the CLI response."
 }
 
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] || [ $# -eq 0 ]; then
@@ -32,7 +30,7 @@ shift
 
 resource_group=""
 webapp_name=""
-kind="appsettings"
+kind="$(hosted_config_default_kind)"
 prefix=""
 setting=""
 seen_resource_group=0
@@ -85,13 +83,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-case "$kind" in
-  appsettings|connection-string) ;;
-  *)
-    echo "hosted-appsettings: kind must be appsettings or connection-string." >&2
-    exit 1
-    ;;
-esac
+hosted_config_require_kind "$kind" || exit 1
 
 HOSTED_APPSETTINGS_RESOURCE_GROUP="$resource_group"
 HOSTED_APPSETTINGS_WEBAPP_NAME="$webapp_name"

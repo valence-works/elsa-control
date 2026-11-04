@@ -3,6 +3,21 @@
 # name or exact value is returned by this helper.
 
 HOSTED_APPSETTINGS_LIB_LOADED=1
+HOSTED_CONFIG_KINDS=(appsettings connection-string)
+
+hosted_config_default_kind() {
+  printf '%s' "${HOSTED_CONFIG_KINDS[0]}"
+}
+
+hosted_config_require_kind() {
+  local kind="${1:-}"
+  local allowed
+  for allowed in "${HOSTED_CONFIG_KINDS[@]}"; do
+    [ "$kind" = "$allowed" ] && return 0
+  done
+  echo "hosted-appsettings: kind must be one of: ${HOSTED_CONFIG_KINDS[*]}." >&2
+  return 1
+}
 
 hosted_appsettings_resource_group() {
   printf '%s' "${HOSTED_APPSETTINGS_RESOURCE_GROUP:-${AZURE_RESOURCE_GROUP:-}}"
@@ -68,13 +83,7 @@ hosted_config_az_list() {
   local output="${3:-tsv}"
   local resource_group webapp_name
   local -a target_arguments=()
-  case "$kind" in
-    appsettings|connection-string) ;;
-    *)
-      echo "hosted-appsettings: unsupported configuration kind." >&2
-      return 1
-      ;;
-  esac
+  hosted_config_require_kind "$kind" || return 1
   hosted_appsettings_require_target || return 1
   resource_group="$(hosted_appsettings_resource_group)"
   webapp_name="$(hosted_appsettings_webapp_name)"
