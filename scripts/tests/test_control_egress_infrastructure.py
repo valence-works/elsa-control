@@ -43,6 +43,53 @@ class ControlEgressTests(unittest.TestCase):
         self.assertEqual("[resourceGroup().location]", self.template["parameters"]["location"]["defaultValue"])
         self.assertNotIn("allowedValues", self.template["parameters"]["location"])
 
+    def test_key_vault_endpoint_mode_only_updates_the_existing_network(self):
+        mode = self.template["parameters"]["egressDeploymentMode"]
+        self.assertEqual("full", mode["defaultValue"])
+        self.assertEqual(["full", "keyVaultEndpointOnly"], mode["allowedValues"])
+
+        full_mode_condition = "[variables('deploySupportingEgressResources')]"
+        for resource_type in (
+            "Microsoft.Network/publicIPAddresses",
+            "Microsoft.Network/natGateways",
+        ):
+            self.assertEqual(full_mode_condition, self.by_type[resource_type][0]["condition"])
+        self.assertEqual(
+            ["[resourceId('Microsoft.Network/publicIPAddresses', parameters('publicIpName'))]"],
+            self.by_type["Microsoft.Network/natGateways"][0]["dependsOn"],
+        )
+
+        vnet = self.by_type["Microsoft.Network/virtualNetworks"][0]
+        self.assertNotIn("condition", vnet)
+        self.assertEqual(
+            ["[resourceId('Microsoft.Network/natGateways', parameters('natGatewayName'))]"],
+            vnet["dependsOn"],
+        )
+        self.assertEqual("[variables('deployedVirtualNetworkProperties')]", vnet["properties"])
+        self.assertIn(
+            "[resourceId('Microsoft.Network/natGateways', parameters('natGatewayName'))]",
+            self.template["variables"]["virtualNetworkProperties"]["subnets"][0]["properties"]["natGateway"]["id"],
+        )
+        self.assertEqual(
+            "[if(equals(parameters('egressDeploymentMode'), 'keyVaultEndpointOnly'), "
+            "union(variables('virtualNetworkProperties'), "
+            "createObject('privateEndpointVNetPolicies', 'Disabled')), "
+            "variables('virtualNetworkProperties'))]",
+            self.template["variables"]["deployedVirtualNetworkProperties"],
+        )
+
+        # The full-mode default and narrow mode retain the same output shape;
+        # the egress address is read from the existing Public IP in either mode.
+        self.assertEqual(
+            {"integrationSubnetResourceId", "egressIpAddress"},
+            set(self.template["outputs"]),
+        )
+        self.assertEqual(
+            "[reference(resourceId('Microsoft.Network/publicIPAddresses', "
+            "parameters('publicIpName')), '2024-05-01').ipAddress]",
+            self.template["outputs"]["egressIpAddress"]["value"],
+        )
+
     def test_public_ip_is_a_standard_static_ipv4_address(self):
         ip = self.by_type["Microsoft.Network/publicIPAddresses"][0]
         self.assertEqual({"name": "Standard", "tier": "Regional"}, ip["sku"])
@@ -59,8 +106,7 @@ class ControlEgressTests(unittest.TestCase):
         self.assertIn("parameters('publicIpName')", addresses[0]["id"])
 
     def test_subnet_is_delegated_to_app_service_and_routes_through_the_nat_gateway(self):
-        vnet = self.by_type["Microsoft.Network/virtualNetworks"][0]
-        subnets = vnet["properties"]["subnets"]
+        subnets = self.template["variables"]["virtualNetworkProperties"]["subnets"]
         self.assertEqual(1, len(subnets))
         subnet = subnets[0]["properties"]
         self.assertEqual([{"name": "app-service", "properties": {"serviceName": "Microsoft.Web/serverFarms"}}], subnet["delegations"])

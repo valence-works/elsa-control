@@ -24,6 +24,33 @@ route-all only affects application traffic, not the platform's own configuration
 | `main.parameters.production.json` | Production region `belgiumcentral` (the API site's region; regional VNet integration requires the same region), names (`vnet-valence-control-prod-bec`, `snet-api-egress`, `natgw-valence-control-prod-bec`, `pip-natgw-valence-control-prod-bec`) and address space (`10.60.0.0/24`, subnet `/26`). |
 | `main.parameters.staging.json` | Isolated staging API region `westeurope`, staging names, and a distinct `10.61.0.0/24` address space. |
 
+## Key Vault endpoint-only mode
+
+`egressDeploymentMode` defaults to `full`, which keeps the existing three-resource provisioning path and both outputs unchanged. For an already-provisioned VNet, `keyVaultEndpointOnly` uses the same VNet and subnet definition but conditionally omits the NAT gateway and Public IP resources. It retains the NAT attachment through `natGatewayName`, adds `Microsoft.KeyVault` to the service endpoints, and explicitly writes the production-read-back VNet setting `privateEndpointVNetPolicies: Disabled`. The subnet's App Service delegation, address prefixes, NAT association, and existing subnet network-policy settings stay in the shared definition. `egressIpAddress` continues to read the existing Public IP value; this mode does not deploy or modify that resource.
+
+Before previewing this mode, perform a read-only check of the existing network:
+
+```sh
+az network vnet show --subscription 8e23037a-420f-4ad0-9594-9d194de29e84 \
+  --resource-group rg-valence-control-prod \
+  --name vnet-valence-control-prod-bec \
+  --query '{location:location,tags:tags,addressPrefixes:addressSpace.addressPrefixes,privateEndpointVNetPolicies:privateEndpointVNetPolicies,subnets:subnets[].{name:name,addressPrefix:addressPrefix,natGatewayId:natGateway.id,delegations:delegations,serviceEndpoints:serviceEndpoints,privateEndpointNetworkPolicies:privateEndpointNetworkPolicies,privateLinkServiceNetworkPolicies:privateLinkServiceNetworkPolicies,networkSecurityGroupId:networkSecurityGroup.id,routeTableId:routeTable.id}}' \
+  --output json
+```
+
+The expected production shape is Belgium Central, the tags and address prefixes in `main.parameters.production.json`, exactly one `snet-api-egress` subnet with the configured prefix and existing NAT gateway, the App Service delegation, no service endpoints yet, `privateEndpointVNetPolicies` set to `Disabled`, and no subnet NSG or route table. Stop if any additional subnet, service endpoint, delegation, NAT target, NSG, route table, or unrepresented writable property is present. Do not guess that an incremental VNet update will preserve it.
+
+Then run the read-only preview with the explicit narrow mode:
+
+```sh
+az deployment group what-if --subscription 8e23037a-420f-4ad0-9594-9d194de29e84 \
+  --resource-group rg-valence-control-prod --name control-egress-keyvault-endpoint-preview \
+  --template-file infra/control-egress/main.bicep \
+  --parameters @infra/control-egress/main.parameters.production.json egressDeploymentMode=keyVaultEndpointOnly
+```
+
+For the production cutover, accept only one VNet `Modify` that adds the Key Vault service endpoint; provider normalization of the endpoint `locations` is `NoEffect`. NAT, Public IP, and unrelated resources must be `Ignore`. Stop on another action or any VNet property change beyond the endpoint and that `NoEffect` metadata. A what-if is not approval to apply: production still needs the separate #911 approval and a fresh reviewed preview. This issue authorizes no production apply.
+
 The site attachment is not in this template. `dev/patch-api-provisioner-identity.py` adds the optional
 `api_egress_subnet_id` parameter to the Aspire-generated API module (`virtualNetworkSubnetId` and
 `vnetRouteAllEnabled` are set only when it is non-empty), and the azd parameter template reads it from
