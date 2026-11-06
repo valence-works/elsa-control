@@ -146,6 +146,7 @@ class RendererTests(HarnessCase):
             "expired": {"REHEARSAL_EXPIRY_UTC": "2020-01-01"},
             "missing subscription": {"AZURE_SUBSCRIPTION_ID": "REQUIRED"},
             "required ACR identity group": {"ACR_PULL_IDENTITY_RESOURCE_GROUP": "REQUIRED"},
+            "empty ACR identity group": {"ACR_PULL_IDENTITY_RESOURCE_GROUP": ""},
             "malformed ACR identity group": {"ACR_PULL_IDENTITY_RESOURCE_GROUP": "rg-acr/other"},
             "ids count mismatch": {"EXPECTED_MIGRATIONS": "52"},
             "bad phase": {"REHEARSAL_PHASE": "production"},
