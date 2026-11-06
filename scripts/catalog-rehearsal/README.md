@@ -48,6 +48,14 @@ no connection material is accepted. Images must be immutable `@sha256:` referenc
 probe image must live in the same registry. Produce the target migration list from the
 exact candidate source checkout:
 
+`AUTHORITY_RESOURCE_GROUP` continues to locate the API identity, and
+`CATALOG_MI_CLIENT_ID` remains its SQL principal binding. The optional
+`ACR_PULL_IDENTITY_RESOURCE_GROUP` selects the resource group of the existing ACR-pull
+identity; when omitted, that identity remains in `AUTHORITY_RESOURCE_GROUP`. Supply only
+a resource-group name, validated like `AUTHORITY_RESOURCE_GROUP`. Selecting the identity
+does not grant registry access or authority. Explicit identity attachment, SQL access,
+ACI creation, cost, and cleanup approvals remain required.
+
 ```sh
 python3 scripts/catalog-rehearsal/list-migration-ids.py <candidate-checkout> expected-migrations.txt
 ```
