@@ -1,0 +1,279 @@
+{
+  "Issue": "https://github.com/valence-works/elsa-control/issues/798",
+  "CapturedAtUtc": "2026-10-15T17:10:58.8446815+00:00",
+  "Machine": {
+    "Cpu": "Intel(R) Xeon(R) Processor",
+    "Processors": 4,
+    "MemoryTotalBytes": 16780627968,
+    "Os": "Ubuntu 24.04.5 LTS",
+    "Kernel": "Linux version 6.12.94+ (root@3862fb5e78e7) (gcc (Debian 12.2.0-14+deb12u1) 12.2.0, GNU ld (GNU Binutils for Debian) 2.40) #1 SMP PREEMPT_DYNAMIC Wed Oct 14 15:52:43 UTC 2026",
+    "DotnetRuntime": ".NET 10.0.13",
+    "DotnetSdk": "10.0.13",
+    "ServerGc": true,
+    "GcMode": "Interactive"
+  },
+  "PackagePath": "/workspace/scripts/shared-shell-ac1/verified-package/bin/Release/net10.0/ElsaControl.SharedShellAc1.VerifiedPackage.dll",
+  "Iterations": 10,
+  "Warmup": 1,
+  "Caveats": [
+    "elsa-control does not host Elsa 4 shells. Managed launch is Dedicated Elsa 3.8 Combined only; Shared is refused at plan admission.",
+    "This harness uses CShells 0.0.30 (the Elsa 4 shell host) plus a representative verified activity package in a collectible ALC. It does not boot Elsa.Foundation.Host / Workbench, Nuplane, Elsa.Activities.Runtime, workflow persistence, or Studio.",
+    "Per-shell cost therefore understates a production Shared shard that also holds the Elsa 4 workflow runtime, EF persistence model, catalog projection, and HTTP pipeline.",
+    "Numbers were taken on a Cloud Agent CI-style VM (burstable, noisy neighbour, page cache already warm). Dedicated Shared hardware, container memory limits, and Server GC under load will differ.",
+    "Cold-start is measured from GetOrActivateAsync to first ALC-backed activity Execute, not from process start to an HTTP WriteLine workflow via the Elsa API.",
+    "The Architect's 4 GiB replica / 1.5 GiB headroom figure is an unmeasured Shared SKU estimate. This repo's implemented Dedicated default is standard-small (0.5 vCPU / 1 GiB)."
+  ],
+  "Density": [
+    {
+      "Groups": 1,
+      "WorkingSetMb": {
+        "Mean": 107.40078125,
+        "P50": 107.66796875,
+        "P95": 111.3638671875,
+        "Min": 103.21875,
+        "Max": 111.4921875,
+        "Count": 10
+      },
+      "PrivateMb": {
+        "Mean": 107.400390625,
+        "P50": 107.66796875,
+        "P95": 111.362109375,
+        "Min": 103.21875,
+        "Max": 111.4921875,
+        "Count": 10
+      },
+      "ManagedHeapMb": {
+        "Mean": 2.912100982666016,
+        "P50": 2.9245033264160156,
+        "P95": 2.9934661865234373,
+        "Min": 2.84136962890625,
+        "Max": 3.0337448120117188,
+        "Count": 10
+      },
+      "GcHeapMb": {
+        "Mean": 2.8851219177246095,
+        "P50": 2.8907241821289062,
+        "P95": 2.9494792938232424,
+        "Min": 2.8058242797851562,
+        "Max": 2.9623641967773438,
+        "Count": 10
+      },
+      "LastAssemblyCount": 82
+    },
+    {
+      "Groups": 5,
+      "WorkingSetMb": {
+        "Mean": 119.218359375,
+        "P50": 120.748046875,
+        "P95": 125.6546875,
+        "Min": 109.89453125,
+        "Max": 126.1328125,
+        "Count": 10
+      },
+      "PrivateMb": {
+        "Mean": 119.217578125,
+        "P50": 120.748046875,
+        "P95": 125.650390625,
+        "Min": 109.89453125,
+        "Max": 126.125,
+        "Count": 10
+      },
+      "ManagedHeapMb": {
+        "Mean": 3.654631805419922,
+        "P50": 3.631885528564453,
+        "P95": 3.839939498901367,
+        "Min": 3.4779052734375,
+        "Max": 3.8844375610351562,
+        "Count": 10
+      },
+      "GcHeapMb": {
+        "Mean": 3.680988311767578,
+        "P50": 3.6745758056640625,
+        "P95": 3.801836395263672,
+        "Min": 3.5055618286132812,
+        "Max": 3.8151092529296875,
+        "Count": 10
+      },
+      "LastAssemblyCount": 82
+    },
+    {
+      "Groups": 20,
+      "WorkingSetMb": {
+        "Mean": 153.927734375,
+        "P50": 154.28515625,
+        "P95": 172.234375,
+        "Min": 131.3515625,
+        "Max": 174.02734375,
+        "Count": 10
+      },
+      "PrivateMb": {
+        "Mean": 153.927734375,
+        "P50": 154.28515625,
+        "P95": 172.234375,
+        "Min": 131.3515625,
+        "Max": 174.02734375,
+        "Count": 10
+      },
+      "ManagedHeapMb": {
+        "Mean": 6.227955627441406,
+        "P50": 6.245487213134766,
+        "P95": 6.626373291015625,
+        "Min": 5.768882751464844,
+        "Max": 6.680961608886719,
+        "Count": 10
+      },
+      "GcHeapMb": {
+        "Mean": 6.291385650634766,
+        "P50": 6.239009857177734,
+        "P95": 6.728789901733398,
+        "Min": 5.845283508300781,
+        "Max": 6.7588958740234375,
+        "Count": 10
+      },
+      "LastAssemblyCount": 82
+    }
+  ],
+  "ColdStart": [
+    {
+      "Groups": 1,
+      "FirstShellTotalMs": {
+        "Mean": 16.677909999999997,
+        "P50": 10.843599999999999,
+        "P95": 44.225339999999946,
+        "Min": 9.3878,
+        "Max": 66.831,
+        "Count": 10
+      },
+      "MeanShellBuildMs": {
+        "Mean": 16.18629,
+        "P50": 10.34975,
+        "P95": 43.730444999999946,
+        "Min": 8.9271,
+        "Max": 66.3168,
+        "Count": 10
+      },
+      "MeanFirstWorkflowMs": {
+        "Mean": 0.4903799999999999,
+        "P50": 0.48560000000000003,
+        "P95": 0.526985,
+        "Min": 0.46,
+        "Max": 0.5291,
+        "Count": 10
+      },
+      "ActivateAllMs": {
+        "Mean": 16.677909999999997,
+        "P50": 10.843599999999999,
+        "P95": 44.225339999999946,
+        "Min": 9.3878,
+        "Max": 66.831,
+        "Count": 10
+      },
+      "ReloadFirstShellMs": {
+        "Mean": 3.5775899999999994,
+        "P50": 3.4772499999999997,
+        "P95": 4.181284999999999,
+        "Min": 3.1022,
+        "Max": 4.538,
+        "Count": 10
+      }
+    },
+    {
+      "Groups": 5,
+      "FirstShellTotalMs": {
+        "Mean": 12.111770000000002,
+        "P50": 11.1009,
+        "P95": 15.87868,
+        "Min": 10.1403,
+        "Max": 16.4563,
+        "Count": 10
+      },
+      "MeanShellBuildMs": {
+        "Mean": 11.553692000000002,
+        "P50": 11.2349,
+        "P95": 15.957486999999997,
+        "Min": 8.73566,
+        "Max": 18.232840000000003,
+        "Count": 10
+      },
+      "MeanFirstWorkflowMs": {
+        "Mean": 0.164912,
+        "P50": 0.16414,
+        "P95": 0.17831399999999997,
+        "Min": 0.15448,
+        "Max": 0.18419999999999997,
+        "Count": 10
+      },
+      "ActivateAllMs": {
+        "Mean": 58.59692,
+        "P50": 57.02465,
+        "P95": 80.59687999999997,
+        "Min": 44.5376,
+        "Max": 91.9619,
+        "Count": 10
+      },
+      "ReloadFirstShellMs": {
+        "Mean": 3.0295900000000002,
+        "P50": 3.0206,
+        "P95": 3.3568049999999996,
+        "Min": 2.6725,
+        "Max": 3.4356,
+        "Count": 10
+      }
+    },
+    {
+      "Groups": 20,
+      "FirstShellTotalMs": {
+        "Mean": 11.31078,
+        "P50": 11.23635,
+        "P95": 12.89205,
+        "Min": 9.9103,
+        "Max": 13.0761,
+        "Count": 10
+      },
+      "MeanShellBuildMs": {
+        "Mean": 10.072256999999999,
+        "P50": 10.15447,
+        "P95": 11.144537249999999,
+        "Min": 8.814494999999999,
+        "Max": 11.410889999999998,
+        "Count": 10
+      },
+      "MeanFirstWorkflowMs": {
+        "Mean": 0.06576749999999999,
+        "P50": 0.0656725,
+        "P95": 0.069047,
+        "Min": 0.061970000000000004,
+        "Max": 0.06942499999999999,
+        "Count": 10
+      },
+      "ActivateAllMs": {
+        "Mean": 202.77446,
+        "P50": 204.45299999999997,
+        "P95": 224.23241,
+        "Min": 177.6073,
+        "Max": 229.52630000000002,
+        "Count": 10
+      },
+      "ReloadFirstShellMs": {
+        "Mean": 3.29983,
+        "P50": 3.2166,
+        "P95": 3.88169,
+        "Min": 2.93,
+        "Max": 4.0193,
+        "Count": 10
+      }
+    }
+  ],
+  "Unload": {
+    "ContextCollected": true,
+    "AssemblyCollected": true,
+    "RefCountAtUnload": 1,
+    "WorkingSetBaselineMb": 33.25,
+    "WorkingSetLoadedMb": 99.875,
+    "WorkingSetAfterMb": 100.296875,
+    "ManagedHeapBaselineMb": 0.10784149169921875,
+    "ManagedHeapLoadedMb": 2.2377166748046875,
+    "ManagedHeapAfterMb": 1.7180633544921875,
+    "WaitedForCollectionMs": 5000
+  }
+}
