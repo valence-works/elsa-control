@@ -61,6 +61,11 @@ def main() -> int:
     subscription = required("AZURE_SUBSCRIPTION_ID", GUID_RE, lower=True)
     resource_group = required("RESOURCE_GROUP", RESOURCE_NAME_RE)
     authority_group = required("AUTHORITY_RESOURCE_GROUP", RESOURCE_NAME_RE)
+    acr_identity_group = (
+        required("ACR_PULL_IDENTITY_RESOURCE_GROUP", RESOURCE_NAME_RE)
+        if "ACR_PULL_IDENTITY_RESOURCE_GROUP" in os.environ
+        else authority_group
+    )
     server = required("CATALOG_SERVER", HOST_RE)
     # The probe connects to this exact host; a short server name resolves nowhere inside ACI.
     if not server.endswith(".database.windows.net"):
@@ -95,9 +100,10 @@ def main() -> int:
     if len(expected_ids) != int(target_migrations) or any(not MIGRATION.fullmatch(item) for item in expected_ids) or len(set(expected_ids)) != len(expected_ids):
         fail()
 
-    identity_prefix = f"/subscriptions/{subscription}/resourceGroups/{authority_group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/"
-    api_identity = identity_prefix + api_identity_name
-    acr_identity = identity_prefix + acr_identity_name
+    identity_prefix = f"/subscriptions/{subscription}/resourceGroups"
+    identity_provider = "/providers/Microsoft.ManagedIdentity/userAssignedIdentities/"
+    api_identity = f"{identity_prefix}/{authority_group}{identity_provider}{api_identity_name}"
+    acr_identity = f"{identity_prefix}/{acr_identity_group}{identity_provider}{acr_identity_name}"
     # The canonical clone connection string is constructed here (Entra managed identity, encryption enabled,
     # no password-bearing aliases); no connection material is accepted from the environment.
     connection = (

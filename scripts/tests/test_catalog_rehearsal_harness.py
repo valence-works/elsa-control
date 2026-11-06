@@ -27,8 +27,15 @@ COUNTS = ("Accounts", "Organizations", "Workspaces", "ElsaInstances", "Deploymen
 MIGRATIONS = [f"2026090100000{i:d}_M{i}" if i < 10 else f"202609010000{i:d}_M{i}" for i in range(1, 54)]
 
 
+def identity_resource_id(resource_group: str, name: str) -> str:
+    return f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{resource_group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/{name}"
+
+
 def python(script: str, *arguments: str, env: dict[str, str] | None = None, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["python3", str(HARNESS / script), *arguments], capture_output=True, text=True, env={**os.environ, **(env or {})}, input=stdin, check=False, timeout=120)
+    process_env = os.environ.copy()
+    process_env.pop("ACR_PULL_IDENTITY_RESOURCE_GROUP", None)
+    process_env.update(env or {})
+    return subprocess.run(["python3", str(HARNESS / script), *arguments], capture_output=True, text=True, env=process_env, input=stdin, check=False, timeout=120)
 
 
 def passed_result(phase: str, group: str, source: str, build: str, baseline_ids: list[str], preview_baseline: int) -> dict[str, object]:
@@ -103,10 +110,24 @@ class RendererTests(HarnessCase):
         self.assertEqual(MIGRATIONS, probe_env["EXPECTED_MIGRATION_IDS"].split())
         self.assertTrue(probe_env["REHEARSAL_SCRIPT"].startswith("#!/usr/bin/env python3"))
         self.assertEqual({"server": REGISTRY, "identity": spec["properties"]["imageRegistryCredentials"][0]["identity"]}, properties["imageRegistryCredentials"][0])
-        self.assertIn("/acr_pull", properties["imageRegistryCredentials"][0]["identity"])
-        self.assertEqual(2, len(spec["identity"]["userAssignedIdentities"]))
+        api_identity = identity_resource_id("rg-control", "api_identity")
+        acr_identity = identity_resource_id("rg-control", "acr_pull")
+        self.assertEqual({api_identity: {}, acr_identity: {}}, spec["identity"]["userAssignedIdentities"])
+        self.assertEqual([{"server": REGISTRY, "identity": acr_identity}], properties["imageRegistryCredentials"])
         self.assertIn("/rehearsal/api-exited", containers["api"]["command"][2])
         self.assertIn(">/dev/null 2>&1", containers["api"]["command"][2])
+
+    def test_acr_pull_identity_can_use_explicit_resource_group(self) -> None:
+        code, spec = self.render(ACR_PULL_IDENTITY_RESOURCE_GROUP="rg-acr-test")
+        self.assertEqual(0, code)
+        assert spec is not None
+        properties = spec["properties"]
+        api_identity = identity_resource_id("rg-control", "api_identity")
+        acr_identity = identity_resource_id("rg-acr-test", "acr_pull")
+        self.assertEqual({api_identity: {}, acr_identity: {}}, spec["identity"]["userAssignedIdentities"])
+        self.assertEqual([{"server": REGISTRY, "identity": acr_identity}], properties["imageRegistryCredentials"])
+        api_env = {item["name"]: item for container in properties["containers"] if container["name"] == "api" for item in container["properties"]["environmentVariables"]}
+        self.assertIn(f"User Id={MI_CLIENT}", api_env["ConnectionStrings__Catalog"]["secureValue"])
 
     def test_previous_phase_binds_previous_image_and_migrated_baseline(self) -> None:
         code, spec = self.render(REHEARSAL_PHASE="previous", REHEARSAL_GROUP_NAME="catalog-rehearsal-previous-96")
@@ -127,6 +148,9 @@ class RendererTests(HarnessCase):
             "wrong group prefix": {"REHEARSAL_GROUP_NAME": "catalog-rehearsal-previous-96"},
             "expired": {"REHEARSAL_EXPIRY_UTC": "2020-01-01"},
             "missing subscription": {"AZURE_SUBSCRIPTION_ID": "REQUIRED"},
+            "required ACR identity group": {"ACR_PULL_IDENTITY_RESOURCE_GROUP": "REQUIRED"},
+            "empty ACR identity group": {"ACR_PULL_IDENTITY_RESOURCE_GROUP": ""},
+            "malformed ACR identity group": {"ACR_PULL_IDENTITY_RESOURCE_GROUP": "rg-acr/other"},
             "ids count mismatch": {"EXPECTED_MIGRATIONS": "52"},
             "bad phase": {"REHEARSAL_PHASE": "production"},
         }
