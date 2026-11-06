@@ -32,7 +32,10 @@ def identity_resource_id(resource_group: str, name: str) -> str:
 
 
 def python(script: str, *arguments: str, env: dict[str, str] | None = None, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["python3", str(HARNESS / script), *arguments], capture_output=True, text=True, env={**os.environ, **(env or {})}, input=stdin, check=False, timeout=120)
+    process_env = os.environ.copy()
+    process_env.pop("ACR_PULL_IDENTITY_RESOURCE_GROUP", None)
+    process_env.update(env or {})
+    return subprocess.run(["python3", str(HARNESS / script), *arguments], capture_output=True, text=True, env=process_env, input=stdin, check=False, timeout=120)
 
 
 def passed_result(phase: str, group: str, source: str, build: str, baseline_ids: list[str], preview_baseline: int) -> dict[str, object]:
