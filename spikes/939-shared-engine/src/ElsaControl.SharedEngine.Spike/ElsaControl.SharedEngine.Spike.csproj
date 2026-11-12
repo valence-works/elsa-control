@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <RootNamespace>ElsaControl.SharedEngine.Spike</RootNamespace>
+    <PreserveCompilationContext>true</PreserveCompilationContext>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <Target Name="RequireElsaCorePin" BeforeTargets="ResolveProjectReferences">
+    <Error
+      Condition="!Exists('$(ElsaCoreRoot)/core/src/modules/Elsa/Elsa.csproj')"
+      Text="elsa-core is not pinned at $(ElsaCoreRoot). Run spikes/939-shared-engine/restore-elsa-core.sh first (pin $(ElsaCorePin))." />
+  </Target>
+
+  <ItemGroup>
+    <PackageReference Include="CShells.AspNetCore" Version="0.0.28" />
+    <PackageReference Include="CShells.FastEndpoints" Version="0.0.28" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(ElsaCoreRoot)/core/src/modules/Elsa/Elsa.csproj" />
+    <ProjectReference Include="$(ElsaCoreRoot)/core/src/modules/Elsa.Http/Elsa.Http.csproj" />
+    <ProjectReference Include="$(ElsaCoreRoot)/core/src/modules/Elsa.Identity/Elsa.Identity.csproj" />
+    <ProjectReference Include="$(ElsaCoreRoot)/core/src/modules/Elsa.Persistence.EFCore.Sqlite/Elsa.Persistence.EFCore.Sqlite.csproj" />
+    <ProjectReference Include="$(ElsaCoreRoot)/core/src/modules/Elsa.Persistence.EFCore.SqlServer/Elsa.Persistence.EFCore.SqlServer.csproj" />
+    <ProjectReference Include="$(ElsaCoreRoot)/core/src/modules/Elsa.Scheduling/Elsa.Scheduling.csproj" />
+    <ProjectReference Include="$(ElsaCoreRoot)/core/src/modules/Elsa.Tenants/Elsa.Tenants.csproj" />
+    <ProjectReference Include="$(ElsaCoreRoot)/core/src/modules/Elsa.Tenants.AspNetCore/Elsa.Tenants.AspNetCore.csproj" />
+    <ProjectReference Include="$(ElsaCoreRoot)/core/src/modules/Elsa.Workflows.Api/Elsa.Workflows.Api.csproj" />
+    <ProjectReference Include="$(ElsaCoreRoot)/core/src/modules/Elsa.Workflows.Runtime.Distributed/Elsa.Workflows.Runtime.Distributed.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,8 @@
+.deps/
+App_Data/
+**/bin/
+**/obj/
+*.db
+*.db-shm
+*.db-wal
+TestResults/

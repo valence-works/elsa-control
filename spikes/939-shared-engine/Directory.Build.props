@@ -1,0 +1,14 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <IsPackable>false</IsPackable>
+    <ElsaCorePin>59b14969027b5cff1273f54970d90da189f4ff0f</ElsaCorePin>
+    <ElsaCoreRoot Condition="'$(ElsaCoreRoot)' == ''">$(MSBuildThisFileDirectory).deps/elsa-core</ElsaCoreRoot>
+  </PropertyGroup>
+</Project>
