@@ -59,7 +59,8 @@ public sealed class OrganizationBillingApiService(
                         _stripeOptions.CheckoutSuccessUrl!,
                         _stripeOptions.CheckoutCancelUrl!,
                         TrialEndsAt: null,
-                        ProviderCustomerReference: existing.ProviderCustomerReference),
+                        ProviderCustomerReference: existing.ProviderCustomerReference,
+                        CheckoutAttemptKey: Guid.NewGuid().ToString("N")),
                     cancellationToken);
                 return OrganizationBillingApiResult.Success(paid);
             }

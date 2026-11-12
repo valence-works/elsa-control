@@ -65,6 +65,32 @@ public sealed class HubBillingEntitlementApiTests
     }
 
     [Fact]
+    public async Task Hub_entitlement_read_does_not_report_suspended_for_active_or_new_organizations()
+    {
+        await using var app = CreateHubApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateHubClient(app, HubSubject);
+        var owned = await BootstrapAsync(client);
+
+        using var missing = await client.GetAsync(
+            $"/api/organizations/{owned.OrganizationId:D}/billing/hosted-subscription");
+        var missingStatus = await missing.Content.ReadControlJsonAsync<HostedSubscriptionManagementResponse>();
+        Assert.Equal(HttpStatusCode.OK, missing.StatusCode);
+        Assert.NotEqual(nameof(OrganizationSubscriptionState.Suspended), missingStatus!.SubscriptionState);
+        Assert.Equal(OrganizationBillingRecoveryActions.None, missingStatus.RecoveryAction);
+
+        await SeedHubSubscriptionAsync(app, owned.OrganizationId);
+        using var active = await client.GetAsync(
+            $"/api/organizations/{owned.OrganizationId:D}/billing/hosted-subscription");
+        var activeStatus = await active.Content.ReadControlJsonAsync<HostedSubscriptionManagementResponse>();
+        Assert.Equal(HttpStatusCode.OK, active.StatusCode);
+        Assert.Equal(nameof(OrganizationSubscriptionState.Active), activeStatus!.SubscriptionState);
+        Assert.NotEqual(nameof(OrganizationSubscriptionState.Suspended), activeStatus.SubscriptionState);
+        Assert.Null(activeStatus.SuspensionReason);
+        Assert.Equal(OrganizationBillingRecoveryActions.None, activeStatus.RecoveryAction);
+    }
+
+    [Fact]
     public async Task Hub_session_gets_organization_not_found_for_another_organization()
     {
         await using var app = CreateHubApplication();

@@ -52,7 +52,19 @@ public sealed class StripeBillingProviderTests
         Assert.Equal("https://checkout.stripe.test/session", result.Url);
         Assert.Null(checkout.Options!.SubscriptionData!.TrialEnd);
         Assert.Equal("cus_123", checkout.Options.Customer);
-        Assert.Equal($"billing-checkout-paid-{OrganizationId:D}", checkout.RequestOptions!.IdempotencyKey);
+        Assert.StartsWith($"billing-checkout-paid-{OrganizationId:D}-", checkout.RequestOptions!.IdempotencyKey);
+        Assert.NotEqual($"billing-checkout-paid-{OrganizationId:D}", checkout.RequestOptions.IdempotencyKey);
+
+        var second = new RecordingCheckoutGateway();
+        var secondProvider = CreateProvider(checkout: second);
+        await secondProvider.CreateCheckoutSessionAsync(new BillingCheckoutSessionRequest(
+            OrganizationId,
+            "price_opaque_default",
+            "https://console.test/billing/success",
+            "https://console.test/billing/cancel",
+            TrialEndsAt: null,
+            ProviderCustomerReference: "cus_123"));
+        Assert.NotEqual(checkout.RequestOptions.IdempotencyKey, second.RequestOptions!.IdempotencyKey);
     }
 
     [Fact]
@@ -144,6 +156,55 @@ public sealed class StripeBillingProviderTests
 
         Assert.False(confirmed);
         Assert.Equal(["GET", "DELETE"], http.Methods);
+    }
+
+    [Fact]
+    public async Task Cleanup_of_an_ineligible_paid_subscription_refunds_the_invoice_then_cancels_once_on_replay()
+    {
+        var http = new RecordingStripeHttpClient();
+        var gateway = new StripeSubscriptionCleanupGateway(() => new StripeClient("sk_test_no_network", httpClient: http));
+        var options = new RequestOptions { IdempotencyKey = "billing-refund-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
+
+        var first = await gateway.CancelOrConfirmAbsentAsync("sub_123", options, CancellationToken.None, refundPaidInvoice: true);
+        var replay = await gateway.CancelOrConfirmAbsentAsync("sub_123", options, CancellationToken.None, refundPaidInvoice: true);
+
+        Assert.True(first);
+        Assert.True(replay);
+        Assert.Equal(1, http.RefundCreates);
+        Assert.Contains("POST", http.Methods);
+        Assert.Equal(OrganizationBillingCleanupKeys.PaidInvoiceRefundIdempotencyKey(options.IdempotencyKey!), http.RefundIdempotencyKey);
+    }
+
+    [Fact]
+    public async Task Provider_cleanup_refunds_then_cancels_for_a_billing_refund_key()
+    {
+        var cleanup = new RecordingCleanupGateway();
+        var provider = CreateProvider(cleanup: cleanup);
+
+        var result = await provider.CleanupAsync(new(
+            OrganizationId,
+            Guid.NewGuid(),
+            "billing-refund-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "stripe",
+            "cus_123",
+            "sub_stale",
+            1));
+
+        Assert.Equal(OrganizationBillingCleanupOutcome.ConfirmedAbsent, result);
+        Assert.Equal("sub_stale", cleanup.SubscriptionReference);
+        Assert.True(cleanup.RefundPaidInvoice);
+        Assert.Equal(1, cleanup.Calls);
+
+        await provider.CleanupAsync(new(
+            OrganizationId,
+            Guid.NewGuid(),
+            "billing-refund-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "stripe",
+            "cus_123",
+            "sub_stale",
+            2));
+        Assert.Equal(2, cleanup.Calls);
+        Assert.True(cleanup.RefundPaidInvoice);
     }
 
     [Fact]
@@ -725,29 +786,78 @@ public sealed class StripeBillingProviderTests
         public string? SubscriptionReference { get; private set; }
         public RequestOptions? RequestOptions { get; private set; }
         public int Calls { get; private set; }
+        public bool RefundPaidInvoice { get; private set; }
 
-        public Task<bool> CancelOrConfirmAbsentAsync(string subscriptionReference, RequestOptions requestOptions, CancellationToken cancellationToken)
+        public Task<bool> CancelOrConfirmAbsentAsync(
+            string subscriptionReference,
+            RequestOptions requestOptions,
+            CancellationToken cancellationToken,
+            bool refundPaidInvoice = false)
         {
             Calls++;
             SubscriptionReference = subscriptionReference;
             RequestOptions = requestOptions;
+            RefundPaidInvoice = refundPaidInvoice;
             return Task.FromResult(true);
         }
     }
 
-    private sealed class RecordingStripeHttpClient(params (HttpStatusCode Status, string SubscriptionStatus)[] responses) : IHttpClient
+    private sealed class RecordingStripeHttpClient : IHttpClient
     {
-        private readonly Queue<(HttpStatusCode Status, string SubscriptionStatus)> _responses = new(responses);
+        private readonly Queue<(HttpStatusCode Status, string SubscriptionStatus)>? _subscriptionResponses;
+        private bool _refunded;
+        private string _subscriptionStatus = "active";
         public List<string> Methods { get; } = [];
+        public int RefundCreates { get; private set; }
+        public string? RefundIdempotencyKey { get; private set; }
+
+        public RecordingStripeHttpClient(params (HttpStatusCode Status, string SubscriptionStatus)[] responses)
+        {
+            if (responses.Length > 0)
+                _subscriptionResponses = new(responses);
+        }
 
         public Task<StripeResponse> MakeRequestAsync(StripeRequest request, CancellationToken cancellationToken = default)
         {
-            Methods.Add(request.Method.ToString().ToUpperInvariant());
-            var response = _responses.Dequeue();
-            var content = response.Status == HttpStatusCode.NotFound
-                ? "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"No such subscription\"}}"
-                : $"{{\"id\":\"sub_123\",\"object\":\"subscription\",\"status\":\"{response.SubscriptionStatus}\"}}";
-            return Task.FromResult(new StripeResponse(response.Status, new HttpResponseMessage().Headers, content));
+            var method = request.Method.ToString().ToUpperInvariant();
+            Methods.Add(method);
+            var path = request.Uri.AbsolutePath;
+
+            if (path.Contains("/invoices", StringComparison.Ordinal))
+            {
+                var content =
+                    "{\"object\":\"list\",\"data\":[{\"id\":\"in_1\",\"object\":\"invoice\",\"amount_paid\":1000,\"status\":\"paid\",\"payments\":{\"object\":\"list\",\"data\":[{\"id\":\"inpay_1\",\"object\":\"invoice_payment\",\"amount_paid\":1000,\"is_default\":true,\"status\":\"paid\",\"payment\":{\"type\":\"payment_intent\",\"payment_intent\":\"pi_1\"}}]}}],\"has_more\":false,\"url\":\"/v1/invoices\"}";
+                return Task.FromResult(new StripeResponse(HttpStatusCode.OK, new HttpResponseMessage().Headers, content));
+            }
+
+            if (method == "POST" && path.Contains("/refunds", StringComparison.Ordinal))
+            {
+                request.StripeHeaders.TryGetValue("Idempotency-Key", out var key);
+                if (!_refunded)
+                {
+                    RefundCreates++;
+                    RefundIdempotencyKey = key;
+                    _refunded = true;
+                }
+                return Task.FromResult(new StripeResponse(
+                    HttpStatusCode.OK,
+                    new HttpResponseMessage().Headers,
+                    "{\"id\":\"re_1\",\"object\":\"refund\",\"amount\":1000,\"payment_intent\":\"pi_1\",\"status\":\"succeeded\"}"));
+            }
+
+            if (_subscriptionResponses is { Count: > 0 })
+            {
+                var response = _subscriptionResponses.Dequeue();
+                var queued = response.Status == HttpStatusCode.NotFound
+                    ? "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"No such subscription\"}}"
+                    : $"{{\"id\":\"sub_123\",\"object\":\"subscription\",\"status\":\"{response.SubscriptionStatus}\"}}";
+                return Task.FromResult(new StripeResponse(response.Status, new HttpResponseMessage().Headers, queued));
+            }
+
+            if (method == "DELETE")
+                _subscriptionStatus = "canceled";
+            var body = $"{{\"id\":\"sub_123\",\"object\":\"subscription\",\"status\":\"{_subscriptionStatus}\"}}";
+            return Task.FromResult(new StripeResponse(HttpStatusCode.OK, new HttpResponseMessage().Headers, body));
         }
 
         public Task<StripeStreamedResponse> MakeStreamingRequestAsync(StripeRequest request, CancellationToken cancellationToken = default) =>

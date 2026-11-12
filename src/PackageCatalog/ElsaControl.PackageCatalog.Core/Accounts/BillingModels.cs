@@ -135,6 +135,18 @@ public static class BillingDiagnosticCodes
     public const string IneligiblePaidSubscription = "billing.ineligible-paid-subscription";
 }
 
+public static class OrganizationBillingCleanupKeys
+{
+    public const string RefundPrefix = "billing-refund-";
+
+    public static bool RequiresPaidInvoiceRefund(string? cleanupKey) =>
+        !string.IsNullOrWhiteSpace(cleanupKey) &&
+        cleanupKey.StartsWith(RefundPrefix, StringComparison.Ordinal);
+
+    public static string PaidInvoiceRefundIdempotencyKey(string cleanupKey) =>
+        $"{cleanupKey}-refund";
+}
+
 public enum BillingProviderEventProcessingStatus
 {
     Accepted,
@@ -546,6 +558,11 @@ public static class OrganizationSubscriptionLifecycle
             case OrganizationSubscriptionState.Active:
                 subscription.ActivatedAt ??= timestamp;
                 subscription.SuspensionReason = null;
+                if (previous == OrganizationSubscriptionState.Suspended)
+                {
+                    subscription.SuspendedAt = null;
+                    subscription.RetentionEndsAt = null;
+                }
                 break;
             case OrganizationSubscriptionState.PastDue:
                 subscription.PastDueAt ??= timestamp;

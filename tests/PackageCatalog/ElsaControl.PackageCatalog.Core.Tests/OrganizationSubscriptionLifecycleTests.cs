@@ -120,6 +120,8 @@ public sealed class OrganizationSubscriptionLifecycleTests
 
         Assert.Equal(OrganizationSubscriptionState.Active, subscription.State);
         Assert.Null(subscription.SuspensionReason);
+        Assert.Null(subscription.SuspendedAt);
+        Assert.Null(subscription.RetentionEndsAt);
         Assert.Equal(OrganizationBillingRecoveryActions.None, OrganizationSubscriptionLifecycle.RecoveryAction(subscription));
     }
 

@@ -482,12 +482,8 @@ public sealed class OrganizationBillingPersistenceTests
         Assert.Equal(1, await db.BillingProviderEvents.CountAsync());
     }
 
-    [Theory]
-    [InlineData("other_customer", "sub_acme")]
-    [InlineData("cus_acme", "other_subscription")]
-    public async Task Conflicting_provider_references_fail_closed_without_new_durable_records(
-        string customerReference,
-        string subscriptionReference)
+    [Fact]
+    public async Task Conflicting_customer_reference_fails_closed_without_new_durable_records()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -500,12 +496,10 @@ public sealed class OrganizationBillingPersistenceTests
 
         var conflicting = Event("evt-past-due", OrganizationSubscriptionState.PastDue, Now.AddMinutes(3)) with
         {
-            ProviderCustomerReference = customerReference,
-            ProviderSubscriptionReference = subscriptionReference
+            ProviderCustomerReference = "other_customer"
         };
         await Assert.ThrowsAsync<BillingProviderEventConflictException>(() => store.ConsumeAsync(conflicting, Now.AddMinutes(4)));
 
-        // The conflict must leave no tracked Added inbox that a later save could commit.
         await db.SaveChangesAsync();
         var subscription = await db.OrganizationSubscriptions.SingleAsync();
         Assert.Equal(OrganizationSubscriptionState.Active, subscription.State);
@@ -513,6 +507,34 @@ public sealed class OrganizationBillingPersistenceTests
         Assert.Equal("sub_acme", subscription.ProviderSubscriptionReference);
         Assert.Equal(1, await db.BillingProviderEvents.CountAsync());
         Assert.Equal(1, await db.OrganizationAuditRecords.CountAsync());
+    }
+
+    [Fact]
+    public async Task Conflicting_subscription_reference_is_ignored_and_does_not_mutate_the_current_row()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        await db.SaveChangesAsync();
+        var store = new OrganizationBillingStore(db);
+        await store.ConsumeAsync(Event("evt-active", OrganizationSubscriptionState.Active, Now.AddMinutes(1)), Now.AddMinutes(2));
+
+        var conflicting = Event("evt-past-due", OrganizationSubscriptionState.PastDue, Now.AddMinutes(3)) with
+        {
+            ProviderSubscriptionReference = "other_subscription"
+        };
+        var ignored = await store.ConsumeAsync(conflicting, Now.AddMinutes(4));
+
+        Assert.Equal(BillingEventConsumptionOutcome.IgnoredOutOfOrder, ignored.Outcome);
+        var subscription = await db.OrganizationSubscriptions.SingleAsync();
+        Assert.Equal(OrganizationSubscriptionState.Active, subscription.State);
+        Assert.Equal("cus_acme", subscription.ProviderCustomerReference);
+        Assert.Equal("sub_acme", subscription.ProviderSubscriptionReference);
+        Assert.Equal(2, await db.BillingProviderEvents.CountAsync());
+        Assert.Equal(BillingProviderEventProcessingStatus.IgnoredOutOfOrder,
+            (await db.BillingProviderEvents.SingleAsync(x => x.ProviderEventId == "evt-past-due")).ProcessingStatus);
     }
 
     [Fact]
@@ -1165,6 +1187,8 @@ public sealed class OrganizationBillingPersistenceTests
         Assert.Equal(OrganizationSubscriptionState.Active, resumed.Subscription.State);
         Assert.Equal("sub_acme", resumed.Subscription.ProviderSubscriptionReference);
         Assert.Null(resumed.Subscription.SuspensionReason);
+        Assert.Null(resumed.Subscription.SuspendedAt);
+        Assert.Null(resumed.Subscription.RetentionEndsAt);
         Assert.True(resumed.Entitlement!.ManagedHostingEnabled);
         Assert.Equal(1, resumed.Entitlement.MaxInstances);
         Assert.Equal(OrganizationSubscriptionState.Active, resumed.Entitlement.SubscriptionState);
@@ -1209,7 +1233,7 @@ public sealed class OrganizationBillingPersistenceTests
             x => x.ProviderSubscriptionReference == "sub_stale_checkout" &&
                  x.State == OrganizationBillingCleanupState.Queued);
         Assert.Contains(await db.OrganizationAuditRecords.ToListAsync(),
-            x => x.Summary.Contains("queued for cancel", StringComparison.Ordinal));
+            x => x.Summary.Contains("queued for refund and cancel", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -1277,7 +1301,7 @@ public sealed class OrganizationBillingPersistenceTests
     }
 
     [Fact]
-    public async Task Created_before_deleted_still_leaves_one_active_lifecycle()
+    public async Task Active_org_rejects_a_second_paid_subscription_while_the_original_is_live()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -1290,34 +1314,66 @@ public sealed class OrganizationBillingPersistenceTests
         var original = await store.ConsumeAsync(
             Event("evt-original", OrganizationSubscriptionState.Active, Now.AddMinutes(1)),
             Now.AddMinutes(2));
-
-        var createdFirst = await store.ConsumeAsync(
-            Event(OrganizationId, "evt-new-created", OrganizationSubscriptionState.Active,
-                Now.AddMinutes(3), "cus_acme", "sub_paid_again") with
+        var second = await store.ConsumeAsync(
+            Event(OrganizationId, "evt-second-checkout", OrganizationSubscriptionState.Active,
+                Now.AddMinutes(3), "cus_acme", "sub_second") with
             {
                 EventType = "customer.subscription.created"
             },
             Now.AddMinutes(4));
-        var lateDeleted = await store.ConsumeAsync(
-            Event("evt-old-deleted", OrganizationSubscriptionState.Suspended, Now.AddMinutes(5)) with
+        var replay = await store.ConsumeAsync(
+            Event(OrganizationId, "evt-second-checkout", OrganizationSubscriptionState.Active,
+                Now.AddMinutes(3), "cus_acme", "sub_second") with
             {
-                EventType = "customer.subscription.deleted"
+                EventType = "customer.subscription.created"
             },
-            Now.AddMinutes(6));
+            Now.AddMinutes(5));
 
-        Assert.Equal(BillingEventConsumptionOutcome.Applied, createdFirst.Outcome);
-        Assert.NotEqual(original.Subscription!.Id, createdFirst.Subscription!.Id);
-        Assert.Equal("sub_paid_again", createdFirst.Subscription.ProviderSubscriptionReference);
-        Assert.Equal(OrganizationSubscriptionState.Active, createdFirst.Subscription.State);
-        Assert.True(createdFirst.Entitlement!.ManagedHostingEnabled);
-        Assert.Equal(1, createdFirst.Entitlement.MaxInstances);
-        Assert.Equal(BillingEventConsumptionOutcome.IgnoredOutOfOrder, lateDeleted.Outcome);
+        Assert.Equal(BillingEventConsumptionOutcome.Rejected, second.Outcome);
+        Assert.Equal(BillingDiagnosticCodes.IneligiblePaidSubscription, second.RejectionCode);
+        Assert.Equal(BillingEventConsumptionOutcome.Replayed, replay.Outcome);
+        Assert.Equal(original.Subscription!.Id, (await store.GetSubscriptionAsync(OrganizationId))!.Id);
+        Assert.Equal(OrganizationSubscriptionState.Active, (await store.GetSubscriptionAsync(OrganizationId))!.State);
+        Assert.Equal("sub_acme", (await store.GetSubscriptionAsync(OrganizationId))!.ProviderSubscriptionReference);
+        Assert.Equal(1, await db.OrganizationSubscriptions.CountAsync(x => x.State == OrganizationSubscriptionState.Active));
+        Assert.Single(await db.OrganizationBillingCleanups.Where(x =>
+            x.ProviderSubscriptionReference == "sub_second" &&
+            x.CleanupKey.StartsWith(OrganizationBillingCleanupKeys.RefundPrefix)).ToListAsync());
+    }
+
+    [Fact]
+    public async Task Late_event_on_a_superseded_reference_is_ignored_without_an_applied_inbox_row()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        var current = OrganizationSubscriptionLifecycle.CreateTrial(OrganizationId, BillingProviderNames.Stripe, Now);
+        OrganizationSubscriptionLifecycle.ApplyState(current, OrganizationSubscriptionState.Active, Now.AddMinutes(1));
+        current.ProviderCustomerReference = "cus_acme";
+        current.ProviderSubscriptionReference = "sub_paid_again";
+        current.LastProviderEventId = "evt-new";
+        current.LastProviderEventOccurredAt = Now.AddMinutes(1);
+        db.OrganizationSubscriptions.Add(current);
+        await db.SaveChangesAsync();
+
+        var store = new OrganizationBillingStore(db);
+        var lateUpdated = await store.ConsumeAsync(
+            Event(OrganizationId, "evt-old-updated", OrganizationSubscriptionState.PastDue,
+                Now.AddMinutes(3), "cus_acme", "sub_old") with
+            {
+                EventType = "customer.subscription.updated"
+            },
+            Now.AddMinutes(4));
+
+        Assert.Equal(BillingEventConsumptionOutcome.IgnoredOutOfOrder, lateUpdated.Outcome);
+        Assert.Equal(current.Id, (await store.GetSubscriptionAsync(OrganizationId))!.Id);
         Assert.Equal(OrganizationSubscriptionState.Active, (await store.GetSubscriptionAsync(OrganizationId))!.State);
         Assert.Equal("sub_paid_again", (await store.GetSubscriptionAsync(OrganizationId))!.ProviderSubscriptionReference);
-        Assert.Equal(1, await db.OrganizationSubscriptions.CountAsync(x => x.State == OrganizationSubscriptionState.Active));
-        db.ChangeTracker.Clear();
-        Assert.Equal(OrganizationSubscriptionState.Deleted,
-            (await db.OrganizationSubscriptions.SingleAsync(x => x.Id == original.Subscription.Id)).State);
+        Assert.Empty(await db.BillingProviderEvents.Where(x =>
+            x.ProviderSubscriptionReference == "sub_old" &&
+            x.ProcessingStatus == BillingProviderEventProcessingStatus.Applied).ToListAsync());
     }
 
     [Fact]

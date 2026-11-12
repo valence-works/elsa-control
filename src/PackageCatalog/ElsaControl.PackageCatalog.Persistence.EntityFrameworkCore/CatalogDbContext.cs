@@ -734,6 +734,8 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         {
             if (AllowsLifecycleDeadlineOverride(entry, propertyName, originalValue, currentValue))
                 return;
+            if (AllowsNonPaymentResumeTimestampClear(entry, propertyName) && currentValue is null)
+                return;
             if (currentValue is null || currentValue.Value.ToUniversalTime() != originalValue.Value.ToUniversalTime())
                 throw new InvalidOperationException($"Subscription {propertyName} is bind-once.");
             return;
@@ -760,6 +762,8 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         {
             if (AllowsLifecycleDeadlineOverride(entry, propertyName, originalValue, currentValue))
                 return;
+            if (AllowsNonPaymentResumeTimestampClear(entry, propertyName) && currentValue is null)
+                return;
             if (currentValue is null || currentValue.Value.ToUniversalTime() != originalValue.Value.ToUniversalTime())
                 throw new InvalidOperationException($"Subscription {propertyName} is bind-once.");
             return;
@@ -770,6 +774,19 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         if (lifecycleTimestamp is null ||
             currentValue.Value.ToUniversalTime() != lifecycleTimestamp.Value.ToUniversalTime().Add(period))
             throw new InvalidOperationException($"Subscription {propertyName} must match its lifecycle event.");
+    }
+
+    private static bool AllowsNonPaymentResumeTimestampClear(
+        EntityEntry<OrganizationSubscription> entry,
+        string propertyName)
+    {
+        if (propertyName is not (nameof(OrganizationSubscription.SuspendedAt)
+            or nameof(OrganizationSubscription.RetentionEndsAt)))
+            return false;
+
+        var originalState = entry.Property<OrganizationSubscriptionState>(
+            nameof(OrganizationSubscription.State)).OriginalValue;
+        return AllowsNonPaymentResume(entry, originalState, entry.Entity);
     }
 
     private bool AllowsLifecycleDeadlineOverride(

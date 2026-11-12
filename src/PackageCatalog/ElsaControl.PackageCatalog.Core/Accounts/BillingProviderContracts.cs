@@ -29,7 +29,8 @@ public sealed record BillingCheckoutSessionRequest(
     string SuccessUrl,
     string CancelUrl,
     DateTimeOffset? TrialEndsAt = null,
-    string? ProviderCustomerReference = null);
+    string? ProviderCustomerReference = null,
+    string? CheckoutAttemptKey = null);
 
 public sealed record BillingCustomerPortalSessionRequest(
     Guid OrganizationId,
