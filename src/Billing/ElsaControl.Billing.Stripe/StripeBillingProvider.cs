@@ -26,6 +26,8 @@ public interface IStripeSubscriptionCleanupGateway
         RequestOptions requestOptions,
         CancellationToken cancellationToken,
         bool refundPaidInvoice = false);
+
+    Task<string?> GetStatusAsync(string subscriptionReference, CancellationToken cancellationToken);
 }
 
 public sealed class StripeCheckoutSessionGateway(Func<StripeClient> clientFactory) : IStripeCheckoutSessionGateway
@@ -65,6 +67,23 @@ public sealed class StripeSubscriptionCleanupGateway(Func<StripeClient> clientFa
         catch (StripeException exception) when (exception.HttpStatusCode == System.Net.HttpStatusCode.NotFound)
         {
             return true;
+        }
+    }
+
+    public async Task<string?> GetStatusAsync(string subscriptionReference, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var subscription = await new SubscriptionService(clientFactory()).GetAsync(
+                subscriptionReference,
+                null,
+                null,
+                cancellationToken);
+            return subscription.Status;
+        }
+        catch (StripeException exception) when (exception.HttpStatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
         }
     }
 
@@ -127,7 +146,7 @@ public sealed class StripeBillingProvider(
     IOptions<StripeBillingOptions> options,
     IStripeCheckoutSessionGateway checkoutGateway,
     IStripeCustomerPortalGateway portalGateway,
-    IStripeSubscriptionCleanupGateway cleanupGateway) : IBillingProvider, IOrganizationBillingCleanupProvider
+    IStripeSubscriptionCleanupGateway cleanupGateway) : IBillingProvider, IOrganizationBillingCleanupProvider, IBillingProviderSubscriptionStatusLookup
 {
     private const long SignatureToleranceSeconds = 300;
     private const string OrganizationMetadataKey = "elsa_control_organization_id";
@@ -166,6 +185,34 @@ public sealed class StripeBillingProvider(
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             return OrganizationBillingCleanupOutcome.RetryableFailure;
+        }
+    }
+
+    public async Task<BillingProviderSubscriptionPresence> GetPresenceAsync(
+        string provider,
+        string subscriptionReference,
+        CancellationToken cancellationToken = default)
+    {
+        if (!string.Equals(provider, Provider, StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(subscriptionReference))
+            return BillingProviderSubscriptionPresence.Unknown;
+
+        try
+        {
+            var status = await cleanupGateway.GetStatusAsync(subscriptionReference, cancellationToken);
+            return BillingProviderSubscriptionPresenceMapping.FromStripeStatus(status);
+        }
+        catch (StripeException)
+        {
+            return BillingProviderSubscriptionPresence.Unknown;
+        }
+        catch (HttpRequestException)
+        {
+            return BillingProviderSubscriptionPresence.Unknown;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return BillingProviderSubscriptionPresence.Unknown;
         }
     }
 

@@ -88,3 +88,47 @@ public static class BillingProviderNames
     /// </summary>
     public const string Internal = "internal";
 }
+
+public enum BillingProviderSubscriptionPresence
+{
+    Live,
+    Ended,
+    Unknown
+}
+
+public interface IBillingProviderSubscriptionStatusLookup
+{
+    Task<BillingProviderSubscriptionPresence> GetPresenceAsync(
+        string provider,
+        string subscriptionReference,
+        CancellationToken cancellationToken = default);
+}
+
+public static class BillingProviderSubscriptionPresenceMapping
+{
+    public static BillingProviderSubscriptionPresence FromStripeStatus(string? status)
+    {
+        if (string.IsNullOrWhiteSpace(status))
+            return BillingProviderSubscriptionPresence.Ended;
+
+        return status.Trim().ToLowerInvariant() switch
+        {
+            "canceled" or "cancelled" or "incomplete_expired" or "unpaid" =>
+                BillingProviderSubscriptionPresence.Ended,
+            _ => BillingProviderSubscriptionPresence.Live
+        };
+    }
+}
+
+public sealed class BillingProviderUnavailableException : InvalidOperationException
+{
+    public BillingProviderUnavailableException(string message)
+        : base(message)
+    {
+    }
+
+    public BillingProviderUnavailableException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+}

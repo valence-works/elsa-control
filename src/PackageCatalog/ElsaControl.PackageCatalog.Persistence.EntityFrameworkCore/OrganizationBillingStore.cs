@@ -13,7 +13,9 @@ namespace ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 /// subscription, projects the entitlement snapshot and writes safe audit
 /// metadata together.
 /// </summary>
-public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext) : IOrganizationBillingStore, IOrganizationBillingLifecycleStore
+public sealed partial class OrganizationBillingStore(
+    CatalogDbContext dbContext,
+    IBillingProviderSubscriptionStatusLookup? subscriptionStatusLookup = null) : IOrganizationBillingStore, IOrganizationBillingLifecycleStore
 {
     public async Task<BillingEventConsumptionResult> ConsumeAsync(
         BillingProviderEvent providerEvent,
@@ -137,6 +139,11 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         try
         {
             return await ConsumeTransactionAsync(providerEvent, receivedAt, cancellationToken);
+        }
+        catch (BillingProviderUnavailableException)
+        {
+            dbContext.ChangeTracker.Clear();
+            throw;
         }
         catch (Exception exception) when (attempt < 2 && IsRetryableConflict(exception))
         {
@@ -265,6 +272,22 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                 await EnsureCleanupAsync(subscription, now, early: true, cancellationToken);
                 OrganizationSubscriptionLifecycle.CloseSuperseded(subscription, occurrence);
                 subscription = null;
+            }
+
+            if (subscription is not null &&
+                IsNewPaidSubscriptionOnDifferentReference(subscription, providerEvent) &&
+                subscription.State == OrganizationSubscriptionState.Active)
+            {
+                var presence = await ResolveActiveReplacementPresenceAsync(subscription, cancellationToken);
+                if (presence == BillingProviderSubscriptionPresence.Ended)
+                {
+                    await EnsureCleanupAsync(subscription, now, early: true, cancellationToken);
+                    OrganizationSubscriptionLifecycle.CloseSuperseded(subscription, occurrence);
+                    subscription = null;
+                }
+                else if (presence != BillingProviderSubscriptionPresence.Live)
+                    throw new BillingProviderUnavailableException(
+                        "The billing provider could not confirm whether the current subscription has ended.");
             }
 
             if (subscription is not null && IsIneligibleNewPaidSubscription(subscription, providerEvent))
@@ -603,22 +626,9 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
 
     private static bool CanStartReplacementPaidLifecycle(
         OrganizationSubscription subscription,
-        BillingProviderEvent providerEvent)
-    {
-        if (providerEvent.State != OrganizationSubscriptionState.Active ||
-            !string.Equals(subscription.Provider, BillingProviderNames.Stripe, StringComparison.Ordinal) ||
-            !string.Equals(providerEvent.Provider, BillingProviderNames.Stripe, StringComparison.Ordinal) ||
-            string.IsNullOrWhiteSpace(providerEvent.ProviderCustomerReference) ||
-            string.IsNullOrWhiteSpace(providerEvent.ProviderSubscriptionReference) ||
-            string.IsNullOrWhiteSpace(subscription.ProviderSubscriptionReference) ||
-            string.Equals(subscription.ProviderSubscriptionReference, providerEvent.ProviderSubscriptionReference, StringComparison.Ordinal))
-            return false;
-        if (subscription.ProviderCustomerReference is not null &&
-            !string.Equals(subscription.ProviderCustomerReference, providerEvent.ProviderCustomerReference, StringComparison.Ordinal))
-            return false;
-
-        return OrganizationSubscriptionLifecycle.IsCanceledSuspension(subscription);
-    }
+        BillingProviderEvent providerEvent) =>
+        IsNewPaidSubscriptionOnDifferentReference(subscription, providerEvent) &&
+        OrganizationSubscriptionLifecycle.IsCanceledSuspension(subscription);
 
     private static bool IsIneligibleNewPaidSubscription(
         OrganizationSubscription subscription,
@@ -633,6 +643,58 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
 
         return true;
     }
+
+    private static bool IsNewPaidSubscriptionOnDifferentReference(
+        OrganizationSubscription subscription,
+        BillingProviderEvent providerEvent)
+    {
+        if (providerEvent.State != OrganizationSubscriptionState.Active ||
+            !string.Equals(subscription.Provider, BillingProviderNames.Stripe, StringComparison.Ordinal) ||
+            !string.Equals(providerEvent.Provider, BillingProviderNames.Stripe, StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(providerEvent.ProviderCustomerReference) ||
+            string.IsNullOrWhiteSpace(providerEvent.ProviderSubscriptionReference) ||
+            string.IsNullOrWhiteSpace(subscription.ProviderSubscriptionReference) ||
+            string.Equals(subscription.ProviderSubscriptionReference, providerEvent.ProviderSubscriptionReference, StringComparison.Ordinal))
+            return false;
+        if (subscription.ProviderCustomerReference is not null &&
+            !string.Equals(subscription.ProviderCustomerReference, providerEvent.ProviderCustomerReference, StringComparison.Ordinal))
+            return false;
+
+        return true;
+    }
+
+    private async Task<BillingProviderSubscriptionPresence> ResolveActiveReplacementPresenceAsync(
+        OrganizationSubscription subscription,
+        CancellationToken cancellationToken)
+    {
+        if (await HasDeletedProviderEventAsync(subscription, cancellationToken))
+            return BillingProviderSubscriptionPresence.Ended;
+
+        if (subscriptionStatusLookup is null)
+            return BillingProviderSubscriptionPresence.Unknown;
+
+        try
+        {
+            return await subscriptionStatusLookup.GetPresenceAsync(
+                subscription.Provider,
+                subscription.ProviderSubscriptionReference!,
+                cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return BillingProviderSubscriptionPresence.Unknown;
+        }
+    }
+
+    private Task<bool> HasDeletedProviderEventAsync(
+        OrganizationSubscription subscription,
+        CancellationToken cancellationToken) =>
+        dbContext.BillingProviderEvents.AnyAsync(x =>
+            x.OrganizationId == subscription.OrganizationId &&
+            x.Provider == subscription.Provider &&
+            x.ProviderSubscriptionReference == subscription.ProviderSubscriptionReference &&
+            x.EventType == "customer.subscription.deleted",
+            cancellationToken);
 
     private static bool IsEventForDifferentSubscription(
         OrganizationSubscription subscription,

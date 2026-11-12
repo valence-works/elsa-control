@@ -213,15 +213,3 @@ public sealed class StripeWebhookSourceOptions
     public List<string> CloudPriceIds { get; set; } = [];
 }
 
-public sealed class BillingProviderUnavailableException : InvalidOperationException
-{
-    public BillingProviderUnavailableException(string message)
-        : base(message)
-    {
-    }
-
-    public BillingProviderUnavailableException(string message, Exception innerException)
-        : base(message, innerException)
-    {
-    }
-}

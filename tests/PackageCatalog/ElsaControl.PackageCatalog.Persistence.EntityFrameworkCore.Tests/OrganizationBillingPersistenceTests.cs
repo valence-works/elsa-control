@@ -1310,7 +1310,7 @@ public sealed class OrganizationBillingPersistenceTests
         db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
         await db.SaveChangesAsync();
 
-        var store = new OrganizationBillingStore(db);
+        var store = CreateStore(db, BillingProviderSubscriptionPresence.Live);
         var original = await store.ConsumeAsync(
             Event("evt-original", OrganizationSubscriptionState.Active, Now.AddMinutes(1)),
             Now.AddMinutes(2));
@@ -1339,6 +1339,83 @@ public sealed class OrganizationBillingPersistenceTests
         Assert.Single(await db.OrganizationBillingCleanups.Where(x =>
             x.ProviderSubscriptionReference == "sub_second" &&
             x.CleanupKey.StartsWith(OrganizationBillingCleanupKeys.RefundPrefix)).ToListAsync());
+    }
+
+    [Fact]
+    public async Task Created_before_deleted_still_leaves_one_active_lifecycle()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        await db.SaveChangesAsync();
+
+        var store = CreateStore(db, BillingProviderSubscriptionPresence.Ended);
+        var original = await store.ConsumeAsync(
+            Event("evt-original", OrganizationSubscriptionState.Active, Now.AddMinutes(1)),
+            Now.AddMinutes(2));
+        var created = await store.ConsumeAsync(
+            Event(OrganizationId, "evt-resubscribe", OrganizationSubscriptionState.Active,
+                Now.AddMinutes(3), "cus_acme", "sub_paid_again") with
+            {
+                EventType = "customer.subscription.created"
+            },
+            Now.AddMinutes(4));
+        var lateDeleted = await store.ConsumeAsync(
+            Event("evt-old-deleted", OrganizationSubscriptionState.Suspended, Now.AddMinutes(5)) with
+            {
+                EventType = "customer.subscription.deleted"
+            },
+            Now.AddMinutes(6));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Applied, created.Outcome);
+        Assert.Equal(BillingEventConsumptionOutcome.IgnoredOutOfOrder, lateDeleted.Outcome);
+        Assert.NotEqual(original.Subscription!.Id, created.Subscription!.Id);
+        Assert.Equal(OrganizationSubscriptionState.Active, created.Subscription.State);
+        Assert.Equal("sub_paid_again", created.Subscription.ProviderSubscriptionReference);
+        Assert.Equal(created.Subscription.Id, (await store.GetSubscriptionAsync(OrganizationId))!.Id);
+        Assert.Equal(OrganizationSubscriptionState.Active, (await store.GetSubscriptionAsync(OrganizationId))!.State);
+        Assert.True(created.Entitlement!.ManagedHostingEnabled);
+        Assert.Equal(1, created.Entitlement.MaxInstances);
+        Assert.Equal(1, await db.OrganizationSubscriptions.CountAsync(x => x.State == OrganizationSubscriptionState.Active));
+        db.ChangeTracker.Clear();
+        var closed = await db.OrganizationSubscriptions.SingleAsync(x => x.Id == original.Subscription.Id);
+        Assert.Equal(OrganizationSubscriptionState.Deleted, closed.State);
+        Assert.Null(closed.ProviderSubscriptionReference);
+        Assert.Empty(await db.OrganizationBillingCleanups.Where(x =>
+            x.ProviderSubscriptionReference == "sub_paid_again" &&
+            x.CleanupKey.StartsWith(OrganizationBillingCleanupKeys.RefundPrefix)).ToListAsync());
+    }
+
+    [Fact]
+    public async Task Active_org_does_not_refund_a_second_subscription_when_the_old_status_lookup_fails()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        await db.SaveChangesAsync();
+
+        var store = CreateStore(db, BillingProviderSubscriptionPresence.Unknown);
+        var original = await store.ConsumeAsync(
+            Event("evt-original", OrganizationSubscriptionState.Active, Now.AddMinutes(1)),
+            Now.AddMinutes(2));
+
+        await Assert.ThrowsAsync<BillingProviderUnavailableException>(() => store.ConsumeAsync(
+            Event(OrganizationId, "evt-resubscribe", OrganizationSubscriptionState.Active,
+                Now.AddMinutes(3), "cus_acme", "sub_paid_again") with
+            {
+                EventType = "customer.subscription.created"
+            },
+            Now.AddMinutes(4)));
+
+        Assert.Equal(original.Subscription!.Id, (await store.GetSubscriptionAsync(OrganizationId))!.Id);
+        Assert.Equal(OrganizationSubscriptionState.Active, (await store.GetSubscriptionAsync(OrganizationId))!.State);
+        Assert.Equal("sub_acme", (await store.GetSubscriptionAsync(OrganizationId))!.ProviderSubscriptionReference);
+        Assert.Empty(await db.BillingProviderEvents.Where(x => x.ProviderEventId == "evt-resubscribe").ToListAsync());
+        Assert.Empty(await db.OrganizationBillingCleanups.ToListAsync());
     }
 
     [Fact]
@@ -1913,8 +1990,23 @@ public sealed class OrganizationBillingPersistenceTests
         string subscriptionReference) =>
         new(organizationId, "stripe", id, "subscription." + state.ToString().ToLowerInvariant(), state, occurredAt, "sha256:" + new string('a', 64), customerReference, subscriptionReference);
 
+    private static OrganizationBillingStore CreateStore(
+        CatalogDbContext db,
+        BillingProviderSubscriptionPresence presence) =>
+        new(db, new StubSubscriptionStatusLookup(presence));
+
     private static CatalogDbContext CreateDb(SqliteConnection connection) =>
         new(new DbContextOptionsBuilder<CatalogDbContext>().UseRetryingSqlite(connection).Options);
+
+    private sealed class StubSubscriptionStatusLookup(BillingProviderSubscriptionPresence presence)
+        : IBillingProviderSubscriptionStatusLookup
+    {
+        public Task<BillingProviderSubscriptionPresence> GetPresenceAsync(
+            string provider,
+            string subscriptionReference,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(presence);
+    }
 
     private static CatalogDbContext CreateMigratedDb(SqliteConnection connection) =>
         new(new DbContextOptionsBuilder<CatalogDbContext>()
