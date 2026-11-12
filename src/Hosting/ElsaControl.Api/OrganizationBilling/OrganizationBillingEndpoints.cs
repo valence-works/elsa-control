@@ -203,6 +203,10 @@ public static class OrganizationBillingEndpoints
         {
             return Results.Conflict(new { code = "webhook.conflict" });
         }
+        catch (BillingProviderUnavailableException)
+        {
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        }
 
         if (result.Outcome == BillingEventConsumptionOutcome.Ignored)
         {

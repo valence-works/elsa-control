@@ -46,7 +46,9 @@ public sealed record HostedSubscriptionManagementResponse(
     bool CanManageSubscription,
     string ManagementAction,
     HostedBillingCopyHooks Copy,
-    string? Source = null);
+    string? Source = null,
+    string? SuspensionReason = null,
+    string? RecoveryAction = null);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record HostedPortalSessionRequest(string? ReturnUrl = null);

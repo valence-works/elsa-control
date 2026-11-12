@@ -21,7 +21,13 @@ public interface IStripeCustomerPortalGateway
 
 public interface IStripeSubscriptionCleanupGateway
 {
-    Task<bool> CancelOrConfirmAbsentAsync(string subscriptionReference, RequestOptions requestOptions, CancellationToken cancellationToken);
+    Task<bool> CancelOrConfirmAbsentAsync(
+        string subscriptionReference,
+        RequestOptions requestOptions,
+        CancellationToken cancellationToken,
+        bool refundPaidInvoice = false);
+
+    Task<string?> GetStatusAsync(string subscriptionReference, CancellationToken cancellationToken);
 }
 
 public sealed class StripeCheckoutSessionGateway(Func<StripeClient> clientFactory) : IStripeCheckoutSessionGateway
@@ -38,10 +44,18 @@ public sealed class StripeCustomerPortalGateway(Func<StripeClient> clientFactory
 
 public sealed class StripeSubscriptionCleanupGateway(Func<StripeClient> clientFactory) : IStripeSubscriptionCleanupGateway
 {
-    public async Task<bool> CancelOrConfirmAbsentAsync(string subscriptionReference, RequestOptions requestOptions, CancellationToken cancellationToken)
+    public async Task<bool> CancelOrConfirmAbsentAsync(
+        string subscriptionReference,
+        RequestOptions requestOptions,
+        CancellationToken cancellationToken,
+        bool refundPaidInvoice = false)
     {
         try
         {
+            if (refundPaidInvoice &&
+                !await RefundLatestPaidInvoiceAsync(subscriptionReference, requestOptions, cancellationToken))
+                return false;
+
             var subscriptions = new SubscriptionService(clientFactory());
             var subscription = await subscriptions.GetAsync(subscriptionReference, null, null, cancellationToken);
             if (string.Equals(subscription.Status, "canceled", StringComparison.Ordinal))
@@ -55,13 +69,84 @@ public sealed class StripeSubscriptionCleanupGateway(Func<StripeClient> clientFa
             return true;
         }
     }
+
+    public async Task<string?> GetStatusAsync(string subscriptionReference, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var subscription = await new SubscriptionService(clientFactory()).GetAsync(
+                subscriptionReference,
+                null,
+                null,
+                cancellationToken);
+            return subscription.Status;
+        }
+        catch (StripeException exception) when (exception.HttpStatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+    }
+
+    private async Task<bool> RefundLatestPaidInvoiceAsync(
+        string subscriptionReference,
+        RequestOptions requestOptions,
+        CancellationToken cancellationToken)
+    {
+        var invoices = await new InvoiceService(clientFactory()).ListAsync(
+            new InvoiceListOptions
+            {
+                Subscription = subscriptionReference,
+                Status = "paid",
+                Limit = 1,
+                Expand = ["data.payments"]
+            },
+            cancellationToken: cancellationToken);
+        var invoice = invoices.Data.FirstOrDefault();
+        if (invoice is null || invoice.AmountPaid <= 0)
+            return true;
+
+        var payment = invoice.Payments?.Data?
+            .Select(x => x.Payment)
+            .FirstOrDefault(x =>
+                !string.IsNullOrWhiteSpace(x?.PaymentIntentId) ||
+                !string.IsNullOrWhiteSpace(x?.ChargeId));
+        var refund = new RefundCreateOptions
+        {
+            Reason = RefundReasons.RequestedByCustomer
+        };
+        if (!string.IsNullOrWhiteSpace(payment?.PaymentIntentId))
+            refund.PaymentIntent = payment.PaymentIntentId;
+        else if (!string.IsNullOrWhiteSpace(payment?.ChargeId))
+            refund.Charge = payment.ChargeId;
+        else
+            return false;
+
+        var refundOptions = new RequestOptions
+        {
+            IdempotencyKey = OrganizationBillingCleanupKeys.PaidInvoiceRefundIdempotencyKey(
+                requestOptions.IdempotencyKey ?? subscriptionReference)
+        };
+        try
+        {
+            await new RefundService(clientFactory()).CreateAsync(refund, refundOptions, cancellationToken);
+            return true;
+        }
+        catch (StripeException exception) when (IsAlreadyRefunded(exception))
+        {
+            return true;
+        }
+    }
+
+    private static bool IsAlreadyRefunded(StripeException exception) =>
+        string.Equals(exception.StripeError?.Code, "charge_already_refunded", StringComparison.Ordinal) ||
+        exception.Message.Contains("already been refunded", StringComparison.OrdinalIgnoreCase);
 }
 
 public sealed class StripeBillingProvider(
     IOptions<StripeBillingOptions> options,
     IStripeCheckoutSessionGateway checkoutGateway,
     IStripeCustomerPortalGateway portalGateway,
-    IStripeSubscriptionCleanupGateway cleanupGateway) : IBillingProvider, IOrganizationBillingCleanupProvider
+    IStripeSubscriptionCleanupGateway cleanupGateway) : IBillingProvider, IOrganizationBillingCleanupProvider, IBillingProviderSubscriptionStatusLookup
 {
     private const long SignatureToleranceSeconds = 300;
     private const string OrganizationMetadataKey = "elsa_control_organization_id";
@@ -85,7 +170,8 @@ public sealed class StripeBillingProvider(
             var confirmed = await cleanupGateway.CancelOrConfirmAbsentAsync(
                 request.ProviderSubscriptionReference,
                 new RequestOptions { IdempotencyKey = request.CleanupKey },
-                cancellationToken);
+                cancellationToken,
+                OrganizationBillingCleanupKeys.RequiresPaidInvoiceRefund(request.CleanupKey));
             return confirmed ? OrganizationBillingCleanupOutcome.ConfirmedAbsent : OrganizationBillingCleanupOutcome.RetryableFailure;
         }
         catch (StripeException)
@@ -102,6 +188,34 @@ public sealed class StripeBillingProvider(
         }
     }
 
+    public async Task<BillingProviderSubscriptionPresence> GetPresenceAsync(
+        string provider,
+        string subscriptionReference,
+        CancellationToken cancellationToken = default)
+    {
+        if (!string.Equals(provider, Provider, StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(subscriptionReference))
+            return BillingProviderSubscriptionPresence.Unknown;
+
+        try
+        {
+            var status = await cleanupGateway.GetStatusAsync(subscriptionReference, cancellationToken);
+            return BillingProviderSubscriptionPresenceMapping.FromStripeStatus(status);
+        }
+        catch (StripeException)
+        {
+            return BillingProviderSubscriptionPresence.Unknown;
+        }
+        catch (HttpRequestException)
+        {
+            return BillingProviderSubscriptionPresence.Unknown;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return BillingProviderSubscriptionPresence.Unknown;
+        }
+    }
+
     public async Task<BillingSessionLink> CreateCheckoutSessionAsync(
         BillingCheckoutSessionRequest request,
         CancellationToken cancellationToken = default)
@@ -109,11 +223,20 @@ public sealed class StripeBillingProvider(
         EnsureCheckoutConfigured();
         if (request.OrganizationId == Guid.Empty)
             throw new ArgumentException("Organization ID is required.", nameof(request));
-        if (request.TrialEndsAt == default || request.TrialEndsAt <= DateTimeOffset.UtcNow)
+        if (request.TrialEndsAt is { } trialEnd && (trialEnd == default || trialEnd <= DateTimeOffset.UtcNow))
             throw new ArgumentException("A future control-plane trial end is required.", nameof(request));
 
         var organizationId = request.OrganizationId.ToString("D");
         var metadata = new Dictionary<string, string> { [OrganizationMetadataKey] = organizationId };
+        var subscriptionData = new SessionSubscriptionDataOptions
+        {
+            Metadata = new Dictionary<string, string>(metadata)
+        };
+        if (request.TrialEndsAt is { } paidTrialEnd)
+            subscriptionData.TrialEnd = paidTrialEnd.UtcDateTime;
+        var idempotencyKey = request.TrialEndsAt is { } trialTicks
+            ? $"billing-checkout-{organizationId}-{trialTicks.UtcTicks}"
+            : $"billing-checkout-paid-{organizationId}-{ResolveCheckoutAttemptKey(request)}";
         global::Stripe.Checkout.Session session;
         try
         {
@@ -127,13 +250,9 @@ public sealed class StripeBillingProvider(
                     Metadata = metadata,
                     SuccessUrl = request.SuccessUrl,
                     CancelUrl = request.CancelUrl,
-                    SubscriptionData = new SessionSubscriptionDataOptions
-                    {
-                        TrialEnd = request.TrialEndsAt.UtcDateTime,
-                        Metadata = new Dictionary<string, string>(metadata)
-                    }
+                    SubscriptionData = subscriptionData
                 },
-                new RequestOptions { IdempotencyKey = $"billing-checkout-{organizationId}-{request.TrialEndsAt.UtcTicks}" },
+                new RequestOptions { IdempotencyKey = idempotencyKey },
                 cancellationToken);
         }
         catch (StripeException exception)
@@ -343,6 +462,11 @@ public sealed class StripeBillingProvider(
         if (!_options.IsProviderReady)
             throw new BillingProviderUnavailableException("The Stripe billing provider is not configured.");
     }
+
+    private static string ResolveCheckoutAttemptKey(BillingCheckoutSessionRequest request) =>
+        string.IsNullOrWhiteSpace(request.CheckoutAttemptKey)
+            ? Guid.NewGuid().ToString("N")
+            : request.CheckoutAttemptKey.Trim();
 
     private static BillingSessionLink RequireSessionUrl(string? url)
     {

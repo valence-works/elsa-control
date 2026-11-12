@@ -438,6 +438,15 @@ public sealed partial class OrganizationBillingStore
                         AddLifecycleAudit(subscription, OrganizationAuditAction.BillingCleanupCompleted, "Provider-neutral billing cleanup was confirmed and the subscription was tombstoned.", completedAt);
                         deleted = true;
                     }
+                    else if (subscription is not null &&
+                             OrganizationBillingCleanupKeys.RequiresPaidInvoiceRefund(cleanup.CleanupKey))
+                    {
+                        AddLifecycleAudit(
+                            subscription,
+                            OrganizationAuditAction.BillingCleanupCompleted,
+                            "Ineligible paid subscription was refunded and cancelled at the provider.",
+                            completedAt);
+                    }
 
                     break;
                 }

@@ -37,6 +37,11 @@ public sealed class OrganizationSubscription
     public DateTimeOffset? DeletedAt { get; set; }
     /// <summary>Set when the customer explicitly requests deletion before retention expires.</summary>
     public DateTimeOffset? EarlyDeletionRequestedAt { get; set; }
+    /// <summary>
+    /// Why the subscription entered <see cref="OrganizationSubscriptionState.Suspended"/>.
+    /// Null when the row is not suspended (or retained from a suspension).
+    /// </summary>
+    public OrganizationSubscriptionSuspensionReason? SuspensionReason { get; set; }
     /// <summary>Advances only for a control-plane lifecycle transition.</summary>
     public int LifecycleVersion { get; set; }
     public DateTimeOffset LastProviderEventOccurredAt { get; set; }
@@ -65,6 +70,24 @@ public enum OrganizationSubscriptionState
     Suspended = 4,
     Retained = 5,
     Deleted = 6
+}
+
+/// <summary>
+/// Why a live commercial row is suspended. This is independent of Stripe's
+/// status vocabulary so Hub copy can stay truthful.
+/// </summary>
+public enum OrganizationSubscriptionSuspensionReason
+{
+    Canceled = 0,
+    NonPayment = 1,
+    DeletionRequested = 2
+}
+
+public static class OrganizationBillingRecoveryActions
+{
+    public const string None = "None";
+    public const string Subscribe = "Subscribe";
+    public const string UpdatePaymentMethod = "UpdatePaymentMethod";
 }
 
 /// <summary>
@@ -109,6 +132,19 @@ public static class BillingDiagnosticCodes
     public const string SubscriptionSourceConflict = "billing.subscription-source-conflict";
     public const string HubOrganizationUnlinked = "billing.hub-organization-unlinked";
     public const string ManagedByHub = "billing.managed-by-hub";
+    public const string IneligiblePaidSubscription = "billing.ineligible-paid-subscription";
+}
+
+public static class OrganizationBillingCleanupKeys
+{
+    public const string RefundPrefix = "billing-refund-";
+
+    public static bool RequiresPaidInvoiceRefund(string? cleanupKey) =>
+        !string.IsNullOrWhiteSpace(cleanupKey) &&
+        cleanupKey.StartsWith(RefundPrefix, StringComparison.Ordinal);
+
+    public static string PaidInvoiceRefundIdempotencyKey(string cleanupKey) =>
+        $"{cleanupKey}-refund";
 }
 
 public enum BillingProviderEventProcessingStatus
@@ -428,6 +464,8 @@ public static class OrganizationSubscriptionLifecycle
 
     public static bool CanTransition(OrganizationSubscription subscription, OrganizationSubscriptionState next) =>
         CanTransition(subscription.State, next) ||
+        AllowsNonPaymentResume(subscription, next) ||
+        AllowsSupersededClose(subscription, next) ||
         subscription.State == OrganizationSubscriptionState.Suspended &&
         next == OrganizationSubscriptionState.Deleted &&
         subscription.EarlyDeletionRequestedAt is not null ||
@@ -435,6 +473,60 @@ public static class OrganizationSubscriptionLifecycle
         next == OrganizationSubscriptionState.Deleted &&
         subscription.EarlyDeletionRequestedAt is not null &&
         string.Equals(subscription.Provider, BillingProviderNames.AzureBound, StringComparison.Ordinal);
+
+    public static bool AllowsNonPaymentResume(OrganizationSubscription subscription, OrganizationSubscriptionState next) =>
+        subscription.State == OrganizationSubscriptionState.Suspended &&
+        next == OrganizationSubscriptionState.Active &&
+        ResolveSuspensionReason(subscription) == OrganizationSubscriptionSuspensionReason.NonPayment;
+
+    public static bool AllowsNonPaymentResume(OrganizationSubscription subscription, BillingProviderEvent providerEvent) =>
+        providerEvent.State is { } next &&
+        AllowsNonPaymentResume(subscription, next) &&
+        !string.IsNullOrWhiteSpace(subscription.ProviderSubscriptionReference) &&
+        string.Equals(
+            subscription.ProviderSubscriptionReference,
+            providerEvent.ProviderSubscriptionReference,
+            StringComparison.Ordinal) &&
+        (subscription.ProviderCustomerReference is null ||
+         string.Equals(
+             subscription.ProviderCustomerReference,
+             providerEvent.ProviderCustomerReference,
+             StringComparison.Ordinal));
+
+    public static bool AllowsSupersededClose(OrganizationSubscription subscription, OrganizationSubscriptionState next) =>
+        next == OrganizationSubscriptionState.Deleted &&
+        subscription.State is OrganizationSubscriptionState.Active or OrganizationSubscriptionState.Suspended;
+
+    public static OrganizationSubscriptionSuspensionReason? ResolveSuspensionReason(OrganizationSubscription subscription)
+    {
+        if (subscription.SuspensionReason is { } stored)
+            return stored;
+        if (subscription.State is not OrganizationSubscriptionState.Suspended and not OrganizationSubscriptionState.Retained)
+            return null;
+        if (subscription.EarlyDeletionRequestedAt is not null)
+            return OrganizationSubscriptionSuspensionReason.DeletionRequested;
+        if (subscription.ConstrainedAt is not null)
+            return OrganizationSubscriptionSuspensionReason.NonPayment;
+        return OrganizationSubscriptionSuspensionReason.Canceled;
+    }
+
+    public static string RecoveryAction(OrganizationSubscription? subscription)
+    {
+        if (subscription is null ||
+            subscription.State is not OrganizationSubscriptionState.Suspended)
+            return OrganizationBillingRecoveryActions.None;
+
+        return ResolveSuspensionReason(subscription) switch
+        {
+            OrganizationSubscriptionSuspensionReason.Canceled => OrganizationBillingRecoveryActions.Subscribe,
+            OrganizationSubscriptionSuspensionReason.NonPayment => OrganizationBillingRecoveryActions.UpdatePaymentMethod,
+            _ => OrganizationBillingRecoveryActions.None
+        };
+    }
+
+    public static bool IsCanceledSuspension(OrganizationSubscription subscription) =>
+        subscription.State == OrganizationSubscriptionState.Suspended &&
+        ResolveSuspensionReason(subscription) == OrganizationSubscriptionSuspensionReason.Canceled;
 
     public static OrganizationSubscription CreateTrial(Guid organizationId, string provider, DateTimeOffset startedAt)
     {
@@ -457,13 +549,20 @@ public static class OrganizationSubscriptionLifecycle
         if (!CanTransition(subscription, next))
             throw new InvalidOperationException($"Subscription cannot transition from {subscription.State} to {next}.");
 
-        var stateChanged = subscription.State != next;
+        var previous = subscription.State;
+        var stateChanged = previous != next;
         var timestamp = occurredAt.ToUniversalTime();
         subscription.State = next;
         switch (next)
         {
             case OrganizationSubscriptionState.Active:
                 subscription.ActivatedAt ??= timestamp;
+                subscription.SuspensionReason = null;
+                if (previous == OrganizationSubscriptionState.Suspended)
+                {
+                    subscription.SuspendedAt = null;
+                    subscription.RetentionEndsAt = null;
+                }
                 break;
             case OrganizationSubscriptionState.PastDue:
                 subscription.PastDueAt ??= timestamp;
@@ -475,6 +574,7 @@ public static class OrganizationSubscriptionLifecycle
             case OrganizationSubscriptionState.Suspended:
                 subscription.SuspendedAt ??= timestamp;
                 subscription.RetentionEndsAt ??= subscription.SuspendedAt.Value.Add(FinalRetentionPeriod);
+                subscription.SuspensionReason = ResolveReasonForSuspension(subscription, previous);
                 break;
             case OrganizationSubscriptionState.Retained:
                 subscription.RetainedAt ??= timestamp;
@@ -486,5 +586,33 @@ public static class OrganizationSubscriptionLifecycle
 
         if (advanceLifecycleVersion && stateChanged)
             subscription.LifecycleVersion++;
+    }
+
+    /// <summary>
+    /// Tombstones a superseded commercial row so a replacement paid lifecycle
+    /// can own the organization. Provider references are cleared so unique
+    /// indexes and later webhooks cannot collide with the new subscription.
+    /// </summary>
+    public static void CloseSuperseded(OrganizationSubscription subscription, DateTimeOffset occurredAt)
+    {
+        if (!AllowsSupersededClose(subscription, OrganizationSubscriptionState.Deleted))
+            throw new InvalidOperationException($"Subscription cannot be superseded from {subscription.State}.");
+
+        ApplyState(subscription, OrganizationSubscriptionState.Deleted, occurredAt, advanceLifecycleVersion: true);
+        subscription.ProviderCustomerReference = null;
+        subscription.ProviderSubscriptionReference = null;
+        subscription.LastProviderEventId = null;
+        subscription.UpdatedAt = occurredAt.ToUniversalTime();
+    }
+
+    private static OrganizationSubscriptionSuspensionReason ResolveReasonForSuspension(
+        OrganizationSubscription subscription,
+        OrganizationSubscriptionState previous)
+    {
+        if (subscription.EarlyDeletionRequestedAt is not null)
+            return OrganizationSubscriptionSuspensionReason.DeletionRequested;
+        if (previous == OrganizationSubscriptionState.Constrained)
+            return OrganizationSubscriptionSuspensionReason.NonPayment;
+        return OrganizationSubscriptionSuspensionReason.Canceled;
     }
 }

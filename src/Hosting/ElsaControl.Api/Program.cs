@@ -445,6 +445,7 @@ builder.Services.AddScoped<IStripeSubscriptionCleanupGateway, StripeSubscription
 builder.Services.AddScoped<StripeBillingProvider>();
 builder.Services.AddScoped<IBillingProvider>(services => services.GetRequiredService<StripeBillingProvider>());
 builder.Services.AddScoped<IOrganizationBillingCleanupProvider>(services => services.GetRequiredService<StripeBillingProvider>());
+builder.Services.AddScoped<IBillingProviderSubscriptionStatusLookup>(services => services.GetRequiredService<StripeBillingProvider>());
 builder.Services.AddScoped<EfCoreElsaInstanceLifecycleStore>();
 builder.Services.AddScoped<IElsaInstanceCommercialGate, EfCoreElsaInstanceCommercialGate>();
 builder.Services.AddScoped<IElsaInstanceLifecycleStore>(services => services.GetRequiredService<EfCoreElsaInstanceLifecycleStore>());

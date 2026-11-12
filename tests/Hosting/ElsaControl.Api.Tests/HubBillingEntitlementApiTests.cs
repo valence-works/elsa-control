@@ -35,6 +35,59 @@ public sealed class HubBillingEntitlementApiTests
         Assert.Equal(nameof(OrganizationSubscriptionState.Active), status.SubscriptionState);
         Assert.Equal(BillingWebhookSources.Hub, status.Source);
         Assert.True(status.BillingLinked);
+        Assert.Null(status.SuspensionReason);
+        Assert.Equal(OrganizationBillingRecoveryActions.None, status.RecoveryAction);
+    }
+
+    [Theory]
+    [InlineData(OrganizationSubscriptionSuspensionReason.Canceled, OrganizationBillingRecoveryActions.Subscribe)]
+    [InlineData(OrganizationSubscriptionSuspensionReason.NonPayment, OrganizationBillingRecoveryActions.UpdatePaymentMethod)]
+    [InlineData(OrganizationSubscriptionSuspensionReason.DeletionRequested, OrganizationBillingRecoveryActions.None)]
+    public async Task Hub_session_reads_suspension_reason_and_recovery_action(
+        OrganizationSubscriptionSuspensionReason reason,
+        string recoveryAction)
+    {
+        await using var app = CreateHubApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateHubClient(app, HubSubject);
+        var owned = await BootstrapAsync(client);
+        await SeedSuspendedHubSubscriptionAsync(app, owned.OrganizationId, reason);
+
+        using var response = await client.GetAsync(
+            $"/api/organizations/{owned.OrganizationId:D}/billing/hosted-subscription");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var status = await response.Content.ReadControlJsonAsync<HostedSubscriptionManagementResponse>();
+        Assert.Equal(nameof(OrganizationSubscriptionState.Suspended), status!.SubscriptionState);
+        Assert.Equal(reason.ToString(), status.SuspensionReason);
+        Assert.Equal(recoveryAction, status.RecoveryAction);
+        Assert.Equal(BillingWebhookSources.Hub, status.Source);
+    }
+
+    [Fact]
+    public async Task Hub_entitlement_read_does_not_report_suspended_for_active_or_new_organizations()
+    {
+        await using var app = CreateHubApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateHubClient(app, HubSubject);
+        var owned = await BootstrapAsync(client);
+
+        using var missing = await client.GetAsync(
+            $"/api/organizations/{owned.OrganizationId:D}/billing/hosted-subscription");
+        var missingStatus = await missing.Content.ReadControlJsonAsync<HostedSubscriptionManagementResponse>();
+        Assert.Equal(HttpStatusCode.OK, missing.StatusCode);
+        Assert.NotEqual(nameof(OrganizationSubscriptionState.Suspended), missingStatus!.SubscriptionState);
+        Assert.Equal(OrganizationBillingRecoveryActions.None, missingStatus.RecoveryAction);
+
+        await SeedHubSubscriptionAsync(app, owned.OrganizationId);
+        using var active = await client.GetAsync(
+            $"/api/organizations/{owned.OrganizationId:D}/billing/hosted-subscription");
+        var activeStatus = await active.Content.ReadControlJsonAsync<HostedSubscriptionManagementResponse>();
+        Assert.Equal(HttpStatusCode.OK, active.StatusCode);
+        Assert.Equal(nameof(OrganizationSubscriptionState.Active), activeStatus!.SubscriptionState);
+        Assert.NotEqual(nameof(OrganizationSubscriptionState.Suspended), activeStatus.SubscriptionState);
+        Assert.Null(activeStatus.SuspensionReason);
+        Assert.Equal(OrganizationBillingRecoveryActions.None, activeStatus.RecoveryAction);
     }
 
     [Fact]
@@ -123,6 +176,39 @@ public sealed class HubBillingEntitlementApiTests
         subscription.ProviderCustomerReference = "cus_hub_owned";
         subscription.ProviderSubscriptionReference = "sub_hub_owned";
         subscription.WebhookSource = BillingWebhookSources.Hub;
+        db.OrganizationSubscriptions.Add(subscription);
+        await db.SaveChangesAsync();
+    }
+
+    private static async Task SeedSuspendedHubSubscriptionAsync(
+        ControlApiTestApplication app,
+        Guid organizationId,
+        OrganizationSubscriptionSuspensionReason reason)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var subscription = OrganizationSubscriptionLifecycle.CreateTrial(organizationId, BillingProviderNames.Stripe, now.AddDays(-20));
+        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Active, now.AddDays(-19));
+        subscription.ProviderCustomerReference = "cus_hub_suspended";
+        subscription.ProviderSubscriptionReference = "sub_hub_suspended";
+        subscription.WebhookSource = BillingWebhookSources.Hub;
+        switch (reason)
+        {
+            case OrganizationSubscriptionSuspensionReason.NonPayment:
+                OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.PastDue, now.AddDays(-10));
+                OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Constrained, now.AddDays(-3));
+                OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Suspended, now.AddDays(-2), advanceLifecycleVersion: true);
+                break;
+            case OrganizationSubscriptionSuspensionReason.DeletionRequested:
+                subscription.EarlyDeletionRequestedAt = now.AddDays(-1);
+                OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Suspended, now.AddDays(-1), advanceLifecycleVersion: true);
+                break;
+            default:
+                OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Suspended, now.AddDays(-1));
+                break;
+        }
+
         db.OrganizationSubscriptions.Add(subscription);
         await db.SaveChangesAsync();
     }

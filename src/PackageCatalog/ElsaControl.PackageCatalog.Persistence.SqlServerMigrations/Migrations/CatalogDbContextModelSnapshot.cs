@@ -728,6 +728,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<long?>("SuspendedAt")
                         .HasColumnType("bigint");
 
+                    b.Property<string>("SuspensionReason")
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
                     b.Property<long>("TrialEndsAt")
                         .HasColumnType("bigint");
 
