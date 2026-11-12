@@ -36,6 +36,26 @@ public sealed class StripeBillingProviderTests
     }
 
     [Fact]
+    public async Task Checkout_without_a_trial_end_starts_a_paid_subscription()
+    {
+        var checkout = new RecordingCheckoutGateway();
+        var provider = CreateProvider(checkout: checkout);
+
+        var result = await provider.CreateCheckoutSessionAsync(new BillingCheckoutSessionRequest(
+            OrganizationId,
+            "price_opaque_default",
+            "https://console.test/billing/success",
+            "https://console.test/billing/cancel",
+            TrialEndsAt: null,
+            ProviderCustomerReference: "cus_123"));
+
+        Assert.Equal("https://checkout.stripe.test/session", result.Url);
+        Assert.Null(checkout.Options!.SubscriptionData!.TrialEnd);
+        Assert.Equal("cus_123", checkout.Options.Customer);
+        Assert.Equal($"billing-checkout-paid-{OrganizationId:D}", checkout.RequestOptions!.IdempotencyKey);
+    }
+
+    [Fact]
     public async Task Portal_session_does_not_reuse_an_idempotency_key_for_a_short_lived_url()
     {
         var portal = new RecordingPortalGateway();

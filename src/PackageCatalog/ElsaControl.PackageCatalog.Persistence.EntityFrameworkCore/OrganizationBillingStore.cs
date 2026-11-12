@@ -220,20 +220,14 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                     BillingWebhookSources.Normalize(providerEvent.WebhookSource),
                     StringComparison.Ordinal))
             {
-                if (OrganizationSubscriptionLifecycle.IsLive(subscription.State))
+                if (OrganizationSubscriptionLifecycle.IsLive(subscription.State) &&
+                    !OrganizationSubscriptionLifecycle.IsCanceledSuspension(subscription))
                     sourceConflict = true;
-                else
+                else if (!OrganizationSubscriptionLifecycle.IsLive(subscription.State))
                     // A terminal Control (or Hub) row is not a live commercial
                     // owner. Start a new lifecycle instead of treating the other
                     // source's customer/subscription references as a mutation.
                     subscription = null;
-            }
-            var existingSubscription = subscription;
-            if (subscription is not null && !sourceConflict)
-            {
-                EnsureSameProvider(subscription, providerEvent.Provider);
-                EnsureReferenceMatches(subscription.ProviderCustomerReference, providerEvent.ProviderCustomerReference, "customer");
-                EnsureReferenceMatches(subscription.ProviderSubscriptionReference, providerEvent.ProviderSubscriptionReference, "subscription");
             }
             var inbox = new BillingProviderEventInboxEntry
             {
@@ -264,6 +258,47 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                 await dbContext.SaveChangesAsync(cancellationToken);
                 var conflictEntitlement = await CurrentEntitlementAsync(providerEvent.OrganizationId, cancellationToken);
                 return new(BillingEventConsumptionOutcome.Rejected, subscription, conflictEntitlement, inbox, inbox.RejectionCode);
+            }
+
+            if (subscription is not null &&
+                await IsLateEventForSupersededSubscriptionAsync(subscription, providerEvent, cancellationToken))
+            {
+                inbox.ProcessingStatus = BillingProviderEventProcessingStatus.IgnoredOutOfOrder;
+                inbox.ProcessedAt = now;
+                AddBillingAudit(providerEvent.OrganizationId, inbox.Id, "A normalized billing provider event was ignored because it belongs to a superseded subscription.", now);
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return new(BillingEventConsumptionOutcome.IgnoredOutOfOrder, subscription, await CurrentEntitlementAsync(providerEvent.OrganizationId, cancellationToken), inbox);
+            }
+
+            if (subscription is not null && CanStartReplacementPaidLifecycle(subscription, providerEvent))
+            {
+                await EnsureCleanupAsync(subscription, now, early: true, cancellationToken);
+                OrganizationSubscriptionLifecycle.CloseSuperseded(subscription, occurrence);
+                subscription = null;
+            }
+
+            if (subscription is not null && IsIneligibleNewPaidSubscription(subscription, providerEvent))
+            {
+                inbox.ProcessingStatus = BillingProviderEventProcessingStatus.Rejected;
+                inbox.RejectionCode = BillingDiagnosticCodes.IneligiblePaidSubscription;
+                inbox.ProcessedAt = now;
+                await QueueIneligiblePaidSubscriptionCancelAsync(subscription, providerEvent, now, cancellationToken);
+                AddBillingAudit(
+                    providerEvent.OrganizationId,
+                    inbox.Id,
+                    "A new paid subscription was refused because the organization cannot start another lifecycle; the provider subscription was queued for cancel.",
+                    now);
+                await dbContext.SaveChangesAsync(cancellationToken);
+                var ineligibleEntitlement = await CurrentEntitlementAsync(providerEvent.OrganizationId, cancellationToken);
+                return new(BillingEventConsumptionOutcome.Rejected, subscription, ineligibleEntitlement, inbox, inbox.RejectionCode);
+            }
+
+            var existingSubscription = subscription;
+            if (subscription is not null)
+            {
+                EnsureSameProvider(subscription, providerEvent.Provider);
+                EnsureReferenceMatches(subscription.ProviderCustomerReference, providerEvent.ProviderCustomerReference, "customer");
+                EnsureReferenceMatches(subscription.ProviderSubscriptionReference, providerEvent.ProviderSubscriptionReference, "subscription");
             }
 
             // A Stripe trialing event must never create a late trial or move its
@@ -301,7 +336,8 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
                 return new(BillingEventConsumptionOutcome.IgnoredOutOfOrder, subscription, null, inbox);
             }
 
-            if (!OrganizationSubscriptionLifecycle.CanTransition(subscription.State, providerEvent.State!.Value))
+            if (!OrganizationSubscriptionLifecycle.CanTransition(subscription.State, providerEvent.State!.Value) &&
+                !OrganizationSubscriptionLifecycle.AllowsNonPaymentResume(subscription, providerEvent))
             {
                 inbox.ProcessingStatus = BillingProviderEventProcessingStatus.Rejected;
                 inbox.RejectionCode = "subscription.transition.invalid";
@@ -333,10 +369,14 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
             inbox.ProcessingStatus = BillingProviderEventProcessingStatus.Applied;
             inbox.ProcessedAt = now;
 
-            var hasReplacement = await dbContext.OrganizationSubscriptions.HasNonTerminalReplacementAsync(
-                subscription.OrganizationId,
-                subscription.Id,
-                cancellationToken);
+            // A replacement row is inserted in this transaction; the superseded
+            // owner is still non-terminal in the database until SaveChanges.
+            // Always project the new commercial owner so engine limits restore.
+            var hasReplacement = !isNewSubscription &&
+                await dbContext.OrganizationSubscriptions.HasNonTerminalReplacementAsync(
+                    subscription.OrganizationId,
+                    subscription.Id,
+                    cancellationToken);
             var entitlement = hasReplacement
                 ? await CurrentEntitlementAsync(subscription.OrganizationId, cancellationToken)
                 : await ProjectEntitlementAsync(subscription, now, cancellationToken);
@@ -560,6 +600,104 @@ public sealed partial class OrganizationBillingStore(CatalogDbContext dbContext)
         var entitlement = await CurrentEntitlementAsync(subscription.OrganizationId, cancellationToken);
         return entitlement is { ManagedHostingEnabled: false, SubscriptionId: not null } &&
                entitlement.SubscriptionId == subscription.Id;
+    }
+
+    private static bool CanStartReplacementPaidLifecycle(
+        OrganizationSubscription subscription,
+        BillingProviderEvent providerEvent)
+    {
+        if (providerEvent.State != OrganizationSubscriptionState.Active ||
+            !string.Equals(subscription.Provider, BillingProviderNames.Stripe, StringComparison.Ordinal) ||
+            !string.Equals(providerEvent.Provider, BillingProviderNames.Stripe, StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(providerEvent.ProviderCustomerReference) ||
+            string.IsNullOrWhiteSpace(providerEvent.ProviderSubscriptionReference) ||
+            string.IsNullOrWhiteSpace(subscription.ProviderSubscriptionReference) ||
+            string.Equals(subscription.ProviderSubscriptionReference, providerEvent.ProviderSubscriptionReference, StringComparison.Ordinal))
+            return false;
+        if (subscription.ProviderCustomerReference is not null &&
+            !string.Equals(subscription.ProviderCustomerReference, providerEvent.ProviderCustomerReference, StringComparison.Ordinal))
+            return false;
+
+        return OrganizationSubscriptionLifecycle.IsCanceledSuspension(subscription) ||
+               subscription.State == OrganizationSubscriptionState.Active;
+    }
+
+    private static bool IsIneligibleNewPaidSubscription(
+        OrganizationSubscription subscription,
+        BillingProviderEvent providerEvent)
+    {
+        if (providerEvent.State != OrganizationSubscriptionState.Active ||
+            string.IsNullOrWhiteSpace(providerEvent.ProviderSubscriptionReference))
+            return false;
+        if (string.Equals(subscription.ProviderSubscriptionReference, providerEvent.ProviderSubscriptionReference, StringComparison.Ordinal))
+            return false;
+
+        var reason = OrganizationSubscriptionLifecycle.ResolveSuspensionReason(subscription);
+        return subscription.State == OrganizationSubscriptionState.Suspended &&
+               reason is OrganizationSubscriptionSuspensionReason.NonPayment
+                   or OrganizationSubscriptionSuspensionReason.DeletionRequested ||
+               subscription.State == OrganizationSubscriptionState.Retained;
+    }
+
+    private async Task<bool> IsLateEventForSupersededSubscriptionAsync(
+        OrganizationSubscription subscription,
+        BillingProviderEvent providerEvent,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(providerEvent.ProviderSubscriptionReference) ||
+            string.IsNullOrWhiteSpace(subscription.ProviderSubscriptionReference) ||
+            string.Equals(subscription.ProviderSubscriptionReference, providerEvent.ProviderSubscriptionReference, StringComparison.Ordinal))
+            return false;
+
+        return await dbContext.BillingProviderEvents.AsNoTracking().AnyAsync(x =>
+            x.OrganizationId == subscription.OrganizationId &&
+            x.Provider == providerEvent.Provider &&
+            x.ProviderSubscriptionReference == providerEvent.ProviderSubscriptionReference &&
+            x.ProcessingStatus == BillingProviderEventProcessingStatus.Applied,
+            cancellationToken);
+    }
+
+    private async Task QueueIneligiblePaidSubscriptionCancelAsync(
+        OrganizationSubscription current,
+        BillingProviderEvent providerEvent,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(providerEvent.ProviderSubscriptionReference) ||
+            string.Equals(current.ProviderSubscriptionReference, providerEvent.ProviderSubscriptionReference, StringComparison.Ordinal))
+            return;
+
+        var alreadyQueued = await dbContext.OrganizationBillingCleanups.AnyAsync(x =>
+            x.OrganizationId == current.OrganizationId &&
+            x.Provider == providerEvent.Provider &&
+            x.ProviderSubscriptionReference == providerEvent.ProviderSubscriptionReference &&
+            x.State != OrganizationBillingCleanupState.Failed,
+            cancellationToken);
+        if (alreadyQueued ||
+            dbContext.OrganizationBillingCleanups.Local.Any(x =>
+                x.OrganizationId == current.OrganizationId &&
+                x.Provider == providerEvent.Provider &&
+                x.ProviderSubscriptionReference == providerEvent.ProviderSubscriptionReference))
+            return;
+
+        var placeholder = OrganizationSubscriptionLifecycle.CreateTrial(
+            providerEvent.OrganizationId,
+            providerEvent.Provider,
+            now);
+        OrganizationSubscriptionLifecycle.ApplyState(placeholder, OrganizationSubscriptionState.Suspended, now, advanceLifecycleVersion: true);
+        OrganizationSubscriptionLifecycle.CloseSuperseded(placeholder, now);
+        placeholder.WebhookSource = BillingWebhookSources.Normalize(providerEvent.WebhookSource);
+        dbContext.OrganizationSubscriptions.Add(placeholder);
+        dbContext.OrganizationBillingCleanups.Add(new OrganizationBillingCleanup
+        {
+            OrganizationId = placeholder.OrganizationId,
+            SubscriptionId = placeholder.Id,
+            CleanupKey = $"billing-refund-{placeholder.Id:N}",
+            Provider = placeholder.Provider,
+            ProviderSubscriptionReference = providerEvent.ProviderSubscriptionReference,
+            RequestedAt = now,
+            NotBeforeAt = now
+        });
     }
 
     private async Task<bool> CanStartPaidSubscriptionAfterConfirmedDeletionAsync(

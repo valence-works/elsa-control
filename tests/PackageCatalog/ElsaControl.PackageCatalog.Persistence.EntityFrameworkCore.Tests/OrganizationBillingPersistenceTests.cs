@@ -1033,6 +1033,294 @@ public sealed class OrganizationBillingPersistenceTests
     }
 
     [Fact]
+    public async Task Cancel_then_resubscribe_within_retention_starts_a_new_active_lifecycle()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        await db.SaveChangesAsync();
+
+        var store = new OrganizationBillingStore(db);
+        var original = await store.ConsumeAsync(
+            Event("evt-original", OrganizationSubscriptionState.Active, Now.AddMinutes(1)),
+            Now.AddMinutes(2));
+        var cancelled = await store.ConsumeAsync(
+            Event("evt-cancelled", OrganizationSubscriptionState.Suspended, Now.AddMinutes(3)) with
+            {
+                EventType = "customer.subscription.deleted"
+            },
+            Now.AddMinutes(4));
+        Assert.Equal(BillingEventConsumptionOutcome.Applied, cancelled.Outcome);
+        Assert.Equal(OrganizationSubscriptionSuspensionReason.Canceled, cancelled.Subscription!.SuspensionReason);
+        Assert.Equal(ElsaInstanceCommercialOperation.LifecycleConstrained, (await new EfCoreElsaInstanceCommercialGate(db).EvaluateAsync(
+            OrganizationId, ElsaInstanceOperationAction.Create, activeInstanceCount: 0)).Code);
+
+        var resubscribed = await store.ConsumeAsync(
+            Event(OrganizationId, "evt-resubscribe", OrganizationSubscriptionState.Active,
+                Now.AddMinutes(5), "cus_acme", "sub_paid_again") with
+            {
+                EventType = "customer.subscription.created"
+            },
+            Now.AddMinutes(6));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Applied, resubscribed.Outcome);
+        Assert.NotEqual(BillingEventConsumptionOutcome.Rejected, resubscribed.Outcome);
+        Assert.Equal(BillingProviderEventProcessingStatus.Applied, resubscribed.Event!.ProcessingStatus);
+        Assert.NotEqual(original.Subscription!.Id, resubscribed.Subscription!.Id);
+        Assert.Equal(OrganizationSubscriptionState.Active, resubscribed.Subscription.State);
+        Assert.Equal("sub_paid_again", resubscribed.Subscription.ProviderSubscriptionReference);
+        Assert.Equal("cus_acme", resubscribed.Subscription.ProviderCustomerReference);
+        Assert.Null(resubscribed.Subscription.SuspensionReason);
+        Assert.True(resubscribed.Entitlement!.ManagedHostingEnabled);
+        Assert.Equal(1, resubscribed.Entitlement.MaxInstances);
+        Assert.Null(resubscribed.Entitlement.ManagedHostingExpiresAt);
+        Assert.Equal(OrganizationSubscriptionState.Active, resubscribed.Entitlement.SubscriptionState);
+        Assert.Equal(resubscribed.Subscription.Id, resubscribed.Entitlement.SubscriptionId);
+        Assert.Equal(OrganizationSubscriptionState.Active, (await store.GetSubscriptionAsync(OrganizationId))!.State);
+
+        db.ChangeTracker.Clear();
+        var history = await db.OrganizationSubscriptions.OrderBy(x => x.CreatedAt).ToListAsync();
+        Assert.Equal(2, history.Count);
+        Assert.Equal(OrganizationSubscriptionState.Deleted, history[0].State);
+        Assert.Null(history[0].ProviderCustomerReference);
+        Assert.Null(history[0].ProviderSubscriptionReference);
+        Assert.Equal("sub_paid_again", history[1].ProviderSubscriptionReference);
+
+        var gate = await new EfCoreElsaInstanceCommercialGate(db).EvaluateAsync(
+            OrganizationId, ElsaInstanceOperationAction.Create, activeInstanceCount: 0);
+        Assert.True(gate.Allowed);
+        Assert.Equal("commercial.allowed", gate.Code);
+
+        await store.AdvanceDueAsync(Now.AddDays(40));
+        db.ChangeTracker.Clear();
+        Assert.Equal(OrganizationSubscriptionState.Active, (await store.GetSubscriptionAsync(OrganizationId))!.State);
+        Assert.True((await db.OrganizationEntitlementSnapshots.SingleAsync()).ManagedHostingEnabled);
+        Assert.Equal(OrganizationSubscriptionState.Deleted,
+            (await db.OrganizationSubscriptions.SingleAsync(x => x.Id == original.Subscription.Id)).State);
+    }
+
+    [Fact]
+    public async Task Cancel_then_resubscribe_from_a_different_webhook_source_is_not_a_source_conflict()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        await EnsureHubAccountLinkAsync(db, OrganizationId);
+        var store = new OrganizationBillingStore(db);
+        await store.ConsumeAsync(
+            Event(OrganizationId, "evt-hub-active", OrganizationSubscriptionState.Active, Now.AddMinutes(1), "cus_hub", "sub_hub") with
+            {
+                WebhookSource = BillingWebhookSources.Hub
+            },
+            Now.AddMinutes(2));
+        await store.ConsumeAsync(
+            Event(OrganizationId, "evt-hub-cancelled", OrganizationSubscriptionState.Suspended, Now.AddMinutes(3), "cus_hub", "sub_hub") with
+            {
+                EventType = "customer.subscription.deleted",
+                WebhookSource = BillingWebhookSources.Hub
+            },
+            Now.AddMinutes(4));
+
+        var resubscribed = await store.ConsumeAsync(
+            Event(OrganizationId, "evt-control-resubscribe", OrganizationSubscriptionState.Active,
+                Now.AddMinutes(5), "cus_hub", "sub_control") with
+            {
+                EventType = "customer.subscription.created"
+            },
+            Now.AddMinutes(6));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Applied, resubscribed.Outcome);
+        Assert.NotEqual(BillingDiagnosticCodes.SubscriptionSourceConflict, resubscribed.RejectionCode);
+        Assert.Equal(BillingWebhookSources.Control, BillingWebhookSources.Normalize(resubscribed.Subscription!.WebhookSource));
+        Assert.Equal("sub_control", resubscribed.Subscription.ProviderSubscriptionReference);
+        Assert.Equal(OrganizationSubscriptionState.Active, resubscribed.Subscription.State);
+        Assert.True(resubscribed.Entitlement!.ManagedHostingEnabled);
+        Assert.Equal(1, resubscribed.Entitlement.MaxInstances);
+    }
+
+    [Fact]
+    public async Task Non_payment_suspended_row_resumes_active_on_the_same_subscription_reference()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        await db.SaveChangesAsync();
+
+        var store = new OrganizationBillingStore(db);
+        var suspended = await SuspendForNonPaymentAsync(store);
+        Assert.Equal(OrganizationSubscriptionSuspensionReason.NonPayment, suspended.SuspensionReason);
+        Assert.NotNull(suspended.RetentionEndsAt);
+
+        var resumed = await store.ConsumeAsync(
+            Event("evt-paid", OrganizationSubscriptionState.Active, Now.AddDays(2)),
+            Now.AddDays(2).AddMinutes(1));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Applied, resumed.Outcome);
+        Assert.Equal(suspended.Id, resumed.Subscription!.Id);
+        Assert.Equal(OrganizationSubscriptionState.Active, resumed.Subscription.State);
+        Assert.Equal("sub_acme", resumed.Subscription.ProviderSubscriptionReference);
+        Assert.Null(resumed.Subscription.SuspensionReason);
+        Assert.True(resumed.Entitlement!.ManagedHostingEnabled);
+        Assert.Equal(1, resumed.Entitlement.MaxInstances);
+        Assert.Equal(OrganizationSubscriptionState.Active, resumed.Entitlement.SubscriptionState);
+        Assert.True((await new EfCoreElsaInstanceCommercialGate(db).EvaluateAsync(
+            OrganizationId, ElsaInstanceOperationAction.Create, activeInstanceCount: 0)).Allowed);
+
+        await store.AdvanceDueAsync(Now.AddDays(40));
+        db.ChangeTracker.Clear();
+        Assert.Equal(OrganizationSubscriptionState.Active, (await store.GetSubscriptionAsync(OrganizationId))!.State);
+        Assert.Equal(1, await db.OrganizationSubscriptions.CountAsync());
+        Assert.True((await db.OrganizationEntitlementSnapshots.SingleAsync()).ManagedHostingEnabled);
+    }
+
+    [Fact]
+    public async Task Non_payment_suspended_row_rejects_a_new_subscription_and_queues_provider_cancel()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        await db.SaveChangesAsync();
+
+        var store = new OrganizationBillingStore(db);
+        var suspended = await SuspendForNonPaymentAsync(store);
+
+        var rejected = await store.ConsumeAsync(
+            Event(OrganizationId, "evt-stale-checkout", OrganizationSubscriptionState.Active,
+                Now.AddDays(2), "cus_acme", "sub_stale_checkout") with
+            {
+                EventType = "customer.subscription.created"
+            },
+            Now.AddDays(2).AddMinutes(1));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Rejected, rejected.Outcome);
+        Assert.Equal(BillingDiagnosticCodes.IneligiblePaidSubscription, rejected.RejectionCode);
+        Assert.Equal(BillingProviderEventProcessingStatus.Rejected, rejected.Event!.ProcessingStatus);
+        Assert.Equal(suspended.Id, (await store.GetSubscriptionAsync(OrganizationId))!.Id);
+        Assert.Equal(OrganizationSubscriptionState.Suspended, (await store.GetSubscriptionAsync(OrganizationId))!.State);
+        Assert.Equal("sub_acme", (await store.GetSubscriptionAsync(OrganizationId))!.ProviderSubscriptionReference);
+        Assert.Contains(await db.OrganizationBillingCleanups.ToListAsync(),
+            x => x.ProviderSubscriptionReference == "sub_stale_checkout" &&
+                 x.State == OrganizationBillingCleanupState.Queued);
+        Assert.Contains(await db.OrganizationAuditRecords.ToListAsync(),
+            x => x.Summary.Contains("queued for cancel", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Non_payment_suspended_row_still_conflicts_across_webhook_sources()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        await EnsureHubAccountLinkAsync(db, OrganizationId);
+        var store = new OrganizationBillingStore(db);
+        await SuspendForNonPaymentAsync(store);
+
+        var rejected = await store.ConsumeAsync(
+            Event(OrganizationId, "evt-hub-new", OrganizationSubscriptionState.Active,
+                Now.AddDays(2), "cus_acme", "sub_hub_new") with
+            {
+                WebhookSource = BillingWebhookSources.Hub
+            },
+            Now.AddDays(2).AddMinutes(1));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Rejected, rejected.Outcome);
+        Assert.Equal(BillingDiagnosticCodes.SubscriptionSourceConflict, rejected.RejectionCode);
+        Assert.Equal("sub_acme", (await store.GetSubscriptionAsync(OrganizationId))!.ProviderSubscriptionReference);
+    }
+
+    [Fact]
+    public async Task Early_deletion_suspended_and_retained_never_resume()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        await db.SaveChangesAsync();
+        var store = new OrganizationBillingStore(db);
+        await store.ConsumeAsync(Event("evt-active", OrganizationSubscriptionState.Active, Now.AddMinutes(1)), Now.AddMinutes(2));
+        await store.RequestDeletionAsync(OrganizationId, Now.AddMinutes(3));
+        Assert.Equal(OrganizationSubscriptionSuspensionReason.DeletionRequested,
+            (await store.GetSubscriptionAsync(OrganizationId))!.SuspensionReason);
+
+        var sameRef = await store.ConsumeAsync(
+            Event("evt-same-ref-active", OrganizationSubscriptionState.Active, Now.AddMinutes(4)),
+            Now.AddMinutes(5));
+        Assert.Equal(BillingEventConsumptionOutcome.Rejected, sameRef.Outcome);
+
+        var newRef = await store.ConsumeAsync(
+            Event(OrganizationId, "evt-new-ref", OrganizationSubscriptionState.Active,
+                Now.AddMinutes(6), "cus_acme", "sub_new"),
+            Now.AddMinutes(7));
+        Assert.Equal(BillingEventConsumptionOutcome.Rejected, newRef.Outcome);
+        Assert.Equal(BillingDiagnosticCodes.IneligiblePaidSubscription, newRef.RejectionCode);
+        Assert.Equal(OrganizationSubscriptionState.Suspended, (await store.GetSubscriptionAsync(OrganizationId))!.State);
+
+        var retainedAdvance = await store.ConsumeAsync(
+            Event("evt-retained", OrganizationSubscriptionState.Retained, Now.AddMinutes(8)),
+            Now.AddMinutes(9));
+        Assert.Equal(BillingEventConsumptionOutcome.Applied, retainedAdvance.Outcome);
+        var retained = await store.ConsumeAsync(
+            Event(OrganizationId, "evt-after-retained", OrganizationSubscriptionState.Active,
+                Now.AddMinutes(12), "cus_acme", "sub_after_retained"),
+            Now.AddMinutes(13));
+        Assert.Equal(BillingEventConsumptionOutcome.Rejected, retained.Outcome);
+        Assert.Equal(OrganizationSubscriptionState.Retained, (await store.GetSubscriptionAsync(OrganizationId))!.State);
+    }
+
+    [Fact]
+    public async Task Created_before_deleted_still_leaves_one_active_lifecycle()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.Organizations.Add(new Organization { Id = OrganizationId, Name = "Acme" });
+        await db.SaveChangesAsync();
+
+        var store = new OrganizationBillingStore(db);
+        var original = await store.ConsumeAsync(
+            Event("evt-original", OrganizationSubscriptionState.Active, Now.AddMinutes(1)),
+            Now.AddMinutes(2));
+
+        var createdFirst = await store.ConsumeAsync(
+            Event(OrganizationId, "evt-new-created", OrganizationSubscriptionState.Active,
+                Now.AddMinutes(3), "cus_acme", "sub_paid_again") with
+            {
+                EventType = "customer.subscription.created"
+            },
+            Now.AddMinutes(4));
+        var lateDeleted = await store.ConsumeAsync(
+            Event("evt-old-deleted", OrganizationSubscriptionState.Suspended, Now.AddMinutes(5)) with
+            {
+                EventType = "customer.subscription.deleted"
+            },
+            Now.AddMinutes(6));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Applied, createdFirst.Outcome);
+        Assert.NotEqual(original.Subscription!.Id, createdFirst.Subscription!.Id);
+        Assert.Equal("sub_paid_again", createdFirst.Subscription.ProviderSubscriptionReference);
+        Assert.Equal(OrganizationSubscriptionState.Active, createdFirst.Subscription.State);
+        Assert.True(createdFirst.Entitlement!.ManagedHostingEnabled);
+        Assert.Equal(1, createdFirst.Entitlement.MaxInstances);
+        Assert.Equal(BillingEventConsumptionOutcome.IgnoredOutOfOrder, lateDeleted.Outcome);
+        Assert.Equal(OrganizationSubscriptionState.Active, (await store.GetSubscriptionAsync(OrganizationId))!.State);
+        Assert.Equal("sub_paid_again", (await store.GetSubscriptionAsync(OrganizationId))!.ProviderSubscriptionReference);
+        Assert.Equal(1, await db.OrganizationSubscriptions.CountAsync(x => x.State == OrganizationSubscriptionState.Active));
+        db.ChangeTracker.Clear();
+        Assert.Equal(OrganizationSubscriptionState.Deleted,
+            (await db.OrganizationSubscriptions.SingleAsync(x => x.Id == original.Subscription.Id)).State);
+    }
+
+    [Fact]
     public async Task Confirmed_Stripe_cleanup_allows_a_later_paid_subscription_without_renewing_the_trial()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -1104,13 +1392,18 @@ public sealed class OrganizationBillingPersistenceTests
         await store.ConsumeAsync(Event("evt-original", OrganizationSubscriptionState.Active, Now.AddMinutes(1)), Now.AddMinutes(2));
         await store.RequestDeletionAsync(OrganizationId, Now.AddMinutes(3));
 
-        await Assert.ThrowsAsync<BillingProviderEventConflictException>(() => store.ConsumeAsync(
+        var rejected = await store.ConsumeAsync(
             Event(OrganizationId, "evt-premature", OrganizationSubscriptionState.Active,
                 Now.AddMinutes(4), "cus_acme", "sub_paid_again"),
-            Now.AddMinutes(5)));
+            Now.AddMinutes(5));
         db.ChangeTracker.Clear();
+        Assert.Equal(BillingEventConsumptionOutcome.Rejected, rejected.Outcome);
+        Assert.Equal(BillingDiagnosticCodes.IneligiblePaidSubscription, rejected.RejectionCode);
         Assert.Equal(OrganizationSubscriptionState.Suspended, (await store.GetSubscriptionAsync(OrganizationId))!.State);
-        Assert.Single(await db.BillingProviderEvents.ToListAsync());
+        Assert.Equal("sub_acme", (await store.GetSubscriptionAsync(OrganizationId))!.ProviderSubscriptionReference);
+        Assert.Equal(2, await db.BillingProviderEvents.CountAsync());
+        Assert.Contains(await db.OrganizationBillingCleanups.ToListAsync(),
+            x => x.ProviderSubscriptionReference == "sub_paid_again");
     }
 
     [Fact]
@@ -1518,6 +1811,17 @@ public sealed class OrganizationBillingPersistenceTests
                 WebhookSource = webhookSource
             },
             Now.AddMinutes(8));
+    }
+
+    private async Task<OrganizationSubscription> SuspendForNonPaymentAsync(OrganizationBillingStore store)
+    {
+        await store.ConsumeAsync(Event("evt-active", OrganizationSubscriptionState.Active, Now.AddMinutes(1)), Now.AddMinutes(2));
+        await store.ConsumeAsync(Event("evt-past-due", OrganizationSubscriptionState.PastDue, Now.AddMinutes(3)), Now.AddMinutes(4));
+        await store.ConsumeAsync(Event("evt-constrained", OrganizationSubscriptionState.Constrained, Now.AddMinutes(5)), Now.AddMinutes(6));
+        var current = Assert.IsType<OrganizationSubscription>(await store.GetSubscriptionAsync(OrganizationId));
+        var suspensionAt = current.ConstrainedAt!.Value.Add(OrganizationSubscriptionLifecycle.ConstraintPeriod);
+        await store.AdvanceOneAsync(OrganizationId, current.Id, suspensionAt);
+        return Assert.IsType<OrganizationSubscription>(await store.GetSubscriptionAsync(OrganizationId));
     }
 
     private static async Task DriveControlToAsync(OrganizationBillingStore store, OrganizationSubscriptionState target)

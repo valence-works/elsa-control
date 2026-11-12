@@ -109,11 +109,20 @@ public sealed class StripeBillingProvider(
         EnsureCheckoutConfigured();
         if (request.OrganizationId == Guid.Empty)
             throw new ArgumentException("Organization ID is required.", nameof(request));
-        if (request.TrialEndsAt == default || request.TrialEndsAt <= DateTimeOffset.UtcNow)
+        if (request.TrialEndsAt is { } trialEnd && (trialEnd == default || trialEnd <= DateTimeOffset.UtcNow))
             throw new ArgumentException("A future control-plane trial end is required.", nameof(request));
 
         var organizationId = request.OrganizationId.ToString("D");
         var metadata = new Dictionary<string, string> { [OrganizationMetadataKey] = organizationId };
+        var subscriptionData = new SessionSubscriptionDataOptions
+        {
+            Metadata = new Dictionary<string, string>(metadata)
+        };
+        if (request.TrialEndsAt is { } paidTrialEnd)
+            subscriptionData.TrialEnd = paidTrialEnd.UtcDateTime;
+        var idempotencyKey = request.TrialEndsAt is { } trialTicks
+            ? $"billing-checkout-{organizationId}-{trialTicks.UtcTicks}"
+            : $"billing-checkout-paid-{organizationId}";
         global::Stripe.Checkout.Session session;
         try
         {
@@ -127,13 +136,9 @@ public sealed class StripeBillingProvider(
                     Metadata = metadata,
                     SuccessUrl = request.SuccessUrl,
                     CancelUrl = request.CancelUrl,
-                    SubscriptionData = new SessionSubscriptionDataOptions
-                    {
-                        TrialEnd = request.TrialEndsAt.UtcDateTime,
-                        Metadata = new Dictionary<string, string>(metadata)
-                    }
+                    SubscriptionData = subscriptionData
                 },
-                new RequestOptions { IdempotencyKey = $"billing-checkout-{organizationId}-{request.TrialEndsAt.UtcTicks}" },
+                new RequestOptions { IdempotencyKey = idempotencyKey },
                 cancellationToken);
         }
         catch (StripeException exception)

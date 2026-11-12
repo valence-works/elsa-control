@@ -475,6 +475,8 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             subscription.ProviderSubscriptionReference = OptionalSafeReference(subscription.ProviderSubscriptionReference, nameof(subscription.ProviderSubscriptionReference), OrganizationBillingLimits.ProviderReferenceMaxLength);
             subscription.LastProviderEventId = OptionalSafeToken(subscription.LastProviderEventId, nameof(subscription.LastProviderEventId), 256);
             EnsureDefined(subscription.State, nameof(subscription.State));
+            if (subscription.SuspensionReason is { } suspensionReason)
+                EnsureDefined(suspensionReason, nameof(subscription.SuspensionReason));
             subscription.TrialStartedAt = subscription.TrialStartedAt.ToUniversalTime();
             subscription.TrialEndsAt = subscription.TrialEndsAt.ToUniversalTime();
             subscription.LastProviderEventOccurredAt = subscription.LastProviderEventOccurredAt.ToUniversalTime();
@@ -629,6 +631,8 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             if (stateChanged)
             {
                 if (!OrganizationSubscriptionLifecycle.CanTransition(originalState, subscription.State) &&
+                    !AllowsNonPaymentResume(entry, originalState, subscription) &&
+                    !AllowsSupersededClose(originalState, subscription) &&
                     !(originalState == OrganizationSubscriptionState.Suspended &&
                       subscription.State == OrganizationSubscriptionState.Deleted &&
                       subscription.EarlyDeletionRequestedAt is not null) &&
@@ -662,6 +666,36 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             EnsureLifecycleTimestamp(entry, nameof(OrganizationSubscription.DeletedAt), subscription.DeletedAt, subscription.State, OrganizationSubscriptionState.Deleted, subscription.LastProviderEventOccurredAt, lifecycleTransition: lifecycleTransition);
         }
     }
+
+    private static bool AllowsNonPaymentResume(
+        EntityEntry<OrganizationSubscription> entry,
+        OrganizationSubscriptionState originalState,
+        OrganizationSubscription subscription)
+    {
+        if (originalState != OrganizationSubscriptionState.Suspended ||
+            subscription.State != OrganizationSubscriptionState.Active)
+            return false;
+
+        var originalReason = entry.Property<OrganizationSubscriptionSuspensionReason?>(
+            nameof(OrganizationSubscription.SuspensionReason)).OriginalValue;
+        var originalConstrainedAt = entry.Property<DateTimeOffset?>(
+            nameof(OrganizationSubscription.ConstrainedAt)).OriginalValue;
+        var originalEarlyDeletionRequestedAt = entry.Property<DateTimeOffset?>(
+            nameof(OrganizationSubscription.EarlyDeletionRequestedAt)).OriginalValue;
+        if (originalReason == OrganizationSubscriptionSuspensionReason.NonPayment)
+            return true;
+        return originalReason is null &&
+               originalEarlyDeletionRequestedAt is null &&
+               originalConstrainedAt is not null;
+    }
+
+    private static bool AllowsSupersededClose(
+        OrganizationSubscriptionState originalState,
+        OrganizationSubscription subscription) =>
+        subscription.State == OrganizationSubscriptionState.Deleted &&
+        originalState is OrganizationSubscriptionState.Active or OrganizationSubscriptionState.Suspended &&
+        subscription.ProviderCustomerReference is null &&
+        subscription.ProviderSubscriptionReference is null;
 
     private static void EnsureUnchanged<T>(EntityEntry<OrganizationSubscription> entry, string propertyName, T currentValue)
     {

@@ -47,6 +47,33 @@ public sealed class OrganizationBillingApiService(
         if (!_stripeOptions.IsCheckoutConfigured)
             return OrganizationBillingApiResult.Unavailable();
 
+        var existing = await billing.GetSubscriptionAsync(organizationId, cancellationToken);
+        if (existing is not null && OrganizationSubscriptionLifecycle.IsCanceledSuspension(existing))
+        {
+            try
+            {
+                var paid = await provider.CreateCheckoutSessionAsync(
+                    new BillingCheckoutSessionRequest(
+                        organizationId,
+                        _stripeOptions.DefaultPriceId!,
+                        _stripeOptions.CheckoutSuccessUrl!,
+                        _stripeOptions.CheckoutCancelUrl!,
+                        TrialEndsAt: null,
+                        ProviderCustomerReference: existing.ProviderCustomerReference),
+                    cancellationToken);
+                return OrganizationBillingApiResult.Success(paid);
+            }
+            catch (BillingProviderUnavailableException)
+            {
+                return OrganizationBillingApiResult.Unavailable();
+            }
+        }
+
+        if (existing is not null &&
+            existing.State == OrganizationSubscriptionState.Suspended &&
+            OrganizationSubscriptionLifecycle.RecoveryAction(existing) != OrganizationBillingRecoveryActions.Subscribe)
+            return OrganizationBillingApiResult.Terminal();
+
         var trial = await StartHostedTrialAsync(organizationId, cancellationToken);
         if (trial.ProviderUnavailable)
             return OrganizationBillingApiResult.Unavailable();
@@ -184,7 +211,11 @@ public sealed class OrganizationBillingApiService(
             canManage,
             action,
             billingLinked ? HostedBillingCopy.ForLinkedCustomer() : HostedBillingCopy.ForMissingLinkage(),
-            subscription is null ? null : BillingWebhookSources.Normalize(subscription.WebhookSource)));
+            subscription is null ? null : BillingWebhookSources.Normalize(subscription.WebhookSource),
+            subscription?.State == OrganizationSubscriptionState.Suspended
+                ? OrganizationSubscriptionLifecycle.ResolveSuspensionReason(subscription)?.ToString()
+                : null,
+            OrganizationSubscriptionLifecycle.RecoveryAction(subscription)));
     }
 
     public async Task<HostedPortalApiResult> CreateHostedPortalAsync(

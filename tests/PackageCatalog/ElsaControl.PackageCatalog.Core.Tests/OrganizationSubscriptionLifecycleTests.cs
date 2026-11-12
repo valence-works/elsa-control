@@ -23,6 +23,7 @@ public sealed class OrganizationSubscriptionLifecycleTests
     [InlineData(OrganizationSubscriptionState.PastDue, OrganizationSubscriptionState.Constrained, true)]
     [InlineData(OrganizationSubscriptionState.Constrained, OrganizationSubscriptionState.Suspended, true)]
     [InlineData(OrganizationSubscriptionState.Suspended, OrganizationSubscriptionState.Retained, true)]
+    [InlineData(OrganizationSubscriptionState.Suspended, OrganizationSubscriptionState.Active, false)]
     [InlineData(OrganizationSubscriptionState.Retained, OrganizationSubscriptionState.Deleted, true)]
     [InlineData(OrganizationSubscriptionState.Active, OrganizationSubscriptionState.Trial, false)]
     [InlineData(OrganizationSubscriptionState.Deleted, OrganizationSubscriptionState.Active, false)]
@@ -79,6 +80,67 @@ public sealed class OrganizationSubscriptionLifecycleTests
         OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Suspended, StartedAt.AddDays(20));
 
         Assert.Equal(subscription.SuspendedAt!.Value.Add(OrganizationSubscriptionLifecycle.FinalRetentionPeriod), subscription.RetentionEndsAt);
+    }
+
+    [Fact]
+    public void Suspended_stays_live_so_unrelated_source_conflicts_are_unchanged()
+    {
+        Assert.True(OrganizationSubscriptionLifecycle.IsLive(OrganizationSubscriptionState.Suspended));
+        Assert.False(OrganizationSubscriptionLifecycle.IsLive(OrganizationSubscriptionState.Retained));
+        Assert.False(OrganizationSubscriptionLifecycle.IsLive(OrganizationSubscriptionState.Deleted));
+    }
+
+    [Fact]
+    public void Non_payment_suspension_can_return_to_active_on_the_same_row()
+    {
+        var subscription = OrganizationSubscriptionLifecycle.CreateTrial(Guid.NewGuid(), "stripe", StartedAt);
+        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.PastDue, StartedAt.AddDays(14));
+        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Constrained, StartedAt.AddDays(21));
+        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Suspended, StartedAt.AddDays(22), advanceLifecycleVersion: true);
+        subscription.ProviderCustomerReference = "cus_acme";
+        subscription.ProviderSubscriptionReference = "sub_acme";
+        var sameRef = new BillingProviderEvent(
+            subscription.OrganizationId,
+            "stripe",
+            "evt-paid",
+            "customer.subscription.updated",
+            OrganizationSubscriptionState.Active,
+            StartedAt.AddDays(23),
+            "sha256:" + new string('a', 64),
+            "cus_acme",
+            "sub_acme");
+
+        Assert.Equal(OrganizationSubscriptionSuspensionReason.NonPayment, subscription.SuspensionReason);
+        Assert.True(OrganizationSubscriptionLifecycle.CanTransition(subscription, OrganizationSubscriptionState.Active));
+        Assert.True(OrganizationSubscriptionLifecycle.AllowsNonPaymentResume(subscription, sameRef));
+        Assert.False(OrganizationSubscriptionLifecycle.AllowsNonPaymentResume(
+            subscription,
+            sameRef with { ProviderSubscriptionReference = "sub_other" }));
+        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Active, StartedAt.AddDays(23));
+
+        Assert.Equal(OrganizationSubscriptionState.Active, subscription.State);
+        Assert.Null(subscription.SuspensionReason);
+        Assert.Equal(OrganizationBillingRecoveryActions.None, OrganizationSubscriptionLifecycle.RecoveryAction(subscription));
+    }
+
+    [Fact]
+    public void Canceled_and_deletion_requested_suspensions_do_not_resume_on_the_same_row()
+    {
+        var canceled = OrganizationSubscriptionLifecycle.CreateTrial(Guid.NewGuid(), "stripe", StartedAt);
+        OrganizationSubscriptionLifecycle.ApplyState(canceled, OrganizationSubscriptionState.Suspended, StartedAt.AddDays(1));
+        Assert.Equal(OrganizationSubscriptionSuspensionReason.Canceled, canceled.SuspensionReason);
+        Assert.Equal(OrganizationBillingRecoveryActions.Subscribe, OrganizationSubscriptionLifecycle.RecoveryAction(canceled));
+        Assert.False(OrganizationSubscriptionLifecycle.CanTransition(canceled, OrganizationSubscriptionState.Active));
+        Assert.Throws<InvalidOperationException>(() =>
+            OrganizationSubscriptionLifecycle.ApplyState(canceled, OrganizationSubscriptionState.Active, StartedAt.AddDays(2)));
+
+        var deletion = OrganizationSubscriptionLifecycle.CreateTrial(Guid.NewGuid(), "stripe", StartedAt);
+        OrganizationSubscriptionLifecycle.ApplyState(deletion, OrganizationSubscriptionState.Active, StartedAt.AddDays(1));
+        deletion.EarlyDeletionRequestedAt = StartedAt.AddDays(2);
+        OrganizationSubscriptionLifecycle.ApplyState(deletion, OrganizationSubscriptionState.Suspended, StartedAt.AddDays(2), advanceLifecycleVersion: true);
+        Assert.Equal(OrganizationSubscriptionSuspensionReason.DeletionRequested, deletion.SuspensionReason);
+        Assert.Equal(OrganizationBillingRecoveryActions.None, OrganizationSubscriptionLifecycle.RecoveryAction(deletion));
+        Assert.False(OrganizationSubscriptionLifecycle.CanTransition(deletion, OrganizationSubscriptionState.Active));
     }
 
     [Fact]

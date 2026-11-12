@@ -291,6 +291,7 @@ internal sealed class OrganizationSubscriptionConfiguration : IEntityTypeConfigu
         builder.Property(x => x.ProviderCustomerReference).HasMaxLength(OrganizationBillingLimits.ProviderReferenceMaxLength);
         builder.Property(x => x.ProviderSubscriptionReference).HasMaxLength(OrganizationBillingLimits.ProviderReferenceMaxLength);
         builder.Property(x => x.State).HasConversion<string>().HasMaxLength(32);
+        builder.Property(x => x.SuspensionReason).HasConversion<string>().HasMaxLength(32);
         builder.Property(x => x.LastProviderEventId).HasMaxLength(256);
         builder.Property(x => x.WebhookSource).HasMaxLength(32);
         builder.Property(x => x.TrialStartedAt).HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));

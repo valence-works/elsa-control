@@ -709,6 +709,10 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<long?>("SuspendedAt")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("SuspensionReason")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
                     b.Property<long>("TrialEndsAt")
                         .HasColumnType("INTEGER");
 

@@ -155,6 +155,83 @@ public sealed class OrganizationBillingApiTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Checkout_for_a_canceled_suspended_organization_starts_paid_checkout_without_a_trial()
+    {
+        await _app.SeedAsync(_ => Task.CompletedTask);
+        var owner = _app.CreateControlIdentityClient(subject: "billing-resubscribe-owner");
+        var organizationId = (await owner.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces"))!.Organizations.Single().Id;
+        await using (var scope = _app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            var store = new OrganizationBillingStore(db);
+            var now = DateTimeOffset.UtcNow;
+            await store.ConsumeAsync(
+                new BillingProviderEvent(
+                    organizationId, BillingProviderNames.Stripe, "evt-active", "customer.subscription.created",
+                    OrganizationSubscriptionState.Active, now.AddMinutes(-2), "sha256:" + new string('a', 64),
+                    "cus_resubscribe", "sub_old"),
+                now.AddMinutes(-1));
+            await store.ConsumeAsync(
+                new BillingProviderEvent(
+                    organizationId, BillingProviderNames.Stripe, "evt-cancelled", "customer.subscription.deleted",
+                    OrganizationSubscriptionState.Suspended, now.AddSeconds(-30), "sha256:" + new string('b', 64),
+                    "cus_resubscribe", "sub_old"),
+                now);
+        }
+
+        var response = await owner.PostControlJsonAsync($"/api/organizations/{organizationId}/billing/checkout", new { });
+        var trial = await owner.PostControlJsonAsync($"/api/organizations/{organizationId}/billing/prepare-hosted-trial", new { });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("https://checkout.fake.test/session", (await response.Content.ReadControlJsonAsync<OrganizationBillingSessionResponse>())!.Url);
+        Assert.NotNull(_provider.LastCheckout);
+        Assert.Null(_provider.LastCheckout!.TrialEndsAt);
+        Assert.Equal("cus_resubscribe", _provider.LastCheckout.ProviderCustomerReference);
+        Assert.Equal(HttpStatusCode.Conflict, trial.StatusCode);
+        Assert.Contains("billing.subscription-terminal", await trial.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Checkout_for_non_payment_or_deletion_requested_stays_terminal()
+    {
+        await _app.SeedAsync(_ => Task.CompletedTask);
+        var owner = _app.CreateControlIdentityClient(subject: "billing-nonpayment-checkout-owner");
+        var organizationId = (await owner.GetControlJsonAsync<MeWorkspacesResponse>("/api/me/workspaces"))!.Organizations.Single().Id;
+        await using (var scope = _app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            var store = new OrganizationBillingStore(db);
+            var now = DateTimeOffset.UtcNow;
+            await store.ConsumeAsync(
+                new BillingProviderEvent(
+                    organizationId, BillingProviderNames.Stripe, "evt-active", "customer.subscription.created",
+                    OrganizationSubscriptionState.Active, now.AddMinutes(-10), "sha256:" + new string('a', 64),
+                    "cus_unpaid", "sub_unpaid"),
+                now.AddMinutes(-9));
+            await store.ConsumeAsync(
+                new BillingProviderEvent(
+                    organizationId, BillingProviderNames.Stripe, "evt-past-due", "customer.subscription.updated",
+                    OrganizationSubscriptionState.PastDue, now.AddMinutes(-8), "sha256:" + new string('b', 64),
+                    "cus_unpaid", "sub_unpaid"),
+                now.AddMinutes(-7));
+            await store.ConsumeAsync(
+                new BillingProviderEvent(
+                    organizationId, BillingProviderNames.Stripe, "evt-unpaid", "customer.subscription.updated",
+                    OrganizationSubscriptionState.Constrained, now.AddMinutes(-6), "sha256:" + new string('c', 64),
+                    "cus_unpaid", "sub_unpaid"),
+                now.AddMinutes(-5));
+            var current = Assert.IsType<OrganizationSubscription>(await store.GetSubscriptionAsync(organizationId));
+            await store.AdvanceOneAsync(organizationId, current.Id, current.ConstrainedAt!.Value.Add(OrganizationSubscriptionLifecycle.ConstraintPeriod));
+        }
+
+        var response = await owner.PostControlJsonAsync($"/api/organizations/{organizationId}/billing/checkout", new { });
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("billing.subscription-terminal", (await response.Content.ReadFromJsonAsync<Dictionary<string, string>>())!["code"]);
+        Assert.Null(_provider.LastCheckout);
+    }
+
+    [Fact]
     public async Task Checkout_for_an_internally_granted_organization_returns_terminal_conflict_before_calling_provider()
     {
         await _app.SeedAsync(_ => Task.CompletedTask);

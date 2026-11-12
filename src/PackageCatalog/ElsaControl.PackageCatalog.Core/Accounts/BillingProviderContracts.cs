@@ -28,7 +28,7 @@ public sealed record BillingCheckoutSessionRequest(
     string PriceReference,
     string SuccessUrl,
     string CancelUrl,
-    DateTimeOffset TrialEndsAt,
+    DateTimeOffset? TrialEndsAt = null,
     string? ProviderCustomerReference = null);
 
 public sealed record BillingCustomerPortalSessionRequest(

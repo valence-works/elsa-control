@@ -14,8 +14,11 @@ internal static class OrganizationSubscriptionQueries
         Guid organizationId) =>
         subscriptions
             .Where(x => x.OrganizationId == organizationId)
-            .OrderBy(x => x.State == OrganizationSubscriptionState.Retained ||
-                          x.State == OrganizationSubscriptionState.Deleted)
+            .OrderBy(x => x.State == OrganizationSubscriptionState.Deleted
+                ? 2
+                : x.State == OrganizationSubscriptionState.Retained
+                    ? 1
+                    : 0)
             .ThenByDescending(x => x.UpdatedAt)
             .ThenByDescending(x => x.CreatedAt)
             .ThenByDescending(x => x.Id);
