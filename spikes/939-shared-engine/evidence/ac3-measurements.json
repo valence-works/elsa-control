@@ -1,0 +1,23 @@
+{
+  "pin": "59b14969027b5cff1273f54970d90da189f4ff0f",
+  "cshells": "0.0.28",
+  "persistence": "sqlite",
+  "idleWorkingSetBytes": 423301120,
+  "activationMilliseconds": {
+    "Default": 35.2254,
+    "tenant-a": 375.6076,
+    "tenant-b": 383.49
+  },
+  "storeSemaphoreIsStatic": true,
+  "sequentialTwentyWritesMs": 471.2244,
+  "concurrentTenWritesPerTenantMs": 447.8812,
+  "sameDefinitionIdCrossTenantPublishMs": 37.6142,
+  "hostLookup": {
+    "probeShells": 64,
+    "samples": 10000,
+    "p50Ms": 0.1149,
+    "p95Ms": 0.1893,
+    "p99Ms": 0.2553,
+    "totalMs": 1266.2495
+  }
+}

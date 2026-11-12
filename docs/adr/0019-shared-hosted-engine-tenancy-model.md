@@ -2,8 +2,9 @@
 
 ## Status
 
-Proposed (#633). Design and decision record only. It creates no Azure resource and
-changes no code. It conforms to ADR-0017 and ADR-0009 and amends neither (§3.3).
+Proposed (#633). Leaf L0 (#939) measured the model on elsa-core `59b14969` and
+CShells `0.0.28`. It still creates no production Azure resource. It conforms to
+ADR-0017 and ADR-0009 and amends neither (§3.3).
 
 ## Date
 
@@ -193,13 +194,47 @@ entry tier. It is **not built** under this ADR. If L0 triggers it, a new ADR mus
 written, and it is gated on G1, G4, G6, G18 and the other model-A rows in §4. The shard record's `DataLayout`
 field is what makes that switch non-breaking for Control.
 
+**L0 (#939) verdict: model B holds. The fallback does not trigger.**
+
+Evidence (sqlite, one process, pin `59b14969`, CShells `0.0.28`; full numbers in
+`spikes/939-shared-engine/evidence/ac3-measurements.json` and
+`docs/spikes/939-shared-engine-l0.md`):
+
+- **AC1.** Two shells, two databases, one process: API list/get, HTTP endpoint, bookmark
+  resume, timers, and Studio session/API keys do not cross tenants. An unknown host
+  reaches an empty `Default` shell.
+- **AC2.** On this pin G1 **applies** in shell mode (`TenantsOptions.IsEnabled = true`,
+  EF filter on). G2 uniqueness is `(DefinitionId, TenantId, Version)`. G1 therefore no
+  longer blocks model A on this pin; G4, G6 and G18 still do.
+- **AC3.** Idle working set of the test process with Default + two Elsa shells:
+  423,301,120 bytes. Elsa shell activation including sqlite migrations: ~376–383 ms.
+  CShells host lookup at 64 probe shells, 10,000 samples: p50 0.11 ms, p95 0.19 ms,
+  p99 0.26 ms. `Store<,>.Semaphore` is static (G8). A two-tenant concurrent write burst
+  (10 publishes each) took 448 ms versus 471 ms for 20 sequential publishes on one
+  tenant — G8 serialises writes across shells. Same `DefinitionId` published on both
+  tenants concurrently: 38 ms (G19 name-only locks, N=2).
+- **Image.** `valence-works/elsa-production-image` was not readable from this worker.
+  Public analogue `Elsa.ModularServer.Web` at the pin enables diagnostics modules and
+  does not reference Proto.Actor. The spike host disables diagnostics and does not
+  enable Proto.Actor.
+- **Azure SQL.** Not provisioned from this worker (no IMDS / Azure identity). Operator
+  bicep under `spikes/939-shared-engine/infra/` targets staging only, ≤3 Standard S0
+  databases, tags `purpose=shared-engine-spike` and `issue=939`.
+- **CShells 0.0.28.** Host routing works only after the spike stamps Host metadata and
+  unique endpoint names, and after a host-level HTTP gate because `IMiddlewareShellFeature`
+  middleware registered at shell activation does not enter an already-started pipeline.
+  Those are spike workarounds, not elsa-core patches.
+
+G8 contention is visible at two tenants and remains a **production** gate, not a
+reason to switch to model A. An open Elsa 3 item stays named only as that.
+
 ### 3.5 Go / no-go
 
 | Question | Verdict |
 |---|---|
-| Model B (database per tenant, shell per tenant): build in **staging** | **GO.** Conditional on leaf L0 passing its two acceptance criteria (§5). |
-| Model B: a **production** shard | **NO-GO until** gates PG-1 to PG-6 (§5) pass **and** Sipke approves the spend, pricing and limits. |
-| Model A (discriminator) on Elsa 3.9.0 and 3.11 `main` for paying tenants | **NO-GO as it stands.** Blocked by G1, G4, G6, G18 and, in a multi-node shard, G15 (§4). G2 is fixed on 3.11. |
+| Model B (database per tenant, shell per tenant): build in **staging** | **GO.** L0 (#939) passed AC1–AC4. |
+| Model B: a **production** shard | **NO-GO until** gates PG-1 to PG-6 (§5) pass **and** Sipke approves the spend, pricing and limits. G8 contention is now measured. |
+| Model A (discriminator) on Elsa 3.9.0 and 3.11 `main` for paying tenants | **NO-GO as it stands.** On pin `59b14969` G1 applies and G2 is fixed; G4, G6, G18 still block A, and in a multi-node shard G15 (§4). |
 | Anything customer-visible about Shared | **NO-GO** until constraint 4 is met. |
 
 ## 4. Elsa 3 multitenancy readiness: cited gaps
@@ -217,7 +252,7 @@ mitigation that our own leaves deliver (G3, G9), and the rest are measured in L0
 
 | # | Gap | Evidence | Models | Slice 1 | Production |
 |---|---|---|---|---|---|
-| G1 | **The shell-mode `TenantsFeature` never turns tenancy on.** The code-first feature sets `TenantsOptions.IsEnabled = true`; the shell feature registers only the resolver pipeline. `IsEnabled` gates the EF query filter (`ElsaDbContextBase.cs:55`, main), tenant stamping and the bulk-upsert ownership check. I found no binding of it in shell mode in elsa-core or CShells. **Unproven by a run**: L0 AC2. | 3.9.0 and **main**: `Elsa.Tenants/Features/TenantsFeature.cs:58` vs `Elsa.Tenants/ShellFeatures/TenantsFeature.cs:15-27`; gates `SetTenantIdFilter.cs:23`, `ApplyTenantId.cs:18`, `Store.cs:195`. Component tests build the code-first host (`WorkflowServer.cs:139-144`, 3.9.0). elsa-core #9223 (milestone 3.11). | A | No (B) | No (B). Blocks A. |
+| G1 | **The shell-mode `TenantsFeature` never turns tenancy on.** The code-first feature sets `TenantsOptions.IsEnabled = true`; the shell feature on 3.9.0 registered only the resolver pipeline. **L0 AC2 on pin `59b14969`: the filter applies.** The shell feature now sets `options.IsEnabled = true`. | 3.9.0: `Elsa.Tenants/ShellFeatures/TenantsFeature.cs` did not set `IsEnabled`. **main `59b14969`**: same file sets `IsEnabled = true`. Proven by `TenantFilterTests`. elsa-core #9223 (milestone 3.11). | A | No (B) | No (B). No longer blocks A on this pin. |
 | G2 | **Definition uniqueness ignored the tenant.** `(DefinitionId, Version)` was one unique index with no `TenantId`: a collision and an existence oracle. | 3.9.0: `Elsa.Persistence.EFCore/Modules/Management/Configurations.cs:24`. **Fixed on main**: the index is now `(DefinitionId, TenantId, Version)` (same file, line 24). elsa-core #9163 (merged 5 Nov, 3.11), #9162 (closed). #7539 is still open on the 3.11 milestone. | A | No | No on 3.11. Re-check on the pinned build. |
 | G3 | **Unresolved or unknown tenant falls open to the default tenant.** A resolver that names an unknown tenant returns `null`; the middleware still opens a scope and the ambient tenant becomes `""`. | 3.9.0: `Elsa.Tenants/Services/DefaultTenantResolverPipelineInvoker.cs:35`; `Elsa.Tenants.AspNetCore/Middleware/TenantResolutionMiddleware.cs:37`; `DefaultTenantAccessor.cs:10`. In B, CShells' strict `Default` fallback applies (`cshells wiki/Shell-Resolution.md:203-209`): every shard configures an explicit, empty `Default` shell (leaf L1). elsa-core #9222 (milestone 3.11). | A; B mitigated by our config | Mitigated in L1, tested in L11 | Same |
 | G4 | **Tenant delete purges no data.** It removes the tenant record and unschedules timers and bookmarks; nothing deletes definitions, instances, logs, secrets or key-values. | 3.9.0 and **main**: `Elsa.Tenants/Endpoints/Tenants/Delete/Endpoint.cs:18`; `Elsa.Scheduling/Handlers/UpdateTenantSchedules.cs` is the only non-core `ITenantDeletedEvent` implementer (`ITenantDeletedEvent.cs`). elsa-core #9224 (milestone 3.11). | A | No (B: drop the database) | No (B). Blocks A. |
@@ -248,8 +283,9 @@ mitigation that our own leaves deliver (G3, G9), and the rest are measured in L0
 - **Blocks production:** G7 (per-tenant limits), G9 (an open Elsa 3 item, or a
   tested L1 mitigation), G15 for any multi-node shard, and G8 or G19 if L0 shows
   cross-tenant contention. G17 stays "avoid" until #8533 is fixed and tested.
-- **Blocks only the discriminator fallback (model A):** G1, G4, G6, G18, G13, G14, plus
-  the G2 re-check. Those are not on the critical path unless §3.4 triggers.
+- **Blocks only the discriminator fallback (model A):** G4, G6, G18, G13, G14.
+  G1 applies on pin `59b14969`; G2 is fixed. Those remaining rows are not on the
+  critical path unless §3.4 triggers.
 
 ### 4.3 What is sound
 
