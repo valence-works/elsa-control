@@ -240,9 +240,11 @@ class AzureApiDeployWorkflowTests(unittest.TestCase):
         deploy_start = self.source.index("      - name: Deploy API app")
         rollback_start = self.source.index("      - name: Restore previous API deployment")
         cleanup_start = self.source.index("      - name: Clean up captured production Stripe billing settings")
+        assertion_start = self.source.index("      - name: Assert required mutate-mode steps succeeded")
         self.assertLess(capture_start, deploy_start)
         self.assertLess(deploy_start, rollback_start)
         self.assertLess(rollback_start, cleanup_start)
+        self.assertLess(cleanup_start, assertion_start)
         rollback_end = self.source.index("\n      - name:", rollback_start + 1)
         rollback = self.source[rollback_start:rollback_end]
         self.assertIn('python3 scripts/production_stripe_reconcile.py --reapply "$PRODUCTION_BILLING_CAPTURE_PATH"', rollback)
@@ -843,6 +845,14 @@ fi
         check_end = self.source.index("\n      - name:", check_start)
         check_script = dedent(self.source[check_start + len("        run: |\n") : check_end])
         return check_script.replace("${{ github.event_name }}", "workflow_dispatch")
+
+    def _step_script(self, step_name: str) -> str:
+        start = self.source.index(f"      - name: {step_name}")
+        run_start = self.source.index("        run: |\n", start) + len("        run: |\n")
+        end = self.source.find("\n      - name:", run_start)
+        if end == -1:
+            end = len(self.source)
+        return dedent(self.source[run_start:end])
 
     def test_pairing_allowlist_is_staging_only_and_excludes_the_smoke_owner_org(self) -> None:
         check_script = self._deployment_config_script()
@@ -1797,6 +1807,8 @@ fi
         self.assertNotIn("write_billing_expected_mode", infra_branch)
         self.assertIn("Development is not a billing target.", self.source)
         self.assertIn("Enabling development billing is unsupported.", self.source)
+        self.assertEqual(names[-1], "Assert required mutate-mode steps succeeded")
+        self.assertIn("always()", by_name["Assert required mutate-mode steps succeeded"])
 
     def test_development_target_leaves_billing_expected_mode_unset(self) -> None:
         check_start = self.source.index("        run: |\n", self.source.index("      - name: Check deployment configuration"))
@@ -1827,6 +1839,140 @@ fi
             )
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             self.assertIn("billing_expected_mode=\n", Path(output.name).read_text())
+
+    def test_missing_deployment_configuration_fails_red(self) -> None:
+        check_start = self.source.index("      - name: Check deployment configuration")
+        check_end = self.source.index("\n      - name:", check_start)
+        check_step = self.source[check_start:check_end]
+        self.assertNotIn("github.event_name", check_step)
+        self.assertNotIn(
+            "Deployment skipped because configuration is incomplete",
+            self.source,
+        )
+        self.assertIn(
+            'echo "::error::Deployment configuration is incomplete. Missing: $missing_names"',
+            check_step,
+        )
+        self.assertIn("exit 1", check_step.split("missing_names=$missing_names", 1)[1])
+
+        check_script = self._deployment_config_script()
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {
+                "AZURE_CLIENT_ID",
+                "AZURE_TENANT_ID",
+                "AZURE_SUBSCRIPTION_ID",
+                "AZURE_CONTAINER_REGISTRY_ENDPOINT",
+                "AZURE_ENV_NAME",
+                "AZURE_LOCATION",
+                "AZURE_RESOURCE_GROUP",
+                "AZURE_WEBAPP_NAME",
+            }
+        }
+        environment.update(
+            {
+                "TARGET_ENVIRONMENT": "production",
+                "DEPLOY_MODE": "app",
+                "AZURE_TENANT_ID": "00000000-0000-0000-0000-000000000002",
+                "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000003",
+                "AZURE_CONTAINER_REGISTRY_ENDPOINT": "prod.azurecr.io",
+                "AZURE_ENV_NAME": "production",
+                "AZURE_LOCATION": "westeurope",
+                "AZURE_RESOURCE_GROUP": "rg-production",
+                "AZURE_WEBAPP_NAME": "prod-api",
+            }
+        )
+        environment.update(PRODUCTION_BILLING_FIXTURE)
+        with tempfile.NamedTemporaryFile() as output, tempfile.NamedTemporaryFile() as github_env:
+            environment["GITHUB_OUTPUT"] = output.name
+            environment["GITHUB_ENV"] = github_env.name
+            result = subprocess.run(
+                ["bash", "-c", check_script],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            combined = result.stdout + result.stderr
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("::error::Deployment configuration is incomplete. Missing: AZURE_CLIENT_ID", combined)
+            self.assertNotIn("::notice::Deployment skipped because configuration is incomplete", combined)
+            self.assertIn("deploy_configured=false", Path(output.name).read_text())
+            self.assertNotIn("deploy_configured=true", Path(output.name).read_text())
+
+    def test_mutate_mode_assertion_fails_when_deploy_is_skipped(self) -> None:
+        assertion_start = self.source.rfind("      - name: Assert required mutate-mode steps succeeded")
+        self.assertGreater(assertion_start, self.source.index("      - name: Clean up captured production Stripe billing settings"))
+        self.assertEqual(
+            assertion_start,
+            self.source.rfind("      - name: "),
+        )
+        assertion_step = self.source[assertion_start:]
+        self.assertIn("if: ${{ always() }}", assertion_step)
+        self.assertIn("DEPLOY_API_OUTCOME: ${{ steps.deploy-api.outcome }}", assertion_step)
+        self.assertIn("HEALTH_GATE_OUTCOME: ${{ steps.health-gate.outcome }}", assertion_step)
+        self.assertIn("PRODUCTION_STRIPE_OUTCOME: ${{ steps.production-stripe.outcome }}", assertion_step)
+
+        assertion_script = self._step_script("Assert required mutate-mode steps succeeded")
+
+        def run_assertion(**extra: str) -> subprocess.CompletedProcess[str]:
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "DEPLOY_MODE": "app",
+                    "TARGET_ENVIRONMENT": "production",
+                    "DEPLOY_API_OUTCOME": "success",
+                    "HEALTH_GATE_OUTCOME": "success",
+                    "PRODUCTION_STRIPE_OUTCOME": "success",
+                }
+            )
+            environment.update(extra)
+            return subprocess.run(
+                ["bash", "-c", assertion_script],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        skipped_deploy = run_assertion(DEPLOY_API_OUTCOME="skipped", HEALTH_GATE_OUTCOME="skipped", PRODUCTION_STRIPE_OUTCOME="skipped")
+        skipped_combined = skipped_deploy.stdout + skipped_deploy.stderr
+        self.assertNotEqual(0, skipped_deploy.returncode)
+        self.assertIn("Required step did not succeed: Deploy API app (outcome=skipped)", skipped_combined)
+        self.assertNotIn("Verify deployed API health", skipped_combined)
+        self.assertNotIn("Audit production Stripe billing", skipped_combined)
+
+        skipped_health = run_assertion(HEALTH_GATE_OUTCOME="skipped", PRODUCTION_STRIPE_OUTCOME="skipped")
+        self.assertNotEqual(0, skipped_health.returncode)
+        self.assertIn(
+            "Required step did not succeed: Verify deployed API health (outcome=skipped)",
+            skipped_health.stdout + skipped_health.stderr,
+        )
+
+        skipped_audit = run_assertion(PRODUCTION_STRIPE_OUTCOME="skipped")
+        self.assertNotEqual(0, skipped_audit.returncode)
+        self.assertIn(
+            "Required step did not succeed: Audit production Stripe billing (outcome=skipped)",
+            skipped_audit.stdout + skipped_audit.stderr,
+        )
+
+        staging_without_audit = run_assertion(TARGET_ENVIRONMENT="test", PRODUCTION_STRIPE_OUTCOME="skipped")
+        self.assertEqual(0, staging_without_audit.returncode, staging_without_audit.stdout + staging_without_audit.stderr)
+
+        complete = run_assertion()
+        self.assertEqual(0, complete.returncode, complete.stdout + complete.stderr)
+
+        for mode in ("build", "telemetry"):
+            with self.subTest(mode=mode):
+                kept = run_assertion(
+                    DEPLOY_MODE=mode,
+                    DEPLOY_API_OUTCOME="skipped",
+                    HEALTH_GATE_OUTCOME="skipped",
+                    PRODUCTION_STRIPE_OUTCOME="skipped",
+                )
+                self.assertEqual(0, kept.returncode, kept.stdout + kept.stderr)
 
     def test_rollback_message_names_the_failed_trigger(self) -> None:
         start = self.source.index(
