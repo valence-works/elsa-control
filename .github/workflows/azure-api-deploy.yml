@@ -611,13 +611,8 @@ jobs:
           missing_names="$(IFS=', '; echo "${missing[*]}")"
           echo "deploy_configured=false" >> "$GITHUB_OUTPUT"
           echo "missing_names=$missing_names" >> "$GITHUB_OUTPUT"
-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "::error::Deployment configuration is incomplete. Missing: $missing_names"
-            exit 1
-          fi
-
-          echo "::notice::Deployment skipped because configuration is incomplete. Missing: $missing_names"
+          echo "::error::Deployment configuration is incomplete. Missing: $missing_names"
+          exit 1
 
       - name: Require main ref for Azure mutation
         if: ${{ success() && steps.deployment-config.outputs.deploy_configured == 'true' }}
@@ -1762,3 +1757,40 @@ jobs:
         run: |
           set -euo pipefail
           rm -f -- "$PRODUCTION_BILLING_CAPTURE_PATH"
+
+      - name: Assert required mutate-mode steps succeeded
+        if: ${{ always() }}
+        env:
+          DEPLOY_API_OUTCOME: ${{ steps.deploy-api.outcome }}
+          HEALTH_GATE_OUTCOME: ${{ steps.health-gate.outcome }}
+          PRODUCTION_STRIPE_OUTCOME: ${{ steps.production-stripe.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "$DEPLOY_MODE" in
+            app|promote|infra)
+              ;;
+            build|telemetry)
+              exit 0
+              ;;
+            *)
+              echo "::error::Unsupported deployment mode; refusing to accept the run as complete."
+              exit 1
+              ;;
+          esac
+
+          fail_if_unsuccessful() {
+            local step_name="$1"
+            local outcome="$2"
+            if [ "$outcome" != "success" ]; then
+              echo "::error::Required step did not succeed: ${step_name} (outcome=${outcome:-unset})."
+              exit 1
+            fi
+          }
+
+          fail_if_unsuccessful "Deploy API app" "${DEPLOY_API_OUTCOME:-}"
+          fail_if_unsuccessful "Verify deployed API health" "${HEALTH_GATE_OUTCOME:-}"
+          if [ "$TARGET_ENVIRONMENT" = "production" ]; then
+            fail_if_unsuccessful "Audit production Stripe billing" "${PRODUCTION_STRIPE_OUTCOME:-}"
+          fi
