@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>ElsaControl.SharedShellAc1.VerifiedPackage</RootNamespace>
+    <AssemblyName>ElsaControl.SharedShellAc1.VerifiedPackage</AssemblyName>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+</Project>
