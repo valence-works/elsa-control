@@ -4,6 +4,9 @@ Files here are shared, byte for byte, with [`valence-works/elsa-production-image
 under the same path. Each repository's tests assert that its code matches the file and that the file's canonical digest
 equals a constant pinned in both repositories, so neither side can change the contract alone.
 
+Hosted billing JSON under [`hosted-subscription/`](hosted-subscription/) is a separate Hub contract. It is not copied
+to the production image. See that folder's README.
+
 - `managed-elsa-studio-grants-v1.json`: Elsa 3.8 `verb:resource` permissions Control may issue to a workspace Owner
   through managed Open Studio, and the release-manifest capability that advertises support for them. The image rejects
   any other permission at redemption.

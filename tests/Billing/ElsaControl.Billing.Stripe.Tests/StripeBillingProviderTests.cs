@@ -405,6 +405,27 @@ public sealed class StripeBillingProviderTests
     }
 
     [Fact]
+    public void Invoice_payment_failed_is_unknown_and_does_not_project_a_lifecycle_state()
+    {
+        var provider = CreateProvider();
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var json = $"{{\"id\":\"evt_invoice_failed\",\"object\":\"event\",\"api_version\":\"2026-08-26.dahlia\",\"created\":{timestamp},\"type\":\"invoice.payment_failed\",\"data\":{{\"object\":{{\"id\":\"in_123\",\"object\":\"invoice\",\"customer\":\"cus_123\",\"amount_due\":1000,\"status\":\"open\",\"metadata\":{{}},\"parent\":{{\"type\":\"subscription_details\",\"subscription_details\":{{\"subscription\":\"sub_old\",\"metadata\":{{\"elsa_control_organization_id\":\"{OrganizationId:D}\"}}}}}}}}}}}}";
+        var signature = EventUtility.GenerateSignatureHeader(json, WebhookSecret, timestamp);
+
+        var result = provider.VerifyAndNormalizeWebhook(
+            System.Text.Encoding.UTF8.GetBytes(json),
+            signature,
+            DateTimeOffset.FromUnixTimeSeconds(timestamp));
+
+        Assert.Equal(BillingWebhookNormalizationStatus.Unknown, result.Status);
+        Assert.Null(result.Event!.State);
+        Assert.Equal(OrganizationId, result.Event.OrganizationId);
+        Assert.Equal("cus_123", result.Event.ProviderCustomerReference);
+        Assert.Equal("sub_old", result.Event.ProviderSubscriptionReference);
+        Assert.Equal("invoice.payment_failed", result.Event.EventType);
+    }
+
+    [Fact]
     public void Supported_subscription_event_without_identity_is_invalid()
     {
         var provider = CreateProvider();

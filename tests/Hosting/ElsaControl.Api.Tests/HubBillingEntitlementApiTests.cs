@@ -91,6 +91,26 @@ public sealed class HubBillingEntitlementApiTests
     }
 
     [Fact]
+    public async Task Hub_session_reads_retained_without_a_recovery_action()
+    {
+        await using var app = CreateHubApplication();
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = CreateHubClient(app, HubSubject);
+        var owned = await BootstrapAsync(client);
+        await SeedRetainedHubSubscriptionAsync(app, owned.OrganizationId);
+
+        using var response = await client.GetAsync(
+            $"/api/organizations/{owned.OrganizationId:D}/billing/hosted-subscription");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var status = await response.Content.ReadControlJsonAsync<HostedSubscriptionManagementResponse>();
+        Assert.Equal(nameof(OrganizationSubscriptionState.Retained), status!.SubscriptionState);
+        Assert.Null(status.SuspensionReason);
+        Assert.Equal(OrganizationBillingRecoveryActions.None, status.RecoveryAction);
+        Assert.Equal(BillingWebhookSources.Hub, status.Source);
+    }
+
+    [Fact]
     public async Task Hub_session_gets_organization_not_found_for_another_organization()
     {
         await using var app = CreateHubApplication();
@@ -209,6 +229,22 @@ public sealed class HubBillingEntitlementApiTests
                 break;
         }
 
+        db.OrganizationSubscriptions.Add(subscription);
+        await db.SaveChangesAsync();
+    }
+
+    private static async Task SeedRetainedHubSubscriptionAsync(ControlApiTestApplication app, Guid organizationId)
+    {
+        await using var scope = app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var subscription = OrganizationSubscriptionLifecycle.CreateTrial(organizationId, BillingProviderNames.Stripe, now.AddDays(-40));
+        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Active, now.AddDays(-39));
+        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Suspended, now.AddDays(-31));
+        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Retained, now.AddDays(-1), advanceLifecycleVersion: true);
+        subscription.ProviderCustomerReference = "cus_hub_retained";
+        subscription.ProviderSubscriptionReference = "sub_hub_retained";
+        subscription.WebhookSource = BillingWebhookSources.Hub;
         db.OrganizationSubscriptions.Add(subscription);
         await db.SaveChangesAsync();
     }

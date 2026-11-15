@@ -1,0 +1,38 @@
+{
+  "organizationId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  "subscription": {
+    "state": "Active",
+    "trialStartedAt": "2026-09-04T10:00:00+00:00",
+    "trialEndsAt": "2026-09-18T10:00:00+00:00",
+    "activatedAt": "2026-09-04T10:00:00+00:00",
+    "pastDueAt": null,
+    "constrainedAt": null,
+    "suspendedAt": null,
+    "retainedAt": null,
+    "deletedAt": null,
+    "updatedAt": "2026-09-04T10:00:00+00:00"
+  },
+  "entitlements": {
+    "canCreateCustomSources": false,
+    "maxSources": 1,
+    "maxWorkspaces": 1,
+    "maxInstances": 1,
+    "maxPackagesIndexed": null,
+    "maxVersionsPerPackage": null,
+    "maxSyncsPerDay": null,
+    "privateFeedsEnabled": false,
+    "managedHostingEnabled": true,
+    "deploymentTargetsEnabled": true,
+    "syncedAt": "2026-09-04T10:00:00+00:00"
+  },
+  "capacity": {
+    "managedInstancesUsed": 1,
+    "managedInstancesLimit": 1,
+    "workspacesUsed": 1,
+    "workspacesLimit": 1
+  },
+  "capabilities": [
+    "managed-hosting",
+    "deployment-targets"
+  ]
+}

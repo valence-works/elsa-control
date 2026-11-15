@@ -1,0 +1,22 @@
+{
+  "organizationId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  "subscriptionState": "Suspended",
+  "billingLinked": true,
+  "portalAvailable": true,
+  "canManageSubscription": true,
+  "managementAction": "open-portal",
+  "copy": {
+    "engineDeletion": {
+      "code": "engine-deletion-leaves-subscription-active",
+      "message": "Deleting a managed engine does not cancel the Hosted subscription. Billing continues until the customer cancels it in the subscription portal."
+    },
+    "subscriptionCancellation": {
+      "code": "subscription-cancellation-ends-at-period-end",
+      "message": "Canceling the Hosted subscription ends access and billing at the end of the current period. It does not immediately delete the managed engine."
+    },
+    "missingBillingLinkage": null
+  },
+  "source": "hub",
+  "suspensionReason": "DeletionRequested",
+  "recoveryAction": "None"
+}
