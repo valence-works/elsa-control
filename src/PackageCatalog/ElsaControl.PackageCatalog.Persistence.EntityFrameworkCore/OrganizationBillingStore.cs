@@ -192,6 +192,7 @@ public sealed partial class OrganizationBillingStore(
         CancellationToken cancellationToken) =>
         dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
         {
+            _pendingOperatorAlerts.Clear();
             if (!await TryEnsureOrganizationExistsAsync(providerEvent.OrganizationId, providerEvent.WebhookSource, cancellationToken))
                 return new BillingEventConsumptionResult(BillingEventConsumptionOutcome.Ignored, null, null, null);
             var existingEvent = await FindInboxAsync(providerEvent, cancellationToken);
@@ -237,6 +238,7 @@ public sealed partial class OrganizationBillingStore(
                 subscription = null;
             var sourceConflict = false;
             if (subscription is not null &&
+                !IsInternalGrantReplaceableByStripe(subscription, providerEvent.Provider) &&
                 !string.Equals(
                     BillingWebhookSources.Normalize(subscription.WebhookSource),
                     BillingWebhookSources.Normalize(providerEvent.WebhookSource),
@@ -281,6 +283,21 @@ public sealed partial class OrganizationBillingStore(
                 await dbContext.SaveChangesAsync(cancellationToken);
                 var conflictEntitlement = await CurrentEntitlementAsync(providerEvent.OrganizationId, cancellationToken);
                 return new(BillingEventConsumptionOutcome.Rejected, subscription, conflictEntitlement, inbox, inbox.RejectionCode);
+            }
+
+            if (subscription is not null &&
+                IsInternalGrantReplaceableByStripe(subscription, providerEvent.Provider) &&
+                providerEvent.State == OrganizationSubscriptionState.Trial &&
+                !BillingWebhookSources.IsHub(providerEvent.WebhookSource))
+            {
+                // Control checkout starts the Stripe trial. A Control-source
+                // trialing webhook must not tombstone an internal grant.
+                inbox.ProcessingStatus = BillingProviderEventProcessingStatus.Rejected;
+                inbox.RejectionCode = "subscription.missing";
+                inbox.ProcessedAt = now;
+                AddBillingAudit(providerEvent.OrganizationId, inbox.Id, "A normalized billing provider event was rejected because no control-plane subscription exists.", now);
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return new(BillingEventConsumptionOutcome.Rejected, subscription, await CurrentEntitlementAsync(providerEvent.OrganizationId, cancellationToken), inbox, inbox.RejectionCode);
             }
 
             if (subscription is not null && IsInternalGrantReplacedByStripe(subscription, providerEvent))
@@ -581,7 +598,7 @@ public sealed partial class OrganizationBillingStore(
             }
             else if (engineQuantity is null or 0)
             {
-                if (StripeCommercialEngineQuantity.IsUninitializedCap(entitlement.MaxInstances))
+                if (!CanKeepProjectedStripeAllowance(entitlement, subscription))
                     entitlement.MaxInstances = StripeCommercialEngineQuantity.MissingOrZeroAllowance;
             }
             else if (StripeCommercialEngineQuantity.TryResolveActiveAllowance(engineQuantity, out var maxInstances))
@@ -590,7 +607,7 @@ public sealed partial class OrganizationBillingStore(
             }
             else
             {
-                if (StripeCommercialEngineQuantity.IsUninitializedCap(entitlement.MaxInstances))
+                if (!CanKeepProjectedStripeAllowance(entitlement, subscription))
                     entitlement.MaxInstances = StripeCommercialEngineQuantity.MissingOrZeroAllowance;
                 await QueueOperatorAlertAsync(
                     subscription.OrganizationId,
@@ -722,11 +739,19 @@ public sealed partial class OrganizationBillingStore(
         IsNewPaidSubscriptionOnDifferentReference(subscription, providerEvent) &&
         OrganizationSubscriptionLifecycle.IsCanceledSuspension(subscription);
 
+    private static bool CanKeepProjectedStripeAllowance(
+        OrganizationEntitlementSnapshot entitlement,
+        OrganizationSubscription subscription) =>
+        entitlement.SubscriptionId == subscription.Id &&
+        !StripeCommercialEngineQuantity.IsUninitializedCap(entitlement.MaxInstances);
+
     private static bool IsInternalGrantReplacedByStripe(
         OrganizationSubscription subscription,
         BillingProviderEvent providerEvent) =>
         IsInternalGrantReplaceableByStripe(subscription, providerEvent.Provider) &&
-        providerEvent.State is OrganizationSubscriptionState.Trial or OrganizationSubscriptionState.Active;
+        (providerEvent.State == OrganizationSubscriptionState.Active ||
+         (providerEvent.State == OrganizationSubscriptionState.Trial &&
+          BillingWebhookSources.IsHub(providerEvent.WebhookSource)));
 
     private static bool IsInternalGrantReplaceableByStripe(OrganizationSubscription subscription, string provider) =>
         string.Equals(subscription.Provider, BillingProviderNames.Internal, StringComparison.Ordinal) &&

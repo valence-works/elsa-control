@@ -244,6 +244,38 @@ public sealed class OrganizationInternalEntitlementPersistenceTests : IAsyncLife
         Assert.Equal(OrganizationInternalEntitlementOutcome.CommercialSubscriptionExists, (await GrantAsync()).Outcome);
     }
 
+    [Fact]
+    public async Task Stripe_active_without_quantity_replaces_an_internal_grant_with_the_missing_quantity_allowance()
+    {
+        await GrantAsync(maxInstances: 3);
+
+        var paid = await _store.ConsumeAsync(StripeEvent(OrganizationSubscriptionState.Active), Now.AddHours(1));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Applied, paid.Outcome);
+        Assert.Equal(BillingProviderNames.Stripe, paid.Subscription!.Provider);
+        Assert.Equal(1, paid.Entitlement!.MaxInstances);
+        Assert.Equal(1, (await ReadAsync()).Entitlements.Single().MaxInstances);
+    }
+
+    [Fact]
+    public async Task Control_trial_webhook_does_not_tombstone_an_internal_grant()
+    {
+        await GrantAsync(maxInstances: 3);
+
+        var rejected = await _store.ConsumeAsync(StripeEvent(OrganizationSubscriptionState.Trial), Now.AddHours(1));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Rejected, rejected.Outcome);
+        Assert.Equal("subscription.missing", rejected.RejectionCode);
+        var persisted = await ReadAsync();
+        Assert.Equal(3, Assert.Single(persisted.Entitlements).MaxInstances);
+        Assert.Contains(
+            persisted.Subscriptions,
+            x => x.Provider == BillingProviderNames.Internal && OrganizationSubscriptionLifecycle.IsLive(x.State));
+        Assert.DoesNotContain(
+            persisted.Subscriptions,
+            x => x.Provider == BillingProviderNames.Stripe && OrganizationSubscriptionLifecycle.IsLive(x.State));
+    }
+
     [Theory]
     [InlineData("internal")]
     [InlineData("INTERNAL")]

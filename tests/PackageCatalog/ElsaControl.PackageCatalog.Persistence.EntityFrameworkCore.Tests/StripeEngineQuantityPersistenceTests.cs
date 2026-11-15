@@ -72,6 +72,30 @@ public sealed class StripeEngineQuantityPersistenceTests
     }
 
     [Fact]
+    public async Task Hub_trial_replaces_an_internal_grant_and_stays_at_one_engine()
+    {
+        await using var db = await SeedOrganizationAsync(linkHub: true);
+        var store = new OrganizationBillingStore(db);
+        Assert.Equal(
+            OrganizationInternalEntitlementOutcome.Granted,
+            (await store.GrantInternalEntitlementAsync(
+                new(OrganizationId, new("Internal dogfood", 3, Now.AddDays(30)), "operator"),
+                Now)).Outcome);
+
+        var trial = await store.ConsumeAsync(
+            Event("evt-hub-trial", OrganizationSubscriptionState.Trial, Now.AddMinutes(1), 2, BillingWebhookSources.Hub),
+            Now.AddMinutes(2));
+
+        Assert.Equal(BillingEventConsumptionOutcome.Applied, trial.Outcome);
+        Assert.Equal(BillingProviderNames.Stripe, trial.Subscription!.Provider);
+        Assert.Equal(OrganizationSubscriptionState.Trial, trial.Subscription.State);
+        Assert.Equal(1, trial.Entitlement!.MaxInstances);
+        Assert.DoesNotContain(
+            await db.OrganizationSubscriptions.ToListAsync(),
+            x => x.Provider == BillingProviderNames.Internal && OrganizationSubscriptionLifecycle.IsLive(x.State));
+    }
+
+    [Fact]
     public async Task Later_event_without_quantity_keeps_the_projected_allowance()
     {
         await using var db = await SeedOrganizationAsync();
