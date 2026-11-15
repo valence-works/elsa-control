@@ -126,6 +126,31 @@ public sealed class OrganizationSubscriptionLifecycleTests
     }
 
     [Fact]
+    public void Non_payment_suspension_becomes_canceled_subscribe_when_the_same_row_is_deleted()
+    {
+        var subscription = OrganizationSubscriptionLifecycle.CreateTrial(Guid.NewGuid(), "stripe", StartedAt);
+        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.PastDue, StartedAt.AddDays(14));
+        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Constrained, StartedAt.AddDays(21));
+        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Suspended, StartedAt.AddDays(22));
+        subscription.ProviderCustomerReference = "cus_acme";
+        subscription.ProviderSubscriptionReference = "sub_acme";
+        var suspendedAt = subscription.SuspendedAt;
+        var retentionEndsAt = subscription.RetentionEndsAt;
+        Assert.Equal(OrganizationSubscriptionSuspensionReason.NonPayment, subscription.SuspensionReason);
+        Assert.Equal(OrganizationBillingRecoveryActions.UpdatePaymentMethod, OrganizationSubscriptionLifecycle.RecoveryAction(subscription));
+
+        OrganizationSubscriptionLifecycle.ApplyState(subscription, OrganizationSubscriptionState.Suspended, StartedAt.AddDays(25));
+
+        Assert.Equal(OrganizationSubscriptionState.Suspended, subscription.State);
+        Assert.Equal(OrganizationSubscriptionSuspensionReason.Canceled, subscription.SuspensionReason);
+        Assert.Equal(OrganizationBillingRecoveryActions.Subscribe, OrganizationSubscriptionLifecycle.RecoveryAction(subscription));
+        Assert.Equal(suspendedAt, subscription.SuspendedAt);
+        Assert.Equal(retentionEndsAt, subscription.RetentionEndsAt);
+        Assert.True(OrganizationSubscriptionLifecycle.IsCanceledSuspension(subscription));
+        Assert.False(OrganizationSubscriptionLifecycle.AllowsNonPaymentResume(subscription, OrganizationSubscriptionState.Active));
+    }
+
+    [Fact]
     public void Canceled_and_deletion_requested_suspensions_do_not_resume_on_the_same_row()
     {
         var canceled = OrganizationSubscriptionLifecycle.CreateTrial(Guid.NewGuid(), "stripe", StartedAt);

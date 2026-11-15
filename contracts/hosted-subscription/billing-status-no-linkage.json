@@ -1,0 +1,12 @@
+{
+  "organizationId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  "subscription": null,
+  "entitlements": null,
+  "capacity": {
+    "managedInstancesUsed": 0,
+    "managedInstancesLimit": null,
+    "workspacesUsed": 1,
+    "workspacesLimit": null
+  },
+  "capabilities": []
+}

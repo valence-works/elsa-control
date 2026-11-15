@@ -1,0 +1,25 @@
+{
+  "organizationId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  "subscriptionState": null,
+  "billingLinked": false,
+  "portalAvailable": false,
+  "canManageSubscription": true,
+  "managementAction": "no-billing-linkage",
+  "copy": {
+    "engineDeletion": {
+      "code": "engine-deletion-leaves-subscription-active",
+      "message": "Deleting a managed engine does not cancel the Hosted subscription. Billing continues until the customer cancels it in the subscription portal."
+    },
+    "subscriptionCancellation": {
+      "code": "subscription-cancellation-ends-at-period-end",
+      "message": "Canceling the Hosted subscription ends access and billing at the end of the current period. It does not immediately delete the managed engine."
+    },
+    "missingBillingLinkage": {
+      "code": "billing-linkage-missing",
+      "message": "No Stripe billing customer is linked to this Hosted organization yet. Complete checkout, or wait for the billing webhook, before managing the subscription."
+    }
+  },
+  "source": null,
+  "suspensionReason": null,
+  "recoveryAction": "None"
+}

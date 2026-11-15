@@ -503,6 +503,21 @@ public sealed class StripeBillingProvider(
         if (dataObject is Customer customer)
             return new(ReadOrganizationId(customer.Metadata), customer.Id, null, customer.Id, null, null, null);
 
+        if (dataObject is Invoice invoice)
+        {
+            var organizationId = ReadOrganizationId(invoice.Metadata);
+            if (organizationId == Guid.Empty)
+                organizationId = ReadOrganizationId(invoice.Parent?.SubscriptionDetails?.Metadata);
+            return new(
+                organizationId,
+                invoice.CustomerId,
+                invoice.Parent?.SubscriptionDetails?.SubscriptionId,
+                invoice.Id,
+                null,
+                invoice.AmountDue == 0 ? null : invoice.AmountDue,
+                invoice.Status);
+        }
+
         if (dataObject is global::Stripe.Checkout.Session checkoutSession)
         {
             var organizationId = ReadOrganizationId(checkoutSession.Metadata);
