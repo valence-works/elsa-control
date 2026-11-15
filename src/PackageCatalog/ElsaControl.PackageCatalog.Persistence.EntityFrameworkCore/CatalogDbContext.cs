@@ -43,6 +43,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     public DbSet<AccountIdentityLinkAuditRecord> AccountIdentityLinkAuditRecords => Set<AccountIdentityLinkAuditRecord>();
     public DbSet<OrganizationSubscription> OrganizationSubscriptions => Set<OrganizationSubscription>();
     public DbSet<BillingProviderEventInboxEntry> BillingProviderEvents => Set<BillingProviderEventInboxEntry>();
+    public DbSet<OrganizationBillingOperatorAlertOutbox> OrganizationBillingOperatorAlertOutbox => Set<OrganizationBillingOperatorAlertOutbox>();
     public DbSet<OrganizationBillingLifecycleNotice> OrganizationBillingLifecycleNotices => Set<OrganizationBillingLifecycleNotice>();
     public DbSet<OrganizationBillingCleanup> OrganizationBillingCleanups => Set<OrganizationBillingCleanup>();
     public DbSet<OrganizationAzureSubscriptionBind> OrganizationAzureSubscriptionBinds => Set<OrganizationAzureSubscriptionBind>();
@@ -144,6 +145,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         modelBuilder.ApplyConfiguration(new Models.AccountIdentityLinkAuditRecordConfiguration());
         modelBuilder.ApplyConfiguration(new Models.OrganizationSubscriptionConfiguration());
         modelBuilder.ApplyConfiguration(new Models.BillingProviderEventInboxEntryConfiguration());
+        modelBuilder.ApplyConfiguration(new Models.OrganizationBillingOperatorAlertOutboxConfiguration());
         modelBuilder.ApplyConfiguration(new Models.OrganizationBillingLifecycleNoticeConfiguration());
         modelBuilder.ApplyConfiguration(new Models.OrganizationBillingCleanupConfiguration());
         modelBuilder.ApplyConfiguration(new Models.OrganizationAzureSubscriptionBindConfiguration());
@@ -446,6 +448,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             EnsureExternalEngineEnrollmentAuditIsAppendOnly();
             EnsureExternalEngineConnectionAuditIsAppendOnly();
             EnsureBillingProviderEventsAreAppendOnly();
+            EnsureBillingOperatorAlertsAreAppendOnly();
             EnsureBillingLifecycleNoticesAreAppendOnly();
             EnsureBillingCleanupsAreNotDeleted();
             EnsureBillingSubscriptionsAreConsistent();
@@ -514,6 +517,8 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             billingEvent.PriceReference = OptionalSafeReference(billingEvent.PriceReference, nameof(billingEvent.PriceReference), OrganizationBillingLimits.ProviderReferenceMaxLength);
             if (billingEvent.AmountMinorUnits is < 0)
                 throw new InvalidOperationException("A billing event amount must be a non-negative minor-unit total.");
+            if (billingEvent.Quantity is < 0)
+                throw new InvalidOperationException("A billing event quantity must be a non-negative integer.");
             billingEvent.RejectionCode = OptionalSafeCode(billingEvent.RejectionCode, nameof(billingEvent.RejectionCode));
             EnsureDefined(billingEvent.ProcessingStatus, nameof(billingEvent.ProcessingStatus));
             if (billingEvent.State.HasValue)
@@ -565,6 +570,22 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             if (cleanup.RequestedAt == default || cleanup.NotBeforeAt == default || cleanup.AttemptCount < 0)
                 throw new InvalidOperationException("Billing cleanup metadata is invalid.");
         }
+
+        foreach (var entry in ChangeTracker.Entries<OrganizationBillingOperatorAlertOutbox>()
+                     .Where(x => x.State is EntityState.Added or EntityState.Modified))
+        {
+            var alert = entry.Entity;
+            if (alert.Id == Guid.Empty || alert.OrganizationId == Guid.Empty)
+                throw new InvalidOperationException("A billing operator alert requires stable organization identifiers.");
+            alert.Kind = RequireSafeCode(alert.Kind, nameof(alert.Kind));
+            alert.DedupeIdentity = RequireSha256Hex(alert.DedupeIdentity, nameof(alert.DedupeIdentity));
+            alert.Summary = RequireAlertSummary(alert.Summary);
+            if (alert.ActiveDedicatedCount is < 0 || alert.MaxInstances is < 0 || alert.Quantity is < 0)
+                throw new InvalidOperationException("A billing operator alert cannot carry negative counts.");
+            alert.CreatedAt = alert.CreatedAt.ToUniversalTime();
+            if (alert.CreatedAt == default)
+                throw new InvalidOperationException("A billing operator alert requires a created timestamp.");
+        }
     }
 
     private void EnsureBillingProviderEventsAreAppendOnly()
@@ -572,6 +593,13 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         foreach (var entry in ChangeTracker.Entries<BillingProviderEventInboxEntry>()
                      .Where(x => x.State is EntityState.Modified or EntityState.Deleted))
             throw new InvalidOperationException("Billing provider event inbox entries are append-only.");
+    }
+
+    private void EnsureBillingOperatorAlertsAreAppendOnly()
+    {
+        foreach (var entry in ChangeTracker.Entries<OrganizationBillingOperatorAlertOutbox>()
+                     .Where(x => x.State is EntityState.Modified or EntityState.Deleted))
+            throw new InvalidOperationException("Billing operator alerts are append-only.");
     }
 
     private void EnsureBillingLifecycleNoticesAreAppendOnly()
@@ -1804,6 +1832,22 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
             value.Any(ch => !(char.IsAsciiLetterOrDigit(ch) || ch is '.' or '-' or '_' or ':')))
             throw new InvalidOperationException($"{name} must be a stable safe code.");
         return value;
+    }
+
+    private static string RequireSha256Hex(string? value, string name) =>
+        OptionalCanonicalHash(value, name) ?? throw new InvalidOperationException($"{name} must be a canonical SHA-256 hash.");
+
+    private static string RequireAlertSummary(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) ||
+            value.Length > 256 ||
+            value.Any(char.IsControl) ||
+            value.Contains('@', StringComparison.Ordinal) ||
+            value.Contains("cus_", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("sub_", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("price_", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("A billing operator alert summary must be a safe operator message.");
+        return value.Trim();
     }
 
     private static string RequireMigrationPhase(string? value)

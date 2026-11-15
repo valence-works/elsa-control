@@ -224,21 +224,24 @@ public sealed class OrganizationInternalEntitlementPersistenceTests : IAsyncLife
     }
 
     [Fact]
-    public async Task Provider_checkout_and_webhooks_cannot_take_over_an_internal_grant()
+    public async Task Stripe_subscription_replaces_an_internal_grant_and_does_not_stack_the_cap()
     {
-        await GrantAsync();
-        var before = await ReadAsync();
+        await GrantAsync(maxInstances: 3);
+        Assert.Equal(3, (await ReadAsync()).Entitlements.Single().MaxInstances);
 
-        await Assert.ThrowsAsync<BillingProviderEventConflictException>(() =>
-            _store.StartTrialAsync(OrganizationId, BillingProviderNames.Stripe, Now.AddHours(1)));
-        _db.ChangeTracker.Clear();
-        await Assert.ThrowsAsync<BillingProviderEventConflictException>(() =>
-            _store.ConsumeAsync(StripeEvent(OrganizationSubscriptionState.Suspended), Now.AddHours(1)));
+        var paid = await _store.ConsumeAsync(
+            StripeEvent(OrganizationSubscriptionState.Active) with { Quantity = 2 },
+            Now.AddHours(1));
 
-        var after = await ReadAsync();
-        Assert.Equal(Json(before.Subscriptions), Json(after.Subscriptions));
-        Assert.Equal(Json(before.Entitlements), Json(after.Entitlements));
-        Assert.Empty(await _db.BillingProviderEvents.ToListAsync());
+        Assert.Equal(BillingEventConsumptionOutcome.Applied, paid.Outcome);
+        Assert.Equal(BillingProviderNames.Stripe, paid.Subscription!.Provider);
+        Assert.Equal(2, paid.Entitlement!.MaxInstances);
+        var persisted = await ReadAsync();
+        Assert.Equal(2, Assert.Single(persisted.Entitlements).MaxInstances);
+        Assert.DoesNotContain(
+            persisted.Subscriptions,
+            x => x.Provider == BillingProviderNames.Internal && OrganizationSubscriptionLifecycle.IsLive(x.State));
+        Assert.Equal(OrganizationInternalEntitlementOutcome.CommercialSubscriptionExists, (await GrantAsync()).Outcome);
     }
 
     [Theory]
@@ -381,25 +384,23 @@ public sealed class OrganizationInternalEntitlementPersistenceTests : IAsyncLife
         var (grant, checkout) = (await grantTask, await checkoutTask);
 
         var persisted = await shared.ReadAsync();
-        var subscription = Assert.Single(persisted.Subscriptions);
         var entitlement = Assert.Single(persisted.Entitlements);
-        if (subscription.Provider == BillingProviderNames.Stripe)
+        var current = Assert.Single(
+            persisted.Subscriptions,
+            x => OrganizationSubscriptionLifecycle.IsLive(x.State));
+        Assert.True(entitlement.ManagedHostingEnabled);
+        if (current.Provider == BillingProviderNames.Stripe)
         {
-            // Checkout won: Stripe enables managed hosting, while the internal
-            // grant must be refused and never layer its cap or expiry over it.
+            // Stripe is the commercial owner. The internal cap must not stack
+            // on top of the Cloud-price quantity (trial defaults to 1).
             Assert.Null(checkout.Error);
-            Assert.Equal(OrganizationInternalEntitlementOutcome.CommercialSubscriptionExists, grant.Value!.Outcome);
-            Assert.True(entitlement.ManagedHostingEnabled);
             Assert.Equal(1, entitlement.MaxInstances);
-            Assert.Equal(subscription.TrialEndsAt, entitlement.ManagedHostingExpiresAt);
-            Assert.DoesNotContain(persisted.Audits, x => x.TargetType == "internal-entitlement");
+            Assert.Equal(current.TrialEndsAt, entitlement.ManagedHostingExpiresAt);
         }
         else
         {
-            // Grant won: checkout must fail loudly rather than attach to it.
-            Assert.Equal(BillingProviderNames.Internal, subscription.Provider);
+            Assert.Equal(BillingProviderNames.Internal, current.Provider);
             Assert.Equal(OrganizationInternalEntitlementOutcome.Granted, grant.Value!.Outcome);
-            Assert.IsType<BillingProviderEventConflictException>(checkout.Error);
             Assert.True(entitlement.ManagedHostingEnabled);
         }
     }

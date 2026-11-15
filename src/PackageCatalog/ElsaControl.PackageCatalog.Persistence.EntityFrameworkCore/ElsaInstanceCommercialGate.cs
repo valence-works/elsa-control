@@ -86,9 +86,11 @@ public sealed class EfCoreElsaInstanceCommercialGate(CatalogDbContext db, TimePr
 
         // MaxInstances is the Dedicated placement allowance (ADR-0017 F5).
         // Shared admission uses MaxSharedTenants and the counting assignment.
+        // Create (and dedicated moves) are denied at the cap. Start/Restart are
+        // denied only when the org is already over allowance.
         if (ShouldCheckDedicatedAllowance(action, placement) &&
             DedicatedCount(activeInstanceCount, placement) is { } dedicatedCount &&
-            dedicatedCount >= entitlement.MaxInstances)
+            BlocksDedicatedAllowance(action, dedicatedCount, entitlement.MaxInstances))
             return new ElsaInstanceCommercialGateDecision(
                 false,
                 ElsaInstanceCommercialOperation.InstanceLimitReached,
@@ -135,10 +137,23 @@ public sealed class EfCoreElsaInstanceCommercialGate(CatalogDbContext db, TimePr
         ElsaInstanceCommercialPlacementRequest? placement)
     {
         if (placement is null)
-            return action == ElsaInstanceOperationAction.Create;
+            return action is ElsaInstanceOperationAction.Create
+                or ElsaInstanceOperationAction.Start
+                or ElsaInstanceOperationAction.Restart;
         return placement.Selection.ConsumesDedicatedAllowance &&
-               (action == ElsaInstanceOperationAction.Create || placement.CreatesTargetTenant);
+               (action is ElsaInstanceOperationAction.Create
+                   or ElsaInstanceOperationAction.Start
+                   or ElsaInstanceOperationAction.Restart ||
+                placement.CreatesTargetTenant);
     }
+
+    private static bool BlocksDedicatedAllowance(
+        ElsaInstanceOperationAction action,
+        int dedicatedCount,
+        int maxInstances) =>
+        action is ElsaInstanceOperationAction.Start or ElsaInstanceOperationAction.Restart
+            ? dedicatedCount > maxInstances
+            : dedicatedCount >= maxInstances;
 
     private static bool ShouldCheckSharedAllowance(
         ElsaInstanceOperationAction action,

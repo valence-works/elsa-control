@@ -421,6 +421,24 @@ internal sealed class BillingProviderEventInboxEntryConfiguration : IEntityTypeC
     }
 }
 
+internal sealed class OrganizationBillingOperatorAlertOutboxConfiguration : IEntityTypeConfiguration<OrganizationBillingOperatorAlertOutbox>
+{
+    public void Configure(EntityTypeBuilder<OrganizationBillingOperatorAlertOutbox> builder)
+    {
+        builder.ToTable("OrganizationBillingOperatorAlertOutbox");
+        builder.HasKey(x => x.Id);
+        builder.Property(x => x.Kind).HasMaxLength(64).IsRequired();
+        builder.Property(x => x.DedupeIdentity).HasMaxLength(64).IsRequired();
+        builder.Property(x => x.Summary).HasMaxLength(256).IsRequired();
+        builder.Property(x => x.CreatedAt).HasConversion(
+            value => value.UtcTicks,
+            value => new DateTimeOffset(value, TimeSpan.Zero));
+        builder.HasIndex(x => x.DedupeIdentity).IsUnique();
+        builder.HasIndex(x => new { x.OrganizationId, x.Kind, x.CreatedAt });
+        builder.HasOne(x => x.Organization).WithMany().HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
 internal sealed class WorkspaceMembershipConfiguration : IEntityTypeConfiguration<WorkspaceMembership>
 {
     public void Configure(EntityTypeBuilder<WorkspaceMembership> builder)

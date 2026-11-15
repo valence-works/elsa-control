@@ -133,6 +133,29 @@ public sealed class ElsaInstanceCommercialGateTests
     }
 
     [Fact]
+    public async Task Over_allowance_denies_create_start_and_restart_but_not_stop_or_delete()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateContext(connection);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = await CreateWorkspaceAsync(db, OrganizationSubscriptionState.Active, managedHostingEnabled: true, maxInstances: 1);
+        var gate = new EfCoreElsaInstanceCommercialGate(db);
+
+        Assert.False((await gate.EvaluateAsync(workspace.OrganizationId, ElsaInstanceOperationAction.Create, 2)).Allowed);
+        var start = await gate.EvaluateAsync(workspace.OrganizationId, ElsaInstanceOperationAction.Start, 2);
+        Assert.False(start.Allowed);
+        Assert.Equal(ElsaInstanceCommercialOperation.InstanceLimitReached, start.Code);
+        Assert.Equal(2, start.CurrentInstanceCount);
+        Assert.Equal(1, start.MaxInstances);
+        Assert.False((await gate.EvaluateAsync(workspace.OrganizationId, ElsaInstanceOperationAction.Restart, 2)).Allowed);
+        Assert.True((await gate.EvaluateAsync(workspace.OrganizationId, ElsaInstanceOperationAction.Start, 1)).Allowed);
+        Assert.True((await gate.EvaluateAsync(workspace.OrganizationId, ElsaInstanceOperationAction.Restart, 1)).Allowed);
+        Assert.True((await gate.EvaluateAsync(workspace.OrganizationId, ElsaInstanceOperationAction.Stop)).Allowed);
+        Assert.True((await gate.EvaluateAsync(workspace.OrganizationId, ElsaInstanceOperationAction.Delete)).Allowed);
+    }
+
+    [Fact]
     public async Task Max_instances_is_enforced_at_the_admission_decision()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

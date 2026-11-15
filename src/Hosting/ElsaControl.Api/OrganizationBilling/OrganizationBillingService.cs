@@ -193,6 +193,8 @@ public sealed class OrganizationBillingApiService(
 
         var canManage = OrganizationRolePolicy.Allows(access.Role!.Value, OrganizationOperation.ManageBilling);
         var subscription = await billing.GetSubscriptionAsync(organizationId, cancellationToken);
+        var entitlement = await accounts.GetLatestOrganizationEntitlementAsync(organizationId, cancellationToken);
+        var activeDedicatedCount = await accounts.ActiveDedicatedInstanceCountAsync(organizationId, cancellationToken);
         var billingLinked = subscription is not null &&
                             !string.IsNullOrWhiteSpace(subscription.ProviderCustomerReference);
         var portalReady = IsStripeProvider && _stripeOptions.IsCloudPortalConfigured;
@@ -216,7 +218,9 @@ public sealed class OrganizationBillingApiService(
             subscription?.State == OrganizationSubscriptionState.Suspended
                 ? OrganizationSubscriptionLifecycle.ResolveSuspensionReason(subscription)?.ToString()
                 : null,
-            OrganizationSubscriptionLifecycle.RecoveryAction(subscription)));
+            OrganizationSubscriptionLifecycle.RecoveryAction(subscription),
+            entitlement?.MaxInstances,
+            activeDedicatedCount));
     }
 
     public async Task<HostedPortalApiResult> CreateHostedPortalAsync(

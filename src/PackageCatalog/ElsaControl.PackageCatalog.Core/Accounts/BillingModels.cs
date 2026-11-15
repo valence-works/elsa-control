@@ -107,7 +107,8 @@ public sealed record BillingProviderEvent(
     string? ProviderObjectReference = null,
     string? PriceReference = null,
     long? AmountMinorUnits = null,
-    string? WebhookSource = null);
+    string? WebhookSource = null,
+    int? Quantity = null);
 
 public static class BillingWebhookSources
 {
@@ -386,6 +387,7 @@ public sealed class BillingProviderEventInboxEntry
     public string? ProviderObjectReference { get; set; }
     public string? PriceReference { get; set; }
     public long? AmountMinorUnits { get; set; }
+    public int? Quantity { get; set; }
     public DateTimeOffset OccurredAt { get; set; }
     public DateTimeOffset ReceivedAt { get; set; }
     public DateTimeOffset? ProcessedAt { get; set; }

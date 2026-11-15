@@ -37,6 +37,8 @@ public sealed class HubBillingEntitlementApiTests
         Assert.True(status.BillingLinked);
         Assert.Null(status.SuspensionReason);
         Assert.Equal(OrganizationBillingRecoveryActions.None, status.RecoveryAction);
+        Assert.Equal(2, status.MaxInstances);
+        Assert.Equal(0, status.ActiveDedicatedCount);
     }
 
     [Theory]
@@ -197,6 +199,17 @@ public sealed class HubBillingEntitlementApiTests
         subscription.ProviderSubscriptionReference = "sub_hub_owned";
         subscription.WebhookSource = BillingWebhookSources.Hub;
         db.OrganizationSubscriptions.Add(subscription);
+        db.OrganizationEntitlementSnapshots.Add(new OrganizationEntitlementSnapshot
+        {
+            OrganizationId = organizationId,
+            SubscriptionId = subscription.Id,
+            ManagedHostingEnabled = true,
+            SubscriptionState = OrganizationSubscriptionState.Active,
+            MaxInstances = 2,
+            SyncedAt = now,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
         await db.SaveChangesAsync();
     }
 
