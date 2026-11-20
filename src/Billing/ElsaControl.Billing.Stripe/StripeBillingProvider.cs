@@ -334,7 +334,7 @@ public sealed class StripeBillingProvider(
                 return BillingWebhookNormalizationResult.Invalid("webhook.payload-invalid");
             var hash = Convert.ToHexString(SHA256.HashData(rawBody.Span)).ToLowerInvariant();
             var dataObject = stripeEvent.Data?.Object;
-            var correlation = ExtractCorrelation(dataObject);
+            var correlation = ExtractCorrelation(dataObject, matchedSource);
             var sourceName = StripeBillingOptions.NormalizeSourceName(matchedSource.Name) ?? BillingWebhookSources.Control;
             var providerEvent = CreateProviderEvent(correlation, stripeEvent, hash, sourceName);
             if (correlation.OrganizationId == Guid.Empty)
@@ -449,7 +449,8 @@ public sealed class StripeBillingProvider(
             correlation.ObjectReference,
             correlation.PriceReference,
             correlation.AmountMinorUnits,
-            sourceName);
+            sourceName,
+            correlation.Quantity);
 
     private void EnsureCheckoutConfigured()
     {
@@ -483,13 +484,14 @@ public sealed class StripeBillingProvider(
         string? ObjectReference,
         string? PriceReference,
         long? AmountMinorUnits,
-        string? Status);
+        string? Status,
+        int? Quantity = null);
 
-    private static StripeEventCorrelation ExtractCorrelation(IHasObject? dataObject)
+    private StripeEventCorrelation ExtractCorrelation(IHasObject? dataObject, StripeWebhookSourceOptions source)
     {
         if (dataObject is Subscription subscription)
         {
-            var (price, amount) = ReadSubscriptionPrice(subscription);
+            var (price, amount, quantity) = ReadSubscriptionPrice(subscription, source);
             return new(
                 ReadOrganizationId(subscription.Metadata),
                 subscription.CustomerId,
@@ -497,7 +499,8 @@ public sealed class StripeBillingProvider(
                 subscription.Id,
                 price,
                 amount,
-                subscription.Status);
+                subscription.Status,
+                quantity);
         }
 
         if (dataObject is Customer customer)
@@ -530,7 +533,7 @@ public sealed class StripeBillingProvider(
                 checkoutSession.CustomerId,
                 null,
                 checkoutSession.Id,
-                ReadCheckoutPrice(checkoutSession),
+                ReadCheckoutPrice(checkoutSession, source),
                 checkoutSession.AmountTotal,
                 null);
         }
@@ -538,15 +541,57 @@ public sealed class StripeBillingProvider(
         return new(Guid.Empty, null, null, null, null, null, null);
     }
 
-    private static (string? PriceReference, long? AmountMinorUnits) ReadSubscriptionPrice(Subscription subscription)
+    private (string? PriceReference, long? AmountMinorUnits, int? Quantity) ReadSubscriptionPrice(
+        Subscription subscription,
+        StripeWebhookSourceOptions source)
     {
-        var price = subscription.Items?.Data?.FirstOrDefault()?.Price;
-        if (price is null)
-            return (null, null);
-        return (string.IsNullOrWhiteSpace(price.Id) ? null : price.Id, price.UnitAmount);
+        var items = subscription.Items?.Data;
+        if (items is null || items.Count == 0)
+            return (null, null, null);
+
+        var cloudPriceIds = CloudPriceIds(source);
+        var cloudItem = cloudPriceIds.Count == 0
+            ? null
+            : items.FirstOrDefault(item =>
+                item.Price?.Id is { } priceId &&
+                cloudPriceIds.Contains(priceId));
+        var selected = cloudItem ?? items[0];
+        var price = selected.Price;
+        var priceReference = string.IsNullOrWhiteSpace(price?.Id) ? null : price.Id;
+        var amount = price?.UnitAmount;
+        if (cloudPriceIds.Count > 0 && cloudItem is null)
+            return (priceReference, amount, null);
+
+        return (priceReference, amount, ReadItemQuantity(selected.Quantity));
     }
 
-    private static string? ReadCheckoutPrice(global::Stripe.Checkout.Session checkoutSession)
+    private HashSet<string> CloudPriceIds(StripeWebhookSourceOptions source)
+    {
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var id in source.CloudPriceIds)
+        {
+            if (!string.IsNullOrWhiteSpace(id))
+                ids.Add(id.Trim());
+        }
+
+        if (!string.IsNullOrWhiteSpace(_options.DefaultPriceId))
+            ids.Add(_options.DefaultPriceId.Trim());
+        return ids;
+    }
+
+    private static int? ReadItemQuantity(long quantity)
+    {
+        // Stripe.NET deserializes an omitted item quantity as 0. Treat missing
+        // and zero as "not recorded" so a later event cannot reset a projected
+        // cap of 2+ back to the default of one.
+        if (quantity <= 0)
+            return null;
+        if (quantity > int.MaxValue)
+            return int.MaxValue;
+        return (int)quantity;
+    }
+
+    private string? ReadCheckoutPrice(global::Stripe.Checkout.Session checkoutSession, StripeWebhookSourceOptions source)
     {
         var priceId = checkoutSession.LineItems?.Data?.FirstOrDefault()?.Price?.Id;
         if (!string.IsNullOrWhiteSpace(priceId))
@@ -554,7 +599,7 @@ public sealed class StripeBillingProvider(
 
         if (checkoutSession.Subscription is Subscription subscription)
         {
-            var (price, _) = ReadSubscriptionPrice(subscription);
+            var (price, _, _) = ReadSubscriptionPrice(subscription, source);
             if (!string.IsNullOrWhiteSpace(price))
                 return price;
         }

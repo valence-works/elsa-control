@@ -28,6 +28,7 @@ public sealed class StripeBillingProviderTests
 
         Assert.Equal("https://checkout.stripe.test/session", result.Url);
         Assert.Equal("price_opaque_default", Assert.Single(checkout.Options!.LineItems!).Price);
+        Assert.Equal(1, Assert.Single(checkout.Options.LineItems!).Quantity);
         Assert.Equal(trialEndsAt.UtcDateTime, checkout.Options.SubscriptionData!.TrialEnd);
         Assert.Equal(OrganizationId.ToString("D"), checkout.Options.ClientReferenceId);
         Assert.Equal(OrganizationId.ToString("D"), checkout.Options.Metadata!["elsa_control_organization_id"]);
@@ -643,6 +644,53 @@ public sealed class StripeBillingProviderTests
         Assert.Equal(BillingWebhookSources.Hub, result.Event!.WebhookSource);
         Assert.Equal(OrganizationSubscriptionState.Active, result.Event.State);
         Assert.Equal(CloudPriceId, result.Event.PriceReference);
+        Assert.Null(result.Event.Quantity);
+    }
+
+    [Theory]
+    [InlineData(BillingWebhookSources.Control, "whsec_test")]
+    [InlineData(BillingWebhookSources.Hub, HubWebhookSecret)]
+    public void Subscription_quantity_is_read_from_the_cloud_price_item(string source, string secret)
+    {
+        var provider = CreateDualSourceProvider();
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var priceId = source == BillingWebhookSources.Hub ? CloudPriceId : "price_configured";
+        var json = SubscriptionEventJson("evt_qty_2", "customer.subscription.updated", "active", timestamp, priceId, quantity: 2);
+        var signature = EventUtility.GenerateSignatureHeader(json, secret, timestamp);
+
+        var result = provider.VerifyAndNormalizeWebhook(
+            System.Text.Encoding.UTF8.GetBytes(json),
+            signature,
+            DateTimeOffset.FromUnixTimeSeconds(timestamp));
+
+        Assert.Equal(BillingWebhookNormalizationStatus.Known, result.Status);
+        Assert.Equal(source, result.Event!.WebhookSource);
+        Assert.Equal(2, result.Event.Quantity);
+        Assert.Equal(priceId, result.Event.PriceReference);
+    }
+
+    [Fact]
+    public void Quantity_on_a_non_cloud_item_is_ignored_when_cloud_prices_are_configured()
+    {
+        var provider = CreateDualSourceProvider();
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var json = SubscriptionEventJson(
+            "evt_other_price_qty",
+            "customer.subscription.updated",
+            "active",
+            timestamp,
+            "price_other",
+            quantity: 5);
+        var signature = EventUtility.GenerateSignatureHeader(json, WebhookSecret, timestamp);
+
+        var result = provider.VerifyAndNormalizeWebhook(
+            System.Text.Encoding.UTF8.GetBytes(json),
+            signature,
+            DateTimeOffset.FromUnixTimeSeconds(timestamp));
+
+        Assert.Equal(BillingWebhookNormalizationStatus.Known, result.Status);
+        Assert.Null(result.Event!.Quantity);
+        Assert.Equal("price_other", result.Event.PriceReference);
     }
 
     [Fact]
@@ -828,13 +876,15 @@ public sealed class StripeBillingProviderTests
         long timestamp,
         string priceId,
         bool livemode = false,
-        bool includeOrganization = true)
+        bool includeOrganization = true,
+        int? quantity = null)
     {
         var metadata = includeOrganization
             ? $",\"metadata\":{{\"elsa_control_organization_id\":\"{OrganizationId:D}\"}}"
             : ",\"metadata\":{}";
         var livemodeJson = livemode ? "true" : "false";
-        return $"{{\"id\":\"{eventId}\",\"object\":\"event\",\"api_version\":\"2026-08-26.dahlia\",\"created\":{timestamp},\"livemode\":{livemodeJson},\"type\":\"{type}\",\"data\":{{\"object\":{{\"id\":\"sub_123\",\"object\":\"subscription\",\"customer\":\"cus_123\",\"status\":\"{status}\",\"items\":{{\"object\":\"list\",\"data\":[{{\"id\":\"si_1\",\"object\":\"subscription_item\",\"price\":{{\"id\":\"{priceId}\",\"object\":\"price\",\"unit_amount\":1000}}}}]}}{metadata}}}}}}}";
+        var quantityJson = quantity is { } value ? $",\"quantity\":{value}" : "";
+        return $"{{\"id\":\"{eventId}\",\"object\":\"event\",\"api_version\":\"2026-08-26.dahlia\",\"created\":{timestamp},\"livemode\":{livemodeJson},\"type\":\"{type}\",\"data\":{{\"object\":{{\"id\":\"sub_123\",\"object\":\"subscription\",\"customer\":\"cus_123\",\"status\":\"{status}\",\"items\":{{\"object\":\"list\",\"data\":[{{\"id\":\"si_1\",\"object\":\"subscription_item\"{quantityJson},\"price\":{{\"id\":\"{priceId}\",\"object\":\"price\",\"unit_amount\":1000}}}}]}}{metadata}}}}}}}";
     }
 
     private static StripeBillingProvider CreateDualSourceProvider(IStripeSubscriptionCleanupGateway? cleanup = null) =>

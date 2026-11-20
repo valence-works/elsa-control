@@ -18,5 +18,7 @@
   },
   "source": "hub",
   "suspensionReason": "Canceled",
-  "recoveryAction": "Subscribe"
+  "recoveryAction": "Subscribe",
+  "maxInstances": 1,
+  "activeDedicatedCount": 0
 }

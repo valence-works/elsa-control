@@ -21,5 +21,7 @@
   },
   "source": null,
   "suspensionReason": null,
-  "recoveryAction": "None"
+  "recoveryAction": "None",
+  "maxInstances": null,
+  "activeDedicatedCount": 0
 }

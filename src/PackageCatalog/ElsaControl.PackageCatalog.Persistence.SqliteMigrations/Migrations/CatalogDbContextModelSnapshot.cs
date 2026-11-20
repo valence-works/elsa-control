@@ -140,6 +140,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .HasMaxLength(256)
                         .HasColumnType("TEXT");
 
+                    b.Property<int?>("Quantity")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long>("ReceivedAt")
                         .HasColumnType("INTEGER");
 
@@ -509,6 +512,52 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                         .IsUnique();
 
                     b.ToTable("OrganizationBillingLifecycleNotices");
+                });
+
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.OrganizationBillingOperatorAlertOutbox", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("ActiveDedicatedCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("DedupeIdentity")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("MaxInstances")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("OrganizationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("Quantity")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Summary")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DedupeIdentity")
+                        .IsUnique();
+
+                    b.HasIndex("OrganizationId", "Kind", "CreatedAt");
+
+                    b.ToTable("OrganizationBillingOperatorAlertOutbox", (string)null);
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.OrganizationEntitlementSnapshot", b =>
@@ -6310,6 +6359,17 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Navigation("Organization");
 
                     b.Navigation("Subscription");
+                });
+
+            modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.OrganizationBillingOperatorAlertOutbox", b =>
+                {
+                    b.HasOne("ElsaControl.PackageCatalog.Core.Accounts.Organization", "Organization")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Organization");
                 });
 
             modelBuilder.Entity("ElsaControl.PackageCatalog.Core.Accounts.OrganizationEntitlementSnapshot", b =>

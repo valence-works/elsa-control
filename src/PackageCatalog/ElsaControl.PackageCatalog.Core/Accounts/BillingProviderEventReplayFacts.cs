@@ -17,13 +17,15 @@ namespace ElsaControl.PackageCatalog.Core.Accounts;
 /// <item><see cref="ProviderObjectReference"/> — Stripe data object id (session, subscription, or customer).</item>
 /// <item><see cref="PriceReference"/> — opaque price id, when present on the payload.</item>
 /// <item><see cref="AmountMinorUnits"/> — commercial amount in minor units, when present on the payload.</item>
+/// <item><see cref="Quantity"/> — Cloud-price subscription item quantity, when present on the payload.</item>
 /// </list>
 /// <see cref="BillingProviderEvent.EventHash"/> is a delivery fingerprint of the
 /// raw request body and is not compared. Stripe redeliveries can change envelope
 /// fields such as <c>pending_webhooks</c> without changing these facts.
-/// Extra commercial facts (object id, price, amount) may be absent on inbox rows
-/// written before those columns existed. A stored null means "not recorded" and
-/// does not conflict with a later delivery that supplies the same core facts.
+/// Extra commercial facts (object id, price, amount, quantity) may be absent on
+/// inbox rows written before those columns existed. A stored null means "not
+/// recorded" and does not conflict with a later delivery that supplies the same
+/// core facts.
 /// </remarks>
 public readonly record struct BillingProviderEventReplayFacts(
     Guid OrganizationId,
@@ -34,7 +36,8 @@ public readonly record struct BillingProviderEventReplayFacts(
     string? ProviderSubscriptionReference,
     string? ProviderObjectReference,
     string? PriceReference,
-    long? AmountMinorUnits)
+    long? AmountMinorUnits,
+    int? Quantity)
 {
     public static BillingProviderEventReplayFacts From(BillingProviderEvent providerEvent) =>
         new(
@@ -46,7 +49,8 @@ public readonly record struct BillingProviderEventReplayFacts(
             providerEvent.ProviderSubscriptionReference,
             providerEvent.ProviderObjectReference,
             providerEvent.PriceReference,
-            providerEvent.AmountMinorUnits);
+            providerEvent.AmountMinorUnits,
+            providerEvent.Quantity);
 
     public static BillingProviderEventReplayFacts From(BillingProviderEventInboxEntry inbox) =>
         new(
@@ -58,7 +62,8 @@ public readonly record struct BillingProviderEventReplayFacts(
             inbox.ProviderSubscriptionReference,
             inbox.ProviderObjectReference,
             inbox.PriceReference,
-            inbox.AmountMinorUnits);
+            inbox.AmountMinorUnits,
+            inbox.Quantity);
 
     public bool ConflictsWith(BillingProviderEventReplayFacts incoming) =>
         OrganizationId != incoming.OrganizationId ||
@@ -69,7 +74,8 @@ public readonly record struct BillingProviderEventReplayFacts(
         !string.Equals(ProviderSubscriptionReference, incoming.ProviderSubscriptionReference, StringComparison.Ordinal) ||
         RecordedExtraConflicts(ProviderObjectReference, incoming.ProviderObjectReference) ||
         RecordedExtraConflicts(PriceReference, incoming.PriceReference) ||
-        AmountMinorUnits is not null && AmountMinorUnits != incoming.AmountMinorUnits;
+        AmountMinorUnits is not null && AmountMinorUnits != incoming.AmountMinorUnits ||
+        Quantity is not null && Quantity != incoming.Quantity;
 
     private static bool RecordedExtraConflicts(string? stored, string? incoming) =>
         stored is not null && !string.Equals(stored, incoming, StringComparison.Ordinal);

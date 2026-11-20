@@ -81,7 +81,7 @@ public sealed class OrganizationBillingApiTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Hosted_trial_preparation_requires_billing_management_and_preserves_terminal_state()
+    public async Task Hosted_trial_preparation_requires_billing_management_and_replaces_an_internal_grant()
     {
         await _app.SeedAsync(_ => Task.CompletedTask);
         var owner = _app.CreateControlIdentityClient(subject: "hosted-trial-access-owner");
@@ -102,10 +102,21 @@ public sealed class OrganizationBillingApiTests : IAsyncLifetime
                 DateTimeOffset.UtcNow);
         }
 
-        var terminal = await owner.PostControlJsonAsync($"/api/organizations/{organizationId}/billing/prepare-hosted-trial", new { });
+        var prepared = await owner.PostControlJsonAsync($"/api/organizations/{organizationId}/billing/prepare-hosted-trial", new { });
 
-        Assert.Equal(HttpStatusCode.Conflict, terminal.StatusCode);
-        Assert.Contains("billing.subscription-terminal", await terminal.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.OK, prepared.StatusCode);
+        var body = await prepared.Content.ReadControlJsonAsync<HostedTrialPreparationResponse>();
+        Assert.NotNull(body);
+        await using var verify = _app.Services.CreateAsyncScope();
+        var verifyDb = verify.ServiceProvider.GetRequiredService<CatalogDbContext>();
+        var current = Assert.Single(
+            await verifyDb.OrganizationSubscriptions.Where(x =>
+                x.OrganizationId == organizationId &&
+                x.State != OrganizationSubscriptionState.Deleted &&
+                x.State != OrganizationSubscriptionState.Retained).ToListAsync());
+        Assert.Equal(BillingProviderNames.Stripe, current.Provider);
+        Assert.Equal(OrganizationSubscriptionState.Trial, current.State);
+        Assert.Equal(1, (await verifyDb.OrganizationEntitlementSnapshots.SingleAsync(x => x.OrganizationId == organizationId)).MaxInstances);
     }
 
     [Fact]
@@ -232,7 +243,7 @@ public sealed class OrganizationBillingApiTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Checkout_for_an_internally_granted_organization_returns_terminal_conflict_before_calling_provider()
+    public async Task Checkout_for_an_internally_granted_organization_replaces_the_grant_with_stripe()
     {
         await _app.SeedAsync(_ => Task.CompletedTask);
         var owner = _app.CreateControlIdentityClient(subject: "billing-internal-owner");
@@ -249,13 +260,19 @@ public sealed class OrganizationBillingApiTests : IAsyncLifetime
 
         var response = await owner.PostControlJsonAsync($"/api/organizations/{organizationId}/billing/checkout", new { });
 
-        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
-        Assert.Equal("billing.subscription-terminal", (await response.Content.ReadFromJsonAsync<Dictionary<string, string>>())!["code"]);
-        Assert.Null(_provider.LastCheckout);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotNull(_provider.LastCheckout);
+        Assert.Equal(organizationId, _provider.LastCheckout!.OrganizationId);
         await using var verifyScope = _app.Services.CreateAsyncScope();
         var verifyDb = verifyScope.ServiceProvider.GetRequiredService<CatalogDbContext>();
-        var subscription = await verifyDb.OrganizationSubscriptions.SingleAsync(x => x.OrganizationId == organizationId);
-        Assert.Equal(BillingProviderNames.Internal, subscription.Provider);
+        var current = Assert.Single(
+            await verifyDb.OrganizationSubscriptions.Where(x =>
+                x.OrganizationId == organizationId &&
+                x.State != OrganizationSubscriptionState.Deleted &&
+                x.State != OrganizationSubscriptionState.Retained).ToListAsync());
+        Assert.Equal(BillingProviderNames.Stripe, current.Provider);
+        Assert.Equal(OrganizationSubscriptionState.Trial, current.State);
+        Assert.Equal(1, (await verifyDb.OrganizationEntitlementSnapshots.SingleAsync(x => x.OrganizationId == organizationId)).MaxInstances);
         Assert.Equal(0, await verifyDb.OrganizationBillingCleanups.CountAsync());
     }
 

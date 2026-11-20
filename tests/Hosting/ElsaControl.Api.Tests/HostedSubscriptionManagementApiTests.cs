@@ -85,6 +85,8 @@ public sealed class HostedSubscriptionManagementApiTests : IAsyncLifetime
         Assert.True(status.CanManageSubscription);
         Assert.Equal(HostedSubscriptionManagementActions.OpenPortal, status.ManagementAction);
         Assert.Equal(BillingWebhookSources.Control, status.Source);
+        Assert.Equal(2, status.MaxInstances);
+        Assert.Equal(0, status.ActiveDedicatedCount);
         Assert.Equal(HostedBillingCopy.EngineDeletion.Code, status.Copy.EngineDeletion.Code);
         Assert.Contains("does not cancel", status.Copy.EngineDeletion.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("does not immediately delete", status.Copy.SubscriptionCancellation.Message, StringComparison.OrdinalIgnoreCase);
@@ -363,6 +365,17 @@ public sealed class HostedSubscriptionManagementApiTests : IAsyncLifetime
         subscription.ProviderCustomerReference = customerReference;
         subscription.ProviderSubscriptionReference = "sub_hosted_test";
         db.OrganizationSubscriptions.Add(subscription);
+        db.OrganizationEntitlementSnapshots.Add(new OrganizationEntitlementSnapshot
+        {
+            OrganizationId = organizationId,
+            SubscriptionId = subscription.Id,
+            ManagedHostingEnabled = true,
+            SubscriptionState = OrganizationSubscriptionState.Active,
+            MaxInstances = 2,
+            SyncedAt = now,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
         await db.SaveChangesAsync();
     }
 

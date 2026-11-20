@@ -34,7 +34,8 @@ public sealed class BillingProviderEventReplayFactsTests
             subscription: "sub_123",
             objectReference: "sub_123",
             priceReference: "price_123",
-            amount: 4900);
+            amount: 4900,
+            quantity: 1);
 
         Assert.True(Conflicts(stored, Event(eventType: "checkout.session.completed")));
         Assert.True(Conflicts(stored, Event(customer: "cus_other")));
@@ -42,8 +43,22 @@ public sealed class BillingProviderEventReplayFactsTests
         Assert.True(Conflicts(stored, Event(objectReference: "cs_other")));
         Assert.True(Conflicts(stored, Event(priceReference: "price_other")));
         Assert.True(Conflicts(stored, Event(amount: 9900)));
+        Assert.True(Conflicts(stored, Event(
+            eventType: "customer.subscription.updated",
+            subscription: "sub_123",
+            objectReference: "sub_123",
+            quantity: 2)));
         Assert.True(Conflicts(stored, Event(organizationId: Guid.NewGuid())));
         Assert.True(Conflicts(stored, Event(state: OrganizationSubscriptionState.PastDue)));
+    }
+
+    [Fact]
+    public void Historical_inbox_row_without_quantity_replays_when_a_later_delivery_supplies_it()
+    {
+        var stored = Inbox(quantity: null);
+        var incoming = Event(quantity: 2);
+
+        Assert.False(BillingProviderEventReplayFacts.From(stored).ConflictsWith(BillingProviderEventReplayFacts.From(incoming)));
     }
 
     [Fact]
@@ -67,6 +82,7 @@ public sealed class BillingProviderEventReplayFactsTests
         string? objectReference = "cs_123",
         string? priceReference = "price_123",
         long? amount = 4900,
+        int? quantity = null,
         string? hash = null) =>
         new(
             organizationId ?? OrganizationId,
@@ -80,7 +96,8 @@ public sealed class BillingProviderEventReplayFactsTests
             subscription,
             objectReference,
             priceReference,
-            amount);
+            amount,
+            Quantity: quantity);
 
     private static BillingProviderEventInboxEntry Inbox(
         string eventType = "checkout.session.completed",
@@ -88,7 +105,8 @@ public sealed class BillingProviderEventReplayFactsTests
         string? subscription = null,
         string? objectReference = "cs_123",
         string? priceReference = "price_123",
-        long? amount = 4900) =>
+        long? amount = 4900,
+        int? quantity = null) =>
         new()
         {
             OrganizationId = OrganizationId,
@@ -102,6 +120,7 @@ public sealed class BillingProviderEventReplayFactsTests
             ProviderObjectReference = objectReference,
             PriceReference = priceReference,
             AmountMinorUnits = amount,
+            Quantity = quantity,
             OccurredAt = OccurredAt
         };
 }

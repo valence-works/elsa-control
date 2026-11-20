@@ -17,6 +17,8 @@ public sealed partial class OrganizationBillingStore(
     CatalogDbContext dbContext,
     IBillingProviderSubscriptionStatusLookup? subscriptionStatusLookup = null) : IOrganizationBillingStore, IOrganizationBillingLifecycleStore
 {
+    private readonly List<OrganizationBillingOperatorAlertOutbox> _pendingOperatorAlerts = [];
+
     public async Task<BillingEventConsumptionResult> ConsumeAsync(
         BillingProviderEvent providerEvent,
         DateTimeOffset receivedAt,
@@ -28,7 +30,18 @@ public sealed partial class OrganizationBillingStore(
         providerEvent = NormalizeEvent(providerEvent);
         ValidateEvent(providerEvent, allowUnknown: false);
 
-        return await ConsumeCoreAsync(providerEvent, receivedAt, cancellationToken, attempt: 0);
+        _pendingOperatorAlerts.Clear();
+        try
+        {
+            var result = await ConsumeCoreAsync(providerEvent, receivedAt, cancellationToken, attempt: 0);
+            FlushPendingOperatorAlerts();
+            return result;
+        }
+        catch
+        {
+            _pendingOperatorAlerts.Clear();
+            throw;
+        }
     }
 
     public async Task<BillingEventConsumptionResult> RecordUnknownAsync(
@@ -89,6 +102,7 @@ public sealed partial class OrganizationBillingStore(
                     ProviderObjectReference = providerEvent.ProviderObjectReference,
                     PriceReference = providerEvent.PriceReference,
                     AmountMinorUnits = providerEvent.AmountMinorUnits,
+                    Quantity = providerEvent.Quantity,
                     OccurredAt = providerEvent.OccurredAt.ToUniversalTime(),
                     ReceivedAt = now,
                     ProcessedAt = now,
@@ -148,6 +162,7 @@ public sealed partial class OrganizationBillingStore(
         catch (Exception exception) when (attempt < 2 && IsRetryableConflict(exception))
         {
             dbContext.ChangeTracker.Clear();
+            _pendingOperatorAlerts.Clear();
             // A concurrent consumer may have committed the same inbox key or
             // a subscription row. Re-read and retry the normalized event so
             // both same-key and different-key concurrent deliveries converge.
@@ -177,6 +192,7 @@ public sealed partial class OrganizationBillingStore(
         CancellationToken cancellationToken) =>
         dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
         {
+            _pendingOperatorAlerts.Clear();
             if (!await TryEnsureOrganizationExistsAsync(providerEvent.OrganizationId, providerEvent.WebhookSource, cancellationToken))
                 return new BillingEventConsumptionResult(BillingEventConsumptionOutcome.Ignored, null, null, null);
             var existingEvent = await FindInboxAsync(providerEvent, cancellationToken);
@@ -222,6 +238,7 @@ public sealed partial class OrganizationBillingStore(
                 subscription = null;
             var sourceConflict = false;
             if (subscription is not null &&
+                !IsInternalGrantReplaceableByStripe(subscription, providerEvent.Provider) &&
                 !string.Equals(
                     BillingWebhookSources.Normalize(subscription.WebhookSource),
                     BillingWebhookSources.Normalize(providerEvent.WebhookSource),
@@ -249,6 +266,7 @@ public sealed partial class OrganizationBillingStore(
                 ProviderObjectReference = providerEvent.ProviderObjectReference,
                 PriceReference = providerEvent.PriceReference,
                 AmountMinorUnits = providerEvent.AmountMinorUnits,
+                Quantity = providerEvent.Quantity,
                 OccurredAt = occurrence,
                 ReceivedAt = now,
                 ProcessingStatus = BillingProviderEventProcessingStatus.Accepted,
@@ -265,6 +283,27 @@ public sealed partial class OrganizationBillingStore(
                 await dbContext.SaveChangesAsync(cancellationToken);
                 var conflictEntitlement = await CurrentEntitlementAsync(providerEvent.OrganizationId, cancellationToken);
                 return new(BillingEventConsumptionOutcome.Rejected, subscription, conflictEntitlement, inbox, inbox.RejectionCode);
+            }
+
+            if (subscription is not null &&
+                IsInternalGrantReplaceableByStripe(subscription, providerEvent.Provider) &&
+                providerEvent.State == OrganizationSubscriptionState.Trial &&
+                !BillingWebhookSources.IsHub(providerEvent.WebhookSource))
+            {
+                // Control checkout starts the Stripe trial. A Control-source
+                // trialing webhook must not tombstone an internal grant.
+                inbox.ProcessingStatus = BillingProviderEventProcessingStatus.Rejected;
+                inbox.RejectionCode = "subscription.missing";
+                inbox.ProcessedAt = now;
+                AddBillingAudit(providerEvent.OrganizationId, inbox.Id, "A normalized billing provider event was rejected because no control-plane subscription exists.", now);
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return new(BillingEventConsumptionOutcome.Rejected, subscription, await CurrentEntitlementAsync(providerEvent.OrganizationId, cancellationToken), inbox, inbox.RejectionCode);
+            }
+
+            if (subscription is not null && IsInternalGrantReplacedByStripe(subscription, providerEvent))
+            {
+                OrganizationSubscriptionLifecycle.CloseSuperseded(subscription, occurrence);
+                subscription = null;
             }
 
             if (subscription is not null && CanStartReplacementPaidLifecycle(subscription, providerEvent))
@@ -401,7 +440,7 @@ public sealed partial class OrganizationBillingStore(
                     cancellationToken);
             var entitlement = hasReplacement
                 ? await CurrentEntitlementAsync(subscription.OrganizationId, cancellationToken)
-                : await ProjectEntitlementAsync(subscription, now, cancellationToken);
+                : await ProjectEntitlementAsync(subscription, now, cancellationToken, providerEvent.Quantity);
             AddBillingAudit(providerEvent.OrganizationId, inbox.Id, "A normalized billing provider event was consumed.", now);
             await dbContext.SaveChangesAsync(cancellationToken);
             return new BillingEventConsumptionResult(BillingEventConsumptionOutcome.Applied, subscription, entitlement, inbox);
@@ -463,6 +502,10 @@ public sealed partial class OrganizationBillingStore(
                 .FirstOrDefaultAsync(cancellationToken);
             if (existing is not null && await CanReplaceRevokedAzureBoundSubscriptionAsync(existing, cancellationToken))
                 existing = null;
+            if (existing is not null && IsInternalGrantReplaceableByStripe(existing, provider))
+            {
+                existing = null;
+            }
             if (existing is not null)
             {
                 EnsureSameProvider(existing, provider);
@@ -487,6 +530,11 @@ public sealed partial class OrganizationBillingStore(
                 .FirstOrDefaultAsync(cancellationToken);
             if (existing is not null && await CanReplaceRevokedAzureBoundSubscriptionAsync(existing, cancellationToken))
                 existing = null;
+            if (existing is not null && IsInternalGrantReplaceableByStripe(existing, provider))
+            {
+                OrganizationSubscriptionLifecycle.CloseSuperseded(existing, started);
+                existing = null;
+            }
             if (existing is not null)
             {
                 EnsureSameProvider(existing, provider);
@@ -518,7 +566,8 @@ public sealed partial class OrganizationBillingStore(
     private async Task<OrganizationEntitlementSnapshot> ProjectEntitlementAsync(
         OrganizationSubscription subscription,
         DateTimeOffset now,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? engineQuantity = null)
     {
         var entitlement = await dbContext.OrganizationEntitlementSnapshots
             .SingleOrDefaultAsync(x => x.OrganizationId == subscription.OrganizationId, cancellationToken);
@@ -532,17 +581,77 @@ public sealed partial class OrganizationBillingStore(
             dbContext.OrganizationEntitlementSnapshots.Add(entitlement);
         }
 
+        var previousMaxInstances = entitlement.MaxInstances;
         // Stripe Trial and Active are the commercial source of truth for the
-        // Hosted Preview capability and its single managed-instance allowance.
-        // Other providers retain their separately administered limits.
+        // Hosted Preview capability. Trial stays at one engine. Active reads
+        // MaxInstances from the current Cloud-price item quantity.
         if (string.Equals(subscription.Provider, BillingProviderNames.Stripe, StringComparison.Ordinal) &&
             subscription.State is OrganizationSubscriptionState.Trial or OrganizationSubscriptionState.Active)
         {
             entitlement.ManagedHostingEnabled = true;
-            entitlement.MaxInstances = 1;
             entitlement.ManagedHostingExpiresAt = subscription.State == OrganizationSubscriptionState.Trial
                 ? subscription.TrialEndsAt
                 : null;
+            if (subscription.State == OrganizationSubscriptionState.Trial)
+            {
+                entitlement.MaxInstances = StripeCommercialEngineQuantity.TrialAllowance;
+            }
+            else if (engineQuantity is null or 0)
+            {
+                if (!CanKeepProjectedStripeAllowance(entitlement, subscription))
+                    entitlement.MaxInstances = StripeCommercialEngineQuantity.MissingOrZeroAllowance;
+            }
+            else if (StripeCommercialEngineQuantity.TryResolveActiveAllowance(engineQuantity, out var maxInstances))
+            {
+                entitlement.MaxInstances = maxInstances;
+            }
+            else
+            {
+                if (!CanKeepProjectedStripeAllowance(entitlement, subscription))
+                    entitlement.MaxInstances = StripeCommercialEngineQuantity.MissingOrZeroAllowance;
+                await QueueOperatorAlertAsync(
+                    subscription.OrganizationId,
+                    OrganizationBillingOperatorAlert.QuantityOutOfRangeKind,
+                    OrganizationBillingOperatorAlert.QuantityOutOfRangeDedupeIdentity(subscription.OrganizationId, engineQuantity.Value),
+                    OrganizationBillingOperatorAlert.QuantityOutOfRangeSummary,
+                    now,
+                    cancellationToken,
+                    maxInstances: entitlement.MaxInstances,
+                    quantity: engineQuantity);
+            }
+
+            if (subscription.State == OrganizationSubscriptionState.Active &&
+                previousMaxInstances != entitlement.MaxInstances &&
+                !StripeCommercialEngineQuantity.IsUninitializedCap(previousMaxInstances))
+            {
+                AddEntitlementAllowanceAudit(subscription.OrganizationId, entitlement.Id, previousMaxInstances, entitlement.MaxInstances, now);
+            }
+
+            if (subscription.State == OrganizationSubscriptionState.Active)
+            {
+                var dedicatedCount = await dbContext.ElsaInstances.CountActiveDedicatedManagedAsync(
+                    subscription.OrganizationId,
+                    cancellationToken);
+                var wasOver = !StripeCommercialEngineQuantity.IsUninitializedCap(previousMaxInstances) &&
+                              dedicatedCount > previousMaxInstances;
+                if (dedicatedCount > entitlement.MaxInstances && !wasOver)
+                {
+                    await QueueOperatorAlertAsync(
+                        subscription.OrganizationId,
+                        OrganizationBillingOperatorAlert.OverAllowanceKind,
+                        OrganizationBillingOperatorAlert.OverAllowanceDedupeIdentity(
+                            subscription.OrganizationId,
+                            previousMaxInstances,
+                            entitlement.MaxInstances,
+                            dedicatedCount,
+                            subscription.LastProviderEventId),
+                        OrganizationBillingOperatorAlert.OverAllowanceSummary,
+                        now,
+                        cancellationToken,
+                        maxInstances: entitlement.MaxInstances,
+                        activeDedicatedCount: dedicatedCount);
+                }
+            }
         }
         else if (string.Equals(subscription.Provider, BillingProviderNames.AzureBound, StringComparison.Ordinal) &&
                  subscription.State != OrganizationSubscriptionState.Active)
@@ -629,6 +738,25 @@ public sealed partial class OrganizationBillingStore(
         BillingProviderEvent providerEvent) =>
         IsNewPaidSubscriptionOnDifferentReference(subscription, providerEvent) &&
         OrganizationSubscriptionLifecycle.IsCanceledSuspension(subscription);
+
+    private static bool CanKeepProjectedStripeAllowance(
+        OrganizationEntitlementSnapshot entitlement,
+        OrganizationSubscription subscription) =>
+        entitlement.SubscriptionId == subscription.Id &&
+        !StripeCommercialEngineQuantity.IsUninitializedCap(entitlement.MaxInstances);
+
+    private static bool IsInternalGrantReplacedByStripe(
+        OrganizationSubscription subscription,
+        BillingProviderEvent providerEvent) =>
+        IsInternalGrantReplaceableByStripe(subscription, providerEvent.Provider) &&
+        (providerEvent.State == OrganizationSubscriptionState.Active ||
+         (providerEvent.State == OrganizationSubscriptionState.Trial &&
+          BillingWebhookSources.IsHub(providerEvent.WebhookSource)));
+
+    private static bool IsInternalGrantReplaceableByStripe(OrganizationSubscription subscription, string provider) =>
+        string.Equals(subscription.Provider, BillingProviderNames.Internal, StringComparison.Ordinal) &&
+        string.Equals(provider, BillingProviderNames.Stripe, StringComparison.Ordinal) &&
+        subscription.State == OrganizationSubscriptionState.Active;
 
     private static bool IsIneligibleNewPaidSubscription(
         OrganizationSubscription subscription,
@@ -801,6 +929,71 @@ public sealed partial class OrganizationBillingStore(
             CreatedAt = createdAt
         });
 
+    private void AddEntitlementAllowanceAudit(
+        Guid organizationId,
+        Guid entitlementId,
+        int previousMaxInstances,
+        int currentMaxInstances,
+        DateTimeOffset createdAt) =>
+        dbContext.OrganizationAuditRecords.Add(new OrganizationAuditRecord
+        {
+            OrganizationId = organizationId,
+            Action = OrganizationAuditAction.EntitlementChanged,
+            TargetType = "entitlement-snapshot",
+            TargetId = entitlementId.ToString("D"),
+            Summary = string.Create(
+                System.Globalization.CultureInfo.InvariantCulture,
+                $"Managed-instance allowance changed from {previousMaxInstances} to {currentMaxInstances}."),
+            CreatedAt = createdAt
+        });
+
+    private async Task QueueOperatorAlertAsync(
+        Guid organizationId,
+        string kind,
+        string dedupeIdentity,
+        string summary,
+        DateTimeOffset createdAt,
+        CancellationToken cancellationToken,
+        int? maxInstances = null,
+        int? activeDedicatedCount = null,
+        int? quantity = null)
+    {
+        if (await dbContext.OrganizationBillingOperatorAlertOutbox.AnyAsync(x => x.DedupeIdentity == dedupeIdentity, cancellationToken) ||
+            dbContext.OrganizationBillingOperatorAlertOutbox.Local.Any(x => x.DedupeIdentity == dedupeIdentity) ||
+            _pendingOperatorAlerts.Any(x => x.DedupeIdentity == dedupeIdentity))
+            return;
+
+        var alert = new OrganizationBillingOperatorAlertOutbox
+        {
+            OrganizationId = organizationId,
+            Kind = kind,
+            DedupeIdentity = dedupeIdentity,
+            ActiveDedicatedCount = activeDedicatedCount,
+            MaxInstances = maxInstances,
+            Quantity = quantity,
+            Summary = summary,
+            CreatedAt = createdAt
+        };
+        dbContext.OrganizationBillingOperatorAlertOutbox.Add(alert);
+        _pendingOperatorAlerts.Add(alert);
+    }
+
+    private void FlushPendingOperatorAlerts()
+    {
+        foreach (var alert in _pendingOperatorAlerts)
+        {
+            OrganizationBillingOperatorAlert.Record(
+                alert.OrganizationId,
+                alert.Kind,
+                alert.DedupeIdentity,
+                alert.MaxInstances,
+                alert.ActiveDedicatedCount,
+                alert.Quantity);
+        }
+
+        _pendingOperatorAlerts.Clear();
+    }
+
     private static void EnsureSameProvider(OrganizationSubscription subscription, string provider)
     {
         if (!string.Equals(subscription.Provider, provider, StringComparison.Ordinal))
@@ -873,6 +1066,7 @@ public sealed partial class OrganizationBillingStore(
             ProviderObjectReference = providerEvent.ProviderObjectReference,
             PriceReference = providerEvent.PriceReference,
             AmountMinorUnits = providerEvent.AmountMinorUnits,
+            Quantity = providerEvent.Quantity,
             OccurredAt = providerEvent.OccurredAt.ToUniversalTime(),
             ReceivedAt = now,
             ProcessingStatus = BillingProviderEventProcessingStatus.Rejected,
@@ -930,6 +1124,8 @@ public sealed partial class OrganizationBillingStore(
         RequireSafeReference(providerEvent.PriceReference, nameof(providerEvent.PriceReference));
         if (providerEvent.AmountMinorUnits is < 0)
             throw new ArgumentException("Amount must be a non-negative minor-unit total.", nameof(providerEvent));
+        if (providerEvent.Quantity is < 0)
+            throw new ArgumentException("Quantity must be a non-negative integer.", nameof(providerEvent));
         if (providerEvent.OccurredAt == default)
             throw new ArgumentException("Billing event occurrence timestamp is required.", nameof(providerEvent));
 
