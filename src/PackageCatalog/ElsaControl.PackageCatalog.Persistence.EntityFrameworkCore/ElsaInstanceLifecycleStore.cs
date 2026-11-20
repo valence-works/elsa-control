@@ -2713,9 +2713,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                         await HasWaitingDeleteSuccessorForConfirmedProviderAsync(
                             instance, operation, cancellationToken))
                     {
-                        desiredLifecycle = operation.Action == ElsaInstanceOperationAction.Stop
-                            ? ElsaDesiredLifecycle.Stopped
-                            : ElsaDesiredLifecycle.Running;
+                        desiredLifecycle = ElsaInstanceOperationGuard.ReplayQueuedPredecessorDesiredLifecycle(
+                            operation.Action, instance.ObservedLifecycle);
                     }
                     else if (!recoveries.TryGetValue(operation.Id, out var predecessorRecovery) ||
                         operation.ReconciledInstanceVersion is not { } predecessorReconciledVersion ||
@@ -2736,9 +2735,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     }
                     else
                     {
-                        desiredLifecycle = operation.Action == ElsaInstanceOperationAction.Stop
-                            ? ElsaDesiredLifecycle.Stopped
-                            : ElsaDesiredLifecycle.Running;
+                        desiredLifecycle = ElsaInstanceOperationGuard.ReplayQueuedPredecessorDesiredLifecycle(
+                            operation.Action, instance.ObservedLifecycle);
                     }
                 }
                 var candidate = new ElsaInstanceProviderSubmission(

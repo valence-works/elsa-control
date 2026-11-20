@@ -28,7 +28,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             instanceId = accepted.Instance.Id;
             operationId = accepted.Operation.Id;
             attemptNumber = accepted.Operation.AttemptNumber;
-            instanceVersion = accepted.Instance.Version;
+            instanceVersion = (await CreateStore(db).GetInstanceAsync(workspace.Id, accepted.Instance.Id))!.Version;
         }
 
         await using (var marker = CreateSqlServerContext(database.ConnectionString))

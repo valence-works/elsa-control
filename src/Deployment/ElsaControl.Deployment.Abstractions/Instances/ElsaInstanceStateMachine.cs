@@ -365,6 +365,23 @@ public static class ElsaInstanceOperationGuard
         submissionInFlightAt is not null;
 
     /// <summary>
+    /// Desired lifecycle used when replaying a queued predecessor whose instance
+    /// is now Deleting. Stop and an already-stopped instance stay Stopped so a
+    /// Reconcile/Retry accepted while stopped is not replayed as Running.
+    /// </summary>
+    public static ElsaDesiredLifecycle ReplayQueuedPredecessorDesiredLifecycle(
+        ElsaInstanceOperationAction action,
+        ElsaObservedLifecycle observedLifecycle)
+    {
+        ElsaInstanceValue.RequireEnum(action, nameof(action));
+        ElsaInstanceValue.RequireEnum(observedLifecycle, nameof(observedLifecycle));
+        return action == ElsaInstanceOperationAction.Stop ||
+               observedLifecycle == ElsaObservedLifecycle.Stopped
+            ? ElsaDesiredLifecycle.Stopped
+            : ElsaDesiredLifecycle.Running;
+    }
+
+    /// <summary>
     /// Indicates whether an operation is unfinished and therefore blocks a new
     /// mutation. Waiting successors remain blocking even though they do not hold
     /// the execution reservation themselves.

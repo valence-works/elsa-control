@@ -583,6 +583,31 @@ public sealed class ElsaInstanceContractTests
     }
 
     [Fact]
+    public void Queued_predecessor_replay_keeps_a_stopped_instance_stopped()
+    {
+        Assert.Equal(
+            ElsaDesiredLifecycle.Stopped,
+            ElsaInstanceOperationGuard.ReplayQueuedPredecessorDesiredLifecycle(
+                ElsaInstanceOperationAction.Stop, ElsaObservedLifecycle.Ready));
+        Assert.Equal(
+            ElsaDesiredLifecycle.Stopped,
+            ElsaInstanceOperationGuard.ReplayQueuedPredecessorDesiredLifecycle(
+                ElsaInstanceOperationAction.Reconcile, ElsaObservedLifecycle.Stopped));
+        Assert.Equal(
+            ElsaDesiredLifecycle.Stopped,
+            ElsaInstanceOperationGuard.ReplayQueuedPredecessorDesiredLifecycle(
+                ElsaInstanceOperationAction.Retry, ElsaObservedLifecycle.Stopped));
+        Assert.Equal(
+            ElsaDesiredLifecycle.Running,
+            ElsaInstanceOperationGuard.ReplayQueuedPredecessorDesiredLifecycle(
+                ElsaInstanceOperationAction.Create, ElsaObservedLifecycle.Unknown));
+        Assert.Equal(
+            ElsaDesiredLifecycle.Running,
+            ElsaInstanceOperationGuard.ReplayQueuedPredecessorDesiredLifecycle(
+                ElsaInstanceOperationAction.Retry, ElsaObservedLifecycle.Ready));
+    }
+
+    [Fact]
     public void Invalid_enum_values_fail_closed_in_transition_guards()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => ElsaInstanceStateMachine.CanTransition(

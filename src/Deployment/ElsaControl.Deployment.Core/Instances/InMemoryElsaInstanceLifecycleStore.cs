@@ -432,9 +432,8 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                                     successor.Action == ElsaInstanceOperationAction.Delete &&
                                     successor.State == ElsaInstanceOperationState.WaitingForPriorOperation))
                             {
-                                desiredLifecycle = operation.Action == ElsaInstanceOperationAction.Stop
-                                    ? ElsaDesiredLifecycle.Stopped
-                                    : ElsaDesiredLifecycle.Running;
+                                desiredLifecycle = ElsaInstanceOperationGuard.ReplayQueuedPredecessorDesiredLifecycle(
+                                    operation.Action, instance.ObservedLifecycle);
                             }
                             var candidate = new ElsaInstanceProviderSubmission(
                                 instance.WorkspaceId,
