@@ -8,11 +8,13 @@ namespace ElsaControl.Deployment.Core.Instances;
 public interface IElsaInstanceProviderSubmissionStore
 {
     /// <summary>
-    /// Records that <c>SubmitAsync</c> is about to run. Stays set until provenance
-    /// is committed, the submit is rejected, or an uncertain hand-off is recorded.
-    /// A crash after this write is reconciled by the provider-reconciliation
-    /// worker replaying the pending Queued submission; the marker does not expire
-    /// through the worker lease, which <c>CommitResolvedAsync</c> already cleared.
+    /// Records that <c>SubmitAsync</c> is about to run and releases the
+    /// resolution lease in the same commit. <c>CommitResolvedAsync</c> keeps that
+    /// lease until this write so a Delete cannot treat the gap as never-submitted.
+    /// The marker stays set until provenance is committed, the submit is rejected,
+    /// or an uncertain hand-off is recorded. A crash after this write is
+    /// reconciled by the provider-reconciliation worker replaying the pending
+    /// Queued submission; the marker does not expire through the worker lease.
     /// </summary>
     Task MarkProviderSubmissionInFlightAsync(
         ElsaInstanceProviderSubmissionInFlightMark mark,

@@ -2160,10 +2160,6 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 operation.AttemptNumber = commit.Operation.AttemptNumber;
                 operation.ResolvedPlanId = commit.Plan.Reference.PlanId;
                 operation.DeploymentRunId = runId;
-                operation.WorkerId = null;
-                operation.LeaseTokenHash = null;
-                operation.LeaseExpiresAt = null;
-                operation.HeartbeatAt = null;
                 operation.UpdatedAt = commit.CommittedAt.ToUniversalTime();
 
                 var runEntity = new DeploymentRunEntity
@@ -2275,6 +2271,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     operation.State = ElsaInstanceOperationState.EntitlementHeld;
                     operation.FailureCode = decision.Code;
                     operation.FailureSummary = decision.Summary;
+                    ClearWorkerLease(operation);
                     operation.UpdatedAt = authorizedAtUtc;
                     authorizationEventType = "lifecycle.entitlement-held";
                     authorizationDiagnosticCode = decision.Code;
@@ -2363,10 +2360,9 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             if (operation.State == ElsaInstanceOperationState.Queued &&
                 run.Status == WorkspaceDeploymentRunStatus.Queued)
             {
-                if (operation.ProviderSubmissionInFlightAt is not null)
-                    return;
                 var markedAt = mark.MarkedAt.ToUniversalTime();
-                operation.ProviderSubmissionInFlightAt = markedAt;
+                operation.ProviderSubmissionInFlightAt ??= markedAt;
+                ClearWorkerLease(operation);
                 operation.UpdatedAt = markedAt;
                 await dbContext.SaveChangesAsync(cancellationToken);
                 return;
@@ -4362,6 +4358,14 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
 
     internal static ElsaInstanceOperation MapOperation(ElsaInstanceOperationEntity entity)
         => MapOperation(entity, null);
+
+    private static void ClearWorkerLease(ElsaInstanceOperationEntity operation)
+    {
+        operation.WorkerId = null;
+        operation.LeaseTokenHash = null;
+        operation.LeaseExpiresAt = null;
+        operation.HeartbeatAt = null;
+    }
 
     private async Task<bool> HasAzureProvenanceAsync(
         Guid workspaceId,

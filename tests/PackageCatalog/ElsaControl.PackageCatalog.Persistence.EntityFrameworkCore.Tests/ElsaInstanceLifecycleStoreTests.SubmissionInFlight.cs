@@ -11,6 +11,50 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
     private const string SqlServerConnectionEnvironmentVariable = "CODEX_664_SQL_CONNECTION";
 
     [DisposableSqlServerFact]
+    public async Task Sql_server_delete_after_commit_resolved_before_mark_does_not_supersede()
+    {
+        var masterConnectionString = GetLoopbackMasterConnectionString();
+        await using var database = await SqlServerTestDatabase.CreateAsync(masterConnectionString);
+        Guid workspaceId;
+        Guid instanceId;
+        Guid operationId;
+        int instanceVersion;
+        await using (var db = CreateSqlServerContext(database.ConnectionString))
+        {
+            await db.Database.MigrateAsync();
+            var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "SQL resolved before mark");
+            workspaceId = workspace.Id;
+            instanceId = accepted.Instance.Id;
+            operationId = accepted.Operation.Id;
+            instanceVersion = (await CreateStore(db).GetInstanceAsync(workspace.Id, accepted.Instance.Id))!.Version;
+            var queued = await db.ElsaInstanceOperations.AsNoTracking()
+                .SingleAsync(x => x.Id == operationId);
+            Assert.NotNull(queued.WorkerId);
+            Assert.Null(queued.ProviderSubmissionInFlightAt);
+        }
+
+        await using var deleter = CreateSqlServerContext(database.ConnectionString);
+        var current = Assert.IsType<ElsaInstance>(await CreateStore(deleter)
+            .GetInstanceAsync(workspaceId, instanceId));
+        Assert.Equal(instanceVersion, current.Version);
+        var deletion = await new ElsaInstanceLifecycleService(
+                CreateStore(deleter), new FixedTimeProvider(Now.AddMinutes(1)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                deleter, workspaceId, instanceId, current.Version,
+                "delete-sql-before-mark", Now.AddMinutes(1)));
+
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+        deleter.ChangeTracker.Clear();
+        var predecessor = await deleter.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == operationId);
+        Assert.Equal(ElsaInstanceOperationState.Queued, predecessor.State);
+        Assert.NotNull(predecessor.WorkerId);
+        Assert.Null(predecessor.ProviderSubmissionInFlightAt);
+        Assert.Null(predecessor.FailureCode);
+        Assert.Null(await CreateStore(deleter).TryClaimNextDeletionAsync("deletion-worker", Now.AddMinutes(2)));
+    }
+
+    [DisposableSqlServerFact]
     public async Task Sql_server_delete_does_not_supersede_a_create_with_submission_in_flight()
     {
         var masterConnectionString = GetLoopbackMasterConnectionString();
@@ -53,6 +97,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests
             .SingleAsync(x => x.Id == operationId);
         Assert.Equal(ElsaInstanceOperationState.Queued, predecessor.State);
         Assert.NotNull(predecessor.ProviderSubmissionInFlightAt);
+        Assert.Null(predecessor.WorkerId);
         Assert.Null(predecessor.FailureCode);
         Assert.Null(await CreateStore(deleter).TryClaimNextDeletionAsync("deletion-worker", Now.AddMinutes(2)));
         deleter.ChangeTracker.Clear();

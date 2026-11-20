@@ -144,6 +144,19 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
     /// Test seam: plants an in-flight worker lease so accept-time Delete/Stop
     /// can prove they wait behind a Queued predecessor that still holds a worker.
     /// </summary>
+    /// <summary>
+    /// Test seam: drops the resolution lease without writing a submission
+    /// marker, which is the never-submitted stuck shape after the worker
+    /// released the claim without calling Submit.
+    /// </summary>
+    public void ClearWorkerLease(Guid operationId)
+    {
+        lock (_gate)
+        {
+            _claims.Remove(operationId);
+        }
+    }
+
     public void SeedWorkerLease(Guid operationId, string workerId, DateTimeOffset expiresAt)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
@@ -219,6 +232,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 run.Run.Status == WorkspaceDeploymentRunStatus.Queued)
             {
                 _submissionInFlight.TryAdd(mark.OperationId, mark.MarkedAt.ToUniversalTime());
+                _claims.Remove(mark.OperationId);
                 return Task.CompletedTask;
             }
 
@@ -1612,7 +1626,6 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             _instances[commit.InstanceId] = commit.Instance;
             _operations[commit.OperationId] = commit.Operation;
             _deploymentRuns[runId] = new ElsaInstanceLifecycleDeploymentRun(run, commit.Operation, commit.InstanceId);
-            _claims.Remove(commit.OperationId);
             return Task.FromResult(new ElsaInstanceLifecycleWorkerResult(
                 ElsaInstanceLifecycleWorkerOutcome.Queued,
                 commit.Operation,

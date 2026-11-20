@@ -193,6 +193,28 @@ public sealed class ElsaInstanceLifecycleWorkerTests
     }
 
     [Fact]
+    public async Task Delete_after_commit_resolved_before_mark_does_not_supersede_the_create()
+    {
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var accepted = await service.CreateAsync(CreateRequest("claims-resolved-before-mark", "create-resolved-before-mark"));
+        store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance));
+        await new ElsaInstanceLifecycleWorker(
+                store,
+                new RecordingResolver(SuccessfulResolution(WorkspaceId, accepted.Instance.Id)),
+                new StaticTimeProvider(Now))
+            .ProcessAvailableAsync("lifecycle-worker-1");
+
+        var deletion = await DeleteAsync(
+            service, authority, accepted.Instance.Id, store.Instances.Single().Version, "delete-before-mark");
+
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+        Assert.Equal(ElsaInstanceOperationState.Queued, store.Operations.Single(x => x.Id == accepted.Operation.Id).State);
+        Assert.Null(await store.TryClaimNextDeletionAsync("deletion-worker-1", Now.AddMinutes(1)));
+    }
+
+    [Fact]
     public async Task Delete_at_accept_time_supersedes_a_never_submitted_queued_create()
     {
         var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
@@ -205,6 +227,7 @@ public sealed class ElsaInstanceLifecycleWorkerTests
                 new RecordingResolver(SuccessfulResolution(WorkspaceId, accepted.Instance.Id)),
                 new StaticTimeProvider(Now))
             .ProcessAvailableAsync("lifecycle-worker-1");
+        store.ClearWorkerLease(accepted.Operation.Id);
 
         var deletion = await DeleteAsync(
             service, authority, accepted.Instance.Id, store.Instances.Single().Version, "delete-never-submitted");
@@ -266,6 +289,7 @@ public sealed class ElsaInstanceLifecycleWorkerTests
                 new RecordingResolver(SuccessfulResolution(WorkspaceId, accepted.Instance.Id)),
                 new StaticTimeProvider(Now))
             .ProcessAvailableAsync("lifecycle-worker-1");
+        store.ClearWorkerLease(accepted.Operation.Id);
         store.SeedAzureProvenance(accepted.Instance.Id);
 
         var deletion = await DeleteAsync(service, authority, accepted.Instance.Id, store.Instances.Single().Version, "delete-after-provenance");
@@ -1177,6 +1201,7 @@ public sealed class ElsaInstanceLifecycleWorkerTests
         {
             HoldPersisted = true;
             var operation = Operations.Single(x => x.Id == operationId);
+            _inner.ClearWorkerLease(operationId);
             _persistedOperations[operationId] = operation.TransitionTo(ElsaInstanceOperationState.EntitlementHeld);
             return Task.FromResult(new ElsaInstanceCommercialGateDecision(
                 false,

@@ -347,9 +347,9 @@ public static class ElsaInstanceOperationGuard
     /// <summary>
     /// Indicates whether Delete/Stop must wait behind a Queued predecessor
     /// instead of cancelling it as never-submitted. Shared by the SQL and
-    /// in-memory stores at accept-time and claim-time. A submission-in-flight
-    /// marker covers the window after the worker lease is cleared and before
-    /// Azure provenance is written.
+    /// in-memory stores at accept-time and claim-time. The resolution lease
+    /// covers the window until the submission-in-flight marker is written; the
+    /// marker then covers the window until Azure provenance is committed.
     /// </summary>
     public static bool MustWaitForQueuedPredecessorHandOff(
         bool queuedHandOffCommitted,
