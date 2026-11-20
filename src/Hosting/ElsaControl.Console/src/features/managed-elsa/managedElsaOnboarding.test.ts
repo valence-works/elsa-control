@@ -38,6 +38,17 @@ describe("onboardingChoices", () => {
     }, { includePreview: true });
     expect(preferredOnboardingChoice(choices)).toBeNull();
   });
+
+  it("tolerates a Supported manifestDigest without treating it as Preview consent", () => {
+    const choices = onboardingChoices({
+      ...optionsFixture(),
+      releases: [{ ...release("3.10.2", true), manifestDigest: digest }]
+    });
+    expect(choices).toHaveLength(1);
+    expect(choices[0].manifestDigest).toBe(digest);
+    expect(choices[0].previewManifestDigest).toBeNull();
+    expect(preferredOnboardingChoice(choices)?.recommended).toBe(true);
+  });
 });
 
 function optionsFixture(): ManagedElsaOnboardingOptions {

@@ -171,9 +171,9 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
     public async Task Onboarding_options_recommend_the_newest_stable_supported_release_by_nuget_semver()
     {
         var app = await PrepareApplicationAsync([], [
-            CatalogEntry("valence-runtime", "3.8", "3.8.0-preview.5413", "preview", "combined", "supported", "paid", 'p'),
-            CatalogEntry("valence-runtime", "3.8", "3.8.x", "stable", "combined", "supported", "paid", 'x'),
-            CatalogEntry("valence-runtime", "3.10", "3.10.2", "stable", "combined", "supported", "paid", 't')
+            CatalogEntry("valence-runtime", "3.8", "3.8.0-preview.5413", "preview", "combined", "supported", "paid", 'a'),
+            CatalogEntry("valence-runtime", "3.8", "3.8.x", "stable", "combined", "supported", "paid", 'b'),
+            CatalogEntry("valence-runtime", "3.10", "3.10.2", "stable", "combined", "supported", "paid", 'c')
         ]);
         var client = app.CreateControlIdentityClient(subject: "managed-semver-owner");
         var workspaceId = await client.GetDefaultWorkspaceIdAsync();
@@ -210,6 +210,109 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(["3.11.0", "3.10.2", "3.10.1"], options!.Releases.Select(item => item.Version));
         Assert.Equal(1, options.Releases.Count(item => item.Recommended));
         Assert.True(options.Releases[0].Recommended);
+        Assert.All(options.Releases.Skip(1), item => Assert.False(item.Recommended));
+        Assert.Null(options.PreviewReleases);
+    }
+
+    [Fact]
+    public async Task OnboardingOptions_SupportedReleases_IncludeAdmittedManifestDigest()
+    {
+        var app = await PrepareApplicationAsync([], [
+            CatalogEntry("valence-runtime", "3.11", "3.11.0", "stable", "combined", "supported", "paid",
+                digestMarker: 'a', manifestDigest: "not-a-digest"),
+            CatalogEntry("valence-runtime", "3.10", "3.10.2", "stable", "combined", "supported", "paid", 'b'),
+            CatalogEntry("valence-runtime", "3.10", "3.10.1", "stable", "combined", "supported", "paid", 'c'),
+            CatalogEntry("valence-runtime", "3.8", "3.8.0-preview.1", "preview", "combined", "preview", "paid", 'p')
+        ]);
+        var client = app.CreateControlIdentityClient(subject: "managed-digest-owner");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+
+        var options = await client.GetControlJsonAsync<ManagedElsaInstanceOnboardingOptionsResponse>(
+            $"/api/workspaces/{workspaceId}/instances/onboarding-options");
+
+        Assert.Equal(["3.10.2", "3.10.1"], options!.Releases.Select(item => item.Version));
+        Assert.Equal(Digest('b'), options.Releases[0].ManifestDigest);
+        Assert.Equal(Digest('c'), options.Releases[1].ManifestDigest);
+        Assert.All(options.Releases, item => Assert.Matches("^sha256:[0-9a-fA-F]{64}$", item.ManifestDigest));
+        Assert.DoesNotContain(options.Releases, item => item.Version == "3.11.0");
+        Assert.DoesNotContain(options.Releases, item => item.Version.Contains("preview", StringComparison.OrdinalIgnoreCase));
+        Assert.Null(options.PreviewReleases);
+
+        using var create = await SendCreateRequestAsync(
+            client, workspaceId, "Digest evidence", "digest-evidence", Intent() with
+            {
+                Release = new ElsaReleaseIntent("valence-runtime", "3.10", "3.10.2", "stable")
+            }, "create-digest-evidence");
+        Assert.Equal(HttpStatusCode.Accepted, create.StatusCode);
+    }
+
+    [Fact]
+    public async Task OnboardingOptions_CloudBff_StillOmitsPreviewReleases()
+    {
+        var catalog = new CapturingReleaseCatalogStore();
+        catalog.SetEntries([
+            CatalogEntry("valence-runtime", "3.8", "3.8.4", "stable", "combined", "supported", "paid", 'a'),
+            CatalogEntry("valence-runtime", "3.8", "3.8.0-preview.1", "preview", "combined", "preview", "paid", 'p')
+        ]);
+        await using var app = new ControlApiTestApplication(
+            configuration: new Dictionary<string, string?>
+            {
+                [$"{CloudBffOptions.ConfigurationSection}:Enabled"] = "true",
+                [$"{CloudBffOptions.ConfigurationSection}:ClientId"] = "elsa-cloud-lovable-bff",
+                [$"{CloudBffOptions.ConfigurationSection}:Scope"] = CloudBffDefaults.DefaultScope
+            },
+            configureServices: services =>
+            {
+                services.AddSingleton<IEngineProvisioningModule, TestProvisioningModule>();
+                services.RemoveAll<IGovernedReleaseCatalogStore>();
+                services.AddSingleton<IGovernedReleaseCatalogStore>(catalog);
+            });
+        await app.SeedAsync(_ => Task.CompletedTask);
+        using var client = app.CreateControlIdentityClient(
+            subject: "onboarding-digest-bff-owner",
+            claims: new Dictionary<string, string>
+            {
+                ["azp"] = "elsa-cloud-lovable-bff",
+                ["scp"] = CloudBffDefaults.DefaultScope
+            });
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+
+        var options = await client.GetControlJsonAsync<ManagedElsaInstanceOnboardingOptionsResponse>(
+            $"/api/workspaces/{workspaceId}/instances/onboarding-options?includePreview=true");
+
+        var release = Assert.Single(options!.Releases);
+        Assert.Equal("3.8.4", release.Version);
+        Assert.Equal(Digest('a'), release.ManifestDigest);
+        Assert.True(release.Recommended);
+        Assert.Null(options.PreviewReleases);
+        Assert.DoesNotContain(catalog.Queries, query => query.CatalogLifecycle == "preview");
+    }
+
+    [Fact]
+    public async Task OnboardingOptions_ExactlyOneRecommendedUnchanged()
+    {
+        var app = await PrepareApplicationAsync([], [
+            CatalogEntry("valence-runtime", "3.8", "3.8.4", "stable", "combined", "supported", "paid", 'a'),
+            CatalogEntry("valence-runtime", "3.9", "3.9.0", "stable", "combined", "supported", "paid", 'b'),
+            CatalogEntry("valence-runtime", "3.10", "3.10.1", "stable", "combined", "supported", "paid", 'c'),
+            CatalogEntry("valence-runtime", "3.10", "3.10.2", "stable", "combined", "supported", "paid", 'd'),
+            CatalogEntry("valence-runtime", "3.11", "3.11.0", "stable", "combined", "supported", "paid", 'e'),
+            CatalogEntry("valence-runtime", "3.8", "3.8.0-preview.1", "preview", "combined", "preview", "paid", 'p')
+        ]);
+        var client = app.CreateControlIdentityClient(subject: "managed-recommended-digest-owner");
+        var workspaceId = await client.GetDefaultWorkspaceIdAsync();
+        await EnableManagedHostingAsync(app, workspaceId);
+
+        var options = await client.GetControlJsonAsync<ManagedElsaInstanceOnboardingOptionsResponse>(
+            $"/api/workspaces/{workspaceId}/instances/onboarding-options");
+
+        Assert.Equal(["3.11.0", "3.10.2", "3.10.1"], options!.Releases.Select(item => item.Version));
+        Assert.Equal(1, options.Releases.Count(item => item.Recommended));
+        Assert.True(options.Releases[0].Recommended);
+        Assert.Equal("3.11.0", options.Releases[0].Version);
+        Assert.Equal(Digest('e'), options.Releases[0].ManifestDigest);
         Assert.All(options.Releases.Skip(1), item => Assert.False(item.Recommended));
         Assert.Null(options.PreviewReleases);
     }
@@ -305,6 +408,8 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Contains("includePreview", document, StringComparison.Ordinal);
         Assert.Contains("recommended", document, StringComparison.Ordinal);
+        Assert.Contains("manifestDigest", document, StringComparison.Ordinal);
+        Assert.Contains("sha256:<64 hex>", document, StringComparison.Ordinal);
         Assert.Contains("/api/workspaces/{workspaceId}/instances/onboarding-options", document, StringComparison.Ordinal);
     }
 
@@ -5069,10 +5174,11 @@ public sealed class ManagedElsaInstanceApiTests : IClassFixture<ManagedElsaInsta
         string topologyId,
         string catalogLifecycle,
         string registryClass,
-        char digestMarker = 'a') => new(
+        char digestMarker = 'a',
+        string? manifestDigest = null) => new(
         "1.0",
         $"oci://registry.example.test/releases/manifest@sha256:{new string(digestMarker, 64)}",
-        $"sha256:{new string(digestMarker, 64)}",
+        manifestDigest ?? $"sha256:{new string(digestMarker, 64)}",
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "https://evidence.example.test/signatures/manifest",
         "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",

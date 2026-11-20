@@ -8,6 +8,7 @@ using ElsaControl.Deployment.Core.Instances;
 using ElsaControl.Deployment.Core.Workspace;
 using ElsaControl.PackageCatalog.Core.Accounts;
 using ElsaControl.RuntimeBuilder.Abstractions.ReleaseCatalog;
+using ElsaControl.RuntimeBuilder.Abstractions.ReleaseManifests;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -110,7 +111,10 @@ public static class ManagedElsaInstanceEndpoints
                 RegistryClass: "paid"), cancellationToken);
             var uniqueNewestFirst = ManagedElsaReleasePicker.SelectUniqueNewestFirst(
                 ManagedElsaReleasePicker.WhereStableReleaseVersion(entries));
-            var capped = ManagedElsaReleasePicker.Cap(uniqueNewestFirst, pickerOptions.Value.EffectiveMaxChoices);
+            var withAdmittedDigest = uniqueNewestFirst
+                .Where(entry => ReleaseManifestEvidenceContract.IsDigest(entry.ManifestDigest))
+                .ToArray();
+            var capped = ManagedElsaReleasePicker.Cap(withAdmittedDigest, pickerOptions.Value.EffectiveMaxChoices);
             var releases = capped
                 .Select((entry, index) => new ManagedElsaInstanceReleaseOption(
                     entry.Distribution.Id,
@@ -118,6 +122,7 @@ public static class ManagedElsaInstanceEndpoints
                     entry.Distribution.ReleaseVersion,
                     entry.Distribution.Channel,
                     entry.Topology.Id,
+                    entry.ManifestDigest,
                     Recommended: index == 0))
                 .ToArray();
 
@@ -146,9 +151,12 @@ public static class ManagedElsaInstanceEndpoints
         }).RequireWorkspaceAccess().AllowCloudBff().AllowHubBff()
             .WithDescription(
                 "Returns a curated Supported release list for managed-instance create. " +
+                "Each Supported choice includes its admitted manifestDigest (sha256:<64 hex>). " +
+                "Entries without a valid digest are omitted. " +
                 "Exactly one choice is recommended (newest by NuGet semver). " +
                 "Preview is omitted unless a Console workspace Owner passes includePreview=true. " +
-                "Hub, Cloud BFF, and Partner API callers never receive previewReleases.")
+                "Hub, Cloud BFF, and Partner API callers never receive previewReleases. " +
+                "Create, apply-release, and intent validation do not accept or require the digest.")
             .AddEndpointFilter<EngineProvisioningRequiredFilter>();
 
         group.MapPost("", async (
@@ -1313,6 +1321,8 @@ public sealed record ManagedElsaInstanceReleaseOption(
     string Version,
     string Channel,
     string TopologyId,
+    [property: Description("Admitted release-manifest digest (sha256:<64 hex>) for this Supported catalog entry. Display and proof evidence only; create and apply-release do not accept or require it.")]
+    string ManifestDigest,
     [property: Description("True on the newest Supported release by NuGet semver. Clients must not rely on array order.")]
     bool Recommended = false);
 public sealed record ManagedElsaInstancePreviewReleaseOption(
