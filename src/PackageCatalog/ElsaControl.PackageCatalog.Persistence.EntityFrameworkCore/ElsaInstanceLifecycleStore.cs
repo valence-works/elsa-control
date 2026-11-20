@@ -735,23 +735,18 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                         predecessorRun is not null &&
                         predecessorRun.Status != WorkspaceDeploymentRunStatus.Queued;
                     var queuedHasAzureProvenance = predecessor.State == ElsaInstanceOperationState.Queued &&
-                        (await dbContext.AzureProviderResourceAssignments.AsNoTracking()
-                            .AnyAsync(x => x.WorkspaceId == instance.WorkspaceId &&
-                                           x.InstanceId == instance.Id, cancellationToken) ||
-                         await dbContext.AzureProviderOperations.AsNoTracking()
-                            .AnyAsync(x => x.WorkspaceId == instance.WorkspaceId &&
-                                           x.InstanceId == instance.Id, cancellationToken));
-                    var predecessorHasInFlightWorkerLease = ElsaInstanceOperationGuard.HasInFlightWorkerLease(
-                        predecessor.WorkerId,
-                        predecessor.LeaseTokenHash,
-                        predecessor.LeaseExpiresAt,
-                        predecessor.HeartbeatAt);
-                    if (queuedHandOffCommitted || queuedHasAzureProvenance || predecessorHasInFlightWorkerLease)
+                        await HasAzureProvenanceAsync(instance.WorkspaceId, instance.Id, cancellationToken);
+                    if (ElsaInstanceOperationGuard.MustWaitForQueuedPredecessorHandOff(
+                            queuedHandOffCommitted,
+                            queuedHasAzureProvenance,
+                            predecessor.WorkerId,
+                            predecessor.LeaseTokenHash,
+                            predecessor.LeaseExpiresAt,
+                            predecessor.HeartbeatAt,
+                            predecessor.ProviderSubmissionInFlightAt))
                     {
-                        // A committed, uncertain, or still-leased provider hand-off
-                        // still needs Delete/Stop to wait. The lease guard matches
-                        // TrySupersedeNeverSubmittedPredecessorAsync so an in-flight
-                        // SubmitAsync cannot finish after this Create is cancelled.
+                        // A committed, uncertain, leased, or still-submitting
+                        // provider hand-off still needs Delete/Stop to wait.
                     }
                     else
                     {
@@ -1721,10 +1716,19 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     ? currentRecoveryRows[0].Id
                     : (Guid?)null;
                 var mappedInstance = MapInstance(instance);
+                var hasSubmissionInFlight = await dbContext.ElsaInstanceOperations.AsNoTracking()
+                    .AnyAsync(x => x.WorkspaceId == instance.WorkspaceId &&
+                                   x.InstanceId == instance.Id &&
+                                   x.ProviderSubmissionInFlightAt != null,
+                        cancellationToken);
                 var local = recoveryRequestId is null &&
-                    mappedInstance.ObservedLifecycle != ElsaObservedLifecycle.Unknown &&
-                    mappedInstance.CurrentDeploymentReference is null && mappedInstance.PlacementAssignmentReference is null &&
-                    mappedInstance.ElsaTenantReference is null;
+                    ElsaInstanceOperationGuard.CanFinalizeDeletionLocally(
+                        mappedInstance.ObservedLifecycle,
+                        mappedInstance.CurrentDeploymentReference is not null,
+                        mappedInstance.PlacementAssignmentReference is not null,
+                        mappedInstance.ElsaTenantReference is not null,
+                        await HasAzureProvenanceAsync(instance.WorkspaceId, instance.Id, cancellationToken),
+                        hasSubmissionInFlight);
 
                 claimedOperationId = operation.Id;
                 claimedWorkerId = workerId;
@@ -1867,10 +1871,17 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     commit.ExpectedInstanceVersion, commit.ExpectedAttemptNumber, commit.WorkerId, commit.LeaseToken, commit.LeaseVersion);
                 var currentAggregate = MapInstance(instance);
                 if (commit.ProofKind == ElsaInstanceDeletionProofKind.LocalNoOwnedResources &&
-                    (currentAggregate.ObservedLifecycle == ElsaObservedLifecycle.Unknown ||
-                     currentAggregate.CurrentDeploymentReference is not null ||
-                     currentAggregate.PlacementAssignmentReference is not null ||
-                     currentAggregate.ElsaTenantReference is not null))
+                    !ElsaInstanceOperationGuard.CanFinalizeDeletionLocally(
+                        currentAggregate.ObservedLifecycle,
+                        currentAggregate.CurrentDeploymentReference is not null,
+                        currentAggregate.PlacementAssignmentReference is not null,
+                        currentAggregate.ElsaTenantReference is not null,
+                        await HasAzureProvenanceAsync(instance.WorkspaceId, instance.Id, cancellationToken),
+                        await dbContext.ElsaInstanceOperations.AsNoTracking().AnyAsync(x =>
+                            x.WorkspaceId == instance.WorkspaceId &&
+                            x.InstanceId == instance.Id &&
+                            x.ProviderSubmissionInFlightAt != null,
+                            cancellationToken)))
                     throw Conflict("Local deletion proof is not valid for this instance.");
                 var correlatedRun = await EnsureTerminalDeletionRunAsync(
                     commit.ExpectedRunId, commit.WorkspaceId, commit.InstanceId, cancellationToken);
@@ -2149,10 +2160,6 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 operation.AttemptNumber = commit.Operation.AttemptNumber;
                 operation.ResolvedPlanId = commit.Plan.Reference.PlanId;
                 operation.DeploymentRunId = runId;
-                operation.WorkerId = null;
-                operation.LeaseTokenHash = null;
-                operation.LeaseExpiresAt = null;
-                operation.HeartbeatAt = null;
                 operation.UpdatedAt = commit.CommittedAt.ToUniversalTime();
 
                 var runEntity = new DeploymentRunEntity
@@ -2264,6 +2271,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     operation.State = ElsaInstanceOperationState.EntitlementHeld;
                     operation.FailureCode = decision.Code;
                     operation.FailureSummary = decision.Summary;
+                    ClearWorkerLease(operation);
                     operation.UpdatedAt = authorizedAtUtc;
                     authorizationEventType = "lifecycle.entitlement-held";
                     authorizationDiagnosticCode = decision.Code;
@@ -2327,6 +2335,48 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             cancellationToken);
     }
 
+    public async Task MarkProviderSubmissionInFlightAsync(
+        ElsaInstanceProviderSubmissionInFlightMark mark,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(mark);
+        mark.Validate();
+        dbContext.ChangeTracker.Clear();
+        await dbContext.ExecuteInTransactionAsync(IsolationLevel.Serializable, async () =>
+        {
+            var operation = await dbContext.ElsaInstanceOperations.SingleOrDefaultAsync(
+                x => x.WorkspaceId == mark.WorkspaceId && x.Id == mark.OperationId,
+                cancellationToken);
+            var run = operation?.DeploymentRunId is { } runId
+                ? await dbContext.DeploymentRuns.SingleOrDefaultAsync(
+                    x => x.WorkspaceId == mark.WorkspaceId && x.Id == runId,
+                    cancellationToken)
+                : null;
+            if (operation is null || run is null ||
+                operation.InstanceId != mark.InstanceId || operation.AttemptNumber != mark.AttemptNumber ||
+                run.ElsaInstanceId != mark.InstanceId)
+                throw Conflict("Provider submission in-flight correlation is invalid.");
+
+            if (operation.State == ElsaInstanceOperationState.Queued &&
+                run.Status == WorkspaceDeploymentRunStatus.Queued)
+            {
+                var markedAt = mark.MarkedAt.ToUniversalTime();
+                operation.ProviderSubmissionInFlightAt ??= markedAt;
+                ClearWorkerLease(operation);
+                operation.UpdatedAt = markedAt;
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return;
+            }
+
+            if (operation.State is ElsaInstanceOperationState.RecoveryRequired or
+                ElsaInstanceOperationState.Succeeded or
+                ElsaInstanceOperationState.Failed)
+                return;
+
+            throw Conflict("Provider submission reservation is no longer queued.");
+        }, cancellationToken);
+    }
+
     public async Task CommitProviderSubmissionAsync(
         ElsaInstanceProviderSubmissionCommit commit,
         CancellationToken cancellationToken = default)
@@ -2355,6 +2405,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
 
             if (operation.State is ElsaInstanceOperationState.Succeeded or ElsaInstanceOperationState.Failed)
             {
+                if (operation.ProviderSubmissionInFlightAt is not null)
+                {
+                    operation.ProviderSubmissionInFlightAt = null;
+                    await dbContext.SaveChangesAsync(cancellationToken);
+                }
                 return;
             }
 
@@ -2371,6 +2426,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                     var previousUncertainReason = CurrentParkReason(operation, run.RecoveryReason);
                     operation.FailureCode = null;
                     operation.FailureSummary = null;
+                    operation.ProviderSubmissionInFlightAt = null;
                     operation.UpdatedAt = commit.SubmittedAt.ToUniversalTime();
                     run.RecoveryReason = ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted;
                     operation.ReconciliationDiagnosticCode = ManagedElsaReasonCodeCatalog.ProviderSubmissionAccepted;
@@ -2395,6 +2451,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                         diagnosticCode: run.RecoveryReason), cancellationToken);
                     await dbContext.SaveChangesAsync(cancellationToken);
                 }
+                else if (operation.ProviderSubmissionInFlightAt is not null)
+                {
+                    operation.ProviderSubmissionInFlightAt = null;
+                    await dbContext.SaveChangesAsync(cancellationToken);
+                }
 
                 return;
             }
@@ -2413,6 +2474,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             operation.LeaseTokenHash = null;
             operation.LeaseExpiresAt = null;
             operation.HeartbeatAt = null;
+            operation.ProviderSubmissionInFlightAt = null;
             operation.UpdatedAt = commit.SubmittedAt.ToUniversalTime();
             run.Status = WorkspaceDeploymentRunStatus.RecoveryRequired;
             run.RecoveryReason = commit.CorrelationId == "provider-submission-uncertain"
@@ -2491,6 +2553,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             operation.LeaseTokenHash = null;
             operation.LeaseExpiresAt = null;
             operation.HeartbeatAt = null;
+            operation.ProviderSubmissionInFlightAt = null;
             operation.UpdatedAt = rejectedAt;
             ApplyReasonClock(
                 operation,
@@ -2654,7 +2717,25 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                 if (desiredLifecycle == ElsaDesiredLifecycle.Deleting &&
                     operation.Action != ElsaInstanceOperationAction.Delete)
                 {
-                    if (!recoveries.TryGetValue(operation.Id, out var predecessorRecovery) ||
+                    // A waiting Delete can flip DesiredLifecycle while SubmitAsync is
+                    // still in flight, or after CommitResolved while the resolution
+                    // lease is still held and Mark has not run. Replay the original
+                    // Create/Stop apply so neither the marker nor that leftover lease
+                    // can wedge the successor.
+                    if (ElsaInstanceOperationGuard.CanReplayQueuedPredecessorBehindWaitingDelete(
+                            operation.State,
+                            operation.ProviderSubmissionInFlightAt,
+                            operation.WorkerId,
+                            operation.LeaseTokenHash,
+                            operation.LeaseExpiresAt,
+                            operation.HeartbeatAt) &&
+                        await HasWaitingDeleteSuccessorForConfirmedProviderAsync(
+                            instance, operation, cancellationToken))
+                    {
+                        desiredLifecycle = ElsaInstanceOperationGuard.ReplayQueuedPredecessorDesiredLifecycle(
+                            operation.Action, instance.ObservedLifecycle);
+                    }
+                    else if (!recoveries.TryGetValue(operation.Id, out var predecessorRecovery) ||
                         operation.ReconciledInstanceVersion is not { } predecessorReconciledVersion ||
                         predecessorRecovery.ObservedInstanceVersion != predecessorReconciledVersion ||
                         !await HasExactWaitingDeleteSuccessorAsync(
@@ -2671,10 +2752,11 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                         });
                         continue;
                     }
-
-                    desiredLifecycle = operation.Action == ElsaInstanceOperationAction.Stop
-                        ? ElsaDesiredLifecycle.Stopped
-                        : ElsaDesiredLifecycle.Running;
+                    else
+                    {
+                        desiredLifecycle = ElsaInstanceOperationGuard.ReplayQueuedPredecessorDesiredLifecycle(
+                            operation.Action, instance.ObservedLifecycle);
+                    }
                 }
                 var candidate = new ElsaInstanceProviderSubmission(
                     operation.WorkspaceId,
@@ -4284,6 +4366,23 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
     internal static ElsaInstanceOperation MapOperation(ElsaInstanceOperationEntity entity)
         => MapOperation(entity, null);
 
+    private static void ClearWorkerLease(ElsaInstanceOperationEntity operation)
+    {
+        operation.WorkerId = null;
+        operation.LeaseTokenHash = null;
+        operation.LeaseExpiresAt = null;
+        operation.HeartbeatAt = null;
+    }
+
+    private async Task<bool> HasAzureProvenanceAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        CancellationToken cancellationToken) =>
+        await dbContext.AzureProviderResourceAssignments.AsNoTracking()
+            .AnyAsync(x => x.WorkspaceId == workspaceId && x.InstanceId == instanceId, cancellationToken) ||
+        await dbContext.AzureProviderOperations.AsNoTracking()
+            .AnyAsync(x => x.WorkspaceId == workspaceId && x.InstanceId == instanceId, cancellationToken);
+
     private async Task SupersedeEntitlementHeldOperationAsync(
         ElsaInstanceOperationEntity operation,
         ElsaInstanceEntity instance,
@@ -4312,6 +4411,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         operation.LeaseTokenHash = null;
         operation.LeaseExpiresAt = null;
         operation.HeartbeatAt = null;
+        operation.ProviderSubmissionInFlightAt = null;
         operation.UpdatedAt = timestamp;
 
         if (operation.DeploymentRunId is not { } runId)
@@ -4388,12 +4488,7 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
         if (blockers is not [{ State: ElsaInstanceOperationState.Queued } predecessor] ||
             predecessor.Action == ElsaInstanceOperationAction.Delete ||
             predecessor.DeploymentRunId is not { } runId ||
-            predecessor.AcceptedAt > deleteOperation.AcceptedAt ||
-            ElsaInstanceOperationGuard.HasInFlightWorkerLease(
-                predecessor.WorkerId,
-                predecessor.LeaseTokenHash,
-                predecessor.LeaseExpiresAt,
-                predecessor.HeartbeatAt))
+            predecessor.AcceptedAt > deleteOperation.AcceptedAt)
             return false;
 
         var activeRuns = await dbContext.DeploymentRuns.AsNoTracking()
@@ -4403,17 +4498,18 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                          x.Status == WorkspaceDeploymentRunStatus.Running ||
                          x.Status == WorkspaceDeploymentRunStatus.RecoveryRequired))
             .ToListAsync(cancellationToken);
-        if (activeRuns is not [{ Status: WorkspaceDeploymentRunStatus.Queued } activeRun] ||
-            activeRun.Id != runId)
-            return false;
-
-        var hasAzureProvenance = await dbContext.AzureProviderResourceAssignments.AsNoTracking()
-                .AnyAsync(x => x.WorkspaceId == deleteOperation.WorkspaceId &&
-                               x.InstanceId == deleteOperation.InstanceId, cancellationToken) ||
-            await dbContext.AzureProviderOperations.AsNoTracking()
-                .AnyAsync(x => x.WorkspaceId == deleteOperation.WorkspaceId &&
-                               x.InstanceId == deleteOperation.InstanceId, cancellationToken);
-        if (hasAzureProvenance)
+        var queuedHandOffCommitted = activeRuns is not [{ Status: WorkspaceDeploymentRunStatus.Queued } queuedRun] ||
+            queuedRun.Id != runId;
+        var hasAzureProvenance = await HasAzureProvenanceAsync(
+            deleteOperation.WorkspaceId, instance.Id, cancellationToken);
+        if (ElsaInstanceOperationGuard.MustWaitForQueuedPredecessorHandOff(
+                queuedHandOffCommitted,
+                hasAzureProvenance,
+                predecessor.WorkerId,
+                predecessor.LeaseTokenHash,
+                predecessor.LeaseExpiresAt,
+                predecessor.HeartbeatAt,
+                predecessor.ProviderSubmissionInFlightAt))
             return false;
 
         var trackedPredecessor = await dbContext.ElsaInstanceOperations
@@ -4424,7 +4520,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
                                        x.Action != ElsaInstanceOperationAction.Delete &&
                                        x.DeploymentRunId == runId &&
                                        x.WorkerId == null && x.LeaseTokenHash == null &&
-                                       x.LeaseExpiresAt == null && x.HeartbeatAt == null,
+                                       x.LeaseExpiresAt == null && x.HeartbeatAt == null &&
+                                       x.ProviderSubmissionInFlightAt == null,
                 cancellationToken);
         var trackedRun = await dbContext.DeploymentRuns.Include(x => x.Environment)
             .SingleOrDefaultAsync(x => x.Id == runId &&
@@ -4512,12 +4609,8 @@ public sealed partial class EfCoreElsaInstanceLifecycleStore(
             return false;
 
         AzureProviderOperationEntity? azureOperation = null;
-        var hasAzureProvenance = await dbContext.AzureProviderResourceAssignments.AsNoTracking()
-                .AnyAsync(x => x.WorkspaceId == deleteOperation.WorkspaceId &&
-                               x.InstanceId == deleteOperation.InstanceId, cancellationToken) ||
-            await dbContext.AzureProviderOperations.AsNoTracking()
-                .AnyAsync(x => x.WorkspaceId == deleteOperation.WorkspaceId &&
-                               x.InstanceId == deleteOperation.InstanceId, cancellationToken);
+        var hasAzureProvenance = await HasAzureProvenanceAsync(
+            deleteOperation.WorkspaceId, instance.Id, cancellationToken);
         if (hasAzureProvenance)
         {
             if (!Guid.TryParseExact(instance.PlacementAssignmentId, "D", out var assignmentId))

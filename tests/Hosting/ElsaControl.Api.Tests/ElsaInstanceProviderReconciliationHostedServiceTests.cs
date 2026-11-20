@@ -931,6 +931,16 @@ public sealed partial class ElsaInstanceProviderReconciliationHostedServiceTests
         public List<ElsaInstanceProviderSubmissionCommit> Commits { get; } = [];
         public List<ElsaInstanceProviderSubmissionRejection> Rejections { get; } = [];
 
+        public List<ElsaInstanceProviderSubmissionInFlightMark> InFlightMarks { get; } = [];
+
+        public Task MarkProviderSubmissionInFlightAsync(
+            ElsaInstanceProviderSubmissionInFlightMark mark,
+            CancellationToken cancellationToken = default)
+        {
+            InFlightMarks.Add(mark);
+            return Task.CompletedTask;
+        }
+
         public Task CommitProviderSubmissionAsync(
             ElsaInstanceProviderSubmissionCommit commit,
             CancellationToken cancellationToken = default)

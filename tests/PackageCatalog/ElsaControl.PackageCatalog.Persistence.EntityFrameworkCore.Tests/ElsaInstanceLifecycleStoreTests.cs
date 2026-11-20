@@ -2600,6 +2600,83 @@ public sealed partial class ElsaInstanceLifecycleStoreTests : IClassFixture<Dele
     }
 
     [Fact]
+    public async Task Delete_after_commit_resolved_before_mark_does_not_supersede_the_create()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Resolved before mark");
+        db.ChangeTracker.Clear();
+        var predecessor = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.NotNull(predecessor.WorkerId);
+        Assert.Null(predecessor.ProviderSubmissionInFlightAt);
+        var current = Assert.IsType<ElsaInstance>(await CreateStore(db)
+            .GetInstanceAsync(workspace.Id, accepted.Instance.Id));
+        var deletion = await new ElsaInstanceLifecycleService(
+                CreateStore(db), new FixedTimeProvider(Now.AddMinutes(1)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, current.Version,
+                "delete-before-mark", Now.AddMinutes(1)));
+
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+        db.ChangeTracker.Clear();
+        predecessor = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Queued, predecessor.State);
+        Assert.NotNull(predecessor.WorkerId);
+        Assert.Null(predecessor.ProviderSubmissionInFlightAt);
+        Assert.Null(predecessor.FailureCode);
+        Assert.Null(await CreateStore(db).TryClaimNextDeletionAsync("deletion-worker", Now.AddMinutes(2)));
+    }
+
+    [Fact]
+    public async Task Crash_after_resolve_before_mark_lets_waiting_delete_proceed_after_replay()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Resolve crash before mark");
+        db.ChangeTracker.Clear();
+        var current = Assert.IsType<ElsaInstance>(await CreateStore(db)
+            .GetInstanceAsync(workspace.Id, accepted.Instance.Id));
+        var deletion = await new ElsaInstanceLifecycleService(
+                CreateStore(db), new FixedTimeProvider(Now.AddMinutes(1)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, current.Version,
+                "delete-after-resolve-crash", Now.AddMinutes(1)));
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+        Assert.Null(await CreateStore(db).TryClaimNextDeletionAsync("deletion-worker", Now.AddMinutes(2)));
+
+        var pending = Assert.Single(await CreateStore(db).ListPendingProviderOperationsAsync(16));
+        Assert.False(pending.HandoffInvalid);
+        Assert.NotNull(pending.Submission);
+        Assert.Equal(accepted.Operation.Id, pending.Submission.OperationId);
+        Assert.Equal(ElsaDesiredLifecycle.Running, pending.Submission.DesiredLifecycle);
+
+        db.ChangeTracker.Clear();
+        await CreateStore(db).FailRejectedProviderSubmissionAsync(new(
+            workspace.Id,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            Now.AddMinutes(2),
+            ["azure.imageRegistry.unsupported"]));
+        db.ChangeTracker.Clear();
+        Assert.Equal(ElsaInstanceOperationState.Failed,
+            (await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id)).State);
+        Assert.Equal(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected,
+            (await db.ElsaInstanceOperations.AsNoTracking().SingleAsync(x => x.Id == accepted.Operation.Id)).FailureCode);
+
+        var claimed = await CreateStore(db).TryClaimNextDeletionAsync("deletion-worker-finalize", Now.AddMinutes(3));
+        Assert.NotNull(claimed);
+        Assert.Equal(deletion.Operation.Id, claimed.Operation.Id);
+    }
+
+    [Fact]
     public async Task Delete_at_accept_time_supersedes_a_never_submitted_queued_create()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -2607,6 +2684,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests : IClassFixture<Dele
         await using var db = CreateMigratedContext(connection);
         await db.Database.MigrateAsync();
         var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Never submitted accept delete");
+        await ReleaseQueuedLifecycleLeaseAsync(db, accepted.Operation.Id);
         db.ChangeTracker.Clear();
         var current = Assert.IsType<ElsaInstance>(await CreateStore(db)
             .GetInstanceAsync(workspace.Id, accepted.Instance.Id));
@@ -2660,6 +2738,129 @@ public sealed partial class ElsaInstanceLifecycleStoreTests : IClassFixture<Dele
     }
 
     [Fact]
+    public async Task Delete_at_accept_time_waits_behind_a_queued_create_with_azure_provenance()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Provenance queued create");
+        await ReleaseQueuedLifecycleLeaseAsync(db, accepted.Operation.Id);
+        await SeedAzureProvenanceAsync(db, workspace, accepted.Instance.Id);
+        db.ChangeTracker.Clear();
+        var current = Assert.IsType<ElsaInstance>(await CreateStore(db)
+            .GetInstanceAsync(workspace.Id, accepted.Instance.Id));
+        var deletion = await new ElsaInstanceLifecycleService(
+                CreateStore(db), new FixedTimeProvider(Now.AddMinutes(1)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, current.Version,
+                "delete-after-provenance-queued", Now.AddMinutes(1)));
+
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+        db.ChangeTracker.Clear();
+        var predecessor = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Queued, predecessor.State);
+        Assert.Null(predecessor.FailureCode);
+    }
+
+    [Fact]
+    public async Task Delete_at_accept_time_does_not_supersede_a_create_with_submission_in_flight()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "In-flight queued create");
+        db.ChangeTracker.Clear();
+        await CreateStore(db).MarkProviderSubmissionInFlightAsync(new(
+            workspace.Id,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            Now));
+        db.ChangeTracker.Clear();
+        var current = Assert.IsType<ElsaInstance>(await CreateStore(db)
+            .GetInstanceAsync(workspace.Id, accepted.Instance.Id));
+        var deletion = await new ElsaInstanceLifecycleService(
+                CreateStore(db), new FixedTimeProvider(Now.AddMinutes(1)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, current.Version,
+                "delete-after-inflight-queued", Now.AddMinutes(1)));
+
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+        db.ChangeTracker.Clear();
+        var predecessor = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Queued, predecessor.State);
+        Assert.NotNull(predecessor.ProviderSubmissionInFlightAt);
+        Assert.Null(predecessor.FailureCode);
+        Assert.Null(await CreateStore(db).TryClaimNextDeletionAsync("deletion-worker", Now.AddMinutes(2)));
+        db.ChangeTracker.Clear();
+        var deletionBatch = await new ElsaInstanceDeletionWorker(
+                CreateStore(db),
+                new ThrowingCleanupPort(),
+                new FixedTimeProvider(Now.AddMinutes(2)))
+            .ProcessAvailableAsync("deletion-worker-local-absent");
+        Assert.Empty(deletionBatch.Results);
+        Assert.Equal(0, deletionBatch.ProviderInvocations);
+        db.ChangeTracker.Clear();
+        var deleteOp = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == deletion.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deleteOp.State);
+        Assert.Null(deleteOp.DeletionDiagnosticCode);
+        Assert.NotEqual(ElsaObservedLifecycle.Deleted,
+            (await db.ElsaInstances.AsNoTracking().SingleAsync(x => x.Id == accepted.Instance.Id)).ObservedLifecycle);
+        var pending = Assert.Single(await CreateStore(db).ListPendingProviderOperationsAsync(16));
+        Assert.NotNull(pending.Submission);
+    }
+
+    [Fact]
+    public async Task Waiting_delete_does_not_supersede_a_create_with_submission_in_flight()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateMigratedContext(connection);
+        await db.Database.MigrateAsync();
+        var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "In-flight claim delete");
+        var workspaceStore = new DeploymentWorkspaceStore(db);
+        var claimedRun = Assert.IsType<WorkspaceDeploymentRun>(
+            await workspaceStore.ClaimNextQueuedRunAsync("stale-deployment-worker", Now));
+        db.ChangeTracker.Clear();
+        var current = Assert.IsType<ElsaInstance>(await CreateStore(db)
+            .GetInstanceAsync(workspace.Id, accepted.Instance.Id));
+        var deletion = await new ElsaInstanceLifecycleService(
+                CreateStore(db), new FixedTimeProvider(Now.AddMinutes(1)))
+            .DeleteAsync(await CreateConfirmedDeleteRequestAsync(
+                db, workspace.Id, accepted.Instance.Id, current.Version,
+                "delete-after-inflight-claim", Now.AddMinutes(1)));
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+
+        db.ChangeTracker.Clear();
+        var run = await db.DeploymentRuns.SingleAsync(x => x.Id == claimedRun.Id);
+        run.Status = WorkspaceDeploymentRunStatus.Queued;
+        run.WorkerId = null;
+        run.WorkerHeartbeatAt = null;
+        run.StartedAt = null;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        await CreateStore(db).MarkProviderSubmissionInFlightAsync(new(
+            workspace.Id,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            Now.AddMinutes(1)));
+        db.ChangeTracker.Clear();
+
+        Assert.Null(await CreateStore(db).TryClaimNextDeletionAsync("deletion-worker", Now.AddMinutes(2)));
+        db.ChangeTracker.Clear();
+        var predecessor = await db.ElsaInstanceOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == accepted.Operation.Id);
+        Assert.Equal(ElsaInstanceOperationState.Queued, predecessor.State);
+        Assert.Null(predecessor.FailureCode);
+    }
+
+    [Fact]
     public async Task Waiting_delete_supersedes_a_never_submitted_queued_create()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -2667,6 +2868,7 @@ public sealed partial class ElsaInstanceLifecycleStoreTests : IClassFixture<Dele
         await using var db = CreateMigratedContext(connection);
         await db.Database.MigrateAsync();
         var (workspace, accepted) = await QueueManagedLifecycleRunAsync(db, "Never submitted delete");
+        await ReleaseQueuedLifecycleLeaseAsync(db, accepted.Operation.Id);
         var workspaceStore = new DeploymentWorkspaceStore(db);
         var claimedRun = Assert.IsType<WorkspaceDeploymentRun>(
             await workspaceStore.ClaimNextQueuedRunAsync("stale-deployment-worker", Now));
@@ -4366,6 +4568,35 @@ public sealed partial class ElsaInstanceLifecycleStoreTests : IClassFixture<Dele
 
     private static EfCoreElsaInstanceLifecycleStore CreateStore(CatalogDbContext db) =>
         new(db, EmptyResolutionInputSource.Instance);
+
+    private static async Task SeedAzureProvenanceAsync(CatalogDbContext db, Workspace workspace, Guid instanceId)
+    {
+        var assignmentStore = (IAzureProviderResourceAssignmentStore)new AzureProviderOperationStore(db);
+        await assignmentStore.CreateOrGetAsync(
+            new(
+                workspace.Id,
+                workspace.OrganizationId,
+                instanceId,
+                new string('a', 64),
+                "11111111-1111-1111-1111-111111111111",
+                "rg-inflight",
+                $"e{instanceId:N}"[..16],
+                "westeurope"),
+            Now);
+        db.ChangeTracker.Clear();
+    }
+
+    private static async Task ReleaseQueuedLifecycleLeaseAsync(CatalogDbContext db, Guid operationId)
+    {
+        db.ChangeTracker.Clear();
+        var operation = await db.ElsaInstanceOperations.SingleAsync(x => x.Id == operationId);
+        operation.WorkerId = null;
+        operation.LeaseTokenHash = null;
+        operation.LeaseExpiresAt = null;
+        operation.HeartbeatAt = null;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+    }
 
     private static async Task<(Workspace Workspace, ElsaInstanceLifecycleAcceptance Accepted)>
         QueueManagedLifecycleRunAsync(CatalogDbContext db, string workspaceName)

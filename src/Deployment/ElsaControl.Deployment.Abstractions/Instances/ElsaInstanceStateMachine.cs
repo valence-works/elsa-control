@@ -345,6 +345,86 @@ public static class ElsaInstanceOperationGuard
         heartbeatAt is not null;
 
     /// <summary>
+    /// Indicates whether Delete/Stop must wait behind a Queued predecessor
+    /// instead of cancelling it as never-submitted. Shared by the SQL and
+    /// in-memory stores at accept-time and claim-time. The resolution lease
+    /// covers the window until the submission-in-flight marker is written; the
+    /// marker then covers the window until Azure provenance is committed.
+    /// </summary>
+    public static bool MustWaitForQueuedPredecessorHandOff(
+        bool queuedHandOffCommitted,
+        bool hasAzureProvenance,
+        string? workerId,
+        string? leaseTokenHash,
+        DateTimeOffset? leaseExpiresAt,
+        DateTimeOffset? heartbeatAt,
+        DateTimeOffset? submissionInFlightAt) =>
+        queuedHandOffCommitted ||
+        hasAzureProvenance ||
+        HasInFlightWorkerLease(workerId, leaseTokenHash, leaseExpiresAt, heartbeatAt) ||
+        submissionInFlightAt is not null;
+
+    /// <summary>
+    /// Local <c>deletion.local.absent</c> finalization is only valid when the
+    /// instance has no owned-resource projections and no Create submit is still
+    /// writing Azure provenance. Stores may return false for additional reasons.
+    /// </summary>
+    public static bool CanFinalizeDeletionLocally(
+        ElsaObservedLifecycle observedLifecycle,
+        bool hasCurrentDeploymentReference,
+        bool hasPlacementAssignmentReference,
+        bool hasElsaTenantReference,
+        bool hasAzureProvenance,
+        bool hasSubmissionInFlight)
+    {
+        ElsaInstanceValue.RequireEnum(observedLifecycle, nameof(observedLifecycle));
+        return observedLifecycle != ElsaObservedLifecycle.Unknown &&
+            !hasCurrentDeploymentReference &&
+            !hasPlacementAssignmentReference &&
+            !hasElsaTenantReference &&
+            !hasAzureProvenance &&
+            !hasSubmissionInFlight;
+    }
+
+    /// <summary>
+    /// Replay of a queued Create/Stop whose instance is now Deleting is allowed
+    /// when the submission-in-flight marker is set or the resolution lease is
+    /// still held. That covers a crash after <c>CommitResolvedAsync</c> and
+    /// before <c>MarkProviderSubmissionInFlightAsync</c>, so reconciliation can
+    /// finish the hand-off instead of leaving a waiting Delete wedged.
+    /// </summary>
+    public static bool CanReplayQueuedPredecessorBehindWaitingDelete(
+        ElsaInstanceOperationState state,
+        DateTimeOffset? submissionInFlightAt,
+        string? workerId,
+        string? leaseTokenHash,
+        DateTimeOffset? leaseExpiresAt,
+        DateTimeOffset? heartbeatAt)
+    {
+        ElsaInstanceValue.RequireEnum(state, nameof(state));
+        return state == ElsaInstanceOperationState.Queued &&
+            (submissionInFlightAt is not null ||
+             HasInFlightWorkerLease(workerId, leaseTokenHash, leaseExpiresAt, heartbeatAt));
+    }
+
+    /// <summary>
+    /// Desired lifecycle used when replaying a queued predecessor whose instance
+    /// is now Deleting. Stop and an already-stopped instance stay Stopped so a
+    /// Reconcile/Retry accepted while stopped is not replayed as Running.
+    /// </summary>
+    public static ElsaDesiredLifecycle ReplayQueuedPredecessorDesiredLifecycle(
+        ElsaInstanceOperationAction action,
+        ElsaObservedLifecycle observedLifecycle)
+    {
+        ElsaInstanceValue.RequireEnum(action, nameof(action));
+        ElsaInstanceValue.RequireEnum(observedLifecycle, nameof(observedLifecycle));
+        return action == ElsaInstanceOperationAction.Stop ||
+               observedLifecycle == ElsaObservedLifecycle.Stopped
+            ? ElsaDesiredLifecycle.Stopped
+            : ElsaDesiredLifecycle.Running;
+    }
+
+    /// <summary>
     /// Indicates whether an operation is unfinished and therefore blocks a new
     /// mutation. Waiting successors remain blocking even though they do not hold
     /// the execution reservation themselves.

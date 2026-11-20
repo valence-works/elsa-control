@@ -193,6 +193,101 @@ public sealed class ElsaInstanceLifecycleWorkerTests
     }
 
     [Fact]
+    public async Task Delete_after_commit_resolved_before_mark_does_not_supersede_the_create()
+    {
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var accepted = await service.CreateAsync(CreateRequest("claims-resolved-before-mark", "create-resolved-before-mark"));
+        store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance));
+        await new ElsaInstanceLifecycleWorker(
+                store,
+                new RecordingResolver(SuccessfulResolution(WorkspaceId, accepted.Instance.Id)),
+                new StaticTimeProvider(Now))
+            .ProcessAvailableAsync("lifecycle-worker-1");
+
+        var deletion = await DeleteAsync(
+            service, authority, accepted.Instance.Id, store.Instances.Single().Version, "delete-before-mark");
+
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+        Assert.Equal(ElsaInstanceOperationState.Queued, store.Operations.Single(x => x.Id == accepted.Operation.Id).State);
+        Assert.Null(await store.TryClaimNextDeletionAsync("deletion-worker-1", Now.AddMinutes(1)));
+    }
+
+    [Fact]
+    public async Task Crash_after_resolve_before_mark_lets_waiting_delete_proceed_after_replay()
+    {
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var accepted = await service.CreateAsync(CreateRequest("claims-resolve-crash", "create-resolve-crash"));
+        store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance));
+        await new ElsaInstanceLifecycleWorker(
+                store,
+                new RecordingResolver(SuccessfulResolution(WorkspaceId, accepted.Instance.Id)),
+                new StaticTimeProvider(Now))
+            .ProcessAvailableAsync("lifecycle-worker-1");
+
+        var deletion = await DeleteAsync(
+            service, authority, accepted.Instance.Id, store.Instances.Single().Version, "delete-after-resolve-crash");
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+        Assert.Null(await store.TryClaimNextDeletionAsync("deletion-worker-1", Now.AddMinutes(1)));
+
+        var pending = Assert.Single(await store.ListPendingProviderOperationsAsync(16));
+        Assert.False(pending.HandoffInvalid);
+        Assert.NotNull(pending.Submission);
+        Assert.Equal(accepted.Operation.Id, pending.Submission.OperationId);
+        Assert.Equal(ElsaDesiredLifecycle.Running, pending.Submission.DesiredLifecycle);
+
+        await store.FailRejectedProviderSubmissionAsync(new(
+            WorkspaceId,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            Now.AddMinutes(1),
+            ["azure.imageRegistry.unsupported"]));
+
+        Assert.Equal(ElsaInstanceOperationState.Failed, store.Operations.Single(x => x.Id == accepted.Operation.Id).State);
+        var deletionBatch = await new ElsaInstanceDeletionWorker(
+                store,
+                new RecordingCleanupPort(),
+                new StaticTimeProvider(Now.AddMinutes(2)))
+            .ProcessAvailableAsync("deletion-worker-finalize");
+        Assert.Equal(ElsaInstanceLifecycleWorkerOutcome.Deleted, Assert.Single(deletionBatch.Results).Outcome);
+        Assert.Equal(0, deletionBatch.ProviderInvocations);
+        Assert.Equal(ElsaInstanceOperationState.Succeeded,
+            store.Operations.Single(x => x.Id == deletion.Operation.Id).State);
+        Assert.Equal(ElsaObservedLifecycle.Deleted, store.Instances.Single().ObservedLifecycle);
+    }
+
+    [Fact]
+    public async Task Delete_at_accept_time_supersedes_a_never_submitted_queued_create()
+    {
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var accepted = await service.CreateAsync(CreateRequest("claims-never-submitted-delete", "create-never-submitted-delete"));
+        store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance));
+        await new ElsaInstanceLifecycleWorker(
+                store,
+                new RecordingResolver(SuccessfulResolution(WorkspaceId, accepted.Instance.Id)),
+                new StaticTimeProvider(Now))
+            .ProcessAvailableAsync("lifecycle-worker-1");
+        store.ClearWorkerLease(accepted.Operation.Id);
+
+        var deletion = await DeleteAsync(
+            service, authority, accepted.Instance.Id, store.Instances.Single().Version, "delete-never-submitted");
+
+        Assert.Equal(ElsaInstanceOperationState.Accepted, deletion.Operation.State);
+        Assert.Equal(
+            ElsaInstanceOperationState.Cancelled,
+            store.Operations.Single(x => x.Id == accepted.Operation.Id).State);
+        Assert.Equal(
+            ManagedElsaReasonCodeCatalog.ProviderSubmissionNeverSubmittedSuperseded,
+            store.Failures.Single(x => x.OperationId == accepted.Operation.Id).Code);
+    }
+
+    [Fact]
     public async Task Delete_at_accept_time_waits_behind_a_queued_create_with_an_active_worker_lease()
     {
         var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
@@ -225,6 +320,140 @@ public sealed class ElsaInstanceLifecycleWorkerTests
         Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
         Assert.Equal(ElsaInstanceOperationState.Queued, store.Operations.Single(x => x.Id == accepted.Operation.Id).State);
         Assert.Null(await store.TryClaimNextDeletionAsync("deletion-worker-1", Now.AddMinutes(1)));
+    }
+
+    [Fact]
+    public async Task Delete_at_accept_time_waits_behind_a_queued_create_with_azure_provenance()
+    {
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var accepted = await service.CreateAsync(CreateRequest("claims-provenance-delete", "create-provenance-delete"));
+        store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance));
+        await new ElsaInstanceLifecycleWorker(
+                store,
+                new RecordingResolver(SuccessfulResolution(WorkspaceId, accepted.Instance.Id)),
+                new StaticTimeProvider(Now))
+            .ProcessAvailableAsync("lifecycle-worker-1");
+        store.ClearWorkerLease(accepted.Operation.Id);
+        store.SeedAzureProvenance(accepted.Instance.Id);
+
+        var deletion = await DeleteAsync(service, authority, accepted.Instance.Id, store.Instances.Single().Version, "delete-after-provenance");
+
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+        Assert.Equal(ElsaInstanceOperationState.Queued, store.Operations.Single(x => x.Id == accepted.Operation.Id).State);
+        Assert.Null(await store.TryClaimNextDeletionAsync("deletion-worker-1", Now.AddMinutes(1)));
+    }
+
+    [Fact]
+    public async Task Delete_accepted_during_submit_does_not_supersede_the_in_flight_create()
+    {
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var accepted = await service.CreateAsync(CreateRequest("claims-inflight-delete", "create-inflight-delete"));
+        store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance));
+        var submitStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSubmit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var workerTask = new ElsaInstanceLifecycleWorker(
+                store,
+                new RecordingResolver(SuccessfulResolution(WorkspaceId, accepted.Instance.Id)),
+                new StaticTimeProvider(Now),
+                new BlockingSubmissionPort(store, submitStarted, releaseSubmit),
+                store)
+            .ProcessAvailableAsync("lifecycle-worker-1");
+
+        await submitStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var deletion = await DeleteAsync(service, authority, accepted.Instance.Id, store.Instances.Single().Version, "delete-during-submit");
+        releaseSubmit.SetResult();
+        await workerTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+        Assert.NotEqual(ElsaInstanceOperationState.Cancelled, store.Operations.Single(x => x.Id == accepted.Operation.Id).State);
+        Assert.Null(await store.TryClaimNextDeletionAsync("deletion-worker-1", Now.AddMinutes(1)));
+    }
+
+    [Fact]
+    public async Task Delete_during_submit_does_not_finalize_as_local_absent()
+    {
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var accepted = await service.CreateAsync(CreateRequest("claims-inflight-local-absent", "create-inflight-local-absent"));
+        store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance));
+        var submitStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSubmit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var workerTask = new ElsaInstanceLifecycleWorker(
+                store,
+                new RecordingResolver(SuccessfulResolution(WorkspaceId, accepted.Instance.Id)),
+                new StaticTimeProvider(Now),
+                new BlockingSubmissionPort(store, submitStarted, releaseSubmit),
+                store)
+            .ProcessAvailableAsync("lifecycle-worker-1");
+
+        await submitStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var deletion = await DeleteAsync(
+            service, authority, accepted.Instance.Id, store.Instances.Single().Version, "delete-during-submit-local-absent");
+        var cleanup = new RecordingCleanupPort();
+        var deletionBatch = await new ElsaInstanceDeletionWorker(
+                store,
+                cleanup,
+                new StaticTimeProvider(Now.AddMinutes(1)))
+            .ProcessAvailableAsync("deletion-worker-local-absent");
+
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation,
+            store.Operations.Single(x => x.Id == deletion.Operation.Id).State);
+        Assert.Equal(ElsaInstanceOperationState.Queued,
+            store.Operations.Single(x => x.Id == accepted.Operation.Id).State);
+        Assert.Empty(deletionBatch.Results);
+        Assert.Equal(0, deletionBatch.ProviderInvocations);
+        Assert.Equal(0, cleanup.Calls);
+        Assert.Null(await store.TryClaimNextDeletionAsync("deletion-worker-local-absent-2", Now.AddMinutes(1)));
+
+        releaseSubmit.SetResult();
+        await workerTask.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotEqual(ElsaInstanceOperationState.Succeeded,
+            store.Operations.Single(x => x.Id == deletion.Operation.Id).State);
+    }
+
+    [Fact]
+    public async Task Submission_in_flight_crash_stays_replayable_until_reconciliation()
+    {
+        var authority = new InMemoryElsaInstanceDeleteConfirmationAuthority();
+        var store = new InMemoryElsaInstanceLifecycleStore(new StaticTimeProvider(Now), authority);
+        var service = new ElsaInstanceLifecycleService(store, new StaticTimeProvider(Now));
+        var accepted = await service.CreateAsync(CreateRequest("claims-inflight-crash", "create-inflight-crash"));
+        store.RegisterResolutionInput(accepted.Operation.Id, ResolutionInput(accepted.Instance));
+        await new ElsaInstanceLifecycleWorker(
+                store,
+                new RecordingResolver(SuccessfulResolution(WorkspaceId, accepted.Instance.Id)),
+                new StaticTimeProvider(Now))
+            .ProcessAvailableAsync("lifecycle-worker-1");
+        await store.MarkProviderSubmissionInFlightAsync(new(
+            WorkspaceId,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            Now));
+
+        var pending = Assert.Single(await store.ListPendingProviderOperationsAsync(16));
+        Assert.NotNull(pending.Submission);
+        var deletion = await DeleteAsync(service, authority, accepted.Instance.Id, store.Instances.Single().Version, "delete-after-inflight-crash");
+        Assert.Equal(ElsaInstanceOperationState.WaitingForPriorOperation, deletion.Operation.State);
+        Assert.Null(await store.TryClaimNextDeletionAsync("deletion-worker-1", Now.AddMinutes(1)));
+        Assert.NotNull(Assert.Single(await store.ListPendingProviderOperationsAsync(16)).Submission);
+
+        store.SeedAzureProvenance(accepted.Instance.Id);
+        await store.CommitProviderSubmissionAsync(new(
+            WorkspaceId,
+            accepted.Instance.Id,
+            accepted.Operation.Id,
+            accepted.Operation.AttemptNumber,
+            "provider-operation-recovered",
+            Now.AddSeconds(1)));
+        Assert.Equal(ElsaInstanceOperationState.RecoveryRequired, store.Operations.Single(x => x.Id == accepted.Operation.Id).State);
+        Assert.Null(Assert.Single(await store.ListPendingProviderOperationsAsync(16)).Submission);
+        Assert.Null(await store.TryClaimNextDeletionAsync("deletion-worker-2", Now.AddMinutes(1)));
     }
 
     [Fact]
@@ -770,6 +999,29 @@ public sealed class ElsaInstanceLifecycleWorkerTests
         Assert.Single(store.DeploymentRuns);
     }
 
+    private static async Task<ElsaInstanceLifecycleAcceptance> DeleteAsync(
+        ElsaInstanceLifecycleService service,
+        InMemoryElsaInstanceDeleteConfirmationAuthority authority,
+        Guid instanceId,
+        int expectedVersion,
+        string idempotencyKey)
+    {
+        var confirmationId = Guid.NewGuid();
+        var actorAccountId = Guid.NewGuid();
+        authority.Add(new ActionConfirmation(
+            confirmationId,
+            WorkspaceId,
+            ConfirmationActionType.DeleteManagedInstance,
+            instanceId.ToString("D"),
+            actorAccountId,
+            Now,
+            Now.AddMinutes(5),
+            null));
+        return await service.DeleteAsync(new ElsaInstanceLifecycleRequest(
+            WorkspaceId, instanceId, expectedVersion, idempotencyKey,
+            DeleteConfirmationId: confirmationId, ActorAccountId: actorAccountId));
+    }
+
     private static ElsaInstanceCreateRequest CreateRequest(string slug, string key) =>
         new(OrganizationId, WorkspaceId, slug, slug, Intent(), key);
 
@@ -884,6 +1136,37 @@ public sealed class ElsaInstanceLifecycleWorkerTests
             throw new InvalidOperationException("resolver exploded");
     }
 
+    private sealed class RecordingCleanupPort : IElsaInstanceProviderCleanupPort
+    {
+        public int Calls { get; private set; }
+
+        public Task<ElsaInstanceCleanupObservation> CleanupAsync(
+            ElsaInstanceCleanupRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            throw new InvalidOperationException("Provider cleanup must not run while a Create submit is in flight.");
+        }
+    }
+
+    private sealed class BlockingSubmissionPort(
+        InMemoryElsaInstanceLifecycleStore store,
+        TaskCompletionSource submitted,
+        TaskCompletionSource release) : IElsaInstanceProviderSubmissionPort
+    {
+        public async Task<ElsaInstanceProviderSubmissionResult> SubmitAsync(
+            ElsaInstanceProviderSubmission request,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            request.Validate();
+            submitted.TrySetResult();
+            await release.Task.WaitAsync(cancellationToken);
+            store.SeedAzureProvenance(request.InstanceId);
+            return new($"provider-operation-{request.OperationId:N}", Replayed: false, PlacementAssignmentId: null);
+        }
+    }
+
     private sealed class RecordingSubmissionPort(
         bool throwOnSubmit = false,
         ElsaInstanceProviderSubmissionFailureKind failureKind = ElsaInstanceProviderSubmissionFailureKind.OutcomeUnknown,
@@ -964,12 +1247,18 @@ public sealed class ElsaInstanceLifecycleWorkerTests
         {
             HoldPersisted = true;
             var operation = Operations.Single(x => x.Id == operationId);
+            _inner.ClearWorkerLease(operationId);
             _persistedOperations[operationId] = operation.TransitionTo(ElsaInstanceOperationState.EntitlementHeld);
             return Task.FromResult(new ElsaInstanceCommercialGateDecision(
                 false,
                 ElsaInstanceCommercialOperation.LifecycleConstrained,
                 "The organization subscription does not permit managed-instance changes."));
         }
+
+        public Task MarkProviderSubmissionInFlightAsync(
+            ElsaInstanceProviderSubmissionInFlightMark mark,
+            CancellationToken cancellationToken = default) =>
+            _inner.MarkProviderSubmissionInFlightAsync(mark, cancellationToken);
 
         public Task CommitProviderSubmissionAsync(ElsaInstanceProviderSubmissionCommit commit, CancellationToken cancellationToken = default) =>
             _inner.CommitProviderSubmissionAsync(commit, cancellationToken);

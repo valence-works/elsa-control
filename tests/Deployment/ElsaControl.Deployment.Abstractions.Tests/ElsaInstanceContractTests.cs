@@ -538,6 +538,137 @@ public sealed class ElsaInstanceContractTests
     }
 
     [Fact]
+    public void Queued_predecessor_hand_off_wait_is_shared_across_stores()
+    {
+        Assert.False(ElsaInstanceOperationGuard.MustWaitForQueuedPredecessorHandOff(
+            queuedHandOffCommitted: false,
+            hasAzureProvenance: false,
+            workerId: null,
+            leaseTokenHash: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            submissionInFlightAt: null));
+        Assert.True(ElsaInstanceOperationGuard.MustWaitForQueuedPredecessorHandOff(
+            queuedHandOffCommitted: true,
+            hasAzureProvenance: false,
+            workerId: null,
+            leaseTokenHash: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            submissionInFlightAt: null));
+        Assert.True(ElsaInstanceOperationGuard.MustWaitForQueuedPredecessorHandOff(
+            queuedHandOffCommitted: false,
+            hasAzureProvenance: true,
+            workerId: null,
+            leaseTokenHash: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            submissionInFlightAt: null));
+        Assert.True(ElsaInstanceOperationGuard.MustWaitForQueuedPredecessorHandOff(
+            queuedHandOffCommitted: false,
+            hasAzureProvenance: false,
+            workerId: "worker-1",
+            leaseTokenHash: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            submissionInFlightAt: null));
+        Assert.True(ElsaInstanceOperationGuard.MustWaitForQueuedPredecessorHandOff(
+            queuedHandOffCommitted: false,
+            hasAzureProvenance: false,
+            workerId: null,
+            leaseTokenHash: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            submissionInFlightAt: DateTimeOffset.UnixEpoch));
+    }
+
+    [Fact]
+    public void Queued_predecessor_replay_behind_a_waiting_delete_covers_lease_or_marker()
+    {
+        Assert.False(ElsaInstanceOperationGuard.CanReplayQueuedPredecessorBehindWaitingDelete(
+            ElsaInstanceOperationState.Queued, null, null, null, null, null));
+        Assert.True(ElsaInstanceOperationGuard.CanReplayQueuedPredecessorBehindWaitingDelete(
+            ElsaInstanceOperationState.Queued,
+            submissionInFlightAt: DateTimeOffset.UnixEpoch,
+            workerId: null,
+            leaseTokenHash: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null));
+        Assert.True(ElsaInstanceOperationGuard.CanReplayQueuedPredecessorBehindWaitingDelete(
+            ElsaInstanceOperationState.Queued,
+            submissionInFlightAt: null,
+            workerId: "resolver-worker",
+            leaseTokenHash: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null));
+        Assert.False(ElsaInstanceOperationGuard.CanReplayQueuedPredecessorBehindWaitingDelete(
+            ElsaInstanceOperationState.RecoveryRequired,
+            submissionInFlightAt: DateTimeOffset.UnixEpoch,
+            workerId: "resolver-worker",
+            leaseTokenHash: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null));
+    }
+
+    [Fact]
+    public void Queued_predecessor_replay_keeps_a_stopped_instance_stopped()
+    {
+        Assert.Equal(
+            ElsaDesiredLifecycle.Stopped,
+            ElsaInstanceOperationGuard.ReplayQueuedPredecessorDesiredLifecycle(
+                ElsaInstanceOperationAction.Stop, ElsaObservedLifecycle.Ready));
+        Assert.Equal(
+            ElsaDesiredLifecycle.Stopped,
+            ElsaInstanceOperationGuard.ReplayQueuedPredecessorDesiredLifecycle(
+                ElsaInstanceOperationAction.Reconcile, ElsaObservedLifecycle.Stopped));
+        Assert.Equal(
+            ElsaDesiredLifecycle.Stopped,
+            ElsaInstanceOperationGuard.ReplayQueuedPredecessorDesiredLifecycle(
+                ElsaInstanceOperationAction.Retry, ElsaObservedLifecycle.Stopped));
+        Assert.Equal(
+            ElsaDesiredLifecycle.Running,
+            ElsaInstanceOperationGuard.ReplayQueuedPredecessorDesiredLifecycle(
+                ElsaInstanceOperationAction.Create, ElsaObservedLifecycle.Unknown));
+        Assert.Equal(
+            ElsaDesiredLifecycle.Running,
+            ElsaInstanceOperationGuard.ReplayQueuedPredecessorDesiredLifecycle(
+                ElsaInstanceOperationAction.Retry, ElsaObservedLifecycle.Ready));
+    }
+
+    [Fact]
+    public void Local_deletion_finalization_waits_for_in_flight_submit_and_azure_provenance()
+    {
+        Assert.True(ElsaInstanceOperationGuard.CanFinalizeDeletionLocally(
+            ElsaObservedLifecycle.Pending,
+            hasCurrentDeploymentReference: false,
+            hasPlacementAssignmentReference: false,
+            hasElsaTenantReference: false,
+            hasAzureProvenance: false,
+            hasSubmissionInFlight: false));
+        Assert.False(ElsaInstanceOperationGuard.CanFinalizeDeletionLocally(
+            ElsaObservedLifecycle.Pending,
+            hasCurrentDeploymentReference: false,
+            hasPlacementAssignmentReference: false,
+            hasElsaTenantReference: false,
+            hasAzureProvenance: false,
+            hasSubmissionInFlight: true));
+        Assert.False(ElsaInstanceOperationGuard.CanFinalizeDeletionLocally(
+            ElsaObservedLifecycle.Pending,
+            hasCurrentDeploymentReference: false,
+            hasPlacementAssignmentReference: false,
+            hasElsaTenantReference: false,
+            hasAzureProvenance: true,
+            hasSubmissionInFlight: false));
+        Assert.False(ElsaInstanceOperationGuard.CanFinalizeDeletionLocally(
+            ElsaObservedLifecycle.Unknown,
+            hasCurrentDeploymentReference: false,
+            hasPlacementAssignmentReference: false,
+            hasElsaTenantReference: false,
+            hasAzureProvenance: false,
+            hasSubmissionInFlight: false));
+    }
+
+    [Fact]
     public void Invalid_enum_values_fail_closed_in_transition_guards()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => ElsaInstanceStateMachine.CanTransition(

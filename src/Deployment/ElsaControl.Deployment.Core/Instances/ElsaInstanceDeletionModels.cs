@@ -164,9 +164,11 @@ public sealed record ElsaInstanceDeletionWorkItem(
             Operation.Id != Outbox.OperationId ||
             Instance.Id != Outbox.InstanceId || Instance.Id != Operation.InstanceId ||
             Instance.WorkspaceId != Outbox.WorkspaceId || Instance.Intent.DesiredLifecycle != ElsaDesiredLifecycle.Deleting ||
-            CanFinalizeLocally != (Instance.ObservedLifecycle != ElsaObservedLifecycle.Unknown &&
-                Instance.CurrentDeploymentReference is null && Instance.PlacementAssignmentReference is null &&
-                Instance.ElsaTenantReference is null))
+            (CanFinalizeLocally &&
+             (Instance.ObservedLifecycle == ElsaObservedLifecycle.Unknown ||
+              Instance.CurrentDeploymentReference is not null ||
+              Instance.PlacementAssignmentReference is not null ||
+              Instance.ElsaTenantReference is not null)))
             throw new InvalidOperationException("Deletion work item is invalid.");
         ElsaInstanceLifecycleLease.Validate(LeaseToken, LeaseVersion);
         if (RecoveryRequestId == Guid.Empty)

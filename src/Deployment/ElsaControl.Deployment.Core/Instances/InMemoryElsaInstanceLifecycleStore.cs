@@ -50,6 +50,8 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
     private readonly Dictionary<Guid, ElsaInstanceLifecycleOutboxMessage> _outbox = [];
     private readonly Dictionary<Guid, ElsaInstanceLifecycleResolutionInput> _resolutionInputs = [];
     private readonly Dictionary<Guid, LifecycleClaim> _claims = [];
+    private readonly Dictionary<Guid, DateTimeOffset> _submissionInFlight = [];
+    private readonly HashSet<Guid> _azureProvenanceInstanceIds = [];
     private readonly Dictionary<string, ElsaInstanceLifecycleResolvedPlan> _resolvedPlans = new(StringComparer.Ordinal);
     private readonly Dictionary<Guid, ElsaInstanceLifecycleDeploymentRun> _deploymentRuns = [];
     private readonly Dictionary<Guid, ElsaInstanceLifecycleRecordedFailure> _failures = [];
@@ -142,6 +144,19 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
     /// Test seam: plants an in-flight worker lease so accept-time Delete/Stop
     /// can prove they wait behind a Queued predecessor that still holds a worker.
     /// </summary>
+    /// <summary>
+    /// Test seam: drops the resolution lease without writing a submission
+    /// marker, which is the never-submitted stuck shape after the worker
+    /// released the claim without calling Submit.
+    /// </summary>
+    public void ClearWorkerLease(Guid operationId)
+    {
+        lock (_gate)
+        {
+            _claims.Remove(operationId);
+        }
+    }
+
     public void SeedWorkerLease(Guid operationId, string workerId, DateTimeOffset expiresAt)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
@@ -155,6 +170,18 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 1,
                 expiresAt.ToUniversalTime());
         }
+    }
+
+    /// <summary>
+    /// Test seam: plants Azure provenance so accept-time Delete/Stop can prove they
+    /// wait behind a Queued predecessor that already has provider rows.
+    /// </summary>
+    public void SeedAzureProvenance(Guid instanceId)
+    {
+        if (instanceId == Guid.Empty)
+            throw new ArgumentException("Instance ID is required.", nameof(instanceId));
+        lock (_gate)
+            _azureProvenanceInstanceIds.Add(instanceId);
     }
 
     public void MarkRecoveryRequired(Guid operationId, string? reasonCode = null)
@@ -185,6 +212,39 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         }
     }
 
+    public Task MarkProviderSubmissionInFlightAsync(
+        ElsaInstanceProviderSubmissionInFlightMark mark,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(mark);
+        mark.Validate();
+        lock (_gate)
+        {
+            if (!_operations.TryGetValue(mark.OperationId, out var operation) ||
+                operation.InstanceId != mark.InstanceId || operation.AttemptNumber != mark.AttemptNumber)
+                throw new ElsaInstanceLifecycleConflictException("Provider submission in-flight correlation is invalid.");
+            var run = _deploymentRuns.Values.SingleOrDefault(x => x.Operation.Id == mark.OperationId);
+            if (run is null)
+                throw new ElsaInstanceLifecycleConflictException("Provider submission in-flight correlation is invalid.");
+
+            if (operation.State == ElsaInstanceOperationState.Queued &&
+                run.Run.Status == WorkspaceDeploymentRunStatus.Queued)
+            {
+                _submissionInFlight.TryAdd(mark.OperationId, mark.MarkedAt.ToUniversalTime());
+                _claims.Remove(mark.OperationId);
+                return Task.CompletedTask;
+            }
+
+            if (operation.State is ElsaInstanceOperationState.RecoveryRequired or
+                ElsaInstanceOperationState.Succeeded or
+                ElsaInstanceOperationState.Failed)
+                return Task.CompletedTask;
+
+            throw new ElsaInstanceLifecycleConflictException("Provider submission reservation is no longer queued.");
+        }
+    }
+
     public Task CommitProviderSubmissionAsync(
         ElsaInstanceProviderSubmissionCommit commit,
         CancellationToken cancellationToken = default)
@@ -199,7 +259,10 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                 operation.InstanceId != commit.InstanceId || operation.AttemptNumber != commit.AttemptNumber)
                 throw new ElsaInstanceLifecycleConflictException("Provider submission correlation is invalid.");
             if (operation.State is ElsaInstanceOperationState.Succeeded or ElsaInstanceOperationState.Failed)
+            {
+                _submissionInFlight.Remove(commit.OperationId);
                 return Task.CompletedTask;
+            }
             if (operation.State == ElsaInstanceOperationState.RecoveryRequired)
             {
                 var existingRun = _deploymentRuns.Values.SingleOrDefault(x => x.Operation.Id == commit.OperationId);
@@ -218,6 +281,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                     };
                     _instances[instance.Id] = WithPlacementAssignment(instance, commit.PlacementAssignmentId);
                 }
+                _submissionInFlight.Remove(commit.OperationId);
                 return Task.CompletedTask;
             }
             if (operation.State != ElsaInstanceOperationState.Queued)
@@ -226,6 +290,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             var recovered = operation.TransitionTo(ElsaInstanceOperationState.Running)
                 .TransitionTo(ElsaInstanceOperationState.RecoveryRequired);
             _operations[commit.OperationId] = recovered;
+            _submissionInFlight.Remove(commit.OperationId);
             var run = _deploymentRuns.Values.SingleOrDefault(x => x.Operation.Id == commit.OperationId);
             if (run is not null)
                 _deploymentRuns[run.Run.Id] = run with
@@ -278,7 +343,10 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             if (operation.State == ElsaInstanceOperationState.Failed &&
                 _failures.TryGetValue(rejection.OperationId, out var existing) &&
                 string.Equals(existing.Code, ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected, StringComparison.Ordinal))
+            {
+                _submissionInFlight.Remove(rejection.OperationId);
                 return Task.CompletedTask;
+            }
 
             if (operation.State != ElsaInstanceOperationState.Queued)
                 throw new ElsaInstanceLifecycleConflictException("Provider submission reservation is no longer queued.");
@@ -289,6 +357,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             var failed = operation.TransitionTo(ElsaInstanceOperationState.Failed);
             _operations[rejection.OperationId] = failed;
             _claims.Remove(rejection.OperationId);
+            _submissionInFlight.Remove(rejection.OperationId);
             _failures[rejection.OperationId] = new ElsaInstanceLifecycleRecordedFailure(
                 rejection.OperationId,
                 ManagedElsaReasonCodeCatalog.ProviderSubmissionRejected,
@@ -368,12 +437,34 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                                 run.Run.ConfirmationId,
                                 run.Run.ActorAccountId);
                             target.Validate();
+                            var desiredLifecycle = instance.DesiredLifecycle;
+                            _claims.TryGetValue(operation.Id, out var claim);
+                            DateTimeOffset? submissionInFlightAt = _submissionInFlight.TryGetValue(operation.Id, out var markedAt)
+                                ? markedAt
+                                : null;
+                            if (desiredLifecycle == ElsaDesiredLifecycle.Deleting &&
+                                operation.Action != ElsaInstanceOperationAction.Delete &&
+                                ElsaInstanceOperationGuard.CanReplayQueuedPredecessorBehindWaitingDelete(
+                                    operation.State,
+                                    submissionInFlightAt,
+                                    claim?.WorkerId,
+                                    claim?.Token,
+                                    claim?.ExpiresAt,
+                                    heartbeatAt: null) &&
+                                _operations.Values.Any(successor =>
+                                    successor.InstanceId == instance.Id &&
+                                    successor.Action == ElsaInstanceOperationAction.Delete &&
+                                    successor.State == ElsaInstanceOperationState.WaitingForPriorOperation))
+                            {
+                                desiredLifecycle = ElsaInstanceOperationGuard.ReplayQueuedPredecessorDesiredLifecycle(
+                                    operation.Action, instance.ObservedLifecycle);
+                            }
                             var candidate = new ElsaInstanceProviderSubmission(
                                 instance.WorkspaceId,
                                 instance.Id,
                                 operation.Id,
                                 operation.AttemptNumber,
-                                instance.DesiredLifecycle,
+                                desiredLifecycle,
                                 typedPlan,
                                 target,
                                 instance.PlacementIntent.RegionCode,
@@ -1007,14 +1098,10 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                         "The safe-exit predecessor changed concurrently.",
                         ElsaInstanceLifecycleConflictReason.OperationActive);
                 var priorRun = _deploymentRuns.Values.SingleOrDefault(x => x.Operation.Id == predecessor.Id);
-                var predecessorHasInFlightWorkerLease = PredecessorHasInFlightWorkerLease(predecessor.Id);
-                if ((predecessor.State == ElsaInstanceOperationState.Queued &&
-                    priorRun is not null &&
-                    priorRun.Run.Status != WorkspaceDeploymentRunStatus.Queued) ||
-                    predecessorHasInFlightWorkerLease)
+                if (PredecessorMustWaitForQueuedHandOff(predecessor, priorRun))
                 {
-                    // A committed, uncertain, or still-leased provider hand-off
-                    // still needs Delete/Stop to wait.
+                    // A committed, uncertain, leased, or still-submitting
+                    // provider hand-off still needs Delete/Stop to wait.
                 }
                 else
                 {
@@ -1024,6 +1111,7 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                     var cancelled = predecessor.TransitionTo(ElsaInstanceOperationState.Cancelled);
                     _operations[predecessor.Id] = cancelled;
                     _claims.Remove(predecessor.Id);
+                    _submissionInFlight.Remove(predecessor.Id);
                     _failures[predecessor.Id] = new ElsaInstanceLifecycleRecordedFailure(
                         predecessor.Id,
                         failureCode,
@@ -1203,12 +1291,13 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                             !string.Equals(lastOperationId.Value, operation.Id.ToString("D"), StringComparison.OrdinalIgnoreCase) ||
                             operation.ExpectedVersion + 1 != instance.Version ||
                             predecessor.AcceptedAt > operation.AcceptedAt ||
-                            PredecessorHasInFlightWorkerLease(predecessor.Id))
+                            PredecessorMustWaitForQueuedHandOff(predecessor, predecessorRun))
                             continue;
 
                         var cancelled = predecessor.TransitionTo(ElsaInstanceOperationState.Cancelled);
                         _operations[predecessor.Id] = cancelled;
                         _claims.Remove(predecessor.Id);
+                        _submissionInFlight.Remove(predecessor.Id);
                         _failures[predecessor.Id] = new ElsaInstanceLifecycleRecordedFailure(
                             predecessor.Id,
                             failureCode,
@@ -1262,9 +1351,15 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
                     .OrderByDescending(x => x.Run.CreatedAt)
                     .Select(x => (Guid?)x.Run.Id)
                     .FirstOrDefault();
-                var local = instance.ObservedLifecycle != ElsaObservedLifecycle.Unknown &&
-                    instance.CurrentDeploymentReference is null && instance.PlacementAssignmentReference is null &&
-                    instance.ElsaTenantReference is null;
+                var hasSubmissionInFlight = _operations.Values.Any(predecessor =>
+                    predecessor.InstanceId == instance.Id && _submissionInFlight.ContainsKey(predecessor.Id));
+                var local = ElsaInstanceOperationGuard.CanFinalizeDeletionLocally(
+                    instance.ObservedLifecycle,
+                    instance.CurrentDeploymentReference is not null,
+                    instance.PlacementAssignmentReference is not null,
+                    instance.ElsaTenantReference is not null,
+                    _azureProvenanceInstanceIds.Contains(instance.Id),
+                    hasSubmissionInFlight);
                 return Task.FromResult<ElsaInstanceDeletionWorkItem?>(new(
                     outbox, operation, instance, local, correlatedRun, claim.Token, claim.Version)
                 {
@@ -1369,11 +1464,16 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             EnsureDeletionOwnership(commit.WorkspaceId, commit.InstanceId, commit.OperationId, commit.OutboxId,
                 commit.ExpectedInstanceVersion, commit.ExpectedAttemptNumber, commit.WorkerId, commit.LeaseToken, commit.LeaseVersion);
             var currentInstance = _instances[commit.InstanceId];
+            var hasSubmissionInFlight = _operations.Values.Any(predecessor =>
+                predecessor.InstanceId == commit.InstanceId && _submissionInFlight.ContainsKey(predecessor.Id));
             if (commit.ProofKind == ElsaInstanceDeletionProofKind.LocalNoOwnedResources &&
-                (currentInstance.ObservedLifecycle == ElsaObservedLifecycle.Unknown ||
-                 currentInstance.CurrentDeploymentReference is not null ||
-                 currentInstance.PlacementAssignmentReference is not null ||
-                 currentInstance.ElsaTenantReference is not null))
+                !ElsaInstanceOperationGuard.CanFinalizeDeletionLocally(
+                    currentInstance.ObservedLifecycle,
+                    currentInstance.CurrentDeploymentReference is not null,
+                    currentInstance.PlacementAssignmentReference is not null,
+                    currentInstance.ElsaTenantReference is not null,
+                    _azureProvenanceInstanceIds.Contains(commit.InstanceId),
+                    hasSubmissionInFlight))
                 throw new ElsaInstanceLifecycleConflictException("Local deletion proof is not valid for this instance.");
             if (commit.ExpectedRunId is { } runId && (!_deploymentRuns.TryGetValue(runId, out var run) ||
                 run.InstanceId != commit.InstanceId || run.Run.Status is WorkspaceDeploymentRunStatus.Queued or WorkspaceDeploymentRunStatus.Running or WorkspaceDeploymentRunStatus.RecoveryRequired))
@@ -1536,7 +1636,6 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
             _instances[commit.InstanceId] = commit.Instance;
             _operations[commit.OperationId] = commit.Operation;
             _deploymentRuns[runId] = new ElsaInstanceLifecycleDeploymentRun(run, commit.Operation, commit.InstanceId);
-            _claims.Remove(commit.OperationId);
             return Task.FromResult(new ElsaInstanceLifecycleWorkerResult(
                 ElsaInstanceLifecycleWorkerOutcome.Queued,
                 commit.Operation,
@@ -1717,15 +1816,25 @@ public sealed class InMemoryElsaInstanceLifecycleStore(
         return value.Trim();
     }
 
-    private bool PredecessorHasInFlightWorkerLease(Guid predecessorId)
+    private bool PredecessorMustWaitForQueuedHandOff(
+        ElsaInstanceOperation predecessor,
+        ElsaInstanceLifecycleDeploymentRun? priorRun)
     {
-        if (!_claims.TryGetValue(predecessorId, out var claim))
-            return false;
-        return ElsaInstanceOperationGuard.HasInFlightWorkerLease(
-            claim.WorkerId,
-            claim.Token,
-            claim.ExpiresAt,
-            heartbeatAt: null);
+        _claims.TryGetValue(predecessor.Id, out var claim);
+        DateTimeOffset? submissionInFlightAt = _submissionInFlight.TryGetValue(predecessor.Id, out var markedAt)
+            ? markedAt
+            : null;
+        var queuedHandOffCommitted = predecessor.State == ElsaInstanceOperationState.Queued &&
+            priorRun is not null &&
+            priorRun.Run.Status != WorkspaceDeploymentRunStatus.Queued;
+        return ElsaInstanceOperationGuard.MustWaitForQueuedPredecessorHandOff(
+            queuedHandOffCommitted,
+            _azureProvenanceInstanceIds.Contains(predecessor.InstanceId),
+            claim?.WorkerId,
+            claim?.Token,
+            claim?.ExpiresAt,
+            heartbeatAt: null,
+            submissionInFlightAt);
     }
 
     private static string CreateLeaseToken() =>

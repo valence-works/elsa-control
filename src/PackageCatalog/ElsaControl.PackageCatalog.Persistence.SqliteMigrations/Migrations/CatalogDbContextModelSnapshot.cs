@@ -3744,6 +3744,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqliteMigrations.Migrations
                     b.Property<Guid>("OrganizationId")
                         .HasColumnType("TEXT");
 
+                    b.Property<long?>("ProviderSubmissionInFlightAt")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long?>("ReasonEnteredAt")
                         .HasColumnType("INTEGER");
 

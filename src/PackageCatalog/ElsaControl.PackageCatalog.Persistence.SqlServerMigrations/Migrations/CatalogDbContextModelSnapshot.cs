@@ -3769,6 +3769,9 @@ namespace ElsaControl.PackageCatalog.Persistence.SqlServerMigrations.Migrations
                     b.Property<Guid>("OrganizationId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<long?>("ProviderSubmissionInFlightAt")
+                        .HasColumnType("bigint");
+
                     b.Property<long?>("ReasonEnteredAt")
                         .HasColumnType("bigint");
 
