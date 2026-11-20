@@ -900,7 +900,6 @@ public sealed partial class ProductionAzureLifecycleProofTests(ITestOutputHelper
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Production");
-            builder.UseSetting("PartnerApi:AllowProcessLocalCache", "true");
         }
     }
 

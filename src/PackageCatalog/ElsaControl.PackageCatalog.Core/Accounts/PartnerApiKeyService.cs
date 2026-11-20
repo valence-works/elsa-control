@@ -56,60 +56,23 @@ public sealed class PartnerApiKeyService(
         var keyId = parsed ? credential.KeyId : "";
         var secret = parsed ? credential.Secret : "";
 
-        PartnerApiKeyCacheEntry? cached = null;
-        if (parsed && environmentMatch)
-            cached = await cache.GetAsync(keyId, cancellationToken);
-
         PartnerApiKeyRecord? record = null;
-        if (cached is null && parsed && environmentMatch)
+        if (parsed && environmentMatch)
             record = await store.FindByKeyIdAsync(keyId, cancellationToken);
 
-        var storedHash = TryDecodeHash(cached?.SecretHash ?? record?.SecretHash, out var decoded)
+        var storedHash = TryDecodeHash(record?.SecretHash, out var decoded)
             ? decoded
             : DummyStoredHash;
         var suppliedHash = parsed ? PartnerApiKeyFormat.HashSecretBytes(secret) : DummySuppliedHash;
         var hashMatch = CryptographicOperations.FixedTimeEquals(storedHash, suppliedHash);
-        var active = environmentMatch &&
-                     hashMatch &&
-                     ((cached is not null && cached.RevokedAt is null && (cached.ExpiresAt is null || cached.ExpiresAt.Value > now)) ||
-                      (record is not null && record.StateAt(now) == PartnerApiKeyState.Active));
-        if (!active)
+        if (!environmentMatch || !hashMatch || record is null || record.StateAt(now) != PartnerApiKeyState.Active)
             return null;
-
-        record ??= ToRecord(cached!);
-        if (cached is null)
-            await cache.SetAsync(ToCacheEntry(record), cancellationToken);
 
         if (record.LastUsedAt is null || now - record.LastUsedAt.Value >= TimeSpan.FromSeconds(30))
             await store.TouchLastUsedAsync(record.KeyId, now, cancellationToken);
 
         return new PartnerApiKeyAuthentication(record, record.Scopes);
     }
-
-    private static PartnerApiKeyRecord ToRecord(PartnerApiKeyCacheEntry entry) =>
-        new(
-            entry.KeyId,
-            entry.OrganizationId,
-            entry.WorkspaceId,
-            entry.ProvisionerAccountId,
-            entry.SecretHash,
-            Name: null,
-            entry.Scopes,
-            CreatedAt: DateTimeOffset.MinValue,
-            entry.ExpiresAt,
-            LastUsedAt: null,
-            entry.RevokedAt);
-
-    private static PartnerApiKeyCacheEntry ToCacheEntry(PartnerApiKeyRecord record) =>
-        new(
-            record.KeyId,
-            record.OrganizationId,
-            record.WorkspaceId,
-            record.ProvisionerAccountId,
-            record.SecretHash,
-            record.Scopes,
-            record.ExpiresAt,
-            record.RevokedAt);
 
     private static bool TryDecodeHash(string? hash, out byte[] bytes)
     {

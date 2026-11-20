@@ -595,7 +595,6 @@ public sealed class ProductionReleaseManifestAdmissionProofTests
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Production");
-            builder.UseSetting("PartnerApi:AllowProcessLocalCache", "true");
             builder.UseContentRoot(contentRoot);
         }
     }

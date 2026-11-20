@@ -12,12 +12,9 @@ using WorkspaceEntity = ElsaControl.PackageCatalog.Core.Accounts.Workspace;
 using ElsaControl.PackageCatalog.Persistence.EntityFrameworkCore;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Distributed;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace ElsaControl.Api.Tests;
 
@@ -63,14 +60,13 @@ public sealed class PartnerApiAuthenticationTests
     public async Task Revoke_invalidates_every_instance_immediately_and_does_not_touch_engines()
     {
         var databasePath = Path.Combine(Path.GetTempPath(), $"partner-api-keys-{Guid.NewGuid():N}.db");
-        var cache = new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions()));
         var revoker = new RecordingMintedTokenRevoker();
         await using var app1 = new ControlApiTestApplication(
             databasePath: databasePath,
-            configureServices: services => Share(services, cache, revoker));
+            configureServices: services => ShareRevoker(services, revoker));
         await using var app2 = new ControlApiTestApplication(
             databasePath: databasePath,
-            configureServices: services => Share(services, cache, revoker));
+            configureServices: services => ShareRevoker(services, revoker));
         await SeedAsync(app1);
         var created = await CreateKeyAsync(app1, OrganizationA, ["engines:read"]);
 
@@ -87,6 +83,55 @@ public sealed class PartnerApiAuthenticationTests
         await AssertIdenticalUnauthorizedAsync(body1, body2);
         Assert.Equal(instancesBefore, await CountInstancesAsync(app1));
         Assert.Equal(instancesBefore, await CountInstancesAsync(app2));
+    }
+
+    [Fact]
+    public async Task Revoked_key_is_rejected_on_the_next_request_even_with_a_warm_cache()
+    {
+        await using var app = await SeededAsync();
+        var created = await CreateKeyAsync(app, OrganizationA, ["engines:read"]);
+        Assert.Equal(HttpStatusCode.OK, (await CallAccountAsync(app, created.Token)).StatusCode);
+
+        await RevokeAsync(app, OrganizationA, created.KeyId);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var stored = await scope.ServiceProvider.GetRequiredService<CatalogDbContext>().PartnerApiKeys.SingleAsync();
+            await app.Services.GetRequiredService<IPartnerApiKeyCache>().SetAsync(
+                new PartnerApiKeyCacheEntry(
+                    stored.KeyId,
+                    stored.OrganizationId,
+                    stored.WorkspaceId,
+                    stored.ProvisionerAccountId,
+                    stored.SecretHash,
+                    stored.Scopes,
+                    stored.ExpiresAt,
+                    RevokedAt: null));
+        }
+
+        var next = await CallAccountAsync(app, created.Token, "203.0.113.24");
+        var unknown = await CallAccountAsync(app, PartnerApiKeyFormat.Issue("test").Token, "203.0.113.25");
+        await AssertIdenticalUnauthorizedAsync(next, unknown);
+    }
+
+    [Fact]
+    public async Task Expired_and_unknown_keys_return_the_same_401()
+    {
+        await using var app = await SeededAsync();
+        var created = await CreateKeyAsync(app, OrganizationA, ["engines:read"]);
+        Assert.Equal(HttpStatusCode.OK, (await CallAccountAsync(app, created.Token)).StatusCode);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CatalogDbContext>();
+            var stored = await db.PartnerApiKeys.SingleAsync();
+            stored.ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+            await db.SaveChangesAsync();
+        }
+
+        var expired = await CallAccountAsync(app, created.Token, "203.0.113.26");
+        var unknown = await CallAccountAsync(app, PartnerApiKeyFormat.Issue("test").Token, "203.0.113.27");
+        await AssertIdenticalUnauthorizedAsync(expired, unknown);
     }
 
     [Fact]
@@ -335,10 +380,8 @@ public sealed class PartnerApiAuthenticationTests
         return await scope.ServiceProvider.GetRequiredService<CatalogDbContext>().ElsaInstances.CountAsync();
     }
 
-    private static void Share(IServiceCollection services, IDistributedCache cache, RecordingMintedTokenRevoker revoker)
+    private static void ShareRevoker(IServiceCollection services, RecordingMintedTokenRevoker revoker)
     {
-        services.RemoveAll<IDistributedCache>();
-        services.AddSingleton(cache);
         services.RemoveAll<IPartnerMintedTokenRevoker>();
         services.AddSingleton<IPartnerMintedTokenRevoker>(revoker);
     }

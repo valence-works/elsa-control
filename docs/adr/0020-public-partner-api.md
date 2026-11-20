@@ -91,12 +91,14 @@ webhook and no public contract.
   A lookup is by `keyId` and a constant-time compare. Keys are sent as
   `Authorization: Bearer`.
 - **Rotation and revocation.** At most two active keys per partner, so rotation is
-  create-new, deploy, revoke-old. Revocation takes effect immediately: the key
-  store invalidates the cache entry on revoke, in every instance, so there is no accept
-  window after revoke. A cache entry for a valid key may live at most 30 seconds, and
-  only so that the invalidation is a safety net, not the mechanism. A test revokes a key
-  and proves the next request on every instance gets 401. Revoking a key never touches
-  engines, and it invalidates the engine tokens that key minted (see API token).
+  create-new, deploy, revoke-old. Revocation takes effect immediately: each
+  authenticated request looks up the key by `keyId` in the store (indexed) and
+  decides Active/Expired/Revoked from that row. Process-local cache is not the
+  revocation mechanism and is not consulted for key status, so a warm cache on
+  another instance cannot accept a just-revoked key. A test revokes a key, replants
+  a stale active cache entry, and proves the next request is 401. Revoking a key
+  never touches engines, and it invalidates the engine tokens that key minted
+  (see API token).
 - **Scopes.** `engines:read`, `engines:write`, `engines:delete`, `releases:apply`,
   `studio:sessions`, `webhooks:manage`. Delete and apply are separate scopes so a
   read-and-create key cannot destroy or change an engine. A key can never manage keys,

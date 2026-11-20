@@ -7,7 +7,6 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Caching.Distributed;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 using System.Threading.RateLimiting;
 
@@ -39,12 +38,6 @@ public sealed class PartnerApiOptions
 
     public string Environment { get; set; } = "";
 
-    /// <summary>
-    /// When true, Production may start with a process-local <see cref="IDistributedCache"/>.
-    /// Isolated tests and gated live proofs may set this. Production hosts must not.
-    /// </summary>
-    public bool AllowProcessLocalCache { get; set; }
-
     public void ApplyEnvironmentDefault(IHostEnvironment environment)
     {
         if (string.IsNullOrWhiteSpace(Environment))
@@ -54,8 +47,7 @@ public sealed class PartnerApiOptions
 
 public sealed class PartnerApiConfigurationValidator(
     IHostEnvironment environment,
-    IOptions<PartnerApiOptions> options,
-    IDistributedCache cache) : IHostedService
+    IOptions<PartnerApiOptions> options) : IHostedService
 {
     public Task StartAsync(CancellationToken cancellationToken)
     {
@@ -73,11 +65,6 @@ public sealed class PartnerApiConfigurationValidator(
         if (environment.IsProduction() &&
             !string.Equals(options.Value.Environment, PartnerApiOptions.LiveEnvironment, StringComparison.Ordinal))
             yield return "PartnerApi:Environment must be live in Production.";
-
-        if (environment.IsProduction() &&
-            !options.Value.AllowProcessLocalCache &&
-            cache is MemoryDistributedCache)
-            yield return "Partner API requires a shared IDistributedCache in Production so revocation invalidates every instance. MemoryDistributedCache is process-local.";
     }
 }
 
