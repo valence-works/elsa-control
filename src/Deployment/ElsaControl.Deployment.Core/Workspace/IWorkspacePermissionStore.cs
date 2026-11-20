@@ -7,6 +7,11 @@ public interface IWorkspacePermissionStore
         Guid accountId,
         CancellationToken cancellationToken = default);
 
+    Task<bool> IsPartnerProvisionerAsync(
+        Guid workspaceId,
+        Guid accountId,
+        CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<WorkspacePermissionGrant>> GetPermissionGrantsAsync(
         Guid workspaceId,
         Guid accountId,

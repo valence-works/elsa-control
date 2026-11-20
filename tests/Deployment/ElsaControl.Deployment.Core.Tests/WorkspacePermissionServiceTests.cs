@@ -102,6 +102,40 @@ public sealed class WorkspacePermissionServiceTests
     }
 
     [Fact]
+    public async Task PartnerProvisioner_effective_permissions_come_from_key_scopes_not_owner_defaults()
+    {
+        var service = new WorkspacePermissionService(_store, [new ManagedElsaInstancePermissionContribution()]);
+        _store.PartnerProvisioner = true;
+
+        var fromStore = await service.GetEffectivePermissionsAsync(_workspaceId, _accountId);
+        var fromScopes = service.GetPartnerProvisionerPermissions(
+            _workspaceId,
+            _accountId,
+            ["engines:read", "engines:delete"]);
+
+        Assert.Empty(fromStore.Permissions);
+        Assert.True(fromScopes.Has(WorkspaceDeploymentPermissions.Read));
+        Assert.True(fromScopes.Has(ManagedElsaInstancePermissions.Open));
+        Assert.True(fromScopes.Has(ManagedElsaInstancePermissions.Delete));
+        Assert.False(fromScopes.Has(WorkspaceDeploymentPermissions.ManageObservability));
+    }
+
+    [Fact]
+    public async Task PartnerProvisioner_cannot_be_bootstrapped_as_owner_or_granted_extra_permissions()
+    {
+        var service = new WorkspacePermissionService(_store);
+        _store.PartnerProvisioner = true;
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            service.BootstrapOwnerPermissionsAsync(_workspaceId, _accountId));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            service.GrantAsync(
+                _workspaceId,
+                new GrantWorkspacePermissionRequest(_accountId, WorkspaceDeploymentPermissions.Read, _accountId)));
+        Assert.Empty(_store.Grants);
+    }
+
+    [Fact]
     public async Task Grant_rejects_an_account_that_is_not_a_workspace_member()
     {
         var service = new WorkspacePermissionService(_store, [Contribution()]);
@@ -166,8 +200,13 @@ public sealed class WorkspacePermissionServiceTests
         public List<WorkspacePermissionGrant> Grants { get; } = [];
         public DateTimeOffset? MembershipCreatedAt { get; set; } = DateTimeOffset.UtcNow.AddDays(-1);
 
+        public bool PartnerProvisioner { get; set; }
+
         public Task<DateTimeOffset?> GetWorkspaceMembershipCreatedAtAsync(Guid workspaceId, Guid accountId, CancellationToken cancellationToken = default) =>
             Task.FromResult(MembershipCreatedAt);
+
+        public Task<bool> IsPartnerProvisionerAsync(Guid workspaceId, Guid accountId, CancellationToken cancellationToken = default) =>
+            Task.FromResult(PartnerProvisioner);
 
         public Task<IReadOnlyList<WorkspacePermissionGrant>> GetPermissionGrantsAsync(Guid workspaceId, Guid accountId, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<WorkspacePermissionGrant>>(Grants.Where(x => x.WorkspaceId == workspaceId && x.AccountId == accountId).ToList());

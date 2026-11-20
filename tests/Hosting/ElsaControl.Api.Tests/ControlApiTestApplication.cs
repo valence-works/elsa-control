@@ -29,21 +29,25 @@ internal sealed class ControlApiTestApplication : WebApplicationFactory<Program>
     public const string TestControlIdentityAudience = "elsa-control-tests";
     public const string TestControlIdentitySigningKey = "local-test-control-identity-signing-key-change-me-12345";
 
-    private readonly string _databasePath = Path.Combine(Path.GetTempPath(), $"elsa-control-catalog-{Guid.NewGuid():N}.db");
+    private readonly string _databasePath;
     private readonly IReadOnlyDictionary<string, string?> _configuration;
     private readonly Action<IServiceCollection>? _configureServices;
+    private readonly bool _ownsDatabaseFile;
 
     public ControlApiTestApplication(
         IReadOnlyDictionary<string, string?>? configuration = null,
-        Action<IServiceCollection>? configureServices = null)
+        Action<IServiceCollection>? configureServices = null,
+        string? databasePath = null)
     {
+        _databasePath = databasePath ?? Path.Combine(Path.GetTempPath(), $"elsa-control-catalog-{Guid.NewGuid():N}.db");
+        _ownsDatabaseFile = databasePath is null;
         _configuration = configuration ?? new Dictionary<string, string?>();
         _configureServices = configureServices;
     }
 
     public static JsonSerializerOptions JsonOptions { get; } = CreateJsonOptions();
 
-    public string ConnectionString => $"Data Source={_databasePath}";
+    public string ConnectionString => $"Data Source={_databasePath};Cache=Shared";
 
     public TestExternalEnginePairingAvailability ExternalEnginePairing =>
         Services.GetRequiredService<TestExternalEnginePairingAvailability>();
@@ -83,7 +87,8 @@ internal sealed class ControlApiTestApplication : WebApplicationFactory<Program>
                 [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:BffPerIp:PermitLimit"] = "10000",
                 [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:BffPerIp:Window"] = "00:01:00",
                 [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIdentity:PermitLimit"] = "10000",
-                [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIdentity:Window"] = "00:01:00"
+                [$"{ManagedElsaInstanceLifecycleRateLimitOptions.ConfigurationSection}:PerIdentity:Window"] = "00:01:00",
+                ["PartnerApi:Environment"] = "test"
             };
             foreach (var (key, value) in _configuration)
                 values[key] = value;
@@ -138,7 +143,7 @@ internal sealed class ControlApiTestApplication : WebApplicationFactory<Program>
     {
         await base.DisposeAsync();
 
-        if (File.Exists(_databasePath))
+        if (_ownsDatabaseFile && File.Exists(_databasePath))
             File.Delete(_databasePath);
     }
 

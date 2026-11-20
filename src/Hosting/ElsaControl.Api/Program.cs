@@ -18,6 +18,7 @@ using ElsaControl.PackageCatalog.Abstractions.Compatibility;
 using ElsaControl.Api.Admin.Accounts;
 using ElsaControl.Api.Admin.Application;
 using ElsaControl.Api.Admin.Organizations;
+using ElsaControl.Api.Partner;
 using ElsaControl.Api.Admin.Workspaces;
 using ElsaControl.Api.Admin.Staging;
 using ElsaControl.Api.Authentication;
@@ -114,8 +115,18 @@ foreach (var hostForwardedHeaders in builder.Services
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<BadRequestExceptionHandler>();
 builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = true);
-builder.Services.AddOpenApi();
+builder.Services.AddOpenApi(options =>
+{
+    options.ShouldInclude = description =>
+        !string.Equals(description.GroupName, PartnerApiKeyDefaults.OpenApiDocumentName, StringComparison.Ordinal);
+});
+builder.Services.AddOpenApi(PartnerApiKeyDefaults.OpenApiDocumentName, options =>
+{
+    options.ShouldInclude = description =>
+        string.Equals(description.GroupName, PartnerApiKeyDefaults.OpenApiDocumentName, StringComparison.Ordinal);
+});
 builder.Services.AddMemoryCache();
+builder.Services.AddDistributedMemoryCache();
 builder.Services.AddHttpClient(AdminDashboardAuthenticationDefaults.DevelopmentUrlConfigurationKey);
 builder.Services.AddConsoleLogStreamingHost(options =>
 {
@@ -151,6 +162,9 @@ var authentication = builder.Services.AddAuthentication(options =>
     {
         options.ForwardDefaultSelector = context =>
         {
+            if (PartnerApiKeySelector.Matches(context))
+                return PartnerApiKeyDefaults.Scheme;
+
             var hub = context.RequestServices.GetRequiredService<IOptions<HubAccountIdentityOptions>>().Value;
             if (HubAccountTokenSelector.Matches(context, hub))
                 return HubAccountIdentityDefaults.Scheme;
@@ -166,6 +180,7 @@ var authentication = builder.Services.AddAuthentication(options =>
     .AddJwtBearer(HubAccountIdentityDefaults.Scheme)
     .AddScheme<AuthenticationSchemeOptions, ApiKeyAuthenticationHandler>(ApiKeyAuthenticationDefaults.Scheme, _ => { })
     .AddScheme<AuthenticationSchemeOptions, BuilderClientApiKeyAuthenticationHandler>(BuilderClientApiKeyAuthenticationDefaults.Scheme, _ => { })
+    .AddScheme<AuthenticationSchemeOptions, PartnerApiKeyAuthenticationHandler>(PartnerApiKeyDefaults.Scheme, _ => { })
     .AddCookie(CustomerAuthenticationDefaults.CookieScheme, options =>
     {
         options.Cookie.Name = CustomerAuthenticationDefaults.CookieName;
@@ -323,8 +338,10 @@ builder.Services.AddRateLimiter(options =>
     options.AddPolicy<string, CloudBootstrapRateLimiterPolicy>(CloudBootstrapRateLimitDefaults.PolicyName);
     options.AddPolicy<string, ManagedElsaInstanceLifecycleRateLimiterPolicy>(
         ManagedElsaInstanceLifecycleRateLimitDefaults.PolicyName);
+    options.AddPolicy<string, PartnerApiRateLimiterPolicy>(PartnerApiRateLimitDefaults.PolicyName);
 });
 builder.Services.AddCatalogAuthorization();
+builder.Services.AddPartnerApiAuthorization();
 builder.Services.AddBuilderClientAuthorization();
 builder.Services.Configure<ReleaseCatalogAdmissionOptions>(
     builder.Configuration.GetSection(ReleaseCatalogAdmissionOptions.ConfigurationSection));
@@ -343,6 +360,16 @@ builder.Services.Configure<StagingLateSuccessLeverOptions>(
     builder.Configuration.GetSection(StagingLateSuccessLeverOptions.ConfigurationSection));
 builder.Services.AddHostedService<StagingLateSuccessLeverConfigurationValidator>();
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.Configure<PartnerApiOptions>(options =>
+{
+    builder.Configuration.GetSection(PartnerApiOptions.ConfigurationSection).Bind(options);
+    if (string.IsNullOrWhiteSpace(options.Environment))
+        options.Environment = builder.Environment.IsProduction() ? "live" : "test";
+});
+builder.Services.AddScoped<IPartnerApiKeyStore, PartnerApiKeyStore>();
+builder.Services.AddSingleton<IPartnerApiKeyCache, DistributedPartnerApiKeyCache>();
+builder.Services.AddSingleton<IPartnerMintedTokenRevoker, NoOpPartnerMintedTokenRevoker>();
+builder.Services.AddScoped<PartnerApiKeyService>();
 builder.Services.AddSingleton<AdminApiKeyValidator>();
 builder.Services.AddSingleton<BuilderClientApiKeyValidator>();
 builder.Services.AddSingleton<ManagedElsaHandoffKeyRing>(services =>
@@ -756,6 +783,7 @@ app.UseRouting();
 app.UseCors();
 app.UseAuthentication();
 app.UseCloudBffAuthorization();
+app.UsePartnerApiIsolation();
 // Must run after authentication so Control can issue a handoff JWT, and before the
 // /admin exact-path middleware + SPA fallback so GET /admin/runtimes?instanceId&state&codeChallenge
 // auto-posts to the runtime callback instead of leaving the browser on Sign in.
@@ -857,6 +885,8 @@ app.MapAdminWorkspaceEntitlementEndpoints();
 app.MapAdminManagedElsaRecoveryEndpoints();
 app.MapAdminAccountHubLinkEndpoints();
 app.MapAdminOrganizationEndpoints();
+app.MapAdminPartnerApiKeyEndpoints();
+app.MapPartnerApiEndpoints();
 app.MapAdminOrganizationInternalEntitlementEndpoints();
 app.MapAdminOrganizationAzureBoundEntitlementEndpoints();
 app.MapAdminOrganizationBillingLifecycleLeverEndpoints();

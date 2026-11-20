@@ -1612,3 +1612,49 @@ internal sealed class ElsaInstanceMigrationConfiguration : IEntityTypeConfigurat
         builder.HasOne<ElsaInstanceOperationEntity>().WithMany().HasForeignKey(x => x.OperationId).OnDelete(DeleteBehavior.Restrict);
     }
 }
+
+internal sealed class PartnerApiKeyConfiguration : IEntityTypeConfiguration<PartnerApiKey>
+{
+    private static readonly ValueComparer<List<string>> StringListComparer = new(
+        (left, right) => ReferenceEquals(left, right) || (left != null && right != null && left.SequenceEqual(right)),
+        value => value == null ? 0 : value.Aggregate(0, (hash, item) => HashCode.Combine(hash, item.GetHashCode(StringComparison.Ordinal))),
+        value => value == null ? new List<string>() : value.ToList());
+
+    public void Configure(EntityTypeBuilder<PartnerApiKey> builder)
+    {
+        builder.ToTable("PartnerApiKeys");
+        builder.HasKey(x => x.Id);
+        builder.Property(x => x.KeyId).HasMaxLength(PartnerApiKeyFormat.KeyIdLength).IsRequired();
+        builder.Property(x => x.SecretHash).HasMaxLength(PartnerApiKeyFormat.SecretHashLength).IsRequired();
+        builder.Property(x => x.Name).HasMaxLength(PartnerApiKeyFormat.MaxNameLength);
+        builder.Property(x => x.CreatedByOperatorSubject).HasMaxLength(512);
+        builder.Property(x => x.RevokedByOperatorSubject).HasMaxLength(512);
+        builder.Property(x => x.Scopes)
+            .HasConversion(
+                value => JsonSerializer.Serialize(value, (JsonSerializerOptions?)null),
+                value => JsonSerializer.Deserialize<List<string>>(value, (JsonSerializerOptions?)null) ?? new List<string>())
+            .Metadata.SetValueComparer(StringListComparer);
+        builder.Property(x => x.CreatedAt)
+            .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        builder.Property(x => x.ExpiresAt)
+            .HasConversion(
+                value => value.HasValue ? value.Value.UtcTicks : (long?)null,
+                value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
+        builder.Property(x => x.LastUsedAt)
+            .HasConversion(
+                value => value.HasValue ? value.Value.UtcTicks : (long?)null,
+                value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
+        builder.Property(x => x.RevokedAt)
+            .HasConversion(
+                value => value.HasValue ? value.Value.UtcTicks : (long?)null,
+                value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
+        builder.HasIndex(x => x.KeyId).IsUnique();
+        builder.HasIndex(x => new { x.OrganizationId, x.RevokedAt, x.ExpiresAt });
+        builder.HasOne(x => x.Organization).WithMany().HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Cascade);
+        builder.HasOne(x => x.Workspace).WithMany()
+            .HasForeignKey(x => new { x.OrganizationId, x.WorkspaceId })
+            .HasPrincipalKey(x => new { x.OrganizationId, x.Id })
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(x => x.ProvisionerAccount).WithMany().HasForeignKey(x => x.ProvisionerAccountId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
