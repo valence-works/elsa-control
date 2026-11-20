@@ -8,9 +8,11 @@ import { Badge, Button, EmptyState, Input, SecondaryButton, Select, buttonClassN
 import { RequestStateView } from "@/components/states/RequestStateViews";
 import { getDeploymentCockpit, getDeploymentPermissions } from "@/features/deployments/deploymentApi";
 import type { DeploymentCockpit, EnvironmentSummary, WorkflowApplication, WorkspaceDeploymentPermissionsResponse } from "@/features/deployments/deploymentModels";
-import { getManagedElsaOnboardingOptions, getManagedElsaOperation } from "@/features/managed-elsa/managedElsaApi";
-import { buildManagedElsaIntent, onboardingChoices, slugify } from "@/features/managed-elsa/managedElsaOnboarding";
-import type { ManagedElsaOnboardingOptions, ManagedElsaOperation, ManagedElsaReleaseOption } from "@/features/managed-elsa/managedElsaModels";
+import { getManagedElsaOperation } from "@/features/managed-elsa/managedElsaApi";
+import { ReleasePicker } from "@/features/managed-elsa/ReleasePicker";
+import { useManagedElsaOnboardingOptions } from "@/features/managed-elsa/useManagedElsaOnboardingOptions";
+import { buildManagedElsaIntent, onboardingChoiceKey, preferredOnboardingChoice, slugify, type OnboardingChoice } from "@/features/managed-elsa/managedElsaOnboarding";
+import type { ManagedElsaOnboardingOptions, ManagedElsaOperation } from "@/features/managed-elsa/managedElsaModels";
 import { getBuilderCatalog, listRuntimeConfigurations } from "@/features/runtime-builder/runtimeBuilderApi";
 import type { BuilderCatalog, RuntimeBuilderIntent, RuntimeConfiguration } from "@/features/runtime-builder/runtimeBuilderModels";
 import { ApiError } from "@/lib/api/httpClient";
@@ -22,7 +24,6 @@ import { useEngineProvisioningProviders } from "@/features/engine-provisioning/u
 
 type Step = "configure" | "review" | "provisioning" | "complete";
 type HandoffStatus = "none" | "pending" | "ready" | "missing";
-type ProvisionRelease = ManagedElsaReleaseOption & { previewManifestDigest?: string | null };
 
 type ProvisionRouteState = {
   workspaceId?: string;
@@ -88,12 +89,10 @@ function EngineProvisioningWorkspace({ workspace }: { workspace: WorkspaceState 
     enabled: Boolean(workspaceId) && providerAvailable && canManageSetup,
     retry: false
   });
-  const options = useQuery<ManagedElsaOnboardingOptions>({
-    queryKey: queryKeys.managedElsaOnboardingOptions(workspaceId),
-    queryFn: () => getManagedElsaOnboardingOptions(workspaceId),
-    enabled: Boolean(workspaceId) && providerAvailable && canManageSetup,
-    retry: false
-  });
+  const canShowPreview = workspace.selectedWorkspace?.role === "Owner";
+  const [showPreview, setShowPreview] = useState(false);
+  const includePreview = canShowPreview && showPreview;
+  const options = useManagedElsaOnboardingOptions(workspaceId, includePreview, providerAvailable && canManageSetup);
   const cockpit = useQuery<DeploymentCockpit>({
     queryKey: queryKeys.deploymentCockpit(workspaceId),
     queryFn: () => getDeploymentCockpit(workspaceId),
@@ -108,13 +107,13 @@ function EngineProvisioningWorkspace({ workspace }: { workspace: WorkspaceState 
   });
 
   const environments = useMemo(() => availableEnvironments(cockpit.data, targets.data), [cockpit.data, targets.data]);
-  const choices = useMemo(() => onboardingChoices(options.data), [options.data]);
+  const choices = options.choices;
   const [step, setStep] = useState<Step>(() => loadPendingProvisioning(workspaceId) ? "provisioning" : "configure");
   const [name, setName] = useState(routeStateForWorkspace.configurationName ?? "");
   const [slug, setSlug] = useState(() => slugify(routeStateForWorkspace.configurationName ?? ""));
   const [applicationId, setApplicationId] = useState(searchParams.get("applicationId") ?? "");
   const [environmentId, setEnvironmentId] = useState(searchParams.get("environmentId") ?? "");
-  const [releaseIndex, setReleaseIndex] = useState("0");
+  const [releaseKey, setReleaseKey] = useState("");
   const [selectedConfigurationId, setSelectedConfigurationId] = useState(routeStateForWorkspace.runtimeConfigurationId ?? "");
   const [builderIntent, setBuilderIntent] = useState<RuntimeBuilderIntent | undefined>();
   const [handoffStatus, setHandoffStatus] = useState<HandoffStatus>(() => {
@@ -137,8 +136,8 @@ function EngineProvisioningWorkspace({ workspace }: { workspace: WorkspaceState 
   const replayedAttemptKey = useRef<string>();
   const queryClient = useQueryClient();
 
-  const selectedRelease = choices[Number(releaseIndex)] as ProvisionRelease | undefined;
-  const previewReleaseRequired = Boolean(selectedRelease && "previewManifestDigest" in selectedRelease && selectedRelease.previewManifestDigest);
+  const selectedRelease = choices.find((choice) => onboardingChoiceKey(choice) === releaseKey) ?? null;
+  const previewReleaseRequired = Boolean(selectedRelease?.previewManifestDigest);
   const selectedConfiguration = configurations.data?.find((configuration) => configuration.id === selectedConfigurationId) ?? null;
   const selectedApplicationId = environments.some((item) => item.application.id === applicationId)
     ? applicationId
@@ -175,7 +174,8 @@ function EngineProvisioningWorkspace({ workspace }: { workspace: WorkspaceState 
     setSlug(slugify(routeStateForWorkspace.configurationName ?? ""));
     setApplicationId(searchParams.get("applicationId") ?? "");
     setEnvironmentId(searchParams.get("environmentId") ?? "");
-    setReleaseIndex("0");
+    setReleaseKey("");
+    setShowPreview(false);
     setSelectedConfigurationId(routeStateForWorkspace.runtimeConfigurationId ?? "");
     setBuilderIntent(undefined);
     setHandoffStatus(!handoffOriginMatches && routeState.builderHandoffToken ? "missing" : handoffToken ? "missing" : "none");
@@ -211,8 +211,14 @@ function EngineProvisioningWorkspace({ workspace }: { workspace: WorkspaceState 
   }, [handoffOriginMatches, handoffToken, routeState.builderHandoffToken]);
 
   useEffect(() => {
-    if (choices.length > 0 && Number(releaseIndex) >= choices.length) setReleaseIndex("0");
-  }, [choices.length, releaseIndex]);
+    if (!choices.length) {
+      if (releaseKey) setReleaseKey("");
+      return;
+    }
+    if (choices.some((choice) => onboardingChoiceKey(choice) === releaseKey)) return;
+    const preferred = preferredOnboardingChoice(choices);
+    setReleaseKey(preferred ? onboardingChoiceKey(preferred) : "");
+  }, [choices, releaseKey]);
 
   useEffect(() => {
     if (environments.length === 0) return;
@@ -360,13 +366,13 @@ function EngineProvisioningWorkspace({ workspace }: { workspace: WorkspaceState 
   if (targets.isError) return <RequestStateView state="unexpected" title="Provisioning targets could not load" description="The server could not determine which application environments are eligible for a new engine." />;
   if (configurations.isError) return <RequestStateView state="unexpected" title="Saved runtime configurations could not load" />;
   if (!options.data) return <RequestStateView state="unexpected" title="Provisioning choices are empty" />;
-  if (choices.length === 0) return <EmptyState title="No managed Elsa releases are available" description="Provisioning needs a release and topology from the workspace onboarding catalog." />;
+  if (choices.length === 0 && !canShowPreview) return <EmptyState title="No managed Elsa releases are available" description="Provisioning needs a release and topology from the workspace onboarding catalog." />;
   if (environments.length === 0) return <EmptyState title="No compatible environments are available" description="Provisioning is offered only for application environments currently eligible on the server." action={<Link to="/admin/deployments/applications" className={buttonClassName("secondary")}>Review applications</Link>} />;
   const onboardingOptions = options.data;
 
   const isBusy = preview.isPending || create.isPending;
   const canReview = Boolean(name.trim() && slug.trim() && selectedRelease && selectedEnvironment && handoffStatus !== "pending" && handoffStatus !== "missing" && (!previewReleaseRequired || previewConsent));
-  const reviewedAttempt = previewResult && selectedEnvironment ? {
+  const reviewedAttempt = previewResult && selectedRelease && selectedEnvironment ? {
     key: idempotencyKey,
     request: buildRequest(previewResult.previewDigest, previewResult.builderIntent),
     display: {
@@ -389,7 +395,7 @@ function EngineProvisioningWorkspace({ workspace }: { workspace: WorkspaceState 
           slug={slug}
           applicationId={selectedApplicationId}
           environmentId={selectedEnvironmentId}
-          releaseIndex={releaseIndex}
+          releaseKey={releaseKey}
           selectedConfigurationId={selectedConfigurationId}
           selectedConfiguration={selectedConfiguration}
           builderIntent={builderIntent}
@@ -414,7 +420,11 @@ function EngineProvisioningWorkspace({ workspace }: { workspace: WorkspaceState 
             setEnvironmentId(first?.environment.id ?? "");
           }}
           onEnvironmentChange={setEnvironmentId}
-          onReleaseChange={(value) => { setReleaseIndex(value); setPreviewConsent(false); }}
+          onReleaseChange={(value) => { setReleaseKey(value); setPreviewConsent(false); }}
+          canShowPreview={canShowPreview}
+          showPreview={showPreview}
+          onShowPreviewChange={(value) => { setShowPreview(value); setPreviewConsent(false); setPreviewResult(null); }}
+          previewError={options.previewError}
           onConfigurationChange={(value) => { setSelectedConfigurationId(value); setBuilderIntent(undefined); setCustomizationOpen(false); }}
           onCustomize={() => {
             if (!builderIntent && selectedConfiguration) setBuilderIntent(selectedConfiguration.intent);
@@ -447,22 +457,22 @@ function EngineProvisioningWorkspace({ workspace }: { workspace: WorkspaceState 
 }
 
 function ConfigureView({
-  name, slug, applicationId, environmentId, releaseIndex, selectedConfigurationId, selectedConfiguration, builderIntent,
+  name, slug, applicationId, environmentId, releaseKey, selectedConfigurationId, selectedConfiguration, builderIntent,
   environments, applicationEnvironments, choices, configurations, workspaceId, launchProfile, previewReleaseRequired, previewConsent, canReview, customizationOpen, disabled, error,
-  handoffStatus,
-  onNameChange, onSlugChange, onApplicationChange, onEnvironmentChange, onReleaseChange, onConfigurationChange, onCustomize, onCustomizationClose, onBuilderIntentChange, onPreviewConsentChange, onSubmit
+  handoffStatus, canShowPreview, showPreview, previewError,
+  onNameChange, onSlugChange, onApplicationChange, onEnvironmentChange, onReleaseChange, onShowPreviewChange, onConfigurationChange, onCustomize, onCustomizationClose, onBuilderIntentChange, onPreviewConsentChange, onSubmit
 }: {
   name: string;
   slug: string;
   applicationId: string;
   environmentId: string;
-  releaseIndex: string;
+  releaseKey: string;
   selectedConfigurationId: string;
   selectedConfiguration: RuntimeConfiguration | null;
   builderIntent?: RuntimeBuilderIntent;
   environments: EmptyEnvironment[];
   applicationEnvironments: EmptyEnvironment[];
-  choices: Array<ManagedElsaReleaseOption & { previewManifestDigest?: string | null }>;
+  choices: OnboardingChoice[];
   configurations: RuntimeConfiguration[];
   workspaceId: string;
   launchProfile: ManagedElsaOnboardingOptions["launchProfile"];
@@ -473,11 +483,15 @@ function ConfigureView({
   handoffStatus: HandoffStatus;
   disabled: boolean;
   error: string | null;
+  canShowPreview: boolean;
+  showPreview: boolean;
+  previewError: string | null;
   onNameChange: (value: string) => void;
   onSlugChange: (value: string) => void;
   onApplicationChange: (value: string) => void;
   onEnvironmentChange: (value: string) => void;
   onReleaseChange: (value: string) => void;
+  onShowPreviewChange: (value: boolean) => void;
   onConfigurationChange: (value: string) => void;
   onCustomize: () => void;
   onCustomizationClose: () => void;
@@ -494,7 +508,17 @@ function ConfigureView({
           <div className="grid gap-4 md:grid-cols-[1.2fr_1fr_1fr]">
             <Field label="Engine name"><Input aria-label="Engine name" required maxLength={200} value={name} onChange={(event) => onNameChange(event.target.value)} placeholder="Name this engine" disabled={disabled} /></Field>
             <Field label="Engine address" hint="Lowercase letters, numbers, and hyphens."><Input aria-label="Engine address" required pattern="[a-z0-9]+(?:-[a-z0-9]+)*" maxLength={63} value={slug} onChange={(event) => onSlugChange(event.target.value)} placeholder="engine-address" disabled={disabled} /></Field>
-            <Field label="Release"><Select aria-label="Release" className="w-full" value={releaseIndex} onChange={(event) => onReleaseChange(event.target.value)} disabled={disabled}>{choices.map((choice, index) => <option key={releaseKey(choice)} value={index}>Elsa {choice.version} · {choice.releaseLine} · {choice.channel} · {choice.topologyId}{choice.previewManifestDigest ? " · Preview" : ""}</option>)}</Select></Field>
+            <ReleasePicker
+              label="Release"
+              choices={choices}
+              value={releaseKey}
+              onChange={onReleaseChange}
+              disabled={disabled}
+              canShowPreview={canShowPreview}
+              showPreview={showPreview}
+              onShowPreviewChange={onShowPreviewChange}
+              previewError={previewError}
+            />
           </div>
           {previewReleaseRequired ? <label className="mt-4 flex items-start gap-2 rounded-ui border border-warning/40 bg-warning/5 p-3 text-sm text-warning"><input type="checkbox" className="mt-1 h-4 w-4 accent-primary" checked={previewConsent} onChange={(event) => onPreviewConsentChange(event.target.checked)} disabled={disabled} /><span>Use this Preview release for this engine. Preview releases have no availability SLO.</span></label> : null}
         </Panel>
@@ -533,7 +557,7 @@ function ConfigureView({
   );
 }
 
-function ReviewView({ name, slug, selectedEnvironment, selectedRelease, selectedConfiguration, preview, error, disabled, onBack, onProvision }: { name: string; slug: string; selectedEnvironment: EmptyEnvironment; selectedRelease: ManagedElsaReleaseOption & { previewManifestDigest?: string | null }; selectedConfiguration: RuntimeConfiguration | null; preview: EngineProvisioningPreviewResponse; error: string | null; disabled: boolean; onBack: () => void; onProvision: () => void }) {
+function ReviewView({ name, slug, selectedEnvironment, selectedRelease, selectedConfiguration, preview, error, disabled, onBack, onProvision }: { name: string; slug: string; selectedEnvironment: EmptyEnvironment; selectedRelease: OnboardingChoice; selectedConfiguration: RuntimeConfiguration | null; preview: EngineProvisioningPreviewResponse; error: string | null; disabled: boolean; onBack: () => void; onProvision: () => void }) {
   return (
     <>
       <PageHeading kicker="Review deployment" title="Ready to provision" description="Review the deployment before provisioning your engine." />
@@ -763,10 +787,6 @@ function parseRouteState(value: unknown): ProvisionRouteState {
     configurationName: typeof state.configurationName === "string" ? state.configurationName : undefined,
     builderHandoffToken: typeof state.builderHandoffToken === "string" ? state.builderHandoffToken : undefined
   };
-}
-
-function releaseKey(release: ManagedElsaReleaseOption & { previewManifestDigest?: string | null }) {
-  return `${release.distributionId}|${release.releaseLine}|${release.version}|${release.channel}|${release.topologyId}|${release.previewManifestDigest ?? ""}`;
 }
 
 function findingSeverityClass(severity: string) {

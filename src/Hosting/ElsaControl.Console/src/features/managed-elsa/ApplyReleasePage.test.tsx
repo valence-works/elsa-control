@@ -20,16 +20,50 @@ describe("ApplyReleasePage", () => {
     vi.unstubAllGlobals();
   });
 
+  it("preselects the recommended Supported release and keeps Preview off", async () => {
+    const fetchMock = installFetch({
+      options: {
+        releases: [
+          { distributionId: "valence-runtime", releaseLine: "3.x", version: "3.9.1", channel: "stable", topologyId: "combined" },
+          { distributionId: "valence-runtime", releaseLine: "3.x", version: "3.10.2", channel: "stable", topologyId: "combined", recommended: true },
+          { distributionId: "valence-runtime", releaseLine: "3.x", version: "3.8.2", channel: "stable", topologyId: "combined" }
+        ],
+        previewReleases: [{
+          distributionId: "valence-runtime",
+          releaseLine: "3.8",
+          version: "3.8.0-preview.5567-build.160",
+          channel: "preview",
+          topologyId: "combined",
+          manifestDigest: digest
+        }]
+      }
+    });
+    renderPage();
+
+    const picker = await screen.findByRole("combobox", { name: "Admitted release" });
+    expect(within(picker).getAllByRole("option")).toHaveLength(3);
+    expect(picker).toHaveDisplayValue(/3.10.2/);
+    expect(screen.getAllByText("Recommended").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByRole("checkbox", { name: /Show Preview releases/ })).not.toBeChecked();
+    expect(within(picker).queryByRole("option", { name: /3.8.0-preview/ })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => includePreviewRequested(String(input)))).toBe(false);
+  });
+
   it("limits the picker to admitted catalog entries and requires Preview consent", async () => {
     const fetchMock = installFetch();
     const user = userEvent.setup();
     renderPage();
 
     const picker = await screen.findByRole("combobox", { name: "Admitted release" });
-    expect(within(picker).getByRole("option", { name: /3.8.0-preview.5567-build.160/ })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /Show Preview releases/ })).not.toBeChecked();
+    expect(within(picker).queryByRole("option", { name: /3.8.0-preview.5567-build.160/ })).not.toBeInTheDocument();
     expect(within(picker).queryByRole("option", { name: /not-admitted/ })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Apply release" })).toBeDisabled();
 
+    await user.click(screen.getByRole("checkbox", { name: /Show Preview releases/ }));
+    const previewPicker = await screen.findByRole("combobox", { name: "Admitted release" });
+    const previewOption = await within(previewPicker).findByRole("option", { name: /3.8.0-preview.5567-build.160/ });
+    await user.selectOptions(previewPicker, previewOption);
     await user.click(screen.getByRole("checkbox", { name: /Preview release with no SLO/ }));
     await user.click(screen.getByRole("button", { name: "Apply release" }));
 
@@ -47,6 +81,51 @@ describe("ApplyReleasePage", () => {
     const body = JSON.parse(String(applyCall?.[1]?.body));
     expect(body.intent.release.requestedVersion).toBe("3.8.0-preview.5567-build.160");
     expect(body.intent.release.previewManifestDigest).toBe(digest);
+  });
+
+  it("selects the requested Preview once an Owner reveals admitted Preview entries", async () => {
+    installFetch({
+      options: {
+        releases: [
+          { distributionId: "valence-runtime", releaseLine: "3.x", version: "3.9.1", channel: "stable", topologyId: "combined" },
+          { distributionId: "valence-runtime", releaseLine: "3.x", version: "3.10.2", channel: "stable", topologyId: "combined", recommended: true },
+          { distributionId: "valence-runtime", releaseLine: "3.x", version: "3.8.2", channel: "stable", topologyId: "combined" }
+        ]
+      }
+    });
+    const user = userEvent.setup();
+    renderPage(`/admin/runtimes/${instanceId}/apply?requestedVersion=3.8.0-preview.5567-build.160`);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(releaseCatalogCopy.applyNotAdmitted);
+    expect(screen.getByRole("combobox", { name: "Admitted release" })).toHaveDisplayValue(/3.10.2/);
+    expect(screen.getByRole("button", { name: "Apply release" })).toBeDisabled();
+
+    await user.click(screen.getByRole("checkbox", { name: /Show Preview releases/ }));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Admitted release" })).toHaveDisplayValue(/3.8.0-preview.5567-build.160/));
+    expect(screen.queryByText(releaseCatalogCopy.applyNotAdmitted)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Apply release" })).toBeDisabled();
+  });
+
+  it("keeps Supported releases when Preview options fail to load", async () => {
+    const fetchMock = installFetch({
+      options: {
+        releases: [
+          { distributionId: "valence-runtime", releaseLine: "3.x", version: "3.9.1", channel: "stable", topologyId: "combined" },
+          { distributionId: "valence-runtime", releaseLine: "3.x", version: "3.10.2", channel: "stable", topologyId: "combined", recommended: true }
+        ]
+      },
+      previewUnavailable: true
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    const picker = await screen.findByRole("combobox", { name: "Admitted release" });
+    expect(picker).toHaveDisplayValue(/3.10.2/);
+    await user.click(screen.getByRole("checkbox", { name: /Show Preview releases/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Preview releases could not load");
+    expect(screen.getByRole("heading", { name: "Apply release" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Admitted release" })).toHaveDisplayValue(/3.10.2/);
+    expect(fetchMock.mock.calls.some(([input]) => includePreviewRequested(String(input)))).toBe(true);
   });
 
   it("refuses Apply when a unique preview identity is not yet admitted", async () => {
@@ -68,7 +147,10 @@ describe("ApplyReleasePage", () => {
     const user = userEvent.setup();
     renderPage();
 
-    await user.click(await screen.findByRole("checkbox", { name: /Preview release with no SLO/ }));
+    await user.click(await screen.findByRole("checkbox", { name: /Show Preview releases/ }));
+    const picker = await screen.findByRole("combobox", { name: "Admitted release" });
+    await user.selectOptions(picker, await within(picker).findByRole("option", { name: /3.8.0-preview.5567-build.160/ }));
+    await user.click(screen.getByRole("checkbox", { name: /Preview release with no SLO/ }));
     await user.click(screen.getByRole("button", { name: "Apply release" }));
     expect(await screen.findByRole("button", { name: "Open" })).toBeInTheDocument();
     expect(screen.getByText(/does not claim Studio success/)).toBeInTheDocument();
@@ -116,10 +198,14 @@ function renderPage(path = `/admin/runtimes/${instanceId}/apply`) {
 
 function installFetch({
   instance = instanceFixture(),
-  acceptImmediately = false
+  acceptImmediately = false,
+  options,
+  previewUnavailable = false
 }: {
   instance?: ManagedElsaInstance;
   acceptImmediately?: boolean;
+  options?: Partial<ManagedElsaOnboardingOptions>;
+  previewUnavailable?: boolean;
 } = {}) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = input instanceof Request ? input.url : input.toString();
@@ -132,8 +218,17 @@ function installFetch({
         organizations: [{ id: organizationId, name: "Acme", role: "Owner" }],
         workspaces: [{ id: workspaceId, name: "Dogfood", kind: "Shared", role: "Owner", organizationId, organizationName: "Acme", organizationRole: "Owner" }]
       });
-    if (url.endsWith(`/api/workspaces/${workspaceId}/instances/onboarding-options`))
-      return Response.json(optionsFixture());
+    if (onboardingOptionsUrl(url)) {
+      if (previewUnavailable && includePreviewRequested(url))
+        return Response.json({ title: "Preview unavailable" }, { status: 403 });
+      return Response.json({
+        ...optionsFixture(includePreviewRequested(url)),
+        ...options,
+        previewReleases: includePreviewRequested(url)
+          ? options?.previewReleases ?? optionsFixture(true).previewReleases
+          : null
+      });
+    }
     if (method === "GET" && url.endsWith(`/api/workspaces/${workspaceId}/instances/${instanceId}`))
       return Response.json(instance);
     if (method === "PATCH" && url.endsWith(`/api/workspaces/${workspaceId}/instances/${instanceId}`))
@@ -228,17 +323,25 @@ function instanceFixture(overrides: Partial<ManagedElsaInstance> = {}): ManagedE
   };
 }
 
-function optionsFixture(): ManagedElsaOnboardingOptions {
+function onboardingOptionsUrl(url: string) {
+  return url.includes(`/api/workspaces/${workspaceId}/instances/onboarding-options`);
+}
+
+function includePreviewRequested(url: string) {
+  return new URL(url, "https://console.test").searchParams.get("includePreview") === "true";
+}
+
+function optionsFixture(includePreview = false): ManagedElsaOnboardingOptions {
   return {
     releases: [],
-    previewReleases: [{
+    previewReleases: includePreview ? [{
       distributionId: "valence-runtime",
       releaseLine: "3.8",
       version: "3.8.0-preview.5567-build.160",
       channel: "preview",
       topologyId: "combined",
       manifestDigest: digest
-    }],
+    }] : null,
     launchProfile: {
       name: "West Europe Dedicated",
       description: "Managed hosting in West Europe.",
