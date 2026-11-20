@@ -261,6 +261,18 @@ A catalog row can have `catalogLifecycle=supported` only when its version has no
 semver prerelease label. That is checked at admission; a prerelease is `preview`
 or nothing.
 
+Admission and every promotion to Supported also re-run a package-resolution
+guard in the catalog ingestion service (not the store). Every package the
+manifest declares must exist on the configured release feed. The current
+producer schema (`central-package-declarations-v1` from
+`Directory.Packages.props`) does not list packages baked into `/app/packages`,
+so Control does not treat image contents as an inventory; a package that is
+only in the image cannot be admitted until the producer declares it as
+image-sourced (an `elsa-production-image` change, out of scope here). Missing
+packages fail with `catalog.packages.unresolvable` naming package ids only.
+A feed outage fails closed with retryable `catalog.packages.feed.unavailable`.
+Smoke boot is not part of admission.
+
 Preview choices are returned in `previewReleases`, including their safe manifest
 digest, only to Console workspace Owners who pass `includePreview=true`. Hub and
 Cloud BFF callers never receive the field. The create console requires an initially

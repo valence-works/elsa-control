@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using NuGet.Common;
 using NuGet.Protocol;
 using NuGet.Protocol.Core.Types;
+using NuGet.Versioning;
 
 namespace ElsaControl.PackageCatalog.Sources.NuGet;
 
@@ -31,6 +32,44 @@ public sealed class NuGetPackageSourceClient(
         }
 
         return results;
+    }
+
+    public async Task<bool> PackageVersionExistsAsync(
+        string serviceIndexUrl,
+        string packageId,
+        string version,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(serviceIndexUrl);
+        ArgumentException.ThrowIfNullOrWhiteSpace(packageId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(version);
+        if (!NuGetVersion.TryParse(version, out var nugetVersion))
+            return false;
+
+        try
+        {
+            var repository = Repository.Factory.GetCoreV3(serviceIndexUrl);
+            var resource = await repository.GetResourceAsync<FindPackageByIdResource>(cancellationToken);
+            using var cache = new SourceCacheContext
+            {
+                NoCache = true,
+                DirectDownload = true
+            };
+            return await resource.DoesPackageExistAsync(
+                packageId,
+                nugetVersion,
+                cache,
+                NullLogger.Instance,
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            throw new InvalidOperationException("The package feed is unavailable.");
+        }
     }
 
     private async Task<IReadOnlyCollection<string>> DiscoverPackageIdsAsync(PackageSource source, SourceRepository repository, CancellationToken cancellationToken)

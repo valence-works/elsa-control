@@ -22,6 +22,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
 {
     private readonly HashSet<(Guid SubscriptionId, string Property)> _lifecycleDeadlineOverrides = [];
     private readonly List<RecoveryRequiredAlertCandidate> _pendingRecoveryRequiredAlerts = [];
+    private Guid? _catalogLifecycleTransitionId;
 
     public DbSet<PackageSource> PackageSources => Set<PackageSource>();
     public DbSet<Package> Packages => Set<Package>();
@@ -264,6 +265,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         finally
         {
             ClearLifecycleDeadlineOverrides();
+            ClearGovernedReleaseCatalogLifecycleTransition();
         }
     }
 
@@ -289,6 +291,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         finally
         {
             ClearLifecycleDeadlineOverrides();
+            ClearGovernedReleaseCatalogLifecycleTransition();
         }
     }
 
@@ -308,6 +311,21 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     }
 
     internal void ClearLifecycleDeadlineOverrides() => _lifecycleDeadlineOverrides.Clear();
+
+    /// <summary>
+    /// Permits a Control-owned catalog-lifecycle transition for one release
+    /// aggregate. Producer facts stay immutable; only CatalogLifecycle and the
+    /// projection fingerprint that includes it may change.
+    /// </summary>
+    internal void PermitGovernedReleaseCatalogLifecycleTransition(Guid releaseId)
+    {
+        if (releaseId == Guid.Empty)
+            throw new ArgumentException("Release ID is required.", nameof(releaseId));
+        _catalogLifecycleTransitionId = releaseId;
+    }
+
+    internal void ClearGovernedReleaseCatalogLifecycleTransition() =>
+        _catalogLifecycleTransitionId = null;
 
     private void QueueRecoveryRequiredAlertIfRequiresHuman(
         Microsoft.EntityFrameworkCore.ChangeTracking.EntityEntry<Models.ElsaInstanceOperationEntity> entry)
@@ -839,10 +857,28 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
 
     private void EnsureGovernedReleaseCatalogIsImmutable()
     {
-        if (ChangeTracker.Entries()
-            .Any(x => x.Entity is Models.IGovernedReleaseCatalogEntity
-                      && (x.State is EntityState.Modified or EntityState.Deleted)))
+        foreach (var entry in ChangeTracker.Entries()
+                     .Where(x => x.Entity is Models.IGovernedReleaseCatalogEntity
+                                 && x.State is EntityState.Modified or EntityState.Deleted))
+        {
+            if (IsPermittedCatalogLifecycleTransition(entry))
+                continue;
             throw new InvalidOperationException("Governed release catalog records are immutable.");
+        }
+    }
+
+    private bool IsPermittedCatalogLifecycleTransition(EntityEntry entry)
+    {
+        if (_catalogLifecycleTransitionId is null
+            || entry.State is not EntityState.Modified
+            || entry.Entity is not Models.GovernedReleaseCatalogEntity root
+            || root.Id != _catalogLifecycleTransitionId)
+            return false;
+
+        return entry.Properties.All(property =>
+            !property.IsModified
+            || property.Metadata.Name is nameof(Models.GovernedReleaseCatalogEntity.CatalogLifecycle)
+                or nameof(Models.GovernedReleaseCatalogEntity.ProjectionFingerprint));
     }
 
     private void EnsureWorkspacePermissionAuditIsAppendOnly()

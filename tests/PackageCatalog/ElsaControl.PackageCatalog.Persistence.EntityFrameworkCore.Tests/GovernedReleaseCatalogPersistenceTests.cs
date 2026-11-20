@@ -166,6 +166,50 @@ public sealed class GovernedReleaseCatalogPersistenceTests
     }
 
     [Fact]
+    public async Task Catalog_lifecycle_transition_updates_only_lifecycle_and_fingerprint()
+    {
+        await using var database = await CreateMigratedDatabaseAsync();
+        var entries = CreateEntries(releaseLine: "3.10", releaseVersion: "3.10.2", manifestDigit: 'd');
+        var stored = await database.Store.StoreAsync(entries);
+        Assert.Equal(GovernedReleaseCatalogWriteStatus.Stored, stored.Status);
+
+        var promoted = await database.Store.UpdateCatalogLifecycleAsync(
+            Digest('d'),
+            "paid",
+            "supported");
+
+        Assert.Equal(GovernedReleaseCatalogWriteStatus.Stored, promoted.Status);
+        Assert.All(promoted.Entries, entry => Assert.Equal("supported", entry.CatalogLifecycle));
+        Assert.Equal("supported", await database.Context.GovernedReleaseCatalog.Select(x => x.CatalogLifecycle).SingleAsync());
+        Assert.NotEqual(
+            stored.Entries[0].CatalogLifecycle,
+            promoted.Entries[0].CatalogLifecycle);
+        Assert.Equal(
+            stored.Entries[0].ManifestDigest,
+            promoted.Entries[0].ManifestDigest);
+
+        var unchanged = await database.Store.UpdateCatalogLifecycleAsync(
+            Digest('d'),
+            "paid",
+            "supported");
+        Assert.Equal(GovernedReleaseCatalogWriteStatus.Unchanged, unchanged.Status);
+    }
+
+    [Fact]
+    public async Task Catalog_lifecycle_cannot_be_mutated_through_the_db_context()
+    {
+        await using var database = await CreateMigratedDatabaseAsync();
+        var db = database.Context;
+        await database.Store.StoreAsync(CreateEntries());
+
+        var release = await db.GovernedReleaseCatalog.SingleAsync();
+        release.CatalogLifecycle = "supported";
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => db.SaveChangesAsync());
+        Assert.Equal("preview", await db.GovernedReleaseCatalog.Select(x => x.CatalogLifecycle).SingleAsync());
+    }
+
+    [Fact]
     public async Task Mutable_image_reference_is_rejected_before_any_catalog_row_is_written()
     {
         await using var database = await CreateMigratedDatabaseAsync();
