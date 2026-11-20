@@ -538,6 +538,51 @@ public sealed class ElsaInstanceContractTests
     }
 
     [Fact]
+    public void Queued_predecessor_hand_off_wait_is_shared_across_stores()
+    {
+        Assert.False(ElsaInstanceOperationGuard.MustWaitForQueuedPredecessorHandOff(
+            queuedHandOffCommitted: false,
+            hasAzureProvenance: false,
+            workerId: null,
+            leaseTokenHash: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            submissionInFlightAt: null));
+        Assert.True(ElsaInstanceOperationGuard.MustWaitForQueuedPredecessorHandOff(
+            queuedHandOffCommitted: true,
+            hasAzureProvenance: false,
+            workerId: null,
+            leaseTokenHash: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            submissionInFlightAt: null));
+        Assert.True(ElsaInstanceOperationGuard.MustWaitForQueuedPredecessorHandOff(
+            queuedHandOffCommitted: false,
+            hasAzureProvenance: true,
+            workerId: null,
+            leaseTokenHash: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            submissionInFlightAt: null));
+        Assert.True(ElsaInstanceOperationGuard.MustWaitForQueuedPredecessorHandOff(
+            queuedHandOffCommitted: false,
+            hasAzureProvenance: false,
+            workerId: "worker-1",
+            leaseTokenHash: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            submissionInFlightAt: null));
+        Assert.True(ElsaInstanceOperationGuard.MustWaitForQueuedPredecessorHandOff(
+            queuedHandOffCommitted: false,
+            hasAzureProvenance: false,
+            workerId: null,
+            leaseTokenHash: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            submissionInFlightAt: DateTimeOffset.UnixEpoch));
+    }
+
+    [Fact]
     public void Invalid_enum_values_fail_closed_in_transition_guards()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => ElsaInstanceStateMachine.CanTransition(

@@ -269,7 +269,9 @@ public sealed class ElsaInstanceProviderReconciliationHostedService(
         // A process can stop after the durable provider operation was created but
         // before the lifecycle hand-off marker was committed. Replaying the
         // reconstructed submission closes that boundary; the provider's operation
-        // identity makes the replay exactly-once.
+        // identity makes the replay exactly-once. The same poll also recovers a
+        // submission-in-flight marker whose SubmitAsync never finished, so the
+        // instance cannot stay wedged behind that marker forever.
         if (operation.Recovery is null && operation.Submission is { } submission)
         {
             // Revalidate the durable hand-off immediately before replay. A legacy
@@ -283,6 +285,19 @@ public sealed class ElsaInstanceProviderReconciliationHostedService(
                     entitlementHoldStore,
                     stoppingToken))
                 return;
+            try
+            {
+                await submissionStore.MarkProviderSubmissionInFlightAsync(new(
+                    submission.WorkspaceId,
+                    submission.InstanceId,
+                    submission.OperationId,
+                    submission.AttemptNumber,
+                    DateTimeOffset.UtcNow), stoppingToken);
+            }
+            catch (ElsaInstanceLifecycleConflictException)
+            {
+                return;
+            }
             try
             {
                 var submitted = await provider.SubmitAsync(submission, stoppingToken);

@@ -307,6 +307,14 @@ internal sealed class ElsaInstanceOperationEntity
     public int LeaseVersion { get; set; }
     public DateTimeOffset? LeaseExpiresAt { get; set; }
     public DateTimeOffset? HeartbeatAt { get; set; }
+    /// <summary>
+    /// Set immediately before <c>SubmitAsync</c> and cleared when provenance is
+    /// written, the submit is rejected, or an uncertain hand-off is recorded.
+    /// Null on existing rows is the never-submitted shape. A crash while this is
+    /// set is reconciled by replaying the pending Queued submission; it does not
+    /// expire through the worker lease.
+    /// </summary>
+    public DateTimeOffset? ProviderSubmissionInFlightAt { get; set; }
     public string? DesiredStateRevisionId { get; set; }
     public string? ResolvedPlanId { get; set; }
     public Guid? DeploymentRunId { get; set; }

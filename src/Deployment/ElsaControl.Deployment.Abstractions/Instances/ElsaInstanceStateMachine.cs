@@ -345,6 +345,26 @@ public static class ElsaInstanceOperationGuard
         heartbeatAt is not null;
 
     /// <summary>
+    /// Indicates whether Delete/Stop must wait behind a Queued predecessor
+    /// instead of cancelling it as never-submitted. Shared by the SQL and
+    /// in-memory stores at accept-time and claim-time. A submission-in-flight
+    /// marker covers the window after the worker lease is cleared and before
+    /// Azure provenance is written.
+    /// </summary>
+    public static bool MustWaitForQueuedPredecessorHandOff(
+        bool queuedHandOffCommitted,
+        bool hasAzureProvenance,
+        string? workerId,
+        string? leaseTokenHash,
+        DateTimeOffset? leaseExpiresAt,
+        DateTimeOffset? heartbeatAt,
+        DateTimeOffset? submissionInFlightAt) =>
+        queuedHandOffCommitted ||
+        hasAzureProvenance ||
+        HasInFlightWorkerLease(workerId, leaseTokenHash, leaseExpiresAt, heartbeatAt) ||
+        submissionInFlightAt is not null;
+
+    /// <summary>
     /// Indicates whether an operation is unfinished and therefore blocks a new
     /// mutation. Waiting successors remain blocking even though they do not hold
     /// the execution reservation themselves.

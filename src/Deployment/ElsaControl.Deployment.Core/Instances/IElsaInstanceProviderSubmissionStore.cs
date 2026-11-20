@@ -7,6 +7,17 @@ namespace ElsaControl.Deployment.Core.Instances;
 /// </summary>
 public interface IElsaInstanceProviderSubmissionStore
 {
+    /// <summary>
+    /// Records that <c>SubmitAsync</c> is about to run. Stays set until provenance
+    /// is committed, the submit is rejected, or an uncertain hand-off is recorded.
+    /// A crash after this write is reconciled by the provider-reconciliation
+    /// worker replaying the pending Queued submission; the marker does not expire
+    /// through the worker lease, which <c>CommitResolvedAsync</c> already cleared.
+    /// </summary>
+    Task MarkProviderSubmissionInFlightAsync(
+        ElsaInstanceProviderSubmissionInFlightMark mark,
+        CancellationToken cancellationToken = default);
+
     Task CommitProviderSubmissionAsync(
         ElsaInstanceProviderSubmissionCommit commit,
         CancellationToken cancellationToken = default);
@@ -14,6 +25,24 @@ public interface IElsaInstanceProviderSubmissionStore
     Task FailRejectedProviderSubmissionAsync(
         ElsaInstanceProviderSubmissionRejection rejection,
         CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Durable submission-in-flight marker. Existing rows without a timestamp are
+/// the never-submitted shape and remain supersedable.
+/// </summary>
+public sealed record ElsaInstanceProviderSubmissionInFlightMark(
+    Guid WorkspaceId,
+    Guid InstanceId,
+    Guid OperationId,
+    int AttemptNumber,
+    DateTimeOffset MarkedAt)
+{
+    public void Validate()
+    {
+        if (WorkspaceId == Guid.Empty || InstanceId == Guid.Empty || OperationId == Guid.Empty || AttemptNumber < 1)
+            throw new InvalidOperationException("Provider submission in-flight identity is invalid.");
+    }
 }
 
 public sealed record ElsaInstanceProviderSubmissionCommit(

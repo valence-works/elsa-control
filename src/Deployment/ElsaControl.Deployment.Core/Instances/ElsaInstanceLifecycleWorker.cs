@@ -262,6 +262,24 @@ public sealed class ElsaInstanceLifecycleWorker(
                 item.Instance.OrganizationId,
                 item.Operation.Action,
                 item.Instance.PlacementAssignmentReference?.AssignmentId ?? item.Operation.Id.ToString("D"));
+            if (_submissionStore is not null)
+            {
+                try
+                {
+                    await _submissionStore.MarkProviderSubmissionInFlightAsync(new(
+                        submission.WorkspaceId,
+                        submission.InstanceId,
+                        submission.OperationId,
+                        submission.AttemptNumber,
+                        _timeProvider.GetUtcNow()), cancellationToken);
+                }
+                catch (ElsaInstanceLifecycleConflictException)
+                {
+                    // Delete/Stop won the never-submitted window before this marker.
+                    return (result, 0);
+                }
+            }
+
             try
             {
                 var submitted = await _provider.SubmitAsync(submission, cancellationToken);
