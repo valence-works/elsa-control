@@ -652,7 +652,8 @@ public sealed class EfCoreManagedElsaInstanceApiStore : IManagedElsaInstanceApiS
             operation.ReconciliationDiagnosticCode ?? operation.DeletionDiagnosticCode,
             UpdatedAt: operation.UpdatedAt,
             ReasonEnteredAt: operation.ReasonEnteredAt,
-            RequiresHumanAt: operation.RequiresHumanAt);
+            RequiresHumanAt: operation.RequiresHumanAt,
+            DeletionDiagnosticCode: operation.DeletionDiagnosticCode);
 
     internal static DateTimeOffset? ResolveRecoveryAttemptStart(IEnumerable<DateTimeOffset> acceptedAt)
     {

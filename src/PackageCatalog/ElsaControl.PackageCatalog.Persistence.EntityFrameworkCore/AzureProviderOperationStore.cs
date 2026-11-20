@@ -670,6 +670,18 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
     public async Task<AzureProviderOperation?> GetAsync(Guid workspaceId, Guid operationId, CancellationToken cancellationToken = default) =>
         await db.AzureProviderOperations.AsNoTracking().SingleOrDefaultAsync(x => x.WorkspaceId == workspaceId && x.Id == operationId, cancellationToken) is { } entity ? ToModel(entity) : null;
 
+    public async Task<bool> HasAnyForInstanceAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        CancellationToken cancellationToken = default)
+    {
+        if (workspaceId == Guid.Empty || instanceId == Guid.Empty)
+            return true;
+
+        return await db.AzureProviderOperations.AsNoTracking()
+            .AnyAsync(x => x.WorkspaceId == workspaceId && x.InstanceId == instanceId, cancellationToken);
+    }
+
     async Task<AzureProviderResourceAssignment> IAzureProviderResourceAssignmentStore.CreateOrGetAsync(
         AzureProviderResourceAssignmentRequest request,
         DateTimeOffset now,
@@ -768,6 +780,18 @@ public sealed class AzureProviderOperationStore(CatalogDbContext db, AzureProvid
             .Take(2)
             .ToListAsync(cancellationToken);
         return entities.Select(ToModel).ToArray();
+    }
+
+    async Task<bool> IAzureProviderResourceAssignmentStore.HasAnyForInstanceAsync(
+        Guid workspaceId,
+        Guid instanceId,
+        CancellationToken cancellationToken)
+    {
+        if (workspaceId == Guid.Empty || instanceId == Guid.Empty)
+            return true;
+
+        return await db.AzureProviderResourceAssignments.AsNoTracking()
+            .AnyAsync(x => x.WorkspaceId == workspaceId && x.InstanceId == instanceId, cancellationToken);
     }
 
     async Task<AzureProviderResourceAssignment?> IAzureProviderResourceAssignmentStore.RebindToCurrentScopeAsync(

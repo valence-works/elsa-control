@@ -52,7 +52,7 @@ are:
 
 - `GET /api/workspaces/{workspaceId}/instances/operations/by-idempotency-key` with `action=Create&slug={submittedSlug}` and the original Create `Idempotency-Key`, or `action=Delete&instanceId={instanceId}` and the stable Delete `Idempotency-Key`. It resolves only the matching accepted operation.
 - `GET /api/workspaces/{workspaceId}/instances/{instanceId}/operations/{operationId}/cleanup-receipt`. This returns historical cleanup evidence.
-- `GET /api/workspaces/{workspaceId}/instances/{instanceId}/operations/{operationId}/cleanup-observation`. When its provider observer is available, this queries the exact owned resource group.
+- `GET /api/workspaces/{workspaceId}/instances/{instanceId}/operations/{operationId}/cleanup-observation`. When its provider observer is available, this queries the exact owned resource group, or the deterministic current-version group for a local-absent tombstone.
 
 Each request uses workspace authorization and performs its own evidence checks.
 The reads do not mutate lifecycle or provider state.
