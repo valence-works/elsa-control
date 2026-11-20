@@ -79,7 +79,9 @@ public sealed class HostedSubscriptionContractTests
             HostedBillingCopy.ForMissingLinkage(),
             null,
             null,
-            OrganizationBillingRecoveryActions.None);
+            OrganizationBillingRecoveryActions.None,
+            MaxInstances: null,
+            ActiveDedicatedCount: 0);
 
     private static HostedSubscriptionManagementResponse Active() =>
         Linked(
@@ -123,7 +125,9 @@ public sealed class HostedSubscriptionContractTests
             HostedBillingCopy.ForLinkedCustomer(),
             BillingWebhookSources.Hub,
             suspensionReason,
-            recoveryAction);
+            recoveryAction,
+            MaxInstances: 1,
+            ActiveDedicatedCount: 0);
 
     private static OrganizationBillingStatusResponse BillingStatusNeverSubscribed() =>
         OrganizationBillingStatusResponse.From(

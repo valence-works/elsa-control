@@ -18,5 +18,7 @@
   },
   "source": "hub",
   "suspensionReason": null,
-  "recoveryAction": "None"
+  "recoveryAction": "None",
+  "maxInstances": 1,
+  "activeDedicatedCount": 0
 }
