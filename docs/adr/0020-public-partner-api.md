@@ -48,7 +48,14 @@ webhook and no public contract.
 
 1. **A partner is an organization with `PartnerStatus`.** It is not a new tenant model.
    The organization is the billing and quota boundary (ADR-0006, ADR-0017 F5). Statuses are
-   `Pending`, `Active` and `Suspended`. Only `Active` can call the API.
+   `Pending`, `Active`, `Suspended` and `Closed`. `Active` has full access to the routes
+   its key scopes allow. `Suspended` is read-only and may call only these verbs:
+   `GET /account`, `GET /releases`, `GET /engines`, `GET /engines/{id}`,
+   `GET /engines/{id}/operations/{opId}` and `GET /webhook-endpoints` (webhook deliveries
+   for existing endpoints continue). Every other verb, including delete, Studio sessions,
+   API tokens and webhook changes, returns 403 `partner.not-active`. `Pending` and
+   `Closed` get nothing: every machine route returns 403 `partner.not-active`, and closing
+   a partner revokes all its keys.
 2. **The partner API is a separate, thin public surface at `/partner/v1`.** It is a facade
    over the same application services as the workspace routes. It does not reuse
    `/api/workspaces/...` routes, does not go through the Hub or Cloud BFF, and adds no
@@ -84,9 +91,12 @@ webhook and no public contract.
   A lookup is by `keyId` and a constant-time compare. Keys are sent as
   `Authorization: Bearer`.
 - **Rotation and revocation.** At most two active keys per partner, so rotation is
-  create-new, deploy, revoke-old. Revocation takes effect on the next request, not on
-  cache expiry (no positive caching longer than 30 seconds). Revoking a key never touches
-  engines.
+  create-new, deploy, revoke-old. Revocation takes effect immediately: the key
+  store invalidates the cache entry on revoke, in every instance, so there is no accept
+  window after revoke. A cache entry for a valid key may live at most 30 seconds, and
+  only so that the invalidation is a safety net, not the mechanism. A test revokes a key
+  and proves the next request on every instance gets 401. Revoking a key never touches
+  engines, and it invalidates the engine tokens that key minted (see API token).
 - **Scopes.** `engines:read`, `engines:write`, `engines:delete`, `releases:apply`,
   `studio:sessions`, `webhooks:manage`. Delete and apply are separate scopes so a
   read-and-create key cannot destroy or change an engine. A key can never manage keys,
@@ -121,8 +131,10 @@ and identity layer. Control owns everything else.
   authorization and tests. None is on any machine surface, and none is reachable with an
   API key, so a stolen key can't mint more keys.
 - **Authorization.** Control authorizes the Hub session's linked account (#851) as an
-  Owner or Admin of the partner organization. The Hub checks nothing that Control doesn't
-  also check. Responses carry `Cache-Control: no-store`. The create and rotate routes use
+  Owner or Admin of the partner organization. A signed-in caller who is not a member of the
+  partner organization, including the owner of another organization, gets 404 on every
+  partner key route. A member without the Owner or Admin role gets 403. The Hub checks
+  nothing that Control doesn't also check. Responses carry `Cache-Control: no-store`. The create and rotate routes use
   the existing identity-and-IP rate limit, and the secret never appears in a URL, a query
   string or a header the Hub forwards or logs.
 - **Hub edge function rules.** The create and rotate functions redact response bodies in
@@ -151,7 +163,10 @@ and identity layer. Control owns everything else.
 - Every query filters by the organization from the credential. A cross-partner id returns
   404, never 403, so ids can't be probed. There is no endpoint that lists partners or
   accepts an organization id. Webhook endpoints, keys and events are partner-scoped the
-  same way.
+  same way. So are `Idempotency-Key` values and pagination tokens: an idempotency record is
+  keyed by the partner and the key, so the same key from two partners never collides, and a
+  pagination token is bound to the partner that received it, so a token presented by another
+  partner returns 404 and never a page.
 - ADR-0019's tenantId stays opaque and is never an input to the partner API.
 
 ### The `/partner/v1` API
@@ -201,7 +216,10 @@ and identity layer. Control owns everything else.
 - **API token.** The partner server calls `api-tokens` and gets a bearer token for the
   engine audience that lives at most 15 minutes, with the `partner-runtime` permission
   set. Control never gives out a long-lived engine secret, so there is nothing to rotate or
-  leak at rest on the partner's side. The first leaf spike must confirm that the engine
+  leak at rest on the partner's side. A token is bound to one engine (later one Shared
+  tenant) and any other engine refuses it. It stops working when that engine is deleted or
+  suspended, when the partner is suspended or closed, and when the key that minted it is
+  revoked. The first leaf spike must confirm that the engine
   accepts this token on its API. If it doesn't, the engine side needs a change in the
   shared engine image first, and the leaf says so.
 - Diagnostics permissions are in neither the Studio nor the API token set for any Shared
@@ -209,9 +227,14 @@ and identity layer. Control owns everything else.
 
 ### Webhooks
 
-- **Endpoints.** HTTPS only, at most 5 per partner. A delivery refuses redirects and
-  refuses any address that resolves to a private, loopback, link-local or metadata range,
-  checked at delivery time after DNS, not only at registration.
+- **Endpoints.** HTTPS only, at most 5 per partner, port 443 only. A delivery refuses
+  redirects and refuses any address that resolves to a private, loopback, link-local or
+  metadata range, checked at delivery time after DNS, not only at registration. The worker
+  connects to the address that passed the check, not to a second lookup of the name, and
+  sends the original host name as SNI and Host. Limits: 5 seconds to connect, 10 seconds
+  in total, a request body of at most 256 KB, and a response read of at most 64 KB, after
+  which the rest is discarded. Any non-2xx, timeout or oversized response counts as a
+  failed attempt. Leaf PA8 carries each of these as an acceptance criterion with a test.
 - **Envelope.** `{ id, type, apiVersion, createdAt, engineId, externalReference, version,
   data }`. Payloads carry ids and states only: no keys, tokens or personal data.
 - **Events.** `engine.ready`, `engine.failed`, `engine.updated` (release applied),
@@ -246,9 +269,10 @@ and identity layer. Control owns everything else.
   partner by an operator through the existing admin entitlement endpoints. They are not in
   this repository, the OpenAPI document or the quick-start.
 - The hosted-subscription golden files gain a `kind` field. The existing
-  Retained/Suspended/Canceled behaviour is unchanged. A suspended partner returns
-  `engine` reads normally, refuses Create and Apply release with the existing commercial
-  code, and emits `engine.suspended`.
+  Retained/Suspended/Canceled behaviour is unchanged. A `Suspended` partner is
+  read-only, as listed under Decision 1: reads work, every write is refused with
+  `partner.not-active`, and `engine.suspended` is emitted. Engine-level commercial codes for
+  Create and Apply release stay as they are for an `Active` partner at its allowance.
 
 ### Quotas and rate limits
 
@@ -344,7 +368,8 @@ Deferred, not rejected. It's the likely end state, but it moves money without a 
 Each leaf carries these cross-cutting criteria in addition to its own:
 
 1. A test with two partners proves that every route returns 404 for the other partner's
-   engine id, operation id, webhook endpoint id and event id.
+   engine id, operation id, webhook endpoint id and event id, and that an idempotency key
+   or a pagination token from one partner is not honoured for the other.
 2. No test, log or problem body contains a key secret, a webhook secret or an engine token.
 3. Every route has a documented `code` for each failure and an entry in the OpenAPI
    document, and the drift test is green.
